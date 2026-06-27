@@ -1,0 +1,63 @@
+[package]
+name = "ds-aec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Platform acoustic-echo-cancelled duplex audio (mic capture + speaker render through ONE OS unit) so STT never hears TTS. macOS = Voice-Processing I/O AudioUnit; other platforms = unsupported stub (half-duplex fallback)."
+
+[dependencies]
+
+# ── macOS: Voice-Processing I/O AudioUnit (built-in AEC) ─────────────────────
+# ONE `kAudioUnitSubType_VoiceProcessingIO` unit renders TTS and captures the
+# mic; the OS owns both streams so it aligns them and cancels the echo for free.
+# The C constants live in objc2-audio-toolbox (coreaudio-rs 0.14.x dropped its
+# `coreaudio::sys` re-export). The realtime render/input callbacks talk to the
+# helper thread through lock-free SPSC rings (ringbuf) — NO mutex on the RT path.
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-rs = "0.14.2"
+objc2-audio-toolbox = { version = "0.3", default-features = false, features = [
+    "std",
+    "AudioOutputUnit",
+    "AudioUnitProperties",
+] }
+ringbuf = "0.5"
+
+# ── Windows: WASAPI capture in the "Communications" category (capture-side AEC) ─
+# Open the mic via IAudioClient2 + SetClientProperties(AudioCategory_Communications)
+# BEFORE Initialize, which engages the OS capture-side AEC APO (+ Win11 Voice
+# Clarity). rodio keeps rendering TTS; the OS taps the render endpoint as the echo
+# reference itself, so this backend is capture-only (`owns_render() == false`).
+# Version pinned to match ds-platform so the workspace resolves ONE `windows` 0.62.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_Threading",
+    # CreateEventW's signature references SECURITY_ATTRIBUTES; without this feature
+    # the function is configured out.
+    "Win32_Security",
+] }
+
+# ── Linux: PipeWire/PulseAudio module-echo-cancel cancelled source (capture-side AEC) ─
+# Open the named cancelled virtual source the server's WebRTC canceller exposes, via the
+# PulseAudio simple API — which talks to BOTH PulseAudio and PipeWire (pipewire-pulse). So
+# rodio keeps rendering TTS; the server taps the render endpoint as the echo reference
+# itself, making this backend capture-only (`owns_render() == false`), like Windows WASAPI.
+# (A future deterministic alternative — linking the WebRTC APM in-process, `owns_render()
+# == true` — is sketched in docs/FULL-DUPLEX-PORT.md §6A; the server-module path ships first.)
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding = "2.28"
+libpulse-simple-binding = "2.25"
+
+[[bin]]
+# M1 smoke test: open the VPIO unit, render a tone, print captured RMS — proves
+# the unit starts, both callbacks fire, and the AEC capture floor drops during
+# playback. Self-contained; no engine wiring.
+name = "ds-aec-probe"
+path = "src/bin/probe.rs"

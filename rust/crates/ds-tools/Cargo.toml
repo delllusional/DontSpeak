@@ -1,0 +1,17 @@
+[package]
+name = "ds-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The single source of truth for DontSpeak's tool catalog (JSON-Schema definitions), shared by the MCP server (ds-mcp) and the app-facing FFI (ds-core) so the list never drifts."
+
+[dependencies]
+serde_json = { workspace = true }
+
+# Test-only: the drift guard compares the set_config inputSchema against the field
+# set of ds_config::SetConfigArgs. Dev-only so the catalog crate stays a leaf at build.
+[dev-dependencies]
+ds-config = { workspace = true }

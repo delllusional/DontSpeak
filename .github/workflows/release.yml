@@ -1,0 +1,320 @@
+name: Release
+
+# Build the Windows installers (.exe — x64 + ARM64) and the macOS app (.dmg — Apple
+# silicon AND Intel/x86_64) on a version tag, then publish them to a GitHub Release.
+# Trigger by pushing a tag:  git tag v0.1.0 && git push origin v0.1.0
+#
+# Runner labels are pinned to the current images (mid-2026): windows-2025 (Windows
+# Server 2025 / VS 2026) and macos-26 (arm64, Xcode 26) — see runner-images. The
+# release is created with the `gh` CLI (GitHub-maintained) rather than a third-party
+# action.
+#
+# Signing is GATED on secrets (see docs/signing.md): Windows is signed via SignPath
+# (free for OSS) when SIGNPATH_* secrets exist; macOS runs the full Developer ID
+# sign + notarize path when APPLE_* secrets exist. With NO secrets, both still build
+# and publish ad-hoc/unsigned (first launch hits SmartScreen / Gatekeeper).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}   # allow manual runs for testing the build itself
+
+permissions:
+  contents: write          # gh release create needs to write the release
+
+jobs:
+  # ── Guard: the pushed tag must equal the single-source version ───────────────
+  # The one place of truth is rust/Cargo.toml ([workspace.package] version), read via
+  # scripts/version.sh. Fail fast (before the long platform builds) if a tag like
+  # v0.1.0 doesn't match it, so the .dmg / installer / About string / tag never drift.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag matches rust/Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          ver="$(bash scripts/version.sh)"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "single-source version=$ver  tag=$tag"
+          [ "$ver" = "$tag" ] || { echo "::error::tag v$tag != rust/Cargo.toml version $ver — bump the workspace version or fix the tag"; exit 1; }
+
+  # ── Tests gate: run the SAME suite as CI, but across ALL THREE OSes, before
+  #    building/publishing (per-commit CI is Linux-only; the release is thorough). ──
+  tests:
+    uses: ./.github/workflows/ci.yml
+    with:
+      full-matrix: true
+
+  # ── Windows installers (setup.exe — x64 + ARM64) ────────────────────────────
+  windows:
+    needs: [check, tests]
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+
+      # build.ps1 expects per-user toolchains on PATH (~/.dotnet, ~/.cargo). cargo is
+      # already there via the preinstalled rustup; install .NET 10 INTO ~/.dotnet so the
+      # script's DOTNET_ROOT/PATH assumptions hold with no edits.
+      - name: Point .NET install at ~/.dotnet
+        shell: pwsh
+        run: echo "DOTNET_INSTALL_DIR=$env:USERPROFILE\.dotnet" >> $env:GITHUB_ENV
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'   # the WinUI app targets net10 (WinApp SDK 2.2 + H.NotifyIcon)
+
+      # rustls' crypto = ring, which assembles via NASM (x64) / clang (arm64). LLVM ships
+      # on the windows image (add to PATH); install NASM. The ARM64 MSVC tools are already
+      # in the image; build.ps1 adds the Rust arm64 target itself.
+      - name: ring asm toolchain (NASM + LLVM on PATH)
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer (${{ matrix.arch }})
+        shell: pwsh
+        run: ./apps/windows/installer/build.ps1 -Arch ${{ matrix.arch }}
+
+      # Upload the unsigned installer — it's both the SignPath input (referenced by
+      # artifact id) and the fallback if signing is not configured.
+      - name: Upload unsigned installer
+        id: unsigned
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer-unsigned-${{ matrix.arch }}
+          path: apps/windows/installer/Output/ds-setup-${{ matrix.arch }}.exe
+          if-no-files-found: error
+
+      # Gate: only sign when the SignPath secrets exist (SignPath Foundation is free for
+      # OSS — see docs/signing.md). Secrets can't be used in `if:` directly, so map the
+      # token to an output first.
+      - name: Detect SignPath config
+        id: sp
+        shell: bash
+        env:
+          TOK: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          if [ -n "$TOK" ]; then echo "on=true" >> "$GITHUB_OUTPUT"; else echo "on=false" >> "$GITHUB_OUTPUT"; fi
+
+      # SignPath pulls the uploaded artifact by id, signs it on its managed HSM, and
+      # writes the signed installer to ./signed. No-op until the secrets are set.
+      - name: Sign installer (SignPath)
+        if: steps.sp.outputs.on == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      # The canonical artifact the release publishes: the SIGNED installer when SignPath
+      # ran, else the unsigned one (so the release still ships either way). One per arch.
+      - name: Upload installer (release artifact)
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer-${{ matrix.arch }}
+          path: ${{ steps.sp.outputs.on == 'true' && format('signed/ds-setup-{0}.exe', matrix.arch) || format('apps/windows/installer/Output/ds-setup-{0}.exe', matrix.arch) }}
+          if-no-files-found: error
+
+      # The raw cross-built ARM64 binaries — consumed by windows-arm-smoke to RUN them on
+      # real ARM64 silicon (this x64 build runner can't execute an arm64 binary).
+      - name: Upload raw ARM64 binaries (smoke-test input)
+        if: matrix.arch == 'arm64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-binaries-arm64
+          # The binaries the Windows installer actually ships + runs: the in-process engine
+          # DLL, the MCP/hook bin, and the warm-synth helper. (dontspeakd — the standalone
+          # headless host — isn't shipped on Windows; the engine runs in-process via the DLL.)
+          path: |
+            rust/target/aarch64-pc-windows-msvc/release/ds_core.dll
+            rust/target/aarch64-pc-windows-msvc/release/dontspeak.exe
+            rust/target/aarch64-pc-windows-msvc/release/ds-helper.exe
+          if-no-files-found: error
+
+  # ── Smoke-test the ARM64 build on REAL ARM64 Windows ─────────────────────────
+  # The windows matrix CROSS-builds arm64 on an x64 runner, which can't execute the output.
+  # This runs the actual binaries on a native windows-11-arm runner: the engine DLL must load
+  # + answer its C ABI, and the bins must launch (right arch, deps resolve) — proving the
+  # shipped ARM64 build actually RUNS, not just compiles.
+  windows-arm-smoke:
+    needs: windows
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-binaries-arm64
+          path: arm64bin
+      - name: Run the ARM64 binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = (Resolve-Path arm64bin).Path
+          # 1) The engine DLL the app P/Invokes loads on ARM64 — a wrong-arch DLL throws
+          #    BadImageFormatException; load-dynamic ⇒ no ONNX Runtime needed just to load.
+          $h = [System.Runtime.InteropServices.NativeLibrary]::Load("$bin\ds_core.dll")
+          [System.Runtime.InteropServices.NativeLibrary]::Free($h)
+          Write-Host "OK: ds_core.dll loaded on ARM64"
+          # 2) Each exe LAUNCHES on ARM64 — the loader resolves the arch + every dependency. A
+          #    wrong-arch / missing-dep binary fails IN THE LOADER (Start-Process throws, or an
+          #    NTSTATUS exit < 0 like 0xC000007B). An app-level exit (>= 0) or a still-running
+          #    server both mean it launched fine — these are stdio servers, so they normally block.
+          foreach ($exe in 'dontspeak.exe','ds-helper.exe') {
+            try { $p = Start-Process "$bin\$exe" -PassThru -ErrorAction Stop }
+            catch { throw "$exe failed to launch on ARM64: $_" }
+            Start-Sleep -Seconds 2
+            if ($p.HasExited -and $p.ExitCode -lt 0) { throw ("{0} loader error on ARM64: 0x{1:X8}" -f $exe, $p.ExitCode) }
+            # Capture liveness BEFORE killing (else we'd read our own kill code as the exit).
+            $status = if ($p.HasExited) { "exit $($p.ExitCode)" } else { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; "running" }
+            Write-Host "OK: $exe launched on ARM64 ($status)"
+          }
+          Write-Host "ARM64 smoke test passed"
+
+  # ── macOS app DMGs (arm64 + x86_64) ─────────────────────────────────────────
+  # Both slices build on the arm64 macos-26 runner: arm64 native, x86_64 cross-compiled
+  # (Rust via the added target, Swift via `swift build --arch x86_64`). The Intel slice
+  # ships WITHOUT the Apple-Silicon-only Core ML shim (libsmkokoro) — its engine ladder
+  # resolves to the system `say` voice + claude_code dictation, which need no onnxruntime.
+  macos:
+    needs: [check, tests]
+    runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      OUTDIR: ${{ github.workspace }}/dist
+      DONTSPEAK_ARCHES: 'arm64 x86_64'   # dist-dmgs.sh builds one DMG per arch
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add Rust apple targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install DMG tooling
+        run: brew install imagemagick librsvg
+
+      # Gate: run the full distribution path (hardened runtime + Developer ID sign +
+      # notarize, the dist-dmgs.sh DONTSPEAK_DIST=1 branch) only when an Apple Developer
+      # ID cert is configured; otherwise build ad-hoc (DIST=0). See docs/signing.md.
+      - name: Detect Apple signing config
+        id: sign
+        env:
+          CERT: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+        run: |
+          if [ -n "$CERT" ]; then echo "on=true" >> "$GITHUB_OUTPUT"; else echo "on=false" >> "$GITHUB_OUTPUT"; fi
+
+      # Import the Developer ID Application cert (+ key) into a temporary keychain so
+      # codesign can use it. Standard, dependency-free `security` incantation.
+      - name: Import Developer ID certificate
+        if: steps.sign.outputs.on == 'true'
+        env:
+          CERT_B64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          CERT_PW: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/build.keychain"; kcpw="$(openssl rand -hex 16)"
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$CERT_PW" -T /usr/bin/codesign
+          security list-keychains -d user -s "$kc" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc" >/dev/null
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      # DONTSPEAK_DIST=1 → bundle libonnxruntime.dylib, hardened-runtime sign inside-out
+      # with entitlements, sign the DMG, and notarize+staple (via the APPLE_ID trio).
+      # When unset/0 it ad-hoc-signs and skips notarization — both bundle the app, helper,
+      # shim and separator model; only signing/notarization differs.
+      - name: Build app DMGs (signed + notarized when configured)
+        env:
+          DONTSPEAK_DIST: ${{ steps.sign.outputs.on == 'true' && '1' || '0' }}
+          DONTSPEAK_CODESIGN_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          DONTSPEAK_APPLE_ID: ${{ secrets.APPLE_ID }}
+          DONTSPEAK_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          DONTSPEAK_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: ./apps/macos/dist-dmgs.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-dmgs
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  # ── Linux packages (.tar.gz + .deb + .rpm) ──────────────────────────────────
+  # The standalone GTK host (apps/linux/gtk) + the engine bins, packaged by
+  # apps/linux/package.sh. AppImage is skipped (its GTK bundling is finicky in CI).
+  # continue-on-error: the GTK host needs a recent libadwaita (>= 1.7) — on an older
+  # runner image this build can fail; that must NOT block the Windows/macOS release,
+  # so Linux packages are best-effort and attached only when the job produces them.
+  linux:
+    needs: [check, tests]
+    # The GTK host needs a RECENT GNOME stack — libadwaita >= 1.7 (v1_7) + GTK 4.12 +
+    # gtk4-layer-shell — which ubuntu-latest (24.04) is too old for. Ubuntu 26.04 ships
+    # libadwaita 1.9 / GTK 4.22 and the layer-shell -dev package (matches windows-2025 /
+    # macos-26). continue-on-error keeps a runner-availability hiccup from blocking the release.
+    runs-on: ubuntu-26.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build deps (GTK4 + libadwaita + layer-shell + ALSA + PulseAudio)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libasound2-dev libpulse-dev \
+            libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev
+
+      - name: Packaging tools (cargo-deb + cargo-generate-rpm)
+        run: cargo install cargo-deb cargo-generate-rpm
+
+      - name: Build Linux packages (.tar.gz + .deb + .rpm)
+        run: ./apps/linux/package.sh --skip-appimage
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-packages
+          path: dist/*
+          if-no-files-found: error
+
+  # ── Publish the GitHub Release with all artifacts ───────────────────────────
+  release:
+    needs: [windows, macos, windows-arm-smoke, linux]
+    runs-on: ubuntu-latest
+    # Only publish a release for an actual tag push (workflow_dispatch just builds).
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Create / update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Windows + macOS are required; Linux packages are best-effort (the linux job
+          # is continue-on-error) — nullglob drops them silently if the job produced none.
+          FILES=(
+            artifacts/windows-installer-x64/ds-setup-x64.exe
+            artifacts/windows-installer-arm64/ds-setup-arm64.exe
+            artifacts/macos-dmgs/*.dmg
+            artifacts/linux-packages/*
+          )
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "DontSpeak ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            "${FILES[@]}"

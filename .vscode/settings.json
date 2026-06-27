@@ -1,0 +1,38 @@
+{
+  // ── Rust (rust-analyzer) ───────────────────────────────────────────────────
+  // The Cargo workspace lives under rust/, not the repo root.
+  "rust-analyzer.linkedProjects": ["rust/Cargo.toml"],
+  "rust-analyzer.cargo.features": "all",
+  // Lint with clippy on save rather than plain `cargo check`.
+  "rust-analyzer.check.command": "clippy",
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true
+  },
+
+  // ── TOML ───────────────────────────────────────────────────────────────────
+  "evenBetterToml.taplo.configFile.enabled": true,
+  "[toml]": {
+    "editor.defaultFormatter": "tamasfe.even-better-toml"
+  },
+
+  // ── Files / search hygiene ─────────────────────────────────────────────────
+  "files.exclude": {
+    "**/.git": true
+  },
+  "search.exclude": {
+    "rust/target": true,
+    "**/bin": true,
+    "**/obj": true,
+    "apps/macos/.build": true,
+    "apps/macos/dist": true,
+    "**/__pycache__": true
+  },
+  // Don't let the editor index these heavy build dirs for file-watching.
+  "files.watcherExclude": {
+    "rust/target/**": true,
+    "**/bin/**": true,
+    "**/obj/**": true,
+    "apps/macos/.build/**": true
+  }
+}

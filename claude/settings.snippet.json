@@ -1,0 +1,80 @@
+{
+  "hooks": {
+    "MessageDisplay": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "narrate",
+              "--display"
+            ],
+            "async": true,
+            "command": "__DONTSPEAK__",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "narrate",
+              "--stop"
+            ],
+            "async": true,
+            "command": "__DONTSPEAK__",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "speak",
+              "greet"
+            ],
+            "async": true,
+            "command": "__DONTSPEAK__",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "speak",
+              "mark-active"
+            ],
+            "async": true,
+            "command": "__DONTSPEAK__",
+            "timeout": 5,
+            "type": "command"
+          },
+          {
+            "args": [
+              "prompt-context"
+            ],
+            "command": "__DONTSPEAK__",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
+  "voice": {
+    "enabled": true,
+    "mode": "tap"
+  },
+  "dontspeak": null,
+  "preferredNotifChannel": "iterm2_with_bell"
+}

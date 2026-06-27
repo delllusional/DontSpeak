@@ -1,0 +1,42 @@
+[package]
+name = "dontspeakd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "dontspeak push-to-talk engine: caps poll + Ctrl+G emit + focus gate + barge-in."
+
+[[bin]]
+name = "dontspeakd"
+path = "src/main.rs"
+
+[dependencies]
+ds-platform = { workspace = true }
+ds-proc = { workspace = true }
+ds-config = { workspace = true }
+ds-ipc = { workspace = true }
+ds-model = { workspace = true }
+ds-stt = { workspace = true }
+ds-engines = { workspace = true }
+# System-`say` wpm mapping (rate_to_wpm) + the shared say-command builder so the
+# warm engine's System-TTS path matches ds-tts's spawners exactly.
+ds-tts = { workspace = true }
+# THE typed model_status schema (the single source of truth this engine PRODUCES;
+# the UI FFI consumes the same type). Replaces the old in-crate status_schema.rs.
+ds-status = { workspace = true }
+# Shared localization catalog — the engine looks up the failure-reason prose it ships in
+# model_status (the %{why}) here, so those user-facing strings live in en.yml like the rest.
+ds-i18n = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# TOML (de)serialize for the persisted lifetime stats file (our stats.toml).
+toml = { workspace = true }
+# Push-based settings.json watch (FSEvents/inotify/ReadDirectoryChangesW) — replaces
+# the per-tick stat() poll for hot-reload; a coarse stat backstop remains.
+notify = { workspace = true }
+
+# unix signal handling (SIGTERM/SIGINT) via type-safe sigaction wrapper.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }

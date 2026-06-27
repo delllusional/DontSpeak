@@ -1,0 +1,24 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.357,0.263,0.592,1.000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "Foreground.svg",
+          "name" : "Foreground"
+        }
+      ]
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : [
+      "iOS",
+      "macOS"
+    ]
+  }
+}

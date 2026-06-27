@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Display name: bundle.sh stamps CFBundleName/CFBundleDisplayName from the i18n
+         catalog's `app.display_name` (the SAME string the app renders), so the bundle
+         name can't drift from the in-app name. "DontSpeak" here is the dev fallback. -->
+    <key>CFBundleName</key>
+    <string>DontSpeak</string>
+    <key>CFBundleDisplayName</key>
+    <string>DontSpeak</string>
+    <key>CFBundleIdentifier</key>
+    <string>app.dontspeak.org</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>DontSpeak</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <!-- BUILD_ID handshake: bundle.sh overwrites this (from git) per build and bakes
+         the SAME id into the engine, so the app can detect + auto-restart the engine
+         that drifted out of lockstep. "dev" for a plain swift build. -->
+    <key>DSBuildID</key>
+    <string>dev</string>
+    <!-- App icon: AppIcon.icon (Icon Composer / Liquid Glass) compiled by actool
+         into Resources/Assets.car (macOS 26, CFBundleIconName) + a fallback
+         Resources/AppIcon.icns (CFBundleIconFile). Both keys named "AppIcon". -->
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <!-- Dockless accessory app (the MenuBarExtra tray): no Dock icon, tray only. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <!-- The Speak pane's "Test recognition" records a few seconds of mic and
+         transcribes it via the engine's in-process Parakeet STT (the same engine
+         used for dictation). -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>DontSpeak records a few seconds of microphone audio to test speech recognition.</string>
+    <!-- Required to request Speech Recognition authorization for the `system` STT engine
+         (macOS on-device SFSpeechRecognizer). Without this key the authorization request
+         is denied outright. On-device only — audio never leaves the machine. -->
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>DontSpeak uses on-device speech recognition to transcribe your dictation locally when the System speech-to-text engine is selected.</string>
+</dict>
+</plist>

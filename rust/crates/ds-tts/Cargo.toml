@@ -1,0 +1,50 @@
+[package]
+name = "ds-tts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Pluggable TTS engines for dontspeak: trait Tts + KokoroTts (native ort/voice-g2p/rodio in-process synth, the default) + SystemTts (say/SAPI/spd-say)."
+
+[dependencies]
+ds-config = { workspace = true }
+ds-proc = { workspace = true }
+ds-model = { workspace = true }
+# The warm helper bin (ds-helper) also hosts Parakeet STT now (engine
+# consolidation), so it pulls ds-stt for Capture + the transcriber.
+ds-stt = { workspace = true }
+# Full-duplex AEC duplex unit (macOS VPIO; stub elsewhere) for the warm helper's
+# render+capture path when DONTSPEAK_FULL_DUPLEX is set. See docs/AEC.md.
+ds-aec = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# ── Phase-2b native Kokoro synth ─────────────────────────────────────────────
+# The pure modules (vocab/voices/trim/group) need NONE of these; the synth + the
+# ds-helper helper bin do. Pinned once in the workspace.
+# ONNX inference (load-dynamic: no onnxruntime baked, resolved at runtime).
+ort = { workspace = true }
+# Pure-Rust English G2P (per-word wrapper avoids the espeak-ng fallback).
+voice-g2p = { workspace = true }
+# 24 kHz mono f32 PCM playback. `symphonia-aiff` (added to the default decoders) lets the
+# earcon `cue` op decode macOS system sounds (.aiff); wav (Windows) + vorbis/oga (Linux) are
+# already in rodio's defaults.
+rodio = { workspace = true, features = ["symphonia-aiff"] }
+
+# setsid for the speaker's own process group (single-speaker pidfile contract).
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# dlopen libsmkokoro.dylib (the FluidAudio Core ML / ANE Kokoro shim) for the
+# apple-native TTS backend. Loaded at runtime, like ort's load-dynamic onnxruntime.
+libloading = "0.9"
+
+[[bin]]
+# Thin helper that does in-process synth + playback in its OWN process group, so
+# the (Child, pgid) single-speaker pidfile contract is preserved unchanged — the
+# hooks still `spawn()` a child and record its pgid (see kokoro.rs).
+name = "ds-helper"
+path = "src/bin/ds_helper/main.rs"

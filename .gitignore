@@ -1,0 +1,32 @@
+# Compiled Swift helpers — arch-specific; rebuilt by scripts/install.sh
+claude/hooks/capslock
+claude/hooks/mic-active
+
+# dontspeakd daemon — compiled binary (arch-specific, AX-grantee; rebuilt by scripts/build.sh)
+# and its runtime log.
+scripts/dontspeakd
+scripts/daemon.log
+
+
+# Rust lockfiles — these are libraries/apps where we don't pin; ignore everywhere
+Cargo.lock
+
+.DS_Store
+
+# sync logs
+.sync.log
+.sync.launchd.log
+scripts/dontspeakd.test
+__pycache__/
+
+# Swift build artifacts
+apps/macos/.build/
+.build/
+apps/macos/dist/
+.tse-staging/
+
+# Xcode / SwiftPM local state
+.swiftpm/
+apps/macos/.swiftpm/
+*.xcuserstate
+xcuserdata/

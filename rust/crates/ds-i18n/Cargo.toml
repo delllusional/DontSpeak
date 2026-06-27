@@ -1,0 +1,19 @@
+[package]
+name = "ds-i18n"
+description = "Shared DontSpeak localization catalog (rust-i18n compile-time YAML + OS locale detection), served to every platform UI through ds-core's C ABI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Compile-time-embedded YAML catalog + runtime locale switching. The translations are
+# baked into the binary, so the shared staticlib (macOS) / cdylib (Windows) carries the
+# whole catalog with no external resource files to ship.
+rust-i18n = "4"
+# OS language detection (macOS, Windows, Linux, …) so the catalog defaults to the
+# system locale without each UI having to pass it in.
+sys-locale = "0.3"
+serde_json = "1"

@@ -1,0 +1,187 @@
+# English — the source of truth for every DontSpeak UI string. macOS wording is canonical;
+# Windows near-duplicates were reconciled onto these keys. Placeholders use %{name}.
+#
+# Top-level keys are grouped by the SURFACE the string is rendered on, so a translator can
+# work one screen at a time:
+#   common  — strings reused on MORE THAN ONE surface (brand, the nav/tray labels, the dash)
+#   tray    — the tray / status-bar menu (macOS) and notification-area menu (Windows)
+#   status  — the Status screen (its Engines group, the panel chrome, and the stats numbers)
+#   tools   — the Tools screen
+#
+# Key classes: most are shared; a few are Windows-only (tray.start_at_login, tray.hint_*).
+# Platform-idiomatic terms differ on purpose (tray.quit "Quit" vs tray.exit "Exit").
+#
+# Per-locale file: the filename (en) is the locale; keys nest and flatten to dot
+# notation (status.caps_lock → key "status.caps_lock").
+
+# ───────────────────────────── GENERIC / SHARED ─────────────────────────────
+# Strings reused across more than one surface, so they don't belong to a single screen.
+common:
+  app_name: DontSpeak    # the product name — the canonical brand string. Reused for the tray
+                         # hover label and the Status "DontSpeak" row title.
+  dash: "—"
+  # The screen labels — "Status", "Tools", "Libraries". ONE key each, shared by the Windows
+  # NavigationView tabs AND the macOS tray menu items (same word, same destination); only
+  # the platform-idiomatic tray ACTIONS below (Quit vs Exit) stay on separate keys.
+  nav_status: Status
+  nav_tools: Tools
+  nav_libraries: Libraries
+  nav_logs: Logs
+
+# ──────────────────────────────── TRAY MENU ─────────────────────────────────
+# macOS status-bar menu + Windows notification-area menu.
+tray:
+  mute: Mute                 # silence the voice without stopping playback
+  quit: Quit                 # macOS idiom
+  settings: Settings         # Windows tray
+  exit: Exit                 # Windows idiom
+  start_at_login: Start at login   # Windows-only
+  # The notification-area icon's hover tooltip is a static product-name label (reuses
+  # common.app_name) — the icon's color already conveys recording/speaking/idle.
+  # Windows tray balloon — shown the first time the window hides to the tray, and when
+  # launched hidden at login. One title + body for both: just point the user at the tray
+  # overflow (^) where new icons hide.
+  hint_tray_title: "DontSpeak is running"
+  hint_tray_body: "Its icon is in the tray, under the ^ overflow if hidden."
+
+# ─────────────────────────────── STATUS SCREEN ──────────────────────────────
+# Everything on the Status panel, top-to-bottom. Three sub-groups by kind:
+#   status.engine — the Engines group (row roles/backends/dot states)
+#   status.*      — the panel chrome (the “DontSpeak” row, Caps Lock, permissions)
+#   status.stats  — the numbers shown under the DontSpeak / TTS / STT rows
+# Keys are ordered to follow the macOS Status panel TOP-TO-BOTTOM, so the Windows mirror
+# can be read off in display order.
+status:
+  # ── Engines group: each row leads with a ROLE, then a secondary detail ──
+  engine:
+    # Row roles — the primary label.
+    role_runtime: Runtime
+    role_tts: TTS
+    role_stt: STT
+    role_diar: Diarization
+    # Backend/model names — the light secondary detail beside each role. The Kokoro (TTS) and
+    # Parakeet (STT) rows each show the runtime they ACTUALLY run on, named by runtime FAMILY:
+    # "ORT …" = ONNX Runtime (its CPU / CUDA / Core ML execution providers); "FluidAudio …" =
+    # the native backend resident on the Apple Neural Engine.
+    coreml_ane: FluidAudio ANE   # native FluidAudio on the Neural Engine: TTS Kokoro + STT Parakeet
+    coreml: ORT Core ML          # TTS runtime detail — ORT Core ML EP (Kokoro)
+    cuda: ORT CUDA               # TTS runtime detail — ORT CUDA EP (Kokoro, Windows GPU)
+    cpu: ORT CPU                 # ORT CPU EP — TTS Kokoro + STT Parakeet
+    kokoro: Kokoro               # TTS detail
+    # STT row shows the CONCRETE engine ACTUALLY running (not the `built_in` setting name):
+    # the `built_in` engine runs the Parakeet model → "Parakeet"; `system`/`claude_code`
+    # show themselves.
+    claude_code: Claude Code     # STT detail — delegate to Claude Code's own voice dictation
+    parakeet: Parakeet           # STT detail — the model the `built_in` engine runs
+    system: System               # STT detail — macOS on-device SpeechAnalyzer
+    pyannote: Pyannote           # Diarization detail — FluidAudio Pyannote + WeSpeaker (keyed by
+                                 # model name like kokoro/parakeet; the role label is role_diar)
+    # The engine's status note — a one-line message shown in the row's EXPANDED section when the
+    # engine ISN'T ready (there's no hover tooltip). Only the not-ready states live here; idle &
+    # running are ready (the row shows its stats, no note). Short + consistent capitalized phrases.
+    status:
+      missing: "Not downloaded"
+      downloading: "Downloading %{pct}%"
+      # Shown while downloading with no known progress fraction (FluidAudio ANE fetches).
+      downloading_indeterminate: "Downloading…"
+      warming: "Starting…"
+      blocked: "Needs permission"        # enabled but a required OS grant is missing
+      failed: "Failed — %{why}"
+    # Failure reasons interpolated into status.engine.status.failed as the %{why} above, shown in
+    # the row's expanded section. `default` is the core formatter's fallback when the engine gives
+    # no reason; the rest are produced by the engine (dontspeakd). The raw OS/helper detail stays in
+    # the logs, not the note.
+    reason:
+      default: "Failed to start"
+      tts_failed: "Speech engine couldn't start"   # all 4 warm-helper failure modes; OS detail → logs
+      cc_voice_off: "Claude Code voice is off — run /voice to enable it"
+      cc_key_unsupported: "Voice key %{key} can't be synthesized — rebind it to Space or Ctrl+<letter>"
+
+  # ── “DontSpeak” row and its expansion (panel chrome) ──
+  # The row title is the product name itself → reuse `common.app_name` (no separate key); the
+  # version shows inline beside it. The lifetime totals/duration live under `status.stats`.
+  #
+  # TTS/STT expansion empty-state: the engine is ready but hasn't produced any stats yet.
+  # (A not-ready engine instead shows its `status.engine.status.*` word here — see that group.)
+  no_data: "No data yet."
+  # Engine-specific rows that are NOT empty-states — they carry their own affordance/info and
+  # so stay distinct: System TTS links out to the OS voices, Claude Code names its delegation.
+  tts_system_settings: "Manage voices"
+  stt_claude_code: "Sends %{key} to Claude Code."
+  stt_claude_code_off: "Uses Claude Code's voice key."
+  diarization_disabled: "Diarization off."
+  diarization_no_speakers: "No voices enrolled."
+  diarization_enrolled: Enrolled
+  diarization_sensitivity: Sensitivity
+  # Download/Retry action on a missing/failed engine row.
+  action:
+    download: Download
+    retry: Retry
+
+  # ── Caps Lock (incl. its OS permissions) · HTTP MCP ──
+  caps_lock: Caps Lock
+  # Brief tap/hold reference shown when the Caps Lock row is expanded.
+  caps_tap: "Tap: start, stop & insert, barge in."
+  caps_hold: "Hold to cancel."
+  # Accessibility + Microphone grants now render nested under the Caps Lock row (their
+  # combined state folds into its dot); there is no longer a separate Permissions section.
+  permission:
+    accessibility: Accessibility
+    accessibility_purpose: Type dictation into apps
+    microphone: Microphone
+    microphone_purpose: Record dictation
+    open_settings_help: Open in System Settings
+  grant:
+    granted: Granted
+    denied: Not granted
+    unknown: Unknown
+
+  # ── Stats: the numbers under the “DontSpeak” / TTS / STT rows ──
+  stats:
+    # Lifetime totals under the “DontSpeak” row (TTS = spoken, STT = transcribed). The TTS/STT
+    # labels are the same words as the engine-row roles → reuse `status.engine.role_tts` /
+    # `status.engine.role_stt`; only the "all-time" qualifier is stats-specific.
+    lifetime_all_time: all-time
+    # Lifetime usage duration shown beside the totals — full granularity, ticks live.
+    duration_live:
+      days: "%{d}d %{h}h %{m}m %{s}s"
+      hours: "%{h}h %{m}m %{s}s"
+      minutes: "%{m}m %{s}s"
+      seconds: "%{s}s"
+    # Per-engine stats under the TTS / STT rows.
+    realtime: Realtime                 # avg realtime factor (lower = faster) + min–max
+    first_audio: First audio           # TTS time-to-first-audio + min–max
+    spoken: Spoken                     # TTS count + audio seconds
+    transcribed: Transcribed           # STT count + audio seconds
+    audio_secs: "%{secs} s"            # the count rows' audio-duration qualifier
+    failures: Failures                 # TTS failure count (shown only when > 0)
+    unit:
+      times: "×"                       # realtime-factor unit (on the average only)
+      seconds: " s"                    # first-audio unit (on the average only)
+
+# ─────────────────────────────── TOOLS SCREEN ───────────────────────────────
+tools:
+  no_arguments: No arguments
+  arguments: Arguments
+  param:
+    required: required
+    optional: optional
+    one_of: "one of: %{values}"
+
+# ──────────────────────────────── LIBRARIES ─────────────────────────────────
+# The Libraries tab: the open-source models + runtimes DontSpeak downloads, each with its
+# license. Rendered from the shared Rust libraries catalog (ds-model), so the list
+# can't drift from what's actually fetched. ONE catalog, every platform's tab.
+libraries:
+  files: Files
+  homepage: Project page
+  view_license: View license
+
+# ──────────────────────────────────── LOGS ──────────────────────────────────
+# The Logs tab: a read-only tail of the unified activity log (dontspeak.log), reloaded each time
+# the tab is shown. Read through the shared ds_log_tail export, so every platform's tab
+# reads the SAME file the engine writes.
+logs:
+  empty: No log yet.
+  filter: Filter logs…
+  no_match: No matching lines.

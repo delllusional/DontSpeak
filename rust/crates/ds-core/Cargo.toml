@@ -1,0 +1,49 @@
+[package]
+name = "ds-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "DontSpeak UI-agnostic core: a stable, read-only C-ABI FFI (engine liveness + model presence + status JSON) a native menu-bar/health UI binds. Control lives in DontSpeak."
+
+# A Rust `lib` PLUS a staticlib + cdylib carrying the `extern "C"` FFI symbols so
+# a native UI can link them:
+#   - staticlib (libds_core.a) — what the macOS SwiftPM app links (single
+#     binary, no dylib loader fuss).
+#   - cdylib (libds_core.dylib/.so/.dll) — for a future Windows/Linux UI
+#     that prefers dynamic linking against the SAME header.
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+# Read-only probes need these; the in-process engine host pulls the full stack.
+ds-config = { workspace = true }
+ds-ipc = { workspace = true }
+ds-model = { workspace = true }
+# The shared tool catalog exposed to the app's Tools window (same list the MCP
+# server gives Claude — see ds-tools).
+ds-tools = { workspace = true }
+# The shared localization catalog, exposed to every platform UI over the C ABI
+# (ds_t / ds_set_locale).
+ds-i18n = { workspace = true }
+# The full engine, hosted in-process by a native app via the C ABI
+# (ds_engine_start/stop/reload). Pulls the TTS/STT/platform stack.
+dontspeakd = { workspace = true }
+# The System-TTS engine's per-OS settings-opener seam (open_voice_settings),
+# surfaced over the C ABI (ds_open_voice_settings) for the UIs' "Manage voices".
+ds-tts = { workspace = true }
+
+[build-dependencies]
+# cbindgen regenerates dontspeak.h from the `extern "C"` surface when present in
+# the cargo cache. It is OPTIONAL: the header is committed, and build.rs falls
+# back to the committed copy when cbindgen cannot be resolved/run (offline CI).
+cbindgen = { version = "0.29", optional = true }
+
+[features]
+# `cbindgen` (off by default) opts into regenerating the committed header. The
+# default build does NOT require the cbindgen crate, so an offline
+# `cargo build`/`cargo test` always succeeds against the committed dontspeak.h.
+default = []
+cbindgen = ["dep:cbindgen"]

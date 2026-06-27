@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the NOTARIZED (dist) build. NOT a sandbox (this app needs
+  Accessibility/Input-Monitoring, which the Mac App Store sandbox forbids — see the audit). Used only
+  when DONTSPEAK_DIST=1; local builds sign without hardened runtime and don't need this.
+
+    - disable-library-validation: the app + ds-helper load libonnxruntime.dylib, which is signed
+      by a different team (Microsoft/pyke). Under hardened runtime, library validation would reject it
+      without this. (Even when bundled and re-signed, keeping this avoids brittle team-id coupling.)
+    - automation.apple-events: the engine sends Apple Events to inspect/paste into the frontmost app
+      (NSAppleEventsUsageDescription). Hardened runtime requires this to send events to other apps.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

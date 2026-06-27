@@ -1,0 +1,66 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    // ── Rust workspace (rust/) ───────────────────────────────────────────────
+    {
+      "label": "rust: build (debug)",
+      "type": "cargo",
+      "command": "build",
+      "args": ["--workspace"],
+      "options": { "cwd": "${workspaceFolder}/rust" },
+      "problemMatcher": ["$rustc"],
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "rust: build (release)",
+      "type": "cargo",
+      "command": "build",
+      "args": ["--workspace", "--release"],
+      "options": { "cwd": "${workspaceFolder}/rust" },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "rust: clippy",
+      "type": "cargo",
+      "command": "clippy",
+      "args": ["--workspace", "--all-targets"],
+      "options": { "cwd": "${workspaceFolder}/rust" },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "rust: test",
+      "type": "cargo",
+      "command": "test",
+      "args": ["--workspace"],
+      "options": { "cwd": "${workspaceFolder}/rust" },
+      "problemMatcher": ["$rustc"],
+      "group": { "kind": "test", "isDefault": true }
+    },
+    {
+      // The C# host P/Invokes ds_core.dll + spawns ds-helper.exe from
+      // rust/target/release — build them before launching the WinUI app.
+      "label": "rust: build core+helper (release)",
+      "type": "cargo",
+      "command": "build",
+      "args": ["--release", "-p", "ds-core", "-p", "sm-tts"],
+      "options": { "cwd": "${workspaceFolder}/rust" },
+      "problemMatcher": ["$rustc"]
+    },
+
+    // ── Windows WinUI host (apps/windows/winui) ──────────────────────────────
+    {
+      "label": "winui: build",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["build", "${workspaceFolder}/apps/windows/winui/DontSpeak.WinUI.csproj"],
+      "problemMatcher": ["$msCompile"]
+    },
+    {
+      // What launch.json's "WinUI host" config depends on: native engine first,
+      // then the managed app.
+      "label": "winui: build (with engine)",
+      "dependsOrder": "sequence",
+      "dependsOn": ["rust: build core+helper (release)", "winui: build"]
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+[package]
+name = "ds-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Platform traits (CapsLockReader / KeyInjector / FrontmostWindow) + per-OS impls."
+build = "build.rs"
+
+[dependencies]
+
+# ---- macOS (compiled & verified on this host) ------------------------------
+[target.'cfg(target_os = "macos")'.dependencies]
+# Ctrl+G via CGEventPost (CGEvent + CGEventSource).
+core-graphics = "0.25"
+# Bridge to Objective-C for NSWorkspace frontmost app. Uses the workspace pins
+# (current objc2 0.6 / app-kit + foundation 0.3), adding only the classes we need.
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = [
+    "NSWorkspace",
+    "NSRunningApplication",
+] }
+objc2-foundation = { workspace = true, features = ["NSString"] }
+# CoreAudio bindings (mic_active probe): AudioObjectGetPropertyData + the property
+# selector constants, instead of hand-declaring the extern + FourCharCodes. Part of
+# the objc2 0.6.x release train (objc2 >=0.6.2, matching the =0.6.4 pin above); the
+# crate auto-links the CoreAudio framework. Default features (AudioHardware) cover
+# the property API we use; no objc2 wrapper feature needed for the plain FFI call.
+objc2-core-audio = "0.3.2"
+# Clipboard for the paste-based text injection (KeyInjector::type_text, §C.3).
+arboard = { workspace = true }
+
+# ---- Windows (cfg, UNCOMPILED on this host) --------------------------------
+[target.'cfg(target_os = "windows")'.dependencies]
+# Clipboard for the paste-based text injection (KeyInjector::type_text) — an atomic
+# Ctrl+V paste, mirroring the macOS Cmd+V path (per-char SendInput crawled in a console).
+arboard = { workspace = true }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    # OpenProcess / QueryFullProcessImageNameW for terminal_frontmost().
+    "Win32_System_Threading",
+    # GetProcessMemoryInfo (WorkingSetSize) for rss_mb() — the memory stat.
+    "Win32_System_ProcessStatus",
+    # LoadLibraryW/GetProcAddress to dlopen nvml.dll for gpu_stats() (GPU usage).
+    "Win32_System_LibraryLoader",
+    # UI Automation (the Windows AX analogue) for paste_target_present(): is the
+    # FOCUSED element an editable text control? Mirrors the macOS Accessibility probe.
+    "Win32_UI_Accessibility",
+    # WASAPI mic-in-use probe (mic_active): COM + audio endpoint/session APIs.
+    # StructuredStorage pulls PROPVARIANT, which IMMDevice::Activate's signature
+    # references — without it that method is feature-gated out.
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_Media_Audio",
+    # Caps-Lock LED indicator (set_caps_lock): open the keyboard class device
+    # (DefineDosDeviceW + CreateFileW) and drive IOCTL_KEYBOARD_SET_INDICATORS.
+    # Win32_Security is required by CreateFileW's SECURITY_ATTRIBUTES parameter.
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Security",
+] }
+
+# ---- Linux (cfg) -----------------------------------------------------------
+[target.'cfg(target_os = "linux")'.dependencies]
+# evdev provides BOTH the LED/key source (`evdev::Device`) and the virtual-keyboard
+# sink (`evdev::uinput::VirtualDevice`) — so the unmaintained `uinput` crate (last
+# release 2018) is no longer needed; key injection goes through evdev's uinput.
+evdev = "0.13"
+x11rb = "0.13"
+# Clipboard for the paste-based text injection (KeyInjector::type_text) — an atomic
+# Ctrl+Shift+V paste into the focused terminal, mirroring the macOS Cmd+V / Windows
+# Ctrl+V path (per-char uinput Unicode is layout-dependent and crawls in a console).
+arboard = { workspace = true }

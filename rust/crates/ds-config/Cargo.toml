@@ -1,0 +1,27 @@
+[package]
+name = "ds-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Path resolution and voice/runtime config for dontspeak (~/.claude, pidfile)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+directories = { workspace = true }
+# Wiring our hooks into OpenAI Codex's `~/.codex/config.toml` without disturbing
+# the user's existing config (format-preserving, like the additive settings.json merge).
+toml_edit = { workspace = true }
+# Serde TOML for OUR own config (our config.toml), which we own outright.
+toml = { workspace = true }
+# Canonical pidfile codec (read_pid) + the cross-platform pid liveness/terminate
+# primitives live in ds-proc; read_engine_pid / pid_alive / evict_stale_engine
+# delegate to it. ds-proc does NOT depend on ds-config, so no cycle.
+ds-proc = { workspace = true }
+# Atomic settings.json write (temp file in the SAME dir + rename) — mirrors the
+# proven ds_proc::write_speaker pattern so a crash never leaves a half-written
+# settings.json (the file Claude Code itself also reads).
+tempfile = { workspace = true }

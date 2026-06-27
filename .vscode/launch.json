@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    // ── Rust: the MCP daemon ─────────────────────────────────────────────────
+    // cppvsdbg is the Windows-MSVC native debugger (reads the rustc PDBs).
+    {
+      "name": "Debug dontspeakd (daemon)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "preLaunchTask": "rust: build (debug)",
+      "program": "${workspaceFolder}/rust/target/debug/dontspeakd.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/rust",
+      "console": "integratedTerminal"
+    },
+    // ── Rust: the CLI ────────────────────────────────────────────────────────
+    {
+      "name": "Debug dontspeak (cli)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "preLaunchTask": "rust: build (debug)",
+      "program": "${workspaceFolder}/rust/target/debug/dontspeak.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/rust",
+      "console": "integratedTerminal"
+    },
+    // ── C#/.NET: the WinUI host ──────────────────────────────────────────────
+    // Builds the native engine (ds_core.dll + helper) then the managed app
+    // and attaches the .NET debugger. Native P/Invoke frames need cppvsdbg.
+    {
+      "name": "Run WinUI host",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "winui: build (with engine)",
+      "program": "${workspaceFolder}/apps/windows/winui/bin/Debug/net10.0-windows10.0.19041.0/win-x64/ds-winui.exe",
+      "cwd": "${workspaceFolder}/apps/windows/winui",
+      "console": "internalConsole",
+      "stopAtEntry": false
+    }
+  ]
+}

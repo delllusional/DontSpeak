@@ -1,0 +1,52 @@
+[package]
+name = "ds-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Model asset locate/download for dontspeak (Parakeet v2 ONNX STT + native Kokoro onnx/voices + the onnxruntime dylib). Pinned SHA-256, atomic temp+rename, retry."
+
+[dependencies]
+ds-config = { workspace = true }
+# Tiny BLOCKING HTTP client (attohttpc) — deliberately NOT reqwest/tokio (no async
+# runtime in the engine; "minimal deps"). Chosen for its socket `read_timeout`
+# (per-read inactivity guard) — see the timeout note in lib.rs. TLS = rustls + ring
+# (workspace dep): pure-Rust crypto that cross-compiles everywhere, incl. win-arm64.
+attohttpc = { workspace = true }
+# OS trust store for TLS. attohttpc's `tls-rustls-webpki-roots-ring` feature pulls the
+# webpki-roots CRATE but NOT the `tls-rustls-webpki-roots` feature flag its root-loading code
+# is gated on — so its built-in root store is EMPTY and every HTTPS download fails with "no
+# root trust anchors". We keep `ring` (cross-compiles to win-arm64; aws-lc-rs doesn't) and
+# instead inject the OS roots ourselves via attohttpc's `add_root_certificate`, which the
+# rustls impl adds to the store regardless of that broken cfg. pki-types matches rustls 0.23.
+rustls-native-certs = "0.8"
+# Name the cert type attohttpc's `add_root_certificate` wants (its `Certificate` =
+# `CertificateDer`); "1" unifies with attohttpc's rustls 0.23 / rustls-native-certs pki-types.
+rustls-pki-types = "1"
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+# Parse the HuggingFace tree API (file list + sizes + LFS oids) so we self-manage the
+# FluidAudio Core ML downloads at a pinned revision (see coreml_repo.rs).
+serde_json = { workspace = true }
+# Extract libonnxruntime.dylib from the microsoft/pyke .tgz (Kokoro route A).
+flate2 = { workspace = true }
+tar = { workspace = true }
+
+# Windows route A ships ONNX Runtime as a .zip (not .tgz), so we need a zip reader
+# to pull lib/onnxruntime.dll out of it. deflate-only (the format MS uses); no
+# bzip2/zstd/aes to keep it lean. flate2 is already in the graph.
+[target.'cfg(windows)'.dependencies]
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
+# Linux x86_64 CUDA GPU runtime: the NVIDIA + onnxruntime-gpu wheels are zips (need `zip` to
+# pull the .so's out), and the CUDA provider's dependency libs are preloaded with RTLD_GLOBAL
+# via dlopen (need `libc`) since glibc reads LD_LIBRARY_PATH only at process start.
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+zip = { version = "8", default-features = false, features = ["deflate"] }
+libc = "0.2"
+
+[dev-dependencies]
+# Localhost TcpListener fixture for the no-network ensure() happy-path test.
+tempfile = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name = "ds-proc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Pidfile single-speaker + process-GROUP kill (barge-in) for dontspeak."
+
+[dependencies]
+tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Single-PID OpenProcess/TerminateProcess. Behind cfg; UNCOMPILED on this host.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }

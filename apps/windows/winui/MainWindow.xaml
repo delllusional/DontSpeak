@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="DontSpeak.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:DontSpeak"
+    Title="DontSpeak">
+
+    <!-- Translucent Fluent material behind the window — the standard Windows 11 look
+         (same Mica used by Settings / Quick Settings). Built into the Windows App SDK;
+         no extra dependency. The cards keep their own surfaces and float on the Mica. -->
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+
+    <!-- The NavigationView plus the engine-state stripe OVERLAID on its top tab row.
+         The stripe lives here (not in PaneFooter) so it reserves NO space in the tab
+         row — a wide stripe can't crowd the Status / Tools tabs into the overflow. -->
+    <Grid>
+    <NavigationView x:Name="Nav"
+                    PaneDisplayMode="Top"
+                    IsSettingsVisible="False"
+                    IsBackButtonVisible="Collapsed"
+                    SelectionChanged="Nav_SelectionChanged">
+        <NavigationView.Resources>
+            <!-- Brand-purple selection underline under the top tabs (the DontSpeak seed color). -->
+            <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="#5B4397" />
+        </NavigationView.Resources>
+        <NavigationView.MenuItems>
+            <NavigationViewItem Content="{loc:Loc Key=common.nav_status}" Tag="status" IsSelected="True" />
+            <NavigationViewItem Content="{loc:Loc Key=common.nav_tools}" Tag="tools" />
+            <NavigationViewItem Content="{loc:Loc Key=common.nav_logs}" Tag="logs" />
+            <NavigationViewItem Content="{loc:Loc Key=common.nav_libraries}" Tag="libraries" />
+        </NavigationView.MenuItems>
+
+        <Grid Margin="20,12,20,20">
+            <!-- ── STATUS — mirrors the macOS SwiftUI StatusView, top-to-bottom ───────────
+                 Three sections: (1) DontSpeak (expands to lifetime usage + version),
+                 (2) the engine rows (TTS / STT, each expands to its stats),
+                 (3) Caps-Lock dictation. The macOS Permissions section is
+                 omitted — it drives the native macOS privacy panes, which Windows lacks. -->
+            <ScrollViewer x:Name="StatusScroll" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
+                <!-- Top-aligned so the panel sizes to its CONTENT (not the scroll viewport) — the
+                     window-height cap (CapHeightToStatusContent) reads this panel's ActualHeight. -->
+                <StackPanel Spacing="14" HorizontalAlignment="Stretch" VerticalAlignment="Top">
+
+                    <!-- ── 1. DontSpeak — tap to reveal lifetime usage + version ── -->
+                    <Border CornerRadius="8" Padding="16"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                        <StackPanel Spacing="6">
+                            <Grid x:Name="DontSpeakHeader" ColumnDefinitions="Auto,*" Padding="0,4,0,4"
+                                  Background="Transparent" Tapped="DontSpeakHeader_Tapped">
+                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <TextBlock Text="{loc:Loc Key=common.app_name}" VerticalAlignment="Center" />
+                                    <!-- Version inline beside the app name (mirrors the macOS engineRowBlock).
+                                         The version itself is the homepage link; the CursorHyperlinkButton shows the
+                                         busy "Wait" spinner on hover (the Windows analog of the macOS beachball) and
+                                         consumes its own click so the row's tap-to-expand still works everywhere else.
+                                         Borderless/zero-padding so it reads as inline text. No ToolTip on purpose: the
+                                         tooltip popup re-asserts the default Arrow cursor and cancels the Wait spinner. -->
+                                    <loc:CursorHyperlinkButton x:Name="VersionLink" Padding="0" MinWidth="0" MinHeight="0"
+                                                     VerticalAlignment="Center" Background="Transparent"
+                                                     Click="VersionLink_Click">
+                                        <TextBlock x:Name="VersionText" Opacity="0.55" FontFamily="Consolas"
+                                                   Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                    </loc:CursorHyperlinkButton>
+                                </StackPanel>
+                                <Ellipse x:Name="EngineDot" Grid.Column="1" Width="11" Height="11"
+                                         HorizontalAlignment="Right" VerticalAlignment="Center" />
+                            </Grid>
+                            <StackPanel x:Name="DontSpeakStats" Spacing="6" Margin="12,0,0,6" Visibility="Collapsed">
+                                <!-- TTS · all-time (seconds spoken, every session) -->
+                                <Grid ColumnDefinitions="Auto,*">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <TextBlock Text="{loc:Loc Key=status.engine.role_tts}" Opacity="0.6" />
+                                        <TextBlock Text="{loc:Loc Key=status.stats.lifetime_all_time}" Opacity="0.45" />
+                                    </StackPanel>
+                                    <TextBlock x:Name="TtsAllTime" Grid.Column="1" HorizontalAlignment="Right" FontFamily="Consolas" />
+                                </Grid>
+                                <!-- STT · all-time (seconds heard) -->
+                                <Grid ColumnDefinitions="Auto,*">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <TextBlock Text="{loc:Loc Key=status.engine.role_stt}" Opacity="0.6" />
+                                        <TextBlock Text="{loc:Loc Key=status.stats.lifetime_all_time}" Opacity="0.45" />
+                                    </StackPanel>
+                                    <TextBlock x:Name="SttAllTime" Grid.Column="1" HorizontalAlignment="Right" FontFamily="Consolas" />
+                                </Grid>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ── 2. Engines — TTS / STT, each row leads with its ROLE ── -->
+                    <Border CornerRadius="8" Padding="16"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                        <StackPanel Spacing="6">
+                            <!-- TTS (Kokoro) -->
+                            <Grid x:Name="TtsHeader" ColumnDefinitions="Auto,*" Padding="0,4,0,4"
+                                  Background="Transparent" Tapped="TtsHeader_Tapped">
+                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <TextBlock Text="{loc:Loc Key=status.engine.role_tts}" />
+                                    <!-- Concrete engine for the active tts_engine (Kokoro / System) — set in code. -->
+                                    <TextBlock x:Name="TtsDetail" Text="{loc:Loc Key=status.engine.kokoro}" Opacity="0.6" VerticalAlignment="Center" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                                    <Ellipse x:Name="TtsDot" Width="11" Height="11" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Grid>
+                            <StackPanel x:Name="TtsStats" Spacing="6" Margin="12,0,0,6" Visibility="Collapsed">
+                                <!-- The active runtime/EP Kokoro runs on (ORT CPU/CUDA/Core ML, FluidAudio ANE). -->
+                                <Grid x:Name="TtsRuntimeRow" ColumnDefinitions="Auto,*" Visibility="Collapsed"><TextBlock Text="{loc:Loc Key=status.engine.role_runtime}" Opacity="0.6" /><TextBlock x:Name="TtsRuntimeText" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
+                                <TextBlock x:Name="TtsStatsMsg" TextWrapping="Wrap" Opacity="0.7" Visibility="Collapsed" />
+                                <!-- System TTS: a clickable "Manage voices" link to the OS voice settings page
+                                     (the Windows analogue of the macOS Spoken-Content row). The whole row opens the
+                                     shared per-OS settings deep link via ds_open_voice_settings; the trailing
+                                     glyph is Segoe Fluent's OpenInNewWindow (E8A7), Windows' built-in "opens externally". -->
+                                <loc:CursorHyperlinkButton x:Name="TtsSystemSettingsRow" Visibility="Collapsed"
+                                                           Padding="0" MinWidth="0" MinHeight="0" CursorShape="Hand"
+                                                           HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                                                           Background="Transparent" Click="TtsSystemSettings_Click">
+                                    <!-- Neutral foreground: a HyperlinkButton tints its content with the system
+                                         ACCENT color by default; pin both text + glyph to the normal text brush so this
+                                         row reads like the other status rows (the macOS row is secondary, not accent). -->
+                                    <Grid ColumnDefinitions="*,Auto">
+                                        <TextBlock x:Name="TtsSystemSettingsText" Opacity="0.7" VerticalAlignment="Center" TextWrapping="Wrap"
+                                                   Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                        <FontIcon Grid.Column="1" Glyph="&#xE8A7;" FontFamily="Segoe Fluent Icons"
+                                                  FontSize="14" Opacity="0.7" VerticalAlignment="Center" Margin="8,0,0,0"
+                                                  Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                    </Grid>
+                                </loc:CursorHyperlinkButton>
+                                <StackPanel x:Name="TtsStatsGrid" Spacing="6">
+                                    <Grid ColumnDefinitions="Auto,*"><TextBlock Text="{loc:Loc Key=status.stats.realtime}" Opacity="0.6" /><TextBlock x:Name="TtsSpeed" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
+                                    <Grid ColumnDefinitions="Auto,*"><TextBlock Text="{loc:Loc Key=status.stats.first_audio}" Opacity="0.6" /><TextBlock x:Name="TtsFirst" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
+                                    <Grid ColumnDefinitions="Auto,*"><TextBlock Text="{loc:Loc Key=status.stats.spoken}" Opacity="0.6" /><TextBlock x:Name="TtsSpoken" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
+                                    <Grid x:Name="TtsFailuresRow" ColumnDefinitions="Auto,*" Visibility="Collapsed"><TextBlock Text="{loc:Loc Key=status.stats.failures}" Opacity="0.6" /><TextBlock x:Name="TtsFailures" Grid.Column="1" HorizontalAlignment="Right" Foreground="#E84646" /></Grid>
+                                </StackPanel>
+                            </StackPanel>
+
+                            <!-- STT (Parakeet) -->
+                            <Grid x:Name="SttHeader" ColumnDefinitions="Auto,*" Padding="0,4,0,4"
+                                  Background="Transparent" Tapped="SttHeader_Tapped">
+                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <TextBlock Text="{loc:Loc Key=status.engine.role_stt}" />
+                                    <!-- Concrete engine for the active stt_engine (Parakeet / Claude Code / System) — set in code. -->
+                                    <TextBlock x:Name="SttDetail" Text="{loc:Loc Key=status.engine.parakeet}" Opacity="0.6" VerticalAlignment="Center" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                                    <Ellipse x:Name="SttDot" Width="11" Height="11" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Grid>
+                            <StackPanel x:Name="SttStats" Spacing="6" Margin="12,0,0,6" Visibility="Collapsed">
+                                <!-- The active runtime/EP Parakeet runs on (built_in only; ORT CPU, FluidAudio ANE). -->
+                                <Grid x:Name="SttRuntimeRow" ColumnDefinitions="Auto,*" Visibility="Collapsed"><TextBlock Text="{loc:Loc Key=status.engine.role_runtime}" Opacity="0.6" /><TextBlock x:Name="SttRuntimeText" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
+                                <TextBlock x:Name="SttStatsMsg" TextWrapping="Wrap" Opacity="0.7" Visibility="Collapsed" />
+                                <StackPanel x:Name="SttStatsGrid" Spacing="6">
+                                    <Grid ColumnDefinitions="Auto,*"><TextBlock Text="{loc:Loc Key=status.stats.realtime}" Opacity="0.6" /><TextBlock x:Name="SttSpeed" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
+                                    <Grid ColumnDefinitions="Auto,*"><TextBlock Text="{loc:Loc Key=status.stats.transcribed}" Opacity="0.6" /><TextBlock x:Name="SttTranscribed" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
+                                </StackPanel>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ── 3. Caps-Lock dictation ── -->
+                    <Border CornerRadius="8" Padding="16"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                        <StackPanel Spacing="6">
+                            <Grid x:Name="CapsHeader" ColumnDefinitions="Auto,*" Padding="0,4,0,4"
+                                  Background="Transparent" Tapped="CapsHeader_Tapped">
+                                <TextBlock Text="{loc:Loc Key=status.caps_lock}" VerticalAlignment="Center" />
+                                <Ellipse x:Name="CapsDot" Grid.Column="1" Width="11" Height="11"
+                                         HorizontalAlignment="Right" VerticalAlignment="Center" />
+                            </Grid>
+                            <!-- Expands to a brief tap/hold reference for what Caps Lock does (mirrors macOS). -->
+                            <StackPanel x:Name="CapsStats" Spacing="6" Margin="12,0,0,6" Visibility="Collapsed">
+                                <TextBlock Text="{loc:Loc Key=status.caps_tap}" TextWrapping="Wrap" Opacity="0.7" />
+                                <TextBlock Text="{loc:Loc Key=status.caps_hold}" TextWrapping="Wrap" Opacity="0.7" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- ── TOOLS ──────────────────────────────────────────────────── -->
+            <ScrollViewer x:Name="ToolsScroll" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+                <StackPanel Spacing="12" HorizontalAlignment="Stretch">
+                    <!-- One native Fluent Expander per tool (built in LoadTools); the small gap
+                         between them matches the Windows 11 Settings "expander list" look. -->
+                    <StackPanel x:Name="ToolsList" Spacing="4" />
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- ── LIBRARIES ──────────────────────────────────────────────────
+                 One Fluent Expander per downloaded project (built in LoadLibraries from the
+                 SHARED Rust libraries catalog — ds_libraries_json). Header = project name +
+                 a license badge; expanding reveals what it's for, links to the project + the
+                 license, and the files it fetches. Same "expander list" look as Tools. -->
+            <ScrollViewer x:Name="LibrariesScroll" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+                <StackPanel Spacing="12" HorizontalAlignment="Stretch">
+                    <StackPanel x:Name="LibrariesList" Spacing="4" />
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- ── LOGS — the COMBINED activity log (unified + aux helper, etc.). Reloaded on
+                 tab-select (no poll timer). A top filter bar narrows lines by free text (matches
+                 source/level/message, case-insensitive); below it a glass card with the
+                 color-coded (per-source + ERROR/WARN), selectable, wrapped log that scrolls within
+                 the window's (Status-locked) height. -->
+            <Grid x:Name="LogsTab" Visibility="Collapsed" RowDefinitions="Auto,*">
+                <TextBox x:Name="LogFilter" Grid.Row="0" Margin="0,0,0,8"
+                         TextChanged="LogFilter_TextChanged" />
+                <ScrollViewer x:Name="LogsScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                    <Border CornerRadius="8" Padding="12"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                        <RichTextBlock x:Name="LogText" FontFamily="Cascadia Mono, Consolas"
+                                       FontSize="12" IsTextSelectionEnabled="True"
+                                       TextWrapping="Wrap" LineHeight="18" />
+                    </Border>
+                </ScrollViewer>
+            </Grid>
+        </Grid>
+    </NavigationView>
+
+        <!-- Engine-state highlight, OVERLAID edge-to-edge on the top tab row (full width,
+             no corners). A uniform translucent wash of the brand tint highlights the whole
+             bar by state; hit-testing is off so it never eats a tab click. Height is matched
+             to the tab row in code (SizeStateStripe); the fill is set live in ApplyStateAccent
+             from the shared Brand tints (idle = no fill, orange = recording/STT, purple =
+             speaking/TTS). -->
+        <Border x:Name="StateStripe" CornerRadius="0" IsHitTestVisible="False"
+                VerticalAlignment="Top" HorizontalAlignment="Stretch"
+                Margin="0" />
+    </Grid>
+</Window>

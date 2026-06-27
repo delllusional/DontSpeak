@@ -1,0 +1,110 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DontSpeak — the Windows WinUI 3 app: the Fluent analogue of the macOS SwiftUI
+    menu-bar app, and now the single resident host (the Rust ds-tray was
+    merged in — see TrayIcon.cs). Unpackaged + framework-dependent: the Windows App
+    Runtime is already on the machine, so this is a plain .exe (no MSIX). It HOSTS
+    the engine in-process by P/Invoking ds_core.dll (the same C ABI SwiftUI
+    links) and shows the tray icon + modern context flyout via H.NotifyIcon (TrayIcon.cs).
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>DontSpeak</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <!-- Build for the host (x64) by default; pass `-p:Platform=ARM64 -r win-arm64` for a
+         Windows-on-ARM build. -->
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <!-- The cargo output dir for the native engine DLL + warm-synth helper: the ARM64 target
+         sub-dir for win-arm64, the host target root otherwise. RELEASE-built (the app always
+         ships against the release-built Rust). -->
+    <CargoArchSub Condition="'$(RuntimeIdentifier)' == 'win-arm64'">aarch64-pc-windows-msvc\</CargoArchSub>
+    <CargoOutDir>$(MSBuildThisFileDirectory)..\..\..\rust\target\$(CargoArchSub)release\</CargoOutDir>
+    <UseWinUI>true</UseWinUI>
+    <Nullable>enable</Nullable>
+    <!-- TrayIcon.cs draws the status-dot icon directly into a 32bpp DIB section. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <!-- Unpackaged: no MSIX identity; the bootstrapper auto-initializes the
+         installed Windows App Runtime at startup. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <AssemblyName>ds-winui</AssemblyName>
+    <!-- Brand app icon (purple squircle + speech-bubble glyph): the EXE icon shown
+         in Explorer/taskbar, and loaded at runtime for the window via AppWindow.SetIcon. -->
+    <ApplicationIcon>AppIcon.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Ship the .ico beside the exe so AppWindow.SetIcon can load it at runtime. -->
+    <Content Include="AppIcon.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
+    <!-- Modern tray icon + context MenuFlyout (the de-facto WinUI tray library; Microsoft
+         ships no first-party NotifyIcon for WinUI 3). Gives the translucent flyout +
+         efficiency mode. -->
+    <!-- 2.4.2-dev: 2.4.1 placed the tray flyout BELOW a bottom taskbar; the dev build adds
+         the bottom-taskbar placement fix (opens upward). Pin to the stable 2.4.2 once it ships. -->
+    <PackageReference Include="H.NotifyIcon.WinUI" Version="2.4.2-dev.22" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.*" />
+    <!-- GDI+ (System.Drawing) renders the brand SVG glyph into the tray icon's DIB
+         for all three states; Windows-only, fine for this win-x64 WinUI app. -->
+    <PackageReference Include="System.Drawing.Common" Version="10.0.*" />
+    <!-- Win2D: GPU (Direct2D) immediate-mode rendering for the dictation overlay. Used
+         OFF-SCREEN (CanvasRenderTarget, no compositor) to rasterize the card, glow, and
+         the per-word blur-replace cross-fade with a real GaussianBlurEffect, then the
+         premultiplied pixels are read back and blitted through the focus-safe layered
+         window (UpdateLayeredWindow) — see DictationPanel.cs. -->
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
+    <!-- Maintained, versioned DirectComposition + DXGI bindings for the dictation overlay's
+         GPU present path (DictationPanel.cs hosts a Win2D CanvasSwapChain on the HWND via
+         DComp). Replaces hand-declared COM vtables (slot-counted ComImport interfaces) whose
+         one-slot-off failure mode was silent corruption. -->
+    <PackageReference Include="Vortice.DirectComposition" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+  </ItemGroup>
+
+  <!-- Ship the engine DLL + the warm-synth helper next to the app (built by the
+       release cargo build of ds-core + ds-helper). ds_core.dll is
+       P/Invoked; ds-helper.exe is spawned by the in-process engine as a
+       SIBLING (install_bin resolves it next to the host exe) for warm/cold Kokoro
+       synth — so it must live beside ds-winui.exe. -->
+  <ItemGroup>
+    <None Include="$(CargoOutDir)ds_core.dll"
+          Condition="Exists('$(CargoOutDir)ds_core.dll')">
+      <Link>ds_core.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="$(CargoOutDir)ds-helper.exe"
+          Condition="Exists('$(CargoOutDir)ds-helper.exe')">
+      <Link>ds-helper.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- Strip the Windows App SDK's bundled Windows-AI / ML runtime from the publish
+       output: onnxruntime.dll + DirectML.dll + the Microsoft.Windows.AI.* projections
+       (~42 MB). DontSpeak never calls the Windows ML APIs — it ships its OWN onnxruntime
+       to the model dir at runtime — so these are dead weight in a self-contained build.
+       Verified: the app + engine run without them. -->
+  <Target Name="StripUnusedWindowsAI" AfterTargets="Publish">
+    <ItemGroup>
+      <_UnusedAI Include="$(PublishDir)onnxruntime.dll" />
+      <_UnusedAI Include="$(PublishDir)onnxruntime_providers_*.dll" />
+      <_UnusedAI Include="$(PublishDir)DirectML.dll" />
+      <_UnusedAI Include="$(PublishDir)Microsoft.Windows.AI.*" />
+    </ItemGroup>
+    <Delete Files="@(_UnusedAI)" />
+    <Message Importance="high" Text="Stripped @(_UnusedAI->Count()) unused Windows-AI/ML files from $(PublishDir)" />
+  </Target>
+
+</Project>

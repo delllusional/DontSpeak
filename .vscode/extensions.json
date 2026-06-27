@@ -1,0 +1,24 @@
+{
+  // DontSpeak is a multi-language repo. These are the extensions VS Code will
+  // offer to install when the workspace is opened (Reload → "Install all").
+  "recommendations": [
+    // Rust workspace (rust/) — the engine, daemon and FFI core. MSVC toolchain.
+    "rust-lang.rust-analyzer",
+    // Cargo.toml + our own config.toml syntax / schema / formatting.
+    "tamasfe.even-better-toml",
+    // Native debugging for the MSVC Rust builds (cppvsdbg reads the PDBs) and the
+    // C# host's P/Invoke into ds_core.dll. Used by .vscode/launch.json.
+    "ms-vscode.cpptools",
+
+    // Windows host app (apps/windows/winui) — .NET 10 / WinUI 3.
+    "ms-dotnettools.csharp",
+    "ms-dotnettools.csdevkit",
+
+    // PowerShell install / enable / hook scripts (apps/windows/**.ps1, scripts/).
+    "ms-vscode.powershell",
+    // Python helper scripts (installer image gen, Linux hook).
+    "ms-python.python",
+    // XAML / XML editing (MainWindow.xaml, App.xaml, app.manifest).
+    "redhat.vscode-xml"
+  ]
+}

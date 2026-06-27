@@ -1,0 +1,40 @@
+#!/bin/sh
+# play — cross-platform "play this WAV" shim. (LINUX)
+# UNTESTED ON LINUX — validate on real Linux hardware before production use.
+#
+# TODO(on-target): OBSOLETE for the Claude hooks after the Phase-4 cutover. The
+# Rust ds-speak / ds-narrate binaries now do audio playback IN-PROCESS
+# (rodio), so speak-reply.sh / speak-message.sh no longer shell out to a WAV
+# player. This shim is retained only as a standalone helper for manual use; it is
+# no longer on the hook path. (No synth/speech tooling is referenced here.)
+#
+# Usage: play <wav-file>
+#
+# On Linux it tries the common player chain:
+#   paplay (PulseAudio/PipeWire) -> aplay (ALSA) -> ffplay (universal).
+# Runs the player in the FOREGROUND.
+set -eu
+
+wav="${1:?usage: play <wav-file>}"
+
+case "$(uname -s)" in
+  Darwin)
+    exec afplay "$wav"
+    ;;
+  Linux)
+    if command -v paplay >/dev/null 2>&1; then
+      exec paplay "$wav"
+    elif command -v aplay >/dev/null 2>&1; then
+      exec aplay -q "$wav"
+    elif command -v ffplay >/dev/null 2>&1; then
+      exec ffplay -nodisp -autoexit -loglevel quiet "$wav"
+    else
+      echo "play: no audio player found (install pulseaudio-utils, alsa-utils, or ffmpeg)" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "play: unsupported OS $(uname -s)" >&2
+    exit 1
+    ;;
+esac

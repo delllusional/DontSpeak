@@ -1,0 +1,23 @@
+[package]
+name = "ds-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Tiny newline-delimited-JSON RPC over a Unix-domain socket. The engine hosts the
+# server; the SwiftUI app (via ds-core) and the speak/narrate hooks are
+# clients. See docs/DAEMON-REFACTOR.md.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Windows has no std Unix-domain-socket support, but Win10 1803+ ships AF_UNIX.
+# uds_windows wraps it with a std-mirroring UnixListener/UnixStream (incoming(),
+# try_clone(), set_read_timeout/set_write_timeout, Read/Write), so the windows
+# transport arm is a near-verbatim copy of the unix one — same filesystem-scoped
+# .sock security model, no loopback-TCP + auth-token handshake needed.
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1.2"

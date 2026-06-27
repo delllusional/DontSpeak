@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="winbg" x1="0" y1="0" x2="0" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8568DE"></stop>
+      <stop offset="1" stop-color="#5B4397"></stop>
+    </linearGradient>
+  </defs>
+
+  
+  <rect x="96" y="96" width="832" height="832" rx="148" ry="148" fill="url(#winbg)"></rect>
+  
+  <rect x="97.5" y="97.5" width="829" height="829" rx="146.5" ry="146.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="3"></rect>
+
+  
+  <svg x="212" y="212" width="600" height="600" viewBox="47 67 446 391" preserveAspectRatio="xMidYMid meet">
+    <path d="M 270,90 C 390,90 470,165 470,250 C 470,335 390,410 270,410&#xA;             C 238,410 205,404 178,392 L 115,425 C 102,432 90,420 96,406&#xA;             L 112,365 C 86,335 70,295 70,250 C 70,165 150,90 270,90 Z" fill="#FFFFFF"></path>
+    <g fill="none" stroke="#5B4397" stroke-width="27" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 215,200 L 160,250 L 215,300"></path>
+      <path d="M 275,170 L 235,330"></path>
+      <path d="M 295,200 L 350,250 L 295,300"></path>
+    </g>
+  </svg>
+</svg>

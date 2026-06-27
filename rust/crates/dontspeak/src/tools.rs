@@ -1,0 +1,898 @@
+//! The `tools/call` router and the individual `call_*` tool handlers (plus their
+//! strict arg structs). Most handlers bridge to the resident `dontspeakd` over
+//! `ds-ipc`; `list_voices`/`set_config`/`status`/`wire` read config or edit
+//! client files directly, never spawning the engine (set_config still best-effort-nudges
+//! a running one to Reload).
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use ds_config::{Paths, TtsEngine, VoiceConfig};
+use ds_ipc::{Request, Response};
+use ds_tts::g2p;
+
+use crate::engine_launch::ensure_engine;
+use crate::mcp::{ok, tool_result};
+use crate::voices::{resolve_voice_engine, voice_groups};
+use crate::{wire_desktop, wire_hooks};
+
+pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>) -> Value {
+    let params = msg.get("params");
+    let name = params
+        .and_then(|p| p.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let args = params
+        .and_then(|p| p.get("arguments"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    let result = match name {
+        // Read-only enumeration: reads the Kokoro voices bin + `say` directly, no engine.
+        "list_voices" => match Paths::resolve() {
+            Some(paths) => call_list_voices(&paths, &args),
+            None => Err("cannot resolve ~/.claude paths".into()),
+        },
+        // Persistent config write to settings.json; the engine applies it via its mtime-watch
+        // (or the best-effort Reload nudge). Doesn't require the engine to be up.
+        "set_config" => match Paths::resolve() {
+            Some(paths) => call_set_config(&paths, &args),
+            None => Err("cannot resolve ~/.claude paths".into()),
+        },
+        // Write a config to disk or register/remove a client integration (no engine needed;
+        // edits client configs via the SAME wire_hooks/wire_desktop entry points the
+        // installer uses, and writes the narration spec to the user data dir).
+        "wire" => call_wire(&args),
+        // Read-only introspection: config (settings.json) + live engine state.
+        // Does NOT spawn the engine — a status check must not start playback.
+        "status" => match Paths::resolve() {
+            Some(paths) => call_status(&paths, sock, &args),
+            None => Err("cannot resolve ~/.claude paths".into()),
+        },
+        // Stateful actions bridge to the resident engine. set_voice sets (or, with no
+        // `voice`, clears) a TRANSIENT session override there (not settings.json).
+        "speak" | "stop_speak" | "listen" | "diarize" | "enroll" | "forget_speaker"
+        | "list_speakers" | "set_voice" => {
+            let Some(sock) = sock else {
+                return ok(
+                    id,
+                    tool_result("cannot resolve the engine socket path".into(), true),
+                );
+            };
+            // Make sure the engine is up (MCP clients may invoke us with none yet).
+            ensure_engine(sock);
+            match name {
+                "speak" => call_speak(sock, &args),
+                "stop_speak" => call_stop(sock),
+                "set_voice" => call_set_voice(sock, &args),
+                "diarize" => call_diarize(sock, &args),
+                "enroll" => call_enroll(sock, &args),
+                "forget_speaker" => call_forget_speaker(sock, &args),
+                "list_speakers" => call_list_speakers(sock),
+                _ => call_dictate(sock, &args),
+            }
+        }
+        other => Err(format!("unknown tool: {other}")),
+    };
+    match result {
+        Ok(text) => ok(id, tool_result(text, false)),
+        Err(e) => ok(id, tool_result(e, true)),
+    }
+}
+
+// ── Tool argument structs ─────────────────────────────────────────────────────
+// Each arg-taking tool deserializes its `arguments` into one of these. `deny_unknown_fields`
+// rejects a typo'd key; `tts_engine` reuses ds_config's strict TtsEngine deserialize
+// (unknown token → error). The fields == the schema's properties, and the
+// `tool_schemas_match_arg_structs` test pins that parity by name AND type.
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct StatusArgs {
+    detail: Option<bool>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SpeakArgs {
+    text: Option<String>,
+    voice: Option<String>,
+    rate: Option<f32>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SetVoiceArgs {
+    voice: Option<String>,
+    tts_engine: Option<TtsEngine>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ListVoicesArgs {
+    tts_engine: Option<TtsEngine>,
+    language: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ListenArgs {
+    seconds: Option<u64>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DiarizeArgs {
+    seconds: Option<u64>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct EnrollArgs {
+    name: Option<String>,
+    seconds: Option<u64>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ForgetSpeakerArgs {
+    name: Option<String>,
+}
+
+fn call_list_voices(paths: &Paths, args: &Value) -> Result<String, String> {
+    let a: ListVoicesArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid list_voices arguments: {e}"))?;
+    let cfg = VoiceConfig::load(paths);
+    // Which engine's voices to list: an explicit `tts_engine` arg, else the engine the TTS
+    // ladder RESOLVES to (Kokoro when spoken replies are off — there's still a voice catalog).
+    let engine = a
+        .tts_engine
+        .or_else(|| cfg.resolved_tts())
+        .unwrap_or(ds_config::TtsEngine::Kokoro);
+    // Default to English; pass `language: "all"` to list every language.
+    let lang_arg = a
+        .language
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("en");
+    let filter = (!lang_arg.eq_ignore_ascii_case("all")).then_some(lang_arg);
+    let mut groups = voice_groups(engine, filter);
+    // Mark the configured voice active (a transient session override is reported
+    // separately by `status`, which probes the engine).
+    let current = cfg.current_voice();
+    let languages: Vec<Value> = groups
+        .iter_mut()
+        .map(|(subtag, voices)| {
+            for v in voices.iter_mut() {
+                let id = v
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                v["active"] = json!(id == current);
+            }
+            json!({ "language": subtag, "voices": voices })
+        })
+        .collect();
+    let out = json!({
+        "engine": engine.brand(),
+        "language": lang_arg,
+        "languages": languages,
+    });
+    Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
+}
+
+// ── Status (config read + read-only engine probe) ────────────────────────────
+
+/// Report configured engine/voice/rate (from settings.json) plus live engine
+/// state incl. any transient session voice. With `detail`, ALSO fold in the deep
+/// per-engine model lifecycle + stats (the former `model_status` tool). Probes the
+/// engine read-only — never spawns it, so a status check can't start the warm child
+/// or any playback; the `detail` section degrades to a note when the engine is down.
+fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<String, String> {
+    let a: StatusArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid status arguments: {e}"))?;
+    let cfg = VoiceConfig::load(paths);
+    // Live engine playback state. Keyed as "state" (NOT "engine") so it doesn't
+    // collide with the configured-engine string below — serde_json keeps only the
+    // last value for a duplicate key, which previously silently dropped the engine
+    // name from the output.
+    let state = match sock {
+        Some(sock) => match ds_ipc::request(sock, &Request::Status) {
+            Ok(Response::Status {
+                tts_active,
+                queued,
+                paused,
+                session_voice,
+            }) => {
+                json!({ "running": true, "tts_active": tts_active, "queued": queued, "paused": paused, "session_voice": session_voice })
+            }
+            Ok(_) => json!({ "running": true, "note": "unexpected engine response" }),
+            Err(_) => json!({ "running": false }),
+        },
+        None => json!({ "running": false, "note": "cannot resolve engine socket" }),
+    };
+    let mut out = json!({
+        "engine": cfg.resolved_tts().map(|e| e.brand()).unwrap_or("off"),
+        "voice": cfg.current_voice(),
+        // The Kokoro voice pool, shared by both TTS backends (no separate apple-native set).
+        "voices": cfg.active_voices().to_vec(),
+        "rate": cfg.tts_rate,
+        "espeak_ng": g2p::espeak_available(),
+        "state": state,
+    });
+    // `detail`: fold in the deep per-engine model lifecycle + stats (engine-sourced, so it
+    // degrades to a note when the engine is down).
+    if a.detail.unwrap_or(false) {
+        out["models"] = match sock {
+            Some(sock) => match ds_ipc::request(sock, &Request::ModelStatus) {
+                Ok(Response::ModelStatus { status }) => status,
+                _ => json!({ "running": false, "note": "engine unavailable" }),
+            },
+            None => json!({ "running": false, "note": "cannot resolve engine socket" }),
+        };
+    }
+    Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
+}
+
+// ── Persistent config writes (settings.json is the source of truth; the engine is
+//    nudged to apply NOW, falling back to its mtime-watch if it's down) ──────────
+
+/// Register or remove the DontSpeak integration for one AI client, at runtime. SHARED
+/// LOGIC: this is a thin adapter that maps (client, enabled) to flags and calls the SAME
+/// `wire_hooks::run` / `wire_desktop::run` entry points the installers use —
+/// never a reimplementation, so install-time and tool-time wiring can't drift. Per-client
+/// flags scope each change so it never touches the other clients; `enabled=false` removes
+/// only our entries (additive + backed-up, like the installer).
+fn call_wire(args: &Value) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Args {
+        target: String,
+        enabled: bool,
+    }
+    let a: Args = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid wire arguments: {e}"))?;
+
+    // The narration spec is a CONFIG FILE on disk, not a client wiring — handle it first and
+    // return directly. enabled=true materializes the built-in default to the user-editable
+    // narration-spec.md (without clobbering an existing edited copy); enabled=false removes
+    // the override, reverting to the built-in DEFAULT_NARRATION_SPEC.
+    if a.target == "narration_spec" {
+        let paths =
+            ds_config::Paths::resolve().ok_or_else(|| "cannot resolve config paths".to_string())?;
+        let f = &paths.narration_spec;
+        if a.enabled {
+            if f.exists() {
+                return Ok(format!(
+                    "Narration spec already on disk at {} — edit it to customize the spoken format.",
+                    f.display()
+                ));
+            }
+            if let Some(dir) = f.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("create config dir: {e}"))?;
+            }
+            std::fs::write(f, ds_config::DEFAULT_NARRATION_SPEC)
+                .map_err(|e| format!("write narration spec: {e}"))?;
+            return Ok(format!(
+                "Wrote the narration spec to {} — edit it to reshape the spoken blockquote replies.",
+                f.display()
+            ));
+        }
+        return match std::fs::remove_file(f) {
+            Ok(()) => Ok(format!(
+                "Removed the narration spec override ({}) — reverting to the built-in default.",
+                f.display()
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok("No narration spec override on disk — already using the built-in default.".into())
+            }
+            Err(e) => Err(format!("remove narration spec: {e}")),
+        };
+    }
+
+    let (label, code) = match a.target.as_str() {
+        // Claude Code's voice hooks in ~/.claude/settings.json (--no-codex = don't touch Codex).
+        "claude_code" => {
+            let flags: Vec<String> = if a.enabled {
+                vec!["--no-codex".into()]
+            } else {
+                vec!["--remove".into(), "--no-codex".into()]
+            };
+            ("Claude Code", wire_hooks::run(&flags))
+        }
+        // The MCP-server entry in Claude Desktop's config. wire_desktop self-skips when
+        // Desktop is absent, so report that honestly rather than claiming a no-op succeeded.
+        "claude_desktop" => {
+            if a.enabled
+                && ds_config::Paths::resolve()
+                    .map(|p| !p.claude_desktop_present())
+                    .unwrap_or(true)
+            {
+                return Ok("Claude Desktop is not installed — nothing to register.".into());
+            }
+            let flags: Vec<String> = if a.enabled {
+                vec![]
+            } else {
+                vec!["--remove".into()]
+            };
+            ("Claude Desktop", wire_desktop::run(&flags))
+        }
+        // Codex's narration hooks in ~/.codex/config.toml (--codex-only = only Codex).
+        "codex" => {
+            let flags: Vec<String> = if a.enabled {
+                vec!["--codex-only".into()]
+            } else {
+                vec!["--remove".into(), "--codex-only".into()]
+            };
+            ("OpenAI Codex", wire_hooks::run(&flags))
+        }
+        other => {
+            return Err(format!(
+                "unknown target {other:?}; expected \"narration_spec\", \"claude_code\", \"claude_desktop\", or \"codex\""
+            ));
+        }
+    };
+
+    if code != 0 {
+        return Err(format!(
+            "wiring {label} failed (exit {code}); see the engine log"
+        ));
+    }
+    let verb = if a.enabled { "Registered" } else { "Removed" };
+    let note = if a.target == "claude_desktop" {
+        " — restart Claude Desktop to load it"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "{verb} the DontSpeak integration for {label}{note}."
+    ))
+}
+
+fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
+    // Single source of truth: deserialize the inbound JSON args straight into
+    // SetConfigArgs. `deny_unknown_fields` rejects typos; enum/number/`capture_gain`
+    // values are validated strictly there. What's settable == that struct's fields, so
+    // this handler and the JSON schema (ds-tools) cannot drift apart.
+    let parsed: ds_config::SetConfigArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid set_config arguments: {e}"))?;
+
+    // System STT opt-in gate: making `system` the ACTIVE dictation engine must be verified by
+    // the RUNNING engine — it owns the macOS SpeechAnalyzer and downloads the en-US on-device
+    // model the first time (the real first-use cost). The engine checks macOS 26 + locale
+    // support + installs the model; we refuse to PERSIST when it isn't usable, so `system`
+    // never silently degrades. Engine down ⇒ we can't verify, so we don't enable it blindly.
+    //
+    // KEY: gate on whether the new ladder RESOLVES to system on THIS machine — NOT merely
+    // whether `system` appears in it. `system` as a non-winning preference (e.g. the default
+    // ladder `[built_in, system, claude_code]` on hardware where the on-device engines can't
+    // run) is harmless: it's skipped at resolution, so it must persist without a probe.
+    let would_run_system = parsed.stt_engine.as_ref().is_some_and(|ladder| {
+        VoiceConfig {
+            stt_engine: ladder.clone(),
+            ..VoiceConfig::default()
+        }
+        .resolved_stt()
+            == Some(ds_config::SttEngine::System)
+    });
+    if would_run_system {
+        match ds_ipc::request(
+            &paths.engine_sock,
+            &ds_ipc::Request::AuthorizeSystemStt,
+        ) {
+            Ok(ds_ipc::Response::Done) => {}
+            Ok(ds_ipc::Response::Error { message }) => return Err(message),
+            Ok(_) => return Err("unexpected response while verifying system STT".into()),
+            Err(_) => {
+                return Err(
+                    "can't verify system speech recognition — launch DontSpeak.app \
+                            (it must be running to check on-device availability + \
+                            permission), then set stt_engine=system again"
+                        .into(),
+                );
+            }
+        }
+    }
+
+    // Apply every provided VoiceConfig field to a fresh load, collecting the summary.
+    let mut cfg = VoiceConfig::load(paths);
+    let changes = parsed.apply(&mut cfg)?;
+
+    if changes.is_empty() {
+        return Err(
+            "no recognized field provided. Accepted fields: rate, voices, tts_engine, \
+                    stt_engine, provider, narrate, caps_enabled, \
+                    greet_on_open, tray_indicator, \
+                    capture_gain, auto_submit, drop_speech_on, pause_in_background."
+                .into(),
+        );
+    }
+
+    // Persist VoiceConfig and nudge the engine to Reload NOW (it falls back to its
+    // mtime-watch if down). settings.json stays the source of truth; the nudge only
+    // removes the poll latency.
+    ds_config::write_settings(paths, &cfg)
+        .map_err(|e| format!("could not write settings.json: {e}"))?;
+    let _ = ds_ipc::request(&paths.engine_sock, &ds_ipc::Request::Reload);
+
+    Ok(format!("Set {}.", changes.join(", ")))
+}
+
+// ── Tool implementations (bridge to the engine over ds-ipc) ──────────────────
+
+/// Ambient Claude session id for THIS MCP process (stdio = one process per
+/// session). Claude Code sets `CLAUDE_CODE_SESSION_ID` in the spawned server's
+/// environment — undocumented for MCP but present in practice (see claude-code
+/// issue #41836). `None` when absent, so the engine treats it as the default,
+/// machine-global session and everything stays backward-compatible. It is NEVER a
+/// tool argument — the MCP protocol/tool schemas are untouched.
+fn session_id() -> Option<String> {
+    std::env::var("CLAUDE_CODE_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+fn call_speak(sock: &Path, args: &Value) -> Result<String, String> {
+    let a: SpeakArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid speak arguments: {e}"))?;
+    let text = a.text.unwrap_or_default();
+    if text.trim().is_empty() {
+        return Err("`text` is required".into());
+    }
+    match ds_ipc::request(
+        sock,
+        &Request::Speak {
+            text,
+            voice: a.voice,
+            rate: a.rate,
+            session: session_id(),
+        },
+    ) {
+        Ok(Response::Done) => Ok("Spoken.".into()),
+        Ok(Response::Error { message }) => Err(format!("speak failed: {message}")),
+        Ok(_) => Err("speak: unexpected response".into()),
+        Err(e) => Err(format!("engine unavailable: {e}")),
+    }
+}
+
+fn call_stop(sock: &Path) -> Result<String, String> {
+    // Scope the barge to the CALLING window (ambient session) so an agent in one
+    // terminal stops only its own voice, not another window's. A non-session caller
+    // (session_id() == None, e.g. the bare CLI) falls back to the global hard barge.
+    match ds_ipc::request(
+        sock,
+        &Request::StopSpeech {
+            session: session_id(),
+        },
+    ) {
+        Ok(_) => Ok("Stopped.".into()),
+        Err(e) => Err(format!("engine unavailable: {e}")),
+    }
+}
+
+/// Set the TRANSIENT session voice override on the engine (not settings.json).
+/// Resolves/validates the voice's engine first, then sends `SetSessionVoice`.
+fn call_set_voice(sock: &Path, args: &Value) -> Result<String, String> {
+    let a: SetVoiceArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid set_voice arguments: {e}"))?;
+    let voice = a.voice.unwrap_or_default().trim().to_string();
+    // No `voice` → CLEAR the transient session override (revert to the configured voice).
+    if voice.is_empty() {
+        return match ds_ipc::request(
+            sock,
+            &Request::ClearSessionVoice {
+                session: session_id(),
+            },
+        ) {
+            Ok(_) => Ok("Session voice cleared; replies use the configured voice.".into()),
+            Err(e) => Err(format!("engine unavailable: {e}")),
+        };
+    }
+    // The typed `tts_engine` (already validated to kokoro|system) becomes the engine
+    // hint resolve_voice_engine takes; None → infer from whichever engine has the voice.
+    let explicit = a.tts_engine.map(|e| e.brand());
+    let npz_present = ds_tts::ane_voices::voices_npz_present();
+    let (engine, label) = match resolve_voice_engine(&voice, explicit) {
+        Ok(v) => v,
+        Err(e) => {
+            // Fresh install: with the voices npz not downloaded yet the catalog only knows
+            // the 6 offline fallback ids, so a real Kokoro-shaped voice (af_nicole) looks
+            // "unknown". Accept it optimistically — the download is kicked below and it
+            // self-applies once ready. A wrong-shaped id still fails fast.
+            let wants_kokoro = explicit.map_or(true, |e| e.eq_ignore_ascii_case("kokoro"));
+            let kokoro_shaped = ds_tts::enumerate::kokoro_gender(&voice).is_some();
+            if wants_kokoro && kokoro_shaped && !npz_present {
+                (TtsEngine::Kokoro, ds_tts::enumerate::kokoro_display_name(&voice))
+            } else {
+                return Err(e);
+            }
+        }
+    };
+    let mut prep_note = String::new();
+    if engine == TtsEngine::Kokoro {
+        // A non-English Kokoro voice needs espeak-ng (English uses the pure-Rust g2p).
+        let lang = ds_tts::enumerate::kokoro_language(&voice);
+        if lang != "en" && !g2p::espeak_available() {
+            return Err(format!(
+                "`{voice}` is a {lang} Kokoro voice, which needs espeak-ng to pronounce correctly. Install it (`brew install espeak-ng`) and restart the engine, or pick a System voice for {lang} (see list_voices tts_engine=system language={lang})."
+            ));
+        }
+        if npz_present {
+            // npz local → extract this voice's ANE pack now (fast, offline) so it plays
+            // this reply. Fail loudly rather than silently fall back to af_heart.
+            if let Err(e) = ds_tts::ane_voices::ensure_materialized(&voice) {
+                return Err(format!("could not prepare voice `{voice}`: {e}"));
+            }
+        } else {
+            // npz missing → kick the engine's single-flight download (non-blocking, joins
+            // any in-flight one) and set the voice anyway; it self-applies on the next
+            // reply once the pack lands.
+            let _ = ds_ipc::request(sock, &Request::EnsureKokoroVoices);
+            prep_note = " Downloading voice list; applies when ready.".into();
+        }
+    }
+    let engine_tok = engine.brand().to_string();
+    let req = Request::SetSessionVoice {
+        engine: engine_tok.clone(),
+        voice: voice.clone(),
+        session: session_id(),
+    };
+    match ds_ipc::request(sock, &req) {
+        Ok(Response::Done) => Ok(format!("Voice set to {label}.{prep_note}")),
+        Ok(Response::Error { message }) => Err(format!("set_voice failed: {message}")),
+        Ok(_) => Err("set_voice: unexpected response".into()),
+        Err(e) => Err(format!("engine unavailable: {e}")),
+    }
+}
+
+/// One-shot speaker diarization: record the mic for `seconds`, then return who spoke
+/// when. The engine blocks for the record window (≤60s, within the IPC read timeout),
+/// so a single request/response suffices — no streaming/stop dance like `listen`.
+fn call_diarize(sock: &Path, args: &Value) -> Result<String, String> {
+    let a: DiarizeArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid diarize arguments: {e}"))?;
+    let seconds = a.seconds.unwrap_or(10).clamp(1, 60);
+    match ds_ipc::request(sock, &Request::Diarize { seconds }) {
+        Ok(Response::Diarization { segments }) => {
+            let segs = segments.as_array().cloned().unwrap_or_default();
+            let speakers: std::collections::BTreeSet<&str> = segs
+                .iter()
+                .filter_map(|s| s.get("speaker").and_then(|v| v.as_str()))
+                .collect();
+            let summary = if segs.is_empty() {
+                "No speech detected.".to_string()
+            } else {
+                format!(
+                    "{} speaker(s) across {} segment(s):",
+                    speakers.len(),
+                    segs.len()
+                )
+            };
+            let body =
+                serde_json::to_string_pretty(&segments).unwrap_or_else(|_| segments.to_string());
+            Ok(format!("{summary}\n{body}"))
+        }
+        Ok(Response::Error { message }) => Err(format!("diarize failed: {message}")),
+        Ok(_) => Err("diarize: unexpected response".into()),
+        Err(e) => Err(format!("engine unavailable: {e}")),
+    }
+}
+
+/// Enroll a voiceprint: record `seconds`, extract an embedding, persist it under `name`.
+/// Blocks for the record window (≤60s, within the IPC read timeout).
+fn call_enroll(sock: &Path, args: &Value) -> Result<String, String> {
+    let a: EnrollArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid enroll arguments: {e}"))?;
+    let name = a.name.unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return Err("enroll: `name` is required".into());
+    }
+    let seconds = a.seconds.unwrap_or(15).clamp(1, 60);
+    match ds_ipc::request(sock, &Request::Enroll { name, seconds }) {
+        Ok(Response::Enrolled { name }) => Ok(format!("Enrolled voiceprint for \"{name}\".")),
+        Ok(Response::Error { message }) => Err(format!("enroll failed: {message}")),
+        Ok(_) => Err("enroll: unexpected response".into()),
+        Err(e) => Err(format!("engine unavailable: {e}")),
+    }
+}
+
+/// Remove an enrolled voiceprint by name (no-op if absent).
+fn call_forget_speaker(sock: &Path, args: &Value) -> Result<String, String> {
+    let a: ForgetSpeakerArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid forget_speaker arguments: {e}"))?;
+    let name = a.name.unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return Err("forget_speaker: `name` is required".into());
+    }
+    match ds_ipc::request(sock, &Request::ForgetSpeaker { name: name.clone() }) {
+        Ok(Response::Done) => Ok(format!(
+            "Removed enrolled voiceprint \"{name}\" (if it existed)."
+        )),
+        Ok(Response::Error { message }) => Err(format!("forget_speaker failed: {message}")),
+        Ok(_) => Err("forget_speaker: unexpected response".into()),
+        Err(e) => Err(format!("engine unavailable: {e}")),
+    }
+}
+
+/// List enrolled speaker names.
+fn call_list_speakers(sock: &Path) -> Result<String, String> {
+    match ds_ipc::request(sock, &Request::ListSpeakers) {
+        Ok(Response::Speakers { names }) => {
+            if names.is_empty() {
+                Ok("No speakers enrolled. Use `enroll` to add one.".into())
+            } else {
+                Ok(format!(
+                    "Enrolled speakers ({}): {}",
+                    names.len(),
+                    names.join(", ")
+                ))
+            }
+        }
+        Ok(Response::Error { message }) => Err(format!("list_speakers failed: {message}")),
+        Ok(_) => Err("list_speakers: unexpected response".into()),
+        Err(e) => Err(format!("engine unavailable: {e}")),
+    }
+}
+
+/// The `listen` tool: record the mic for `seconds` via a live Parakeet recognition
+/// session and return the final transcript. Streams `TestRecognitionStart`, stops it
+/// after the window on a second connection, and drains to the terminal `Transcript`.
+fn call_dictate(sock: &Path, args: &Value) -> Result<String, String> {
+    let a: ListenArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid listen arguments: {e}"))?;
+    let seconds = a.seconds.unwrap_or(10).clamp(1, 60);
+
+    let mut client = ds_ipc::connect(sock).map_err(|e| format!("engine unavailable: {e}"))?;
+    client
+        .send(&Request::TestRecognitionStart)
+        .map_err(|e| format!("start dictation: {e}"))?;
+
+    // Stop the session after `seconds` (on a SECOND connection, since this one is busy
+    // streaming) — the engine then runs the final pass and emits Transcript.
+    //
+    // CONC-11: make the timer CANCELLABLE and JOINED so it can neither leak nor fire a
+    // stray TestRecognitionStop after we've already returned. The thread waits on a
+    // channel for up to `seconds`: a normal timeout means "time's up, stop the
+    // session"; a Disconnected (we dropped `cancel_tx` on the way out) means the
+    // dictation already ended (transcript/error/EOF) so it skips the stop and exits.
+    // We always join the handle before returning, so the second connection can't race
+    // a later, unrelated session.
+    let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
+    let sock2 = sock.to_path_buf();
+    let timer = std::thread::spawn(move || {
+        // Timed out → the session is still running; stop it for the final pass.
+        // Cancelled (sender dropped) or signalled → we already finished; do nothing.
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+            cancel_rx.recv_timeout(Duration::from_secs(seconds))
+        {
+            let _ = ds_ipc::request(&sock2, &Request::TestRecognitionStop);
+        }
+    });
+
+    // Drain the stream to its terminal response, THEN cancel + join the timer so it
+    // never outlives this call (drop runs on every return path of the closure).
+    let outcome = loop {
+        match client.recv() {
+            Ok(Response::Transcript { text }) => {
+                break Ok(if text.trim().is_empty() {
+                    "(silence — nothing recognized)".into()
+                } else {
+                    text
+                });
+            }
+            Ok(Response::Error { message }) => break Err(format!("dictation: {message}")),
+            Ok(_) => continue, // listening / partial — keep reading
+            Err(e) => break Err(format!("dictation stream ended: {e}")),
+        }
+    };
+    // Cancel the pending timer (drop the sender) and join it so the thread is gone
+    // before we return — no leak, and no late stop landing on a future session.
+    drop(cancel_tx);
+    let _ = timer.join();
+    outcome
+}
+
+#[cfg(test)]
+mod drift {
+    use super::*;
+
+    /// Map a JSON value to the JSON-Schema scalar `type` token it satisfies.
+    fn json_type_of(v: &Value) -> &'static str {
+        match v {
+            Value::Bool(_) => "boolean",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+            Value::Number(n) => {
+                if n.is_f64() {
+                    "number"
+                } else {
+                    "integer"
+                }
+            }
+            Value::Null => "null",
+        }
+    }
+
+    /// Assert one tool's advertised inputSchema properties match `populated` (a fully-
+    /// populated args struct serialized to JSON) by NAME and declared scalar TYPE.
+    fn assert_tool_matches(tool: &str, populated: Value) {
+        let cat = ds_tools::catalog();
+        let entry = cat
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == tool)
+            .unwrap_or_else(|| panic!("{tool} in catalog"));
+        let props = entry["inputSchema"]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{tool} inputSchema has properties"));
+        let fields = populated
+            .as_object()
+            .expect("args struct serializes to an object");
+
+        let mut schema_keys: Vec<&String> = props.keys().collect();
+        let mut struct_keys: Vec<&String> = fields.keys().collect();
+        schema_keys.sort();
+        struct_keys.sort();
+        assert_eq!(
+            schema_keys, struct_keys,
+            "{tool}: inputSchema properties and args struct fields are out of sync"
+        );
+
+        for (name, prop) in props {
+            if let Some(decl) = prop.get("type").and_then(|t| t.as_str()) {
+                let actual = json_type_of(&fields[name]);
+                assert_eq!(
+                    decl, actual,
+                    "{tool}.{name}: schema type `{decl}` != struct field type `{actual}`"
+                );
+            }
+        }
+    }
+
+    /// DRIFT GUARD for the arg-taking tools (set_config has its own guard in ds-tools).
+    /// Each fully-populated literal is exhaustive (no `..`), so a new struct field also
+    /// breaks this at COMPILE time; a missing/renamed/mistyped schema property fails the
+    /// assertions. `rate` is non-integral so it reads as `number`, not `integer`.
+    #[test]
+    fn tool_schemas_match_arg_structs() {
+        assert_tool_matches(
+            "speak",
+            serde_json::to_value(SpeakArgs {
+                text: Some("hi".into()),
+                voice: Some("af_sarah".into()),
+                rate: Some(1.25),
+            })
+            .unwrap(),
+        );
+        assert_tool_matches(
+            "set_voice",
+            serde_json::to_value(SetVoiceArgs {
+                voice: Some("af_sarah".into()),
+                tts_engine: Some(TtsEngine::Kokoro),
+            })
+            .unwrap(),
+        );
+        assert_tool_matches(
+            "list_voices",
+            serde_json::to_value(ListVoicesArgs {
+                tts_engine: Some(TtsEngine::Kokoro),
+                language: Some("en".into()),
+            })
+            .unwrap(),
+        );
+        assert_tool_matches(
+            "status",
+            serde_json::to_value(StatusArgs { detail: Some(true) }).unwrap(),
+        );
+        assert_tool_matches(
+            "listen",
+            serde_json::to_value(ListenArgs { seconds: Some(10) }).unwrap(),
+        );
+        assert_tool_matches(
+            "diarize",
+            serde_json::to_value(DiarizeArgs { seconds: Some(10) }).unwrap(),
+        );
+        assert_tool_matches(
+            "enroll",
+            serde_json::to_value(EnrollArgs {
+                name: Some("Alex".into()),
+                seconds: Some(15),
+            })
+            .unwrap(),
+        );
+        assert_tool_matches(
+            "forget_speaker",
+            serde_json::to_value(ForgetSpeakerArgs {
+                name: Some("Alex".into()),
+            })
+            .unwrap(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod status_output {
+    use super::*;
+
+    /// CORR-1: `status` must emit BOTH the configured-engine string (`engine`) AND the
+    /// live playback state (`state`) — previously two `"engine"` keys collided and
+    /// serde_json silently kept only the last, dropping the engine name. Run with no
+    /// socket so no engine is contacted and a missing config falls back to defaults.
+    #[test]
+    fn status_has_distinct_engine_and_state_keys() {
+        // A nonexistent config path → VoiceConfig::load returns defaults (no file written).
+        let mut paths = Paths::resolve().expect("resolve paths");
+        paths.config_toml = std::env::temp_dir().join(format!(
+            "ds-mcp-status-test-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+
+        let json = call_status(&paths, None, &json!({})).expect("status builds");
+        let v: Value = serde_json::from_str(&json).expect("status returns valid JSON");
+
+        // `engine` is the configured engine NAME (a string), not dropped by a key clash.
+        let engine = v.get("engine").expect("`engine` key present");
+        assert!(
+            engine.is_string(),
+            "`engine` must be a string (configured engine name), got {engine:?}"
+        );
+        assert!(
+            matches!(engine.as_str(), Some("kokoro") | Some("system")),
+            "`engine` should be a known engine token, got {engine:?}"
+        );
+
+        // `state` is the live engine-state object (running=false here, no socket).
+        let state = v.get("state").expect("`state` key present");
+        assert!(
+            state.is_object(),
+            "`state` must be an object, got {state:?}"
+        );
+        assert_eq!(
+            state.get("running"),
+            Some(&Value::Bool(false)),
+            "with no socket the engine reports not running"
+        );
+    }
+
+    /// `detail` is opt-in: the concise default omits the heavy `models` section, and
+    /// `detail: true` adds it (degrading to a note when no engine socket is available).
+    #[test]
+    fn status_detail_gates_the_models_section() {
+        let mut paths = Paths::resolve().expect("resolve paths");
+        paths.config_toml = std::env::temp_dir().join(format!(
+            "ds-mcp-status-detail-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+
+        // Default (no detail): no `models` key.
+        let concise: Value =
+            serde_json::from_str(&call_status(&paths, None, &json!({})).unwrap()).unwrap();
+        assert!(
+            concise.get("models").is_none(),
+            "concise status omits `models`"
+        );
+
+        // detail: true → a `models` object (here the engine-down note, since sock is None).
+        let detailed: Value =
+            serde_json::from_str(&call_status(&paths, None, &json!({ "detail": true })).unwrap())
+                .unwrap();
+        let models = detailed
+            .get("models")
+            .expect("detail adds a `models` section");
+        assert!(models.is_object(), "`models` is an object, got {models:?}");
+    }
+}

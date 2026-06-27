@@ -1,0 +1,13 @@
+DontSpeak seed color
+===================
+
+#5B4397      hex
+0.357, 0.263, 0.592   sRGB (extended-srgb, the icon.json automatic-gradient seed)
+
+This is the brand purple the app icon is GENERATED from (macOS Icon Composer Liquid
+Glass seed: apps/macos/AppIcon.icon/icon.json → fill.automatic-gradient). It is also:
+  • the </> stroke + background gradient in assets/icon.svg
+  • the menu-bar "speaking" pill tint (code: Brand.seedPurple in
+    apps/macos/Sources/DontSpeak/Brand.swift)
+
+Keep these in sync — this single value is the source of truth for the brand purple.

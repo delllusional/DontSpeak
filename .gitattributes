@@ -1,0 +1,15 @@
+# Speech-normalizer parity fixtures are byte-for-byte golden files captured from
+# speak.py (LF-terminated). The parity test (sm-normalize/tests/parity.rs) compares
+# the normalizer output against them verbatim, so they MUST stay LF on every
+# platform — otherwise Windows autocrlf rewrites them to CRLF on checkout and every
+# case fails with a \r\n vs \n mismatch.
+rust/crates/sm-normalize/tests/fixtures/*.in  text eol=lf
+rust/crates/sm-normalize/tests/fixtures/*.out text eol=lf
+
+# Shell scripts and Linux desktop/audio-config assets are executed on Linux, where a
+# CRLF (from Windows autocrlf) breaks the shebang / parsing. Pin them to LF everywhere.
+*.sh                     text eol=lf
+*.desktop                text eol=lf
+apps/linux/aec/*.conf    text eol=lf
+apps/linux/aec/*.pa      text eol=lf
+apps/linux/udev-rule.txt text eol=lf

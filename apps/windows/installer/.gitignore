@@ -1,0 +1,4 @@
+# Installer build artifacts (produced by build.ps1 / build-portable.ps1).
+payload/
+Output/
+portable/

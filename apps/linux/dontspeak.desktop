@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=DontSpeak
+GenericName=Voice for Claude Code
+Comment=Hands-free voice loop for Claude Code — tap Caps Lock to dictate, hear replies spoken back
+Exec=ds-gtk
+Icon=dontspeak
+Terminal=false
+Categories=Utility;Accessibility;AudioVideo;
+Keywords=voice;dictation;speech;tts;stt;claude;mcp;
+StartupNotify=false
+# Copied to ~/.config/autostart/ by the installer to run the GUI host at login (the Linux
+# analogue of the macOS login item / Windows Run key). The host hosts the engine in-process,
+# so this single entry starts everything; remove it (or toggle below) to disable autostart.
+X-GNOME-Autostart-enabled=true

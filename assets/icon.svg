@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- DontSpeak app icon — DESIGN REFERENCE (full composition: gradient squircle tile
+     + white speech bubble with a code "</>"). The shipping macOS icon is the Icon
+     Composer document apps/macos/AppIcon.icon (Liquid Glass): its Assets/Foreground.svg
+     is the bubble+glyph from here on a transparent canvas, and the tile gradient is
+     the icon.json background fill. apps/macos/bundle.sh compiles it via actool. -->
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7E5FD6"/>
+      <stop offset="1" stop-color="#5B4397"/>
+    </linearGradient>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#2E2151" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="208" ry="208" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="448" rx="208" ry="208" fill="#ffffff" opacity="0.08"/>
+
+  <g filter="url(#sh)">
+    <!-- gemini glyph: speech bubble + </> , recentred onto the tile -->
+    <svg x="162" y="162" width="700" height="700" viewBox="47 67 446 391" preserveAspectRatio="xMidYMid meet">
+      <path d="M 270,90 C 390,90 470,165 470,250 C 470,335 390,410 270,410
+               C 238,410 205,404 178,392 L 115,425 C 102,432 90,420 96,406
+               L 112,365 C 86,335 70,295 70,250 C 70,165 150,90 270,90 Z" fill="#FFFFFF"/>
+      <g fill="none" stroke="#5B4397" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M 215,200 L 160,250 L 215,300"/>
+        <path d="M 275,170 L 235,330"/>
+        <path d="M 295,200 L 350,250 L 295,300"/>
+      </g>
+    </svg>
+  </g>
+</svg>

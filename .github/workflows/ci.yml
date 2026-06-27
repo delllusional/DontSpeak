@@ -1,0 +1,112 @@
+name: CI
+
+# Run the project's ACTUAL test suite. The real tests live in the Rust workspace
+# (cargo test --workspace); the macOS SwiftPM package and the WinUI app have no test
+# targets today, so those steps auto-skip rather than fail (no placeholder/dummy
+# tests) and pick tests up automatically if/when they're added.
+#
+# Cost/coverage split:
+#   • Per commit / PR  → Linux only (fast; covers the platform-agnostic majority).
+#   • Release pipeline → the FULL ubuntu + windows-2025 + macos-26 matrix, so the
+#     macOS Core ML/ANE and Windows CUDA-path tests (cfg-gated to their own OS) run
+#     before anything is built or published. release.yml calls this with
+#     full-matrix: true.
+# This is `workflow_call`-able so the release reuses the EXACT same test definition.
+
+on:
+  # Per-commit + PR test runs (Linux-only — the fast, platform-agnostic majority).
+  push:
+  pull_request:
+  # Manual runs (workflow_dispatch) and the release gate (workflow_call from release.yml)
+  # also run tests; the release passes full-matrix: true for all three OSes.
+  workflow_dispatch: {}
+  workflow_call:
+    inputs:
+      full-matrix:
+        description: Run on all three OSes (Linux + Windows + macOS) instead of just Linux.
+        type: boolean
+        default: false
+
+# Never cancel a run: every per-commit check should FINISH (green), so a commit on the
+# branch page never shows a cancelled (red) mark. Grouped per ref, so the release's
+# full-matrix gate (a tag ref) is independent of the per-commit branch check — they run in
+# parallel and both go green. Deliberate trade-off: when a commit and its tag are pushed
+# together, the quick Linux per-commit check runs alongside the release's full gate.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Pick the OS matrix: Linux-only by default, all three when full-matrix is requested
+  # (the release gate). push/PR events have no `inputs`, so they fall to Linux-only.
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.pick.outputs.os }}
+    steps:
+      - id: pick
+        run: |
+          if [ "${{ inputs.full-matrix }}" = "true" ]; then
+            echo 'os=["ubuntu-latest","windows-2025","macos-26"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: setup
+    name: tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.setup.outputs.os) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # cpal links ALSA and ds-aec links PulseAudio (libpulse) — neither dev lib is
+      # on the ubuntu runner by default. Install both + pkg-config. macOS/Windows use native audio.
+      - name: Linux audio deps (ALSA + PulseAudio)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpulse-dev pkg-config
+
+      # rustls' crypto = ring, which assembles via NASM on x64 Windows. Install NASM and put
+      # it + LLVM (preinstalled on the image) on PATH so ring's build script finds them.
+      - name: ring asm toolchain on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+
+      # cfg-gated platform code (macOS Core ML / ANE, Windows CUDA EP) compiles on its
+      # own OS via the matrix, so on the full-matrix release run every test executes
+      # somewhere. Cargo.lock is gitignored in this repo, so no --locked.
+      - name: cargo test (workspace)
+        working-directory: rust
+        run: cargo test --workspace
+
+      # macOS SwiftUI app: run swift test only if the package declares test targets.
+      - name: swift test (macOS app, if any)
+        if: runner.os == 'macOS'
+        run: |
+          if grep -q 'testTarget' apps/macos/Package.swift 2>/dev/null; then
+            # Package.swift force_loads ../../rust/target/release-ffi/libds_core.a (the
+            # FFI staticlib, release-ffi profile — see apps/macos/build.sh). swift test links
+            # it, so build it FIRST or the link fails with "library ... not found".
+            ( cd rust && cargo build --profile release-ffi -p ds-core )
+            cd apps/macos && swift test
+          else
+            echo "no Swift test targets in apps/macos/Package.swift — skipping"
+          fi
+
+      # WinUI app: run dotnet test only if a test project exists.
+      - name: dotnet test (WinUI app, if any)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if ls apps/windows/**/*[Tt]est*.csproj >/dev/null 2>&1; then
+            dotnet test apps/windows
+          else
+            echo "no .NET test projects under apps/windows — skipping"
+          fi

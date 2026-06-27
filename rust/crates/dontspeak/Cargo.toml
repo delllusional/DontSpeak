@@ -1,0 +1,39 @@
+[package]
+name = "dontspeak"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "DontSpeak single multi-call binary: the stdio MCP server (default) PLUS the two Claude Code hook verbs (`notify`/`provide`) and the `wire-hooks`/`wire-desktop` installer subcommands — all thin clients of the resident dontspeakd over the ds-ipc Unix socket. Stdio only; no HTTP."
+
+# ONE binary, busybox-style — argv selects the role (see src/main.rs):
+#   (no args)        the stdio MCP server (registered with Claude Code/Desktop)
+#   notify           COMMAND hook sink: run the event's side effect, no reply (async)
+#   provide          QUERY hook: return the event's hookSpecificOutput JSON (sync)
+#   wire-hooks …     wire/unwire the hooks in settings.json
+#   wire-desktop …   register/unregister the MCP server in Claude Desktop
+[[bin]]
+name = "dontspeak"
+path = "src/main.rs"
+
+# Thin bridge: JSON-RPC over stdin/stdout — the ONLY transport. Forwards to the resident
+# engine over the ds-ipc client; no HTTP, no async runtime (the workspace's no-tokio
+# stance).
+[dependencies]
+ds-config = { workspace = true }
+ds-ipc = { workspace = true }
+# Voice enumeration (Kokoro bin / `say -v ?`) for the list_voices / set_voice
+# tools — config read+write is the SAME direct path the GUI uses (the engine
+# auto-applies a settings.json change via its mtime-watch), so these two tools
+# need no engine round-trip. ALSO the cold-spawn synth path for the `speak` hooks
+# (`ds_tts::spawn_for`) when the warm engine is down.
+ds-tts = { workspace = true }
+# The tool catalog (names/descriptions/schemas) is shared with the app's FFI
+# (ds-core) so the list never drifts — this server exposes it, the app shows it.
+ds-tools = { workspace = true }
+# Mic-active gate for the `narrate --display` hook (was ds-narrate).
+ds-platform = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

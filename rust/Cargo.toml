@@ -1,0 +1,146 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ds-config",
+    "crates/ds-ipc",
+    "crates/ds-proc",
+    "crates/ds-platform",
+    "crates/ds-model",
+    "crates/ds-tts",
+    "crates/ds-stt",
+    "crates/ds-aec",
+    "crates/ds-engines",
+    "crates/ds-tools",
+    "crates/ds-i18n",
+    "crates/ds-status",
+    "crates/ds-core",
+    "crates/dontspeakd",
+    "crates/dontspeak",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+repository = "https://github.com/dontspeak/dontspeak"
+authors = ["Alex Yanchenko <alex@yanchenko.com>"]
+
+# Shared dependency versions pinned once; crates opt in via `workspace = true`.
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.12"
+directories = "6.0"
+tempfile = "3.27"
+# Format-preserving TOML editor for surgically wiring our hooks into OpenAI Codex's
+# `~/.codex/config.toml` (keeps the user's existing tables + comments).
+toml_edit = "0.25"
+# Serde TOML for OUR own config file (our config.toml) — we own the whole
+# file, so plain (de)serialize is enough; no format preservation needed.
+toml = "1"
+# unix-only process-group kill
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+# Cross-platform filesystem watch (settings.json hot-reload): FSEvents on macOS,
+# inotify on Linux, ReadDirectoryChangesW on Windows — a push notification in place of
+# stat() polling. Default features select the native backend per OS.
+notify = "8"
+
+# ── Phase-2 engine deps (pinned once) ────────────────────────────────────────
+# Model download (ds-model): tiny blocking HTTP, checksum, atomic rename. We use
+# attohttpc (not ureq) because it exposes a socket-level `read_timeout` — a per-
+# read INACTIVITY timeout that aborts a stalled CDN mid-download while letting a
+# slow-but-progressing 325 MB model finish. ureq 3 dropped that (phase/total
+# timeouts only), which is why we moved off it. rustls + bundled webpki roots, no
+# native-tls/openssl, no tokio. Crypto provider = `ring` (the `-ring` feature variant),
+# NOT the default aws-lc-rs: aws-lc-sys's native crypto won't cross-compile to
+# aarch64-pc-windows-msvc, whereas ring is pure-Rust and builds on every target.
+attohttpc = { version = "0.31", default-features = false, features = ["tls-rustls-webpki-roots-ring"] }
+sha2 = "0.11"
+# STT capture/resample (ds-stt, Parakeet): mic capture (cpal) → mono → 16 kHz
+# (rubato) → transcribe-rs over the shared `ort` runtime.
+cpal = "0.18"
+rubato = "3.0"
+# Clipboard for the paste-based text injection (ds-platform, macOS target).
+arboard = "3"
+
+# ── Phase-2b: native Kokoro TTS (ds-tts) ─────────────────────────────────────
+# ONNX inference. `load-dynamic` resolves libonnxruntime at RUNTIME (via
+# ORT_DYLIB_PATH), so the HOST build compiles with NO onnxruntime present and the
+# binary is not statically baked. default-features=false drops the bundled
+# download-binaries strategy (documented as the route-B fallback in ds-model).
+# rc.12 needs an `api-N` level alongside `load-dynamic`: ort's Vitis AI EP
+# registration (src/ep/vitis.rs) is gated on `load-dynamic`, but the underlying
+# ort-sys field `SessionOptionsAppendExecutionProvider_VitisAI` moved behind
+# `#[cfg(feature = "api-18")]` in rc.12. `load-dynamic` alone pulls no api-N level,
+# so the EP code referenced a field that didn't exist → E0609 (pykeio/ort#547).
+#
+# We pin `api-24` (rc.12's default level). NOTE: the shipped onnxruntime dylib must be
+# ≥ this api level, because ort-sys computes `ORT_API_VERSION = 17 + (#enabled api-N)` and
+# at runtime calls `GetApi(ORT_API_VERSION)`, which returns NULL only if the library is
+# OLDER than the requested version. api-24 ⇒ requests v24; ds-model ships ONNX
+# Runtime 1.27.0, which serves the v24 request fine (a NEWER runtime is backward-compatible
+# with an older API request). We ship 1.27 (not 1.24) because 1.24's loader DEADLOCKS on
+# the SepFormer speaker-separation graph; 1.27 loads it cleanly. We can't pin the api level
+# LOWER than 24 anyway: `transcribe-rs` depends on ort with its DEFAULT features (api-24),
+# and cargo unifies features additively. So the dylib VERSION is the knob, not the api level.
+#
+# `load-dynamic` still wins the build (it sets `ort-sys/disable-linking`, so the
+# build script returns before any download even though transcribe-rs co-enables
+# `download-binaries`). If ds-model's onnxruntime pin changes, keep it ≥ the ORT
+# release whose API version == this `api-N` (api-24 ⇒ ≥ 1.24).
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "api-24", "coreml", "cuda"] }
+# Pure-Rust English G2P (misaki dict embedded; MIT). Its espeak-ng fallback is an
+# EXTERNAL binary we avoid via the per-word skip wrapper in ds-tts/g2p.rs.
+voice-g2p = "0.2.2"
+# Audio playback of raw f32 mono PCM at 24 kHz.
+rodio = "0.22"
+# Extract libonnxruntime.dylib from the microsoft .tgz (ds-model route A).
+flate2 = "1"
+tar = "0.4"
+
+# ── macOS platform deps ──────────────────────────────────────────────────────
+# objc2 tree used by ds-platform (NSWorkspace frontmost-app check). The native
+# macOS GUI is the SwiftUI app (macos/), not a Rust crate — the old Slint tray
+# (slint / tray-icon / muda) has been removed.
+objc2 = "=0.6.4"
+objc2-app-kit = "=0.3.2"
+objc2-foundation = "=0.3.2"
+
+# internal crates
+ds-config = { path = "crates/ds-config" }
+ds-ipc = { path = "crates/ds-ipc" }
+ds-proc = { path = "crates/ds-proc" }
+ds-platform = { path = "crates/ds-platform" }
+ds-model = { path = "crates/ds-model" }
+ds-tts = { path = "crates/ds-tts" }
+ds-stt = { path = "crates/ds-stt" }
+ds-aec = { path = "crates/ds-aec" }
+ds-engines = { path = "crates/ds-engines" }
+ds-tools = { path = "crates/ds-tools" }
+ds-i18n = { path = "crates/ds-i18n" }
+ds-status = { path = "crates/ds-status" }
+ds-core = { path = "crates/ds-core" }
+dontspeakd = { path = "crates/dontspeakd" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"
+
+# Release profile for the ds-core FFI STATICLIB the macOS SwiftUI app links
+# (opt in with `cargo build --profile release-ffi -p ds-core`). It inherits
+# `release` (LTO, opt-level=z) but does NOT strip: a stripped `.a` loses the
+# `#[no_mangle] extern "C"` symbol table, so the Swift linker can't resolve
+# `-lds_core`. apps/macos/build.sh uses this profile.
+[profile.release-ffi]
+inherits = "release"
+strip = false
+lto = false
+# Override release's panic="abort" so ffi.rs's catch_unwind guard can actually
+# catch a panic and return the documented default instead of aborting the host
+# SwiftUI app. This only adds unwind tables to the FFI staticlib; correct-path
+# codegen and the Swift symbol link are unaffected.
+panic = "unwind"

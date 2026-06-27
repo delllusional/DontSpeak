@@ -1,0 +1,15 @@
+[package]
+name = "ds-engines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Engine selection factory for dontspeak: config enum -> Box<dyn Tts/Stt>, degrade-to-default-never-silent (ARCHITECTURE §A.3)."
+
+[dependencies]
+ds-config = { workspace = true }
+ds-tts = { workspace = true }
+ds-stt = { workspace = true }
+ds-platform = { workspace = true }

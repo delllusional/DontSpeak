@@ -1,0 +1,4 @@
+.build/
+ctest
+ctest_asr
+*.wav
