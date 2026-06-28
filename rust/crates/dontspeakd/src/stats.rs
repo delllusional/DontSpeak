@@ -449,10 +449,7 @@ mod tests {
         // first add of a session persists immediately; subsequent adds inside the
         // debounce window stay in memory until flush() (or a later, debounced add).
         let mut path = std::env::temp_dir();
-        path.push(format!(
-            "ds-stats-debounce-{}.json",
-            std::process::id()
-        ));
+        path.push(format!("ds-stats-debounce-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         let lt = LifetimeSeconds::load(path.clone());

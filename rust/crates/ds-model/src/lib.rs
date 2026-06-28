@@ -75,7 +75,10 @@ pub use spec::{
     parakeet_vocab_spec, prefetch_items,
 };
 
-#[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
 pub use ort::{
     cuda_onnxruntime_path, cuda_runtime_dir, cuda_runtime_present,
     ensure_cuda_runtime_with_progress,

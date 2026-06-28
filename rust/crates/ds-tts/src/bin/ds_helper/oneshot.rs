@@ -9,10 +9,10 @@ use ds_tts::synth::KokoroSynth;
 
 /// Ensure the assets, point ort at the dylib, and build the session ONCE.
 fn load_synth() -> Result<KokoroSynth, String> {
-    let model_path = ds_model::model_path(ds_model::KOKORO_ONNX_FILE)
-        .ok_or("cannot resolve model_dir()")?;
-    let voices_path = ds_model::model_path(ds_model::KOKORO_VOICES_FILE)
-        .ok_or("cannot resolve model_dir()")?;
+    let model_path =
+        ds_model::model_path(ds_model::KOKORO_ONNX_FILE).ok_or("cannot resolve model_dir()")?;
+    let voices_path =
+        ds_model::model_path(ds_model::KOKORO_VOICES_FILE).ok_or("cannot resolve model_dir()")?;
     // Do NOT download here — enabling TTS must use an already-downloaded model and
     // FAIL (so the UI shows a red dot) when it's missing, never auto-fetch it.
     if !ds_model::kokoro_present() {

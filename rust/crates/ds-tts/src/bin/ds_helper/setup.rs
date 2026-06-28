@@ -12,9 +12,8 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         ds_model::run_setup_parakeet_with_progress(&p).map(|_| ())
     };
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    let cuda = || -> std::io::Result<()> {
-        ds_model::ensure_cuda_runtime_with_progress(&p).map(|_| ())
-    };
+    let cuda =
+        || -> std::io::Result<()> { ds_model::ensure_cuda_runtime_with_progress(&p).map(|_| ()) };
     #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
     let cuda = || -> std::io::Result<()> { Ok(()) };
     let r = match what {
@@ -32,10 +31,7 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
             eprintln!("{msg}");
             // stderr is discarded under the GUI subsystem (Inno can't read it), so leave a
             // diagnosable trace the installer/user can find.
-            let _ = std::fs::write(
-                std::env::temp_dir().join("ds-prefetch-error.log"),
-                &msg,
-            );
+            let _ = std::fs::write(std::env::temp_dir().join("ds-prefetch-error.log"), &msg);
             1
         }
     }

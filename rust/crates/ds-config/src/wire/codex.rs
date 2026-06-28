@@ -31,7 +31,8 @@ const CODEX_HOOK_MARKER: &str = "dontspeak";
 /// The `(event, verb, timeout)` hooks we wire into Codex. Codex has no MessageDisplay stream,
 /// so the reply is voiced from `Stop`; and the narration spec is injected at `UserPromptSubmit`
 /// via the synchronous `provide` verb (its stdout `additionalContext` is read by Codex).
-const CODEX_HOOKS: &[(&str, &str, i64)] = &[("UserPromptSubmit", "provide", 5), ("Stop", "notify", 1800)];
+const CODEX_HOOKS: &[(&str, &str, i64)] =
+    &[("UserPromptSubmit", "provide", 5), ("Stop", "notify", 1800)];
 
 /// Why a [`merge_codex_hooks`]/[`strip_codex_hooks`] call could not apply. The caller must
 /// treat BOTH variants as a non-success: an unmergeable shape must NOT be reported as a
@@ -51,7 +52,10 @@ impl std::fmt::Display for CodexMergeError {
         match self {
             CodexMergeError::Parse(e) => write!(f, "config.toml is not valid TOML: {e}"),
             CodexMergeError::UnmergeableShape(s) => {
-                write!(f, "config.toml has an unexpected `{s}` shape; left unchanged (Codex hooks NOT wired)")
+                write!(
+                    f,
+                    "config.toml has an unexpected `{s}` shape; left unchanged (Codex hooks NOT wired)"
+                )
             }
         }
     }
@@ -120,7 +124,11 @@ fn hooks_table(doc: &mut DocumentMut) -> Result<&mut TomlTable, CodexMergeError>
 /// Append our group to the `hooks.<event>` slot — handling both the array-of-tables form we
 /// write and a user's inline `<event> = [{…}]` array. Returns `Err` only for a scalar shape we
 /// can't coerce. A no-op (already ours) leaves the slot untouched.
-fn append_to_event(htbl: &mut TomlTable, event: &str, group: TomlTable) -> Result<(), CodexMergeError> {
+fn append_to_event(
+    htbl: &mut TomlTable,
+    event: &str,
+    group: TomlTable,
+) -> Result<(), CodexMergeError> {
     match htbl.get_mut(event) {
         None => {
             let mut aot = ArrayOfTables::new();
@@ -257,7 +265,9 @@ mod tests {
     #[test]
     fn merge_into_empty_wires_both_events() {
         let out = merged("");
-        assert!(out.contains("[[hooks.UserPromptSubmit]]") || out.contains("hooks.UserPromptSubmit"));
+        assert!(
+            out.contains("[[hooks.UserPromptSubmit]]") || out.contains("hooks.UserPromptSubmit")
+        );
         assert!(out.contains("[[hooks.Stop]]") || out.contains("hooks.Stop"));
         assert!(out.contains("\"/home/u/.local/bin/dontspeak\" provide"));
         assert!(out.contains("\"/home/u/.local/bin/dontspeak\" notify"));
@@ -270,12 +280,25 @@ mod tests {
         let existing = "model = \"o4\"\n\n[tui]\ntheme = \"dark\"\n";
         let once = merged(existing);
         assert!(once.contains("model = \"o4\""), "unrelated key preserved");
-        assert!(once.contains("theme = \"dark\""), "unrelated table preserved");
+        assert!(
+            once.contains("theme = \"dark\""),
+            "unrelated table preserved"
+        );
         // Re-merging must not duplicate our groups.
         let twice = merged(&once);
         assert_eq!(once, twice, "idempotent");
-        assert_eq!(twice.matches("\"/home/u/.local/bin/dontspeak\" notify").count(), 1);
-        assert_eq!(twice.matches("\"/home/u/.local/bin/dontspeak\" provide").count(), 1);
+        assert_eq!(
+            twice
+                .matches("\"/home/u/.local/bin/dontspeak\" notify")
+                .count(),
+            1
+        );
+        assert_eq!(
+            twice
+                .matches("\"/home/u/.local/bin/dontspeak\" provide")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -283,28 +306,42 @@ mod tests {
         let existing = "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"/usr/bin/true\"\n";
         let out = merged(existing);
         assert!(out.contains("/usr/bin/true"), "user's Stop hook survives");
-        assert!(out.contains("\"/home/u/.local/bin/dontspeak\" notify"), "ours added alongside");
+        assert!(
+            out.contains("\"/home/u/.local/bin/dontspeak\" notify"),
+            "ours added alongside"
+        );
     }
 
     #[test]
     fn strip_removes_only_ours_and_drops_empty_events() {
-        let merged_doc = merged("[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"/usr/bin/true\"\n");
+        let merged_doc = merged(
+            "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"/usr/bin/true\"\n",
+        );
         let stripped = strip_codex_hooks(&merged_doc).unwrap();
         assert!(stripped.contains("/usr/bin/true"), "user hook kept");
         assert!(!stripped.contains("dontspeak"), "all ours removed");
         // UserPromptSubmit was ours-only → dropped entirely.
-        assert!(!stripped.contains("UserPromptSubmit"), "ours-only event removed");
+        assert!(
+            !stripped.contains("UserPromptSubmit"),
+            "ours-only event removed"
+        );
     }
 
     #[test]
     fn unmergeable_scalar_hooks_errors() {
         let bad = "hooks = \"oops\"\n";
-        assert!(matches!(merge_codex_hooks(bad, BIN), Err(CodexMergeError::UnmergeableShape(_))));
+        assert!(matches!(
+            merge_codex_hooks(bad, BIN),
+            Err(CodexMergeError::UnmergeableShape(_))
+        ));
     }
 
     #[test]
     fn parse_error_surfaces() {
         let bad = "this is = = not toml\n";
-        assert!(matches!(merge_codex_hooks(bad, BIN), Err(CodexMergeError::Parse(_))));
+        assert!(matches!(
+            merge_codex_hooks(bad, BIN),
+            Err(CodexMergeError::Parse(_))
+        ));
     }
 }

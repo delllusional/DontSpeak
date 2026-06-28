@@ -15,8 +15,8 @@
 //! malformed existing file is treated as empty rather than destroyed. `--print-only`
 //! emits the merged document to stdout without touching disk (the hands-off path).
 
-use serde_json::Value;
 use ds_config::{HookSpec, INSTALLED_BINS, Paths};
+use serde_json::Value;
 
 /// Resolve an installed sibling binary with the platform executable suffix.
 ///
@@ -125,7 +125,9 @@ pub fn run(args: &[String]) -> i32 {
             "--codex-only" => codex_only = true,
             "--prune-stale" => prune_only = true,
             "-h" | "--help" => {
-                eprintln!("usage: dontspeak wire-hooks [--remove] [--print-only] [--no-codex | --codex-only] [--prune-stale]");
+                eprintln!(
+                    "usage: dontspeak wire-hooks [--remove] [--print-only] [--no-codex | --codex-only] [--prune-stale]"
+                );
                 return 0;
             }
             other => eprintln!("wire-hooks: ignoring unknown arg {other:?}"),
@@ -150,9 +152,7 @@ pub fn run(args: &[String]) -> i32 {
     // self-documenting file (the engine still fails-open to defaults without it).
     // Client-agnostic, so do it on any non-remove wire.
     if !remove && !paths.config_toml.exists() {
-        if let Err(e) =
-            ds_config::write_settings(&paths, &ds_config::VoiceConfig::default())
-        {
+        if let Err(e) = ds_config::write_settings(&paths, &ds_config::VoiceConfig::default()) {
             eprintln!(
                 "wire-hooks: could not seed {}: {e}",
                 paths.config_toml.display()

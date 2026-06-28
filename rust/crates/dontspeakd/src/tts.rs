@@ -453,7 +453,10 @@ impl TtsManager {
                 .unwrap_or(false);
             return if have_dylib { "CoreML-ANE" } else { "CPU" };
         }
-        #[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+        #[cfg(all(
+            any(target_os = "windows", target_os = "linux"),
+            target_arch = "x86_64"
+        ))]
         {
             let wants_cuda =
                 which.eq_ignore_ascii_case("ort_cuda") || which.eq_ignore_ascii_case("auto");
@@ -818,7 +821,13 @@ impl TtsManager {
                     // STT lifecycle — the SAME generic handler `start()`'s wait loop uses, so the
                     // pre-/post-READY paths can't drift (STT preloads in parallel → lines land on
                     // either side of READY). `DOWNLOADING stt`/`WARMING stt` here; STTLOADED next.
-                    } else if apply_dl_progress(l, "stt", &stt_downloading, &stt_dl, gate.as_deref()) {
+                    } else if apply_dl_progress(
+                        l,
+                        "stt",
+                        &stt_downloading,
+                        &stt_dl,
+                        gate.as_deref(),
+                    ) {
                         // The live push is built into apply_dl_progress (same as the wait loop).
                     } else if l == "STTLOADED" {
                         mark_loaded(&stt_downloading, &stt_dl, &stt_loaded, gate.as_deref());
@@ -1243,8 +1252,8 @@ mod coexist_it {
     #[test]
     #[ignore]
     fn coexist_smoke() {
-        let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/debug/ds-helper");
+        let bin =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ds-helper");
         let mgr = Arc::new(TtsManager::new(
             bin,
             Arc::new(crate::stats::TtsStats::new()),
@@ -1299,10 +1308,22 @@ mod dl_lifecycle_tests {
         let dling = AtomicBool::new(false);
         let dl = Mutex::new((0u64, 0, 0, 0));
         // A "stt" line is IGNORED by the "tts" handler (kind scoping — no cross-talk).
-        assert!(!apply_dl_progress("DOWNLOADING stt 1 2 3 4", "tts", &dling, &dl, None));
+        assert!(!apply_dl_progress(
+            "DOWNLOADING stt 1 2 3 4",
+            "tts",
+            &dling,
+            &dl,
+            None
+        ));
         assert!(!dling.load(Ordering::Relaxed));
         // The matching kind sets downloading + the per-file (done, total, index, count).
-        assert!(apply_dl_progress("DOWNLOADING tts 10 100 3 22", "tts", &dling, &dl, None));
+        assert!(apply_dl_progress(
+            "DOWNLOADING tts 10 100 3 22",
+            "tts",
+            &dling,
+            &dl,
+            None
+        ));
         assert!(dling.load(Ordering::Relaxed));
         assert_eq!(*dl.lock().unwrap(), (10, 100, 3, 22));
         // WARMING <kind> clears downloading + progress (→ the dot reads "Starting…").
@@ -1310,10 +1331,22 @@ mod dl_lifecycle_tests {
         assert!(!dling.load(Ordering::Relaxed));
         assert_eq!(*dl.lock().unwrap(), (0, 0, 0, 0));
         // The bare signal (no payload) still flips downloading.
-        assert!(apply_dl_progress("DOWNLOADING tts", "tts", &dling, &dl, None));
+        assert!(apply_dl_progress(
+            "DOWNLOADING tts",
+            "tts",
+            &dling,
+            &dl,
+            None
+        ));
         assert!(dling.load(Ordering::Relaxed));
         // A non-lifecycle line is not consumed (so PROVIDER/ERR/READY fall through).
-        assert!(!apply_dl_progress("PROVIDER CoreML", "tts", &dling, &dl, None));
+        assert!(!apply_dl_progress(
+            "PROVIDER CoreML",
+            "tts",
+            &dling,
+            &dl,
+            None
+        ));
         assert!(!apply_dl_progress("READY", "tts", &dling, &dl, None));
     }
 
@@ -1321,7 +1354,13 @@ mod dl_lifecycle_tests {
     fn apply_dl_progress_drives_stt_identically() {
         let dling = AtomicBool::new(false);
         let dl = Mutex::new((0u64, 0, 0, 0));
-        assert!(apply_dl_progress("DOWNLOADING stt 5 50 1 4", "stt", &dling, &dl, None));
+        assert!(apply_dl_progress(
+            "DOWNLOADING stt 5 50 1 4",
+            "stt",
+            &dling,
+            &dl,
+            None
+        ));
         assert_eq!(*dl.lock().unwrap(), (5, 50, 1, 4));
         assert!(apply_dl_progress("WARMING stt", "stt", &dling, &dl, None));
         assert!(!dling.load(Ordering::Relaxed));

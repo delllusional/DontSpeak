@@ -543,11 +543,17 @@ mod tests {
         let budget = tail_preview_budget_samples(RATE);
         assert!(!tail_previewable(0, RATE), "empty tail is never previewed");
         assert!(tail_previewable(1, RATE), "a one-sample tail previews");
-        assert!(tail_previewable(budget, RATE), "a tail exactly at the bound still previews");
+        assert!(
+            tail_previewable(budget, RATE),
+            "a tail exactly at the bound still previews"
+        );
         // A tail one sample past the bound is rejected — but the VAD force-commits at the
         // same bound, so in practice the tail is committed before it can reach here. The
         // point: there is NO length that is both unpreviewable AND uncommitted (the bug).
-        assert!(!tail_previewable(budget + 1, RATE), "an over-bound tail is skipped");
+        assert!(
+            !tail_previewable(budget + 1, RATE),
+            "an over-bound tail is skipped"
+        );
     }
 
     #[test]

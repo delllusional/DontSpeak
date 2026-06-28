@@ -7,11 +7,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use ds_config::{Paths, TtsEngine, VoiceConfig};
 use ds_ipc::{Request, Response};
 use ds_tts::g2p;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::engine_launch::ensure_engine;
 use crate::mcp::{ok, tool_result};
@@ -254,8 +254,8 @@ fn call_wire(args: &Value) -> Result<String, String> {
         target: String,
         enabled: bool,
     }
-    let a: Args = serde_json::from_value(args.clone())
-        .map_err(|e| format!("invalid wire arguments: {e}"))?;
+    let a: Args =
+        serde_json::from_value(args.clone()).map_err(|e| format!("invalid wire arguments: {e}"))?;
 
     // The narration spec is a CONFIG FILE on disk, not a client wiring — handle it first and
     // return directly. enabled=true materializes the built-in default to the user-editable
@@ -287,9 +287,9 @@ fn call_wire(args: &Value) -> Result<String, String> {
                 "Removed the narration spec override ({}) — reverting to the built-in default.",
                 f.display()
             )),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Ok("No narration spec override on disk — already using the built-in default.".into())
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(
+                "No narration spec override on disk — already using the built-in default.".into(),
+            ),
             Err(e) => Err(format!("remove narration spec: {e}")),
         };
     }
@@ -380,10 +380,7 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
             == Some(ds_config::SttEngine::System)
     });
     if would_run_system {
-        match ds_ipc::request(
-            &paths.engine_sock,
-            &ds_ipc::Request::AuthorizeSystemStt,
-        ) {
+        match ds_ipc::request(&paths.engine_sock, &ds_ipc::Request::AuthorizeSystemStt) {
             Ok(ds_ipc::Response::Done) => {}
             Ok(ds_ipc::Response::Error { message }) => return Err(message),
             Ok(_) => return Err("unexpected response while verifying system STT".into()),
@@ -506,7 +503,10 @@ fn call_set_voice(sock: &Path, args: &Value) -> Result<String, String> {
             let wants_kokoro = explicit.map_or(true, |e| e.eq_ignore_ascii_case("kokoro"));
             let kokoro_shaped = ds_tts::enumerate::kokoro_gender(&voice).is_some();
             if wants_kokoro && kokoro_shaped && !npz_present {
-                (TtsEngine::Kokoro, ds_tts::enumerate::kokoro_display_name(&voice))
+                (
+                    TtsEngine::Kokoro,
+                    ds_tts::enumerate::kokoro_display_name(&voice),
+                )
             } else {
                 return Err(e);
             }

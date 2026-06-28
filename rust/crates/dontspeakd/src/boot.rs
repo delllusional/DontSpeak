@@ -114,10 +114,7 @@ pub fn engine_run(
     // The SessionStart hook injects this file's contents into Claude so replies lead with a
     // spoken-line blockquote.
     if !paths.narration_spec.exists()
-        && let Err(e) = std::fs::write(
-            &paths.narration_spec,
-            ds_config::DEFAULT_NARRATION_SPEC,
-        )
+        && let Err(e) = std::fs::write(&paths.narration_spec, ds_config::DEFAULT_NARRATION_SPEC)
     {
         log(&format!(
             "WARN: cannot write default narration spec {}: {e}",
@@ -135,7 +132,9 @@ pub fn engine_run(
     // is cross-platform (SIGTERM → clean shutdown on unix; TerminateProcess on
     // Windows, after which its helper self-exits on stdin EOF). No-op if none/dead.
     if let Some(old) = ds_config::evict_stale_engine(&paths.engine_pid, std::process::id()) {
-        log(&format!("evicted stale engine pid {old} before binding the RPC socket"));
+        log(&format!(
+            "evicted stale engine pid {old} before binding the RPC socket"
+        ));
     }
 
     // §E.4: write our own pid so the GUI can SIGHUP us for a no-restart reload +

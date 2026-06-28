@@ -107,12 +107,8 @@ where
 
         let result: std::io::Result<()> = match asset {
             Asset::Kokoro => ds_model::run_setup_kokoro_with_progress(&emit).map(|_| ()),
-            Asset::Onnxruntime => {
-                ds_model::ensure_onnxruntime_with_progress(&emit).map(|_| ())
-            }
-            Asset::ParakeetOnnx => {
-                ds_model::run_setup_parakeet_with_progress(&emit).map(|_| ())
-            }
+            Asset::Onnxruntime => ds_model::ensure_onnxruntime_with_progress(&emit).map(|_| ()),
+            Asset::ParakeetOnnx => ds_model::run_setup_parakeet_with_progress(&emit).map(|_| ()),
         };
 
         let (status, present) = match result {

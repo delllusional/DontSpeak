@@ -134,9 +134,7 @@ where
 /// Read-don't-write: we only read Claude Code's keybindings.json, never modify it.
 fn claude_code_chord() -> ds_platform::KeyChord {
     ds_config::Paths::resolve()
-        .map(|p| {
-            ds_platform::KeyChord::parse(&ds_config::read_claude_code_voice(&p).key)
-        })
+        .map(|p| ds_platform::KeyChord::parse(&ds_config::read_claude_code_voice(&p).key))
         .unwrap_or_default()
 }
 
@@ -211,9 +209,7 @@ pub fn make_diarizer(provider: DiarizerProvider) -> Option<Box<dyn Diarizer>> {
     // `VoiceConfig::resolved_diarizer`); this just maps rung → backend.
     match provider {
         #[cfg(target_os = "macos")]
-        DiarizerProvider::AppleNative => {
-            Some(Box::new(ds_stt::diarize::CoremlDiarizer::new()))
-        }
+        DiarizerProvider::AppleNative => Some(Box::new(ds_stt::diarize::CoremlDiarizer::new())),
         // AppleNative is macOS-only; the resolver never hands it here off macOS.
         #[allow(unreachable_patterns)]
         other => {
@@ -284,9 +280,18 @@ mod tests {
             system_stt: false,
         };
         // Kokoro / Off → the Kokoro box; System (supported) → the system `say` box.
-        assert_eq!(tts_box(TtsEngine::Kokoro, &avail, test_paths()).kind(), "kokoro");
-        assert_eq!(tts_box(TtsEngine::Off, &avail, test_paths()).kind(), "kokoro");
-        assert_eq!(tts_box(TtsEngine::System, &avail, test_paths()).kind(), "system");
+        assert_eq!(
+            tts_box(TtsEngine::Kokoro, &avail, test_paths()).kind(),
+            "kokoro"
+        );
+        assert_eq!(
+            tts_box(TtsEngine::Off, &avail, test_paths()).kind(),
+            "kokoro"
+        );
+        assert_eq!(
+            tts_box(TtsEngine::System, &avail, test_paths()).kind(),
+            "system"
+        );
     }
 
     #[test]
@@ -295,7 +300,10 @@ mod tests {
             system_tts: false, // unsupported OS
             system_stt: false,
         };
-        assert_eq!(tts_box(TtsEngine::System, &avail, test_paths()).kind(), "kokoro");
+        assert_eq!(
+            tts_box(TtsEngine::System, &avail, test_paths()).kind(),
+            "kokoro"
+        );
     }
 
     // ── STT engine → box MAPPING (pure, ladder-free) ────────────────────────

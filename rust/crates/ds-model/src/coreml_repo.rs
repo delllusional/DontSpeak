@@ -84,7 +84,12 @@ pub static KOKORO_G2P_COREML: CoremlRepo = CoremlRepo {
     name: "kokoro_g2p_coreml",
     repo: "FluidInference/kokoro-82m-coreml",
     revision: "c94edcb4b671856795458645cd389c0a9184e8bb",
-    include_prefixes: &["G2PEncoder", "G2PDecoder", "g2p_vocab.json", "us_lexicon_cache.json"],
+    include_prefixes: &[
+        "G2PEncoder",
+        "G2PDecoder",
+        "g2p_vocab.json",
+        "us_lexicon_cache.json",
+    ],
     exclude_substrings: &[".mlpackage", ".DS_Store"],
     target: kokoro_g2p_target,
 };
@@ -143,10 +148,7 @@ struct TreeFile {
 fn keep(repo: &CoremlRepo, path: &str) -> bool {
     let included = repo.include_prefixes.is_empty()
         || repo.include_prefixes.iter().any(|p| path.starts_with(p));
-    let excluded = repo
-        .exclude_substrings
-        .iter()
-        .any(|s| path.contains(s));
+    let excluded = repo.exclude_substrings.iter().any(|s| path.contains(s));
     included && !excluded
 }
 
@@ -211,7 +213,12 @@ fn fetch_tree(repo: &CoremlRepo) -> std::io::Result<Vec<TreeFile>> {
 fn already_have(dest: &Path, f: &TreeFile) -> bool {
     match &f.sha256 {
         Some(sha) => verify_sha256(dest, sha),
-        None => f.size > 0 && std::fs::metadata(dest).map(|m| m.len() == f.size).unwrap_or(false),
+        None => {
+            f.size > 0
+                && std::fs::metadata(dest)
+                    .map(|m| m.len() == f.size)
+                    .unwrap_or(false)
+        }
     }
 }
 
@@ -226,7 +233,10 @@ fn download_one(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let url = format!("{HF_HOST}/{}/resolve/{}/{}", repo.repo, repo.revision, f.path);
+    let url = format!(
+        "{HF_HOST}/{}/resolve/{}/{}",
+        repo.repo, repo.revision, f.path
+    );
     let dir = dest.parent().unwrap_or_else(|| Path::new("."));
     let mut attempt = 0;
     loop {
@@ -339,20 +349,35 @@ mod tests {
     #[test]
     fn filters_keep_only_the_runtime_set() {
         // Kokoro runtime set keeps the ANE/ tree, drops the .mlpackage source copies + docs.
-        assert!(keep(&KOKORO_COREML, "ANE/KokoroVocoder.mlmodelc/coremldata.bin"));
+        assert!(keep(
+            &KOKORO_COREML,
+            "ANE/KokoroVocoder.mlmodelc/coremldata.bin"
+        ));
         assert!(keep(&KOKORO_COREML, "ANE/af_heart.bin"));
         assert!(!keep(&KOKORO_COREML, "ANE/KokoroVocoder.mlpackage/x"));
         assert!(!keep(&KOKORO_COREML, "ANE/.DS_Store"));
         assert!(!keep(&KOKORO_COREML, "ANE/LICENSE"));
         assert!(!keep(&KOKORO_COREML, "G2PEncoder.mlmodelc/coremldata.bin")); // belongs to G2P set
         // G2P set is the complement at the repo root.
-        assert!(keep(&KOKORO_G2P_COREML, "G2PEncoder.mlmodelc/coremldata.bin"));
+        assert!(keep(
+            &KOKORO_G2P_COREML,
+            "G2PEncoder.mlmodelc/coremldata.bin"
+        ));
         assert!(keep(&KOKORO_G2P_COREML, "g2p_vocab.json"));
-        assert!(!keep(&KOKORO_G2P_COREML, "ANE/KokoroVocoder.mlmodelc/coremldata.bin"));
+        assert!(!keep(
+            &KOKORO_G2P_COREML,
+            "ANE/KokoroVocoder.mlmodelc/coremldata.bin"
+        ));
         // Parakeet keeps the v2 runtime mlmodelc, drops alternate encoders.
-        assert!(keep(&PARAKEET_COREML, "Encoder.mlmodelc/weights/weight.bin"));
+        assert!(keep(
+            &PARAKEET_COREML,
+            "Encoder.mlmodelc/weights/weight.bin"
+        ));
         assert!(keep(&PARAKEET_COREML, "parakeet_vocab.json"));
-        assert!(!keep(&PARAKEET_COREML, "ParakeetEncoder_4bit_par.mlmodelc/x"));
+        assert!(!keep(
+            &PARAKEET_COREML,
+            "ParakeetEncoder_4bit_par.mlmodelc/x"
+        ));
     }
 
     #[test]
@@ -428,7 +453,12 @@ mod tests {
     #[test]
     fn revisions_are_full_40_char_commit_shas() {
         for r in all_coreml_repos() {
-            assert_eq!(r.revision.len(), 40, "{} revision must be a full SHA", r.name);
+            assert_eq!(
+                r.revision.len(),
+                40,
+                "{} revision must be a full SHA",
+                r.name
+            );
             assert!(r.revision.chars().all(|c| c.is_ascii_hexdigit()));
             assert!(r.repo.starts_with("FluidInference/"));
         }

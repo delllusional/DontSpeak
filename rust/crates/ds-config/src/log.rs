@@ -194,14 +194,20 @@ fn combined_log_json_at(unified_log: &Path, max_bytes: u64) -> String {
     // Sibling auxiliary logs: every `*.log` in the dir that isn't the unified log itself and
     // isn't a rotated `*.log.N` (those have extension `N`, not `log`, so they're already out).
     if let Some(dir) = unified_log.parent() {
-        let unified_name = unified_log.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let unified_name = unified_log
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
         if let Ok(rd) = std::fs::read_dir(dir) {
             let mut aux: Vec<std::path::PathBuf> = rd
                 .flatten()
                 .map(|e| e.path())
                 .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("log"))
                 .filter(|p| {
-                    p.file_name().and_then(|s| s.to_str()).map(|n| n != unified_name) == Some(true)
+                    p.file_name()
+                        .and_then(|s| s.to_str())
+                        .map(|n| n != unified_name)
+                        == Some(true)
                 })
                 .collect();
             aux.sort();
@@ -259,8 +265,16 @@ mod tests {
         )
         .unwrap();
         // A sibling aux log (raw stderr, no timestamps) + a rotated file that must be ignored.
-        std::fs::write(dir.path().join("ds-helper.log"), b"listen-debug: rms=0.02\n").unwrap();
-        std::fs::write(dir.path().join("dontspeak.log.1"), b"[1] INFO engine old rotated\n").unwrap();
+        std::fs::write(
+            dir.path().join("ds-helper.log"),
+            b"listen-debug: rms=0.02\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("dontspeak.log.1"),
+            b"[1] INFO engine old rotated\n",
+        )
+        .unwrap();
 
         let json = combined_log_json_at(&unified, 64 * 1024);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -268,10 +282,18 @@ mod tests {
         let sources: Vec<&str> = arr.iter().map(|l| l["source"].as_str().unwrap()).collect();
         assert!(sources.contains(&"engine"), "unified engine line present");
         assert!(sources.contains(&"config"), "unified config line present");
-        assert!(sources.contains(&"helper"), "aux helper line tagged by file name");
-        assert!(!arr.iter().any(|l| l["text"].as_str() == Some("old rotated")
-            || l["text"].as_str().map(|t| t.contains("old rotated")).unwrap_or(false)),
-            "rotated *.log.1 is excluded");
+        assert!(
+            sources.contains(&"helper"),
+            "aux helper line tagged by file name"
+        );
+        assert!(
+            !arr.iter().any(|l| l["text"].as_str() == Some("old rotated")
+                || l["text"]
+                    .as_str()
+                    .map(|t| t.contains("old rotated"))
+                    .unwrap_or(false)),
+            "rotated *.log.1 is excluded"
+        );
     }
 
     #[test]
@@ -284,8 +306,14 @@ mod tests {
         assert_eq!(log_tail(&p, 1000), "line1\nline2\nline3\n");
         // Small window → the partial leading line is dropped; the view starts clean.
         let tail = log_tail(&p, 11);
-        assert!(tail.ends_with("line3\n"), "ends at the newest line: {tail:?}");
-        assert!(!tail.contains("ine2"), "partial first line dropped: {tail:?}");
+        assert!(
+            tail.ends_with("line3\n"),
+            "ends at the newest line: {tail:?}"
+        );
+        assert!(
+            !tail.contains("ine2"),
+            "partial first line dropped: {tail:?}"
+        );
     }
 
     #[test]
@@ -305,7 +333,10 @@ mod tests {
         // Below threshold → no rotation.
         std::fs::write(&p, b"small").unwrap();
         rotate_if_large(&p);
-        assert!(p.is_file() && !dir.path().join("aux.log.1").exists(), "small file untouched");
+        assert!(
+            p.is_file() && !dir.path().join("aux.log.1").exists(),
+            "small file untouched"
+        );
         // At/over threshold → current renamed to `.1`, active gone (recreated on next open).
         std::fs::write(&p, vec![0u8; LOG_MAX_BYTES as usize]).unwrap();
         rotate_if_large(&p);

@@ -256,7 +256,10 @@ pub fn prefetch_items(what: &str) -> Vec<PrefetchItem> {
         .iter()
         .filter_map(&spec_item)
         .collect(),
-        #[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+        #[cfg(all(
+            any(target_os = "windows", target_os = "linux"),
+            target_arch = "x86_64"
+        ))]
         "cuda" => {
             if crate::ort::cuda_runtime_present() {
                 return vec![];

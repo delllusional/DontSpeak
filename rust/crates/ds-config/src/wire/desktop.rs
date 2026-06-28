@@ -58,10 +58,7 @@ mod tests {
     #[test]
     fn merge_mcp_server_into_empty_creates_entry() {
         let out = merge_mcp_server(Value::Null, "dontspeak", "/abs/ds-mcp", &[]);
-        assert_eq!(
-            out["mcpServers"]["dontspeak"]["command"],
-            "/abs/ds-mcp"
-        );
+        assert_eq!(out["mcpServers"]["dontspeak"]["command"], "/abs/ds-mcp");
         // No args → no "args" key (keep the entry minimal).
         assert!(out["mcpServers"]["dontspeak"].get("args").is_none());
     }
@@ -76,10 +73,7 @@ mod tests {
         });
         let out = merge_mcp_server(existing, "dontspeak", "/abs/ds-mcp", &[]);
         // Our entry was added…
-        assert_eq!(
-            out["mcpServers"]["dontspeak"]["command"],
-            "/abs/ds-mcp"
-        );
+        assert_eq!(out["mcpServers"]["dontspeak"]["command"], "/abs/ds-mcp");
         // …and the unrelated server + top-level key are untouched.
         assert_eq!(out["mcpServers"]["other"]["command"], "/usr/bin/other");
         assert_eq!(out["mcpServers"]["other"]["args"][0], "--flag");
@@ -91,10 +85,7 @@ mod tests {
         // A reinstall at a new path must RE-POINT our command, not duplicate/skip.
         let first = merge_mcp_server(Value::Null, "dontspeak", "/old/ds-mcp", &[]);
         let second = merge_mcp_server(first, "dontspeak", "/new/ds-mcp", &[]);
-        assert_eq!(
-            second["mcpServers"]["dontspeak"]["command"],
-            "/new/ds-mcp"
-        );
+        assert_eq!(second["mcpServers"]["dontspeak"]["command"], "/new/ds-mcp");
         // Still exactly one entry.
         assert_eq!(second["mcpServers"].as_object().unwrap().len(), 1);
     }

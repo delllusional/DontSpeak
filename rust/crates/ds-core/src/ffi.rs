@@ -394,10 +394,7 @@ pub extern "C" fn ds_set_provider(which: *const c_char) -> u8 {
         let Some(paths) = ds_config::Paths::resolve() else {
             return 0;
         };
-        match ds_ipc::request(
-            &paths.engine_sock,
-            &ds_ipc::Request::SetProvider { which },
-        ) {
+        match ds_ipc::request(&paths.engine_sock, &ds_ipc::Request::SetProvider { which }) {
             Ok(ds_ipc::Response::Done) => 1,
             _ => 0,
         }

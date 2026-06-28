@@ -219,7 +219,10 @@ pub fn ensure_ort_dylib_gpu(want_gpu: bool) -> Result<PathBuf, String> {
         set_ort_dylib_path(&gpu_so);
         return Ok(gpu_so);
     }
-    #[cfg(not(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64")))]
+    #[cfg(not(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    )))]
     let _ = want_gpu;
     ensure_ort_dylib()
 }
@@ -370,12 +373,18 @@ pub fn ensure_onnxruntime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io:
 // DEMAND (only when GPU is selected) from the pinned PyPI wheels (`urls::CUDA_WHEELS`) into
 // `model_dir()/cuda/`, then point ORT_DYLIB_PATH at the GPU runtime. Windows then prepends the
 // dir to PATH; Linux preloads the dependency .so's RTLD_GLOBAL (see `ensure_ort_dylib_gpu`).
-#[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
 pub(crate) use crate::urls::CUDA_WHEELS;
 
 /// The dir (under `model_dir()`) holding the GPU CUDA runtime libs — kept separate from the
 /// CPU runtime so the two never clash.
-#[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
 pub fn cuda_runtime_dir() -> Option<PathBuf> {
     model_path("cuda")
 }
@@ -383,7 +392,10 @@ pub fn cuda_runtime_dir() -> Option<PathBuf> {
 /// The GPU onnxruntime path (set `ORT_DYLIB_PATH` to this for CUDA). Windows: a fixed
 /// `onnxruntime.dll`. Linux: the versioned `libonnxruntime.so.<ver>` the wheel ships, found by
 /// scanning the runtime dir for the core lib (excluding the `_providers_*` plugins).
-#[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
 pub fn cuda_onnxruntime_path() -> Option<PathBuf> {
     let dir = cuda_runtime_dir()?;
     #[cfg(target_os = "windows")]
@@ -417,7 +429,10 @@ fn cuda_core_runtime_so(dir: &std::path::Path) -> Option<PathBuf> {
 }
 
 /// Is the CUDA GPU runtime already fetched (cheap presence check)?
-#[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
 pub fn cuda_runtime_present() -> bool {
     let Some(dir) = cuda_runtime_dir() else {
         return false;
@@ -450,7 +465,10 @@ pub fn cuda_runtime_present() -> bool {
 /// Each wheel is a zip; we pull out every `*.dll`. Idempotent (a present runtime
 /// returns immediately). `progress(done_wheels, total_wheels)`. ~1.4 GB on first
 /// fetch — the caller (GPU opt-in) gates this.
-#[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
 pub fn ensure_cuda_runtime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
     // Windows wheels carry .dll's, Linux wheels carry .so's — same flatten-into-one-dir flow.
     #[cfg(target_os = "windows")]

@@ -27,8 +27,7 @@ pub(crate) fn spawn_ipc_server(
 ) {
     let sock = paths.engine_sock.clone();
     std::thread::spawn(move || {
-        let handler = move |req: ds_ipc::Request,
-                            emit: &mut dyn FnMut(&ds_ipc::Response)| {
+        let handler = move |req: ds_ipc::Request, emit: &mut dyn FnMut(&ds_ipc::Response)| {
             match req {
                 ds_ipc::Request::Ping => emit(&ds_ipc::Response::Pong),
                 ds_ipc::Request::Status => {
@@ -161,8 +160,7 @@ pub(crate) fn spawn_ipc_server(
                     // dictation status changes or the cap elapses, then reply with the
                     // fresh snapshot. One-thread-per-connection (see ipc server), so this
                     // never stalls the timer's ModelStatus / SetMuted on other connections.
-                    let timeout =
-                        std::time::Duration::from_millis(timeout_ms.clamp(1, 60_000));
+                    let timeout = std::time::Duration::from_millis(timeout_ms.clamp(1, 60_000));
                     shared.gate.wait_changed(since, timeout);
                     emit(&ds_ipc::Response::ModelStatus {
                         status: model_status_json(&shared, &paths, ttsq.is_tts_active()),
@@ -231,14 +229,11 @@ pub(crate) fn spawn_ipc_server(
                     let secs = seconds.clamp(1, 60);
                     let name = name.trim().to_string();
                     if name.is_empty() {
-                        emit(&ds_ipc::Response::error(
-                            "enroll: name must not be empty",
-                        ));
+                        emit(&ds_ipc::Response::error("enroll: name must not be empty"));
                     } else {
                         match ttsq.enroll(secs) {
                             Ok(emb) => {
-                                let mut store =
-                                    ds_config::SpeakerStore::load(&paths.speakers_json);
+                                let mut store = ds_config::SpeakerStore::load(&paths.speakers_json);
                                 store.upsert(name.clone(), emb);
                                 match store.save(&paths.speakers_json) {
                                     Ok(()) => emit(&ds_ipc::Response::Enrolled { name }),
@@ -256,9 +251,7 @@ pub(crate) fn spawn_ipc_server(
                     store.remove(&name);
                     match store.save(&paths.speakers_json) {
                         Ok(()) => emit(&ds_ipc::Response::Done),
-                        Err(e) => emit(&ds_ipc::Response::error(format!(
-                            "forget_speaker: {e}"
-                        ))),
+                        Err(e) => emit(&ds_ipc::Response::error(format!("forget_speaker: {e}"))),
                     }
                 }
                 ds_ipc::Request::ListSpeakers => {

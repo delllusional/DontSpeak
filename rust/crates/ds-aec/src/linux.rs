@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use crate::shared::{enqueue_bounded, CaptureHandle};
+use crate::shared::{CaptureHandle, enqueue_bounded};
 
 use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::Direction;
@@ -88,14 +88,14 @@ impl DuplexAudio {
         let mut connected: Option<(String, Simple)> = None;
         for name in candidate_sources() {
             match Simple::new(
-                None,                 // default server
-                "DontSpeak",           // app name
+                None,        // default server
+                "DontSpeak", // app name
                 Direction::Record,
-                Some(&name),          // the cancelled source
-                "aec-capture",        // stream description
+                Some(&name),   // the cancelled source
+                "aec-capture", // stream description
                 &spec,
-                None,                 // default channel map
-                None,                 // default buffering
+                None, // default channel map
+                None, // default buffering
             ) {
                 Ok(s) => {
                     connected = Some((name, s));

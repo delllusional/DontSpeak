@@ -105,23 +105,20 @@ pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 8_831_605;
 pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 31_604_221;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub const ONNXRUNTIME_DIST_URL: &str =
-    "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-osx-arm64-1.27.0.tgz";
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-osx-arm64-1.27.0.tgz";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
     "545e81c58152353acb0d1e8bd6ce4b62f830c0961f5b3acfedc790ffd76e477a";
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const ONNXRUNTIME_DIST_URL: &str =
-    "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-win-x64-1.27.0.zip";
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-win-x64-1.27.0.zip";
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
     "c5c81710938e68079ff1a192b04897faabe4b43830d48f39f27ecd4e16138bfc";
 
 // Windows on ARM (native arm64) — Microsoft's official win-arm64 build.
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const ONNXRUNTIME_DIST_URL: &str =
-    "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-win-arm64-1.27.0.zip";
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-win-arm64-1.27.0.zip";
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
     "a32f2650575b3c20df462e337519fd1cc4105356130d11dba9771c6f374d952f";
@@ -130,8 +127,7 @@ pub const ONNXRUNTIME_DIST_SHA256: &str =
 // lib/libonnxruntime.so.1.27.0 is the dynamic runtime `ort` (load-dynamic) dlopens via
 // ORT_DYLIB_PATH (the bare libonnxruntime.so is a symlink; see archive::extract_dylib_member).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub const ONNXRUNTIME_DIST_URL: &str =
-    "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-linux-x64-1.27.0.tgz";
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-linux-x64-1.27.0.tgz";
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
     "547e40a48f1fe73e3f812d7c88a948612c23f896b91e4e2ee1e232d7b468246f";
@@ -254,7 +250,12 @@ pub const PARAKEET: Project = Project {
     homepage: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2",
     license: "CC-BY-4.0",
     license_url: "https://creativecommons.org/licenses/by/4.0/",
-    files: &[PARAKEET_ENCODER, PARAKEET_DECODER, PARAKEET_PREPROC, PARAKEET_VOCAB],
+    files: &[
+        PARAKEET_ENCODER,
+        PARAKEET_DECODER,
+        PARAKEET_PREPROC,
+        PARAKEET_VOCAB,
+    ],
 };
 
 /// ONNX Runtime inference library (MIT). Files are platform-selected (the load-dynamic
@@ -271,7 +272,10 @@ pub const ONNX_RUNTIME: Project = Project {
 /// NVIDIA CUDA runtime libraries (optional GPU acceleration; NVIDIA CUDA Toolkit EULA).
 /// Windows/Linux x64. Files (the cuda/cublas/cufft/nvrtc/nvjitlink wheels) assembled in
 /// the collector from [`CUDA_WHEELS`].
-#[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
 pub const NVIDIA_CUDA: Project = Project {
     name: "NVIDIA CUDA runtime",
     usage: "GPU acceleration libraries (optional)",
@@ -283,7 +287,10 @@ pub const NVIDIA_CUDA: Project = Project {
 
 /// NVIDIA cuDNN (optional GPU acceleration; NVIDIA cuDNN SLA — separate, stricter terms
 /// than the CUDA EULA). Windows/Linux x64; the cuDNN wheel from [`CUDA_WHEELS`].
-#[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
 pub const NVIDIA_CUDNN: Project = Project {
     name: "NVIDIA cuDNN",
     usage: "GPU deep-learning primitives (optional)",

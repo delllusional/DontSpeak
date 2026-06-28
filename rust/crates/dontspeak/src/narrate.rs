@@ -275,11 +275,16 @@ mod tests {
         let reply = "Done — all three tests pass.";
         let mut a = Accum::default();
         assert_eq!(
-            a.feed(0, reply, None, true, /*messages*/ false, /*short*/ true),
+            a.feed(
+                0, reply, None, true, /*messages*/ false, /*short*/ true
+            ),
             vec!["Done — all three tests pass."]
         );
         let mut b = Accum::default();
-        assert!(b.feed(0, reply, None, true, false, false).is_empty(), "messages-only ⇒ silent");
+        assert!(
+            b.feed(0, reply, None, true, false, false).is_empty(),
+            "messages-only ⇒ silent"
+        );
     }
 
     #[test]
@@ -350,7 +355,9 @@ mod tests {
         );
         let long = "word ".repeat(80); // ~400 chars
         assert_eq!(
-            Accum::default().feed(0, &long, None, true, true, true).len(),
+            Accum::default()
+                .feed(0, &long, None, true, true, true)
+                .len(),
             1,
             "long text → read, not silenced"
         );

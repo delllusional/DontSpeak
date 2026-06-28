@@ -358,7 +358,10 @@ mod tests {
         for f in &floats {
             expected.extend_from_slice(&f.to_le_bytes());
         }
-        assert_eq!(pack, expected, "extracted bytes must equal the LE f32 payload");
+        assert_eq!(
+            pack, expected,
+            "extracted bytes must equal the LE f32 payload"
+        );
         // Spot-check it round-trips back to the source floats.
         let row3 = 3 * 256 * 4;
         assert_eq!(

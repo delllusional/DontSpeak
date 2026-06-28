@@ -203,7 +203,10 @@ mod tests {
         let frame = RATE as usize * FRAME_MS / 1000;
         let b = d.feed(&speech((MAX_SEGMENT_SECS + 2) * fps));
         let max = frame * fps * MAX_SEGMENT_SECS;
-        assert_eq!(b[0], max, "first force-split must be exactly at MAX_SEGMENT_SECS");
+        assert_eq!(
+            b[0], max,
+            "first force-split must be exactly at MAX_SEGMENT_SECS"
+        );
         assert!(
             MAX_SEGMENT_SECS <= 8,
             "force-split must stay within the helper's live-partial tail budget (~8 s) \

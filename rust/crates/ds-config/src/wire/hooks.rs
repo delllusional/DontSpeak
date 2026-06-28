@@ -350,16 +350,32 @@ mod tests {
         // async notify-only sinks, recognized as ours (idempotent), and stripped on uninstall.
         let out = merge_hooks(json!({}), &spec());
         for evt in ["Stop", "Notification"] {
-            let g = out["hooks"][evt].as_array().unwrap_or_else(|| panic!("{evt} wired"));
+            let g = out["hooks"][evt]
+                .as_array()
+                .unwrap_or_else(|| panic!("{evt} wired"));
             assert_eq!(g.len(), 1, "{evt} is a single notify group");
-            assert_eq!(g[0]["hooks"][0]["args"], json!(["notify"]), "{evt} is notify-only");
-            assert_eq!(g[0]["hooks"][0]["async"], json!(true), "{evt} never blocks Claude");
+            assert_eq!(
+                g[0]["hooks"][0]["args"],
+                json!(["notify"]),
+                "{evt} is notify-only"
+            );
+            assert_eq!(
+                g[0]["hooks"][0]["async"],
+                json!(true),
+                "{evt} never blocks Claude"
+            );
         }
         // Idempotent re-merge, and clean strip on uninstall.
         let twice = merge_hooks(out.clone(), &spec());
         assert_eq!(twice, out, "second merge is a no-op");
         let stripped = strip_hooks(out);
-        assert!(stripped["hooks"].get("Stop").is_none(), "Stop stripped on uninstall");
-        assert!(stripped["hooks"].get("Notification").is_none(), "Notification stripped on uninstall");
+        assert!(
+            stripped["hooks"].get("Stop").is_none(),
+            "Stop stripped on uninstall"
+        );
+        assert!(
+            stripped["hooks"].get("Notification").is_none(),
+            "Notification stripped on uninstall"
+        );
     }
 }

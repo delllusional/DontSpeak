@@ -40,7 +40,12 @@ pub(crate) fn debug(s: &str) {
 /// with that prefix stripped. Unprefixed lines are `INFO`.
 fn split_level(s: &str) -> (ds_config::LogLevel, &str) {
     use ds_config::LogLevel::*;
-    for (pfx, lvl) in [("FATAL:", Error), ("ERROR:", Error), ("WARN:", Warn), ("DEBUG:", Debug)] {
+    for (pfx, lvl) in [
+        ("FATAL:", Error),
+        ("ERROR:", Error),
+        ("WARN:", Warn),
+        ("DEBUG:", Debug),
+    ] {
         if let Some(rest) = s.strip_prefix(pfx) {
             return (lvl, rest.trim_start());
         }

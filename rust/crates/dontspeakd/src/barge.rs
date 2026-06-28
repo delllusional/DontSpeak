@@ -58,23 +58,58 @@ pub(crate) fn barge_step(
 ) -> (BargeAction, BargeState) {
     if full_duplex {
         // Mic permanently live → no edges; never barge, and forget any prior barge.
-        return (BargeAction::None, BargeState { prev: true, barged: false, ticks: 0 });
+        return (
+            BargeAction::None,
+            BargeState {
+                prev: true,
+                barged: false,
+                ticks: 0,
+            },
+        );
     }
     if active && !st.prev && !ours {
         // Foreign mic rising edge → pause OUR TTS, and remember WE did it.
-        (BargeAction::Pause, BargeState { prev: active, barged: true, ticks: 0 })
+        (
+            BargeAction::Pause,
+            BargeState {
+                prev: active,
+                barged: true,
+                ticks: 0,
+            },
+        )
     } else if st.barged && !active {
         // Our barge's foreign mic went idle → resume. (Only `st.barged` — a non-barge
         // idle tick does nothing, so a Caps/PTT pause is left for `stop_recording`.)
-        (BargeAction::Resume, BargeState { prev: active, barged: false, ticks: 0 })
+        (
+            BargeAction::Resume,
+            BargeState {
+                prev: active,
+                barged: false,
+                ticks: 0,
+            },
+        )
     } else if st.barged && !ours {
         // Our barge but the mic still reads active (sticky/foreign) → count toward the
         // self-heal bound so a never-idle probe can't wedge the queue paused.
         let ticks = st.ticks.saturating_add(1);
         if ticks >= max_ticks {
-            (BargeAction::Resume, BargeState { prev: active, barged: false, ticks: 0 })
+            (
+                BargeAction::Resume,
+                BargeState {
+                    prev: active,
+                    barged: false,
+                    ticks: 0,
+                },
+            )
         } else {
-            (BargeAction::None, BargeState { prev: active, barged: true, ticks })
+            (
+                BargeAction::None,
+                BargeState {
+                    prev: active,
+                    barged: true,
+                    ticks,
+                },
+            )
         }
     } else {
         // Nothing to do — just advance the edge memory.
@@ -125,7 +160,11 @@ mod tests {
     use super::*;
 
     const MAX: u32 = 40;
-    const IDLE: BargeState = BargeState { prev: false, barged: false, ticks: 0 };
+    const IDLE: BargeState = BargeState {
+        prev: false,
+        barged: false,
+        ticks: 0,
+    };
 
     fn step(active: bool, ours: bool, st: BargeState) -> (BargeAction, BargeState) {
         barge_step(active, ours, false, st, MAX)
@@ -156,7 +195,11 @@ mod tests {
         let mut st = IDLE;
         for _ in 0..100 {
             let (a, n) = step(false, false, st);
-            assert_eq!(a, BargeAction::None, "idle tick must never resume a foreign-less state");
+            assert_eq!(
+                a,
+                BargeAction::None,
+                "idle tick must never resume a foreign-less state"
+            );
             st = n;
         }
     }

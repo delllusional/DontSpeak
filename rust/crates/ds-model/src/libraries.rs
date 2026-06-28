@@ -68,7 +68,10 @@ pub fn catalog() -> Value {
     // Optional CUDA / cuDNN GPU runtime (Windows + Linux x64). Split the pinned wheels by
     // license: onnxruntime-gpu → ONNX Runtime (MIT); cuDNN → its own SLA; everything else
     // → the CUDA Toolkit EULA. The wheels carry no size in the registry, so none is shown.
-    #[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
     let (cuda_files, cudnn_files) = {
         let mut cuda: Vec<Value> = Vec::new();
         let mut cudnn: Vec<Value> = Vec::new();
@@ -86,7 +89,10 @@ pub fn catalog() -> Value {
     };
 
     // System libraries first (CUDA, then cuDNN), lowest-level before the runtime that uses them.
-    #[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
     {
         if !cuda_files.is_empty() {
             projects.push(project_obj(&urls::NVIDIA_CUDA, cuda_files));
@@ -168,7 +174,10 @@ mod tests {
 
     /// On Windows/Linux x64 every pinned CUDA wheel must be bucketed into a project (no wheel
     /// left license-less), and the cuDNN wheel must land under the cuDNN SLA, not the CUDA EULA.
-    #[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
     #[test]
     fn all_cuda_wheels_are_bucketed_by_license() {
         let cat = catalog();

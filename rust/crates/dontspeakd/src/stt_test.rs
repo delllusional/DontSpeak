@@ -31,9 +31,7 @@ impl TestSession {
         // Provider-aware gate: on the ANE (Core ML) path the ONNX model files are never
         // downloaded, so the raw ONNX-only `parakeet_present()` would wrongly block here.
         let parakeet_ok = ds_config::Paths::resolve()
-            .map(|p| {
-                crate::config_gate::parakeet_present_for(&ds_config::VoiceConfig::load(&p))
-            })
+            .map(|p| crate::config_gate::parakeet_present_for(&ds_config::VoiceConfig::load(&p)))
             .unwrap_or(false);
         if !parakeet_ok {
             emit(&Response::error(

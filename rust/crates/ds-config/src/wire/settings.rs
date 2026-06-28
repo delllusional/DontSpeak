@@ -314,7 +314,10 @@ mod tests {
             loaded.stt_engine,
             vec![SttEngine::BuiltIn, SttEngine::System, SttEngine::ClaudeCode]
         );
-        assert_eq!(loaded.tts_engine, vec![TtsEngine::Kokoro, TtsEngine::System]);
+        assert_eq!(
+            loaded.tts_engine,
+            vec![TtsEngine::Kokoro, TtsEngine::System]
+        );
         let merged = merge_settings(Value::Null, &loaded);
         assert_eq!(
             merged["dontspeak"]["stt_engine"],

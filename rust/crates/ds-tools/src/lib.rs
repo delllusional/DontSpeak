@@ -96,7 +96,12 @@ static TOOLS: &[Tool] = &[
         name: "list_voices",
         description: LIST_VOICES,
         params: &[
-            p("tts_engine", PType::Enum(&["built_in", "system"]), false, LIST_VOICES_ENGINE),
+            p(
+                "tts_engine",
+                PType::Enum(&["built_in", "system"]),
+                false,
+                LIST_VOICES_ENGINE,
+            ),
             p("language", PType::Str, false, LIST_VOICES_LANGUAGE),
         ],
         min_one: false,
@@ -106,7 +111,12 @@ static TOOLS: &[Tool] = &[
         description: SET_VOICE,
         params: &[
             p("voice", PType::Str, false, SET_VOICE_VOICE),
-            p("tts_engine", PType::Enum(&["built_in", "system"]), false, SET_VOICE_ENGINE),
+            p(
+                "tts_engine",
+                PType::Enum(&["built_in", "system"]),
+                false,
+                SET_VOICE_ENGINE,
+            ),
         ],
         min_one: false,
     },
@@ -160,32 +170,107 @@ static TOOLS: &[Tool] = &[
         // UI) so related knobs sit together — this order is what the Tools window shows.
         params: &[
             // ── TTS output ──
-            p("tts_engine", PType::EnumArray(&["off", "built_in", "system"]), false, SET_CONFIG_TTS_ENGINE),
-            p("tts_built_in_voices", PType::StrArray, false, SET_CONFIG_TTS_VOICES),
-            p("tts_system_voice", PType::Str, false, SET_CONFIG_TTS_SYSTEM_VOICE),
+            p(
+                "tts_engine",
+                PType::EnumArray(&["off", "built_in", "system"]),
+                false,
+                SET_CONFIG_TTS_ENGINE,
+            ),
+            p(
+                "tts_built_in_voices",
+                PType::StrArray,
+                false,
+                SET_CONFIG_TTS_VOICES,
+            ),
+            p(
+                "tts_system_voice",
+                PType::Str,
+                false,
+                SET_CONFIG_TTS_SYSTEM_VOICE,
+            ),
             p("tts_rate", PType::Num(0.5, 2.0), false, SET_CONFIG_TTS_RATE),
             // ── Narration ──
-            p("narrate", PType::EnumArray(&["shorts", "digests"]), false, SET_CONFIG_NARRATE),
+            p(
+                "narrate",
+                PType::EnumArray(&["shorts", "digests"]),
+                false,
+                SET_CONFIG_NARRATE,
+            ),
             p("greet_on_open", PType::Bool, false, SET_CONFIG_GREET),
-            p("drop_speech_on", PType::EnumArray(&["voice", "keyboard"]), false, SET_CONFIG_DROP_SPEECH),
-            p("pause_in_background", PType::Bool, false, SET_CONFIG_PAUSE_BG),
+            p(
+                "drop_speech_on",
+                PType::EnumArray(&["voice", "keyboard"]),
+                false,
+                SET_CONFIG_DROP_SPEECH,
+            ),
+            p(
+                "pause_in_background",
+                PType::Bool,
+                false,
+                SET_CONFIG_PAUSE_BG,
+            ),
             // ── Earcons ──
-            p("earcon_reply_sound", PType::Str, false, SET_CONFIG_EARCON_REPLY),
-            p("earcon_needs_input_sound", PType::Str, false, SET_CONFIG_EARCON_INPUT),
+            p(
+                "earcon_reply_sound",
+                PType::Str,
+                false,
+                SET_CONFIG_EARCON_REPLY,
+            ),
+            p(
+                "earcon_needs_input_sound",
+                PType::Str,
+                false,
+                SET_CONFIG_EARCON_INPUT,
+            ),
             // ── STT / dictation ──
             p("caps_enabled", PType::Bool, false, SET_CONFIG_CAPS),
-            p("stt_engine", PType::EnumArray(&["off", "built_in", "system", "claude_code"]), false, SET_CONFIG_STT_ENGINE),
+            p(
+                "stt_engine",
+                PType::EnumArray(&["off", "built_in", "system", "claude_code"]),
+                false,
+                SET_CONFIG_STT_ENGINE,
+            ),
             p("capture_gain", PType::Gain, false, SET_CONFIG_CAPTURE_GAIN),
             p("auto_submit", PType::Bool, false, SET_CONFIG_AUTO_SUBMIT),
             // ── Compute backend ──
-            p("provider", PType::EnumArray(&["ane", "ort_cuda", "ort_coreml", "ort_cpu"]), false, SET_CONFIG_PROVIDER),
+            p(
+                "provider",
+                PType::EnumArray(&["ane", "ort_cuda", "ort_coreml", "ort_cpu"]),
+                false,
+                SET_CONFIG_PROVIDER,
+            ),
             // ── Diarization ──
-            p("diarizer_provider", PType::EnumArray(&["apple_native"]), false, SET_CONFIG_DIARIZER),
-            p("clustering_threshold", PType::Num(0.5, 0.9), false, SET_CONFIG_CLUSTERING),
-            p("speaker_threshold", PType::Num(0.0, 1.0), false, SET_CONFIG_SPEAKER_THRESH),
-            p("stt_speaker_lock", PType::Bool, false, SET_CONFIG_SPEAKER_LOCK),
+            p(
+                "diarizer_provider",
+                PType::EnumArray(&["apple_native"]),
+                false,
+                SET_CONFIG_DIARIZER,
+            ),
+            p(
+                "clustering_threshold",
+                PType::Num(0.5, 0.9),
+                false,
+                SET_CONFIG_CLUSTERING,
+            ),
+            p(
+                "speaker_threshold",
+                PType::Num(0.0, 1.0),
+                false,
+                SET_CONFIG_SPEAKER_THRESH,
+            ),
+            p(
+                "stt_speaker_lock",
+                PType::Bool,
+                false,
+                SET_CONFIG_SPEAKER_LOCK,
+            ),
             // ── UI ──
-            p("tray_indicator", PType::EnumArray(&["stt", "tts", "stt_animated", "tts_animated"]), false, SET_CONFIG_TRAY),
+            p(
+                "tray_indicator",
+                PType::EnumArray(&["stt", "tts", "stt_animated", "tts_animated"]),
+                false,
+                SET_CONFIG_TRAY,
+            ),
         ],
         min_one: true,
     },
@@ -193,7 +278,12 @@ static TOOLS: &[Tool] = &[
         name: "wire",
         description: WIRE,
         params: &[
-            p("target", PType::Enum(&["narration_spec", "claude_code", "claude_desktop", "codex"]), true, WIRE_TARGET),
+            p(
+                "target",
+                PType::Enum(&["narration_spec", "claude_code", "claude_desktop", "codex"]),
+                true,
+                WIRE_TARGET,
+            ),
             p("enabled", PType::Bool, true, WIRE_ENABLED),
         ],
         min_one: false,

@@ -13,8 +13,8 @@
 //! preserved), a timestamped backup before writing, and a MALFORMED existing file is
 //! left untouched rather than destroyed. `--print-only` previews to stdout.
 
-use serde_json::Value;
 use ds_config::Paths;
+use serde_json::Value;
 
 /// Resolve the absolute path to register as the MCP `command`. Prefer the stable
 /// install location (`~/.local/bin/dontspeak`) so the entry survives rebuilds at

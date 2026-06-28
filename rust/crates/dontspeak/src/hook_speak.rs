@@ -14,8 +14,8 @@
 //! pipeline — the final reply is just another streamed message. Non-streaming clients (Codex)
 //! get their final reply voiced from the Stop handler in `hook_core`.
 
-use serde::Deserialize;
 use ds_config::Paths;
+use serde::Deserialize;
 
 /// The `session_id` every Claude Code hook payload carries. Parsed ambiently so the
 /// engine can scope the greet / active-marking to the right Claude session.
@@ -64,7 +64,9 @@ pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str) {
 pub fn engine_earcon(paths: &Paths, event: &str) {
     let _ = ds_ipc::request(
         &paths.engine_sock,
-        &ds_ipc::Request::Earcon { event: event.to_string() },
+        &ds_ipc::Request::Earcon {
+            event: event.to_string(),
+        },
     );
 }
 

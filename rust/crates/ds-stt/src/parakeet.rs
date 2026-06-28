@@ -226,14 +226,20 @@ impl ParakeetTranscriber {
 /// paths handle STT. Mirrors the Kokoro `want_gpu` check in the TTS loader, reading the STT
 /// env instead of `DONTSPEAK_PROVIDER`.
 fn stt_wants_cuda() -> bool {
-    #[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
     {
         std::env::var("DONTSPEAK_STT_PROVIDER")
             .map(|p| p.eq_ignore_ascii_case("ort_cuda"))
             .unwrap_or(false)
             && ds_model::cuda_runtime_present()
     }
-    #[cfg(not(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64")))]
+    #[cfg(not(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    )))]
     {
         false
     }

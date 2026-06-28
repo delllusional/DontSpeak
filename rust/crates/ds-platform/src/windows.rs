@@ -168,9 +168,12 @@ fn ensure_caps_hook() {
         .name("caps-ll-hook".into())
         .spawn(|| unsafe {
             let hmod = GetModuleHandleW(None).unwrap_or_default();
-            let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(caps_hook_proc), Some(hmod.into()), 0);
+            let hook =
+                SetWindowsHookExW(WH_KEYBOARD_LL, Some(caps_hook_proc), Some(hmod.into()), 0);
             let Ok(_hook) = hook else {
-                eprintln!("dontspeak: SetWindowsHookExW(WH_KEYBOARD_LL) failed — Caps dictation disabled");
+                eprintln!(
+                    "dontspeak: SetWindowsHookExW(WH_KEYBOARD_LL) failed — Caps dictation disabled"
+                );
                 return;
             };
             // A low-level hook is delivered to THIS thread; keep a live message pump or

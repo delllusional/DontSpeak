@@ -22,8 +22,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
 use ds_config::{NarrateKind, Paths, VoiceConfig};
+use serde::Deserialize;
 
 /// SessionEnd notify: barge ONLY this session's engine playback (so closing one window
 /// never silences another's reply). The `payload` is the hook JSON; no payload / no
@@ -137,8 +137,7 @@ pub fn speak_reply(paths: &Paths, payload: &str) {
         return;
     };
     let session = hook.session_id.clone().filter(|s| !s.trim().is_empty());
-    let streamed =
-        streamed_via_message_display(paths, session.as_deref().unwrap_or_default());
+    let streamed = streamed_via_message_display(paths, session.as_deref().unwrap_or_default());
 
     let speak = stop_utterances(
         hook.last_assistant_message.as_deref(),
@@ -866,7 +865,13 @@ mod tests {
     fn stop_is_silent_when_already_streamed() {
         // THE regression guard: streamed = true (Claude Code, MessageDisplay already narrated)
         // ⇒ Stop voices NOTHING, even though the reply is full of speakable blockquotes.
-        let spoken = stop_utterances(Some(DIGEST_REPLY), true, true, false, /*streamed*/ true);
+        let spoken = stop_utterances(
+            Some(DIGEST_REPLY),
+            true,
+            true,
+            false,
+            /*streamed*/ true,
+        );
         assert!(
             spoken.is_empty(),
             "streamed reply must not be re-voiced on Stop, got {spoken:?}"
@@ -877,7 +882,13 @@ mod tests {
     fn stop_voices_whole_reply_when_not_streamed() {
         // Codex (streamed = false): the entire reply is voiced from Stop — every top-level
         // blockquote, in order, exactly as the streaming path would have emitted them.
-        let spoken = stop_utterances(Some(DIGEST_REPLY), true, false, false, /*streamed*/ false);
+        let spoken = stop_utterances(
+            Some(DIGEST_REPLY),
+            true,
+            false,
+            false,
+            /*streamed*/ false,
+        );
         assert_eq!(
             spoken,
             vec!["First point.".to_string(), "Second point.".to_string()],
@@ -943,7 +954,10 @@ mod tests {
             let _ = std::fs::create_dir_all(parent);
         }
         atomic_write(&sp, "{}");
-        assert!(streamed_via_message_display(&paths, cc), "CC session streamed");
+        assert!(
+            streamed_via_message_display(&paths, cc),
+            "CC session streamed"
+        );
         assert!(
             !streamed_via_message_display(&paths, codex),
             "a different (Codex) session is never marked streamed"

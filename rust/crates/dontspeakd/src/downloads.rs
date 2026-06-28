@@ -53,9 +53,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
             "kokoro" => ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ()),
             // Voice-tensor pack only (~28 MB) — the ANE/Core ML path needs the voices npz
             // but not the 310 MB ONNX model. Requested by `EnsureKokoroVoices`.
-            "kokoro_voices" => {
-                ds_model::run_setup_kokoro_voices_with_progress(&prog).map(|_| ())
-            }
+            "kokoro_voices" => ds_model::run_setup_kokoro_voices_with_progress(&prog).map(|_| ()),
             "parakeet" => ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ()),
             // Diarization Core ML models — we fetch them OURSELVES (real %) into the dir the
             // shim loads from offline, like Kokoro/Parakeet. macOS-only (ANE shim).
@@ -105,24 +103,18 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
     let need_kokoro = cfg.resolved_tts() == Some(ds_config::TtsEngine::Kokoro)
         && !(cfg.uses_apple_native_model() && apple_native_shim_available())
         && !(exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
-            && exists(ds_model::model_path(
-                ds_model::KOKORO_VOICES_FILE,
-            ))
+            && exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
             && exists(ds_model::onnxruntime_dylib_path()));
     let need_parakeet = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
         && matches!(
             cfg.resolved_stt_provider(),
             ds_config::Provider::OrtCpu | ds_config::Provider::OrtCuda
         )
-        && !(exists(ds_model::model_path(
-            ds_model::PARAKEET_ENCODER_FILE,
-        )) && exists(ds_model::model_path(
-            ds_model::PARAKEET_DECODER_FILE,
-        )) && exists(ds_model::model_path(
-            ds_model::PARAKEET_PREPROC_FILE,
-        )) && exists(ds_model::model_path(
-            ds_model::PARAKEET_VOCAB_FILE,
-        )) && exists(ds_model::onnxruntime_dylib_path()));
+        && !(exists(ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE))
+            && exists(ds_model::model_path(ds_model::PARAKEET_DECODER_FILE))
+            && exists(ds_model::model_path(ds_model::PARAKEET_PREPROC_FILE))
+            && exists(ds_model::model_path(ds_model::PARAKEET_VOCAB_FILE))
+            && exists(ds_model::onnxruntime_dylib_path()));
     let which = match (need_kokoro, need_parakeet) {
         (true, true) => "all",
         (true, false) => "kokoro",
@@ -145,7 +137,10 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
 /// only when the runtime is already present and never pulls the large download silently.
 pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg, which: &str) {
     tts.set_provider(which);
-    #[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
     if which.eq_ignore_ascii_case("ort_cuda") && !ds_model::cuda_runtime_present() {
         {
             let mut s = downloads.lock().unwrap();
@@ -185,6 +180,9 @@ pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg
             }
         });
     }
-    #[cfg(not(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64")))]
+    #[cfg(not(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    )))]
     let _ = downloads;
 }

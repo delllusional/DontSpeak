@@ -376,7 +376,10 @@ mod tests {
         )
         .unwrap();
         let ch = arr.apply(&mut c2).unwrap();
-        assert_eq!(c2.stt_engine, vec![SttEngine::BuiltIn, SttEngine::ClaudeCode]);
+        assert_eq!(
+            c2.stt_engine,
+            vec![SttEngine::BuiltIn, SttEngine::ClaudeCode]
+        );
         assert_eq!(ch, vec!["stt_engine=[built_in,claude_code]".to_string()]);
 
         // An empty array (or `["off"]`) disables dictation.

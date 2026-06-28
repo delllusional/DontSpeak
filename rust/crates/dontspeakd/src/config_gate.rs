@@ -82,9 +82,7 @@ pub(crate) fn parakeet_available() -> bool {
 /// (FluidAudio self-fetches its models). Use this at every Parakeet readiness gate.
 pub(crate) fn parakeet_present_for(cfg: &VoiceConfig) -> bool {
     match cfg.resolved_stt_provider() {
-        ds_config::Provider::OrtCpu | ds_config::Provider::OrtCuda => {
-            ds_model::parakeet_present()
-        }
+        ds_config::Provider::OrtCpu | ds_config::Provider::OrtCuda => ds_model::parakeet_present(),
         ds_config::Provider::Ane => parakeet_available(),
         // `resolved_stt_provider()` only ever returns OrtCpu, OrtCuda, or Ane.
         _ => false,
@@ -96,11 +94,17 @@ pub(crate) fn parakeet_present_for(cfg: &VoiceConfig) -> bool {
 /// callers (e.g. the honest `stt_provider` status row) compile on every platform; only
 /// Windows x86_64 has a downloadable CUDA runtime, so it's always false elsewhere —
 /// where `resolved_stt_provider` never returns CUDA anyway.
-#[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
 pub(crate) fn cuda_runtime_present() -> bool {
     ds_model::cuda_runtime_present()
 }
-#[cfg(not(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64")))]
+#[cfg(not(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+)))]
 pub(crate) fn cuda_runtime_present() -> bool {
     false
 }

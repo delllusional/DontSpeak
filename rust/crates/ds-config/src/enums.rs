@@ -373,8 +373,12 @@ pub enum TrayKind {
 
 impl TrayKind {
     /// All variants (canonical-token order); single source for the catalog parity test.
-    pub const ALL: &'static [TrayKind] =
-        &[TrayKind::Stt, TrayKind::Tts, TrayKind::SttAnimated, TrayKind::TtsAnimated];
+    pub const ALL: &'static [TrayKind] = &[
+        TrayKind::Stt,
+        TrayKind::Tts,
+        TrayKind::SttAnimated,
+        TrayKind::TtsAnimated,
+    ];
 
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
@@ -421,10 +425,18 @@ pub(crate) fn normalize_tray_indicator(kinds: Vec<TrayKind>) -> Vec<TrayKind> {
     }
     let mut out = Vec::new();
     if let Some(a) = stt {
-        out.push(if a { TrayKind::SttAnimated } else { TrayKind::Stt });
+        out.push(if a {
+            TrayKind::SttAnimated
+        } else {
+            TrayKind::Stt
+        });
     }
     if let Some(a) = tts {
-        out.push(if a { TrayKind::TtsAnimated } else { TrayKind::Tts });
+        out.push(if a {
+            TrayKind::TtsAnimated
+        } else {
+            TrayKind::Tts
+        });
     }
     out
 }
@@ -841,7 +853,12 @@ pub(crate) fn parse_stt_ladder(v: &toml::Value) -> Vec<SttEngine> {
 /// than failing open). Accepts a single token string OR an array of tokens; an unknown token —
 /// or a non-string array element — is an ERROR listing the valid tokens. The `off` token is
 /// dropped (`"off"` / `["off"]` ⇒ EMPTY ladder = off), and known rungs are de-duped in order.
-fn strict_ladder<T, F>(v: &serde_json::Value, parse: F, off: T, valid: &str) -> Result<Vec<T>, String>
+fn strict_ladder<T, F>(
+    v: &serde_json::Value,
+    parse: F,
+    off: T,
+    valid: &str,
+) -> Result<Vec<T>, String>
 where
     T: Copy + PartialEq,
     F: Fn(&str) -> Option<T>,
@@ -898,9 +915,14 @@ where
     let Some(v) = Option::<serde_json::Value>::deserialize(d)? else {
         return Ok(None);
     };
-    strict_ladder(&v, SttEngine::parse, SttEngine::Off, "off|built_in|system|claude_code")
-        .map(Some)
-        .map_err(D::Error::custom)
+    strict_ladder(
+        &v,
+        SttEngine::parse,
+        SttEngine::Off,
+        "off|built_in|system|claude_code",
+    )
+    .map(Some)
+    .map_err(D::Error::custom)
 }
 
 #[cfg(test)]
@@ -908,7 +930,11 @@ mod tests {
     use super::*;
 
     fn arr(toks: &[&str]) -> toml::Value {
-        toml::Value::Array(toks.iter().map(|s| toml::Value::String(s.to_string())).collect())
+        toml::Value::Array(
+            toks.iter()
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect(),
+        )
     }
     fn s(tok: &str) -> toml::Value {
         toml::Value::String(tok.to_string())
@@ -935,18 +961,52 @@ mod tests {
         // built-in engines; an x86_64 mac (no ONNX, no arm64 Core-ML shim, no SpeechAnalyzer)
         // falls through to `say` (TTS) and claude_code (STT).
         let resolve_tts = |os: &str, arch: &str| -> Option<TtsEngine> {
-            default_tts_engine().into_iter().find(|e| e.tts_usable_on(os, arch))
+            default_tts_engine()
+                .into_iter()
+                .find(|e| e.tts_usable_on(os, arch))
         };
         let resolve_stt = |os: &str, arch: &str| -> Option<SttEngine> {
-            default_stt_engine().into_iter().find(|e| e.stt_usable_on(os, arch))
+            default_stt_engine()
+                .into_iter()
+                .find(|e| e.stt_usable_on(os, arch))
         };
         let cases = [
-            ("macos", "aarch64", Some(TtsEngine::Kokoro), Some(SttEngine::BuiltIn)),
-            ("macos", "x86_64", Some(TtsEngine::System), Some(SttEngine::ClaudeCode)),
-            ("windows", "x86_64", Some(TtsEngine::Kokoro), Some(SttEngine::BuiltIn)),
-            ("windows", "aarch64", Some(TtsEngine::Kokoro), Some(SttEngine::BuiltIn)),
-            ("linux", "x86_64", Some(TtsEngine::Kokoro), Some(SttEngine::BuiltIn)),
-            ("linux", "aarch64", Some(TtsEngine::Kokoro), Some(SttEngine::BuiltIn)),
+            (
+                "macos",
+                "aarch64",
+                Some(TtsEngine::Kokoro),
+                Some(SttEngine::BuiltIn),
+            ),
+            (
+                "macos",
+                "x86_64",
+                Some(TtsEngine::System),
+                Some(SttEngine::ClaudeCode),
+            ),
+            (
+                "windows",
+                "x86_64",
+                Some(TtsEngine::Kokoro),
+                Some(SttEngine::BuiltIn),
+            ),
+            (
+                "windows",
+                "aarch64",
+                Some(TtsEngine::Kokoro),
+                Some(SttEngine::BuiltIn),
+            ),
+            (
+                "linux",
+                "x86_64",
+                Some(TtsEngine::Kokoro),
+                Some(SttEngine::BuiltIn),
+            ),
+            (
+                "linux",
+                "aarch64",
+                Some(TtsEngine::Kokoro),
+                Some(SttEngine::BuiltIn),
+            ),
         ];
         for (os, arch, want_tts, want_stt) in cases {
             assert_eq!(resolve_tts(os, arch), want_tts, "TTS on {os}/{arch}");
@@ -954,7 +1014,11 @@ mod tests {
         }
         // Invariants across every target: claude_code is always a usable STT rung (so default
         // STT never dead-ends), and `off` never resolves.
-        for (os, arch) in [("macos", "x86_64"), ("windows", "x86_64"), ("linux", "aarch64")] {
+        for (os, arch) in [
+            ("macos", "x86_64"),
+            ("windows", "x86_64"),
+            ("linux", "aarch64"),
+        ] {
             assert!(SttEngine::ClaudeCode.stt_usable_on(os, arch));
             assert!(!SttEngine::Off.stt_usable_on(os, arch));
             assert!(!TtsEngine::Off.tts_usable_on(os, arch));
@@ -979,15 +1043,24 @@ mod tests {
         assert!(parse_tts_ladder(&arr(&[])).is_empty());
         // Unknown tokens drop; an explicit all-unknown array stays EMPTY (NOT the default —
         // the user gave an array, so we honor its emptiness).
-        assert_eq!(parse_tts_ladder(&arr(&["festival", "built_in"])), vec![TtsEngine::Kokoro]);
+        assert_eq!(
+            parse_tts_ladder(&arr(&["festival", "built_in"])),
+            vec![TtsEngine::Kokoro]
+        );
         assert!(parse_tts_ladder(&arr(&["festival"])).is_empty());
         // Legacy SCALAR string: known → one rung; `off` → empty; UNKNOWN → the default ladder.
         assert_eq!(parse_tts_ladder(&s("system")), vec![TtsEngine::System]);
         assert!(parse_tts_ladder(&s("off")).is_empty());
         assert_eq!(parse_tts_ladder(&s("festival")), default_tts_engine());
         // A non-string/array scalar (bool/int) → the default ladder.
-        assert_eq!(parse_tts_ladder(&toml::Value::Integer(3)), default_tts_engine());
-        assert_eq!(parse_tts_ladder(&toml::Value::Boolean(true)), default_tts_engine());
+        assert_eq!(
+            parse_tts_ladder(&toml::Value::Integer(3)),
+            default_tts_engine()
+        );
+        assert_eq!(
+            parse_tts_ladder(&toml::Value::Boolean(true)),
+            default_tts_engine()
+        );
     }
 
     #[test]
@@ -997,10 +1070,16 @@ mod tests {
             parse_stt_ladder(&arr(&["claude_code", "built_in", "off", "claude_code"])),
             vec![SttEngine::ClaudeCode, SttEngine::BuiltIn]
         );
-        assert_eq!(parse_stt_ladder(&s("claude_code")), vec![SttEngine::ClaudeCode]);
+        assert_eq!(
+            parse_stt_ladder(&s("claude_code")),
+            vec![SttEngine::ClaudeCode]
+        );
         assert!(parse_stt_ladder(&s("off")).is_empty());
         assert_eq!(parse_stt_ladder(&s("deepgram")), default_stt_engine());
-        assert_eq!(parse_stt_ladder(&toml::Value::Boolean(false)), default_stt_engine());
+        assert_eq!(
+            parse_stt_ladder(&toml::Value::Boolean(false)),
+            default_stt_engine()
+        );
     }
 
     #[test]

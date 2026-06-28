@@ -18,8 +18,7 @@ pub const LIST_VOICES: &str = "List TTS voices grouped by language. Returns \
     {engine, language, languages:[{language, voices:[{id,label,language_tag,gender,engine,active}]}]}, \
     where language_tag is the full BCP-47 tag (e.g. \"en-US\"). Optional tts_engine and language \
     filters; defaults to the configured engine and English.";
-pub const LIST_VOICES_ENGINE: &str =
-    "Engine whose voices to list: \"built_in\" (Kokoro) or \"system\" (OS). Default: the configured engine.";
+pub const LIST_VOICES_ENGINE: &str = "Engine whose voices to list: \"built_in\" (Kokoro) or \"system\" (OS). Default: the configured engine.";
 pub const LIST_VOICES_LANGUAGE: &str =
     "BCP-47 primary subtag (e.g. \"en\", \"fr\", \"ja\") or \"all\". Default: \"en\".";
 
@@ -28,8 +27,7 @@ pub const SET_VOICE: &str = "Set or clear the voice for THIS session (not saved;
     restart). Pass voice (an id from list_voices) to set; omit it to clear and revert to the \
     configured voice. Engine is inferred from the id (\"af_sarah\" → Kokoro, \"Samantha\" → System) \
     or pass tts_engine. Scoped to this Claude session.";
-pub const SET_VOICE_VOICE: &str =
-    "A voice id from list_voices (e.g. \"af_sarah\", \"Samantha\"). Omit to clear the session override.";
+pub const SET_VOICE_VOICE: &str = "A voice id from list_voices (e.g. \"af_sarah\", \"Samantha\"). Omit to clear the session override.";
 pub const SET_VOICE_ENGINE: &str =
     "TTS engine for the voice: \"built_in\" or \"system\"; inferred from the id when omitted.";
 
@@ -41,8 +39,7 @@ pub const LISTEN_SECONDS: &str = "Seconds to record before transcribing (default
 pub const STATUS: &str = "Report current state: engine, active voice, default rate, whether speech \
     is playing (tts_active), queue length, paused, and any session_voice override. Pass detail:true \
     to also include per-engine model lifecycle, the running map, dictation state, and stats.";
-pub const STATUS_DETAIL: &str =
-    "Also include the full engine lifecycle, the running map, dictation state, and stats. Default false.";
+pub const STATUS_DETAIL: &str = "Also include the full engine lifecycle, the running map, dictation state, and stats. Default false.";
 
 // ── diarize ──────────────────────────────────────────────────────────────────────────
 pub const DIARIZE: &str = "Record the mic and return speaker diarization (who spoke when): \
@@ -55,10 +52,12 @@ pub const DIARIZE_SECONDS: &str = "Seconds to record before diarizing (default 1
 pub const ENROLL: &str = "Record the mic and save a speaker voiceprint under name, so future diarize \
     calls label that person. Re-enrolling the same name replaces it. macOS-only.";
 pub const ENROLL_NAME: &str = "The person's name/label for this voiceprint.";
-pub const ENROLL_SECONDS: &str = "Seconds to record (default 15; longer/varied = a stronger voiceprint).";
+pub const ENROLL_SECONDS: &str =
+    "Seconds to record (default 15; longer/varied = a stronger voiceprint).";
 
 // ── forget_speaker ───────────────────────────────────────────────────────────────────
-pub const FORGET_SPEAKER: &str = "Remove an enrolled voiceprint by name (no-op if it isn't enrolled).";
+pub const FORGET_SPEAKER: &str =
+    "Remove an enrolled voiceprint by name (no-op if it isn't enrolled).";
 pub const FORGET_SPEAKER_NAME: &str = "The enrolled name to remove.";
 
 // ── list_speakers ────────────────────────────────────────────────────────────────────
@@ -76,7 +75,8 @@ pub const SET_CONFIG_TTS_VOICES: &str = "Ordered Kokoro voice ids for the BUILT-
     the default, the rest a per-terminal round-robin pool). Built-in only.";
 pub const SET_CONFIG_TTS_SYSTEM_VOICE: &str = "Voice name for the SYSTEM engine (e.g. \"Samantha\"); \
     empty = OS default. System engine only.";
-pub const SET_CONFIG_TTS_RATE: &str = "Speech rate 0.5–2.0 (1.0 = normal). Applies to both engines.";
+pub const SET_CONFIG_TTS_RATE: &str =
+    "Speech rate 0.5–2.0 (1.0 = normal). Applies to both engines.";
 pub const SET_CONFIG_NARRATE: &str = "What to narrate aloud — a set of [\"shorts\", \"digests\"] \
     (default both). \"digests\": speak the spoken blockquotes Claude writes and inject the narration \
     spec (gives long replies a spoken digest). \"shorts\": also speak a short, blockquote-free reply on \

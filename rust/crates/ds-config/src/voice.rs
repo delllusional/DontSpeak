@@ -12,8 +12,8 @@ use crate::enums::{
     default_tray_indicator, default_tts_engine,
 };
 use crate::{
-    DiarizerProvider, DropSpeechKind, ListenMode, LogLevel, NarrateKind, Paths, Provider, SttEngine,
-    TrayKind, TtsEngine, log,
+    DiarizerProvider, DropSpeechKind, ListenMode, LogLevel, NarrateKind, Paths, Provider,
+    SttEngine, TrayKind, TtsEngine, log,
 };
 
 /// Spoken wake phrases for the hands-free (always-listening) mode: the word that opens
@@ -212,7 +212,10 @@ pub struct VoiceConfig {
 
     /// Which submit kinds drop that window's pending speech — a SET of `voice`/`keyboard`
     /// (default `["voice", "keyboard"]` = drop on any submit; `[]` = never). See [`DropSpeechKind`].
-    #[serde(default = "default_drop_speech_on", deserialize_with = "de_drop_speech_on")]
+    #[serde(
+        default = "default_drop_speech_on",
+        deserialize_with = "de_drop_speech_on"
+    )]
     pub drop_speech_on: Vec<DropSpeechKind>,
 
     /// Whether playback PAUSES while no terminal is frontmost — i.e. while DontSpeak's host
@@ -438,7 +441,8 @@ impl VoiceConfig {
             tts_toggled: self.resolved_tts() != prev.resolved_tts(),
             // The shared `provider` drives the STT runtime too, so a provider change
             // rebuilds STT (as well as restarting the TTS child via `provider_changed`).
-            stt_changed: self.resolved_stt() != prev.resolved_stt() || self.provider != prev.provider,
+            stt_changed: self.resolved_stt() != prev.resolved_stt()
+                || self.provider != prev.provider,
             listen_mode_changed: self.listen_mode != prev.listen_mode,
             provider_changed: self.provider != prev.provider,
         }
@@ -909,7 +913,10 @@ pub(crate) mod tests {
         assert!(p(r#"{"stt_engine":[]}"#).is_empty(), "empty array = off");
         // Unknown tokens drop from an array; an all-unknown / wrong-typed scalar falls open to
         // the default ladder (never errors the block).
-        assert_eq!(p(r#"{"stt_engine":["deepgram","built_in"]}"#), vec![SttEngine::BuiltIn]);
+        assert_eq!(
+            p(r#"{"stt_engine":["deepgram","built_in"]}"#),
+            vec![SttEngine::BuiltIn]
+        );
         assert_eq!(p(r#"{"stt_engine":"deepgram"}"#), default);
         assert_eq!(p(r#"{"stt_engine":3}"#), default);
     }
@@ -947,7 +954,10 @@ pub(crate) mod tests {
         // fall through: TTS → system (`say`), STT → claude_code (LAST, always usable).
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         {
-            assert_eq!(VoiceConfig::default().resolved_tts(), Some(TtsEngine::System));
+            assert_eq!(
+                VoiceConfig::default().resolved_tts(),
+                Some(TtsEngine::System)
+            );
             assert_eq!(
                 VoiceConfig::default().resolved_stt(),
                 Some(SttEngine::ClaudeCode)
@@ -965,7 +975,10 @@ pub(crate) mod tests {
     fn resolved_tts_honors_ladder_order_when_multiple_usable() {
         // On a build where BOTH built_in (Kokoro) and system (`say`) can run, the FIRST listed
         // rung wins — proving resolution is preference-ORDERED, not a fixed priority.
-        #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            target_os = "windows"
+        ))]
         {
             let c = |rungs: Vec<TtsEngine>| VoiceConfig {
                 tts_engine: rungs,
@@ -1076,10 +1089,10 @@ pub(crate) mod tests {
             endpoint_silence_ms: 650,
             full_duplex: true,
             capture_gain: CaptureGain::Manual(2.5),
-            auto_submit: false,                     // non-default (default is on)
+            auto_submit: false, // non-default (default is on)
             drop_speech_on: vec![DropSpeechKind::Voice], // non-default (default is [voice, keyboard])
-            pause_in_background: true,              // non-default (default is false)
-            earcon_reply_sound: "Glass".into(),    // non-default (default is empty/off)
+            pause_in_background: true,                   // non-default (default is false)
+            earcon_reply_sound: "Glass".into(),          // non-default (default is empty/off)
             earcon_needs_input_sound: "Funk".into(),
         }
     }

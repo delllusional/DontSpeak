@@ -32,8 +32,8 @@ use std::cell::{Cell, RefCell};
 use std::io;
 
 use evdev::{
-    AttributeSet, Device, EventSummary, EventType, InputEvent, KeyCode, LedCode, SynchronizationCode,
-    uinput::VirtualDevice,
+    AttributeSet, Device, EventSummary, EventType, InputEvent, KeyCode, LedCode,
+    SynchronizationCode, uinput::VirtualDevice,
 };
 
 use crate::{
@@ -231,13 +231,7 @@ impl LinuxPlatform {
         };
         let init_warning = match (kbd_err, uin_err) {
             (None, None) => None,
-            (a, b) => Some(
-                [a, b]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            ),
+            (a, b) => Some([a, b].into_iter().flatten().collect::<Vec<_>>().join("; ")),
         };
 
         let wayland = Self::wayland_session();
@@ -426,7 +420,11 @@ impl CapsKeyMonitor for LinuxPlatform {
         // §F drift-recovery: drive the real keyboard LED via an EV_LED write on the device.
         // The kernel reflects it onto the physical LED. Best-effort; no-op without a keyboard.
         if let Some(kbd) = self.kbd.as_ref() {
-            let events = [InputEvent::new(EventType::LED.0, LedCode::LED_CAPSL.0, on as i32)];
+            let events = [InputEvent::new(
+                EventType::LED.0,
+                LedCode::LED_CAPSL.0,
+                on as i32,
+            )];
             let _ = kbd.borrow_mut().send_events(&events);
         }
     }
@@ -479,7 +477,14 @@ impl X11Focus {
     fn active_window(&self) -> Option<Window> {
         let reply = self
             .conn
-            .get_property(false, self.root, self.net_active_window, AtomEnum::WINDOW, 0, 1)
+            .get_property(
+                false,
+                self.root,
+                self.net_active_window,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
             .ok()?
             .reply()
             .ok()?;
@@ -493,9 +498,9 @@ impl X11Focus {
         };
         // WM_CLASS is "instance\0class\0" (Latin-1). Match the CLASS (second) field, then
         // fall back to the instance, against the terminal allowlist (lowercased).
-        let Ok(cookie) = self
-            .conn
-            .get_property(false, win, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
+        let Ok(cookie) =
+            self.conn
+                .get_property(false, win, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
         else {
             return false;
         };

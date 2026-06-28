@@ -52,7 +52,10 @@ pub fn engine_state_word_files(
                 // fraction — so show an indeterminate label instead of a misleading "0%".
                 ds_i18n::t("status.engine.status.downloading_indeterminate")
             } else {
-                fill("status.engine.status.downloading", &[("pct", &pct.to_string())])
+                fill(
+                    "status.engine.status.downloading",
+                    &[("pct", &pct.to_string())],
+                )
             };
             if file_count > 1 && file_index > 0 {
                 format!("{file_index}/{file_count} · {base}")
@@ -97,7 +100,10 @@ pub fn duration_live(secs: f64) -> String {
             &[("m", &m.to_string()), ("s", &ss)],
         )
     } else {
-        fill("status.stats.duration_live.seconds", &[("s", &s.to_string())])
+        fill(
+            "status.stats.duration_live.seconds",
+            &[("s", &s.to_string())],
+        )
     }
 }
 
@@ -163,7 +169,10 @@ mod tests {
             "3/22 · Downloading 50%"
         );
         // Single file (count ≤ 1) → no prefix.
-        assert_eq!(engine_state_word_files("downloading", 0.5, "", 1, 1), "Downloading 50%");
+        assert_eq!(
+            engine_state_word_files("downloading", 0.5, "", 1, 1),
+            "Downloading 50%"
+        );
         assert_eq!(engine_state_word("failed", 0.0, ""), "Failed to start");
         assert_eq!(
             engine_state_word("failed", 0.0, "no model"),

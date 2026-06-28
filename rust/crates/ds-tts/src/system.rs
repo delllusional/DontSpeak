@@ -63,7 +63,12 @@ pub fn open_voice_settings() -> bool {
         "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?SpokenContent",
         "x-apple.systempreferences:com.apple.preference.universalaccess?SpeakableItems",
     ] {
-        if Command::new("open").arg(uri).status().map(|s| s.success()).unwrap_or(false) {
+        if Command::new("open")
+            .arg(uri)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
             return true;
         }
     }
@@ -130,8 +135,9 @@ pub fn default_voice_name() -> Option<String> {
 /// can't confirm is the one actually heard).
 #[cfg(target_os = "macos")]
 pub fn default_voice_name() -> Option<String> {
-    read_voice_pref("SelectedVoiceName")
-        .or_else(|| read_voice_pref("SelectedVoiceID").and_then(|id| name_from_voice_identifier(&id)))
+    read_voice_pref("SelectedVoiceName").or_else(|| {
+        read_voice_pref("SelectedVoiceID").and_then(|id| name_from_voice_identifier(&id))
+    })
 }
 
 /// Read one key from the macOS speech-voice prefs domain. `None` if the key/domain is absent,
@@ -390,7 +396,11 @@ mod tests {
             ("com.apple.voice.premium.en-US.Ava", "Ava"),
             ("com.apple.speech.synthesis.voice.Alex", "Alex"),
         ] {
-            assert_eq!(name_from_voice_identifier(id).as_deref(), Some(want), "id={id}");
+            assert_eq!(
+                name_from_voice_identifier(id).as_deref(),
+                Some(want),
+                "id={id}"
+            );
         }
     }
 
@@ -401,12 +411,18 @@ mod tests {
             name_from_voice_identifier("com.apple.speech.synthesis.voice.fred").as_deref(),
             Some("Fred")
         );
-        assert_eq!(name_from_voice_identifier("samantha").as_deref(), Some("Samantha"));
+        assert_eq!(
+            name_from_voice_identifier("samantha").as_deref(),
+            Some("Samantha")
+        );
     }
 
     #[test]
     fn voice_id_handles_bare_and_empty() {
-        assert_eq!(name_from_voice_identifier("Daniel").as_deref(), Some("Daniel")); // no dots
+        assert_eq!(
+            name_from_voice_identifier("Daniel").as_deref(),
+            Some("Daniel")
+        ); // no dots
         assert_eq!(name_from_voice_identifier("trailing."), None); // empty trailing segment
         assert_eq!(name_from_voice_identifier(""), None);
         assert_eq!(name_from_voice_identifier("   "), None);

@@ -14,10 +14,10 @@ use crate::config_gate::{
 use crate::downloads::DownloadProg;
 use crate::engine::{PasteState, dictation_preview};
 use crate::stats;
+use crate::tts::TtsManager;
 use ds_status::{
     CapsEvent as CapsEventDto, DiarStats, Dictation, EngineObj, Loaded, ModelStatus, Running, Stats,
 };
-use crate::tts::TtsManager;
 
 /// Epoch milliseconds, for ordering caps events the app displays as a live log.
 pub(crate) fn now_ms() -> u64 {
@@ -173,9 +173,7 @@ pub(crate) fn model_status_json(
     // files) even though TTS works.
     let tts_uses_apple_native = cfg.uses_apple_native_model();
     let kokoro_onnx_files = exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
-        && exists(ds_model::model_path(
-            ds_model::KOKORO_VOICES_FILE,
-        ))
+        && exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
         && exists(ds_model::onnxruntime_dylib_path());
     let kokoro_present = kokoro_present_for(
         tts_uses_apple_native,
@@ -187,15 +185,11 @@ pub(crate) fn model_status_json(
     //                    the only runtime with deletable, downloadable files.
     //   * apple-native → gated on FluidAudio capability (macOS + shim); FluidAudio
     //                    self-manages its model cache (no on-disk file gate here).
-    let parakeet_onnx_files = exists(ds_model::model_path(
-        ds_model::PARAKEET_ENCODER_FILE,
-    )) && exists(ds_model::model_path(
-        ds_model::PARAKEET_DECODER_FILE,
-    )) && exists(ds_model::model_path(
-        ds_model::PARAKEET_PREPROC_FILE,
-    )) && exists(ds_model::model_path(
-        ds_model::PARAKEET_VOCAB_FILE,
-    )) && exists(ds_model::onnxruntime_dylib_path());
+    let parakeet_onnx_files = exists(ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE))
+        && exists(ds_model::model_path(ds_model::PARAKEET_DECODER_FILE))
+        && exists(ds_model::model_path(ds_model::PARAKEET_PREPROC_FILE))
+        && exists(ds_model::model_path(ds_model::PARAKEET_VOCAB_FILE))
+        && exists(ds_model::onnxruntime_dylib_path());
     let stt_uses_onnx = matches!(
         cfg.resolved_stt_provider(),
         ds_config::Provider::OrtCpu | ds_config::Provider::OrtCuda
@@ -384,7 +378,16 @@ pub(crate) fn model_status_json(
         // files — FluidAudio self-manages its cache, mirroring the Parakeet row) AND
         // while the WARM Kokoro child isn't holding the files (the System engine doesn't
         // warm Kokoro, so the files are free even with TTS on).
-        kokoro: engine_obj(kokoro_present, !tts_uses_apple_native && kokoro_present && !kokoro_warm, kokoro_dling, kokoro_error, tts.tts_loaded(), kokoro_enabled, kokoro_progress, tts.tts_dl_files()),
+        kokoro: engine_obj(
+            kokoro_present,
+            !tts_uses_apple_native && kokoro_present && !kokoro_warm,
+            kokoro_dling,
+            kokoro_error,
+            tts.tts_loaded(),
+            kokoro_enabled,
+            kokoro_progress,
+            tts.tts_dl_files(),
+        ),
         // Parakeet STT — one engine, runtime chosen by `stt_provider`. With the ONNX
         // runtime it has downloadable model files (removable only when the warm Kokoro
         // child isn't holding the shared dylib) and shows a download ring; with
@@ -393,7 +396,11 @@ pub(crate) fn model_status_json(
             parakeet_present,
             stt_uses_onnx && parakeet_present && !kokoro_warm,
             parakeet_dling,
-            if stt_uses_onnx { dl_err_for("parakeet") } else { None },
+            if stt_uses_onnx {
+                dl_err_for("parakeet")
+            } else {
+                None
+            },
             tts.stt_loaded() && parakeet_enabled,
             parakeet_enabled,
             parakeet_progress,
@@ -423,18 +430,48 @@ pub(crate) fn model_status_json(
         // en-US model is still being prepared (present but not Ready) — then "running"
         // (green) once it's installed, "missing" when selected but unavailable (macOS < 26 /
         // unsupported locale) so the dot honestly shows it can't run, no silent fallback.
-        system: engine_obj(system_present, false, false, None, system_running, system_enabled, 0.0, (0, 0)),
+        system: engine_obj(
+            system_present,
+            false,
+            false,
+            None,
+            system_running,
+            system_enabled,
+            0.0,
+            (0, 0),
+        ),
         // claude_code STT — Claude Code does the (cloud) transcription; nothing to download
         // or remove. "present" = CC voice on + key synthesizable; the `error` carries the
         // "run /voice" / "rebind the key" hint so the UI can tell the user how to enable it.
-        claude_code: engine_obj(claude_code_present, false, false, claude_code_error, claude_code_running, claude_code_enabled, 0.0, (0, 0)),
+        claude_code: engine_obj(
+            claude_code_present,
+            false,
+            false,
+            claude_code_error,
+            claude_code_running,
+            claude_code_enabled,
+            0.0,
+            (0, 0),
+        ),
         // System TTS (macOS `say`) — the speech-OUT analogue of the System STT row, so the
         // adaptive TTS row can show "System" (green when selected + TTS on) instead of a
         // greyed-out Kokoro. No model to download/remove.
-        tts_system: engine_obj(tts_system_enabled, false, false, None, tts_system_running, tts_system_running, 0.0, (0, 0)),
+        tts_system: engine_obj(
+            tts_system_enabled,
+            false,
+            false,
+            None,
+            tts_system_running,
+            tts_system_running,
+            0.0,
+            (0, 0),
+        ),
         // The ACTIVE STT engine token, so the app's single STT row can reflect whichever
         // engine is selected (parakeet vs system) without inferring it from the dots.
-        stt_engine: resolved_stt.map(|e| e.as_str()).unwrap_or("off").to_string(),
+        stt_engine: resolved_stt
+            .map(|e| e.as_str())
+            .unwrap_or("off")
+            .to_string(),
         // The ACTUAL STT runtime for the built_in (Parakeet) engine — "ane" (FluidAudio
         // Core ML / ANE — the neural engine), "ort_cuda" (transcribe-rs/ort, NVIDIA GPU) or
         // "ort_cpu" (transcribe-rs/ort, CPU). Like the TTS `tts_provider`, this is HONEST
@@ -450,7 +487,10 @@ pub(crate) fn model_status_json(
         ),
         // The ACTIVE TTS engine token ("built_in" = Kokoro, "system" = `say`), so the app's
         // TTS row adapts the same way the STT row does (built_in → Kokoro, system → System).
-        tts_engine: resolved_tts.map(|e| e.as_str()).unwrap_or("off").to_string(),
+        tts_engine: resolved_tts
+            .map(|e| e.as_str())
+            .unwrap_or("off")
+            .to_string(),
         // The ACTUAL TTS runtime the warm Kokoro child is on, as a config-style TOKEN
         // (`ane`/`ort_coreml`/`ort_cuda`/`ort_cpu`) so it matches `stt_provider`'s vocabulary
         // AND round-trips with the `tts_provider` setting. Mapped from the live PROVIDER the
@@ -508,12 +548,18 @@ pub(crate) fn model_status_json(
             // empty pill prompting the user to talk. Once words arrive (or we're awaiting
             // confirmation, or capture stopped) it goes static. The no-target warning glow
             // is a SEPARATE cue driven by `has_paste_target`.
-            prompt_glow: stt_active.load(Ordering::Relaxed) && dict_text.is_empty() && !dict_awaiting,
+            prompt_glow: stt_active.load(Ordering::Relaxed)
+                && dict_text.is_empty()
+                && !dict_awaiting,
         },
         // Menu-bar icon preference (app-only; the engine just passes it through): a SET of
         // tokens, e.g. ["stt","tts"] (both), ["stt"], or [] (never color). Drives which states
         // color the tray.
-        tray_indicator: cfg.tray_indicator.iter().map(|k| k.as_str().to_string()).collect(),
+        tray_indicator: cfg
+            .tray_indicator
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect(),
         // Live engine stats for the app's stats view: TTS + STT realtime factors /
         // counts, lifetime totals, and which models are resident in the warm helper.
         stats: Stats {
@@ -660,15 +706,36 @@ mod tests {
         // GUARD against the "UI claims CUDA but runs CPU" trap: ort_cuda DEGRADES to ort_cpu when
         // the GPU runtime isn't fetched — NOT the naive resolved preference.
         let b = Some(SttEngine::BuiltIn);
-        assert_eq!(stt_provider_token(b, Provider::OrtCuda, false, false).as_deref(), Some("ort_cpu"));
-        assert_eq!(stt_provider_token(b, Provider::OrtCuda, false, true).as_deref(), Some("ort_cuda"));
+        assert_eq!(
+            stt_provider_token(b, Provider::OrtCuda, false, false).as_deref(),
+            Some("ort_cpu")
+        );
+        assert_eq!(
+            stt_provider_token(b, Provider::OrtCuda, false, true).as_deref(),
+            Some("ort_cuda")
+        );
         // ane degrades to ort_cpu without the FluidAudio shim; ort_cpu is always itself.
-        assert_eq!(stt_provider_token(b, Provider::Ane, false, false).as_deref(), Some("ort_cpu"));
-        assert_eq!(stt_provider_token(b, Provider::Ane, true, false).as_deref(), Some("ane"));
-        assert_eq!(stt_provider_token(b, Provider::OrtCpu, true, true).as_deref(), Some("ort_cpu"));
+        assert_eq!(
+            stt_provider_token(b, Provider::Ane, false, false).as_deref(),
+            Some("ort_cpu")
+        );
+        assert_eq!(
+            stt_provider_token(b, Provider::Ane, true, false).as_deref(),
+            Some("ane")
+        );
+        assert_eq!(
+            stt_provider_token(b, Provider::OrtCpu, true, true).as_deref(),
+            Some("ort_cpu")
+        );
         // No local runtime for the delegate/OS engines or when TTS/STT is off.
-        assert_eq!(stt_provider_token(Some(SttEngine::ClaudeCode), Provider::OrtCuda, true, true), None);
-        assert_eq!(stt_provider_token(None, Provider::OrtCuda, true, true), None);
+        assert_eq!(
+            stt_provider_token(Some(SttEngine::ClaudeCode), Provider::OrtCuda, true, true),
+            None
+        );
+        assert_eq!(
+            stt_provider_token(None, Provider::OrtCuda, true, true),
+            None
+        );
     }
 
     #[test]
@@ -704,8 +771,12 @@ mod tests {
     fn tts_and_stt_states_are_independent() {
         // The point of parallel init: each engine's dot is computed from ITS OWN flags, so STT
         // can read "downloading" while TTS is already "running" — neither gates the other.
-        let stt = engine_state(true, /* dling */ true, false, /* running */ false, true);
-        let tts = engine_state(true, /* dling */ false, false, /* running */ true, true);
+        let stt = engine_state(
+            true, /* dling */ true, false, /* running */ false, true,
+        );
+        let tts = engine_state(
+            true, /* dling */ false, false, /* running */ true, true,
+        );
         assert_eq!((tts, stt), ("running", "downloading"));
         // ...and the reverse pairing (TTS still fetching while STT is warm) holds too.
         let tts = engine_state(true, true, false, false, true);

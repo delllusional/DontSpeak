@@ -146,7 +146,11 @@ pub fn system_sounds() -> Vec<SystemSound> {
             };
             let name = name.to_string();
             if seen.insert(name.clone()) {
-                out.push(SystemSound { name, path, bytes: meta.len() });
+                out.push(SystemSound {
+                    name,
+                    path,
+                    bytes: meta.len(),
+                });
             }
         }
     }
@@ -185,7 +189,10 @@ mod tests {
         for ev in [EarconEvent::ReplyDone, EarconEvent::NeedsInput] {
             assert_eq!(EarconEvent::parse(ev.as_str()), Some(ev));
         }
-        assert_eq!(EarconEvent::parse("  reply_done "), Some(EarconEvent::ReplyDone));
+        assert_eq!(
+            EarconEvent::parse("  reply_done "),
+            Some(EarconEvent::ReplyDone)
+        );
         assert_eq!(EarconEvent::parse("bogus"), None);
     }
 
@@ -238,7 +245,11 @@ mod tests {
 
         let cfg = VoiceConfig {
             earcon_reply_sound: snd.to_string_lossy().into_owned(),
-            earcon_needs_input_sound: dir.path().join("missing.wav").to_string_lossy().into_owned(),
+            earcon_needs_input_sound: dir
+                .path()
+                .join("missing.wav")
+                .to_string_lossy()
+                .into_owned(),
             ..VoiceConfig::default()
         };
         assert_eq!(resolve_cue(&cfg, EarconEvent::ReplyDone), Some(snd));

@@ -13,8 +13,7 @@ use serde_json::{Value, json};
 /// The stdio `provide` subcommand prints this JSON to stdout.
 pub(crate) fn narration_context() -> Option<Value> {
     let paths = ds_config::Paths::resolve()?;
-    if !ds_config::VoiceConfig::load(&paths).narrates(ds_config::NarrateKind::Digests)
-    {
+    if !ds_config::VoiceConfig::load(&paths).narrates(ds_config::NarrateKind::Digests) {
         return None; // "digests" off → inject nothing so Claude stops emitting the blockquote
     }
     // Built-in default unless a non-empty override file exists.

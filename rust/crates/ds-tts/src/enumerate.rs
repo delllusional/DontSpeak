@@ -432,7 +432,10 @@ mod tests {
     #[test]
     fn voice_display_name_per_engine() {
         // Kokoro id → friendly first name.
-        assert_eq!(voice_display_name(TtsEngine::Kokoro, "af_sarah").as_deref(), Some("Sarah"));
+        assert_eq!(
+            voice_display_name(TtsEngine::Kokoro, "af_sarah").as_deref(),
+            Some("Sarah")
+        );
         // System with an EXPLICIT voice tidies it (no OS-default query path).
         assert_eq!(
             voice_display_name(TtsEngine::System, "Microsoft Zira Desktop").as_deref(),
@@ -445,7 +448,10 @@ mod tests {
     #[test]
     fn current_voice_name_off_and_resolved_engine() {
         // Off (empty `tts_engine` ladder) never names a voice — on every platform.
-        let off = VoiceConfig { tts_engine: Vec::new(), ..Default::default() };
+        let off = VoiceConfig {
+            tts_engine: Vec::new(),
+            ..Default::default()
+        };
         assert_eq!(current_voice_name(&off), None);
 
         // A single-rung ladder names that engine's voice WHERE the rung is usable here, else
@@ -456,13 +462,19 @@ mod tests {
             tts_built_in_voices: vec!["am_michael".into()],
             ..Default::default()
         };
-        assert_eq!(current_voice_name(&kokoro), kokoro.resolved_tts().map(|_| "Michael".into()));
+        assert_eq!(
+            current_voice_name(&kokoro),
+            kokoro.resolved_tts().map(|_| "Michael".into())
+        );
 
         let system = VoiceConfig {
             tts_engine: vec![TtsEngine::System],
             tts_system_voice: "Microsoft Zira Desktop".into(),
             ..Default::default()
         };
-        assert_eq!(current_voice_name(&system), system.resolved_tts().map(|_| "Zira".into()));
+        assert_eq!(
+            current_voice_name(&system),
+            system.resolved_tts().map(|_| "Zira".into())
+        );
     }
 }

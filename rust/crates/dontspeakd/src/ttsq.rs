@@ -821,14 +821,32 @@ mod tests {
     #[test]
     fn should_hold_mic_and_focus_gates() {
         // MIC gate (half-duplex): a live mic holds; full-duplex ignores the mic.
-        assert!(should_hold(false, true, false, false, false), "half-duplex + mic → hold");
-        assert!(!should_hold(true, true, false, false, false), "full-duplex ignores mic");
+        assert!(
+            should_hold(false, true, false, false, false),
+            "half-duplex + mic → hold"
+        );
+        assert!(
+            !should_hold(true, true, false, false, false),
+            "full-duplex ignores mic"
+        );
         // FOCUS gate: only when pause_in_background AND a terminal has been seen AND none
         // is frontmost. Self-arming: unseen terminal never holds (degrade to always-play).
-        assert!(should_hold(false, false, true, true, false), "bg pause + seen + not front → hold");
-        assert!(!should_hold(false, false, true, false, false), "never-seen terminal → play");
-        assert!(!should_hold(false, false, true, true, true), "terminal frontmost → play");
-        assert!(!should_hold(false, false, false, true, false), "pause_in_background off → play");
+        assert!(
+            should_hold(false, false, true, true, false),
+            "bg pause + seen + not front → hold"
+        );
+        assert!(
+            !should_hold(false, false, true, false, false),
+            "never-seen terminal → play"
+        );
+        assert!(
+            !should_hold(false, false, true, true, true),
+            "terminal frontmost → play"
+        );
+        assert!(
+            !should_hold(false, false, false, true, false),
+            "pause_in_background off → play"
+        );
         // Nothing gating → play.
         assert!(!should_hold(false, false, false, false, false));
     }
@@ -851,9 +869,15 @@ mod tests {
         assert!(!voice_submit_recent(None, base));
         // Within the window (0s, 2s) → it's the voice submit's echo.
         assert!(voice_submit_recent(Some(base), base));
-        assert!(voice_submit_recent(Some(base), base + Duration::from_secs(2)));
+        assert!(voice_submit_recent(
+            Some(base),
+            base + Duration::from_secs(2)
+        ));
         // Past the window (4s) → a genuine keyboard submit, not the echo.
-        assert!(!voice_submit_recent(Some(base), base + Duration::from_secs(4)));
+        assert!(!voice_submit_recent(
+            Some(base),
+            base + Duration::from_secs(4)
+        ));
     }
 
     fn pool() -> Vec<String> {
@@ -990,7 +1014,10 @@ mod tests {
             );
         }
         // …consecutive indices differ, and the index wraps the set.
-        assert_ne!(greeting_line(Some("Sarah"), 0), greeting_line(Some("Sarah"), 1));
+        assert_ne!(
+            greeting_line(Some("Sarah"), 0),
+            greeting_line(Some("Sarah"), 1)
+        );
         assert_eq!(
             greeting_line(Some("Sarah"), 0),
             greeting_line(Some("Sarah"), GREETINGS.len())

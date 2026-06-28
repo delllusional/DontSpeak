@@ -210,7 +210,10 @@ mod tests {
                 tts: TtsSnapshot::default(),
                 stt: SttSnapshot::default(),
                 lifetime: LifetimeSnapshot::default(),
-                loaded: Loaded { tts: false, stt: false },
+                loaded: Loaded {
+                    tts: false,
+                    stt: false,
+                },
                 diarization: DiarStats {
                     enabled: false,
                     present: false,
@@ -220,7 +223,10 @@ mod tests {
                     speaker_threshold: 0.5,
                 },
             },
-            caps_events: vec![CapsEvent { ts: 1, kind: "press".to_string() }],
+            caps_events: vec![CapsEvent {
+                ts: 1,
+                kind: "press".to_string(),
+            }],
             build_id: "test".to_string(),
             seq: 0,
         }
@@ -234,14 +240,27 @@ mod tests {
     fn json_contract_round_trips() {
         let v = serde_json::to_value(sample()).unwrap();
 
-        for eng in ["kokoro", "parakeet", "diarization", "system", "claude_code", "tts_system"] {
+        for eng in [
+            "kokoro",
+            "parakeet",
+            "diarization",
+            "system",
+            "claude_code",
+            "tts_system",
+        ] {
             assert!(v[eng]["state"].is_string(), "{eng}.state");
             assert!(v[eng]["error"].is_null(), "{eng}.error null when None");
         }
         assert!(v["stt_provider"].is_null(), "stt_provider null when None");
         assert!(v["tts_provider"].is_null(), "tts_provider null when None");
-        assert!(v["claude_code_key"].is_null(), "claude_code_key null when None");
-        assert!(v["dictation"]["target"].is_null(), "dictation.target null when None");
+        assert!(
+            v["claude_code_key"].is_null(),
+            "claude_code_key null when None"
+        );
+        assert!(
+            v["dictation"]["target"].is_null(),
+            "dictation.target null when None"
+        );
         assert!(v["seq"].is_u64());
         assert!(v["stats"]["tts"]["rtf_avg"].is_f64());
         assert!(v["stats"]["stt"]["transcriptions"].is_u64());

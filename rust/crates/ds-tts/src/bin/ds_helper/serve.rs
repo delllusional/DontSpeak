@@ -3,10 +3,10 @@
 //! `State`/`Job` machine and the op dispatch (`listen`/`lstop`/`load`/`unload`/
 //! `speak`/etc.).
 
-use serde::Deserialize;
 use ds_aec::DuplexAudio;
 use ds_tts::batch::{chunk_text, stream_batches};
 use ds_tts::g2p;
+use serde::Deserialize;
 
 use crate::_exit;
 use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
@@ -549,8 +549,11 @@ pub(crate) fn serve() -> ! {
                             // muted → no cue
                         } else if let Some(mixer) = cue_mixer.clone() {
                             std::thread::spawn(move || {
-                                let Ok(file) = std::fs::File::open(&path) else { return };
-                                let Ok(decoder) = rodio::Decoder::new(std::io::BufReader::new(file))
+                                let Ok(file) = std::fs::File::open(&path) else {
+                                    return;
+                                };
+                                let Ok(decoder) =
+                                    rodio::Decoder::new(std::io::BufReader::new(file))
                                 else {
                                     return;
                                 };
@@ -1040,7 +1043,10 @@ mod audio_tests {
         // ~80 ms @ 24 kHz mono = 1920 samples — and NEVER empty (empty re-breaks the onset).
         assert_eq!(pcm.len(), 24_000 * LEAD_SILENCE_MS as usize / 1000);
         assert_eq!(pcm.len(), 1_920);
-        assert!(!pcm.is_empty(), "leading silence must not regress to 0 samples");
+        assert!(
+            !pcm.is_empty(),
+            "leading silence must not regress to 0 samples"
+        );
         // Pure silence — a non-zero lead would be an audible click before every reply.
         assert!(pcm.iter().all(|&s| s == 0.0));
     }
@@ -1052,6 +1058,9 @@ mod audio_tests {
             leading_silence_pcm(48_000).len(),
             48_000 * LEAD_SILENCE_MS as usize / 1000
         );
-        assert!(LEAD_SILENCE_MS >= 40, "too little lead won't cover the stream-resume latency");
+        assert!(
+            LEAD_SILENCE_MS >= 40,
+            "too little lead won't cover the stream-resume latency"
+        );
     }
 }
