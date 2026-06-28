@@ -28,6 +28,9 @@ const LOG_KEEP_OLD: usize = 2;
 /// Severity for a unified-log line, rendered as a fixed token (INFO/WARN/ERROR).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
+    /// Verbose per-event telemetry (per-utterance TTS timing, etc.). Written only when the
+    /// caller opts in (the engine gates it on `DONTSPEAK_DEBUG`), so normal logs stay clean.
+    Debug,
     Info,
     Warn,
     Error,
@@ -36,6 +39,7 @@ pub enum LogLevel {
 impl LogLevel {
     pub fn as_str(self) -> &'static str {
         match self {
+            LogLevel::Debug => "DEBUG",
             LogLevel::Info => "INFO",
             LogLevel::Warn => "WARN",
             LogLevel::Error => "ERROR",

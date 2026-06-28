@@ -17,17 +17,30 @@ static LOG_PATHS: std::sync::OnceLock<Option<Paths>> = std::sync::OnceLock::new(
 /// if `$HOME` can't be resolved.
 pub(crate) fn log(s: &str) {
     let (level, msg) = split_level(s);
+    // DEBUG lines are verbose per-event telemetry — drop them unless debug is on (same
+    // `DONTSPEAK_DEBUG` gate the engine's `dbg()` uses), so normal logs stay clean while the
+    // detail is one env var away when diagnosing.
+    if level == ds_config::LogLevel::Debug && !crate::config_gate::debug_enabled() {
+        return;
+    }
     match LOG_PATHS.get_or_init(Paths::resolve) {
         Some(p) => ds_config::log(p, level, "engine", msg),
         None => eprintln!("{s}"),
     }
 }
 
+/// Log a `DEBUG`-level line — written only when `DONTSPEAK_DEBUG` is on (see [`log`]). For
+/// verbose per-event telemetry (per-utterance TTS timing, etc.) that would be noise at INFO.
+/// A thin wrapper so call sites read as intent (`debug(...)`) rather than a `"DEBUG:"` prefix.
+pub(crate) fn debug(s: &str) {
+    log(&format!("DEBUG:{s}"));
+}
+
 /// Map a leading severity word to a [`ds_config::LogLevel`], returning the message
 /// with that prefix stripped. Unprefixed lines are `INFO`.
 fn split_level(s: &str) -> (ds_config::LogLevel, &str) {
     use ds_config::LogLevel::*;
-    for (pfx, lvl) in [("FATAL:", Error), ("ERROR:", Error), ("WARN:", Warn)] {
+    for (pfx, lvl) in [("FATAL:", Error), ("ERROR:", Error), ("WARN:", Warn), ("DEBUG:", Debug)] {
         if let Some(rest) = s.strip_prefix(pfx) {
             return (lvl, rest.trim_start());
         }

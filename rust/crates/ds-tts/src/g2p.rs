@@ -28,45 +28,258 @@
 //! silver entries, so common prose is well covered.
 
 /// Phonemize already-normalized English `text` to a Kokoro-compatible phoneme
-/// string. Never shells espeak; never returns an error (worst case: a word's
-/// phonemes are empty and that word is silent).
+/// string. Never shells espeak; never returns an error. An OOV word the misaki
+/// dict can't resolve is recovered by a tiered ESPEAK-FREE fallback (name lexicon
+/// → neural predictor → letter-by-letter spelling; see [`phonemize_word`]) so it
+/// is pronounced/approximated audibly, NEVER silent — the cross-platform parity
+/// fix for the macOS neural-G2P path. (Without this, an OOV proper noun like
+/// "Nicole" degrades to empty phonemes and vanishes whenever espeak-ng is absent.)
 pub fn phonemize(text: &str) -> String {
     // Expand digits to English words first — `voice-g2p` (misaki) has no number
     // frontend, so a bare "12" would drop at the vocab layer (silent). English
     // only: non-English voices reach espeak (which expands in-language) and never
     // call this. See [`crate::numbers`].
     let text = crate::numbers::expand_numbers(text);
+    // FAST PATH: the whole-string conversion is POS-aware (homographs, cross-word
+    // reductions), so keep it UNCHANGED whenever every word resolves. Only when a
+    // word is OOV (would go silent) do we rebuild per-word with the fallback — so
+    // common prose pays nothing and never loses context.
     match voice_g2p::english_to_phonemes(&text) {
-        Ok(ph) => ph,
-        Err(_) => phonemize_resilient(&text),
+        Ok(whole) if !text.split_whitespace().any(word_is_oov) => whole,
+        _ => phonemize_per_word(&text),
     }
 }
 
-/// Per-word resilient phonemization: split on whitespace, phonemize each token
-/// alone, drop a token whose conversion errors, and emit trailing punctuation
-/// between words so sentence batching downstream still works.
-fn phonemize_resilient(text: &str) -> String {
+/// A whitespace token is OOV iff it has a pronounceable (alphabetic) core that
+/// voice-g2p leaves empty — i.e. the dict missed it and (no espeak) it would be
+/// silent. Punctuation-only tokens and already-expanded numbers are never "OOV".
+fn word_is_oov(token: &str) -> bool {
+    let core = token.trim_matches(|c: char| !c.is_alphanumeric());
+    if !core.chars().any(|c| c.is_alphabetic()) {
+        return false;
+    }
+    voice_g2p::english_to_phonemes(core)
+        .map(|p| p.trim().is_empty())
+        .unwrap_or(true)
+}
+
+/// Per-word phonemization with an ESPEAK-FREE OOV fallback: dict first, then the
+/// name lexicon, then letter-by-letter spelling — so an OOV word is approximated
+/// audibly, never silent. Trailing sentence punctuation is preserved between words
+/// so the downstream `split_phonemes` batching still sees `.,!?;`.
+fn phonemize_per_word(text: &str) -> String {
     let mut out = String::new();
     for word in text.split_whitespace() {
-        // Separate any leading/trailing ASCII punctuation the batcher cares about
-        // so a word like "world." still contributes the '.' even if the core
-        // word fails to convert.
         let (core, trailing) = split_trailing_punct(word);
-        if !core.is_empty()
-            && let Ok(ph) = voice_g2p::english_to_phonemes(core)
-        {
-            let ph = ph.trim();
+        if !core.is_empty() {
+            let ph = phonemize_word(core);
             if !ph.is_empty() {
                 if !out.is_empty() {
                     out.push(' ');
                 }
-                out.push_str(ph);
+                out.push_str(&ph);
             }
         }
-        // On Err: skip this word entirely (graceful degradation).
         if !trailing.is_empty() {
             out.push_str(trailing);
         }
+    }
+    out
+}
+
+/// One word → phonemes, NEVER silent for a real word: misaki dict, else the name
+/// lexicon, else letter-by-letter spelling. `core` has trailing sentence punctuation
+/// already peeled by the caller; we strip any remaining edge punctuation for the
+/// dict/lexicon lookup but spell over the alphabetic letters only.
+fn phonemize_word(core: &str) -> String {
+    if let Ok(ph) = voice_g2p::english_to_phonemes(core) {
+        let ph = ph.trim();
+        if !ph.is_empty() {
+            return ph.to_string();
+        }
+    }
+    // OOV (dict miss + no espeak). Tiered, espeak-free, all in-vocab:
+    //   1. name lexicon — authoritative pronunciation for known proper nouns (the model
+    //      mis-stresses some names, e.g. "Nicole" → NIH-kul, so the lexicon wins);
+    //   2. neural predictor — real pronunciation for arbitrary OOV (parity with macOS);
+    //   3. letter-by-letter spelling — the never-silent floor when neither applies.
+    let bare = core.trim_matches(|c: char| !c.is_alphanumeric());
+    if let Some(lex) = name_lexicon(bare) {
+        return lex.to_string();
+    }
+    if let Some(neural) = neural_phonemes(bare) {
+        return neural;
+    }
+    spell_out(bare)
+}
+
+/// Hand-authored Kokoro phonemes for common OOV proper nouns — the Kokoro voice names the
+/// misaki dict misses (`Nicole`, `Aoede`, `Eric`, `Fenrir`, `Santa`). Lets them pronounce
+/// CORRECTLY without espeak instead of being spelled out. Every string is built from phoneme
+/// chars that voice-g2p itself emits for in-dict words, so they bridge to Kokoro losslessly;
+/// `oov_lexicon_is_vocab_safe` pins that. Match on the lowercased bare word.
+fn name_lexicon(word: &str) -> Option<&'static str> {
+    Some(match word.to_ascii_lowercase().as_str() {
+        "nicole" => "nɪkˈOl",
+        "aoede" => "Aˈidi",
+        "eric" => "ˈɛɹɪk",
+        "fenrir" => "fˈɛnɹɪɹ",
+        "santa" => "sˈæntə",
+        _ => return None,
+    })
+}
+
+/// Spell an OOV word letter-by-letter using each letter's NAME phonemes — the never-silent
+/// floor for an unknown word with no lexicon entry. Non-letters are skipped (digits are
+/// expanded upstream). Letter phonemes are the validated voice-g2p outputs for the spoken
+/// letter names ("en" → ˈɛn, "eye" → ˈI, …), so they're guaranteed in-vocab.
+fn spell_out(word: &str) -> String {
+    word.chars()
+        .filter_map(letter_phonemes)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One ASCII letter → the Kokoro phonemes for its spoken NAME, or `None` for a non-letter.
+/// Sourced from voice-g2p's own output for the letter-name words (validated in-vocab); `a`/`e`
+/// use the bare vowel since "ay"/"ee" aren't dict words.
+fn letter_phonemes(c: char) -> Option<&'static str> {
+    Some(match c.to_ascii_lowercase() {
+        'a' => "ˈA",
+        'b' => "bˈi",
+        'c' => "sˈi",
+        'd' => "dˈi",
+        'e' => "ˈi",
+        'f' => "ˈɛf",
+        'g' => "ʤˈi",
+        'h' => "ˈAʧ",
+        'i' => "ˈI",
+        'j' => "ʤˈA",
+        'k' => "kˈA",
+        'l' => "ˌɛl",
+        'm' => "ˈɛm",
+        'n' => "ˈɛn",
+        'o' => "ˈO",
+        'p' => "pˈi",
+        'q' => "kjˈu",
+        'r' => "ɑɹ",
+        's' => "ˈɛs",
+        't' => "tˈi",
+        'u' => "ju",
+        'v' => "vˈi",
+        'w' => "dˈʌbᵊl ju",
+        'x' => "ˈɛks",
+        'y' => "wˌI",
+        'z' => "zˈi",
+        _ => return None,
+    })
+}
+
+/// The bundled pure-Rust NEURAL OOV predictor (a g2p.py port), loaded ONCE. `Model` is immutable
+/// after load (only `ndarray` weights + lookup maps, no interior mutability ⇒ `Sync`), so a
+/// `&'static` is shared across threads; predictions return `&'static str`. `None` if the model
+/// can't load (then callers spell the word out). Lazy: the first OOV word pays the ~one-time load.
+fn neural_oov_model() -> Option<&'static grapheme_to_phoneme::Model> {
+    static MODEL: std::sync::OnceLock<Option<grapheme_to_phoneme::Model>> =
+        std::sync::OnceLock::new();
+    MODEL
+        .get_or_init(|| grapheme_to_phoneme::Model::load_in_memory().ok())
+        .as_ref()
+}
+
+/// Real (approximate) pronunciation for an OOV word via the neural predictor, bridged to Kokoro
+/// IPA. This is the parity-with-macOS fallback (macOS uses FluidAudio's neural G2P): a dict miss
+/// like "Yanchenko" is PRONOUNCED, not spelled. `None` (→ caller spells it) when the model is
+/// unavailable, the word isn't bare ASCII letters (the predictor has no number/punct frontend),
+/// or it predicts nothing.
+fn neural_phonemes(word: &str) -> Option<String> {
+    if word.is_empty() || !word.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let arpa = neural_oov_model()?.predict_phonemes_strs(word).ok()?;
+    let ipa = arpabet_to_kokoro(&arpa);
+    (!ipa.trim().is_empty()).then_some(ipa)
+}
+
+/// Bridge ARPABET (from [`neural_phonemes`]) into the Kokoro/misaki IPA inventory. A vowel's
+/// stress digit (0/1/2) becomes a stress mark placed IMMEDIATELY BEFORE the vowel — exactly
+/// misaki's convention (e.g. ARPABET `N IH0 K OW1 L` → `nɪkˈOl`), so neural OOV phonemes match
+/// the dict's style and bridge to Kokoro losslessly. Every mapping target is a phoneme the dict
+/// itself emits (validated against `KOKORO_VOCAB` by `arpabet_bridge_is_vocab_safe`).
+/// Diphthongs use Kokoro's single-char shorthands (eɪ→A, aɪ→I, oʊ→O, ɔɪ→Y, aʊ→W).
+fn arpabet_to_kokoro(tokens: &[&str]) -> String {
+    let mut out = String::new();
+    for tok in tokens {
+        // Peel a trailing stress digit (vowels carry 0/1/2; consonants carry none).
+        let (base, stress) = match tok.as_bytes().last() {
+            Some(b'0') => (&tok[..tok.len() - 1], 0u8),
+            Some(b'1') => (&tok[..tok.len() - 1], 1u8),
+            Some(b'2') => (&tok[..tok.len() - 1], 2u8),
+            _ => (*tok, 9u8), // consonant — no stress
+        };
+        let ipa: &str = match base {
+            "AA" => "ɑ",
+            "AE" => "æ",
+            // Reduced (AH0 → schwa) vs full (AH1/AH2 → ʌ).
+            "AH" => {
+                if stress == 0 {
+                    "ə"
+                } else {
+                    "ʌ"
+                }
+            }
+            "AO" => "ɔ",
+            "AW" => "W",
+            "AY" => "I",
+            "EH" => "ɛ",
+            // R-coloured: stressed NURSE vowel (ɜɹ) vs reduced lettER (əɹ).
+            "ER" => {
+                if stress == 1 || stress == 2 {
+                    "ɜɹ"
+                } else {
+                    "əɹ"
+                }
+            }
+            "EY" => "A",
+            "IH" => "ɪ",
+            "IY" => "i",
+            "OW" => "O",
+            "OY" => "Y",
+            "UH" => "ʊ",
+            "UW" => "u",
+            "B" => "b",
+            "CH" => "ʧ",
+            "D" => "d",
+            "DH" => "ð",
+            "F" => "f",
+            "G" => "ɡ",
+            "HH" => "h",
+            "JH" => "ʤ",
+            "K" => "k",
+            "L" => "l",
+            "M" => "m",
+            "N" => "n",
+            "NG" => "ŋ",
+            "P" => "p",
+            "R" => "ɹ",
+            "S" => "s",
+            "SH" => "ʃ",
+            "T" => "t",
+            "TH" => "θ",
+            "V" => "v",
+            "W" => "w",
+            "Y" => "j",
+            "Z" => "z",
+            "ZH" => "ʒ",
+            _ => continue, // unknown ARPABET token: skip rather than emit garbage
+        };
+        // Stress mark precedes the VOWEL only (consonants have stress == 9 → no mark).
+        out.push_str(match stress {
+            1 => "ˈ",
+            2 => "ˌ",
+            _ => "",
+        });
+        out.push_str(ipa);
     }
     out
 }
@@ -276,15 +489,15 @@ mod tests {
     }
 
     #[test]
-    fn resilient_path_skips_a_bad_word_but_keeps_punctuation() {
-        // Drive the resilient path directly. Even if a token is OOV and yields
-        // nothing, sentence punctuation is preserved for the batcher.
-        let ph = phonemize_resilient("Hello unresolvableglyphword. world");
-        // The '.' must survive so split_phonemes can break the batch there.
+    fn per_word_path_recovers_oov_and_keeps_punctuation() {
+        // Drive the per-word path directly. An OOV token is now SPELLED OUT (never
+        // silent), and sentence punctuation is still preserved for the batcher.
+        let ph = phonemize_per_word("Hello unresolvableglyphword. world");
         assert!(
             ph.contains('.'),
             "trailing sentence punct preserved: {ph:?}"
         );
+        assert!(!ph.trim().is_empty(), "OOV word must not vanish: {ph:?}");
     }
 
     #[test]
@@ -293,5 +506,162 @@ mod tests {
         assert_eq!(split_trailing_punct("hi?!"), ("hi", "?!"));
         assert_eq!(split_trailing_punct("plain"), ("plain", ""));
         assert_eq!(split_trailing_punct("..."), ("", "..."));
+    }
+
+    // ── OOV recovery (espeak-free) — the cross-platform parity fix ────────────────
+
+    #[test]
+    fn oov_proper_noun_is_audible_not_silent() {
+        // "Nicole" is OOV in the misaki dict; without the fallback it phonemized to
+        // EMPTY (silent). It must now be non-empty, mid-phrase AND alone.
+        assert!(
+            !phonemize("Nicole").trim().is_empty(),
+            "Nicole alone must be audible"
+        );
+        let phrase = phonemize("This was Nicole");
+        assert!(
+            !phrase.trim().is_empty(),
+            "phrase ending in an OOV name must carry the name: {phrase:?}"
+        );
+        // The lexicon pronunciation (not a spelled-out fallback) is used: it contains
+        // the authored Nicole phonemes, not six letter-name tokens.
+        assert!(
+            phrase.contains("nɪkˈOl"),
+            "expected the lexicon pronunciation: {phrase:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_oov_word_is_pronounced_by_the_neural_fallback() {
+        // A word with no dict entry and no lexicon entry is PRONOUNCED by the neural
+        // predictor (parity with macOS) — audible, in-vocab, and not the spelled-out form.
+        let ph = phonemize("Yanchenko");
+        assert!(
+            !ph.trim().is_empty(),
+            "unknown OOV word must be audible, not vanish: {ph:?}"
+        );
+        let unmapped: Vec<char> = ph
+            .chars()
+            .filter(|c| crate::vocab::vocab_id(*c).is_none())
+            .collect();
+        assert!(
+            unmapped.is_empty(),
+            "neural OOV output must be in-vocab: {ph:?} {unmapped:?}"
+        );
+        // It's pronounced, not spelled: spelling would contain the letter-name 'O' phoneme
+        // ˈO with spaces between every letter; the neural form has no such per-letter spacing.
+        let spelled = phonemize_per_word("Yanchenko").matches(' ').count();
+        assert!(
+            spelled < 7,
+            "expected a pronounced word, not 9 spelled letters: {ph:?}"
+        );
+    }
+
+    #[test]
+    fn neural_predictor_loads_and_pronounces() {
+        // The bundled model loads and yields in-vocab phonemes for an arbitrary OOV word.
+        let ph = neural_phonemes("kubernetes").expect("neural model should pronounce a word");
+        assert!(!ph.trim().is_empty());
+        let unmapped: Vec<char> = ph
+            .chars()
+            .filter(|c| crate::vocab::vocab_id(*c).is_none())
+            .collect();
+        assert!(
+            unmapped.is_empty(),
+            "neural phonemes out of vocab: {ph:?} {unmapped:?}"
+        );
+    }
+
+    #[test]
+    fn arpabet_bridge_is_vocab_safe_for_all_symbols() {
+        // Every ARPABET symbol the predictor can emit (all 15 vowels × 3 stresses + 24
+        // consonants) must bridge to phonemes fully inside KOKORO_VOCAB — else a neural
+        // OOV word could still drop a char in `tokenize` and clip.
+        let vowels = [
+            "AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY", "IH", "IY", "OW", "OY", "UH",
+            "UW",
+        ];
+        let cons = [
+            "B", "CH", "D", "DH", "F", "G", "HH", "JH", "K", "L", "M", "N", "NG", "P", "R", "S",
+            "SH", "T", "TH", "V", "W", "Y", "Z", "ZH",
+        ];
+        let mut toks: Vec<String> = Vec::new();
+        for v in vowels {
+            for s in ["0", "1", "2"] {
+                toks.push(format!("{v}{s}"));
+            }
+        }
+        for c in cons {
+            toks.push(c.to_string());
+        }
+        for t in &toks {
+            let ipa = arpabet_to_kokoro(&[t.as_str()]);
+            assert!(!ipa.is_empty(), "ARPABET {t:?} bridged to empty");
+            let unmapped: Vec<char> = ipa
+                .chars()
+                .filter(|c| crate::vocab::vocab_id(*c).is_none())
+                .collect();
+            assert!(
+                unmapped.is_empty(),
+                "ARPABET {t:?} -> {ipa:?} has OOV chars {unmapped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn arpabet_bridge_matches_misaki_stress_style() {
+        // ARPABET "N IH0 K OW1 L" must bridge to exactly the misaki-style "nɪkˈOl" (stress
+        // mark immediately before the stressed vowel), so neural output reads like the dict.
+        assert_eq!(arpabet_to_kokoro(&["N", "IH0", "K", "OW1", "L"]), "nɪkˈOl");
+    }
+
+    #[test]
+    fn in_vocab_text_is_unchanged_by_the_fallback() {
+        // The fast path must be byte-identical to the raw whole-string conversion when
+        // nothing is OOV — the fallback adds nothing for common prose.
+        let raw = voice_g2p::english_to_phonemes("the quick brown fox").unwrap_or_default();
+        assert_eq!(phonemize("the quick brown fox"), raw);
+    }
+
+    #[test]
+    fn oov_lexicon_is_vocab_safe() {
+        // Every hand-authored lexicon pronunciation must map fully into KOKORO_VOCAB
+        // (else `tokenize` would silently drop a char and the word would still clip).
+        for name in ["nicole", "aoede", "eric", "fenrir", "santa"] {
+            let ph = name_lexicon(name).expect("lexicon entry");
+            let unmapped: Vec<char> = ph
+                .chars()
+                .filter(|c| crate::vocab::vocab_id(*c).is_none())
+                .collect();
+            assert!(
+                unmapped.is_empty(),
+                "lexicon {name:?} has out-of-vocab chars: {unmapped:?}"
+            );
+            assert!(
+                !crate::vocab::tokenize(ph).is_empty(),
+                "lexicon {name:?} tokenizes empty"
+            );
+        }
+    }
+
+    #[test]
+    fn every_letter_phoneme_is_vocab_safe() {
+        // The spelling fallback must produce only in-vocab phonemes for a..z, so a
+        // spelled OOV word is always playable.
+        for c in 'a'..='z' {
+            let ph = letter_phonemes(c).expect("a..z mapped");
+            let unmapped: Vec<char> = ph
+                .chars()
+                .filter(|c| crate::vocab::vocab_id(*c).is_none())
+                .collect();
+            assert!(
+                unmapped.is_empty(),
+                "letter {c:?} has out-of-vocab chars: {unmapped:?}"
+            );
+            assert!(
+                !crate::vocab::tokenize(ph).is_empty(),
+                "letter {c:?} tokenizes empty"
+            );
+        }
     }
 }

@@ -93,6 +93,9 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dy
 # Pure-Rust English G2P (misaki dict embedded; MIT). Its espeak-ng fallback is an
 # EXTERNAL binary we avoid via the per-word skip wrapper in ds-tts/g2p.rs.
 voice-g2p = "0.2.2"
+# Pure-Rust NEURAL OOV predictor (g2p.py port; BSD-4, bundled model, ndarray-only).
+# Pronounces dict-miss words without espeak; ARPABET bridged to Kokoro IPA in g2p.rs.
+grapheme_to_phoneme = "0.1"
 # Audio playback of raw f32 mono PCM at 24 kHz.
 rodio = "0.22"
 # Extract libonnxruntime.dylib from the microsoft .tgz (ds-model route A).

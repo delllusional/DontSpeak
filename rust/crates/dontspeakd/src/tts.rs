@@ -785,6 +785,12 @@ impl TtsManager {
                         m.lock().unwrap().done = true;
                         cv.notify_all();
                     } else if let Some(rest) = l.strip_prefix("STATS ") {
+                        // Persist the per-utterance playback timing to the activity log (it
+                        // otherwise only fed the in-app stats view, so a clipped/short reply left
+                        // no trace — the gap that made the tail-clip bug hard to diagnose). DEBUG
+                        // level: off by default, one concise line per speak when DONTSPEAK_DEBUG
+                        // is on, size-rotated like the rest.
+                        crate::logging::debug(&format!("TTS speak {rest}"));
                         if let Some(secs) = stats.record_stats_line(rest) {
                             lifetime.add_tts(secs);
                         }

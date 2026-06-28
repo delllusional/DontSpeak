@@ -28,6 +28,10 @@ serde_json = { workspace = true }
 ort = { workspace = true }
 # Pure-Rust English G2P (per-word wrapper avoids the espeak-ng fallback).
 voice-g2p = { workspace = true }
+# Pure-Rust NEURAL OOV predictor (g2p.py port) — pronounces dictionary-miss words
+# (proper nouns etc.) without espeak. Outputs ARPABET; bridged to Kokoro IPA in g2p.rs.
+# Bundles its own model in-memory; deps are ndarray only (no ML runtime). BSD-4.
+grapheme_to_phoneme = { workspace = true }
 # 24 kHz mono f32 PCM playback. `symphonia-aiff` (added to the default decoders) lets the
 # earcon `cue` op decode macOS system sounds (.aiff); wav (Windows) + vorbis/oga (Linux) are
 # already in rodio's defaults.
