@@ -20,6 +20,10 @@ use crate::status::{CAPS_LOG_MAX, CapsEvent, CapsLog, StatusGate, now_ms};
 use crate::tts::TtsManager;
 use crate::ttsq::TtsQueue;
 
+/// Max gap between two Caps taps to count as a DOUBLE-tap (skip the current message).
+/// Only armed while speech is PLAYING, so it never delays starting dictation from silence.
+const DOUBLE_TAP_MS: u64 = 280;
+
 /// Shared dictation-preview buffer — the engine ↔ confirm-panel channel.
 ///
 /// While recording, `HelperStt` mirrors each PARTIAL transcript into `partial`.
@@ -135,6 +139,12 @@ pub(crate) struct Engine<P: Platform + 'static> {
     /// Latch so a single sustained hold fires the reset exactly once — and so the
     /// release that ENDS a long-press is not mistaken for a tap.
     long_press_fired: bool,
+    /// A Caps TAP whose action is DEFERRED while speech plays, to detect a DOUBLE-tap
+    /// (skip the current message → next). `Some(release_instant)` after a first tap;
+    /// the single fires from `tick` once `DOUBLE_TAP_MS` elapses with no second tap.
+    /// `None` when idle or not speaking (then a tap acts immediately — no added latency
+    /// on starting dictation from silence). See [`apply_caps_edge`](Self::apply_caps_edge).
+    pending_tap_at: Option<Instant>,
 
     // ── engine-owns-everything: last-applied config + subsystem gates ─────────
     /// The config the engine last APPLIED. Held so [`Engine::reload`] can diff
@@ -234,6 +244,7 @@ impl<P: Platform + 'static> Engine<P> {
             long_press_ms,
             caps_down_since: None,
             long_press_fired: false,
+            pending_tap_at: None,
             cfg,
             caps_enabled,
             tts: None,
@@ -414,6 +425,8 @@ impl<P: Platform + 'static> Engine<P> {
     /// the LED off. This is the "hold to shut it up" gesture — there is NO hold-to-dictate;
     /// a hold never leaves a recording running (the stuck-state bug the tap/hold split fixes).
     fn cancel_all(&mut self) {
+        // Drop any deferred single tap — a long-press supersedes it (don't toggle later).
+        self.pending_tap_at = None;
         // End any in-flight listen via ABORT: ClaudeNative releases Ctrl+G (nothing left
         // held); Parakeet/System DISCARD the capture WITHOUT injecting a partial transcript.
         if self.holding {
@@ -751,6 +764,8 @@ impl<P: Platform + 'static> Engine<P> {
         // while the key is down (a no-op on the event-driven port, which owns/suppresses
         // the key and never drives the LED).
         self.check_long_press();
+        // Fire a deferred single tap if its double-tap window lapsed with no second tap.
+        self.check_pending_tap();
 
         // DEFERRED submit: the stop tap armed `confirm_armed`; the local-transcript engine
         // deposits its FINAL asynchronously, so paste once it lands (or disarm if empty).
@@ -803,10 +818,55 @@ impl<P: Platform + 'static> Engine<P> {
             self.caps_down_since = None;
             self.record_caps("release");
             if was_tap {
-                self.toggle_dictation();
+                self.handle_tap(at);
             }
             self.long_press_fired = false;
             self.plat.set_caps_lock(self.holding);
+        }
+    }
+
+    /// A Caps TAP (quick release). While speech is PLAYING, the tap is DEFERRED up to
+    /// [`DOUBLE_TAP_MS`] to see whether a SECOND tap follows: two quick taps = skip the
+    /// current message and advance to the next ([`TtsQueue::skip_current`]); a lone tap =
+    /// the normal [`toggle_dictation`](Self::toggle_dictation), fired from [`tick`] once the
+    /// window lapses. While NOT speaking there is nothing to skip, so the tap acts
+    /// IMMEDIATELY — starting dictation from silence keeps zero added latency.
+    fn handle_tap(&mut self, at: Instant) {
+        let speaking = self.ttsq.as_ref().is_some_and(|q| q.is_tts_active());
+        let window = Duration::from_millis(DOUBLE_TAP_MS);
+        match tap_decision(speaking, self.pending_tap_at, at, window) {
+            // Not speaking (or no prior tap to pair) — act now, no added latency.
+            TapAction::Immediate => {
+                self.pending_tap_at = None;
+                self.toggle_dictation();
+            }
+            // Second tap inside the window → DOUBLE-TAP: skip the current message.
+            TapAction::Skip => {
+                self.pending_tap_at = None;
+                if let Some(q) = &self.ttsq {
+                    q.skip_current();
+                }
+                self.dbg("double-tap — skipped current message, advancing to next");
+            }
+            // First tap while speaking → defer; the single fires from `tick` if no
+            // second tap arrives within the window.
+            TapAction::Defer => self.pending_tap_at = Some(at),
+        }
+    }
+
+    /// Fire a DEFERRED single tap once its [`DOUBLE_TAP_MS`] window has elapsed with no
+    /// second tap. Skipped while a Caps press is in flight (`caps_down_since` set) — that
+    /// could be the second tap of a double, or a hold becoming a long-press — so the single
+    /// never fires mid-gesture. Run once per [`tick`].
+    fn check_pending_tap(&mut self) {
+        if self.caps_down_since.is_some() {
+            return;
+        }
+        if let Some(t0) = self.pending_tap_at {
+            if t0.elapsed() > Duration::from_millis(DOUBLE_TAP_MS) {
+                self.pending_tap_at = None;
+                self.toggle_dictation();
+            }
         }
     }
 
@@ -958,9 +1018,65 @@ pub(crate) fn caps_tap_action(stt_on: bool, recording: bool, voice_paused: bool)
     }
 }
 
+/// What a Caps tap should do — the pure time-and-state core of [`Engine::handle_tap`].
+#[derive(Debug, PartialEq, Eq)]
+enum TapAction {
+    /// Act now (the normal toggle). Not speaking, or a stale prior tap → treat as a new one.
+    Immediate,
+    /// First tap while speaking — hold the action until the double-tap window lapses.
+    Defer,
+    /// Second tap within the window → skip the current message.
+    Skip,
+}
+
+/// Decide a tap from `(speech playing?, the pending deferred tap, this tap's time, window)`.
+/// Not speaking ⇒ `Immediate` (zero added latency on starting dictation from silence).
+/// Speaking ⇒ `Skip` if a prior tap is within `window`, else `Defer` (incl. a stale prior
+/// tap, which the caller has already fired from `tick`). Pure — exhaustively unit-tested.
+fn tap_decision(
+    speaking: bool,
+    pending: Option<Instant>,
+    now: Instant,
+    window: Duration,
+) -> TapAction {
+    if !speaking {
+        return TapAction::Immediate;
+    }
+    match pending {
+        Some(t0) if now.saturating_duration_since(t0) <= window => TapAction::Skip,
+        _ => TapAction::Defer,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tap_decision_immediate_when_not_speaking() {
+        // Not speaking ⇒ act now regardless of any pending tap (dictation-start stays instant).
+        let now = Instant::now();
+        let w = Duration::from_millis(280);
+        assert_eq!(tap_decision(false, None, now, w), TapAction::Immediate);
+        assert_eq!(tap_decision(false, Some(now), now, w), TapAction::Immediate);
+    }
+
+    #[test]
+    fn tap_decision_defers_then_skips_while_speaking() {
+        let t0 = Instant::now();
+        let w = Duration::from_millis(280);
+        // Speaking, no prior tap → DEFER (first tap of a possible double).
+        assert_eq!(tap_decision(true, None, t0, w), TapAction::Defer);
+        // Second tap INSIDE the window → SKIP the current message.
+        let inside = t0 + Duration::from_millis(100);
+        assert_eq!(tap_decision(true, Some(t0), inside, w), TapAction::Skip);
+        // At the exact window boundary still counts as a double (<=).
+        assert_eq!(tap_decision(true, Some(t0), t0 + w, w), TapAction::Skip);
+        // Second tap BEYOND the window → DEFER again (a stale prior tap already fired as a
+        // single from `tick`; this one starts a fresh deferral, not a skip).
+        let beyond = t0 + Duration::from_millis(281);
+        assert_eq!(tap_decision(true, Some(t0), beyond, w), TapAction::Defer);
+    }
 
     #[test]
     fn caps_tap_action_is_pause_resume_in_both_modes() {

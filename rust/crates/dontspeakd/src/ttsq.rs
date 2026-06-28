@@ -314,6 +314,20 @@ impl TtsQueue {
         self.cv.notify_one();
     }
 
+    /// Skip the CURRENTLY-playing item and advance to the NEXT queued one — the caps
+    /// DOUBLE-TAP gesture. Unlike [`clear`](Self::clear) (the long-press "stop everything"),
+    /// the rest of the queue is KEPT: bumping the generation makes the worker abandon its
+    /// in-flight item, then it dequeues the next and plays it (or goes idle if none remain).
+    /// A no-op when nothing is playing (the engine only calls this while `is_tts_active`).
+    pub fn skip_current(&self) {
+        // NB: do NOT clear `items` and do NOT touch `paused`/`tts_active` — the worker
+        // re-asserts `tts_active` when it dequeues the next item (or clears it if the queue
+        // is now empty). Fade the current audio out (no click), then wake the worker.
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.tts.stop_fade();
+        self.cv.notify_one();
+    }
+
     /// Per-window barge (a `StopSpeech { session }` from one terminal — its new-reply
     /// preempt or its SessionEnd close): drop only THIS session's queued items and
     /// cancel the in-flight item ONLY if it belongs to this session. Another window's
