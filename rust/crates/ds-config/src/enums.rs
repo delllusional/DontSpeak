@@ -737,22 +737,6 @@ where
 // schema / `ALL` stability but are DROPPED from a ladder (a scalar `"off"` ⇒ empty ⇒ off).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Whether the BUILT-IN (Kokoro TTS / Parakeet STT) ONNX + Core-ML stack can run in this
-/// build. Unusable ONLY on x86_64 macOS: there is no pinned onnxruntime distribution for
-/// Intel macs AND the FluidAudio Core ML shim is arm64-only. Available on arm64 macOS (the
-/// shim) and on Windows/Linux (onnxruntime ships). A STATIC build fact — see the ladder note.
-pub(crate) fn built_in_usable() -> bool {
-    built_in_usable_on(std::env::consts::OS, std::env::consts::ARCH)
-}
-
-/// Whether the `system` STT engine (macOS SpeechAnalyzer, en-US) can run in this build. It
-/// lives in the arm64-macOS shim (`libsmkokoro`), so only an arm64 macOS build ships it;
-/// runtime still gates on macOS 26 + an installed locale model (handled downstream). Never
-/// usable on x86_64 macOS / Windows / Linux.
-pub(crate) fn system_stt_buildable() -> bool {
-    system_stt_buildable_on(std::env::consts::OS, std::env::consts::ARCH)
-}
-
 // The platform predicates as PURE functions of (os, arch) — `os`/`arch` are
 // `std::env::consts::OS`/`ARCH` strings ("macos"/"windows"/"linux", "x86_64"/"aarch64").
 // Splitting them out lets the cross-platform engine-selection logic be unit-tested for EVERY
