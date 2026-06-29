@@ -6,37 +6,31 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Pluggable STT engines for dontspeak: trait Stt + ClaudeNative (the Ctrl+G default) + Parakeet (local, ort via transcribe-rs; macOS Core ML/ANE)."
+description = "Pluggable STT engines for dontspeak: trait Stt + ClaudeNative (the Ctrl+G default) + Parakeet (local cache-aware streaming FastConformer over ort; macOS Core ML/ANE)."
 
 [dependencies]
 ds-config = { workspace = true }
 ds-platform = { workspace = true }
 ds-model = { workspace = true }
 
-# ── Parakeet-ONNX local STT (the `parakeet-onnx` engine, cross-platform) ─────
-# Mic capture (cpal) → mono → 16 kHz (rubato) → transcribe-rs ParakeetModel (TDT
-# 0.6b v2 int8) over the shared `ort` (load-dynamic) runtime. transcribe-rs's
-# `onnx` feature pulls `ort` with its default features, but our workspace `ort`
-# pin (load-dynamic → ort-sys/disable-linking) wins the build, so no onnxruntime
-# is downloaded/linked.
-#
-# `ort-cuda` enables transcribe-rs's CUDA execution-provider path (gated behind this
-# feature) so `set_ort_accelerator(Cuda)` actually registers the EP for Parakeet's
-# sessions — the STT analogue of Kokoro's CUDA TTS. It only adds `ort/cuda`, which the
-# workspace `ort` pin ALREADY enables; load-dynamic (disable-linking) still wins, so it
-# does NOT pull the ~800 MB linked CUDA build. Without GPU/runtime it falls back to CPU.
-transcribe-rs = { version = "0.3.11", default-features = false, features = ["onnx", "ort-cuda"] }
+# ── Local cross-platform STT (the built-in `parakeet` engine) ───────────────
+# Mic capture (cpal) → mono → 16 kHz (rubato) → cache-aware streaming FastConformer
+# transducer (`ds-stt::streaming`) over the shared `ort` (load-dynamic) runtime.
+# `transcribe-rs` is kept ONLY for its energy VAD (`EnergyVad`/`SmoothedVad` in
+# boundary.rs); default-features=false drops its ONNX/ort inference path (we run ort
+# directly), so it pulls no onnxruntime of its own.
+transcribe-rs = { version = "0.3.11", default-features = false }
 cpal = { workspace = true }
 rubato = { workspace = true }
 
-# Direct `ort` for the speaker-SEPARATION session (SepFormer int8 ONNX → split a mixture
-# into voices for the dictation speaker-lock). Same shared load-dynamic runtime Parakeet's
-# transcribe-rs and Kokoro use — no separate onnxruntime is linked/downloaded.
+# Direct `ort` for the streaming STT runner and the speaker-SEPARATION session (SepFormer
+# int8 ONNX). Same shared load-dynamic runtime Kokoro uses — no separate onnxruntime linked.
 ort = { workspace = true }
 
 # Diarization segments cross the shim's C ABI as JSON (see ds-stt::diarize).
 serde = { workspace = true }
 serde_json = { workspace = true }
+kaldi-native-fbank = "0.1.0"
 
 # ── Parakeet local STT (the `parakeet` engine, macOS Core ML / ANE) ──────────
 # dlopen libsmkokoro.dylib (the FluidAudio Core ML / ANE shim) at runtime, like

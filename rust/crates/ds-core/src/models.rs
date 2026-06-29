@@ -152,8 +152,8 @@ pub fn delete(asset: Asset) -> bool {
             for file in [
                 ds_model::PARAKEET_ENCODER_FILE,
                 ds_model::PARAKEET_DECODER_FILE,
-                ds_model::PARAKEET_PREPROC_FILE,
-                ds_model::PARAKEET_VOCAB_FILE,
+                ds_model::PARAKEET_JOINER_FILE,
+                ds_model::PARAKEET_TOKENS_FILE,
             ] {
                 if let Some(p) = ds_model::model_path(file) {
                     paths.push(p);

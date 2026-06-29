@@ -41,35 +41,38 @@ pub const KOKORO_VOICES: Download = Download {
     size_bytes: 28_214_398,
 };
 
-// ── Parakeet TDT 0.6b v2 (English) STT — istupakov/parakeet-tdt-0.6b-v2-onnx ──
-// `transcribe-rs` expects all four files flat in ONE dir under exactly these names.
+// ── Parakeet STT: cache-aware STREAMING FastConformer transducer (480ms, int8) ──
+// NeMo `stt_en_fastconformer_hybrid_large_streaming_480ms`, transducer branch, exported by
+// csukuangfj (sherpa-onnx). This REPLACED the old whole-buffer transcribe-rs Parakeet TDT model
+// (see `docs/STREAMING-STT-PLAN.md`); the `built_in` STT engine + config tokens keep the
+// "parakeet" name. The `ds-stt::streaming` runner loads all four flat in one dir (~137 MB total).
 
 pub const PARAKEET_ENCODER: Download = Download {
-    file_name: "encoder-model.int8.onnx",
-    url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.int8.onnx",
-    sha256: "3e0581fda6ab843888b51e56d7ee78b6d5bc3237ec113af1f732d1d5286aa155",
-    size_bytes: 652_184_014,
+    file_name: "encoder.int8.onnx",
+    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/main/encoder.int8.onnx",
+    sha256: "100c5616929a131b5b3c8c8ab0d83aaba2cdcae163acd8d190b4e5ffa5f7d051",
+    size_bytes: 131_507_603,
 };
 
 pub const PARAKEET_DECODER: Download = Download {
-    file_name: "decoder_joint-model.int8.onnx",
-    url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/decoder_joint-model.int8.onnx",
-    sha256: "a449f49acd68979d418651dd2dcb737cc0f1bf0225e009e29ee326354edbf7d3",
-    size_bytes: 8_998_286,
+    file_name: "decoder.int8.onnx",
+    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/main/decoder.int8.onnx",
+    sha256: "4f04431988472f8c7b815f942aa6901976929c9e22353029681fcdb262da0164",
+    size_bytes: 3_955_864,
 };
 
-pub const PARAKEET_PREPROC: Download = Download {
-    file_name: "nemo128.onnx",
-    url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/nemo128.onnx",
-    sha256: "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f",
-    size_bytes: 139_764,
+pub const PARAKEET_JOINER: Download = Download {
+    file_name: "joiner.int8.onnx",
+    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/main/joiner.int8.onnx",
+    sha256: "d2d8e7290a6a8245a83ed211aa0dd8cdf8effb8a7c64fe392399561111b52f30",
+    size_bytes: 1_408_182,
 };
 
-pub const PARAKEET_VOCAB: Download = Download {
-    file_name: "vocab.txt",
-    url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/vocab.txt",
-    sha256: "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d",
-    size_bytes: 9_384,
+pub const PARAKEET_TOKENS: Download = Download {
+    file_name: "tokens.txt",
+    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/main/tokens.txt",
+    sha256: "618dc110fc2213886b52e063ff42329bbdf37a266ca7705184090fa5f39f3131",
+    size_bytes: 11_896,
 };
 
 // On-disk file-name aliases — kept as standalone consts because they are part of the
@@ -79,8 +82,8 @@ pub const KOKORO_ONNX_FILE: &str = KOKORO_ONNX.file_name;
 pub const KOKORO_VOICES_FILE: &str = KOKORO_VOICES.file_name;
 pub const PARAKEET_ENCODER_FILE: &str = PARAKEET_ENCODER.file_name;
 pub const PARAKEET_DECODER_FILE: &str = PARAKEET_DECODER.file_name;
-pub const PARAKEET_PREPROC_FILE: &str = PARAKEET_PREPROC.file_name;
-pub const PARAKEET_VOCAB_FILE: &str = PARAKEET_VOCAB.file_name;
+pub const PARAKEET_JOINER_FILE: &str = PARAKEET_JOINER.file_name;
+pub const PARAKEET_TOKENS_FILE: &str = PARAKEET_TOKENS.file_name;
 
 // ── ONNX Runtime 1.27.0 — microsoft/onnxruntime releases ─────────────────────
 // The shared `load-dynamic` inference dylib (Kokoro + Parakeet ONNX paths). The per-OS
@@ -243,18 +246,19 @@ pub const KOKORO: Project = Project {
     files: &[KOKORO_ONNX, KOKORO_VOICES],
 };
 
-/// Parakeet TDT 0.6B v2 STT model (NVIDIA, CC-BY-4.0; ONNX export by istupakov).
+/// Parakeet STT model — NVIDIA NeMo cache-aware streaming FastConformer transducer
+/// (CC-BY-4.0; ONNX streaming export by csukuangfj / sherpa-onnx).
 pub const PARAKEET: Project = Project {
-    name: "Parakeet TDT 0.6B v2",
-    usage: "Speech-to-text model (NVIDIA; ONNX export by istupakov)",
-    homepage: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2",
+    name: "FastConformer streaming transducer (en, 480ms)",
+    usage: "Speech-to-text model (NVIDIA NeMo; streaming ONNX export by csukuangfj/sherpa-onnx)",
+    homepage: "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_fastconformer_hybrid_large_streaming_480ms",
     license: "CC-BY-4.0",
     license_url: "https://creativecommons.org/licenses/by/4.0/",
     files: &[
         PARAKEET_ENCODER,
         PARAKEET_DECODER,
-        PARAKEET_PREPROC,
-        PARAKEET_VOCAB,
+        PARAKEET_JOINER,
+        PARAKEET_TOKENS,
     ],
 };
 

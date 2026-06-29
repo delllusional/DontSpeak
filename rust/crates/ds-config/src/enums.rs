@@ -28,8 +28,8 @@ pub enum SttEngine {
     /// (gated by `caps_enabled`) for its OTHER job — silencing/cancelling the voice — so
     /// `off` means "Caps controls speech but never dictates". Token `off`.
     Off,
-    /// DontSpeak's BUILT-IN local STT: the bundled Parakeet TDT 0.6b v2 model. The RUNTIME
-    /// (cross-platform ONNX via `transcribe-rs`/`ort`, or macOS FluidAudio Core ML / ANE) is
+    /// DontSpeak's BUILT-IN local STT: a cache-aware streaming FastConformer transducer. The
+    /// RUNTIME (cross-platform ONNX via `ort`, or macOS FluidAudio Core ML / ANE) is
     /// selected by the shared [`Provider`] — exactly as it drives Kokoro TTS. The factory
     /// degrades it to ClaudeCode when the model is unavailable. Token `built_in`. The DEFAULT
     /// (on-device dictation).
@@ -275,9 +275,10 @@ pub enum Provider {
     /// ONNX Runtime, CPU execution provider.
     #[default]
     OrtCpu,
-    /// ONNX Runtime, CUDA execution provider (NVIDIA GPU). Used by BOTH engines on Windows:
-    /// Kokoro TTS (its own ort session) and Parakeet STT (transcribe-rs `set_ort_accelerator`),
-    /// over the one shared warm-helper ort runtime.
+    /// ONNX Runtime, CUDA execution provider (NVIDIA GPU) — for Kokoro TTS's ort session over the
+    /// shared warm-helper runtime. (The streaming Parakeet STT runner is CPU-only for now — int8
+    /// dynamic-quant isn't GPU-accelerated — so for STT this token reflects the resolved
+    /// preference, not the realized EP.)
     OrtCuda,
     /// ONNX Runtime, CoreML execution provider (macOS) — ort offloading ops to Core ML.
     /// TTS only; explicit (NOT in the default ladder, as it benches slower than CPU for

@@ -1,8 +1,16 @@
 //! STT capture/transcribe cluster: the shared [`transcribe_loop`] and its two
 //! callers ([`run_listen`] half-duplex, [`run_concurrent_listen`] full-duplex),
 //! plus the make-up gain ([`auto_gain`]) and silence trim ([`trim_silence_16k`]).
+//!
+//! For the cross-platform ONNX "parakeet" engine, both callers route to [`try_streaming`] — a
+//! cache-aware [`ds_stt::streaming::StreamingModel`] that encodes each frame once (no whole-tail
+//! re-encode); it REPLACED the old whole-buffer engine. The macOS apple-native / system engines
+//! keep the offline `transcribe_loop`. See `docs/STREAMING-STT-PLAN.md`.
+
+use std::sync::{Mutex, OnceLock};
 
 use ds_aec::CaptureHandle;
+use ds_stt::streaming::StreamingModel;
 
 /// Control flags for the full-duplex concurrent listen thread (set by the stdin
 /// reader, polled by the thread). `start` opens a listen, `stop` (the `lstop` op)
@@ -321,15 +329,26 @@ fn run_concurrent_listen(
     transcriber: &std::sync::Mutex<ds_stt::LocalTranscriber>,
     sig: &(std::sync::Mutex<ListenSig>, std::sync::Condvar),
 ) {
+    let stopped = || {
+        let s = sig.0.lock().unwrap();
+        s.stop || s.quit
+    };
+    // Streaming path first; falls through to the offline loop when unavailable.
+    if try_streaming(
+        capture.capture_rate(),
+        std::time::Duration::from_secs(120),
+        "coexist-listen",
+        &mut || capture.drain(),
+        &stopped,
+    ) {
+        return;
+    }
     transcribe_loop(
         capture.capture_rate(),
         std::time::Duration::from_secs(120),
         "coexist-listen",
         || capture.drain(),
-        || {
-            let s = sig.0.lock().unwrap();
-            s.stop || s.quit
-        },
+        stopped,
         |pcm| {
             transcriber
                 .lock()
@@ -390,12 +409,23 @@ pub(crate) fn run_listen(
             return;
         }
     };
+    let stopped = || cancel.load(Ordering::SeqCst);
+    // Streaming path first; falls through to the offline loop when unavailable.
+    if try_streaming(
+        capture.input_rate(),
+        std::time::Duration::from_secs(60),
+        "listen-stream",
+        &mut || capture.drain_new(),
+        &stopped,
+    ) {
+        return;
+    }
     transcribe_loop(
         capture.input_rate(),
         std::time::Duration::from_secs(60),
         "listen-debug",
         || capture.drain_new(),
-        || cancel.load(Ordering::SeqCst),
+        stopped,
         |pcm| {
             transcriber
                 .transcribe_pcm_16k(pcm)
@@ -404,6 +434,114 @@ pub(crate) fn run_listen(
         },
         speaker_locked_pcm,
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache-aware streaming dictation (the built-in ONNX "parakeet" engine).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Process-wide lazily-loaded streaming model (one mic / one listen at a time, so a single
+/// shared instance is fine). `None` until the first streaming listen loads it.
+fn streaming_cell() -> &'static Mutex<Option<StreamingModel>> {
+    static CELL: OnceLock<Mutex<Option<StreamingModel>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+/// Whether this listen should stream: the resolved STT provider is the cross-platform ONNX path
+/// (`ort_cpu`/`ort_cuda`, carried in `DONTSPEAK_STT_PROVIDER`) — i.e. the built-in "parakeet"
+/// engine, which IS the streaming model now — AND its assets are present. The macOS apple-native
+/// (`ane`) and system engines keep the offline `transcribe_loop`. No config flag: streaming is
+/// simply how the ONNX engine works.
+fn streaming_enabled() -> bool {
+    let provider = std::env::var("DONTSPEAK_STT_PROVIDER").unwrap_or_default();
+    let is_onnx =
+        provider.eq_ignore_ascii_case("ort_cpu") || provider.eq_ignore_ascii_case("ort_cuda");
+    is_onnx && ds_model::parakeet_present()
+}
+
+/// Try to run this listen via the streaming model. Returns `true` if it handled the session
+/// (emitting PARTIAL/STTSTATS/FINAL/LDONE), `false` if streaming is unavailable so the caller
+/// should fall back to the offline [`transcribe_loop`]. Lazy-loads the model on first use.
+fn try_streaming(
+    rate: u32,
+    timeout: std::time::Duration,
+    label: &str,
+    drain: &mut dyn FnMut() -> Vec<f32>,
+    stopped: &dyn Fn() -> bool,
+) -> bool {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+    if !streaming_enabled() {
+        return false;
+    }
+    let cell = streaming_cell();
+    let mut guard = cell.lock().unwrap();
+    if guard.is_none() {
+        let Some(dir) = ds_model::parakeet_dir() else {
+            return false;
+        };
+        match StreamingModel::load(&dir, true) {
+            Ok(m) => *guard = Some(m),
+            Err(e) => {
+                eprintln!("{label}: streaming load failed, using offline: {e}");
+                return false;
+            }
+        }
+    }
+    let model = guard.as_mut().expect("just loaded");
+    let mut state = match model.new_state(rate) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{label}: streaming state failed, using offline: {e}");
+            return false;
+        }
+    };
+    let flush = || {
+        let _ = std::io::stdout().flush();
+    };
+    let _ = drain(); // drop stale pre-listen audio
+    println!("LISTENING");
+    flush();
+    let started = Instant::now();
+    let mut last_text = String::new();
+    let mut partials = 0u32;
+    while !stopped() && started.elapsed() < timeout {
+        std::thread::sleep(Duration::from_millis(50));
+        let block = drain();
+        if block.is_empty() {
+            continue;
+        }
+        match model.accept_audio(&mut state, &block) {
+            Ok(text) => {
+                if text != last_text && !text.trim().is_empty() {
+                    println!("PARTIAL {text}");
+                    flush();
+                    last_text = text;
+                    partials += 1;
+                }
+            }
+            Err(e) => eprintln!("{label}: streaming accept: {e}"),
+        }
+    }
+    let final_start = Instant::now();
+    let text = model.finalize(&mut state).unwrap_or_else(|e| {
+        eprintln!("{label}: streaming finalize: {e}");
+        String::new()
+    });
+    let final_ms = final_start.elapsed().as_secs_f64() * 1000.0;
+    let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let audio_ms = StreamingModel::audio_ms(&state);
+    let transcribe_ms = StreamingModel::transcribe_ms(&state);
+    // STTSTATS schema shared with the offline path; `preview_ms=0` (no re-encode) + `streaming=1`
+    // are the success markers in the activity-log `STT listen ...` line under DONTSPEAK_DEBUG.
+    println!(
+        "STTSTATS transcribe_ms={transcribe_ms:.1} audio_ms={audio_ms:.1} wall_ms={wall_ms:.1} \
+         final_ms={final_ms:.1} preview_ms=0.0 partials={partials} streaming=1"
+    );
+    println!("FINAL {}", text.replace('\n', " "));
+    println!("LDONE");
+    flush();
+    true
 }
 
 /// Resolve the bundled SepFormer separator model: the app sets `DONTSPEAK_SEPARATOR_PATH`

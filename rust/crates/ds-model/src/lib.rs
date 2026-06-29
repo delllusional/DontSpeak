@@ -1,6 +1,6 @@
 //! ds-model — locate & download model assets for dontspeak (ARCHITECTURE §C.1 / §D).
 //!
-//! Assets: the Parakeet v2 STT model (encoder + decoder_joint + preprocessor + vocab) AND the native
+//! Assets: the Parakeet STT model (streaming FastConformer: encoder + decoder + joiner + tokens) AND the native
 //! Kokoro TTS triple — `kokoro-v1.0.onnx` (~310 MB), `voices-v1.0.bin` (~28 MB),
 //! and the matching `libonnxruntime` dylib for `ort` (load-dynamic, resolved at
 //! runtime). One base dir [`ds_config::model_dir`] holds every asset; each is a
@@ -69,10 +69,10 @@ pub use setup::{
 };
 pub use spec::{
     DownloadFile, KOKORO_ONNX_FILE, KOKORO_VOICES_FILE, ModelSpec, PARAKEET_DECODER_FILE,
-    PARAKEET_ENCODER_FILE, PARAKEET_PREPROC_FILE, PARAKEET_VOCAB_FILE, PrefetchItem, kokoro_files,
+    PARAKEET_ENCODER_FILE, PARAKEET_JOINER_FILE, PARAKEET_TOKENS_FILE, PrefetchItem, kokoro_files,
     kokoro_onnx_spec, kokoro_present, kokoro_voices_spec, parakeet_decoder_spec, parakeet_dir,
-    parakeet_encoder_spec, parakeet_files, parakeet_preproc_spec, parakeet_present,
-    parakeet_vocab_spec, prefetch_items,
+    parakeet_encoder_spec, parakeet_files, parakeet_joiner_spec, parakeet_present,
+    parakeet_tokens_spec, prefetch_items,
 };
 
 #[cfg(all(

@@ -12,8 +12,8 @@
 //!     `SFSpeechRecognizer` path runs in the warm helper.
 //!
 //!   * [`parakeet::ParakeetTranscriber`] — LOCAL on-device STT: mic capture (cpal) → 16 kHz
-//!     (rubato) → `transcribe-rs` `ParakeetModel` (TDT 0.6b v2 int8) over the shared `ort` runtime;
-//!     pastes the transcript via `KeyInjector::type_text`.
+//!     (rubato) → the cache-aware streaming FastConformer ([`streaming`]) over the shared `ort`
+//!     runtime; pastes the transcript via `KeyInjector::type_text`.
 //!
 //! `Stt` is intentionally NOT `Send`: the engine drives it from its single poll
 //! thread, and `ClaudeNative` borrows the engine-owned platform (whose macOS
@@ -35,6 +35,8 @@ pub mod separate;
 /// and system (SpeechAnalyzer) STT backends. macOS only.
 #[cfg(target_os = "macos")]
 pub mod shim;
+/// Cache-aware STREAMING Parakeet/FastConformer transducer over `ort` (each frame encoded once).
+pub mod streaming;
 /// System STT over macOS `SFSpeechRecognizer` (on-device). macOS only.
 #[cfg(target_os = "macos")]
 pub mod sysspeech;

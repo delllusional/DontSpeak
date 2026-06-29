@@ -8,7 +8,7 @@ use crate::download::{ensure, ensure_with_progress};
 use crate::ort::{ensure_onnxruntime, ensure_onnxruntime_with_progress};
 use crate::spec::{
     kokoro_files, kokoro_onnx_spec, kokoro_voices_spec, parakeet_decoder_spec, parakeet_dir,
-    parakeet_encoder_spec, parakeet_files, parakeet_preproc_spec, parakeet_vocab_spec,
+    parakeet_encoder_spec, parakeet_files, parakeet_joiner_spec, parakeet_tokens_spec,
 };
 
 /// Eager pre-download of the FULL Parakeet asset set: encoder, decoder, preprocessor,
@@ -16,8 +16,8 @@ use crate::spec::{
 pub fn run_setup_parakeet() -> std::io::Result<PathBuf> {
     ensure(&parakeet_encoder_spec())?;
     ensure(&parakeet_decoder_spec())?;
-    ensure(&parakeet_preproc_spec())?;
-    ensure(&parakeet_vocab_spec())?;
+    ensure(&parakeet_joiner_spec())?;
+    ensure(&parakeet_tokens_spec())?;
     ensure_onnxruntime()?;
     parakeet_dir().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve model_dir()")
@@ -41,10 +41,10 @@ pub fn run_setup_parakeet_with_progress(progress: &dyn Fn(u64, u64)) -> std::io:
     ensure_with_progress(&parakeet_decoder_spec(), &|done, _| {
         progress((enc_size + done).min(grand_total), grand_total);
     })?;
-    ensure_with_progress(&parakeet_preproc_spec(), &|done, _| {
+    ensure_with_progress(&parakeet_joiner_spec(), &|done, _| {
         progress((enc_size + dec_size + done).min(grand_total), grand_total);
     })?;
-    ensure_with_progress(&parakeet_vocab_spec(), &|done, _| {
+    ensure_with_progress(&parakeet_tokens_spec(), &|done, _| {
         progress(
             (enc_size + dec_size + pre_size + done).min(grand_total),
             grand_total,

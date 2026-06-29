@@ -161,8 +161,8 @@ mod tests {
             urls::KOKORO_VOICES,
             urls::PARAKEET_ENCODER,
             urls::PARAKEET_DECODER,
-            urls::PARAKEET_PREPROC,
-            urls::PARAKEET_VOCAB,
+            urls::PARAKEET_JOINER,
+            urls::PARAKEET_TOKENS,
         ] {
             assert!(
                 names.iter().any(|n| n == d.file_name),

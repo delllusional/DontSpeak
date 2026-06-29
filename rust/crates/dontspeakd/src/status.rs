@@ -187,8 +187,8 @@ pub(crate) fn model_status_json(
     //                    self-manages its model cache (no on-disk file gate here).
     let parakeet_onnx_files = exists(ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE))
         && exists(ds_model::model_path(ds_model::PARAKEET_DECODER_FILE))
-        && exists(ds_model::model_path(ds_model::PARAKEET_PREPROC_FILE))
-        && exists(ds_model::model_path(ds_model::PARAKEET_VOCAB_FILE))
+        && exists(ds_model::model_path(ds_model::PARAKEET_JOINER_FILE))
+        && exists(ds_model::model_path(ds_model::PARAKEET_TOKENS_FILE))
         && exists(ds_model::onnxruntime_dylib_path());
     let stt_uses_onnx = matches!(
         cfg.resolved_stt_provider(),
@@ -473,12 +473,12 @@ pub(crate) fn model_status_json(
             .unwrap_or("off")
             .to_string(),
         // The ACTUAL STT runtime for the built_in (Parakeet) engine — "ane" (FluidAudio
-        // Core ML / ANE — the neural engine), "ort_cuda" (transcribe-rs/ort, NVIDIA GPU) or
-        // "ort_cpu" (transcribe-rs/ort, CPU). Like the TTS `tts_provider`, this is HONEST
-        // about fallback: `ane` degrades to ort_cpu when the FluidAudio shim is absent, and
-        // `ort_cuda` degrades to ort_cpu when the GPU runtime isn't fetched — the SAME
-        // checks the loaders use (`for_provider` on SMKOKORO_DYLIB_PATH, `stt_wants_cuda`
-        // on cuda_runtime_present), so engine + helper agree. Null for system/claude_code.
+        // Core ML / ANE — the neural engine), "ort_cuda" (ort, NVIDIA GPU) or "ort_cpu" (ort,
+        // CPU). Like the TTS `tts_provider`, this is HONEST about fallback: `ane` degrades to
+        // ort_cpu when the FluidAudio shim is absent, and `ort_cuda` degrades to ort_cpu when the
+        // GPU runtime isn't fetched — the SAME checks the loaders use (`for_provider` on
+        // SMKOKORO_DYLIB_PATH, the GPU-runtime probe), so engine + helper agree. Null for
+        // system/claude_code.
         stt_provider: stt_provider_token(
             resolved_stt,
             cfg.resolved_stt_provider(),
@@ -612,12 +612,12 @@ pub(crate) fn model_status_json(
 /// The STT runtime TOKEN the UI shows — the ACTUAL runtime, NOT the naive resolved preference.
 /// `ane` degrades to `ort_cpu` when the FluidAudio shim is absent, and `ort_cuda` degrades to
 /// `ort_cpu` when the GPU runtime isn't fetched — the SAME gates the loaders use (`for_provider`,
-/// `stt_wants_cuda` on `cuda_runtime_present`), so the row matches what really loaded. `None` for
-/// non-built_in engines (claude_code/system/off have no local Parakeet runtime). Pure (callers
-/// pass the live `shim_ok`/`cuda_present`) so the "actual, not naive" invariant is unit-tested —
-/// see [`provider_token_tests`]. (One asymmetry: the deepest fallback — GPU runtime present but
-/// the ort CUDA session fails to BUILD — is caught for TTS via the child's `provider()`, but not
-/// for STT, since `transcribe-rs` doesn't surface its realized EP.)
+/// the GPU-runtime probe), so the row matches what really loaded. `None` for non-built_in engines
+/// (claude_code/system/off have no local Parakeet runtime). Pure (callers pass the live
+/// `shim_ok`/`cuda_present`) so the "actual, not naive" invariant is unit-tested — see
+/// [`provider_token_tests`]. (NOTE: the streaming runner currently builds CPU-only ort sessions —
+/// int8 dynamic-quant isn't GPU-accelerated — so an `ort_cuda` token reflects the resolved
+/// PREFERENCE; STT compute is on CPU regardless until/unless a GPU EP is wired for streaming.)
 fn stt_provider_token(
     resolved_stt: Option<ds_config::SttEngine>,
     resolved_provider: ds_config::Provider,

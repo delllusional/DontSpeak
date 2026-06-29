@@ -38,7 +38,7 @@ impl ModelSpec {
 // …); re-export them from the registry so the historical paths keep resolving.
 pub use crate::urls::{
     KOKORO_ONNX_FILE, KOKORO_VOICES_FILE, PARAKEET_DECODER_FILE, PARAKEET_ENCODER_FILE,
-    PARAKEET_PREPROC_FILE, PARAKEET_VOCAB_FILE,
+    PARAKEET_JOINER_FILE, PARAKEET_TOKENS_FILE,
 };
 
 /// [`ModelSpec`] for `kokoro-v1.0.onnx` (~310 MB).
@@ -74,55 +74,48 @@ pub fn kokoro_present() -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Parakeet TDT 0.6b v2 (English) STT model — int8 ONNX (encoder + decoder_joint +
-// nemo128 preprocessor + vocab). Run in-process via `transcribe-rs` over the SAME
-// `ort` (load-dynamic) runtime as Kokoro, so the onnxruntime dylib is shared (no
-// extra dylib to fetch).
+// Parakeet STT model — the cache-aware STREAMING FastConformer transducer (int8 ONNX:
+// encoder + decoder LSTM + joiner + tokens), run in-process by `ds-stt::streaming` over the
+// SAME shared `ort` (load-dynamic) runtime as Kokoro, so the onnxruntime dylib is shared.
+// This REPLACED the old whole-buffer transcribe-rs Parakeet TDT model; the `built_in` STT
+// engine keeps the "parakeet" name. All four files load flat from `model_dir()`.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// The Parakeet URLs/digests/sizes live in the registry (`urls.rs`); `transcribe-rs`
-// (`ParakeetModel::load`) expects all four files flat in ONE dir under exactly the names
-// pinned there. The file-name consts are re-exported above with the Kokoro ones.
-
-/// [`ModelSpec`] for the Parakeet encoder (`encoder-model.int8.onnx`, ~622 MB).
+/// [`ModelSpec`] for the encoder (`encoder.int8.onnx`, ~132 MB).
 pub fn parakeet_encoder_spec() -> ModelSpec {
     ModelSpec::of(crate::urls::PARAKEET_ENCODER)
 }
 
-/// [`ModelSpec`] for the Parakeet decoder+joint (`decoder_joint-model.int8.onnx`,
-/// ~9 MB).
+/// [`ModelSpec`] for the decoder LSTM (`decoder.int8.onnx`, ~4 MB).
 pub fn parakeet_decoder_spec() -> ModelSpec {
     ModelSpec::of(crate::urls::PARAKEET_DECODER)
 }
 
-/// [`ModelSpec`] for the Parakeet mel preprocessor (`nemo128.onnx`, ~140 KB).
-pub fn parakeet_preproc_spec() -> ModelSpec {
-    ModelSpec::of(crate::urls::PARAKEET_PREPROC)
+/// [`ModelSpec`] for the joiner (`joiner.int8.onnx`, ~1.4 MB).
+pub fn parakeet_joiner_spec() -> ModelSpec {
+    ModelSpec::of(crate::urls::PARAKEET_JOINER)
 }
 
-/// [`ModelSpec`] for the Parakeet vocab (`vocab.txt`, ~9 KB).
-pub fn parakeet_vocab_spec() -> ModelSpec {
-    ModelSpec::of(crate::urls::PARAKEET_VOCAB)
+/// [`ModelSpec`] for the tokens (`tokens.txt`, ~12 KB).
+pub fn parakeet_tokens_spec() -> ModelSpec {
+    ModelSpec::of(crate::urls::PARAKEET_TOKENS)
 }
 
-/// The directory `transcribe-rs` should load Parakeet from (the flat
-/// `model_dir()` holding all four files). `None` only if the data dir won't
-/// resolve.
+/// The directory the streaming model loads from (the flat `model_dir()` holding all four
+/// files). `None` only if the data dir won't resolve.
 pub fn parakeet_dir() -> Option<PathBuf> {
     ds_config::model_dir()
 }
 
-/// Is the FULL Parakeet asset set present AND checksum-valid (encoder + decoder,
-/// preprocessor, vocab, and the shared onnxruntime dylib)? The STT factory uses
-/// this as the cheap, network-free availability probe so it degrades to
-/// ClaudeNative when the model is absent. The onnxruntime dylib is shared with
-/// Kokoro (existence-only, as it's extracted from a separately sha-verified `.tgz`).
+/// Is the FULL Parakeet (streaming) asset set present AND checksum-valid (encoder + decoder +
+/// joiner + tokens + the shared onnxruntime dylib)? The STT factory uses this as the cheap,
+/// network-free availability probe so it degrades to ClaudeNative when the model is absent.
 pub fn parakeet_present() -> bool {
     let specs = [
         parakeet_encoder_spec(),
         parakeet_decoder_spec(),
-        parakeet_preproc_spec(),
-        parakeet_vocab_spec(),
+        parakeet_joiner_spec(),
+        parakeet_tokens_spec(),
     ];
     let models_ok = specs.iter().all(|spec| {
         model_path(&spec.file_name)
@@ -184,16 +177,14 @@ pub fn kokoro_files() -> Vec<DownloadFile> {
     v
 }
 
-/// The files the FULL Parakeet download fetches, in fetch order (encoder, decoder,
-/// preprocessor, vocab, then the shared onnxruntime dylib `.tgz` on supported
-/// platforms). Byte counts are the exact `istupakov/parakeet-tdt-0.6b-v2-onnx`
-/// blob sizes.
+/// The files the FULL Parakeet (streaming) download fetches, in fetch order (encoder, decoder,
+/// joiner, tokens, then the shared onnxruntime dylib `.tgz` on supported platforms).
 pub fn parakeet_files() -> Vec<DownloadFile> {
     let mut v = vec![
         DownloadFile::of(crate::urls::PARAKEET_ENCODER),
         DownloadFile::of(crate::urls::PARAKEET_DECODER),
-        DownloadFile::of(crate::urls::PARAKEET_PREPROC),
-        DownloadFile::of(crate::urls::PARAKEET_VOCAB),
+        DownloadFile::of(crate::urls::PARAKEET_JOINER),
+        DownloadFile::of(crate::urls::PARAKEET_TOKENS),
     ];
     v.extend(onnxruntime_dylib_file_entry());
     v
@@ -250,8 +241,8 @@ pub fn prefetch_items(what: &str) -> Vec<PrefetchItem> {
         "parakeet" => [
             parakeet_encoder_spec(),
             parakeet_decoder_spec(),
-            parakeet_preproc_spec(),
-            parakeet_vocab_spec(),
+            parakeet_joiner_spec(),
+            parakeet_tokens_spec(),
         ]
         .iter()
         .filter_map(&spec_item)
@@ -289,8 +280,8 @@ mod tests {
             kokoro_voices_spec().url,
             parakeet_encoder_spec().url,
             parakeet_decoder_spec().url,
-            parakeet_preproc_spec().url,
-            parakeet_vocab_spec().url,
+            parakeet_joiner_spec().url,
+            parakeet_tokens_spec().url,
         ];
         if let Some(d) = onnxruntime_dist() {
             urls.push(d.url.to_string());
@@ -363,21 +354,20 @@ mod tests {
     #[test]
     fn parakeet_specs_have_right_urls_files_and_pins() {
         let enc = parakeet_encoder_spec();
-        assert_eq!(enc.file_name, "encoder-model.int8.onnx");
-        assert_eq!(
-            enc.url,
-            "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.int8.onnx"
+        assert_eq!(enc.file_name, "encoder.int8.onnx");
+        assert!(
+            enc.url.contains(
+                "sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/main/encoder.int8.onnx"
+            ),
+            "encoder url: {}",
+            enc.url
         );
         let dec = parakeet_decoder_spec();
-        assert_eq!(dec.file_name, "decoder_joint-model.int8.onnx");
-        let pre = parakeet_preproc_spec();
-        assert_eq!(pre.file_name, "nemo128.onnx");
-        let voc = parakeet_vocab_spec();
-        assert_eq!(voc.file_name, "vocab.txt");
-        assert_eq!(
-            voc.url,
-            "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/vocab.txt"
-        );
+        assert_eq!(dec.file_name, "decoder.int8.onnx");
+        let pre = parakeet_joiner_spec();
+        assert_eq!(pre.file_name, "joiner.int8.onnx");
+        let voc = parakeet_tokens_spec();
+        assert_eq!(voc.file_name, "tokens.txt");
         // All four pin distinct, lowercase, 64-hex digests.
         for spec in [&enc, &dec, &pre, &voc] {
             assert_eq!(spec.sha256.len(), 64, "sha256 must be 64 hex chars");

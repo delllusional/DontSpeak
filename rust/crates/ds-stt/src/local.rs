@@ -1,8 +1,7 @@
-//! Local on-device STT selector. Wraps the two local transcribers behind one type so
+//! Local on-device STT selector. Wraps the local transcribers behind one type so
 //! the warm helper can hold whichever the user selected (`stt_engine`) without caring
-//! which it is. Parakeet-ONNX (`transcribe-rs`/`ort`, cross-platform) and — on macOS —
-//! Parakeet Core ML / ANE (FluidAudio). Both run the same model family; the only
-//! difference is the runtime. Both are SELECTABLE; neither replaces the other.
+//! which it is. Parakeet-ONNX (cross-platform streaming FastConformer over `ort`) and — on
+//! macOS — Parakeet Core ML / ANE (FluidAudio). Both are SELECTABLE; neither replaces the other.
 
 use std::path::PathBuf;
 
@@ -22,7 +21,7 @@ fn shim_available() -> bool {
 /// The active local transcriber. Same lazy-load surface as
 /// [`ParakeetTranscriber`] so call sites are backend-agnostic.
 pub enum LocalTranscriber {
-    /// Cross-platform Parakeet over `transcribe-rs` / `ort` (the `ort_cpu` STT provider).
+    /// Cross-platform Parakeet — the streaming FastConformer over `ort` (the `ort_cpu` provider).
     /// Boxed: `ParakeetTranscriber` is much larger than the Core ML variant, so storing
     /// it inline made every `LocalTranscriber` as big as it (clippy `large_enum_variant`).
     /// Box keeps the enum small; the lazy-load surface is unchanged because the box

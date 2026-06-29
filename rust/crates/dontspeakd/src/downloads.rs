@@ -112,8 +112,8 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
         )
         && !(exists(ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE))
             && exists(ds_model::model_path(ds_model::PARAKEET_DECODER_FILE))
-            && exists(ds_model::model_path(ds_model::PARAKEET_PREPROC_FILE))
-            && exists(ds_model::model_path(ds_model::PARAKEET_VOCAB_FILE))
+            && exists(ds_model::model_path(ds_model::PARAKEET_JOINER_FILE))
+            && exists(ds_model::model_path(ds_model::PARAKEET_TOKENS_FILE))
             && exists(ds_model::onnxruntime_dylib_path()));
     let which = match (need_kokoro, need_parakeet) {
         (true, true) => "all",

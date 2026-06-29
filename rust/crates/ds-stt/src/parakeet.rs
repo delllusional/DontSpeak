@@ -1,7 +1,11 @@
-//! Parakeet (ONNX) — the portable local on-device STT engine: mic capture (cpal)
-//! → mono → 16 kHz (rubato) → `transcribe-rs` `ParakeetModel` (TDT 0.6b v2 int8)
-//! over the shared `ort` (load-dynamic) runtime, through the [`crate::Stt`] trait. The
-//! cross-platform sibling of the macOS-only Core ML / ANE Parakeet backend.
+//! Parakeet — the portable local on-device STT engine: mic capture (cpal) → mono → 16 kHz
+//! (rubato) → the cache-aware streaming FastConformer transducer ([`crate::streaming`]) over the
+//! shared `ort` (load-dynamic) runtime, through the [`crate::Stt`] trait. The cross-platform
+//! sibling of the macOS-only Core ML / ANE Parakeet backend.
+//!
+//! NOTE: this file owns the mic [`Capture`] + [`resample`] helpers and the [`ParakeetTranscriber`]
+//! whole-buffer adapter (one-shot over the streaming model, for segment-at-a-time callers). The
+//! live helper dictation drives [`crate::streaming::StreamingModel`] INCREMENTALLY for partials.
 //!
 //! Unlike [`crate::claude_native::ClaudeNative`] (which drives Claude Code's
 //! built-in voice via a push-to-talk tap), this engine records the audio itself and
@@ -16,7 +20,7 @@
 //!
 //! Everything fail-quiets: any device/model/inference error logs and drops the
 //! capture without injecting. The model is loaded LAZILY on the first transcription
-//! (~660 MB int8 ONNX), so selecting Parakeet never blocks the config hot-reload and
+//! (~137 MB int8 ONNX), so selecting Parakeet never blocks the config hot-reload and
 //! the first dictation pays the one-time load.
 //!
 //! The reusable pieces — [`Capture`] (mic → 16 kHz mono PCM) and
@@ -35,9 +39,8 @@ use cpal::Sample as _;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Async, FixedAsync, Indexing, PolynomialDegree, Resampler};
-use transcribe_rs::onnx::Quantization;
-use transcribe_rs::onnx::parakeet::ParakeetModel;
-use transcribe_rs::{SpeechModel, TranscribeOptions};
+
+use crate::streaming::StreamingModel;
 
 /// The sample rate Parakeet expects (16 kHz mono, f32 in [-1, 1]).
 const TARGET_RATE: u32 = 16_000;
@@ -139,19 +142,24 @@ impl Capture {
 // Transcriber — owns the lazily-loaded Parakeet model; PCM (16 kHz mono) → text.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Holds the Parakeet model (loaded lazily on first use) and turns 16 kHz mono
-/// PCM into text. `Send`, so the engine's test session can hold it across threads.
+/// The cross-platform ONNX on-device STT engine — now backed by the cache-aware streaming
+/// FastConformer ([`crate::streaming::StreamingModel`]), which REPLACED the old whole-buffer
+/// `transcribe-rs` Parakeet TDT engine (see `docs/STREAMING-STT-PLAN.md`). The name is kept
+/// because the `built_in` STT engine, its config provider tokens, and the model-asset wiring
+/// all still call it "parakeet". Exposes the same lazy-load + whole-buffer API; the helper's
+/// live dictation drives the streaming model INCREMENTALLY (per-chunk partials) instead — both
+/// share this one model. `Send`.
 pub struct ParakeetTranscriber {
-    /// The dir holding `encoder-model.int8.onnx` / `decoder_joint-model.int8.onnx`
-    /// / `nemo128.onnx` / `vocab.txt` (the flat `model_dir()`).
+    /// The flat `model_dir()` holding `encoder.int8.onnx` / `decoder.int8.onnx` /
+    /// `joiner.int8.onnx` / `tokens.txt`.
     model_dir: PathBuf,
-    /// Lazily loaded on first transcription; cached for subsequent calls.
-    model: Option<ParakeetModel>,
+    /// Lazily loaded on first use; cached for subsequent calls.
+    model: Option<StreamingModel>,
 }
 
 impl ParakeetTranscriber {
-    /// Build a transcriber for the Parakeet assets in `model_dir`. Cheap — the
-    /// model is not loaded until the first [`transcribe_pcm_16k`](Self::transcribe_pcm_16k).
+    /// Build a transcriber for the streaming model assets in `model_dir`. Cheap — the model is
+    /// not loaded until the first [`preload`](Self::preload) / [`transcribe_pcm_16k`].
     pub fn new(model_dir: PathBuf) -> Self {
         Self {
             model_dir,
@@ -159,89 +167,38 @@ impl ParakeetTranscriber {
         }
     }
 
-    /// Lazily load the Parakeet model (TDT 0.6b v2, int8) over the shared
-    /// onnxruntime. Points `ort` (load-dynamic) at the dylib first. Returns a
-    /// mutable ref to the cached model, or an error string (logged) if loading fails.
-    fn model(&mut self) -> Result<&mut ParakeetModel, String> {
+    /// Lazily load the streaming model (int8) over the shared onnxruntime (CPU EP — the int8
+    /// graph runs fast on CPU, and dynamic-quant ops aren't GPU-accelerated anyway). Points
+    /// `ort` (load-dynamic) at the dylib first.
+    fn model(&mut self) -> Result<&mut StreamingModel, String> {
         if self.model.is_none() {
-            // Point `ort` (load-dynamic) at the runtime via the SHARED GPU-aware bootstrap
-            // — the SAME one the Kokoro-ONNX TTS path uses, so both engines run over one
-            // ort runtime: the Windows CUDA GPU onnxruntime when STT prefers CUDA and its
-            // runtime is present, else the version-checked CPU dylib. (In the warm helper
-            // whichever engine loads first selects the dylib; this is idempotent, and
-            // correct standalone.)
-            let use_cuda = stt_wants_cuda();
-            ds_model::ensure_ort_dylib_gpu(use_cuda)?;
-            // transcribe-rs's accelerator is GLOBAL and best-effort: `Cuda` registers the
-            // CUDA EP for Parakeet's sessions, falling back to CPU (with a log warning) if
-            // the GPU runtime/driver is unavailable — so this never breaks dictation. Set it
-            // EXPLICITLY in BOTH directions (kept consistent with the dylib chosen above):
-            // `Cuda` only when the GPU dylib was selected, else `CpuOnly` so a CPU config
-            // never probes for a GPU. This is the STT analogue of synth.rs's Kokoro CUDA EP.
-            transcribe_rs::set_ort_accelerator(if use_cuda {
-                transcribe_rs::OrtAccelerator::Cuda
-            } else {
-                transcribe_rs::OrtAccelerator::CpuOnly
-            });
-            let m = ParakeetModel::load(&self.model_dir, &Quantization::Int8)
-                .map_err(|e| format!("model load: {e}"))?;
-            self.model = Some(m);
+            self.model = Some(StreamingModel::load(&self.model_dir, true)?);
         }
         Ok(self.model.as_mut().expect("model just loaded"))
     }
 
-    /// Force-load the model now (idempotent) so it's resident before the first
-    /// transcription — the eager counterpart to [`unload`](Self::unload). Lets the
-    /// helper preload Parakeet the moment it's the selected engine, so "loaded"
-    /// reflects residency instead of waiting for the first dictation.
+    /// Force-load the model now (idempotent) so it's resident before the first transcription.
     pub fn preload(&mut self) -> Result<(), String> {
         self.model().map(|_| ())
     }
 
-    /// Free the cached model if loaded, returning whether anything was freed. The
-    /// next [`transcribe_pcm_16k`](Self::transcribe_pcm_16k) lazily reloads it. Lets
-    /// the warm helper reclaim the STT model's RAM when dictation switches off
-    /// Parakeet while the helper stays warm for TTS.
+    /// Free the cached model if loaded, returning whether anything was freed.
     pub fn unload(&mut self) -> bool {
         self.model.take().is_some()
     }
 
-    /// Transcribe 16 kHz mono f32 PCM to trimmed text. Empty input → empty string.
+    /// Transcribe 16 kHz mono f32 PCM to trimmed text (whole-buffer / one-shot: feed it all
+    /// through the streaming model, then finalize). Empty input → empty string. Used by the
+    /// segment-at-a-time callers (hands-free listener, test recognition); the live helper
+    /// dictation uses the streaming model's incremental path directly.
     pub fn transcribe_pcm_16k(&mut self, pcm: &[f32]) -> Result<String, String> {
         if pcm.is_empty() {
             return Ok(String::new());
         }
         let model = self.model()?;
-        let result = model
-            .transcribe(pcm, &TranscribeOptions::default())
-            .map_err(|e| format!("transcribe: {e}"))?;
-        Ok(result.text.trim().to_string())
-    }
-}
-
-/// Whether the Parakeet STT path should run on the CUDA GPU: the RESOLVED STT provider
-/// (carried via `DONTSPEAK_STT_PROVIDER`, set by the engine from `Provider::resolved_stt`) is
-/// `ort_cuda` AND the GPU runtime is fetched. Gated to Windows/Linux x86_64 — the platforms
-/// with a downloadable CUDA runtime; everywhere else the CPU (and, on macOS, the native ANE)
-/// paths handle STT. Mirrors the Kokoro `want_gpu` check in the TTS loader, reading the STT
-/// env instead of `DONTSPEAK_PROVIDER`.
-fn stt_wants_cuda() -> bool {
-    #[cfg(all(
-        any(target_os = "windows", target_os = "linux"),
-        target_arch = "x86_64"
-    ))]
-    {
-        std::env::var("DONTSPEAK_STT_PROVIDER")
-            .map(|p| p.eq_ignore_ascii_case("ort_cuda"))
-            .unwrap_or(false)
-            && ds_model::cuda_runtime_present()
-    }
-    #[cfg(not(all(
-        any(target_os = "windows", target_os = "linux"),
-        target_arch = "x86_64"
-    )))]
-    {
-        false
+        let mut state = model.new_state(TARGET_RATE)?;
+        model.accept_audio(&mut state, pcm)?;
+        model.finalize(&mut state)
     }
 }
 
