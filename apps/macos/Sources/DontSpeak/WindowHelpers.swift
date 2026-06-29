@@ -6,7 +6,6 @@
 
 import SwiftUI
 import AppKit
-import ObjectiveC
 
 /// Reaches the hosting `NSWindow` from SwiftUI so callers can tweak native window
 /// chrome (e.g. disable the minimize/zoom buttons for a close-only window). The
@@ -82,32 +81,6 @@ extension View {
     }
 }
 
-/// Pins the sidebar/detail divider so it CAN'T be dragged. `navigationSplitViewColumnWidth`
-/// fixes the column's preferred width, but the AppKit `NSSplitView` underneath still lets the
-/// user grab the divider and drag the panes — far enough to push the sidebar off-screen. The
-/// canonical way to disable a divider is a delegate returning a ZERO effective drag rect for it
-/// (`splitView(_:effectiveRect:forDrawnRect:ofDividerAt:)`), so there's no hit area to grab.
-/// We wrap (not replace) SwiftUI's own split delegate — forwarding every other call to it — so
-/// the column layout it manages is untouched; only the drag is removed.
-private final class FixedDividerSplitDelegate: NSObject, NSSplitViewDelegate {
-    weak var wrapped: NSSplitViewDelegate?
-    init(wrapping: NSSplitViewDelegate?) { self.wrapped = wrapping }
-
-    func splitView(_ splitView: NSSplitView, effectiveRect proposedEffectiveRect: NSRect,
-                   forDrawnRect drawnRect: NSRect, ofDividerAt dividerIndex: Int) -> NSRect {
-        .zero   // no drag hit area → the divider is immovable
-    }
-
-    // Transparently forward every OTHER delegate method to SwiftUI's original delegate, so its
-    // column sizing/collapse behavior is preserved — we only override the one method above.
-    override func responds(to aSelector: Selector!) -> Bool {
-        super.responds(to: aSelector) || (wrapped?.responds(to: aSelector) ?? false)
-    }
-    override func forwardingTarget(for aSelector: Selector!) -> Any? { wrapped }
-}
-
-private nonisolated(unsafe) var kFixedDividerDelegateKey: UInt8 = 0
-
 /// Depth-first search for the first `NSSplitView` under a view (the one `NavigationSplitView`
 /// builds for the sidebar/detail layout).
 @MainActor private func firstSplitView(in view: NSView) -> NSSplitView? {
@@ -119,16 +92,29 @@ private nonisolated(unsafe) var kFixedDividerDelegateKey: UInt8 = 0
 }
 
 extension View {
-    /// Make the sidebar/detail divider non-draggable (see `FixedDividerSplitDelegate`). Applied
-    /// once when the window appears; the wrapping delegate is retained via an associated object
-    /// so ARC keeps it alive for the window's lifetime.
-    func lockSidebarDivider() -> some View {
+    /// Pin the sidebar so the divider can't be dragged and the column can't collapse to zero.
+    /// `navigationSplitViewColumnWidth` sets only a PREFERRED width — the AppKit `NSSplitView`
+    /// underneath still lets the user grab the divider and drag the sidebar down to nothing.
+    ///
+    /// We fix it on the sidebar's `NSSplitViewItem` directly: equal min/max `thickness` (AppKit
+    /// enforces it, so the divider has nowhere to go) plus `canCollapse = false` (so it can't snap
+    /// to zero). Crucially this does NOT touch the split view's DELEGATE — on macOS a
+    /// `NavigationSplitView` is backed by an `NSSplitViewController` that is its OWN split-view
+    /// delegate, so the earlier approach (wrapping that delegate with a forwarding proxy) left
+    /// AppKit forwarding layout callbacks to a freed object → a segfault during split-view layout.
+    /// Reading the controller off the delegate and setting its item's thickness is delegate-safe,
+    /// and if a future SwiftUI build reshapes the hierarchy this simply no-ops (draggable again),
+    /// never crashes.
+    func lockSidebarDivider(width: CGFloat = 150) -> some View {
         background(WindowAccessor { window in
             guard let content = window.contentView,
-                  let split = firstSplitView(in: content) else { return }
-            let proxy = FixedDividerSplitDelegate(wrapping: split.delegate)
-            objc_setAssociatedObject(split, &kFixedDividerDelegateKey, proxy, .OBJC_ASSOCIATION_RETAIN)
-            split.delegate = proxy
+                  let split = firstSplitView(in: content),
+                  let controller = split.delegate as? NSSplitViewController,
+                  let sidebar = controller.splitViewItems.first
+            else { return }
+            sidebar.canCollapse = false
+            sidebar.minimumThickness = width
+            sidebar.maximumThickness = width
         })
     }
 }
