@@ -279,7 +279,11 @@ mod tests {
                 ("license", r.license),
                 ("license_url", r.license_url),
             ] {
-                assert!(!val.is_empty(), "Core ML set `{}` has empty {field}", r.name);
+                assert!(
+                    !val.is_empty(),
+                    "Core ML set `{}` has empty {field}",
+                    r.name
+                );
             }
         }
     }
@@ -302,7 +306,9 @@ mod tests {
         // CUDA/cuDNN never show on a non-CUDA platform.
         if !urls::Platform::WITH_CUDA.contains(&plat) {
             assert!(
-                !names.iter().any(|n| n.contains("CUDA") || n.contains("cuDNN")),
+                !names
+                    .iter()
+                    .any(|n| n.contains("CUDA") || n.contains("cuDNN")),
                 "no GPU libraries on {plat:?}, got {names:?}"
             );
         }
