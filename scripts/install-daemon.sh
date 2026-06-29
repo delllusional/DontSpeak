@@ -15,8 +15,9 @@
 #   1. compute a BUILD_ID (git short hash + -dirty) unless DONTSPEAK_BUILD_ID is set,
 #   2. cargo build --release the 3 bins WITH that id baked into dontspeakd,
 #   3. install them to $INSTALL_DIR (default ~/.local/bin),
-#   4. codesign dontspeakd with a STABLE identity (so the Accessibility/Input-
-#      Monitoring grant survives rebuilds), ad-hoc for the rest,
+#   4. codesign ALL installed bins with a STABLE identity AND the app's signing
+#      identifier (app.dontspeak.org) so the Accessibility/Input-Monitoring grants
+#      survive rebuilds and are shared with the app bundle (ad-hoc only as fallback),
 #   5. install the optional swift hook helpers (macOS only),
 #   6. defensively remove any stale standalone launchd daemon (the app hosts it now),
 #   (logging is ~/Library/Logs/dontspeak.log with in-process rotation, no conf.)
@@ -53,22 +54,25 @@ for b in dontspeakd dontspeak ds-helper; do
   install -m 0755 "$REL/$b" "$INSTALL_DIR/$b"
 done
 
-# ── 3. codesign: STABLE identity for dontspeakd (TCC grant survives rebuilds) ───────
+# ── 3. codesign: STABLE identity + the app's identifier for EVERY bin ───────────────
+# Sign all three installed bins with the SAME stable cert AND the SAME signing
+# identifier the app bundle uses (app.dontspeak.org — see apps/macos/bundle-lib.sh).
+# One cert + one identifier across the app, its bundled helper, and these CLI bins means
+# TCC (Accessibility / Input Monitoring) keys every component to ONE app identity, so the
+# grants are shared and survive rebuilds. A stable cdhash is what makes them persist;
+# ad-hoc (no identity) rotates it and re-prompts every build, so it's only the fallback.
 if [ "$UNAME" = "Darwin" ]; then
+  ensure_local_sign_identity   # mint the self-signed local-dev cert ONCE if none exists (scripts/lib/common.sh). This runs in bundle.sh step 0, BEFORE step 3 signs the app — provisioning here means the bins get the STABLE signature on the very first clean install, not just on the second build. No-op when an identity already exists / in dist mode / when opted out.
   STABLE_ID="$(find_codesign_id || true)"   # shared resolver (scripts/lib/common.sh); empty → ad-hoc. `|| true`: with no identity the pipeline's grep exits 1, and under `set -euo pipefail` a bare command-subst assignment would abort before the ad-hoc fallback below.
   sign_stable() {
-    codesign --force --identifier "org.dontspeak.daemon" --sign "$STABLE_ID" "$INSTALL_DIR/$1" 2>/dev/null \
-      && echo "   signed $1 (stable: ${STABLE_ID%% (*}…)" >&2 \
+    codesign --force --identifier "app.dontspeak.org" --sign "$STABLE_ID" "$INSTALL_DIR/$1" 2>/dev/null \
+      && echo "   signed $1 (stable: ${STABLE_ID%% (*}…, app.dontspeak.org)" >&2 \
       || { echo "   !! stable-sign $1 failed; ad-hoc fallback" >&2; codesign --force --sign - "$INSTALL_DIR/$1" 2>/dev/null; }
   }
   for b in dontspeakd dontspeak ds-helper; do
-    case "$b" in
-      dontspeakd)
-        if [ -n "$STABLE_ID" ]; then sign_stable "$b"
-        else codesign --force --sign - "$INSTALL_DIR/$b" 2>/dev/null \
-               && echo "   ad-hoc signed $b (no stable identity — grant RE-PROMPTS on rebuild; set DONTSPEAK_CODESIGN_ID)" >&2; fi ;;
-      *) codesign --force --sign - "$INSTALL_DIR/$b" 2>/dev/null && echo "   ad-hoc signed $b" >&2 || true ;;
-    esac
+    if [ -n "$STABLE_ID" ]; then sign_stable "$b"
+    else codesign --force --sign - "$INSTALL_DIR/$b" 2>/dev/null \
+           && echo "   ad-hoc signed $b (no stable identity — grant RE-PROMPTS on rebuild; set DONTSPEAK_CODESIGN_ID)" >&2; fi
   done
 fi
 

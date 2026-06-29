@@ -693,7 +693,13 @@ impl<P: Platform + 'static> Engine<P> {
             .map(|r| r.load(Ordering::Relaxed))
             .unwrap_or(false);
         if recording || self.awaiting_confirm() {
-            let present = self.plat.paste_target_present();
+            // A focused editable field is the primary signal, but terminals — the app's
+            // MAIN dictation target — frequently don't expose an AX-settable text element
+            // (custom-drawn TTY views), so `paste_target_present` reads "no target" even
+            // though a synthetic Cmd+V lands fine. Treat a frontmost terminal as a paste
+            // target too: that's exactly where the focus-gated Caps + voice-submit paths
+            // inject (see `listener::exec`), so the glow must not warn there.
+            let present = self.plat.paste_target_present() || self.plat.terminal_frontmost();
             if let Ok(mut p) = self.paste.lock() {
                 p.has_paste_target = present;
             }
@@ -1530,6 +1536,45 @@ mod tests {
             "pasted once the final landed"
         );
         assert!(!d.confirm_armed, "disarmed after the deferred submit");
+    }
+
+    #[test]
+    fn frontmost_terminal_is_a_paste_target_even_without_ax_focus() {
+        // Regression: the "no target" glow used only the AX focused-element probe
+        // (`paste_target_present`). Terminals — the app's main dictation target —
+        // often don't expose an AX-settable editable element, so the probe read
+        // false and the bar glowed orange even though a Cmd+V paste lands fine.
+        // A frontmost terminal must itself count as a paste target.
+        let mut d = mk(600);
+        // Panel up: the live probe only runs while recording or awaiting confirm.
+        d.stt_active = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        )));
+
+        // AX probe blind (no editable field exposed), but a terminal IS frontmost.
+        d.plat.paste_target.set(false);
+        d.plat.terminal_frontmost.set(true);
+        d.tick();
+        assert!(
+            d.paste.lock().unwrap().has_paste_target,
+            "frontmost terminal is a paste target even when the AX probe sees no editable field"
+        );
+
+        // Neither signal: genuinely nowhere to paste → glow on.
+        d.plat.terminal_frontmost.set(false);
+        d.tick();
+        assert!(
+            !d.paste.lock().unwrap().has_paste_target,
+            "no editable field and no terminal ⇒ no paste target"
+        );
+
+        // A focused editable field in a non-terminal app still counts on its own.
+        d.plat.paste_target.set(true);
+        d.tick();
+        assert!(
+            d.paste.lock().unwrap().has_paste_target,
+            "a focused editable field is a paste target on its own"
+        );
     }
 
     #[test]

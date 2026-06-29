@@ -39,12 +39,18 @@ pkill -f "DontSpeak.app/Contents/MacOS/DontSpeak" 2>/dev/null || true
 pkill -f "ds-helper" 2>/dev/null || true
 pkill -x dontspeakd 2>/dev/null || true
 
-echo "==> 2. un-wire the Claude Code hooks (before deleting the binary)"
+echo "==> 2. un-wire the Claude Code hooks + Codex + Claude Desktop MCP (before deleting the binary)"
 if [ -x "$INSTALL_DIR/dontspeak" ]; then
+  # wire-hooks --remove strips Claude Code (settings.json) AND Codex (~/.codex/config.toml);
+  # Claude Desktop's mcpServers.dontspeak entry is a SEPARATE config the binary only touches
+  # via wire-desktop, so it MUST be un-wired here too or it dangles at a deleted binary path.
   "$INSTALL_DIR/dontspeak" wire-hooks --remove 2>/dev/null \
     || echo "   (wire-hooks --remove failed or nothing to remove)"
+  "$INSTALL_DIR/dontspeak" wire-desktop --remove 2>/dev/null \
+    || echo "   (wire-desktop --remove failed or nothing to remove)"
 else
-  echo "   (no $INSTALL_DIR/dontspeak — skipping hook removal)"
+  echo "   (no $INSTALL_DIR/dontspeak — skipping hook removal; strip mcpServers.dontspeak"
+  echo "    from ~/Library/Application Support/Claude/claude_desktop_config.json by hand)"
 fi
 
 echo "==> 3. remove the app bundle + installed engine binaries"
@@ -77,6 +83,14 @@ rm -f "$H"/Library/Application\ Support/CrashReporter/ds-*.plist \
       "$H"/Library/Logs/DiagnosticReports/ds-*.ips \
       "$H"/Library/Logs/DiagnosticReports/Retired/ds-*.ips
 rm -f "$H/Library/LaunchAgents/org.dontspeak.daemon.plist"
+
+echo "==> 4b. remove the DontSpeak hook helpers (install-daemon.sh seeds these into the"
+echo "        SHARED ~/.claude/hooks — so delete only OUR files, never the whole dir)"
+# Mirror install-daemon.sh: it copies/compiles mic-active + capslock (each .swift + the
+# built binary) and copies HOOKS-README.md → README.md into ~/.claude/hooks.
+for f in mic-active mic-active.swift capslock capslock.swift README.md; do
+  rm -f "$H/.claude/hooks/$f"
+done
 
 echo "==> 5. forget the login item (best-effort; SMAppService also reaps it once the app is gone)"
 osascript -e 'tell application "System Events" to delete login item "DontSpeak"' 2>/dev/null || true

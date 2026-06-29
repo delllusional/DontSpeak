@@ -8,8 +8,9 @@
 # the TCC grants survive rebuilds), and installs the thin hook wrappers.
 # Logging is ~/Library/Logs/dontspeak.log with in-process rotation (no conf needed).
 #
-# This wrapper adds the things specific to a fresh CLI install: the settings.json
-# snippet (PRINTED for you to merge — never auto-edited) and the next-steps notes.
+# This wrapper adds the things specific to a fresh CLI install: merging the voice
+# hooks into ~/.claude/settings.json via `dontspeak wire-hooks` (additive, backed-up;
+# preview with --print-only, undo with --remove) and the next-steps notes.
 #
 # ENGINE HOST: on macOS the engine runs IN-PROCESS inside DontSpeak.app (built via
 # apps/macos/bundle.sh) — it owns the RPC socket, hosts TTS/STT, and catches Caps-Lock,

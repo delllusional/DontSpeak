@@ -84,13 +84,40 @@ pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
     });
 }
 
-/// Full-auto model fetch: when an engine is ENABLED but its (ONNX) model files are
-/// missing, kick off the background download so first activation just works — there is no
-/// manual Download button. Idempotent (file-presence gated here; [`start_download`] no-ops
-/// if one is already in flight) and ONNX-only — the apple-native / system backends
-/// self-manage their model caches. Called on startup, on every config reload, and on a
-/// slow poll-loop tick (so a download that failed — e.g. no network at launch — retries
-/// without any user action). Downloads both as `"all"` when both are missing.
+/// On the apple-native (ANE / Core ML) Kokoro path, FluidAudio self-manages its Core ML
+/// model chain — but that chain ships only `af_heart.bin`. Every OTHER voice's style tensor
+/// lives solely in the shared `voices-v1.0.bin` npz, from which `ds_tts::ane_voices::materialize`
+/// extracts it on demand. So the npz must be fetched even on the ANE path (it isn't part of the
+/// Core ML repo); otherwise a configured voice other than `af_heart` silently degrades to
+/// `af_heart` at synth time. Pure, so the policy is unit-testable without touching the disk.
+fn ane_needs_voices_npz(tts_is_kokoro: bool, ane_active: bool, voices_npz_present: bool) -> bool {
+    tts_is_kokoro && ane_active && !voices_npz_present
+}
+
+/// The next single download target to kick from the computed needs (single-flight — later
+/// targets land on subsequent poll ticks). The small voices-only npz is prioritized over
+/// Parakeet since it gates the ACTIVE TTS voice. `None` ⇒ nothing missing. Pure/testable.
+fn pick_download(
+    need_kokoro: bool,
+    need_kokoro_voices: bool,
+    need_parakeet: bool,
+) -> Option<&'static str> {
+    match (need_kokoro, need_kokoro_voices, need_parakeet) {
+        (true, _, true) => Some("all"),
+        (true, _, false) => Some("kokoro"),
+        (false, true, _) => Some("kokoro_voices"),
+        (false, false, true) => Some("parakeet"),
+        (false, false, false) => None,
+    }
+}
+
+/// Full-auto model fetch: when an engine is ENABLED but a model file it needs is missing,
+/// kick off the background download so first activation just works — there is no manual
+/// Download button. Idempotent (file-presence gated here; [`start_download`] no-ops if one
+/// is already in flight). Mostly ONNX models, plus the Kokoro voices npz on the ANE path
+/// (see [`ane_needs_voices_npz`]); the rest of the apple-native / system caches self-manage.
+/// Called on startup, on every config reload, and on a slow poll-loop tick (so a download
+/// that failed — e.g. no network at launch — retries without any user action).
 pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig) {
     let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
     // `uses_apple_native_model()` is an arch-BLIND config preference: the default provider
@@ -100,11 +127,22 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
     // Intel macOS, or a headless engine with no SMKOKORO_DYLIB_PATH — the warm child falls
     // back to the ONNX path and needs these files. Gate on the SAME runtime truth the status
     // / provider-token downgrade uses, so the model is fetched instead of silently skipped.
-    let need_kokoro = cfg.resolved_tts() == Some(ds_config::TtsEngine::Kokoro)
-        && !(cfg.uses_apple_native_model() && apple_native_shim_available())
+    let tts_is_kokoro = cfg.resolved_tts() == Some(ds_config::TtsEngine::Kokoro);
+    let ane_active = cfg.uses_apple_native_model() && apple_native_shim_available();
+    let need_kokoro = tts_is_kokoro
+        && !ane_active
         && !(exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
             && exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
             && exists(ds_model::onnxruntime_dylib_path()));
+    // EXCEPTION to "ANE self-manages its cache": the Core ML chain ships only `af_heart.bin`,
+    // so the shared `voices-v1.0.bin` npz (the source for EVERY other voice) must still be
+    // fetched on the ANE path — else any configured voice ≠ af_heart silently degrades to
+    // af_heart at synth time (`synth_coreml` materializes from this npz, never downloads it).
+    let need_kokoro_voices = ane_needs_voices_npz(
+        tts_is_kokoro,
+        ane_active,
+        exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE)),
+    );
     let need_parakeet = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
         && matches!(
             cfg.resolved_stt_provider(),
@@ -115,11 +153,8 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
             && exists(ds_model::model_path(ds_model::PARAKEET_JOINER_FILE))
             && exists(ds_model::model_path(ds_model::PARAKEET_TOKENS_FILE))
             && exists(ds_model::onnxruntime_dylib_path()));
-    let which = match (need_kokoro, need_parakeet) {
-        (true, true) => "all",
-        (true, false) => "kokoro",
-        (false, true) => "parakeet",
-        (false, false) => return,
+    let Some(which) = pick_download(need_kokoro, need_kokoro_voices, need_parakeet) else {
+        return;
     };
     start_download(downloads, which);
 }
@@ -185,4 +220,51 @@ pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg
         target_arch = "x86_64"
     )))]
     let _ = downloads;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ane_needs_voices_npz, pick_download};
+
+    #[test]
+    fn ane_path_still_needs_the_voices_npz() {
+        // The crux: the apple-native (ANE / Core ML) Kokoro chain self-manages, but it ships
+        // only af_heart. The shared voices npz (the source for every OTHER voice, e.g.
+        // af_nicole) must STILL be fetched on the ANE path, or the chosen voice silently
+        // falls back to af_heart at synth time.
+        assert!(
+            ane_needs_voices_npz(true, true, false),
+            "ANE active + npz missing ⇒ must fetch the voices npz"
+        );
+        assert!(
+            !ane_needs_voices_npz(true, true, true),
+            "npz already present ⇒ nothing to fetch"
+        );
+        // ONNX path (ane_active=false): the npz rides along with the full ONNX `need_kokoro`
+        // fetch, so the ANE-specific trigger must stay OFF to avoid a redundant download.
+        assert!(
+            !ane_needs_voices_npz(true, false, false),
+            "ONNX path fetches the npz via need_kokoro, not this trigger"
+        );
+        // TTS isn't Kokoro at all ⇒ no Kokoro assets needed.
+        assert!(
+            !ane_needs_voices_npz(false, true, false),
+            "non-Kokoro TTS needs no voices npz"
+        );
+    }
+
+    #[test]
+    fn ane_voices_npz_is_queued_not_skipped() {
+        // Fresh ANE install: full ONNX Kokoro NOT needed, but the voices npz IS. The policy
+        // must queue the voices-only fetch ("kokoro_voices") instead of downloading nothing.
+        assert_eq!(pick_download(false, true, false), Some("kokoro_voices"));
+        // With Parakeet ONNX also missing, the small npz lands first (it gates the active
+        // voice); Parakeet follows on the next poll tick.
+        assert_eq!(pick_download(false, true, true), Some("kokoro_voices"));
+        // Regression guards on the pre-existing mappings.
+        assert_eq!(pick_download(false, false, false), None);
+        assert_eq!(pick_download(true, false, false), Some("kokoro"));
+        assert_eq!(pick_download(true, false, true), Some("all"));
+        assert_eq!(pick_download(false, false, true), Some("parakeet"));
+    }
 }

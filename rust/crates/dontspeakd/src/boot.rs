@@ -84,6 +84,12 @@ pub fn engine_run(
     // stays up as the resident service (no more launchd crash-loop), and the caps
     // loop self-gates on AX trust (re-probed each reload, so granting it later +
     // a reload nudge enables dictation without a restart).
+    // One-time PROMPT for the OS permission the caps loop needs (macOS
+    // Accessibility). This registers the app in the Accessibility list AND shows the
+    // grant dialog on a fresh install, so the user has a row to toggle — without it
+    // the silent `preflight` probe below just keeps logging "not trusted" forever and
+    // the app never appears in Settings. No-op off macOS / when already trusted.
+    plat.request_permissions();
     if let Err(e) = plat.preflight() {
         log(&format!(
             "WARN: {e} — Caps-Lock dictation is OFF until granted; \

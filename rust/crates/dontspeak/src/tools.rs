@@ -521,13 +521,16 @@ fn call_set_voice(sock: &Path, args: &Value) -> Result<String, String> {
                 "`{voice}` is a {lang} Kokoro voice, which needs espeak-ng to pronounce correctly. Install it (`brew install espeak-ng`) and restart the engine, or pick a System voice for {lang} (see list_voices tts_engine=system language={lang})."
             ));
         }
-        if npz_present {
-            // npz local → extract this voice's ANE pack now (fast, offline) so it plays
-            // this reply. Fail loudly rather than silently fall back to af_heart.
+        if npz_present && ds_tts::ane_voices::materialization_required() {
+            // npz local → on the Apple CoreML/ANE backend extract this voice's ANE pack now
+            // (fast, offline) so it plays this reply; fail loudly rather than silently fall
+            // back to af_heart. The ONNX backend (non-macOS) reads the voice straight from the
+            // npz, so there's nothing to materialize there — and `ane_dir()` needs $HOME, which
+            // is unset on Windows, so calling it off-Apple would spuriously fail.
             if let Err(e) = ds_tts::ane_voices::ensure_materialized(&voice) {
                 return Err(format!("could not prepare voice `{voice}`: {e}"));
             }
-        } else {
+        } else if !npz_present {
             // npz missing → kick the engine's single-flight download (non-blocking, joins
             // any in-flight one) and set the voice anyway; it self-applies on the next
             // reply once the pack lands.
