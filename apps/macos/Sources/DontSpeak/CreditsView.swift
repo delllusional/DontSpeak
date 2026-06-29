@@ -108,14 +108,14 @@ struct CreditsView: View {
         .scrollIndicators(.hidden)
     }
 
-    /// One collapsible library: a tappable header (name + a license badge + a rotating
-    /// chevron) that reveals what it's for, its links, and the files it fetches — the shared
+    /// One collapsible library: a tappable header (just the name + a rotating chevron — the
+    /// license now rides the "view license" link in the expanded body, so the collapsed row
+    /// stays clean) that reveals what it's for, its links, and the files it fetches — the shared
     /// `DisclosureRow`, the same disclosure look the Tools pane uses.
     @ViewBuilder
     private func libraryRow(_ lib: LibraryInfo) -> some View {
         DisclosureRow(expanded: $expanded, id: lib.name) {
             Text(lib.name).glassRowTitle()
-            if !lib.license.isEmpty { LicenseBadge(lib.license) }
         } content: {
             libraryDetail(lib)
         }
@@ -138,8 +138,12 @@ struct CreditsView: View {
                     }
                 }
                 if !lib.licenseURL.isEmpty, let url = URL(string: lib.licenseURL) {
+                    // The link is LABELED with the actual license (e.g. "MIT", "Apache-2.0"),
+                    // which used to sit as a badge on the collapsed row; falls back to the
+                    // generic "View License" only when the catalog has no license name.
                     Link(destination: url) {
-                        Label(L.t("libraries.view_license"), systemImage: "doc.text")
+                        Label(lib.license.isEmpty ? L.t("libraries.view_license") : lib.license,
+                              systemImage: "doc.text")
                     }
                 }
             }
@@ -173,20 +177,5 @@ struct CreditsView: View {
         }
         .padding(.leading, 10)
         .padding(.vertical, 1)
-    }
-}
-
-/// A small license tag beside a library name — a quiet capsule (the SPDX id or vendor
-/// license name), so the licensing is visible without opening the row.
-private struct LicenseBadge: View {
-    let text: String
-    init(_ text: String) { self.text = text }
-    var body: some View {
-        Text(text)
-            .font(.caption2).fontWeight(.medium)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(.regularMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(.separator.opacity(0.6), lineWidth: 0.5))
     }
 }
