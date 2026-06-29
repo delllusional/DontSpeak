@@ -185,6 +185,8 @@ impl SttStats {
 
     /// Parse a `transcribe_ms=.. audio_ms=..` STTSTATS line and record it. Returns
     /// the recorded audio duration in SECONDS (for the lifetime total), or `None`.
+    /// The line carries extra diagnostic fields (`wall_ms`, `final_ms`, `preview_ms`,
+    /// `partials`, …) for the activity-log latency trace; they're ignored here.
     pub fn record_stt_line(&self, rest: &str) -> Option<f64> {
         let (mut tr, mut audio) = (0.0, 0.0);
         for kv in rest.split_whitespace() {

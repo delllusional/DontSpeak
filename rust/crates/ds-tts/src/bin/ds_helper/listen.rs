@@ -172,6 +172,10 @@ fn transcribe_loop(
     let mut last_text = String::new();
     let mut partials = 0u32;
     let mut total_transcribe_ms = 0f64;
+    // Live-preview transcription time (the bounded tail re-pass every ~180 ms). Kept SEPARATE
+    // from `total_transcribe_ms` (which is committed-segment + final work only) so the debug
+    // STTSTATS line shows how much GPU/CPU the streaming overlay costs vs the real transcript.
+    let mut total_preview_ms = 0f64;
 
     // Transcribe one device-rate segment through the SAME pipeline the old final pass
     // used (gain → resample → speaker-lock → trim → model), now applied per segment.
@@ -219,8 +223,7 @@ fn transcribe_loop(
         if last_partial.elapsed() >= Duration::from_millis(180) {
             let tail = &accum[committed_until.min(accum.len())..];
             let tail_text = if tail_previewable(tail.len(), rate) {
-                let mut scratch = 0f64;
-                segment_text(tail, &mut scratch)
+                segment_text(tail, &mut total_preview_ms)
             } else {
                 None
             };
@@ -235,7 +238,10 @@ fn transcribe_loop(
     }
 
     // Final pass: drain the tail, then finalize only the SHORT remaining segment past the
-    // last boundary (not the whole buffer).
+    // last boundary (not the whole buffer). Timed from here (`final_start`) so STTSTATS can
+    // report the stop→FINAL latency — the lag felt on the second Caps tap — apart from the
+    // capture phase.
+    let final_start = Instant::now();
     accum.extend_from_slice(&drain());
     let final_gain = gain_of(&accum);
     // DONTSPEAK_LISTEN_DUMP=1 → write the full 16 kHz buffer Parakeet effectively saw.
@@ -253,6 +259,8 @@ fn transcribe_loop(
         committed.push(text);
     }
     let text = committed.join(" ");
+    let final_ms = final_start.elapsed().as_secs_f64() * 1000.0;
+    let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     // Diagnostics (→ helper log): RMS of the captured audio, sample counts, segment +
     // partial counts, and the resolved gain. A near-zero RMS means silence reached the
@@ -268,7 +276,19 @@ fn transcribe_loop(
         accum.len(),
         committed.len(),
     );
-    println!("STTSTATS transcribe_ms={total_transcribe_ms:.1} audio_ms={audio_ms:.1}");
+    // STTSTATS → the engine's stats + (in DONTSPEAK_DEBUG) the activity log. The first two
+    // fields feed the in-app stats; the rest are diagnostics for the speech-IN latency budget
+    // (the engine parser ignores unknown tokens, so adding fields is backward-compatible):
+    //   wall_ms     total LISTENING→FINAL wall time (the felt latency)
+    //   final_ms    stop→FINAL (drain + last-segment transcribe) — the second-Caps-tap lag
+    //   preview_ms  GPU/CPU spent on the live overlay re-passes (not part of the transcript)
+    //   partials/segments/gain/rms/rate  capture-side context (mirrors the helper-log line)
+    println!(
+        "STTSTATS transcribe_ms={total_transcribe_ms:.1} audio_ms={audio_ms:.1} \
+         wall_ms={wall_ms:.1} final_ms={final_ms:.1} preview_ms={total_preview_ms:.1} \
+         partials={partials} segments={} gain={final_gain:.2} rms={rms:.4} rate={rate}",
+        committed.len(),
+    );
     println!("FINAL {text}");
     println!("LDONE");
     flush();

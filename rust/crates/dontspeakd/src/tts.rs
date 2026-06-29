@@ -813,6 +813,11 @@ impl TtsManager {
                     } else if let Some(rest) = l.strip_prefix("FINAL ") {
                         push_listen(ListenEvt::Final(rest.to_string()));
                     } else if let Some(rest) = l.strip_prefix("STTSTATS ") {
+                        // Per-listen transcription timing → the activity log, the speech-IN
+                        // mirror of the `TTS speak` line above (so a slow dictation leaves a
+                        // trace, not just an in-app stats bump). DEBUG: off by default, one
+                        // concise line per listen when DONTSPEAK_DEBUG is on.
+                        crate::logging::debug(&format!("STT listen {rest}"));
                         if let Some(secs) = stt_stats.record_stt_line(rest) {
                             lifetime.add_stt(secs);
                         }
