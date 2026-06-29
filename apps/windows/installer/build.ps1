@@ -6,7 +6,7 @@ What it does, end to end:
   2. dotnet publish  the WinUI app FRAMEWORK-DEPENDENT (the minimal ~54 MB payload;
      the csproj's StripUnusedWindowsAI target trims the unused Windows-ML runtime).
   3. Stage the payload (app publish + dontspeak.exe + AppIcon.ico).
-  4. Compile dontspeak.iss with Inno Setup (ISCC) → Output\ds-setup.exe.
+  4. Compile dontspeak.iss with Inno Setup (ISCC) → Output\dontspeak-setup.exe.
 
 The installer itself (dontspeak.iss) lays down that minimal app, ensures the two
 runtimes (.NET 10 Desktop + Windows App Runtime 2.0), optionally pulls the

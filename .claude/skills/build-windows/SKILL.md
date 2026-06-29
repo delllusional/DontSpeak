@@ -19,10 +19,10 @@ The shipping app is the WinUI app installed from the Inno `setup.exe`. The engin
    ```powershell
    pwsh -NoProfile -File apps\windows\installer\build.ps1 -Arch x64
    ```
-   (`-Arch arm64` cross-compiles.) Slow (~min) — run in the background + read the tee'd log. On success: `DONE → ...\ds-setup-x64.exe`.
+   (`-Arch arm64` cross-compiles.) Slow (~min) — run in the background + read the tee'd log. On success: `DONE → ...\dontspeak-setup-x64.exe`.
 2. **Copy to Desktop** (handy for the user):
    ```powershell
-   Copy-Item apps\windows\installer\Output\ds-setup-x64.exe ([Environment]::GetFolderPath('Desktop')) -Force
+   Copy-Item apps\windows\installer\Output\dontspeak-setup-x64.exe ([Environment]::GetFolderPath('Desktop')) -Force
    ```
 3. **Stop running processes** so the upgrade can replace files in use:
    ```powershell
@@ -31,7 +31,7 @@ The shipping app is the WinUI app installed from the Inno `setup.exe`. The engin
 4. *(clean install only)* **uninstall the old build first** — see Uninstall below. For a plain in-place upgrade, skip this.
 5. **Install elevated + silent** (tell the user to approve the **UAC** prompt):
    ```powershell
-   Start-Process ([Environment]::GetFolderPath('Desktop') + '\ds-setup-x64.exe') `
+   Start-Process ([Environment]::GetFolderPath('Desktop') + '\dontspeak-setup-x64.exe') `
      -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Verb RunAs -Wait -PassThru
    ```
    Exit code `0` = success. Same `AppId` ⇒ in-place upgrade (the workspace version need not change).
@@ -43,8 +43,8 @@ The shipping app is the WinUI app installed from the Inno `setup.exe`. The engin
 
 ## Use case 2 — build a distributable package
 
-- **Installer** (the release artifact): `build.ps1 -Arch x64` / `-Arch arm64` → `Output\ds-setup-<arch>.exe` (~15 MB, framework-dependent).
-- **Portable zip** (self-contained, no install, bundles models): `build-portable.ps1 -Arch x64 [-SkipModels]` → `Output\ds-portable-<arch>.zip`.
+- **Installer** (the release artifact): `build.ps1 -Arch x64` / `-Arch arm64` → `Output\dontspeak-setup-<arch>.exe` (~15 MB, framework-dependent).
+- **Portable zip** (self-contained, no install, bundles models): `build-portable.ps1 -Arch x64 [-SkipModels]` → `Output\dontspeak-portable-<arch>.zip`.
 - **Signing** is gated on SignPath secrets (CI `release.yml` only); local builds are unsigned → first launch may hit SmartScreen.
 - The full multi-arch signed release is tag-triggered CI (`release.yml`) — this skill is the fast local path.
 

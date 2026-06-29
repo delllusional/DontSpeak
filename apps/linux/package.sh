@@ -55,7 +55,7 @@ done
 
 # ── 2. portable tarball (always) ─────────────────────────────────────────────────────────
 echo "==> [2/5] portable tarball"
-PKG="ds-$VERSION-$ARCH"
+PKG="dontspeak-$VERSION-$ARCH"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 ROOT="$STAGE/$PKG"
 install -d "$ROOT/bin" "$ROOT/share/applications" "$ROOT/share/icons/hicolor/scalable/apps" "$ROOT/udev"
@@ -96,8 +96,8 @@ echo "    → $TARBALL"
 echo "==> [3/5] .deb"
 if cargo deb --version >/dev/null 2>&1; then
   # --no-build: reuse the release bins we just built (cargo-deb would only rebuild the gtk crate).
-  ( cd "$GTK_DIR" && cargo deb --no-build --output "$OUTDIR/ds_${VERSION}_${DEB_ARCH}.deb" ) \
-    && echo "    → $OUTDIR/ds_${VERSION}_${DEB_ARCH}.deb" \
+  ( cd "$GTK_DIR" && cargo deb --no-build --output "$OUTDIR/dontspeak_${VERSION}_${DEB_ARCH}.deb" ) \
+    && echo "    → $OUTDIR/dontspeak_${VERSION}_${DEB_ARCH}.deb" \
     || echo "    !! cargo deb failed (see above)"
 else
   echo "    (skip — install with: cargo install cargo-deb)"

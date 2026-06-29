@@ -43,7 +43,7 @@ DisableWelcomePage=no
 ; + start-at-login options live on the FINISHED page (postinstall checkboxes below).
 DisableReadyPage=yes
 UninstallDisplayIcon={app}\ds-winui.exe
-OutputBaseFilename=ds-setup-{#TargetArch}
+OutputBaseFilename=dontspeak-setup-{#TargetArch}
 SetupIconFile={#PayloadDir}\AppIcon.ico
 ; Modern wizard + branded, frameless Welcome page (the intro blurb lives in [Messages]
 ; WelcomeLabel1/2 below). Two image sizes each so they stay crisp on high-DPI displays.
@@ -151,20 +151,29 @@ Source: "{#PayloadDir}\ds-helper.exe"; Flags: dontcopy
 ; Start-menu shortcuts are always created; the DESKTOP shortcut + start-at-login are
 ; offered as checkboxes on the FINISHED page (see the postinstall [Run] entries below).
 [Icons]
-Name: "{group}\DontSpeak"; Filename: "{app}\ds-winui.exe"; IconFilename: "{app}\AppIcon.ico"
+; AppUserModelID MUST match App.xaml.cs's AppUserModelId ("DontSpeak"): Windows maps the
+; running process's AUMID to THIS shortcut and uses the shortcut name ("DontSpeak") as the app's
+; display name in the taskbar + Task Manager "Apps" group (else it falls back to "ds-winui").
+Name: "{group}\DontSpeak"; Filename: "{app}\ds-winui.exe"; IconFilename: "{app}\AppIcon.ico"; \
+  AppUserModelID: "DontSpeak"
 Name: "{group}\Uninstall DontSpeak"; Filename: "{uninstallexe}"
 
 [Run]
 ; --- Prerequisites (install only if missing) ---
-; .NET is fetched on the IN-WIZARD download page (real progress bar, no console window)
-; then installed silently here. The Windows App Runtime goes via winget, hidden — both
-; without a terminal popping up.
-Filename: "{tmp}\dotnet-desktop-10-x64.exe"; Parameters: "/install /quiet /norestart"; \
+; BOTH runtimes are fetched on the IN-WIZARD download page (real progress bar, no console
+; window) and installed silently here — no winget (winget isn't on PATH in the elevated
+; installer context, so the old `winget install` path silently no-op'd and left a
+; non-launching app behind). The DOWNLOAD URLs come from ds-model (urls.rs, the single
+; registry) via `ds-helper --print-manifest dotnet|winapp` — the installer hardcodes none;
+; the saved file name ({code:...}) is whatever that manifest returns. .NET installs with
+; /quiet; the Windows App Runtime redistributable with --quiet. Each Check guards on
+; "missing AND the download landed", so a present runtime or a skipped download is a no-op.
+Filename: "{tmp}\{code:DotNetExeName}"; Parameters: "/install /quiet /norestart"; \
   StatusMsg: "Installing .NET 10 Desktop Runtime..."; \
   Flags: runhidden waituntilterminated; Check: DotNetExeReady
-Filename: "{cmd}"; \
-  Parameters: "/c winget install -e --id Microsoft.WindowsAppRuntime.2.0 --accept-package-agreements --accept-source-agreements --silent & exit 0"; \
-  StatusMsg: "Installing Windows App Runtime..."; Flags: runhidden waituntilterminated; Check: WinAppRtMissing
+Filename: "{tmp}\{code:WinAppExeName}"; Parameters: "--quiet"; \
+  StatusMsg: "Installing Windows App Runtime..."; \
+  Flags: runhidden waituntilterminated; Check: WinAppRtExeReady
 
 ; --- Place/extract the components the download page already fetched into {tmp}
 ;     (verify + extract only, NO network here). If a file wasn't pre-downloaded
@@ -259,6 +268,10 @@ var
   NeedDownload, HelperReady: Boolean;
   QueuedCount: Integer;
   DesktopDefaulted: Boolean;  { so the Claude Desktop auto-pre-check happens once, not on every revisit }
+  { Saved-as file names for the two prerequisite runtimes, set when their download is queued
+    (from the basename ds-model returns) — the Run-section code-constant filenames and the
+    *ExeReady Checks read these so the .iss never hardcodes a download name. }
+  DotNetFile, WinAppFile: String;
 
 { ── Dark title bar ─────────────────────────────────────────────────────────────
   Inno Setup has no real dark-mode theming, and a half-dark wizard (dark body, light
@@ -295,16 +308,43 @@ begin
             DirExists(ExpandConstant('{localappdata}\Programs\claude'));
 end;
 
-{ True when the Windows App Runtime 2.0 isn't installed (winget's own detection;
-  exit 0 = found) — the standard "install only if missing" gate. }
+{ True when the Windows App Runtime (major 2 — the WinAppSDK 2.x family the app links) isn't
+  present. Detected via Get-AppxPackage (always available — NO winget, which isn't reachable
+  from the elevated installer): the framework package family is Microsoft.WindowsAppRuntime.2.
+  Within a major version the runtime rolls forward and is back-compatible, so presence of the
+  family is the gate (if the major is absent we install the build's matching version). Exit
+  0 = present; any other code (incl. a failed Exec) = missing, the conservative default. The
+  "2" tracks the WinAppSDK major in ds-model's WINDOWS_APP_RUNTIME_VERSION (urls.rs). }
 function WinAppRtMissing: Boolean;
 var rc: Integer;
 begin
-  if Exec('cmd.exe', '/c winget list -e --id Microsoft.WindowsAppRuntime.2.0 >nul 2>&1',
-          '', SW_HIDE, ewWaitUntilTerminated, rc) then
+  if Exec('powershell.exe',
+       '-NoProfile -ExecutionPolicy Bypass -Command "if (Get-AppxPackage -Name '
+       + 'Microsoft.WindowsAppRuntime.2) { exit 0 } else { exit 1 }"',
+       '', SW_HIDE, ewWaitUntilTerminated, rc) then
     Result := (rc <> 0)
   else
     Result := True;
+end;
+
+{ Run the downloaded Windows App Runtime redistributable ONLY if it's actually present (the
+  download page saved it as WinAppFile) AND still needed — mirrors DotNetExeReady. }
+function WinAppRtExeReady: Boolean;
+begin
+  Result := WinAppRtMissing and (WinAppFile <> '') and
+            FileExists(ExpandConstant('{tmp}\') + WinAppFile);
+end;
+
+{ The code-constant filenames for the two prerequisite installers in the Run section —
+  whatever name the download was saved under (from ds-model's manifest). Empty until queued;
+  the *ExeReady Checks gate the Run entries, so an empty name is never actually executed. }
+function DotNetExeName(Param: String): String;
+begin
+  Result := DotNetFile;
+end;
+function WinAppExeName(Param: String): String;
+begin
+  Result := WinAppFile;
 end;
 
 { True when no .NET 10 Desktop Runtime is present. }
@@ -330,7 +370,8 @@ end;
   it in the temp dir); guards against a "cannot find the file" error if it was skipped. }
 function DotNetExeReady: Boolean;
 begin
-  Result := DotNetMissing and FileExists(ExpandConstant('{tmp}\dotnet-desktop-10-x64.exe'));
+  Result := DotNetMissing and (DotNetFile <> '') and
+            FileExists(ExpandConstant('{tmp}\') + DotNetFile);
 end;
 
 { Extract the helper to the temp dir once (it answers --print-manifest; URLs from ds-model). }
@@ -396,6 +437,27 @@ begin
   end;
 end;
 
+{ Queue a prerequisite runtime's installer on the download page and return the saved-as
+  basename (for the Run-section code-constant filename). The URL comes from ds-model — `ds-helper
+  --print-manifest dotnet|winapp` returns a single `url|basename|` line (no sha; aka.ms
+  permalinks aren't sha-pinnable) — so the .iss hardcodes no download URL. Returns '' if the
+  manifest is unavailable; the caller's *ExeReady Check then skips the install step. }
+function QueuePrereq(const What: String): String;
+var bar: Integer; url, rest, base: String; lines: TArrayOfString;
+begin
+  Result := '';
+  lines := ComponentManifest(What);
+  if GetArrayLength(lines) = 0 then exit;
+  rest := Trim(lines[0]);
+  bar := Pos('|', rest);  if bar = 0 then exit;
+  url := Copy(rest, 1, bar - 1);  rest := Copy(rest, bar + 1, Length(rest));
+  bar := Pos('|', rest);  if bar > 0 then base := Copy(rest, 1, bar - 1) else base := rest;
+  if (url = '') or (base = '') then exit;
+  DownloadPage.Add(url, base, '');
+  NeedDownload := True;  QueuedCount := QueuedCount + 1;
+  Result := base;
+end;
+
 procedure InitializeWizard;
 begin
   { Standard Inno download page (progress bar + the wizard's own Cancel button), so it
@@ -448,14 +510,11 @@ begin
   QueueComponent('onnx\kokoro', 'kokoro');
   QueueComponent('onnx\parakeet', 'parakeet');
   QueueComponent('onnx\cuda', 'cuda');
-  { .NET runtime: fetch on the download page too (silent install runs in [Run]) so its
-    progress shows in-wizard with no console. aka.ms is Microsoft's stable permalink. }
-  if DotNetMissing then
-  begin
-    DownloadPage.Add('https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.exe',
-      'dotnet-desktop-10-x64.exe', '');
-    NeedDownload := True;  QueuedCount := QueuedCount + 1;
-  end;
+  { Prerequisite runtimes — same in-wizard download UX as the models (silent install runs
+    in the Run section), URLs from ds-model (NO hardcoded URL, NO winget). Each is queued only
+    when its own presence probe says it's missing; the saved-as name is kept for the install. }
+  if DotNetMissing then DotNetFile := QueuePrereq('dotnet');
+  if WinAppRtMissing then WinAppFile := QueuePrereq('winapp');
   Log('prefetch: queued ' + IntToStr(QueuedCount) + ' file(s)');
   if not NeedDownload then exit;
   { The standard wizard Cancel stays active during the download; clicking it aborts the
@@ -502,14 +561,16 @@ begin
   Result := '';
 end;
 
-{ The WinApp Runtime winget step swallows its exit code (& exit 0 lets benign winget RCs
-  through), so verify the REQUIRED runtime actually landed and warn otherwise — a silent
-  winget failure must not leave a non-launching app behind a "successful" install. }
+{ Verify the REQUIRED runtime actually landed and warn otherwise — a runtime that's still
+  missing here means the in-wizard download was skipped/failed (e.g. no network), and must
+  not leave a non-launching app behind a "successful" install. The only fix path is online,
+  so point the user at re-running setup with a connection rather than at any manual command. }
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if (CurStep = ssPostInstall) and WinAppRtMissing then
-    SuppressibleMsgBox('DontSpeak could not install the Windows App Runtime automatically.'
-      + ' The app may not start until it is present (run:  winget install -e --id Microsoft.WindowsAppRuntime.2.0).',
+    SuppressibleMsgBox('DontSpeak could not download the Windows App Runtime (no network?).'
+      + ' The app may not start until it is installed — re-run this setup with an internet'
+      + ' connection to finish installing it.',
       mbError, MB_OK, IDOK);
 end;
 

@@ -8,7 +8,7 @@ dir. The app auto-detects that dir on launch (App.EnablePortableModelDir → DON
 so an EXTRACTED copy runs fully offline — no .NET / Windows App Runtime install, no model
 download.
 
-Output: Output\ds-portable-<arch>.zip
+Output: Output\dontspeak-portable-<arch>.zip
 
 Prereqs: Rust (MSVC) + the arm64 cross tools/clang for -Arch arm64 (ring assembles with
 clang), .NET 10 SDK (~/.dotnet). Usage:
@@ -26,7 +26,7 @@ Initialize-BuildEnv
 $b = Resolve-BuildArch -Arch $Arch -Repo $repo   # .Rel / .CargoTargetArg / .RustTarget / .DotnetPlatform
 $rel    = $b.Rel
 $dotnetPlatform = $b.DotnetPlatform
-$stage  = "$PSScriptRoot\portable\ds-portable-$Arch"
+$stage  = "$PSScriptRoot\portable\dontspeak-portable-$Arch"
 $outDir = "$PSScriptRoot\Output"
 
 Write-Host "==> 1/4  cargo build --release ($($Arch): core + helper + dontspeak)" -ForegroundColor Cyan
@@ -60,9 +60,9 @@ if ($SkipModels) {
     if ($code) { throw "model prefetch failed ($code) — see %TEMP%\ds-prefetch-error.log" }
 }
 
-Write-Host "==> 4/4  zip → Output\ds-portable-$Arch.zip" -ForegroundColor Cyan
+Write-Host "==> 4/4  zip → Output\dontspeak-portable-$Arch.zip" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force $outDir | Out-Null
-$zip = "$outDir\ds-portable-$Arch.zip"
+$zip = "$outDir\dontspeak-portable-$Arch.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal
 $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)

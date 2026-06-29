@@ -35,6 +35,14 @@
     <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
     <EnableMsixTooling>true</EnableMsixTooling>
     <AssemblyName>ds-winui</AssemblyName>
+    <!-- Process/file IDENTITY shown to the user (Task Manager, Explorer "Details"): the exe
+         stays ds-winui.exe (referenced across the installer + hooks), but its version-resource
+         FileDescription/ProductName read "DontSpeak" so Task Manager lists the app as DontSpeak,
+         not "ds-winui". FileDescription <- AssemblyTitle, ProductName <- Product. The Rust
+         ds-helper child is branded the same way via winresource (rust/crates/ds-tts/build.rs). -->
+    <AssemblyTitle>DontSpeak</AssemblyTitle>
+    <Product>DontSpeak</Product>
+    <Company>DontSpeak</Company>
     <!-- Brand app icon (purple squircle + speech-bubble glyph): the EXE icon shown
          in Explorer/taskbar, and loaded at runtime for the window via AppWindow.SetIcon. -->
     <ApplicationIcon>AppIcon.ico</ApplicationIcon>

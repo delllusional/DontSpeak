@@ -44,7 +44,7 @@ Prereqs (one-time on the build machine):
 
 ```powershell
 pwsh windows/installer/build.ps1
-# → windows/installer/Output/ds-setup.exe
+# → windows/installer/Output/dontspeak-setup.exe
 ```
 
 `build.ps1` does: `cargo build --release` (core + helper + mcp) → `dotnet publish`

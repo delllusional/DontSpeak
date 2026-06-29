@@ -44,6 +44,11 @@ nix = { version = "0.31", default-features = false, features = ["signal", "proce
 # inotify on Linux, ReadDirectoryChangesW on Windows — a push notification in place of
 # stat() polling. Default features select the native backend per OS.
 notify = "8"
+# Windows version-resource embedder: stamps the .exe's FileDescription + ProductName so
+# Task Manager / Explorer "Details" show "DontSpeak" instead of the bare exe name. Maintained
+# fork of the unmaintained `winres` (which breaks on Rust >= 1.61). Used from build.rs;
+# needs rc.exe (Windows SDK) at build time, and the build script no-ops on non-Windows targets.
+winresource = "0.1"
 
 # ── Phase-2 engine deps (pinned once) ────────────────────────────────────────
 # Model download (ds-model): tiny blocking HTTP, checksum, atomic rename. We use

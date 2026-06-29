@@ -93,7 +93,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: windows-installer-unsigned-${{ matrix.arch }}
-          path: apps/windows/installer/Output/ds-setup-${{ matrix.arch }}.exe
+          path: apps/windows/installer/Output/dontspeak-setup-${{ matrix.arch }}.exe
           if-no-files-found: error
 
       # Gate: only sign when the SignPath secrets exist (SignPath Foundation is free for
@@ -127,7 +127,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: windows-installer-${{ matrix.arch }}
-          path: ${{ steps.sp.outputs.on == 'true' && format('signed/ds-setup-{0}.exe', matrix.arch) || format('apps/windows/installer/Output/ds-setup-{0}.exe', matrix.arch) }}
+          path: ${{ steps.sp.outputs.on == 'true' && format('signed/dontspeak-setup-{0}.exe', matrix.arch) || format('apps/windows/installer/Output/dontspeak-setup-{0}.exe', matrix.arch) }}
           if-no-files-found: error
 
       # The raw cross-built ARM64 binaries — consumed by windows-arm-smoke to RUN them on
@@ -308,8 +308,8 @@ jobs:
           # Windows + macOS are required; Linux packages are best-effort (the linux job
           # is continue-on-error) — nullglob drops them silently if the job produced none.
           FILES=(
-            artifacts/windows-installer-x64/ds-setup-x64.exe
-            artifacts/windows-installer-arm64/ds-setup-arm64.exe
+            artifacts/windows-installer-x64/dontspeak-setup-x64.exe
+            artifacts/windows-installer-arm64/dontspeak-setup-arm64.exe
             artifacts/macos-dmgs/*.dmg
             artifacts/linux-packages/*
           )

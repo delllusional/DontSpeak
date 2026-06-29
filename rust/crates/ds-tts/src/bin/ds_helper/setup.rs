@@ -22,6 +22,11 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         "parakeet" => ds_model::run_setup_parakeet_with_progress(&p).map(|_| ()), // parakeet (+ onnx)
         "models" => models(),
         "cuda" => cuda(),
+        // Windows installer prerequisites (.NET / Windows App Runtime): the installer
+        // downloads + runs these itself via the URLs from ds-model's manifest — ds-model
+        // never installs them — so prefetch is a no-op here (guards against a stray
+        // --install-prefetched falling through to the model fetch).
+        "dotnet" | "winapp" => Ok(()),
         _ => models().and_then(|_| cuda()),
     };
     match r {

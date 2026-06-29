@@ -70,6 +70,10 @@ assets = [
 ]
 
 [package.metadata.generate-rpm]
+# Override the crate name (ds-linux-gtk) so the .rpm is "dontspeak-<ver>.rpm" — matching the
+# .deb (which sets name above) and keeping every user-visible artifact free of the ds- prefix.
+name = "dontspeak"
+summary = "Hands-free voice loop for Claude Code (GTK4/libadwaita host, in-process engine)."
 assets = [
     { source = "target/release/ds-gtk", dest = "/usr/bin/ds-gtk", mode = "755" },
     { source = "../../../rust/target/release/dontspeak", dest = "/usr/bin/dontspeak", mode = "755" },

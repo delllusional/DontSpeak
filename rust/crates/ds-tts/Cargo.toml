@@ -46,6 +46,11 @@ nix = { workspace = true }
 # apple-native TTS backend. Loaded at runtime, like ort's load-dynamic onnxruntime.
 libloading = "0.9"
 
+# Brand the ds-helper.exe Windows version resource so Task Manager lists the helper child as
+# "DontSpeak" (not "ds-helper"). Build-only; the build script no-ops off Windows. See build.rs.
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }
+
 [[bin]]
 # Thin helper that does in-process synth + playback in its OWN process group, so
 # the (Child, pgid) single-speaker pidfile contract is preserved unchanged — the

@@ -45,14 +45,14 @@ apps/linux/package.sh --skip-appimage # tarball + deb + rpm only
 ```
 Builds the engine bins + the GTK host, then emits to `dist/`:
 
-- **`ds-<ver>-<arch>.tar.gz`** — **always**. Self-contained portable bundle (binaries + `.desktop` + icon + udev rule + an `install.sh`); the universal baseline, like the Windows portable zip. Extract and run `./install.sh`.
+- **`dontspeak-<ver>-<arch>.tar.gz`** — **always**. Self-contained portable bundle (binaries + `.desktop` + icon + udev rule + an `install.sh`); the universal baseline, like the Windows portable zip. Extract and run `./install.sh`.
 - **`.deb`** — when `cargo deb` is installed (`cargo install cargo-deb`). Layout from `[package.metadata.deb]` in `apps/linux/gtk/Cargo.toml`; GTK deps auto-detected via `$auto`.
 - **`.rpm`** — when `cargo generate-rpm` is installed (`cargo install cargo-generate-rpm`). Layout from `[package.metadata.generate-rpm]`.
 - **AppImage** — **experimental**; only when `linuxdeploy` + `linuxdeploy-plugin-gtk` are on PATH (GTK bundling is finicky — verify on the target). Skip with `--skip-appimage`.
 
-Each native format is best-effort: a missing tool is skipped with an install hint, so the tarball always succeeds. ⚠️ These were authored without a Linux box to test on — **verify on Linux** (the `.deb`/`.rpm` asset paths and GTK deps especially).
+Each native format is best-effort: a missing tool is skipped with an install hint, so the tarball always succeeds. The tarball/`.deb`/`.rpm` path is now CI-exercised on every release (see NOTE); the **AppImage** path + `uninstall.sh` remain unexercised — **verify those on Linux**.
 
-> NOTE: `release.yml` still publishes only Windows + macOS. Wiring a Linux job that runs `package.sh` and uploads the artifacts is the remaining step to ship Linux packages in GitHub Releases.
+> NOTE: `release.yml` now builds + uploads the Linux packages (`.tar.gz`/`.deb`/`.rpm`) via a `linux` job on `ubuntu-26.04` that runs `apps/linux/package.sh --skip-appimage` (installing `cargo-deb` + `cargo-generate-rpm` and the real GTK/libadwaita/layer-shell deps) and uploads them as the `linux-packages` artifact (`if-no-files-found: error`).
 
 ## Uninstall / clean
 
@@ -64,4 +64,4 @@ Mirrors the macOS `scripts/uninstall.sh`: stops the GUI host + systemd service, 
 
 ## Notes
 
-- The package + uninstall scripts were added 2026-06-28 to close the Windows/macOS symmetry; they are **untested on Linux** (written from the Windows box) — first run on a Linux host should be treated as verification.
+- The package + uninstall scripts were added 2026-06-28 to close the Windows/macOS symmetry. The `package.sh --skip-appimage` path (tarball + `.deb` + `.rpm`) is now run in CI on `ubuntu-26.04` every release, so it's exercised. The **AppImage** path and `uninstall.sh` are still **unexercised on Linux** — first run of those on a Linux host should be treated as verification.

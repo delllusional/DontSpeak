@@ -34,9 +34,17 @@ public partial class App : Application
     private static Mutex? _instanceMutex;
     private static EventWaitHandle? _activate;
     private const string ActivateEvent = "DontSpeak.WinUI.Activate";
+    // The app's explicit AppUserModelID. The installer stamps this SAME id on the Start-menu
+    // shortcut (dontspeak.iss [Icons] AppUserModelID) whose name is "DontSpeak", so Windows
+    // resolves this id to that name — making the taskbar + Task Manager "Apps" group read
+    // "DontSpeak" instead of the "ds-winui" exe-name fallback. Keep the two in sync.
+    private const string AppUserModelId = "DontSpeak";
 
     public App()
     {
+        // Claim our app identity FIRST — before any window/tray/UI — so the taskbar and Task
+        // Manager group this process as "DontSpeak" (see AppUserModelId). Best-effort.
+        try { Win32.SetCurrentProcessExplicitAppUserModelID(AppUserModelId); } catch { }
         EnablePortableModelDir();
         InitializeComponent();
     }

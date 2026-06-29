@@ -117,6 +117,14 @@ internal static class Win32
     [DllImport("user32.dll")]
     internal static extern int GetSystemMetrics(int index);
 
+    // Set this process's explicit AppUserModelID so the taskbar AND Task Manager group the app
+    // under its real identity (paired with the Start-menu shortcut's matching AppUserModelID,
+    // which maps this id -> the shortcut name "DontSpeak"). Without it Windows falls back to the
+    // exe base name ("ds-winui") for the group label. Must be called at startup before any UI.
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    internal static extern int SetCurrentProcessExplicitAppUserModelID(
+        [MarshalAs(UnmanagedType.LPWStr)] string appID);
+
     // The layered-window blit for the dictation overlay.
     [DllImport("user32.dll")]
     internal static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst,
