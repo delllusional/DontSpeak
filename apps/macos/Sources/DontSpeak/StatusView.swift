@@ -3,6 +3,12 @@
 //  The single window: a read-only health + permissions panel. All controls
 //  (engine/voice/language/rate/toggles/downloads) live in DontSpeak; this
 //  screen only shows state and helps grant the OS permissions MCP can't.
+//
+//  Each expandable row is its OWN `View` struct that owns its `@State expanded`, so toggling one
+//  row (or a status push that only touches one engine's dot) invalidates just that row's subtree
+//  — not the whole `StatusView`. Collapsed rows never build their stat content, so their FFI
+//  formatters don't run. The shared row chrome + stat-cell formatters are the file-private
+//  helpers at the bottom.
 
 import SwiftUI
 import AppKit
@@ -73,7 +79,7 @@ struct StatusDot: View {
     private let size: CGFloat = 10
 
     // No hover tooltip on any dot — a not-ready engine surfaces its state as a line in the
-    // row's expanded section instead (see `EngineStatus.troubleNote` / `statEngineRow`).
+    // row's expanded section instead (see `EngineStatus.troubleNote` / `EngineStatRow`).
     var body: some View {
         Group {
             switch status {
@@ -130,33 +136,6 @@ struct ExpandDot<Dot: View>: View {
 
 struct StatusView: View {
     @Environment(Core.self) private var core
-    @State private var engineExpanded = false
-    @State private var capsExpanded = false
-    @State private var kokoroExpanded = false
-    @State private var parakeetExpanded = false
-    @State private var systemExpanded = false
-    @State private var ttsSystemExpanded = false
-    @State private var claudeCodeExpanded = false
-    @State private var diarExpanded = false
-
-    /// Roll-up grant state of the OS permissions nested under Caps Lock — folded into the
-    /// Caps header dot via `capsCombined`. Orange ONLY when a permission is actually DENIED;
-    /// a not-yet-requested one (the mic is `.unknown` until first dictation prompts it) is
-    /// not a problem the user must act on, so it must not flag the header. (Input Monitoring
-    /// is intentionally absent: Accessibility subsumes it, so it never needs a separate grant.)
-    private var permsRollup: Grant {
-        [core.perms.accessibility, core.perms.microphone].contains(.denied) ? .denied : .granted
-    }
-
-    /// The Caps Lock header dot's combined state: the live caps loop (running / blocked /
-    /// idle) folded together with the nested permission grants. A DENIED permission surfaces
-    /// as orange on the header — the same "needs action" cue as caps being enabled-but-blocked
-    /// — so the collapsed header flags a permission problem without the user opening it.
-    private var capsCombined: EngineStatus {
-        if permsRollup == .denied { return .blocked }
-        if core.activity.capsRunning { return .running }
-        return core.activity.capsWanted ? .blocked : .idle
-    }
 
     var body: some View {
         // A Control-Center / HUD layout: the Status pane of the merged sidebar window. The
@@ -169,7 +148,7 @@ struct StatusView: View {
                 // spoken + heard, all sessions). Client integrations are wired via the
                 // `wire` MCP tool, not here — the panel stays status-only.
                 Platter {
-                    engineRowBlock
+                    DontSpeakRow()
                 }
 
                 // Engines platter — one row per engine; the lifecycle dot folds together
@@ -182,14 +161,16 @@ struct StatusView: View {
                     // Speaker diarization (on-demand) — same lifecycle dot as STT/TTS;
                     // gray/idle when disabled, green when enabled+ready.
                     PlatterDivider()
-                    statEngineRow(L.t("status.engine.role_diar"), L.t("status.engine.pyannote"), core.engineDots.diarizer, $diarExpanded) { diarStats() }
+                    EngineStatRow(role: L.t("status.engine.role_diar"),
+                                  detail: L.t("status.engine.pyannote"),
+                                  status: core.engineDots.diarizer) { DiarStatsContent() }
                 }
 
                 // Caps Lock platter — the dictation capture loop; expands to its tap/hold
                 // reference followed by the OS permissions it needs (Accessibility / Mic),
                 // whose grant state also folds into this header's dot.
                 Platter {
-                    capsRowBlock
+                    CapsLockRow()
                 }
             }
             .windowContentInset()
@@ -199,10 +180,114 @@ struct StatusView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// The headline engine row: tap to expand to lifetime totals; while open the dot
-    /// crossfades to a chevron (ExpandDot), same as every expandable row.
+    /// The TTS engine row, showing the CONCRETE engine for the selected `tts_engine`:
+    /// system → "System" (macOS `say`, nothing to download), built_in → "Kokoro" (the
+    /// neural model it runs; the setting is "built_in" but here we name what's speaking).
     @ViewBuilder
-    private var engineRowBlock: some View {
+    private var ttsEngineRow: some View {
+        switch core.selection.ttsEngine {
+        case "off":
+            OffEngineRow(role: L.t("status.engine.role_tts"))
+        case "system":
+            EngineStatRow(role: L.t("status.engine.role_tts"), detail: L.t("status.engine.system"),
+                          status: core.engineDots.ttsSystem) { TtsStatsContent() }
+        default:
+            EngineStatRow(role: L.t("status.engine.role_tts"), detail: L.t("status.engine.kokoro"),
+                          status: core.engineDots.kokoro) { TtsStatsContent() }
+        }
+    }
+
+    /// The STT engine row, showing the CONCRETE engine ACTUALLY running for the selected
+    /// `stt_engine`: claude_code → "Claude Code" (delegate), system → "System" (on-device
+    /// recognizer), built_in → "Parakeet" (the model it runs). Nothing to download for the
+    /// first two; here we name what's actually transcribing.
+    @ViewBuilder
+    private var sttEngineRow: some View {
+        switch core.selection.sttEngine {
+        case "off":
+            OffEngineRow(role: L.t("status.engine.role_stt"))
+        case "claude_code":
+            EngineStatRow(role: L.t("status.engine.role_stt"), detail: L.t("status.engine.claude_code"),
+                          status: core.engineDots.claudeCode) { SttStatsContent() }
+        case "system":
+            EngineStatRow(role: L.t("status.engine.role_stt"), detail: L.t("status.engine.system"),
+                          status: core.engineDots.system) { SttStatsContent() }
+        default:
+            EngineStatRow(role: L.t("status.engine.role_stt"), detail: L.t("status.engine.parakeet"),
+                          status: core.engineDots.parakeet) { SttStatsContent() }
+        }
+    }
+}
+
+// MARK: - Rows (each owns its own `expanded` state)
+
+/// An engine row that expands to reveal its stats: a tappable header (the ROLE — TTS / STT /
+/// diarization — with the concrete backend/model as a light secondary qualifier), a status dot
+/// that crossfades to a chevron while open, and the stats shown via `if` when expanded. Models
+/// download automatically on first activation, so there is NO manual Download/Retry button — the
+/// dot alone conveys missing → downloading → running. Owns `expanded`, so toggling it doesn't
+/// re-render the whole Status pane, and `stats` (an FFI-backed content view) is only built when
+/// open AND the engine is ready.
+private struct EngineStatRow<Stats: View>: View {
+    let role: String
+    let detail: String
+    let status: EngineStatus
+    @ViewBuilder var stats: () -> Stats
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Text(role).glassRowTitle()
+                    Text(detail).glassRowDetail()
+                }
+                Spacer()
+                ExpandDot(expanded: expanded) { StatusDot(status) }
+            }
+            .frame(maxWidth: .infinity)
+            .platterRow()
+            .contentShape(Rectangle())
+            .onTapGesture { withAnimation(.snappy(duration: 0.2)) { expanded.toggle() } }
+            if expanded {
+                PlatterDivider()
+                statusDetailBlock {
+                    // Not ready (pending/failed) → show the state here, where the stats would be;
+                    // running/idle → the engine's own stats. (Replaces the old dot tooltip.)
+                    if let note = status.troubleNote {
+                        Text(note).glassCaption()
+                    } else {
+                        stats()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A disabled (off) engine row: just the role + a gray idle dot (no detail label, no tooltip —
+/// the gray dot alone conveys "off"), not expandable. Used when `tts_engine`/`stt_engine` is `off`.
+private struct OffEngineRow: View {
+    let role: String
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(role).glassRowTitle()
+            Spacer()
+            StatusDot(.idle)
+        }
+        .frame(maxWidth: .infinity)
+        .platterRow()
+    }
+}
+
+/// The headline engine row: app name + version (the version links to the homepage), expanding to
+/// lifetime totals (seconds spoken + heard, all sessions). Tap anywhere but the version to expand;
+/// while open the dot crossfades to a chevron (ExpandDot), same as every expandable row.
+private struct DontSpeakRow: View {
+    @Environment(Core.self) private var core
+    @State private var expanded = false
+
+    var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 // App name + version, mirroring the engine rows' role + secondary-detail
@@ -217,131 +302,88 @@ struct StatusView: View {
                         .onTapGesture { core.openHomepage() }
                 }
                 Spacer()
-                ExpandDot(expanded: engineExpanded) { StatusDot(core.activity.engineRunning ? .running : .idle) }
+                ExpandDot(expanded: expanded) { StatusDot(core.activity.engineRunning ? .running : .idle) }
             }
             .frame(maxWidth: .infinity)
             .platterRow()
             .contentShape(Rectangle())
-            .onTapGesture { withAnimation(.snappy(duration: 0.2)) { engineExpanded.toggle() } }
-            if engineExpanded {
+            .onTapGesture { withAnimation(.snappy(duration: 0.2)) { expanded.toggle() } }
+            if expanded {
                 PlatterDivider()
-                detailBlock { dontSpeakDetails() }
+                statusDetailBlock { LifetimeContent() }
             }
         }
     }
+}
 
-    /// The TTS engine row, showing the CONCRETE engine for the selected `tts_engine`:
-    /// system → "System" (macOS `say`, nothing to download), built_in → "Kokoro" (the
-    /// neural model it runs; the setting is "built_in" but here we name what's speaking).
-    @ViewBuilder
-    private var ttsEngineRow: some View {
-        switch core.selection.ttsEngine {
-        case "off":
-            offEngineRow(L.t("status.engine.role_tts"))
-        case "system":
-            statEngineRow(L.t("status.engine.role_tts"), L.t("status.engine.system"), core.engineDots.ttsSystem, $ttsSystemExpanded) { ttsStats() }
-        default:
-            statEngineRow(L.t("status.engine.role_tts"), L.t("status.engine.kokoro"), core.engineDots.kokoro, $kokoroExpanded) { ttsStats() }
-        }
+/// Caps Lock — the push-to-talk / barge-in capture loop (green while the engine's Caps loop is
+/// live, orange when enabled but blocked by a missing permission, gray when off). A subsystem
+/// status, NOT a permission, so it leads this group. Expands to a brief tap/hold reference (what
+/// the key does in each mode) followed by the OS permissions it needs (their grant state folds
+/// into this header's dot via `capsCombined`).
+private struct CapsLockRow: View {
+    @Environment(Core.self) private var core
+    @State private var expanded = false
+
+    /// Roll-up grant state of the OS permissions nested below — folded into the header dot via
+    /// `capsCombined`. Orange ONLY when a permission is actually DENIED; a not-yet-requested one
+    /// (the mic is `.unknown` until first dictation prompts it) is not a problem the user must act
+    /// on, so it must not flag the header. (Input Monitoring is intentionally absent: Accessibility
+    /// subsumes it, so it never needs a separate grant.)
+    private var permsRollup: Grant {
+        [core.perms.accessibility, core.perms.microphone].contains(.denied) ? .denied : .granted
     }
 
-    /// A disabled (off) engine row: just the role + a gray idle dot (no detail label, no
-    /// tooltip — the gray dot alone conveys "off"), not expandable. Used when
-    /// `tts_engine`/`stt_engine` is `off`.
-    @ViewBuilder
-    private func offEngineRow(_ role: String) -> some View {
-        HStack(spacing: 8) {
-            Text(role).glassRowTitle()
-            Spacer()
-            StatusDot(.idle)
-        }
-        .frame(maxWidth: .infinity)
-        .platterRow()
+    /// The header dot's combined state: the live caps loop (running / blocked / idle) folded
+    /// together with the nested permission grants. A DENIED permission surfaces as orange on the
+    /// header — the same "needs action" cue as caps being enabled-but-blocked — so the collapsed
+    /// header flags a permission problem without the user opening it.
+    private var capsCombined: EngineStatus {
+        if permsRollup == .denied { return .blocked }
+        if core.activity.capsRunning { return .running }
+        return core.activity.capsWanted ? .blocked : .idle
     }
 
-    /// The STT engine row, showing the CONCRETE engine ACTUALLY running for the selected
-    /// `stt_engine`: claude_code → "Claude Code" (delegate), system → "System" (on-device
-    /// recognizer), built_in → "Parakeet" (the model it runs). Nothing to download for the
-    /// first two; here we name what's actually transcribing.
-    @ViewBuilder
-    private var sttEngineRow: some View {
-        switch core.selection.sttEngine {
-        case "off":
-            offEngineRow(L.t("status.engine.role_stt"))
-        case "claude_code":
-            statEngineRow(L.t("status.engine.role_stt"), L.t("status.engine.claude_code"), core.engineDots.claudeCode, $claudeCodeExpanded) { sttStats() }
-        case "system":
-            statEngineRow(L.t("status.engine.role_stt"), L.t("status.engine.system"), core.engineDots.system, $systemExpanded) { sttStats() }
-        default:
-            statEngineRow(L.t("status.engine.role_stt"), L.t("status.engine.parakeet"), core.engineDots.parakeet, $parakeetExpanded) { sttStats() }
-        }
-    }
-
-    /// Caps Lock — the push-to-talk / barge-in capture loop (green while the engine's
-    /// Caps loop is live, orange when enabled but blocked by a missing permission, gray
-    /// when off). A subsystem status, NOT a permission, so it leads this group. Expands to
-    /// a brief tap/hold reference (what the key does in each mode).
-    @ViewBuilder
-    private var capsRowBlock: some View {
+    var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text(L.t("status.caps_lock")).glassRowTitle()
                 Spacer()
-                ExpandDot(expanded: capsExpanded) {
-                    StatusDot(capsCombined)
-                }
+                ExpandDot(expanded: expanded) { StatusDot(capsCombined) }
             }
             .frame(maxWidth: .infinity)
             .platterRow()
             .contentShape(Rectangle())
-            .onTapGesture { withAnimation(.snappy(duration: 0.2)) { capsExpanded.toggle() } }
-            if capsExpanded {
+            .onTapGesture { withAnimation(.snappy(duration: 0.2)) { expanded.toggle() } }
+            if expanded {
                 PlatterDivider()
-                detailBlock {
-                    hint("status.caps_tap")
-                    hint("status.caps_hold")
+                statusDetailBlock {
+                    glassHint("status.caps_tap")
+                    glassHint("status.caps_hold")
                 }
                 // The OS permissions the Caps loop + dictation need — formerly their own
                 // section, now nested here (their grant state folds into the header dot above).
                 PlatterDivider()
-                permRow(L.t("status.permission.accessibility"), core.perms.accessibility,
-                        L.t("status.permission.accessibility_purpose"), "Privacy_Accessibility")
+                PermRow(name: L.t("status.permission.accessibility"), grant: core.perms.accessibility,
+                        purpose: L.t("status.permission.accessibility_purpose"), pane: "Privacy_Accessibility")
                 PlatterDivider()
-                permRow(L.t("status.permission.microphone"), core.perms.microphone,
-                        L.t("status.permission.microphone_purpose"), "Privacy_Microphone")
+                PermRow(name: L.t("status.permission.microphone"), grant: core.perms.microphone,
+                        purpose: L.t("status.permission.microphone_purpose"), pane: "Privacy_Microphone")
             }
         }
     }
+}
 
-    /// Stacks an expanded row's detail content with consistent platter insets — the
-    /// in-platter equivalent of the grouped-Form sub-rows it replaces.
-    @ViewBuilder
-    private func detailBlock<C: View>(@ViewBuilder _ content: () -> C) -> some View {
-        VStack(alignment: .leading, spacing: 8) { content() }
-            // Restore the Form's label-left / value-right spread for the LabeledContent
-            // rows, which a plain VStack would otherwise center.
-            .labeledContentStyle(.spread)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-    }
+/// One permission row: name + what it's for, a button that opens the exact System Settings →
+/// Privacy pane, and a live grant dot.
+private struct PermRow: View {
+    @Environment(Core.self) private var core
+    let name: String
+    let grant: Grant
+    let purpose: String
+    let pane: String
 
-    /// A muted one-line hint — the empty-states explainer.
-    @ViewBuilder
-    private func hint(_ key: String) -> some View {
-        Text(L.t(key)).glassCaption()
-    }
-
-    /// Interpolated variant (e.g. the claude_code hint naming the synthesized key).
-    @ViewBuilder
-    private func hint(_ key: String, _ params: [String: String]) -> some View {
-        Text(L.t(key, params)).glassCaption()
-    }
-
-    /// One permission row: name + what it's for, a live grant badge, and a button
-    /// that opens the exact System Settings → Privacy pane.
-    @ViewBuilder
-    private func permRow(_ name: String, _ grant: Grant, _ purpose: String, _ pane: String) -> some View {
+    var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).glassRowTitle()
@@ -362,64 +404,15 @@ struct StatusView: View {
         .frame(maxWidth: .infinity)
         .platterRow()
     }
+}
 
-    /// Grant shown as a single dot (no text), matching the StatusDot column:
-    /// green = granted, orange = not granted, gray ring = unknown.
-    @ViewBuilder
-    private func grantDot(_ grant: Grant) -> some View {
-        Group {
-            switch grant {
-            case .granted: Circle().fill(Color.green)
-            case .denied: Circle().fill(Color.orange)
-            case .unknown: Circle().strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1.5)
-            }
-        }
-        .frame(width: 10, height: 10)
-        .help(grant == .granted ? L.t("status.grant.granted") : (grant == .denied ? L.t("status.grant.denied") : L.t("status.grant.unknown")))
-    }
+// MARK: - Expanded stat content (each reads the live `Core` and only renders when its row is open)
 
-    /// An engine row that expands to reveal its stats: a tappable header (the ROLE — TTS /
-    /// STT / diarization — with the concrete backend/model as a light secondary qualifier),
-    /// a status dot that crossfades to a chevron while open, and the stats shown via `if`
-    /// when expanded. Models download automatically on first activation, so there is NO
-    /// manual Download/Retry button — the dot alone conveys missing → downloading → running.
-    @ViewBuilder
-    private func statEngineRow<Content: View>(_ role: String, _ detail: String, _ status: EngineStatus,
-                                              _ expanded: Binding<Bool>,
-                                              @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                HStack(spacing: 6) {
-                    Text(role).glassRowTitle()
-                    Text(detail).glassRowDetail()
-                }
-                Spacer()
-                ExpandDot(expanded: expanded.wrappedValue) { StatusDot(status) }
-            }
-            .frame(maxWidth: .infinity)
-            .platterRow()
-            .contentShape(Rectangle())
-            .onTapGesture { withAnimation(.snappy(duration: 0.2)) { expanded.wrappedValue.toggle() } }
-            if expanded.wrappedValue {
-                PlatterDivider()
-                detailBlock {
-                    // Not ready (pending/failed) → show the state here, where the stats would be;
-                    // running/idle → the engine's own stats. (Replaces the old dot tooltip.)
-                    if let note = status.troubleNote {
-                        Text(note).glassCaption()
-                    } else {
-                        content()
-                    }
-                }
-            }
-        }
-    }
-
-    /// The "DontSpeak" row's expanded details: lifetime usage — total seconds spoken (TTS)
-    /// and heard (STT), summed across all sessions and persisted by the engine. Updates
-    /// live off the status push.
-    @ViewBuilder
-    private func dontSpeakDetails() -> some View {
+/// The "DontSpeak" row's expanded details: lifetime usage — total seconds spoken (TTS) and heard
+/// (STT), summed across all sessions and persisted by the engine. Updates live off the status push.
+private struct LifetimeContent: View {
+    @Environment(Core.self) private var core
+    var body: some View {
         LabeledContent {
             Text(durationText(core.stats.lifetime.ttsSecs)).monospacedDigit()
         } label: {
@@ -431,52 +424,14 @@ struct StatusView: View {
             lifetimeLabel(L.t("status.engine.role_stt"))
         }
     }
+}
 
-    /// A lifetime-total row label: the metric name (TTS/STT) with a light "all-time"
-    /// qualifier, so the cumulative-across-all-sessions meaning is clear. No icon.
-    @ViewBuilder
-    private func lifetimeLabel(_ name: String) -> some View {
-        HStack(spacing: 6) {
-            Text(name).glassRowTitle()
-            Text(L.t("status.stats.lifetime_all_time")).glassRowDetail()
-        }
-    }
-
-    /// Seconds → a duration shown DOWN TO SECONDS so these lifetime rows visibly tick up
-    /// as usage accrues. Resolved by the shared Rust formatter (`ds_duration_live`)
-    /// so the bucket selection + leading-zero-unit rule live in ONE place for every UI.
-    private func durationText(_ secs: Double) -> String {
-        smTake(ds_duration_live(secs))
-    }
-
-    /// A session-count row — "<count>  <secs> s" — via the SHARED `ds_stats_count`
-    /// formatter (was a hand-built HStack; de-dup-first, so the secondary tint is flattened).
-    @ViewBuilder
-    private func countRow(_ label: String, _ count: Int, _ secs: Double) -> some View {
-        LabeledContent {
-            Text(smTake(ds_stats_count(UInt64(count), secs))).monospacedDigit()
-        } label: {
-            Text(label).glassRowTitle()
-        }
-    }
-
-    /// A stat RANGE row — "avg<unit>  ·  lo–hi" — via the SHARED `ds_stats_range`
-    /// formatter (replaces the two-tone `StatRange`; de-dup-first, styling flattened for now).
-    @ViewBuilder
-    private func rangeRow(_ title: String, _ lo: Double, _ avg: Double, _ hi: Double,
-                          _ precision: UInt32, _ unitKey: String) -> some View {
-        LabeledContent {
-            Text(smTake(ds_stats_range(lo, avg, hi, precision, unitKey))).monospacedDigit()
-        } label: {
-            Text(title).glassRowTitle()
-        }
-    }
-
-    /// TTS stats for the ACTIVE engine. System `say` synthesizes in the OS (no local RTF
-    /// to report), so it shows a one-line note + a link out to System Settings → Spoken
-    /// Content where its voices and per-language packs live. Kokoro shows the live stats.
-    @ViewBuilder
-    private func ttsStats() -> some View {
+/// TTS stats for the ACTIVE engine. System `say` synthesizes in the OS (no local RTF to report),
+/// so it shows a one-line note + a link out to System Settings → Spoken Content where its voices
+/// and per-language packs live. Kokoro shows the live stats.
+private struct TtsStatsContent: View {
+    @Environment(Core.self) private var core
+    var body: some View {
         if core.selection.ttsEngine == "system" {
             // System `say` synthesizes in the OS — no local stats. A normal expander row
             // (label left, open-icon in the value column) whose WHOLE row is clickable,
@@ -496,69 +451,66 @@ struct StatusView: View {
             if let prov = core.selection.ttsProvider {
                 LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(prov))
             }
-            // Ready by the time we get here (pending/failed is handled in statEngineRow).
+            // Ready by the time we get here (pending/failed is handled in EngineStatRow).
             let s = core.stats.tts
             if s.utterances == 0 {
-                hint("status.no_data")
+                glassHint("status.no_data")
             } else {
-                rangeRow(L.t("status.stats.realtime"), s.rtfMin, s.rtfAvg, s.rtfMax, 2, "status.stats.unit.times")
-                rangeRow(L.t("status.stats.first_audio"), s.firstMinMs / 1000, s.firstAvgMs / 1000, s.firstMaxMs / 1000, 1, "status.stats.unit.seconds")
-                countRow(L.t("status.stats.spoken"), s.utterances, s.audioSecs)
+                statRangeRow(L.t("status.stats.realtime"), s.rtfMin, s.rtfAvg, s.rtfMax, 2, "status.stats.unit.times")
+                statRangeRow(L.t("status.stats.first_audio"), s.firstMinMs / 1000, s.firstAvgMs / 1000, s.firstMaxMs / 1000, 1, "status.stats.unit.seconds")
+                statCountRow(L.t("status.stats.spoken"), s.utterances, s.audioSecs)
                 if s.failures > 0 {
                     LabeledContent(L.t("status.stats.failures"), value: "\(s.failures)").foregroundStyle(.red)
                 }
             }
         }
     }
+}
 
-    /// STT stats for the ACTIVE engine (Parakeet / System / Claude Code) — the same
-    /// realtime-factor + count display for whichever is selected; the "not yet" hint is
-    /// engine-specific so it never mislabels System/Claude Code as Parakeet.
-    @ViewBuilder
-    private func sttStats() -> some View {
+/// STT stats for the ACTIVE engine (Parakeet / System / Claude Code) — the same realtime-factor +
+/// count display for whichever is selected; the "not yet" hint is engine-specific so it never
+/// mislabels System/Claude Code as Parakeet.
+private struct SttStatsContent: View {
+    @Environment(Core.self) private var core
+    var body: some View {
         // For built_in (Parakeet), lead with the active RUNTIME — Core ML / ANE vs ONNX —
         // the speech-IN analogue of the Runtime row's TTS provider, so "Parakeet on the ANE
         // vs CPU" has a clean readout. (System/Claude Code have no local runtime to show.)
         if core.selection.sttEngine == "built_in", let prov = core.selection.sttProvider {
             LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(prov))
         }
-        // Ready by the time we get here (pending/failed is handled in statEngineRow). Claude
+        // Ready by the time we get here (pending/failed is handled in EngineStatRow). Claude
         // Code does no local transcription — it delegates — so instead of stats it names the
         // key it sends through; the local engines show their realtime/count stats.
         let s = core.stats.stt
         if core.selection.sttEngine == "claude_code" {
             if let k = core.selection.claudeCodeKey, !k.isEmpty {
-                hint("status.stt_claude_code", ["key": k])
+                glassHint("status.stt_claude_code", ["key": k])
             } else {
-                hint("status.stt_claude_code_off")
+                glassHint("status.stt_claude_code_off")
             }
         } else if s.transcriptions == 0 {
-            hint("status.no_data")
+            glassHint("status.no_data")
         } else {
-            rangeRow(L.t("status.stats.realtime"), s.rtfMin, s.rtfAvg, s.rtfMax, 2, "status.stats.unit.times")
-            countRow(L.t("status.stats.transcribed"), s.transcriptions, s.audioSecs)
+            statRangeRow(L.t("status.stats.realtime"), s.rtfMin, s.rtfAvg, s.rtfMax, 2, "status.stats.unit.times")
+            statCountRow(L.t("status.stats.transcribed"), s.transcriptions, s.audioSecs)
         }
     }
+}
 
-    /// The runtime TOKEN → short label, via the SHARED `ds_runtime_label` formatter
-    /// (was a hand-written switch duplicated with the Windows/Linux hosts; now ONE mapping).
-    private func runtimeLabel(_ provider: String) -> String {
-        smTake(ds_runtime_label(provider))
-    }
-
-    /// Diarization stats. Numbers only make sense once at least one voice is enrolled (so
-    /// the recognized names + sensitivity have something to label); until then show only a
-    /// prompt to enroll — the green dot already conveys "engine ready". Once set up, lead
-    /// with the RUNTIME line (Core ML / ANE), mirroring STT/TTS, then who it recognizes and
-    /// the clustering sensitivity.
-    @ViewBuilder
-    private func diarStats() -> some View {
+/// Diarization stats. Numbers only make sense once at least one voice is enrolled (so the
+/// recognized names + sensitivity have something to label); until then show only a prompt to
+/// enroll — the green dot already conveys "engine ready". Once set up, lead with the RUNTIME line
+/// (Core ML / ANE), mirroring STT/TTS, then who it recognizes and the clustering sensitivity.
+private struct DiarStatsContent: View {
+    @Environment(Core.self) private var core
+    var body: some View {
         let s = core.stats.diarization
         if !s.enabled {
-            hint("status.diarization_disabled")
+            glassHint("status.diarization_disabled")
         } else if s.speakers.isEmpty {
             // Enabled + ready, but not set up yet — prompt to enroll; no numbers.
-            hint("status.diarization_no_speakers")
+            glassHint("status.diarization_no_speakers")
         } else {
             if !s.runtime.isEmpty {
                 LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(s.runtime))
@@ -569,14 +521,102 @@ struct StatusView: View {
                            value: String(format: "%.2f", s.clusteringThreshold))
         }
     }
+}
 
-    /// Take ownership of a Rust-owned `char*` (always free it) and return a Swift String.
-    private func smTake(_ ptr: UnsafeMutablePointer<CChar>?) -> String {
-        guard let ptr else { return "" }
-        defer { ds_string_free(ptr) }
-        return String(cString: ptr)
+// MARK: - Shared row chrome + stat-cell formatters (file-private)
+
+/// Stacks an expanded row's detail content with consistent platter insets — the in-platter
+/// equivalent of the grouped-Form sub-rows it replaces.
+@MainActor @ViewBuilder
+private func statusDetailBlock<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+    VStack(alignment: .leading, spacing: 8) { content() }
+        // Restore the Form's label-left / value-right spread for the LabeledContent
+        // rows, which a plain VStack would otherwise center.
+        .labeledContentStyle(.spread)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+}
+
+/// A muted one-line hint — the empty-states explainer.
+@MainActor
+private func glassHint(_ key: String) -> some View {
+    Text(L.t(key)).glassCaption()
+}
+
+/// Interpolated variant (e.g. the claude_code hint naming the synthesized key).
+@MainActor
+private func glassHint(_ key: String, _ params: [String: String]) -> some View {
+    Text(L.t(key, params)).glassCaption()
+}
+
+/// Grant shown as a single dot (no text), matching the StatusDot column:
+/// green = granted, orange = not granted, gray ring = unknown.
+@MainActor @ViewBuilder
+private func grantDot(_ grant: Grant) -> some View {
+    Group {
+        switch grant {
+        case .granted: Circle().fill(Color.green)
+        case .denied: Circle().fill(Color.orange)
+        case .unknown: Circle().strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1.5)
+        }
+    }
+    .frame(width: 10, height: 10)
+    .help(grant == .granted ? L.t("status.grant.granted") : (grant == .denied ? L.t("status.grant.denied") : L.t("status.grant.unknown")))
+}
+
+/// A lifetime-total row label: the metric name (TTS/STT) with a light "all-time" qualifier, so the
+/// cumulative-across-all-sessions meaning is clear. No icon.
+@MainActor
+private func lifetimeLabel(_ name: String) -> some View {
+    HStack(spacing: 6) {
+        Text(name).glassRowTitle()
+        Text(L.t("status.stats.lifetime_all_time")).glassRowDetail()
     }
 }
+
+/// Seconds → a duration shown DOWN TO SECONDS so these lifetime rows visibly tick up as usage
+/// accrues. Resolved by the shared Rust formatter (`ds_duration_live`) so the bucket selection +
+/// leading-zero-unit rule live in ONE place for every UI.
+private func durationText(_ secs: Double) -> String {
+    smTake(ds_duration_live(secs))
+}
+
+/// A session-count row — "<count>  <secs> s" — via the SHARED `ds_stats_count` formatter.
+@MainActor @ViewBuilder
+private func statCountRow(_ label: String, _ count: Int, _ secs: Double) -> some View {
+    LabeledContent {
+        Text(smTake(ds_stats_count(UInt64(count), secs))).monospacedDigit()
+    } label: {
+        Text(label).glassRowTitle()
+    }
+}
+
+/// A stat RANGE row — "avg<unit>  ·  lo–hi" — via the SHARED `ds_stats_range` formatter.
+@MainActor @ViewBuilder
+private func statRangeRow(_ title: String, _ lo: Double, _ avg: Double, _ hi: Double,
+                          _ precision: UInt32, _ unitKey: String) -> some View {
+    LabeledContent {
+        Text(smTake(ds_stats_range(lo, avg, hi, precision, unitKey))).monospacedDigit()
+    } label: {
+        Text(title).glassRowTitle()
+    }
+}
+
+/// The runtime TOKEN → short label, via the SHARED `ds_runtime_label` formatter (was a
+/// hand-written switch duplicated with the Windows/Linux hosts; now ONE mapping).
+private func runtimeLabel(_ provider: String) -> String {
+    smTake(ds_runtime_label(provider))
+}
+
+/// Take ownership of a Rust-owned `char*` (always free it) and return a Swift String.
+private func smTake(_ ptr: UnsafeMutablePointer<CChar>?) -> String {
+    guard let ptr else { return "" }
+    defer { ds_string_free(ptr) }
+    return String(cString: ptr)
+}
+
+// MARK: - Cursor modifiers
 
 /// Shows the pointing-hand (link) cursor on hover, to signal a clickable link.
 /// Uses the native `pointerStyle` on macOS 15+; on older macOS it sets `NSCursor`
@@ -625,4 +665,3 @@ private struct BusyCursorOnHover: ViewModifier {
         }
     }
 }
-
