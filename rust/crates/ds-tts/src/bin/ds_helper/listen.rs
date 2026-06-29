@@ -172,10 +172,20 @@ fn transcribe_loop(
     let mut last_text = String::new();
     let mut partials = 0u32;
     let mut total_transcribe_ms = 0f64;
-    // Live-preview transcription time (the bounded tail re-pass every ~180 ms). Kept SEPARATE
-    // from `total_transcribe_ms` (which is committed-segment + final work only) so the debug
-    // STTSTATS line shows how much GPU/CPU the streaming overlay costs vs the real transcript.
+    // Live-preview transcription time (the tail re-pass). Kept SEPARATE from
+    // `total_transcribe_ms` (committed-segment + final work only) so the debug STTSTATS line
+    // shows how much GPU/CPU the streaming overlay costs vs the real transcript.
     let mut total_preview_ms = 0f64;
+    // Live-preview pacing. Base cadence for a short tail, with an ADAPTIVE BACK-OFF: the next
+    // re-pass waits at least as long as the last one took (clamped), so an expensive pass on a
+    // long tail self-throttles instead of re-running the whole tail dozens of times — preview
+    // can't exceed ~half the session. The tail is still previewed WHOLE (no length cap), so the
+    // overlay never blanks (see `tail_preview_budget_samples`). `last_preview_at` fingerprints
+    // the audio so an unchanged tail (no new samples) isn't re-transcribed at all.
+    let base_cadence = Duration::from_millis(180);
+    let preview_ceiling = Duration::from_millis(1500);
+    let mut preview_cadence = base_cadence;
+    let mut last_preview_at = (usize::MAX, 0usize); // (committed_until, tail_len) of the last pass
 
     // Transcribe one device-rate segment through the SAME pipeline the old final pass
     // used (gain → resample → speaker-lock → trim → model), now applied per segment.
@@ -214,24 +224,33 @@ fn transcribe_loop(
                 }
             }
         }
-        // Live partial: finalized segments, plus a cheap re-pass of the still-open tail
-        // when it's short enough (force-split bounds it). The tail is NOT committed here.
-        // 180 ms cadence (was 350): partials stream in roughly twice as often so the
-        // overlay tracks speech smoothly instead of landing in visible ~⅓-second chunks.
-        // The extra cost is one more bounded tail re-pass per emission (warm Parakeet),
-        // and the dedup below (`merged != last_text`) still drops no-change repeats.
-        if last_partial.elapsed() >= Duration::from_millis(180) {
+        // Live partial: finalized segments, plus a re-pass of the still-open tail (force-split
+        // bounds its length). The tail is NOT committed here. The cadence is adaptive (see the
+        // `preview_cadence` setup above): a short tail keeps the snappy 180 ms beat so the
+        // overlay tracks speech; a long tail throttles so the GPU isn't burned on repeated
+        // full-tail re-passes. The dedup below (`merged != last_text`) still drops no-change
+        // repeats, and the `last_preview_at` fingerprint skips re-running an unchanged tail.
+        if last_partial.elapsed() >= preview_cadence {
             let tail = &accum[committed_until.min(accum.len())..];
-            let tail_text = if tail_previewable(tail.len(), rate) {
-                segment_text(tail, &mut total_preview_ms)
+            let fingerprint = (committed_until, tail.len());
+            if tail_previewable(tail.len(), rate) && fingerprint != last_preview_at {
+                let t0 = Instant::now();
+                let tail_text = segment_text(tail, &mut total_preview_ms);
+                // Back-off: next re-pass waits at least this pass's duration (≤ half the time
+                // on previews), clamped to a responsiveness ceiling so the overlay still
+                // refreshes at least every `preview_ceiling`.
+                preview_cadence = t0.elapsed().clamp(base_cadence, preview_ceiling);
+                last_preview_at = fingerprint;
+                if let Some(merged) = next_overlay(&committed, tail_text.as_deref(), &last_text) {
+                    println!("PARTIAL {merged}");
+                    flush();
+                    last_text = merged;
+                    partials += 1;
+                }
             } else {
-                None
-            };
-            if let Some(merged) = next_overlay(&committed, tail_text.as_deref(), &last_text) {
-                println!("PARTIAL {merged}");
-                flush();
-                last_text = merged;
-                partials += 1;
+                // Nothing new to preview (empty/over-budget tail, or no new audio since the
+                // last pass): relax to the base cadence and try again next tick.
+                preview_cadence = base_cadence;
             }
             last_partial = Instant::now();
         }
