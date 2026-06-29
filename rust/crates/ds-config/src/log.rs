@@ -143,10 +143,10 @@ pub fn log_tail(path: &Path, max_bytes: u64) -> String {
     }
     let mut s = String::from_utf8_lossy(&buf).into_owned();
     // Started mid-file ⇒ the first line is likely partial — drop through the first newline.
-    if start > 0 {
-        if let Some(nl) = s.find('\n') {
-            s.drain(..=nl);
-        }
+    if start > 0
+        && let Some(nl) = s.find('\n')
+    {
+        s.drain(..=nl);
     }
     s
 }

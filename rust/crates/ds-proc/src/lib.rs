@@ -148,11 +148,11 @@ mod imp {
 
     pub fn kill_group(pid: i32) {
         unsafe {
-            if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid as u32) {
-                if !h.is_invalid() {
-                    let _ = TerminateProcess(h, 143);
-                    let _ = CloseHandle(h);
-                }
+            if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid as u32)
+                && !h.is_invalid()
+            {
+                let _ = TerminateProcess(h, 143);
+                let _ = CloseHandle(h);
             }
         }
     }

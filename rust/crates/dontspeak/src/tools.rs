@@ -500,7 +500,7 @@ fn call_set_voice(sock: &Path, args: &Value) -> Result<String, String> {
             // the 6 offline fallback ids, so a real Kokoro-shaped voice (af_nicole) looks
             // "unknown". Accept it optimistically — the download is kicked below and it
             // self-applies once ready. A wrong-shaped id still fails fast.
-            let wants_kokoro = explicit.map_or(true, |e| e.eq_ignore_ascii_case("kokoro"));
+            let wants_kokoro = explicit.is_none_or(|e| e.eq_ignore_ascii_case("kokoro"));
             let kokoro_shaped = ds_tts::enumerate::kokoro_gender(&voice).is_some();
             if wants_kokoro && kokoro_shaped && !npz_present {
                 (

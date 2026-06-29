@@ -242,13 +242,13 @@ fn download_one(
     loop {
         let tmp = tempfile::Builder::new().tempfile_in(dir)?;
         let res = download_to(&url, tmp.path(), progress).and_then(|()| {
-            if let Some(sha) = &f.sha256 {
-                if !verify_sha256(tmp.path(), sha) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("sha256 mismatch for {}", f.path),
-                    ));
-                }
+            if let Some(sha) = &f.sha256
+                && !verify_sha256(tmp.path(), sha)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("sha256 mismatch for {}", f.path),
+                ));
             }
             Ok(())
         });

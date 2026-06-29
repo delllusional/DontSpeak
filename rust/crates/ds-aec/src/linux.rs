@@ -44,10 +44,10 @@ const CHUNK_FRAMES: usize = CAPTURE_RATE as usize / 50;
 /// name, then the common PipeWire/Pulse default. First that connects wins.
 fn candidate_sources() -> Vec<String> {
     let mut v = Vec::new();
-    if let Ok(s) = std::env::var("DONTSPEAK_AEC_SOURCE") {
-        if !s.is_empty() {
-            v.push(s);
-        }
+    if let Ok(s) = std::env::var("DONTSPEAK_AEC_SOURCE")
+        && !s.is_empty()
+    {
+        v.push(s);
     }
     v.push("ds_ec_source".to_string());
     v.push("echo-cancel-source".to_string());

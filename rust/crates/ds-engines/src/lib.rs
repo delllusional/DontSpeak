@@ -254,14 +254,6 @@ mod tests {
         }
     }
 
-    fn cfg_with(stt: SttEngine, tts: TtsEngine) -> VoiceConfig {
-        VoiceConfig {
-            stt_engine: vec![stt],
-            tts_engine: vec![tts],
-            ..Default::default()
-        }
-    }
-
     fn plat() -> Rc<FakePlat> {
         Rc::new(FakePlat::default())
     }

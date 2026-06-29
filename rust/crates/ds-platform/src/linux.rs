@@ -113,27 +113,6 @@ fn key_for_base(base: &KeyBase) -> Option<KeyCode> {
     })
 }
 
-#[cfg(test)]
-mod keycode_parity {
-    use super::*;
-    use crate::chord::all_supported_bases;
-
-    #[test]
-    fn every_supported_base_maps_to_a_keycode() {
-        for b in all_supported_bases() {
-            assert!(
-                key_for_base(&b).is_some(),
-                "Linux key_for_base has no evdev code for {b:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn unsupported_base_has_no_keycode() {
-        assert!(key_for_base(&KeyBase::Unsupported("f5".into())).is_none());
-    }
-}
-
 /// Does this device look like the keyboard? (exposes both KEY_CAPSLOCK and the LED_CAPSL
 /// LED — the source the macOS-style LED poll needs.) First match wins.
 fn is_caps_keyboard(dev: &Device) -> bool {
@@ -518,5 +497,26 @@ impl X11Focus {
             .into_iter()
             .flatten()
             .any(|name| TERM_WM_CLASSES.contains(&name.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod keycode_parity {
+    use super::*;
+    use crate::chord::all_supported_bases;
+
+    #[test]
+    fn every_supported_base_maps_to_a_keycode() {
+        for b in all_supported_bases() {
+            assert!(
+                key_for_base(&b).is_some(),
+                "Linux key_for_base has no evdev code for {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_base_has_no_keycode() {
+        assert!(key_for_base(&KeyBase::Unsupported("f5".into())).is_none());
     }
 }

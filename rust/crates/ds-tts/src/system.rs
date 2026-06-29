@@ -100,11 +100,11 @@ pub fn open_voice_settings() -> bool {
 /// speaks with when `tts_system_voice` is empty. Used to NAME "who is speaking" (the greeting)
 /// for the OS-default voice. Returns the raw OS name (e.g. Windows `"Microsoft Hazel Desktop"`);
 /// the caller tidies it for display. `None` if it can't be resolved.
-///   * Windows → the `System.Speech` synthesizer's current voice (the SAME engine our
-///               `say_command` speaks through, so the name always matches what's heard).
-///   * macOS   → the System Voice from Spoken Content (`SelectedVoiceName`, else a name
-///               derived from the `SelectedVoiceID` identifier — see [`default_voice_name`]).
-///   * Linux   → TODO (not wired yet — falls back to a name-less greeting).
+/// * Windows → the `System.Speech` synthesizer's current voice (the SAME engine our
+///   `say_command` speaks through, so the name always matches what's heard).
+/// * macOS   → the System Voice from Spoken Content (`SelectedVoiceName`, else a name
+///   derived from the `SelectedVoiceID` identifier — see [`default_voice_name`]).
+/// * Linux   → TODO (not wired yet — falls back to a name-less greeting).
 #[cfg(target_os = "windows")]
 pub fn default_voice_name() -> Option<String> {
     use std::os::windows::process::CommandExt;

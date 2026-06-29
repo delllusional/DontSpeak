@@ -229,10 +229,10 @@ pub fn model_dir() -> Option<PathBuf> {
     // Portable / bundled builds ship the models alongside the app and point this at them via
     // DONTSPEAK_MODEL_DIR, so an EXTRACTED, no-install copy reads its bundled models in place
     // (and an offline installer can target the per-user cache explicitly). Empty = ignored.
-    if let Some(d) = std::env::var_os("DONTSPEAK_MODEL_DIR") {
-        if !d.is_empty() {
-            return Some(PathBuf::from(d));
-        }
+    if let Some(d) = std::env::var_os("DONTSPEAK_MODEL_DIR")
+        && !d.is_empty()
+    {
+        return Some(PathBuf::from(d));
     }
     Some(BaseDirs::new()?.cache_dir().join(APP_DIR).join("models"))
 }

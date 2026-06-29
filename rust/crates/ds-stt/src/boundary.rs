@@ -176,7 +176,7 @@ mod tests {
         let b = d.feed(&s);
         let frame = RATE as usize * FRAME_MS / 1000;
         assert_eq!(b.len(), 1);
-        assert!(b[0] % frame == 0, "boundary is frame-aligned");
+        assert!(b[0].is_multiple_of(frame), "boundary is frame-aligned");
         assert!(b[0] <= fed, "boundary within the fed sample count");
     }
 
@@ -207,11 +207,10 @@ mod tests {
             b[0], max,
             "first force-split must be exactly at MAX_SEGMENT_SECS"
         );
-        assert!(
-            MAX_SEGMENT_SECS <= 8,
-            "force-split must stay within the helper's live-partial tail budget (~8 s) \
-             or the dictation overlay goes blank on long pause-free speech"
-        );
+        // Compile-time invariant (not a runtime check on a constant): force-split must stay
+        // within the helper's live-partial tail budget (~8 s) or the dictation overlay goes
+        // blank on long pause-free speech.
+        const _: () = assert!(MAX_SEGMENT_SECS <= 8);
     }
 
     #[test]

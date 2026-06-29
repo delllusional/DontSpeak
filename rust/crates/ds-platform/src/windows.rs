@@ -392,7 +392,7 @@ impl FrontmostWindow for WindowsPlatform {
         };
         thread_local! {
             static UIA: std::cell::RefCell<Option<IUIAutomation>> =
-                std::cell::RefCell::new(None);
+                const { std::cell::RefCell::new(None) };
         }
         UIA.with(|cell| {
             let mut slot = cell.borrow_mut();
@@ -418,21 +418,19 @@ impl FrontmostWindow for WindowsPlatform {
                     return false;
                 };
                 // Primary: an Edit or Document control type (the text-input roles).
-                if let Ok(ct) = el.CurrentControlType() {
-                    if ct == UIA_EditControlTypeId || ct == UIA_DocumentControlTypeId {
-                        return true;
-                    }
+                if let Ok(ct) = el.CurrentControlType()
+                    && (ct == UIA_EditControlTypeId || ct == UIA_DocumentControlTypeId)
+                {
+                    return true;
                 }
                 // Fallback: a non-read-only Value pattern (editable contents) — catches
                 // editable elements that report a non-standard control type.
                 if let Ok(vp) =
                     el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                    && let Ok(read_only) = vp.CurrentIsReadOnly()
+                    && !read_only.as_bool()
                 {
-                    if let Ok(read_only) = vp.CurrentIsReadOnly() {
-                        if !read_only.as_bool() {
-                            return true;
-                        }
-                    }
+                    return true;
                 }
                 false
             }
@@ -544,20 +542,19 @@ mod caps_led {
                     OPEN_EXISTING,
                     FILE_FLAGS_AND_ATTRIBUTES(0),
                     None,
-                ) {
-                    if !h.is_invalid() {
-                        let _ = DeviceIoControl(
-                            h,
-                            IOCTL_KEYBOARD_SET_INDICATORS,
-                            Some(&kip as *const _ as *const c_void),
-                            std::mem::size_of::<KeyboardIndicatorParameters>() as u32,
-                            None,
-                            0,
-                            None,
-                            None,
-                        );
-                        let _ = CloseHandle(h);
-                    }
+                ) && !h.is_invalid()
+                {
+                    let _ = DeviceIoControl(
+                        h,
+                        IOCTL_KEYBOARD_SET_INDICATORS,
+                        Some(&kip as *const _ as *const c_void),
+                        std::mem::size_of::<KeyboardIndicatorParameters>() as u32,
+                        None,
+                        0,
+                        None,
+                        None,
+                    );
+                    let _ = CloseHandle(h);
                 }
                 // Drop the temporary symlink (NULL target = remove all defs for the name).
                 let _ = DefineDosDeviceW(

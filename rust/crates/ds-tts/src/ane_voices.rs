@@ -102,10 +102,10 @@ pub fn materialize(voice: &str) -> Result<PathBuf, String> {
 /// the ANE path, so only the voice-tensor pack is fetched. Idempotent: returns the
 /// existing pack path when the voice is already materialized.
 pub fn ensure_materialized(voice: &str) -> Result<PathBuf, String> {
-    if let Some(p) = voice_pack_path(voice) {
-        if p.is_file() {
-            return Ok(p);
-        }
+    if let Some(p) = voice_pack_path(voice)
+        && p.is_file()
+    {
+        return Ok(p);
     }
     ensure_voices_npz()?;
     materialize(voice)

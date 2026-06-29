@@ -1098,7 +1098,10 @@ impl TtsManager {
 
     /// Barge-in: cancel any in-flight playback. Fire-and-forget (no stdout read),
     /// so it can run while a `speak` is blocked awaiting its `DONE`. Stops BOTH the
-    /// Kokoro warm child's playback and any in-flight System `say`.
+    /// Kokoro warm child's playback and any in-flight System `say`. Only the macOS/Windows
+    /// `speak_system` path calls this (Linux has no System engine), so it's gated to those
+    /// targets to stay dead-code-clean.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn stop(&self) {
         let _ = self.write_request(r#"{"op":"stop"}"#);
         if let Some(mut c) = self.say_child.lock().unwrap().take() {

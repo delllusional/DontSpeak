@@ -660,6 +660,7 @@ impl<P: Platform + 'static> Engine<P> {
     ///   * a quick TAP (release before `long_press_ms`) toggles recording;
     ///   * a LONG-PRESS (hold ≥ `long_press_ms`) force-resets to idle;
     ///   * the Caps LED is a pure OUTPUT, re-asserted to `holding` — never read back.
+    ///
     /// See the inline GESTURE MODEL block below for the full rationale.
     pub(crate) fn tick(&mut self) {
         // Publish whether a terminal is the frontmost app for the TTS worker's focus
@@ -798,6 +799,7 @@ impl<P: Platform + 'static> Engine<P> {
     ///     long-press threshold (hold), both handled in [`check_long_press`].
     ///   * UP — a release NOT consumed by a long-press is a TAP → toggle dictation
     ///     (start when idle, stop+submit when recording).
+    ///
     /// The Caps-held mirror feeds `PasteBuf::caps_held` so model_status suppresses the
     /// finalized transcript while a press is IN FLIGHT (a hold-cancel must not flash the
     /// bubble before it dismisses).
@@ -862,19 +864,20 @@ impl<P: Platform + 'static> Engine<P> {
         if self.caps_down_since.is_some() {
             return;
         }
-        if let Some(t0) = self.pending_tap_at {
-            if t0.elapsed() > Duration::from_millis(DOUBLE_TAP_MS) {
-                self.pending_tap_at = None;
-                self.toggle_dictation();
-            }
+        if let Some(t0) = self.pending_tap_at
+            && t0.elapsed() > Duration::from_millis(DOUBLE_TAP_MS)
+        {
+            self.pending_tap_at = None;
+            self.toggle_dictation();
         }
     }
 
     /// The time-based half of the gesture, run once per [`tick`] regardless of edges:
-    /// a Caps hold past `long_press_ms` force-resets to idle (CANCEL — discard dictation
-    /// + silence voice), exactly once per press; and the Caps LED is re-pinned to
-    /// `holding` for as long as the key is held (counters the OS's own hold-delay latch
-    /// flip on the polled ports — a no-op on Windows, which suppresses the key outright).
+    /// a Caps hold past `long_press_ms` force-resets to idle (CANCEL — discard
+    /// dictation + silence voice), exactly once per press; and the Caps LED is
+    /// re-pinned to `holding` for as long as the key is held (counters the OS's own
+    /// hold-delay latch flip on the polled ports — a no-op on Windows, which
+    /// suppresses the key outright).
     fn check_long_press(&mut self) {
         let Some(t) = self.caps_down_since else {
             return;

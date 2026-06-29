@@ -253,10 +253,10 @@ pub fn friendly_system_name(raw: &str) -> String {
 
 /// The DISPLAY name of a resolved `(engine, voice)` — the ONE place that turns "what is
 /// speaking" into a short, speakable name, shared by the greeting and the UI:
-///   * Kokoro → the voice id's friendly name (`af_sarah` → "Sarah").
-///   * System → the configured voice tidied, or — when empty — the OS DEFAULT voice's name
-///              (the exact voice narration uses), tidied. `None` if the default can't be read.
-///   * Off    → `None`.
+/// * Kokoro → the voice id's friendly name (`af_sarah` → "Sarah").
+/// * System → the configured voice tidied, or — when empty — the OS DEFAULT voice's
+///   name (the exact voice narration uses), tidied. `None` if the default can't be read.
+/// * Off    → `None`.
 pub fn voice_display_name(engine: TtsEngine, voice: &str) -> Option<String> {
     match engine {
         TtsEngine::Off => None,

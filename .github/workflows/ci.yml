@@ -49,6 +49,24 @@ jobs:
         working-directory: rust
         run: cargo fmt --all --check
 
+  # Clippy gate: deny ALL warnings across the workspace + every target (incl. tests). Linux
+  # only per-commit (matches the test default); covers the platform-agnostic majority plus the
+  # Linux cfg paths. Needs the same ALSA/PulseAudio dev libs as the tests (clippy compiles the
+  # cpal / ds-aec crates). Platform-specific (macOS/Windows cfg) lints are caught when the
+  # release runs the full matrix's tests; clippy here only type-checks the host's active cfg.
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linux audio deps (ALSA + PulseAudio)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpulse-dev pkg-config
+      - name: cargo clippy -D warnings
+        working-directory: rust
+        # --keep-going: lint every crate even after one fails, so a multi-crate workspace
+        # surfaces ALL lints in one run instead of stopping at the first.
+        run: cargo clippy --workspace --all-targets --keep-going -- -D warnings
+
   # Pick the OS matrix: Linux-only by default, all three when full-matrix is requested
   # (the release gate). push/PR events have no `inputs`, so they fall to Linux-only.
   setup:

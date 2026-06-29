@@ -1058,9 +1058,8 @@ mod audio_tests {
             leading_silence_pcm(48_000).len(),
             48_000 * LEAD_SILENCE_MS as usize / 1000
         );
-        assert!(
-            LEAD_SILENCE_MS >= 40,
-            "too little lead won't cover the stream-resume latency"
-        );
+        // Compile-time invariant (not a runtime check on a constant): too little lead
+        // won't cover the rodio output-stream resume latency.
+        const _: () = assert!(LEAD_SILENCE_MS >= 40);
     }
 }
