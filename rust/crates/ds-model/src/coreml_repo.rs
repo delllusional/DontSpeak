@@ -97,8 +97,9 @@ fn parakeet_target() -> Option<PathBuf> {
 /// On-disk folder name of the apple-native STREAMING STT set (Parakeet EOU 120M).
 pub const PARAKEET_EOU_DIR_NAME: &str = "parakeet-eou-streaming";
 /// The EOU variant subfolder we fetch — MIRRORS the chunk size the shim requests
-/// (`StreamingEouAsrManager(chunkSize: .ms320)` in `shim.swift`), so they can't drift.
-pub const PARAKEET_EOU_VARIANT: &str = "320ms";
+/// (`StreamingEouAsrManager(chunkSize: .ms160)` in `shim.swift`), so they can't drift. 160ms is
+/// FluidAudio's lowest-latency EOU variant (~6 partials/sec) — picked for a snappier live overlay.
+pub const PARAKEET_EOU_VARIANT: &str = "160ms";
 
 /// `coreml_dir()/parakeet-eou-streaming` — download target for the streaming EOU set. The repo's
 /// `320ms/` subtree lands under here, so the loadable model dir is the `320ms` subfolder (see
@@ -203,17 +204,18 @@ pub static PARAKEET_COREML: CoremlRepo = CoremlRepo {
 /// Apple-native STREAMING speech-to-text (Parakeet EOU 120M, cache-aware encoder) — the smooth
 /// real-time path the dictation overlay is built for. Without it the macOS Core ML STT silently
 /// falls back to the slower offline sliding-window engine (whole-tail re-passes). We fetch only the
-/// 320 ms variant the shim requests: the three runtime `.mlmodelc` bundles + the vocab (NOT the
-/// `.mlpackage` sources or the conversion scripts). cc-by-4.0 (NVIDIA NeMo; Core ML by FluidInference).
+/// 160 ms variant the shim requests (lowest latency → ~6 partials/sec): the three runtime
+/// `.mlmodelc` bundles + the vocab (NOT the `.mlpackage` sources or the conversion scripts).
+/// cc-by-4.0 (NVIDIA NeMo; Core ML by FluidInference).
 pub static PARAKEET_EOU_COREML: CoremlRepo = CoremlRepo {
     name: "parakeet_eou_coreml",
     repo: "FluidInference/parakeet-realtime-eou-120m-coreml",
     revision: "40a23f4c0b333aa17ad8c0f2ea47ec2347f2f355",
     include_prefixes: &[
-        "320ms/streaming_encoder.mlmodelc/",
-        "320ms/decoder.mlmodelc/",
-        "320ms/joint_decision.mlmodelc/",
-        "320ms/vocab.json",
+        "160ms/streaming_encoder.mlmodelc/",
+        "160ms/decoder.mlmodelc/",
+        "160ms/joint_decision.mlmodelc/",
+        "160ms/vocab.json",
     ],
     exclude_substrings: &[".mlpackage", ".DS_Store"],
     target: parakeet_eou_target,

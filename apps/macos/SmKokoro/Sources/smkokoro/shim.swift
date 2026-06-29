@@ -227,13 +227,10 @@ public func smk_asr_shutdown() {
 // the whole buffer per preview. Drives the SAME helper loop as the ONNX streaming path via the
 // Rust `CoremlStreamer` (start/push/finish == reset/accept/finalize).
 //
-// MAC-TODO (confirm on a Mac — this file can't be built on the Windows dev box):
-//   • exact `StreamingEouAsrManager` init + `loadModels(modelDir:)` path for the
-//     `parakeet-realtime-eou-120m` Core ML model (downloaded via ds-model coreml_repo);
-//   • `process(audioBuffer:)` argument type ([Float] vs AVAudioPCMBuffer) and whether it returns
-//     incremental partial text or "" until EOU/finish (docs say it may return "" mid-stream — if so,
-//     wire `setEouCallback`/`eouDetected` to surface partials, or switch to SlidingWindowAsrManager
-//     whose `transcribeChunk` returns the accumulated transcript).
+// NOTE: `process(audioBuffer:)` deliberately returns "" mid-stream (it decodes incrementally but
+// only surfaces text from `finish()` / the EOU callback). So `smk_asr_stream_push` reads the
+// running hypothesis via `getPartialTranscript()` after each chunk to feed the live overlay — see
+// the call site below.
 private final class StreamAsrState: @unchecked Sendable {
     let lock = NSLock()
     var manager: StreamingEouAsrManager?
@@ -255,7 +252,7 @@ public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
             return mgr
         }
         guard let dir else { throw SmkError.nilDir }
-        let mgr = StreamingEouAsrManager(chunkSize: .ms320) // balanced latency/throughput
+        let mgr = StreamingEouAsrManager(chunkSize: .ms160) // lowest latency (~6 partials/sec)
         try await mgr.loadModels(from: dir)
         await mgr.reset()
         return mgr
@@ -269,8 +266,8 @@ public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
     }
 }
 
-/// Feed a 16 kHz mono chunk; hand back the hypothesis-so-far (may be empty mid-stream — see
-/// MAC-TODO). Caller frees *out via smk_free_str.
+/// Feed a 16 kHz mono chunk; hand back the running hypothesis-so-far (via `getPartialTranscript`,
+/// since `process` itself returns "" mid-stream). Caller frees *out via smk_free_str.
 @_cdecl("smk_asr_stream_push")
 public func smk_asr_stream_push(
     _ samples: UnsafePointer<Float>?,
@@ -302,7 +299,12 @@ public func smk_asr_stream_push(
         if !audio.isEmpty, let dst = buffer.floatChannelData {
             audio.withUnsafeBufferPointer { dst[0].update(from: $0.baseAddress!, count: audio.count) }
         }
-        return try await mgr.process(audioBuffer: buffer)
+        // `process()` decodes the chunk but RETURNS "" by design (it only yields text from
+        // `finish()` / the EOU callback) — so reading its result gave the overlay nothing mid-stream.
+        // Pull the running hypothesis explicitly: `getPartialTranscript()` decodes the accumulated
+        // token ids, i.e. the same transcript-so-far `finish()` will return, growing per chunk.
+        _ = try await mgr.process(audioBuffer: buffer)
+        return await mgr.getPartialTranscript()
     }) {
     case .success(let text):
         outText?.pointee = strdup(text)
