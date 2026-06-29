@@ -5,6 +5,13 @@ use std::io;
 
 use serde::{Deserialize, Serialize};
 
+/// The product's out-of-the-box Kokoro voice — the ONE source of truth for "which
+/// voice when none is otherwise chosen". Used for the default `tts_built_in_voices`,
+/// the `current_voice()` empty-list fallback, AND the helper's empty-request fallback
+/// (`ds_helper`), so a missing/blank voice string can NEVER resolve to a different
+/// voice than the configured default. Do NOT re-hardcode this literal elsewhere.
+pub const DEFAULT_KOKORO_VOICE: &str = "af_sarah";
+
 use crate::enums::{
     de_diarizer_provider, de_drop_speech_on, de_listen_mode, de_narrate, de_provider,
     de_stt_engine, de_tray_indicator, de_tts_engine, default_diarizer_provider,
@@ -291,10 +298,10 @@ fn default_earcon_reply() -> String {
     }
 }
 fn default_voices() -> Vec<String> {
-    // Default to a single voice (Sarah) out of the box. Add more ids via `set_config`
-    // to form a per-terminal pool so concurrent Claude sessions speak with different
-    // voices; with one entry every terminal uses Sarah.
-    vec!["af_sarah".to_string()]
+    // Default to a single voice ([`DEFAULT_KOKORO_VOICE`]) out of the box. Add more ids
+    // via `set_config` to form a per-terminal pool so concurrent Claude sessions speak
+    // with different voices; with one entry every terminal uses that voice.
+    vec![DEFAULT_KOKORO_VOICE.to_string()]
 }
 fn default_long_press_ms() -> u64 {
     600
@@ -590,14 +597,14 @@ impl VoiceConfig {
         &self.tts_built_in_voices
     }
 
-    /// The default/current voice — `active_voices()[0]`, falling back to `af_sarah` if the
-    /// list is somehow empty. The per-session pool assignment (in the engine) hands later
-    /// terminals the subsequent entries.
+    /// The default/current voice — `active_voices()[0]`, falling back to
+    /// [`DEFAULT_KOKORO_VOICE`] if the list is somehow empty. The per-session pool
+    /// assignment (in the engine) hands later terminals the subsequent entries.
     pub fn current_voice(&self) -> String {
         self.active_voices()
             .first()
             .cloned()
-            .unwrap_or_else(|| "af_sarah".into())
+            .unwrap_or_else(|| DEFAULT_KOKORO_VOICE.into())
     }
 
     /// Whether `kind` is in the narration set. `narrates(Digests)` gates both message-blockquote
@@ -653,8 +660,15 @@ pub(crate) mod tests {
     #[test]
     fn voice_defaults_when_absent() {
         let v: VoiceConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(v.tts_built_in_voices, vec!["af_sarah"]);
-        assert_eq!(v.current_voice(), "af_sarah");
+        // Both the default pool and the empty-list fallback resolve to the ONE shared
+        // default constant — no independently-hardcoded literal can drift from it.
+        assert_eq!(v.tts_built_in_voices, vec![DEFAULT_KOKORO_VOICE]);
+        assert_eq!(v.current_voice(), DEFAULT_KOKORO_VOICE);
+        let empty = VoiceConfig {
+            tts_built_in_voices: vec![],
+            ..v.clone()
+        };
+        assert_eq!(empty.current_voice(), DEFAULT_KOKORO_VOICE);
         // Default narration: shorts first, then digests — both on out of the box.
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
         assert!(v.narrates(NarrateKind::Digests) && v.narrates(NarrateKind::Shorts));

@@ -56,7 +56,7 @@ pub use paths::{Paths, coreml_dir, coreml_model_present, data_dir, model_dir};
 pub use pidfile::{engine_pid_alive, evict_stale_engine, pid_alive, read_engine_pid};
 pub use set_config::SetConfigArgs;
 pub use speakers::{Speaker, SpeakerStore};
-pub use voice::{CaptureGain, ConfigChange, HandsFreePhrases, VoiceConfig};
+pub use voice::{CaptureGain, ConfigChange, DEFAULT_KOKORO_VOICE, HandsFreePhrases, VoiceConfig};
 pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};
 pub use wire::desktop::{merge_mcp_server, strip_mcp_server};
 pub use wire::hooks::{HookSpec, INSTALLED_BINS, merge_hooks, strip_hooks};

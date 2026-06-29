@@ -40,10 +40,33 @@ pub struct CoremlRepo {
     pub target: fn() -> Option<PathBuf>,
 }
 
+/// On-disk folder name (== the FluidAudio repo's last path segment) of the apple-native
+/// Kokoro Core ML chain. The ONE source of truth for this folder name — both the download
+/// target and the voice-pack materialize dir derive from it, so they can't drift apart.
+pub const KOKORO_COREML_DIR_NAME: &str = "kokoro-82m-coreml";
+
+/// The HuggingFace repo + pinned revision shared by BOTH Kokoro Core ML sets — the runtime
+/// ANE chain ([`KOKORO_COREML`]) and the G2P/lexicon sub-models ([`KOKORO_G2P_COREML`]) live
+/// in the SAME repo at the SAME commit (they're just different sub-paths of one tree). ONE
+/// source of truth so a revision bump can't update one set and silently leave the other
+/// pinned to a stale tree (which would mix model files across two commits). The
+/// `kokoro_sets_share_one_repo_and_revision` test pins both statics to these.
+const KOKORO_HF_REPO: &str = "FluidInference/kokoro-82m-coreml";
+const KOKORO_HF_REVISION: &str = "c94edcb4b671856795458645cd389c0a9184e8bb";
+
 /// `coreml_dir()/kokoro-82m-coreml` — the apple-native Kokoro runtime chain (the `ANE/`
 /// subtree). FluidAudio's `KokoroAneManager(directory: coreml_dir)` looks here.
 fn kokoro_main_target() -> Option<PathBuf> {
-    Some(ds_config::coreml_dir()?.join("kokoro-82m-coreml"))
+    Some(ds_config::coreml_dir()?.join(KOKORO_COREML_DIR_NAME))
+}
+
+/// `coreml_dir()/kokoro-82m-coreml/ANE` — the exact directory FluidAudio's ANE Kokoro chain
+/// LOADS voice packs from (the `<voice>.bin` files; `af_heart.bin` ships here). Because we
+/// init the shim with [`ds_config::coreml_dir`] (NOT FluidAudio's empty-default cache),
+/// `KokoroAneManager` resolves voice packs UNDER this tree — so any voice pack we materialize
+/// for the ANE path MUST land here, or the shim 404s and silently falls back to `af_heart`.
+pub fn kokoro_ane_dir() -> Option<PathBuf> {
+    Some(kokoro_main_target()?.join("ANE"))
 }
 
 /// `~/.cache/fluidaudio/Models/kokoro` — FluidAudio's `G2PModel` singleton HARDCODES this
@@ -61,18 +84,36 @@ fn parakeet_target() -> Option<PathBuf> {
     Some(ds_config::model_dir()?.join("parakeet-tdt-0.6b-v2"))
 }
 
+/// On-disk folder name of the speaker-diarization Core ML set (== the FluidAudio repo's last
+/// path segment). ONE source of truth: the download target, the presence check, and the Swift
+/// shim's load path (`shim.swift`, kept in sync by comment + the `diarizer_model_names_match_prefixes`
+/// test) all derive from this so they can't drift.
+pub const DIARIZER_COREML_DIR_NAME: &str = "speaker-diarization-coreml";
+/// The two `.mlmodelc` bundles the diarizer shim loads from [`diarizer_dir`]. Mirrored as
+/// literals in the Swift shim (`smk_diar_init`) — a Rust-side rename trips
+/// `diarizer_model_names_match_prefixes` so the cross-language pair can't silently drift.
+pub const DIARIZER_SEGMENTATION_MODEL: &str = "pyannote_segmentation.mlmodelc";
+pub const DIARIZER_EMBEDDING_MODEL: &str = "wespeaker_v2.mlmodelc";
+
 /// `coreml_dir()/speaker-diarization-coreml` — a dir WE choose; the shim's `smk_diar_init`
-/// loads the two diarization `.mlmodelc` from here via FluidAudio's explicit local-file API.
+/// loads the two diarization `.mlmodelc` ([`DIARIZER_SEGMENTATION_MODEL`] /
+/// [`DIARIZER_EMBEDDING_MODEL`]) from here via FluidAudio's explicit local-file API.
 fn diarizer_target() -> Option<PathBuf> {
-    Some(ds_config::coreml_dir()?.join("speaker-diarization-coreml"))
+    Some(ds_config::coreml_dir()?.join(DIARIZER_COREML_DIR_NAME))
+}
+
+/// Public accessor for the diarizer model dir (== [`diarizer_target`]) — the ONE place
+/// Rust consumers resolve where the two diarization `.mlmodelc` live.
+pub fn diarizer_dir() -> Option<PathBuf> {
+    diarizer_target()
 }
 
 /// Apple-native Kokoro TTS runtime models (the `ANE/` subtree). Pinned to the FluidInference
 /// repo revision audited 2026-06. apache-2.0.
 pub static KOKORO_COREML: CoremlRepo = CoremlRepo {
     name: "kokoro_coreml",
-    repo: "FluidInference/kokoro-82m-coreml",
-    revision: "c94edcb4b671856795458645cd389c0a9184e8bb",
+    repo: KOKORO_HF_REPO,
+    revision: KOKORO_HF_REVISION,
     include_prefixes: &["ANE/"],
     exclude_substrings: &[".mlpackage", ".DS_Store", "ANE/LICENSE", "ANE/README"],
     target: kokoro_main_target,
@@ -82,8 +123,8 @@ pub static KOKORO_COREML: CoremlRepo = CoremlRepo {
 /// hardcoded `~/.cache/fluidaudio/Models/kokoro`. Same repo + revision as the runtime set.
 pub static KOKORO_G2P_COREML: CoremlRepo = CoremlRepo {
     name: "kokoro_g2p_coreml",
-    repo: "FluidInference/kokoro-82m-coreml",
-    revision: "c94edcb4b671856795458645cd389c0a9184e8bb",
+    repo: KOKORO_HF_REPO,
+    revision: KOKORO_HF_REVISION,
     include_prefixes: &[
         "G2PEncoder",
         "G2PDecoder",
@@ -345,6 +386,37 @@ pub fn coreml_repo_present(repo: &CoremlRepo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diarizer_model_names_match_prefixes() {
+        // The two `.mlmodelc` consts (mirrored as literals in the Swift `smk_diar_init`
+        // loader) MUST equal the download include-prefixes (with the dir-style trailing
+        // slash). A rename of either const without updating the prefixes — or vice versa —
+        // would make Rust download to one name and the Swift shim load another (the
+        // `ane_voices`-class bug, but cross-language so the compiler can't catch it). This
+        // test catches the Rust half; the Swift comment pins the other.
+        assert_eq!(
+            DIARIZER_COREML.include_prefixes,
+            [
+                format!("{DIARIZER_SEGMENTATION_MODEL}/"),
+                format!("{DIARIZER_EMBEDDING_MODEL}/"),
+            ]
+        );
+        // The repo path's last segment is the on-disk folder name we materialize into.
+        assert!(DIARIZER_COREML.repo.ends_with(DIARIZER_COREML_DIR_NAME));
+    }
+
+    #[test]
+    fn kokoro_sets_share_one_repo_and_revision() {
+        // The runtime ANE chain and the G2P/lexicon set are two sub-paths of ONE HF tree;
+        // they MUST stay pinned to the same repo + commit, or a half-bumped revision mixes
+        // model files across commits. Both derive from the shared consts, so this can't
+        // drift — and the repo's last segment is the on-disk folder name we materialize into.
+        assert_eq!(KOKORO_COREML.repo, KOKORO_G2P_COREML.repo);
+        assert_eq!(KOKORO_COREML.revision, KOKORO_G2P_COREML.revision);
+        assert_eq!(KOKORO_COREML.repo, KOKORO_HF_REPO);
+        assert!(KOKORO_HF_REPO.ends_with(KOKORO_COREML_DIR_NAME));
+    }
 
     #[test]
     fn filters_keep_only_the_runtime_set() {

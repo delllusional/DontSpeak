@@ -94,7 +94,7 @@ fn main() {
     let voice = {
         let v = args.next().unwrap_or_default();
         if v.trim().is_empty() {
-            "af_sarah".to_string()
+            ds_config::DEFAULT_KOKORO_VOICE.to_string()
         } else {
             v
         }

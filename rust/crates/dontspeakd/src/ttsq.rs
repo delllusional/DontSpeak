@@ -87,11 +87,23 @@ fn pick_pool_voice(
     pool: &[String],
     session: &str,
 ) -> String {
-    if let Some(v) = assignments.get(session) {
+    // Reuse this session's prior pick ONLY if it's still in the live pool. The pool is
+    // `tts_built_in_voices`, which the user can change at runtime (set_config →
+    // hot-reload) WITHOUT clearing `pool_assignments`; a cached pick that's no longer
+    // configured must NOT linger, or the terminal keeps speaking a voice the user
+    // dropped (e.g. greets/replies in the old default `af_sarah` after switching to
+    // `af_nicole` — heard as "Sarah introduces herself as Nicole"). When the cached
+    // pick is stale we fall through and re-pick from the current pool; `assign_pool_voice`
+    // overwrites the stale map entry with this fresh pick, so the heal is permanent.
+    if let Some(v) = assignments.get(session)
+        && pool.iter().any(|p| p == v)
+    {
         return v.clone();
     }
     pool.iter()
-        .find(|v| !assignments.values().any(|a| a == *v))
+        // Skip voices already CLAIMED by another live session (a stale self-entry for
+        // `session` isn't in `pool`, so it never blocks here) so terminals stay distinct.
+        .find(|v| !assignments.iter().any(|(s, a)| s != session && a == *v))
         .cloned()
         .unwrap_or_else(|| pool[assignments.len() % pool.len()].clone())
 }
@@ -924,6 +936,38 @@ mod tests {
         // The first terminal's pool voice == the default/current voice (pool[0]).
         let p = pool();
         assert_eq!(pick_pool_voice(&HashMap::new(), &p, "s1"), p[0]);
+    }
+
+    #[test]
+    fn stale_assignment_is_dropped_when_voice_leaves_the_pool() {
+        // Regression: a session assigned under the OLD pool keeps speaking the old
+        // voice after the user changes `tts_built_in_voices` (the assignment cache
+        // survives a config hot-reload). The stale pick must be discarded and a voice
+        // from the CURRENT pool chosen instead — otherwise the terminal keeps using a
+        // voice the user dropped ("Sarah introduces herself as Nicole").
+        let mut a = HashMap::new();
+        a.insert("s1".to_string(), "af_sarah".to_string()); // picked under the old default
+        let new_pool = vec!["af_nicole".to_string()]; // user switched to Nicole-only
+        let v = pick_pool_voice(&a, &new_pool, "s1");
+        assert_eq!(
+            v, "af_nicole",
+            "a voice no longer in the pool must not be reused"
+        );
+        // And once re-recorded, the fresh pick is stable.
+        a.insert("s1".to_string(), v);
+        assert_eq!(pick_pool_voice(&a, &new_pool, "s1"), "af_nicole");
+    }
+
+    #[test]
+    fn stale_assignment_repick_avoids_voices_taken_by_other_live_sessions() {
+        // When a stale session re-picks, it must still get a DISTINCT voice from the
+        // sessions whose assignments are still valid under the new pool.
+        let p = vec!["af_nicole".to_string(), "am_adam".to_string()];
+        let mut a = HashMap::new();
+        a.insert("s1".to_string(), "af_sarah".to_string()); // stale (old pool)
+        a.insert("s2".to_string(), "af_nicole".to_string()); // valid, holds af_nicole
+        // s1 re-picks: af_nicole is taken by s2, so s1 gets am_adam (not the stale af_sarah).
+        assert_eq!(pick_pool_voice(&a, &p, "s1"), "am_adam");
     }
 
     /// Build a narration `Item` tagged with `session` (the only field `select_pos`

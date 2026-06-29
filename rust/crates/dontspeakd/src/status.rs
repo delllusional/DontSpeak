@@ -662,13 +662,12 @@ fn tts_provider_token(
 }
 
 /// Whether FluidAudio's speaker-diarization Core ML models are on disk in our `coreml_dir`.
-/// FluidAudio has renamed this subdir across versions, so we match any non-empty subdir whose
-/// name looks like the diarization set (pyannote / wespeaker / speaker / diariz). A false
-/// "missing" only nags the Download button — the shim re-downloads on demand.
+/// Uses the SAME completion-marker check the downloader writes (`coreml_repo_present`), so the
+/// status row and the downloader can never disagree about one location — a partial/aborted
+/// fetch (subdir exists, no `.ds-ready` marker) reads MISSING here exactly as it does to the
+/// downloader, instead of the old substring heuristic that called a half-download "present".
 fn diarization_present() -> bool {
-    ["diariz", "speaker", "pyannote", "wespeaker"]
-        .iter()
-        .any(|n| ds_config::coreml_model_present(n))
+    ds_model::coreml_repo::coreml_repo_present(&ds_model::coreml_repo::DIARIZER_COREML)
 }
 
 /// PURE lifecycle-state string (the app maps it 1:1 to a status dot). Precedence:

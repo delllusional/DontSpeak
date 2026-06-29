@@ -141,6 +141,8 @@ its session goes quiet; the next `MarkActive` repoints it.
   pause/resume/barge treat every item identically.
 - **P8** per-session queues are over-engineered → single queue + session-tag filter.
   **Applied** (whole redesign).
-- Fact-check: there is no skip-ahead / cap at all (the old `NARRATION_MAX` is gone);
-  `GreetSession`/`Speak`/`SpeakNarration` carry session; `UserPromptSubmit`/`MarkActive`/
-  `DropSession` do not exist yet. **Corrected in text.**
+- Fact-check (snapshot at the 2026-06-21 audit): there is no skip-ahead / cap at all (the
+  old `NARRATION_MAX` is gone); `GreetSession`/`Speak`/`SpeakNarration` carry session;
+  `UserPromptSubmit`/`MarkActive`/`DropSession` did not exist yet. **Corrected in text.**
+  (Since shipped: `MarkActive` was added and is now central to the design — §5.3; `DropSession`
+  was deliberately *not* added — single queue, no per-session GC, see §8.)

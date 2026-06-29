@@ -69,6 +69,9 @@ fn ensure_coreml_diarizer(cfg: &ds_config::VoiceConfig) -> Result<(), String> {
     use ds_config::DiarizerProvider;
     match cfg.resolved_diarizer() {
         DiarizerProvider::AppleNative => Ok(()),
+        // Defensive: `AppleNative` is the only variant today (so this arm is unreachable),
+        // but keep the rejection so adding an unwired provider can't silently fall through.
+        #[allow(unreachable_patterns)]
         other => Err(format!(
             "diarizer_provider={} is not available on this platform (only apple-native is wired)",
             other.as_str()
@@ -474,7 +477,7 @@ pub(crate) fn serve() -> ! {
                     continue; // ignore malformed lines rather than desync
                 };
                 let voice = if req.voice.trim().is_empty() {
-                    "af_sarah".to_string()
+                    ds_config::DEFAULT_KOKORO_VOICE.to_string()
                 } else {
                     req.voice
                 };

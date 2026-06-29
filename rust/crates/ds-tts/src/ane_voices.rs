@@ -22,14 +22,16 @@ use std::path::PathBuf;
 /// Bytes in one ANE voice pack: `[510, 256]` little-endian f32.
 const VOICE_PACK_BYTES: usize = 510 * 256 * 4;
 
-/// FluidAudio's on-disk model cache for the English ANE Kokoro variant —
-/// `~/.cache/fluidaudio/Models/kokoro-82m-coreml/ANE/` on macOS (its
-/// `TtsCacheDirectory` + the repo `folderName`). This is FluidAudio's *default*
-/// cache, which the shim selects by initializing the model store with an empty
-/// `model_dir`. `None` if `$HOME` is unset.
+/// The directory FluidAudio's English ANE Kokoro chain LOADS voice packs from —
+/// `coreml_dir()/kokoro-82m-coreml/ANE/` (where `af_heart.bin` ships). DontSpeak inits the
+/// shim with [`ds_config::coreml_dir`] (NOT FluidAudio's empty-default `~/.cache/fluidaudio`
+/// cache), so `KokoroAneManager` resolves packs under OUR cache, not FluidAudio's scattered
+/// default. We MUST materialize here or the shim won't find the pack — it then tries to
+/// download, 404s, and silently degrades to `af_heart`. Resolved via the ONE shared
+/// [`ds_model::coreml_repo::kokoro_ane_dir`] so the materialize target can't drift from where
+/// the synth chain reads. `None` if the cache dir can't be resolved (`$HOME` unset).
 pub fn ane_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".cache/fluidaudio/Models/kokoro-82m-coreml/ANE"))
+    ds_model::coreml_repo::kokoro_ane_dir()
 }
 
 /// Sanitize a voice id to the filename FluidAudio's `ensureVoicePack` looks up
@@ -111,6 +113,16 @@ pub fn ensure_materialized(voice: &str) -> Result<PathBuf, String> {
     materialize(voice)
 }
 
+/// Does the active TTS backend need a per-voice ANE pack materialized before it can
+/// play a Kokoro voice? Only the Apple CoreML/ANE backend ([`crate::synth_coreml`],
+/// itself `#[cfg(target_os = "macos")]`) consumes these packs; the ONNX backend used
+/// everywhere else reads the voice straight from the npz. So off-Apple this is `false`,
+/// and callers must NOT touch [`materialize`]/[`ane_dir`] — `ane_dir` needs `$HOME`,
+/// which is unset on Windows and would make `set_voice` spuriously fail.
+pub const fn materialization_required() -> bool {
+    cfg!(target_os = "macos")
+}
+
 /// Is the voices npz (`voices-v1.0.bin`) already on disk? Cheap presence probe used to
 /// decide whether a voice can be extracted now or its download must be kicked first.
 pub fn voices_npz_present() -> bool {
@@ -134,6 +146,21 @@ pub fn ensure_voices_npz() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn materialization_gated_to_apple_coreml_backend() {
+        // Drift guard for the `set_voice` path: ANE packs exist ONLY for the macOS
+        // CoreML backend (`synth_coreml`, `#[cfg(target_os = "macos")]`). Everywhere
+        // else the ONNX backend reads the voice from the npz, so we must not touch
+        // `ane_dir()` (it needs $HOME, unset on Windows). If this predicate ever drifts
+        // away from the backend's own cfg, `set_voice` regresses to the $HOME failure.
+        assert_eq!(materialization_required(), cfg!(target_os = "macos"));
+        #[cfg(not(target_os = "macos"))]
+        assert!(
+            !materialization_required(),
+            "off-Apple must never materialize ANE packs"
+        );
+    }
 
     #[test]
     fn sanitize_matches_fluidaudio_rules() {

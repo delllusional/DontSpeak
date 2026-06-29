@@ -52,11 +52,11 @@ pub(crate) fn set_new_pgroup(cmd: &mut Command) {
 /// System-TTS "Manage voices" affordance, so macOS / Windows / Linux all launch the right
 /// page from a single call (exposed to the apps as `ds_open_voice_settings`). Returns
 /// true if a page was launched.
-///   * macOS  → System Settings ▸ Accessibility ▸ Spoken Content (where the `say` voices and
-///              per-language packs live): the modern anchor, then the legacy one.
-///   * Windows→ Settings ▸ Time & language ▸ Speech (`ms-settings:speech` — the only Settings
-///              deep link Windows exposes for TTS voices; its "Manage voices" adds voices).
-///   * Linux  → TODO: no portable system-voice settings page yet (spd-say/espeak are CLI).
+/// - macOS → System Settings ▸ Accessibility ▸ Spoken Content (where the `say` voices and
+///   per-language packs live): the modern anchor, then the legacy one.
+/// - Windows → Settings ▸ Time & language ▸ Speech (`ms-settings:speech` — the only Settings
+///   deep link Windows exposes for TTS voices; its "Manage voices" adds voices).
+/// - Linux → TODO: no portable system-voice settings page yet (spd-say/espeak are CLI).
 #[cfg(target_os = "macos")]
 pub fn open_voice_settings() -> bool {
     for uri in [

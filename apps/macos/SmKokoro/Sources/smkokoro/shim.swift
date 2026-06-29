@@ -31,7 +31,7 @@ private func runBlocking<T>(_ op: @escaping @Sendable () async throws -> T) -> R
     return box.value ?? .failure(SmkError.noResult)
 }
 
-private enum SmkError: Error { case noResult, notInitialized, nilText, nilDir }
+private enum SmkError: Error { case noResult, notInitialized, nilText, nilDir, badAudio }
 
 // MARK: - shared state
 
@@ -218,6 +218,121 @@ public func smk_asr_shutdown() {
     asr.manager = nil
     asr.lock.unlock()
     if let mgr { _ = runBlocking({ await mgr.cleanup(); return true }) }
+}
+
+// MARK: - Streaming ASR (FluidAudio StreamingEouAsrManager, Core ML / ANE)
+//
+// The cache-aware STREAMING counterpart of `smk_transcribe`: feed 16 kHz chunks as they arrive
+// (encoder cache threaded inside FluidAudio — each frame encoded once), instead of re-transcribing
+// the whole buffer per preview. Drives the SAME helper loop as the ONNX streaming path via the
+// Rust `CoremlStreamer` (start/push/finish == reset/accept/finalize).
+//
+// MAC-TODO (confirm on a Mac — this file can't be built on the Windows dev box):
+//   • exact `StreamingEouAsrManager` init + `loadModels(modelDir:)` path for the
+//     `parakeet-realtime-eou-120m` Core ML model (downloaded via ds-model coreml_repo);
+//   • `process(audioBuffer:)` argument type ([Float] vs AVAudioPCMBuffer) and whether it returns
+//     incremental partial text or "" until EOU/finish (docs say it may return "" mid-stream — if so,
+//     wire `setEouCallback`/`eouDetected` to surface partials, or switch to SlidingWindowAsrManager
+//     whose `transcribeChunk` returns the accumulated transcript).
+private final class StreamAsrState: @unchecked Sendable {
+    let lock = NSLock()
+    var manager: StreamingEouAsrManager?
+}
+private let streamAsr = StreamAsrState()
+
+/// Begin a new streaming utterance: build/load the streaming manager on first use (from
+/// `modelDir`, the streaming EOU Core ML model dir DontSpeak pre-downloaded), then reset its
+/// per-utterance state. Returns 0 on success. `modelDir` is only consulted on the first call.
+@_cdecl("smk_asr_stream_start")
+public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
+    streamAsr.lock.lock()
+    defer { streamAsr.lock.unlock() }
+    DownloadUtils.enforceOffline = true // DontSpeak pre-downloads the streaming model set
+    let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
+    switch runBlocking({ () -> StreamingEouAsrManager in
+        if let mgr = streamAsr.manager {
+            await mgr.reset()
+            return mgr
+        }
+        guard let dir else { throw SmkError.nilDir }
+        let mgr = StreamingEouAsrManager(chunkSize: .ms320) // balanced latency/throughput
+        try await mgr.loadModels(from: dir)
+        await mgr.reset()
+        return mgr
+    }) {
+    case .success(let mgr):
+        streamAsr.manager = mgr
+        return 0
+    case .failure(let e):
+        logErr("smk_asr_stream_start error: \(e)")
+        return 1
+    }
+}
+
+/// Feed a 16 kHz mono chunk; hand back the hypothesis-so-far (may be empty mid-stream — see
+/// MAC-TODO). Caller frees *out via smk_free_str.
+@_cdecl("smk_asr_stream_push")
+public func smk_asr_stream_push(
+    _ samples: UnsafePointer<Float>?,
+    _ n: Int,
+    _ sampleRate: Int32,
+    _ outText: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+) -> Int32 {
+    streamAsr.lock.lock()
+    let mgr = streamAsr.manager
+    streamAsr.lock.unlock()
+    guard let mgr else {
+        logErr("smk_asr_stream_push: not started")
+        return 2
+    }
+    // StreamingEouAsrManager.process expects an AVAudioPCMBuffer and resamples it to 16 kHz
+    // mono Float32 internally. Copy the caller's chunk into a Sendable [Float] and build the
+    // (non-Sendable) buffer INSIDE the closure — capturing the buffer here would violate the
+    // @Sendable contract of runBlocking.
+    let audio = samples.map { Array(UnsafeBufferPointer(start: $0, count: n)) } ?? []
+    let rate = Double(sampleRate)
+    switch runBlocking({ () -> String in
+        guard rate > 0,
+              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: rate, channels: 1, interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                            frameCapacity: AVAudioFrameCount(max(audio.count, 1)))
+        else { throw SmkError.badAudio }
+        buffer.frameLength = AVAudioFrameCount(audio.count)
+        if !audio.isEmpty, let dst = buffer.floatChannelData {
+            audio.withUnsafeBufferPointer { dst[0].update(from: $0.baseAddress!, count: audio.count) }
+        }
+        return try await mgr.process(audioBuffer: buffer)
+    }) {
+    case .success(let text):
+        outText?.pointee = strdup(text)
+        return 0
+    case .failure(let e):
+        logErr("smk_asr_stream_push error: \(e)")
+        return 1
+    }
+}
+
+/// Flush the stream and return the final transcript. Caller frees *out via smk_free_str.
+@_cdecl("smk_asr_stream_finish")
+public func smk_asr_stream_finish(
+    _ outText: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+) -> Int32 {
+    streamAsr.lock.lock()
+    let mgr = streamAsr.manager
+    streamAsr.lock.unlock()
+    guard let mgr else {
+        outText?.pointee = strdup("")
+        return 0
+    }
+    switch runBlocking({ () -> String in try await mgr.finish() }) {
+    case .success(let text):
+        outText?.pointee = strdup(text)
+        return 0
+    case .failure(let e):
+        logErr("smk_asr_stream_finish error: \(e)")
+        return 1
+    }
 }
 
 // MARK: - System STT (macOS 26 SpeechAnalyzer + SpeechTranscriber, en-US, ON-DEVICE)
@@ -411,6 +526,11 @@ public func smk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThresho
     }()
     // DontSpeak pre-downloads the two diarization models into `<model_dir>/speaker-diarization-
     // coreml`; load them DIRECTLY from there (no network) via FluidAudio's local-file API.
+    // CONTRACT: the folder + the two `.mlmodelc` basenames below MIRROR the Rust consts
+    // `DIARIZER_COREML_DIR_NAME` / `DIARIZER_SEGMENTATION_MODEL` / `DIARIZER_EMBEDDING_MODEL`
+    // in `ds-model/src/coreml_repo.rs` (which is where they're downloaded). Keep them
+    // byte-identical — a mismatch makes this offline load fail with `modelMissing`. The Rust
+    // `diarizer_model_names_match_prefixes` test pins the Rust half.
     DownloadUtils.enforceOffline = true
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     switch runBlocking({ () -> DiarizerManager in

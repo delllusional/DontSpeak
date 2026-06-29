@@ -29,9 +29,11 @@ drifted.
 - **macOS** calls these through `L.t(...)` (`apps/macos/Sources/DontSpeak/Localization.swift`).
 - **Windows** calls them through `Loc.T(...)` (`apps/windows/winui/Loc.cs`); XAML uses the
   `{loc:Loc Key=...}` markup extension (`apps/windows/winui/LocExtension.cs`).
+- **Linux** calls them from the GTK host (`apps/linux/gtk/`) over the same FFI
+  (`ds_t` / `ds_set_locale`, via `ffi.rs`).
 
-Linux has no GUI, so it consumes none of this. OS-rendered metadata is **not** in the
-catalog (it can't come from an FFI call) — see "Native channel" below.
+OS-rendered metadata is **not** in the catalog (it can't come from an FFI call) — see
+"Native channel" below.
 
 ## Key grouping
 
@@ -44,6 +46,9 @@ can work one screen at a time:
 - `status` — the Status screen: its Engines group (`status.engine.*`), the panel chrome
   (`status.caps_lock`, `status.permission.*`, …), and the stats numbers (`status.stats.*`).
 - `tools` — the Tools screen.
+- `libraries` — the Libraries tab (the downloaded models/runtimes + their licenses,
+  rendered from the shared `ds-model` catalog).
+- `logs` — the Logs tab (the read-only `dontspeak.log` tail; filter/empty/no-match chrome).
 
 ## Key classes
 
@@ -112,12 +117,12 @@ OS-rendered metadata stays in each platform's native resources:
 - ✅ **WinUI Status surface** — name/version/usage via `Loc.T` (version + lifetime usage
   live under the Status "DontSpeak" row; there is no separate About surface), and the two
   nav tab labels via `{loc:Loc Key=common.nav_status}` / `common.nav_tools`.
-- ⏳ **Remaining WinUI literals** (mechanical `Loc.T` / `{loc:Loc}` swaps, keys already in
-  `en.yml`, **needs a Windows build to verify**):
-  - `MainWindow.xaml` — section headers, stat labels (`{loc:Loc Key=...}`).
+- ✅ **WinUI literals migrated** (the mechanical `Loc.T` / `{loc:Loc}` swaps; keys in
+  `en.yml`. Still wants a Windows build to verify on-device):
+  - `MainWindow.xaml` — nav, section headers, stat labels via `{loc:Loc Key=...}`.
   - `MainWindow.xaml.cs` — `running`/`stopped`, `on`/`off`, the unloaded/empty-state
-    blurbs, the stats value lines (`status.stats.spoken_value` / `transcribed_value`), `Download`/
-    `Retry`, `required`/`optional`/`any`.
-  - `App.xaml.cs` — the tray tooltips.
+    blurbs, the stats lines (`status.stats.spoken` / `transcribed`), `Download`/
+    `Retry`, `required`/`optional`/`any` — all via `Loc.T(...)`.
+  - `App.xaml.cs` — the tray balloon (`tray.hint_tray_title` / `tray.hint_tray_body`).
 - ⏳ **macOS `InfoPlist.strings`** + `CFBundleDevelopmentRegion` + `bundle-lib.sh` step
   (only needed once a non-English locale is added).

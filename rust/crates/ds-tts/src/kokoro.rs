@@ -39,7 +39,7 @@ impl KokoroTts {
 
 impl Tts for KokoroTts {
     fn speak(&self, text: &str, voice_id: Option<&str>, rate: f32) -> std::io::Result<SpeakHandle> {
-        let voice = voice_id.unwrap_or("af_sarah");
+        let voice = voice_id.unwrap_or(ds_config::DEFAULT_KOKORO_VOICE);
         let (child, pgid) = spawn(&self.paths, text, voice, rate)?;
         // Fire-and-forget for the trait path: the caller waits by pgid (or via
         // the pidfile) and clears the pidfile. We must NOT block here (speak must
