@@ -20,13 +20,14 @@ enum Glass {
     static let panelCorner: CGFloat = 18
     /// An inner platter corner — tighter than the panel so it nests cleanly.
     static let platterCorner: CGFloat = 12
-    /// The content margin between a window's glass edge and its platters on the sides and
-    /// bottom (the traffic-light bar's clearance comes from the system title-bar safe area,
-    /// not this). Shared by the Status and Tools windows so margins can't drift.
+    /// The content margin between a window's glass edge and its platters — 16pt. Shared by every
+    /// screen so margins can't drift.
     static let windowInset: CGFloat = 16
-    /// The margin BELOW the traffic-light bar — half the side/bottom inset, since the system
-    /// title-bar safe area already provides most of the top clearance.
-    static let windowTopInset: CGFloat = windowInset / 2
+    /// The margin between the content and the title-bar strip — the SAME as the sides, so the
+    /// content is inset evenly on all four edges. The detail respects the title-bar safe area, so
+    /// this is its whole top gap; the full-height sidebar bleeds UNDER the bar, so there it's
+    /// added ON TOP of the title-bar height (see MainWindow) to land its first row level.
+    static let windowTopInset: CGFloat = windowInset
 }
 
 /// Liquid Glass on macOS 26+, ultra-thin material otherwise, clipped to a rounded rect.
@@ -169,6 +170,48 @@ struct Platter<Content: View>: View {
 struct PlatterDivider: View {
     var body: some View {
         Divider().padding(.leading, 14)
+    }
+}
+
+/// A collapsible platter row: a tappable header (the caller's `header`, plus a trailing
+/// rotating chevron) that reveals `content` when expanded. The open set is owned by the
+/// caller and keyed by `id`, so a whole list of these shares ONE `@State` and the disclosure
+/// look + animation live in one place — shared by the Tools and Libraries panes so they can't
+/// drift.
+struct DisclosureRow<Header: View, Content: View>: View {
+    @Binding var expanded: Set<String>
+    let id: String
+    @ViewBuilder var header: () -> Header
+    @ViewBuilder var content: () -> Content
+
+    private var isOpen: Bool { expanded.contains(id) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) {
+                    if isOpen { expanded.remove(id) } else { expanded.insert(id) }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    header()
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isOpen {
+                PlatterDivider()
+                content()
+            }
+        }
     }
 }
 

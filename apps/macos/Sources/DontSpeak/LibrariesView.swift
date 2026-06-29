@@ -1,0 +1,190 @@
+//  LibrariesView.swift
+//
+//  The Libraries tab: the third-party open-source models + runtimes DontSpeak downloads,
+//  each with its license. The list is the SAME shared catalog every platform renders —
+//  read via the FFI (ds_libraries_json → the shared ds-model `libraries` catalog), already
+//  FILTERED to this platform (so an Apple-Silicon build shows the Core ML / ANE model sets
+//  and never the CUDA GPU runtime). It can't drift from what's actually fetched.
+
+import SwiftUI
+import AppKit
+import CDontSpeak
+
+/// One downloaded file of a library, from the catalog's `files` array.
+struct LibraryFile: Identifiable, Sendable {
+    let name: String
+    let url: String
+    let sizeBytes: Int?
+    var id: String { name }
+}
+
+/// One library/project as shown in the list.
+struct LibraryInfo: Identifiable, Sendable {
+    let name: String
+    let usage: String
+    let homepage: String
+    let license: String
+    let licenseURL: String
+    let files: [LibraryFile]
+    var id: String { name }
+}
+
+/// Wire shape of the FFI libraries catalog (`ds_libraries_json` → the shared ds-model
+/// `libraries::catalog`): an array of projects, each with a `files` array. Decoded
+/// type-safely, then mapped to the view models above.
+private struct LibraryDTO: Decodable {
+    let name: String
+    let usage: String?
+    let homepage: String?
+    let license: String?
+    let license_url: String?
+    let files: [LibraryFileDTO]?
+}
+
+private struct LibraryFileDTO: Decodable {
+    let name: String
+    let url: String?
+    let size_bytes: Int?
+}
+
+/// Read the catalog from the FFI and decode it into typed `LibraryInfo`s. Display order is
+/// the catalog's own (lowest-level first), so render as-is — no re-sorting.
+private func loadLibraries() -> [LibraryInfo] {
+    guard let dtos = ffiDecode([LibraryDTO].self, ds_libraries_json) else { return [] }
+    return dtos.map { d in
+        LibraryInfo(
+            name: d.name,
+            usage: d.usage ?? "",
+            homepage: d.homepage ?? "",
+            license: d.license ?? "",
+            licenseURL: d.license_url ?? "",
+            files: (d.files ?? []).map {
+                LibraryFile(name: $0.name, url: $0.url ?? "", sizeBytes: $0.size_bytes)
+            }
+        )
+    }
+}
+
+/// Human file size ("310 MB") from a byte count — file-style (decimal) units, matching the
+/// "~310 MB" sizing the download manifest shows.
+private func humanSize(_ bytes: Int) -> String {
+    let f = ByteCountFormatter()
+    f.countStyle = .file
+    f.allowsNonnumericFormatting = false
+    return f.string(fromByteCount: Int64(bytes))
+}
+
+struct LibrariesView: View {
+    @State private var libraries: [LibraryInfo] = []
+    /// Names of the libraries currently expanded (collapsed by default) — same disclosure
+    /// idea as the Tools pane: a tappable header with a rotating chevron.
+    @State private var expanded: Set<String> = []
+
+    var body: some View {
+        // The Libraries pane of the merged sidebar window — just the scrollable content; the
+        // glass slab + traffic-light strip live once on the `MainWindow` container.
+        libraryList
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear { libraries = loadLibraries() }
+    }
+
+    /// The catalog as a Control-Center / HUD layout matching the Tools pane: one glass slab
+    /// with the libraries on a single headerless "platter".
+    @ViewBuilder private var libraryList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Platter {
+                    ForEach(Array(libraries.enumerated()), id: \.element.id) { idx, lib in
+                        if idx > 0 { PlatterDivider() }
+                        libraryRow(lib)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .windowContentInset()
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    /// One collapsible library: a tappable header (name + a license badge + a rotating
+    /// chevron) that reveals what it's for, its links, and the files it fetches — the shared
+    /// `DisclosureRow`, the same disclosure look the Tools pane uses.
+    @ViewBuilder
+    private func libraryRow(_ lib: LibraryInfo) -> some View {
+        DisclosureRow(expanded: $expanded, id: lib.name) {
+            Text(lib.name).glassRowTitle()
+            if !lib.license.isEmpty { LicenseBadge(lib.license) }
+        } content: {
+            libraryDetail(lib)
+        }
+    }
+
+    /// The expanded body of a library row: what it's for, its links, then the files it fetches.
+    @ViewBuilder
+    private func libraryDetail(_ lib: LibraryInfo) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !lib.usage.isEmpty {
+                Text(lib.usage)
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 14) {
+                if let url = URL(string: lib.homepage), !lib.homepage.isEmpty {
+                    Link(destination: url) {
+                        Label(L.t("libraries.homepage"), systemImage: "link")
+                    }
+                }
+                if let url = URL(string: lib.licenseURL), !lib.licenseURL.isEmpty {
+                    Link(destination: url) {
+                        Label(L.t("libraries.view_license"), systemImage: "doc.text")
+                    }
+                }
+            }
+            .font(.caption)
+
+            if !lib.files.isEmpty {
+                Text(L.t("libraries.files"))
+                    .font(.caption2).fontWeight(.semibold)
+                    .foregroundStyle(.tertiary).textCase(.uppercase)
+                    .padding(.top, 2)
+                ForEach(lib.files) { f in
+                    fileRow(f)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14).padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private func fileRow(_ f: LibraryFile) -> some View {
+        HStack(spacing: 6) {
+            Text(f.name)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 8)
+            if let b = f.sizeBytes, b > 0 {
+                Text(humanSize(b)).font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.leading, 10)
+        .padding(.vertical, 1)
+    }
+}
+
+/// A small license tag beside a library name — a quiet capsule (the SPDX id or vendor
+/// license name), so the licensing is visible without opening the row.
+private struct LicenseBadge: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text)
+            .font(.caption2).fontWeight(.medium)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(.separator.opacity(0.6), lineWidth: 0.5))
+    }
+}

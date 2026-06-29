@@ -70,6 +70,36 @@ extension View {
     }
 }
 
+/// One-shot: size the hosting window so its content area is exactly `contentHeight` (the
+/// measured Status content, insets included) plus the hidden title-bar height — wrapping the
+/// window to the Status page on first open, with the last platter one side-margin from the
+/// bottom. Runs ONCE (a latch), keeping the window's top edge fixed; after that the window is the
+/// user's to resize freely. Driven by a `GeometryReader` so it needs no SwiftUI state.
+struct WrapWindowToContentHeight: NSViewRepresentable {
+    let contentHeight: CGFloat
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        guard contentHeight > 1, !context.coordinator.done else { return }
+        DispatchQueue.main.async {
+            guard !context.coordinator.done, let window = view.window else { return }
+            context.coordinator.done = true
+            // The hidden title bar still reserves this height; the content sits below it.
+            let titleBar = NSWindow.frameRect(forContentRect: .zero, styleMask: [.titled]).height
+            let target = contentHeight + titleBar
+            var frame = window.frame
+            // Keep the top edge put (window origin is bottom-left, so move the bottom up/down).
+            frame.origin.y += frame.size.height - target
+            frame.size.height = target
+            window.setFrame(frame, display: true, animate: false)
+        }
+    }
+
+    final class Coordinator { var done = false }
+}
+
 extension OpenWindowAction {
     /// Bring the (accessory) app forward, then open one of its windows. Accessory apps
     /// aren't frontmost, so a window opened from the menu bar would otherwise appear

@@ -105,6 +105,26 @@ char *ds_model_status_wait(uint64_t since, uint32_t timeout_ms);
 // can call). Owned `char*`, free with `ds_string_free`. HANDLE-FREE — no engine.
 char *ds_tools_json(void);
 
+// The third-party libraries catalog for the app's Libraries tab — a JSON array of
+// `{name, usage, homepage, license, license_url, files:[{name, url, size_bytes?}]}`,
+// already FILTERED to this platform (the shared `ds-model` catalog declares each library's
+// `platforms`, so a build shows only what it actually downloads — e.g. the Apple-Silicon
+// Core ML sets here, never the CUDA/cuDNN GPU runtime). Owned `char*`, free with
+// `ds_string_free`. HANDLE-FREE — no engine.
+char *ds_libraries_json(void);
+
+// The COMBINED activity-log tail for the app's Logs tab — a JSON array of
+// `{source, level, text}` merging the unified log with every sibling auxiliary log, in rough
+// chronological order; `max_bytes` caps the tail PER file. `"[]"` when there's no log yet.
+// Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
+char *ds_logs_json(uint32_t max_bytes);
+
+// Logs-tab colors as a JSON object (`{levels:{ERROR,WARN}, source_palette:[…]}`) — the single
+// cross-platform source of truth for the activity-log view's coloring, so every platform's Logs
+// tab tints identically (sibling of `ds_brand_colors_json`). Owned `char*`, free with
+// `ds_string_free`. HANDLE-FREE — no engine.
+char *ds_log_colors_json(void);
+
 // The product homepage URL (e.g. the About screen's clickable link) — a single
 // source of truth so every platform's UI opens the same address. Owned `char*`,
 // free with `ds_string_free`. HANDLE-FREE — no engine needed.

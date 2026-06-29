@@ -183,5 +183,5 @@ libraries:
 # reads the SAME file the engine writes.
 logs:
   empty: No log yet.
-  filter: Filter logs…
+  # The filter field is an empty native search field (no placeholder) on every platform.
   no_match: No matching lines.

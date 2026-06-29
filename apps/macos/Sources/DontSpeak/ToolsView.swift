@@ -7,7 +7,6 @@
 //  allowed values), read from the catalog's ORDERED `params` array (authored order).
 
 import SwiftUI
-import AppKit
 import CDontSpeak
 
 /// One argument of a tool, from the catalog's ordered `params` array.
@@ -74,11 +73,7 @@ private func toToolParam(_ p: ParamDTO) -> ToolParam {
 /// the params as an ORDERED array (the authored order), so we render them as-is — no
 /// sort, no inference from an unordered JSON-Schema `properties` object.
 private func loadTools() -> [ToolInfo] {
-    guard let ptr = ds_tools_json() else { return [] }
-    defer { ds_string_free(ptr) }
-    guard let data = String(cString: ptr).data(using: .utf8),
-          let dtos = try? JSONDecoder().decode([ToolDTO].self, from: data)
-    else { return [] }
+    guard let dtos = ffiDecode([ToolDTO].self, ds_tools_json) else { return [] }
     return dtos.map { t in
         ToolInfo(name: t.name, summary: t.description ?? "", params: (t.params ?? []).map(toToolParam))
     }
@@ -86,29 +81,16 @@ private func loadTools() -> [ToolInfo] {
 
 struct ToolsView: View {
     @State private var tools: [ToolInfo] = []
-    /// Title-bar height (system-derived, no hardcoded constant) — sizes the frosted top strip
-    /// that content blurs under. Mirrors the Status window's derivation.
-    private var titleBarHeight: CGFloat {
-        NSWindow.frameRect(forContentRect: .zero, styleMask: [.titled]).height
-    }
     /// Names of the tools currently expanded (collapsed by default) — same disclosure idea
     /// as the Status window, but each row shows a plain rotating chevron rather than the
     /// status dot↔chevron crossfade.
     @State private var expanded: Set<String> = []
 
     var body: some View {
+        // The Tools pane of the merged sidebar window — just the scrollable content; the glass
+        // slab + traffic-light strip live once on the `MainWindow` container.
         toolList
-            // Flexible on both axes — opens at 520×640, floors at 420×320, grows to fill
-            // the window. A normal resizable window with an internal ScrollView (see
-            // `toolList`): expanding a tool scrolls inside, the window never auto-resizes.
-            .frame(minWidth: 420, idealWidth: 520, maxWidth: .infinity,
-                   minHeight: 320, idealHeight: 640, maxHeight: .infinity)
-            // One continuous glass slab behind everything; the host window is itself clear.
-            // The title-bar height gives the frosted top strip its size, so tool rows BLUR as
-            // they scroll under the traffic-light strip (same as the Status window).
-            .windowGlass(topHeight: titleBarHeight)
-            .glassWindow()
-            .closeOnlyWindow()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear { tools = loadTools() }
     }
 
@@ -137,36 +119,15 @@ struct ToolsView: View {
     }
 
     /// One collapsible tool: a tappable header (name + a rotating chevron on the right) that
-    /// reveals the summary and arguments when expanded — the Status window's disclosure idea,
-    /// with a plain chevron instead of the status dot.
+    /// reveals the summary and arguments when expanded — the shared `DisclosureRow`, the same
+    /// disclosure look the Libraries pane uses.
     @ViewBuilder
     private func toolRow(_ tool: ToolInfo) -> some View {
-        let isOpen = expanded.contains(tool.name)
-        VStack(spacing: 0) {
-            Button {
-                withAnimation(.snappy(duration: 0.2)) {
-                    if isOpen { expanded.remove(tool.name) } else { expanded.insert(tool.name) }
-                }
-            } label: {
-                HStack(spacing: 8) {
-                    Text(tool.name)
-                        .font(.system(.body, design: .monospaced)).fontWeight(.semibold)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(isOpen ? 90 : 0))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if isOpen {
-                PlatterDivider()
-                toolDetail(tool)
-            }
+        DisclosureRow(expanded: $expanded, id: tool.name) {
+            Text(tool.name)
+                .font(.system(.body, design: .monospaced)).fontWeight(.semibold)
+        } content: {
+            toolDetail(tool)
         }
     }
 

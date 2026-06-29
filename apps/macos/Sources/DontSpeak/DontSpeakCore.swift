@@ -138,6 +138,11 @@ struct HealthSnapshot: Sendable, Equatable {
 /// `Sendable` snapshot.
 @Observable @MainActor
 final class Core {
+    /// Which screen the single window's sidebar shows. Stored here (not local to the window)
+    /// so the menu-bar items can open the window AND jump straight to a screen; the sidebar
+    /// binds to it, so navigating there writes back here.
+    var screen: AppScreen = .status
+
     /// Live activity + tray state (engine/caps liveness, record/speak, mute, tray prefs).
     var activity = Activity()
     /// Per-engine lifecycle dots (Kokoro/Parakeet/system/claude_code/diarizer/ttsSystem).

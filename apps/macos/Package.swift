@@ -1,7 +1,8 @@
 // swift-tools-version: 6.2
 //
-// DontSpeak — native macOS SwiftUI app (MenuBarExtra tray + 5-screen Settings)
-// bound to the Rust core over the C ABI in CDontSpeak/include/dontspeak.h.
+// DontSpeak — native macOS SwiftUI app (MenuBarExtra tray + a sidebar window with the
+// Status / Tools / Logs / Libraries screens) bound to the Rust core over the C ABI in
+// CDontSpeak/include/dontspeak.h.
 //
 // Deployment target is macOS 14 (Sonoma) — the floor set by the app's core shell
 // (MenuBarExtra, the Layout protocol, SMAppService) plus the SmKokoro apple-native audio

@@ -139,19 +139,6 @@ struct StatusView: View {
     @State private var claudeCodeExpanded = false
     @State private var diarExpanded = false
 
-    /// The collapsed content's natural height (incl. bottom inset), used as the window's
-    /// MIN height so the bottom edge can't be dragged shorter than the content + its
-    /// padding — else the last platter's margin scrolls off, flush to the edge. A layout
-    /// floor only; the window never auto-resizes. Seeded small until the first measurement.
-    @State private var collapsedFloor: CGFloat = 240
-
-    /// True while ANY section is expanded — so the floor only samples the FULLY-collapsed
-    /// height (an expanded section is taller, but the ScrollView absorbs that overflow).
-    private var anyExpanded: Bool {
-        engineExpanded || capsExpanded || kokoroExpanded || parakeetExpanded
-            || systemExpanded || ttsSystemExpanded || claudeCodeExpanded
-    }
-
     /// The app version number ("0.2.0"), from the shared Rust source; a dash if absent.
     private var versionNumber: String {
         guard let ptr = ds_version() else { return L.t("common.dash") }
@@ -159,23 +146,6 @@ struct StatusView: View {
         return String(cString: ptr)
     }
 
-    /// The whole-window state wash — the live tray color (narrating = purple, dictating =
-    /// orange) at soft opacity, clear when idle. From the shared `TrayState.tint` (same
-    /// source as the menu-bar pill) so window glass and menu bar can't drift; `windowGlass`
-    /// animates the slab between these values.
-    private var stateTint: Color {
-        guard let c = TrayState.current(core).tint else { return .clear }
-        return Color(nsColor: c).opacity(0.5)
-    }
-
-    /// The title-bar height, derived from the system (no hardcoded constant) so the state
-    /// tint band covers exactly the traffic-light strip on any macOS version.
-    /// `frameRect(forContentRect:)` adds the title-bar inset to a zero-height content rect —
-    /// computed with a plain `[.titled]` mask because the real window's `.fullSizeContentView`
-    /// would otherwise make the inset zero.
-    private var titleBarHeight: CGFloat {
-        NSWindow.frameRect(forContentRect: .zero, styleMask: [.titled]).height
-    }
 
     /// Roll-up grant state of the OS permissions nested under Caps Lock — folded into the
     /// Caps header dot via `capsCombined`. Orange ONLY when a permission is actually DENIED;
@@ -197,11 +167,10 @@ struct StatusView: View {
     }
 
     var body: some View {
-        // A Control-Center / HUD layout: the window is one continuous Liquid-Glass slab
-        // (windowGlass + glassWindow), and the former Form sections are translucent
-        // "platters" floating on it. A ScrollView holds the platters so expanding a section
-        // scrolls inside the window — it never auto-resizes, so nothing jumps. Resizable
-        // (fixed 340 width; vertical resize + scroll).
+        // A Control-Center / HUD layout: the Status pane of the merged sidebar window. The
+        // window chrome (the continuous Liquid-Glass slab + the state-tinted traffic-light
+        // strip) lives ONCE on the `MainWindow` container; this view is just the scrollable
+        // content — the former Form sections are translucent "platters" on the shared glass.
         ScrollView {
             VStack(spacing: 12) {
                 // Engine platter — the headline row; expands to lifetime totals (seconds
@@ -232,27 +201,18 @@ struct StatusView: View {
                 }
             }
             .windowContentInset()
-            // Measure the natural (uncompressed) content height — when nothing is expanded
-            // this is the collapsed floor we apply below.
-            .measureContentHeight()
+            // Wrap the window to the Status page on first open: this measures the natural content
+            // height (incl. the 16pt top/bottom insets) and sizes the window to it ONCE, so the
+            // last platter sits exactly one side-margin from the bottom instead of floating above
+            // empty space. Measured on the VStack inside the ScrollView, so it's the un-clipped
+            // height; the one-shot resize lives in `WrapWindowToContentHeight`.
+            .background(GeometryReader { proxy in
+                WrapWindowToContentHeight(contentHeight: proxy.size.height)
+            })
         }
         .scrollIndicators(.hidden)
-        // Sample the height only while fully collapsed; an expanded section is taller and
-        // would otherwise raise the floor (the ScrollView absorbs that overflow).
-        .onPreferenceChange(ContentHeightKey.self) { h in
-            if !anyExpanded, h > 0 { collapsedFloor = h }
-        }
-        // Fixed 340 width; floor at the collapsed content height (so its bottom margin can't
-        // be dragged away) and fill upward.
-        .frame(width: 340)
-        .frame(minHeight: collapsedFloor, maxHeight: .infinity)
-        // One continuous glass slab behind everything; the host window is itself clear. The
-        // TITLE-BAR strip tints to the live state (narrating = purple, dictating = orange),
-        // crossfading between states; the rest stays plain glass so platters stay readable.
-        .windowGlass(topTint: stateTint, topHeight: titleBarHeight)
-        .glassWindow()
-        // No minimize button (Close + standard resizable zoom).
-        .closeOnlyWindow()
+        // Fills the detail pane; the window is resized via the container, not this pane.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// The headline engine row: tap to expand to lifetime totals; while open the dot
@@ -682,25 +642,3 @@ private struct BusyCursorOnHover: ViewModifier {
     }
 }
 
-/// Carries the measured natural height of the window content up to `StatusView`, which
-/// floors the window at the collapsed value (see `collapsedFloor`). `reduce` keeps the
-/// largest reported height so a transient zero during layout never lowers the floor.
-struct ContentHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-extension View {
-    /// Publish this view's natural height via `ContentHeightKey` (a clear background
-    /// GeometryReader, so it never affects layout). macOS 14 has no `onGeometryChange`,
-    /// so this is the preference-key form.
-    func measureContentHeight() -> some View {
-        background(
-            GeometryReader { g in
-                Color.clear.preference(key: ContentHeightKey.self, value: g.size.height)
-            }
-        )
-    }
-}

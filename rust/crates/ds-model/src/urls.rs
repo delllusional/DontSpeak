@@ -250,6 +250,92 @@ pub const WINDOWS_APP_RUNTIME_URL: &str =
 // and CI fails.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A build target (OS × architecture) the app ships for. The SINGLE place the per-platform
+/// rule is expressed as data: every [`Project`] declares which of these it applies to, and
+/// `crate::libraries::catalog` filters to [`current_platform`] — so the Libraries tab on each
+/// platform shows only what that platform actually downloads, with no scattered `#[cfg]` in
+/// the collector. The variants are exactly the targets the app distributes; an unrecognized
+/// target resolves to the closest generic one (no GPU/Apple-native extras).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Platform {
+    WindowsX64,
+    WindowsArm64,
+    LinuxX64,
+    /// Apple Silicon — the only macOS target with the Core ML / ANE (FluidAudio) path and a
+    /// bundled ONNX Runtime dist.
+    MacArm64,
+    /// Intel macOS — no Apple-native (FluidAudio) path and no ONNX Runtime dist (see
+    /// `ort::onnxruntime_dist`); only the portable model assets apply.
+    MacX64,
+}
+
+impl Platform {
+    /// Every target the app distributes — the applicability list for assets present on ALL
+    /// platforms (the Kokoro / Parakeet model files). One source so "all platforms" can't
+    /// silently fall out of sync with the enum.
+    pub const ALL: &'static [Platform] = &[
+        Platform::WindowsX64,
+        Platform::WindowsArm64,
+        Platform::LinuxX64,
+        Platform::MacArm64,
+        Platform::MacX64,
+    ];
+
+    /// Targets with a bundled ONNX Runtime dist — everywhere except Intel macOS (and Linux
+    /// arm, which the app doesn't ship). Mirrors `ort::onnxruntime_dist` returning `Some`.
+    pub const WITH_ONNX_RUNTIME: &'static [Platform] = &[
+        Platform::WindowsX64,
+        Platform::WindowsArm64,
+        Platform::LinuxX64,
+        Platform::MacArm64,
+    ];
+
+    /// Targets with the optional NVIDIA CUDA / cuDNN GPU runtime (x64 Windows + Linux only;
+    /// never Windows-on-ARM or any Mac). Mirrors the `CUDA_WHEELS` cfg gate.
+    pub const WITH_CUDA: &'static [Platform] = &[Platform::WindowsX64, Platform::LinuxX64];
+
+    /// The lone target with the Apple-native Core ML / ANE (FluidAudio) model sets.
+    pub const APPLE_NATIVE: &'static [Platform] = &[Platform::MacArm64];
+}
+
+/// The platform THIS build runs on — the ONE place the OS/arch `cfg` lives. Every other
+/// per-platform decision is plain data filtered against this value.
+pub const fn current_platform() -> Platform {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        Platform::WindowsX64
+    }
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        Platform::WindowsArm64
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        Platform::LinuxX64
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        Platform::MacArm64
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        Platform::MacX64
+    }
+    // Any target the app doesn't ship (e.g. linux-arm64): treat as a generic portable target —
+    // only the all-platform model assets apply (the GPU/Apple-native lists exclude it, and the
+    // file-assembly cfg gates below never materialize CUDA/ONNX files there anyway).
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+    )))]
+    {
+        Platform::LinuxX64
+    }
+}
+
 /// A third-party project the app downloads at runtime: what it's for, its license,
 /// and the files it pulls. Pure data; `crate::libraries` collects it for the UI. The
 /// `files` list is empty for projects whose files are platform-selected (ONNX Runtime,
@@ -267,8 +353,18 @@ pub struct Project {
     pub license: &'static str,
     /// Canonical URL of the license text.
     pub license_url: &'static str,
+    /// The platforms this project applies to — the catalog shows it only on these. The
+    /// single source of the per-platform rule (see [`Platform`]).
+    pub platforms: &'static [Platform],
     /// The downloads this project contributes (empty ⇒ platform-selected, see above).
     pub files: &'static [Download],
+}
+
+impl Project {
+    /// Whether this project is shown on `platform` (its applicability list contains it).
+    pub fn runs_on(&self, platform: Platform) -> bool {
+        self.platforms.contains(&platform)
+    }
 }
 
 /// Kokoro TTS voice model (Apache-2.0).
@@ -278,17 +374,19 @@ pub const KOKORO: Project = Project {
     homepage: "https://github.com/thewh1teagle/kokoro-onnx",
     license: "Apache-2.0",
     license_url: "https://www.apache.org/licenses/LICENSE-2.0",
+    platforms: Platform::ALL,
     files: &[KOKORO_ONNX, KOKORO_VOICES],
 };
 
 /// Parakeet STT model — NVIDIA NeMo cache-aware streaming FastConformer transducer
 /// (CC-BY-4.0; ONNX streaming export by csukuangfj / sherpa-onnx).
 pub const PARAKEET: Project = Project {
-    name: "FastConformer streaming transducer (en, 480ms)",
+    name: "FastConformer",
     usage: "Speech-to-text model (NVIDIA NeMo; streaming ONNX export by csukuangfj/sherpa-onnx)",
     homepage: "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_fastconformer_hybrid_large_streaming_480ms",
     license: "CC-BY-4.0",
     license_url: "https://creativecommons.org/licenses/by/4.0/",
+    platforms: Platform::ALL,
     files: &[
         PARAKEET_ENCODER,
         PARAKEET_DECODER,
@@ -305,36 +403,34 @@ pub const ONNX_RUNTIME: Project = Project {
     homepage: "https://github.com/microsoft/onnxruntime",
     license: "MIT",
     license_url: "https://github.com/microsoft/onnxruntime/blob/main/LICENSE",
+    platforms: Platform::WITH_ONNX_RUNTIME,
     files: &[],
 };
 
 /// NVIDIA CUDA runtime libraries (optional GPU acceleration; NVIDIA CUDA Toolkit EULA).
-/// Windows/Linux x64. Files (the cuda/cublas/cufft/nvrtc/nvjitlink wheels) assembled in
-/// the collector from [`CUDA_WHEELS`].
-#[cfg(all(
-    any(target_os = "windows", target_os = "linux"),
-    target_arch = "x86_64"
-))]
+/// Windows/Linux x64 (see `platforms`). Files (the cuda/cublas/cufft/nvrtc/nvjitlink wheels)
+/// are assembled in the collector from the cfg-gated [`CUDA_WHEELS`]. The METADATA below
+/// compiles on every target (plain strings) so the data-driven catalog can reference it
+/// unconditionally and filter by `platforms`; only the file-assembly stays cfg-gated.
 pub const NVIDIA_CUDA: Project = Project {
     name: "NVIDIA CUDA runtime",
     usage: "GPU acceleration libraries (optional)",
     homepage: "https://developer.nvidia.com/cuda-toolkit",
     license: "NVIDIA CUDA Toolkit EULA",
     license_url: "https://docs.nvidia.com/cuda/eula/index.html",
+    platforms: Platform::WITH_CUDA,
     files: &[],
 };
 
 /// NVIDIA cuDNN (optional GPU acceleration; NVIDIA cuDNN SLA — separate, stricter terms
-/// than the CUDA EULA). Windows/Linux x64; the cuDNN wheel from [`CUDA_WHEELS`].
-#[cfg(all(
-    any(target_os = "windows", target_os = "linux"),
-    target_arch = "x86_64"
-))]
+/// than the CUDA EULA). Windows/Linux x64 (see `platforms`); the cuDNN wheel from the
+/// cfg-gated [`CUDA_WHEELS`]. Metadata compiles everywhere; only file-assembly is cfg-gated.
 pub const NVIDIA_CUDNN: Project = Project {
     name: "NVIDIA cuDNN",
     usage: "GPU deep-learning primitives (optional)",
     homepage: "https://developer.nvidia.com/cudnn",
     license: "NVIDIA cuDNN SLA",
     license_url: "https://docs.nvidia.com/deeplearning/cudnn/sla/index.html",
+    platforms: Platform::WITH_CUDA,
     files: &[],
 };

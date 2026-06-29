@@ -38,6 +38,16 @@ pub struct CoremlRepo {
     pub include_prefixes: &'static [&'static str],
     pub exclude_substrings: &'static [&'static str],
     pub target: fn() -> Option<PathBuf>,
+    /// Library-catalog metadata (the macOS-only Apple-Silicon model sets shown in the
+    /// Libraries tab). The license lives WITH the files here — same can't-drift principle
+    /// as [`crate::urls::Project`] — so `crate::libraries` can render these alongside the
+    /// downloaded ONNX assets without a second, drift-prone source. `display_name`/`usage`
+    /// empty ⇒ the set is an internal sub-component of another entry (e.g. the Kokoro G2P
+    /// sub-models share the Kokoro repo) and is folded into it, not listed on its own.
+    pub display_name: &'static str,
+    pub usage: &'static str,
+    pub license: &'static str,
+    pub license_url: &'static str,
 }
 
 /// On-disk folder name (== the FluidAudio repo's last path segment) of the apple-native
@@ -117,6 +127,10 @@ pub static KOKORO_COREML: CoremlRepo = CoremlRepo {
     include_prefixes: &["ANE/"],
     exclude_substrings: &[".mlpackage", ".DS_Store", "ANE/LICENSE", "ANE/README"],
     target: kokoro_main_target,
+    display_name: "Kokoro (Core ML / ANE)",
+    usage: "Apple-Silicon text-to-speech voice model (FluidAudio Core ML / ANE)",
+    license: "Apache-2.0",
+    license_url: "https://www.apache.org/licenses/LICENSE-2.0",
 };
 
 /// Shared Kokoro G2P + lexicon (the repo ROOT files), which FluidAudio loads from its own
@@ -133,6 +147,12 @@ pub static KOKORO_G2P_COREML: CoremlRepo = CoremlRepo {
     ],
     exclude_substrings: &[".mlpackage", ".DS_Store"],
     target: kokoro_g2p_target,
+    // Same repo + license as the Kokoro runtime set; folded into the "Kokoro (Core ML / ANE)"
+    // catalog entry (empty display_name) rather than listed as a separate library.
+    display_name: "",
+    usage: "",
+    license: "Apache-2.0",
+    license_url: "https://www.apache.org/licenses/LICENSE-2.0",
 };
 
 /// Apple-native Parakeet TDT 0.6b v2 STT. cc-by-4.0 (attribution required). Pinned revision
@@ -152,6 +172,10 @@ pub static PARAKEET_COREML: CoremlRepo = CoremlRepo {
     ],
     exclude_substrings: &[".DS_Store"],
     target: parakeet_target,
+    display_name: "Parakeet (Core ML)",
+    usage: "Apple-Silicon speech-to-text model (NVIDIA NeMo; Core ML export by FluidInference)",
+    license: "CC-BY-4.0",
+    license_url: "https://creativecommons.org/licenses/by/4.0/",
 };
 
 /// Apple-native speaker diarization (pyannote segmentation + wespeaker embedding). cc-by-4.0.
@@ -163,6 +187,10 @@ pub static DIARIZER_COREML: CoremlRepo = CoremlRepo {
     include_prefixes: &["pyannote_segmentation.mlmodelc/", "wespeaker_v2.mlmodelc/"],
     exclude_substrings: &[".DS_Store"],
     target: diarizer_target,
+    display_name: "Diarization (Core ML)",
+    usage: "Apple-Silicon speaker diarization (pyannote segmentation + wespeaker embedding)",
+    license: "CC-BY-4.0",
+    license_url: "https://creativecommons.org/licenses/by/4.0/",
 };
 
 /// Every Core ML repo we self-manage, in the order a clean install fetches them.

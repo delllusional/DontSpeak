@@ -1,7 +1,8 @@
 //  DontSpeakApp.swift
 //
-//  @main entry. A dockless (accessory) MenuBarExtra tray app + a single health
-//  window. This app HOSTS the engine in-process and owns its lifecycle: it calls
+//  @main entry. A dockless (accessory) MenuBarExtra tray app + one sidebar window
+//  (Status / Tools / Logs / Libraries). This app HOSTS the engine in-process and owns its
+//  lifecycle: it calls
 //  ds_engine_start() on launch and ds_engine_stop() on quit via the C
 //  ABI. It also shows status and helps grant OS permissions. All control lives in
 //  DontSpeak.
@@ -26,29 +27,18 @@ struct DontSpeakApp: App {
         }
         .menuBarExtraStyle(.menu)
 
-        // The health/permissions panel (tray "Settings"). Empty title + hidden title
-        // bar so the window shows no title text, like the system standard About panel.
-        Window("", id: "status") {
-            StatusView()
+        // The single app window: a sidebar of screens (Status / Tools / Logs / Libraries)
+        // over one detail pane — the former standalone `status` + `tools` windows merged and
+        // the two missing screens added. Empty title + hidden title bar so the window shows no
+        // title text (like the system About panel) and the frosted state-tinted strip reads as
+        // the title bar. Resizable; each pane scrolls internally.
+        Window("", id: "main") {
+            MainWindow()
                 .environment(core)
         }
-        // A normal resizable window with an internal ScrollView: expanding a section
-        // scrolls inside it, the window never auto-resizes — so nothing jumps and the
-        // chrome never flickers. `.contentMinSize` floors the size at the content's minimum;
-        // a `.defaultSize` sets the opening size.
         .windowResizability(.contentMinSize)
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 340, height: 560)
-
-        // The MCP tools reference (opened from About) — an independent window. Empty
-        // title + hidden title bar, matching the other windows. Same resizable + scroll
-        // model so the (taller) catalog scrolls instead of resizing the window.
-        Window("", id: "tools") {
-            ToolsView()
-        }
-        .windowResizability(.contentMinSize)
-        .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 520, height: 640)
+        .defaultSize(width: 720, height: 640)
     }
 
 }
