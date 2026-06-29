@@ -219,12 +219,6 @@ impl SttStats {
             failures: s.failures,
         }
     }
-
-    /// JSON form of [`snapshot`](Self::snapshot) for the unit tests.
-    #[cfg(test)]
-    pub fn snapshot_json(&self) -> serde_json::Value {
-        serde_json::to_value(self.snapshot()).unwrap()
-    }
 }
 
 /// How often, at most, the lifetime totals are flushed to disk. CORR-2: the

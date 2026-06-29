@@ -714,6 +714,10 @@ pub(crate) mod tests {
 
     #[test]
     fn provider_resolution_walks_the_ladder_per_platform() {
+        // Only the macOS arm below exercises the resolver (Core ML / ANE rungs); other
+        // platforms have nothing platform-specific to assert here, so the helper is gated
+        // with them to avoid an unused-closure warning off macOS.
+        #[cfg(target_os = "macos")]
         let cfg = |rungs: Vec<Provider>| VoiceConfig {
             provider: rungs,
             ..VoiceConfig::default()
