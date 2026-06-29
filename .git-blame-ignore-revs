@@ -1,0 +1,9 @@
+# Revisions ignored by `git blame` (bulk reformats / mechanical rewrites), so blame
+# points at the real author of each line instead of the formatting commit.
+#
+# Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub honors this file automatically in its blame view.
+
+# style: adopt rustfmt (style_edition 2024) and reformat the workspace
+2525573f1e316d53851e965fd8821843cca80dfa

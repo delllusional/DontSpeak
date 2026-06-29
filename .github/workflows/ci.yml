@@ -37,6 +37,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Formatting gate: the workspace is kept rustfmt-clean (rust/rustfmt.toml pins
+  # style_edition 2024). Runs on Linux only — formatting is platform-independent.
+  # Fast (no build), so it gives quick feedback in parallel with the test matrix.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: cargo fmt --check
+        working-directory: rust
+        run: cargo fmt --all --check
+
   # Pick the OS matrix: Linux-only by default, all three when full-matrix is requested
   # (the release gate). push/PR events have no `inputs`, so they fall to Linux-only.
   setup:
