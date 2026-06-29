@@ -400,10 +400,10 @@ impl<P: Platform + 'static> Engine<P> {
             if submit {
                 self.plat.press_enter();
                 if let Some(q) = &self.ttsq {
-                    // Mark the voice submit's own auto-Enter so the keyboard-drop path
-                    // (`MarkActive`) doesn't double-count it as a keyboard submit. Gated on
+                    // Mark the voice submit's own auto-Enter so the text-drop path
+                    // (`MarkActive`) doesn't double-count it as a text submit. Gated on
                     // `submit` — with `auto_submit=off` the engine never presses Enter, so a
-                    // later manual Enter is a real keyboard submit caught by `MarkActive`.
+                    // later manual Enter is a real text submit caught by `MarkActive`.
                     q.note_voice_submit();
                     // `drop_speech_on` contains `voice` → drop this window's now-stale
                     // pending speech before the new turn answers. Scoped to the active window.

@@ -83,8 +83,8 @@ pub const SET_CONFIG_NARRATE: &str = "What to narrate aloud — a set of [\"shor
     its own. [] = narrate nothing.";
 pub const SET_CONFIG_GREET: &str = "Greet each new terminal aloud in its pool voice. Default on.";
 pub const SET_CONFIG_DROP_SPEECH: &str = "Drop a window's pending speech on submit — a set of \
-    \"voice\" (a dictation submit) and \"keyboard\" (you type and press Enter). Default \
-    [\"voice\",\"keyboard\"] (drop on any submit); [] = never. Keyboard needs the UserPromptSubmit hook.";
+    \"voice\" (a dictation submit) and \"text\" (you type and press Enter). Default \
+    [\"text\"] (drop only on a typed submit); [] = never. Text needs the UserPromptSubmit hook.";
 pub const SET_CONFIG_PAUSE_BG: &str =
     "Pause speech while no terminal is frontmost; resume on focus. Default false.";
 pub const SET_CONFIG_EARCON_REPLY: &str = "Reply-done chime (Stop hook): a system-sound name or an \

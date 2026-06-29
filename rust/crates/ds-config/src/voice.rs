@@ -210,8 +210,8 @@ pub struct VoiceConfig {
     #[serde(default = "default_enabled")]
     pub auto_submit: bool,
 
-    /// Which submit kinds drop that window's pending speech — a SET of `voice`/`keyboard`
-    /// (default `["voice", "keyboard"]` = drop on any submit; `[]` = never). See [`DropSpeechKind`].
+    /// Which submit kinds drop that window's pending speech — a SET of `voice`/`text`
+    /// (default `["text"]` = drop on a typed submit; `[]` = never). See [`DropSpeechKind`].
     #[serde(
         default = "default_drop_speech_on",
         deserialize_with = "de_drop_speech_on"
@@ -1094,9 +1094,9 @@ pub(crate) mod tests {
             full_duplex: true,
             capture_gain: CaptureGain::Manual(2.5),
             auto_submit: false, // non-default (default is on)
-            drop_speech_on: vec![DropSpeechKind::Voice], // non-default (default is [voice, keyboard])
-            pause_in_background: true,                   // non-default (default is false)
-            earcon_reply_sound: "Glass".into(),          // non-default (default is empty/off)
+            drop_speech_on: vec![DropSpeechKind::Voice], // non-default (default is [text])
+            pause_in_background: true, // non-default (default is false)
+            earcon_reply_sound: "Glass".into(), // non-default (default is empty/off)
             earcon_needs_input_sound: "Funk".into(),
         }
     }

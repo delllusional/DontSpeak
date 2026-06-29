@@ -215,7 +215,7 @@ pub struct TtsQueue {
     gate: Arc<StatusGate>,
     /// When a VOICE submit (Caps dictation / hands-free) last pressed Enter. The
     /// UserPromptSubmit hook fires for EVERY submit, so `MarkActive` consumes this to tell
-    /// a voice submit's own auto-Enter apart from a real keyboard submit (the `keyboard`
+    /// a voice submit's own auto-Enter apart from a real text submit (the `text`
     /// drop must not fire on a voice submit). See `note_voice_submit` / `take_recent_voice_submit`.
     last_voice_submit: Mutex<Option<Instant>>,
     /// Shared read handle to the single mic-in-use watcher (CoreAudio listener on macOS, poll
@@ -393,14 +393,14 @@ impl TtsQueue {
     }
 
     /// Mark that a VOICE submit just pressed Enter (Caps dictation / hands-free). Called on
-    /// every voice submit regardless of `drop_speech_on`, so the keyboard-drop path can
-    /// de-dup the voice submit's own auto-Enter from a real keyboard submit.
+    /// every voice submit regardless of `drop_speech_on`, so the text-drop path can
+    /// de-dup the voice submit's own auto-Enter from a real text submit.
     pub fn note_voice_submit(&self) {
         *self.last_voice_submit.lock().unwrap() = Some(Instant::now());
     }
 
     /// Consume the voice-submit mark: true iff a voice submit happened in the last ~3s — i.e.
-    /// the UserPromptSubmit hook now firing is that voice submit's echo, NOT a keyboard submit.
+    /// the UserPromptSubmit hook now firing is that voice submit's echo, NOT a text submit.
     pub fn take_recent_voice_submit(&self) -> bool {
         let mut g = self.last_voice_submit.lock().unwrap();
         let recent = voice_submit_recent(*g, Instant::now());
@@ -804,7 +804,7 @@ fn should_hold(
 }
 
 /// How recently a voice submit must have happened for the next UserPromptSubmit hook to be
-/// its echo (rather than a real keyboard submit). The hook fires sub-second after the voice
+/// its echo (rather than a real text submit). The hook fires sub-second after the voice
 /// submit's auto-Enter, so the window is generous.
 const VOICE_SUBMIT_WINDOW: Duration = Duration::from_secs(3);
 
@@ -873,7 +873,7 @@ mod tests {
             Some(base),
             base + Duration::from_secs(2)
         ));
-        // Past the window (4s) → a genuine keyboard submit, not the echo.
+        // Past the window (4s) → a genuine text submit, not the echo.
         assert!(!voice_submit_recent(
             Some(base),
             base + Duration::from_secs(4)

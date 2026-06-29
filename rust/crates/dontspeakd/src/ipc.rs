@@ -80,10 +80,10 @@ pub(crate) fn spawn_ipc_server(
                     // UserPromptSubmit → this terminal is now the active one. The queue
                     // speaks only its items and holds the rest until they're active.
                     ttsq.set_active_session(session.clone());
-                    // `drop_speech_on` contains `keyboard`: the UserPromptSubmit hook fires for
-                    // EVERY submit (typed OR dictated), so this is the keyboard-submit drop
+                    // `drop_speech_on` contains `text`: the UserPromptSubmit hook fires for
+                    // EVERY submit (typed OR dictated), so this is the text-submit drop
                     // point. BUT a VOICE submit also pressed Enter via the engine — de-dup so
-                    // that auto-Enter doesn't count as a keyboard submit: if a voice submit
+                    // that auto-Enter doesn't count as a text submit: if a voice submit
                     // just happened, this hook is its echo, so skip (the `voice` path handled
                     // it). Read config live so a runtime `set_config` change takes effect
                     // without an engine restart.
@@ -91,7 +91,7 @@ pub(crate) fn spawn_ipc_server(
                     if !was_voice
                         && VoiceConfig::load(&paths)
                             .drop_speech_on
-                            .contains(&DropSpeechKind::Keyboard)
+                            .contains(&DropSpeechKind::Text)
                     {
                         ttsq.clear_session(session);
                     }

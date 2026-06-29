@@ -394,16 +394,16 @@ mod tests {
     fn set_config_drop_speech_on_array_parses_dedups_and_rejects_bad_token() {
         // Valid tokens parse into the set, de-duped, in array order.
         let args: SetConfigArgs = serde_json::from_value(
-            serde_json::json!({ "drop_speech_on": ["keyboard", "voice", "voice"] }),
+            serde_json::json!({ "drop_speech_on": ["text", "voice", "voice"] }),
         )
         .unwrap();
         let mut cfg = VoiceConfig::default();
         let changes = args.apply(&mut cfg).unwrap();
         assert_eq!(
             cfg.drop_speech_on,
-            vec![DropSpeechKind::Keyboard, DropSpeechKind::Voice]
+            vec![DropSpeechKind::Text, DropSpeechKind::Voice]
         );
-        assert_eq!(changes, vec!["drop_speech_on=[keyboard,voice]".to_string()]);
+        assert_eq!(changes, vec!["drop_speech_on=[text,voice]".to_string()]);
 
         // An unknown token is REJECTED (strict, unlike the fail-open config file).
         let err = serde_json::from_value::<SetConfigArgs>(

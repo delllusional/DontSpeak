@@ -199,7 +199,7 @@ static TOOLS: &[Tool] = &[
             p("greet_on_open", PType::Bool, false, SET_CONFIG_GREET),
             p(
                 "drop_speech_on",
-                PType::EnumArray(&["voice", "keyboard"]),
+                PType::EnumArray(&["voice", "text"]),
                 false,
                 SET_CONFIG_DROP_SPEECH,
             ),
@@ -572,7 +572,7 @@ mod tests {
             tray_indicator: Some(vec![TrayKind::Stt, TrayKind::Tts]),
             capture_gain: Some(CaptureGain::Manual(2.0)),
             auto_submit: Some(false),
-            drop_speech_on: Some(vec![DropSpeechKind::Voice, DropSpeechKind::Keyboard]),
+            drop_speech_on: Some(vec![DropSpeechKind::Voice, DropSpeechKind::Text]),
             pause_in_background: Some(true),
             earcon_reply_sound: Some("Tink".to_string()),
             earcon_needs_input_sound: Some("Funk".to_string()),

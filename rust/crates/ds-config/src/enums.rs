@@ -442,31 +442,31 @@ pub(crate) fn normalize_tray_indicator(kinds: Vec<TrayKind>) -> Vec<TrayKind> {
 }
 
 /// Which submit kinds DROP the still-pending speech for that window — a SET
-/// (config `drop_speech_on = ["voice", "keyboard"]`), not a single mode. The drop is
+/// (config `drop_speech_on = ["voice", "text"]`), not a single mode. The drop is
 /// permanent (pruned + the in-flight item cancelled, not paused/resumable) and scoped to
 /// the submitting window — never silences another. Two INDEPENDENT members:
-///   `voice`    — drop on a VOICE submit (a Caps-Lock dictation / hands-free submit word).
-///                Engine-internal, hook-free.
-///   `keyboard` — drop on a KEYBOARD submit (you type a prompt and press Enter yourself),
-///                via the `UserPromptSubmit` hook (→ `MarkActive`). A voice submit also
-///                presses Enter, but that auto-Enter must NOT count as keyboard — the
-///                engine de-dups it (see `MarkActive`).
+///   `voice` — drop on a VOICE submit (a Caps-Lock dictation / hands-free submit word).
+///             Engine-internal, hook-free.
+///   `text`  — drop on a TEXT submit (you type a prompt and press Enter yourself),
+///             via the `UserPromptSubmit` hook (→ `MarkActive`). A voice submit also
+///             presses Enter, but that auto-Enter must NOT count as text — the
+///             engine de-dups it (see `MarkActive`).
 /// An EMPTY set means submitting never drops; pending speech plays to the end. See
 /// [`crate::VoiceConfig::drop_speech_on`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropSpeechKind {
     Voice,
-    Keyboard,
+    Text,
 }
 
 impl DropSpeechKind {
     /// All variants (canonical-token order); single source for the catalog parity test.
-    pub const ALL: &'static [DropSpeechKind] = &[DropSpeechKind::Voice, DropSpeechKind::Keyboard];
+    pub const ALL: &'static [DropSpeechKind] = &[DropSpeechKind::Voice, DropSpeechKind::Text];
 
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "voice" => Some(DropSpeechKind::Voice),
-            "keyboard" => Some(DropSpeechKind::Keyboard),
+            "text" => Some(DropSpeechKind::Text),
             _ => None,
         }
     }
@@ -475,7 +475,7 @@ impl DropSpeechKind {
     pub fn as_str(self) -> &'static str {
         match self {
             DropSpeechKind::Voice => "voice",
-            DropSpeechKind::Keyboard => "keyboard",
+            DropSpeechKind::Text => "text",
         }
     }
 }
@@ -535,11 +535,12 @@ macro_rules! fail_open_de {
 }
 
 fail_open_de!(de_listen_mode, ListenMode);
-/// Default `drop_speech_on` (when the config key is ABSENT): drop on BOTH submit kinds, so
-/// starting a new prompt — typed OR spoken — silences the still-pending reply. An explicit
-/// `drop_speech_on = []` still means "never drop" (plays to the end).
+/// Default `drop_speech_on` (when the config key is ABSENT): drop on a TYPED submit only, so
+/// starting a new prompt by typing silences the still-pending reply, while a spoken dictation
+/// submit lets it play on. An explicit `drop_speech_on = []` still means "never drop" (plays to
+/// the end).
 pub(crate) fn default_drop_speech_on() -> Vec<DropSpeechKind> {
-    vec![DropSpeechKind::Voice, DropSpeechKind::Keyboard]
+    vec![DropSpeechKind::Text]
 }
 /// Fail-open array deserialize for `drop_speech_on` (config file): a non-array or any
 /// unknown token degrades to the empty set (= never drop), de-duping in array order.
@@ -608,7 +609,7 @@ strict_de!(TtsEngine, "off|built_in|system");
 strict_de!(ListenMode, "record_submit|always");
 strict_de!(Provider, "ort_cpu|ort_cuda|ort_coreml|ane");
 strict_de!(TrayKind, "stt|tts");
-strict_de!(DropSpeechKind, "voice|keyboard");
+strict_de!(DropSpeechKind, "voice|text");
 strict_de!(DiarizerProvider, "apple_native");
 strict_de!(NarrateKind, "digests|shorts");
 
