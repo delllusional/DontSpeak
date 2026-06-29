@@ -29,6 +29,23 @@ pub fn model_dir_arg() -> CString {
     CString::new("").unwrap()
 }
 
+/// The directory to hand the shim's `smk_asr_stream_start` (the STREAMING Parakeet EOU set),
+/// as a `CString`. Unlike the offline [`model_dir_arg`], this is the EOU model's OWN subdir —
+/// `ds_model::coreml_repo::parakeet_eou_dir` (the ONE source of truth shared with the download
+/// target), since FluidAudio's `StreamingEouAsrManager.loadModels(from:)` loads the `.mlmodelc`
+/// files FLAT from the dir it's given. NOT created here: the dir exists only once the model is
+/// downloaded, and an absent dir makes `smk_asr_stream_start` fail → the caller cleanly falls
+/// back to the offline path. Falls back to `""` only if the path can't resolve.
+pub fn eou_model_dir_arg() -> CString {
+    if let Some(dir) = ds_model::coreml_repo::parakeet_eou_dir()
+        && let Some(s) = dir.to_str()
+        && let Ok(c) = CString::new(s)
+    {
+        return c;
+    }
+    CString::new("").unwrap()
+}
+
 /// `dlopen` the shim dylib pointed to by `SMKOKORO_DYLIB_PATH` (set by the macOS
 /// app, mirroring `ORT_DYLIB_PATH`). Errors if the env var is unset or the load
 /// fails — the caller fails-quiet / falls back from there.

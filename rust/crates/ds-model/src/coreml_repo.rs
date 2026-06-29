@@ -94,6 +94,28 @@ fn parakeet_target() -> Option<PathBuf> {
     Some(ds_config::model_dir()?.join("parakeet-tdt-0.6b-v2"))
 }
 
+/// On-disk folder name of the apple-native STREAMING STT set (Parakeet EOU 120M).
+pub const PARAKEET_EOU_DIR_NAME: &str = "parakeet-eou-streaming";
+/// The EOU variant subfolder we fetch — MIRRORS the chunk size the shim requests
+/// (`StreamingEouAsrManager(chunkSize: .ms320)` in `shim.swift`), so they can't drift.
+pub const PARAKEET_EOU_VARIANT: &str = "320ms";
+
+/// `coreml_dir()/parakeet-eou-streaming` — download target for the streaming EOU set. The repo's
+/// `320ms/` subtree lands under here, so the loadable model dir is the `320ms` subfolder (see
+/// [`parakeet_eou_dir`]).
+fn parakeet_eou_target() -> Option<PathBuf> {
+    Some(ds_config::coreml_dir()?.join(PARAKEET_EOU_DIR_NAME))
+}
+
+/// The exact dir FluidAudio's `StreamingEouAsrManager.loadModels(from:)` reads the streaming
+/// `.mlmodelc` set + `vocab.json` from (handed to the shim's `smk_asr_stream_start`). The download
+/// writes the repo's `320ms/` subtree under [`parakeet_eou_target`], so the loadable dir is that
+/// subfolder. ONE source of truth so the download target and the shim load path (via
+/// `ds_stt::coreml::CoremlStreamer`) can't drift.
+pub fn parakeet_eou_dir() -> Option<PathBuf> {
+    Some(parakeet_eou_target()?.join(PARAKEET_EOU_VARIANT))
+}
+
 /// On-disk folder name of the speaker-diarization Core ML set (== the FluidAudio repo's last
 /// path segment). ONE source of truth: the download target, the presence check, and the Swift
 /// shim's load path (`shim.swift`, kept in sync by comment + the `diarizer_model_names_match_prefixes`
@@ -178,6 +200,29 @@ pub static PARAKEET_COREML: CoremlRepo = CoremlRepo {
     license_url: "https://creativecommons.org/licenses/by/4.0/",
 };
 
+/// Apple-native STREAMING speech-to-text (Parakeet EOU 120M, cache-aware encoder) — the smooth
+/// real-time path the dictation overlay is built for. Without it the macOS Core ML STT silently
+/// falls back to the slower offline sliding-window engine (whole-tail re-passes). We fetch only the
+/// 320 ms variant the shim requests: the three runtime `.mlmodelc` bundles + the vocab (NOT the
+/// `.mlpackage` sources or the conversion scripts). cc-by-4.0 (NVIDIA NeMo; Core ML by FluidInference).
+pub static PARAKEET_EOU_COREML: CoremlRepo = CoremlRepo {
+    name: "parakeet_eou_coreml",
+    repo: "FluidInference/parakeet-realtime-eou-120m-coreml",
+    revision: "40a23f4c0b333aa17ad8c0f2ea47ec2347f2f355",
+    include_prefixes: &[
+        "320ms/streaming_encoder.mlmodelc/",
+        "320ms/decoder.mlmodelc/",
+        "320ms/joint_decision.mlmodelc/",
+        "320ms/vocab.json",
+    ],
+    exclude_substrings: &[".mlpackage", ".DS_Store"],
+    target: parakeet_eou_target,
+    display_name: "Parakeet EOU streaming (Core ML)",
+    usage: "Apple-Silicon real-time streaming speech-to-text (NVIDIA NeMo; Core ML export by FluidInference)",
+    license: "CC-BY-4.0",
+    license_url: "https://creativecommons.org/licenses/by/4.0/",
+};
+
 /// Apple-native speaker diarization (pyannote segmentation + wespeaker embedding). cc-by-4.0.
 /// We fetch only the two `.mlmodelc` the shim hands to FluidAudio's local-file loader.
 pub static DIARIZER_COREML: CoremlRepo = CoremlRepo {
@@ -194,11 +239,12 @@ pub static DIARIZER_COREML: CoremlRepo = CoremlRepo {
 };
 
 /// Every Core ML repo we self-manage, in the order a clean install fetches them.
-pub fn all_coreml_repos() -> [&'static CoremlRepo; 4] {
+pub fn all_coreml_repos() -> [&'static CoremlRepo; 5] {
     [
         &KOKORO_COREML,
         &KOKORO_G2P_COREML,
         &PARAKEET_COREML,
+        &PARAKEET_EOU_COREML,
         &DIARIZER_COREML,
     ]
 }

@@ -68,6 +68,12 @@ fn auto_gain(buf: &[f32]) -> f32 {
     (TARGET_PEAK / peak).clamp(0.5, 15.0)
 }
 
+/// Minimum 16 kHz length a segment must have for transcription. Mirrors FluidAudio's
+/// `ASRConstants.minimumAudioDurationSeconds` (0.3 s): the Parakeet guard throws
+/// `invalidAudioData` below it, and the ONNX path has no useful output on sub-frame audio
+/// either. 0.3 s × 16 000 Hz = 4800 samples.
+const MIN_TRANSCRIBE_SAMPLES_16K: usize = 4800;
+
 /// Max open-tail length (in device-rate samples) we re-transcribe for the live preview.
 ///
 /// SINGLE source of truth: the VAD's force-split bound, [`ds_stt::boundary::MAX_SEGMENT_SECS`].
@@ -191,7 +197,10 @@ fn transcribe_loop(
     // overlay never blanks (see `tail_preview_budget_samples`). `last_preview_at` fingerprints
     // the audio so an unchanged tail (no new samples) isn't re-transcribed at all.
     let base_cadence = Duration::from_millis(180);
-    let preview_ceiling = Duration::from_millis(1500);
+    // Upper bound on the adaptive back-off: even on a long open tail the overlay refreshes at
+    // least this often, so the per-word blur stays reasonably fluid instead of snapping in ~1.5 s
+    // chunks. Lowered from 1500 ms — the trade is a little more GPU on long, pause-free phrases.
+    let preview_ceiling = Duration::from_millis(700);
     let mut preview_cadence = base_cadence;
     let mut last_preview_at = (usize::MAX, 0usize); // (committed_until, tail_len) of the last pass
 
@@ -205,7 +214,11 @@ fn transcribe_loop(
         let pcm = ds_stt::resample_to_16k(&apply_gain(seg), rate);
         let pcm = filter_final(&pcm); // speaker lock (identity when off)
         let pcm = trim_silence_16k(&pcm);
-        if pcm.is_empty() {
+        // Below the model's minimum input length there's nothing to transcribe — and FEEDING it
+        // is actively harmful: FluidAudio's Parakeet REJECTS clips under `minimumAudioDurationSeconds`
+        // (0.3 s) with `invalidAudioData`, so a short/silence-heavy tail re-pass would just log an
+        // error and waste the pass (no overlay update → choppier blur). Skip it. 0.3 s @ 16 kHz.
+        if pcm.len() < MIN_TRANSCRIBE_SAMPLES_16K {
             return None;
         }
         let t0 = Instant::now();

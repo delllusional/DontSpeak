@@ -168,7 +168,10 @@ impl CoremlStreamer {
         let lib = crate::shim::open()?;
         Ok(Self {
             lib,
-            model_dir: crate::shim::model_dir_arg(),
+            // The streaming EOU set lives in its OWN subdir (downloaded by the helper via
+            // `ds_model::coreml_repo::PARAKEET_EOU_COREML`), NOT flat in `coreml_dir` like the
+            // offline model — so point `smk_asr_stream_start` straight at it.
+            model_dir: crate::shim::eou_model_dir_arg(),
         })
     }
 

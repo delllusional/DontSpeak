@@ -188,12 +188,15 @@ fn ensure_coreml_models(kind: &str) -> bool {
         return true; // no ANE shim → ONNX path; nothing for us to fetch here
     }
     use ds_model::coreml_repo::{
-        CoremlRepo, KOKORO_COREML, KOKORO_G2P_COREML, PARAKEET_COREML, coreml_repo_present,
-        ensure_coreml_repos,
+        CoremlRepo, KOKORO_COREML, KOKORO_G2P_COREML, PARAKEET_COREML, PARAKEET_EOU_COREML,
+        coreml_repo_present, ensure_coreml_repos,
     };
     let repos: &[&CoremlRepo] = match kind {
         "tts" => &[&KOKORO_COREML, &KOKORO_G2P_COREML],
-        "stt" => &[&PARAKEET_COREML],
+        // The streaming EOU set (the smooth real-time path) AND the offline sliding-window set
+        // (the fallback) — both Core ML, both fetched before the STT warm so dictation has the
+        // fast path when present and a working fallback when stream-start ever fails.
+        "stt" => &[&PARAKEET_EOU_COREML, &PARAKEET_COREML],
         _ => return true,
     };
     if repos.iter().all(|r| coreml_repo_present(r)) {
