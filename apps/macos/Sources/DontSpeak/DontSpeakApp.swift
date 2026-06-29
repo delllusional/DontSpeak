@@ -38,7 +38,7 @@ struct DontSpeakApp: App {
         }
         .windowResizability(.contentMinSize)
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 720, height: 640)
+        .defaultSize(width: 510, height: 600)
     }
 
 }

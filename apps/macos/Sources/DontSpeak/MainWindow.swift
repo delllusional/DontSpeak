@@ -70,7 +70,12 @@ struct MainWindow: View {
             // resizes; only the detail pane takes the window's slack. (Use the range form, NOT
             // the single-value `navigationSplitViewColumnWidth(_:)` — that variant crashes
             // AppKit's split-view KVO on window open.)
-            .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 240)
+            // FIXED sidebar width — equal min/ideal/max pins the column so the split divider
+            // can't be dragged: the sidebar is just wide enough for the four labels and never
+            // resizes; only the detail pane takes the window's slack. (Use the range form, NOT
+            // the single-value `navigationSplitViewColumnWidth(_:)` — that variant crashes
+            // AppKit's split-view KVO on window open.)
+            .navigationSplitViewColumnWidth(min: 150, ideal: 150, max: 150)
             // Let the window's glass slab show through the sidebar rather than an opaque list.
             .scrollContentBackground(.hidden)
             // Run the sidebar column the FULL window height — UP UNDER the title-bar strip — so
@@ -103,7 +108,7 @@ struct MainWindow: View {
         // window out when they want more room. `minHeight` is low so the first-open
         // wrap-to-Status resize (`WrapWindowToContentHeight`) can shrink to the short Status page
         // without the content-min floor fighting it.
-        .frame(minWidth: 660, idealWidth: 720, minHeight: 320, idealHeight: 640)
+        .frame(minWidth: 460, idealWidth: 510, minHeight: 320, idealHeight: 600)
         // One continuous glass slab behind everything; the host window is itself clear. The
         // TITLE-BAR strip tints to the live state and crossfades between states — the colored
         // traffic-light bar, unchanged, now spanning the full window width.
