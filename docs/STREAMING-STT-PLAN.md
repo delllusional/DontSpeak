@@ -15,7 +15,7 @@ open tail on every preview tick.
       (DONTSPEAK_STREAMING_MODEL_DIR) — exact transcript, each frame encoded once. **Cross-platform
       by construction** (shared `ds-stt`, no C build deps).
 - [x] **Model download** (`ds-model`): registry entry (url+digest+size) + spec/presence/dir +
-      prefetch for the 480ms int8 model (`ds-model/src/spec.rs`, `urls.rs`).
+      prefetch for the 80ms int8 model (`ds-model/src/spec.rs`, `urls.rs`).
 - [x] **Wire into `listen.rs`**: streams chunks through `StreamingModel` unconditionally (both
       callers route to `try_streaming`), replacing the committed/preview re-encode loop; a
       whole-buffer one-shot over the same model stays as fallback.

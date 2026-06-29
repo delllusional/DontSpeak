@@ -5,9 +5,9 @@ the cache-aware streaming NeMo FastConformer transducer. The Rust runner in `ds-
 this; keep them in sync. Run it against a downloaded model dir to regenerate ground truth.
 
 ## Model
-`sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8`
+`sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8`
 (HF: `csukuangfj/...`). Files: `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx`,
-`tokens.txt`. fp32 variant: drop `.int8`. 80ms / 1040ms variants exist (different latency).
+`tokens.txt`. fp32 variant: drop `.int8`. 480ms / 1040ms variants exist (different latency).
 
 ## Verified ONNX contract (read dims from encoder metadata at runtime)
 - **Encoder** in: `audio_signal f32 [1,80,T]`, `length i64 [1]`, `cache_last_channel f32 [1,17,70,512]`,

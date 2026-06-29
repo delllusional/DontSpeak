@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(enc.file_name, "encoder.int8.onnx");
         assert!(
             enc.url.contains(
-                "sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/main/encoder.int8.onnx"
+                "sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8/resolve/main/encoder.int8.onnx"
             ),
             "encoder url: {}",
             enc.url

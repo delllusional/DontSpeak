@@ -27,9 +27,9 @@ Each carries its upstream license:
 - **Kokoro-82M** TTS model (hexgrad) — **Apache-2.0**.
 - **Parakeet TDT 0.6b v2** STT model (NVIDIA), the macOS Core ML / ANE path — **CC-BY-4.0**.
   Attribution is required: "Parakeet TDT 0.6b v2 © NVIDIA, licensed under CC-BY-4.0."
-- **stt_en_fastconformer_hybrid_large_streaming_480ms** STT model (NVIDIA NeMo), the
+- **stt_en_fastconformer_hybrid_large_streaming_80ms** STT model (NVIDIA NeMo), the
   cross-platform ONNX path — **CC-BY-4.0**. The streaming ONNX export is by csukuangfj /
-  sherpa-onnx. Attribution is required: "stt_en_fastconformer_hybrid_large_streaming_480ms
+  sherpa-onnx. Attribution is required: "stt_en_fastconformer_hybrid_large_streaming_80ms
   © NVIDIA, licensed under CC-BY-4.0; ONNX export © csukuangfj / sherpa-onnx."
   https://github.com/k2-fsa/sherpa-onnx
 - **pyannote** speaker-segmentation model — **MIT**.
