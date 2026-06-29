@@ -180,8 +180,16 @@ pub trait CapsKeyMonitor {
 /// One platform's full capability set.
 pub trait Platform: CapsLockReader + KeyInjector + FrontmostWindow + CapsKeyMonitor {
     /// One-time startup check (e.g. macOS Accessibility trust). Returns an
-    /// error the engine prints before exiting non-zero.
+    /// error the engine prints before exiting non-zero. SILENT and repeatable —
+    /// the caps re-probe loop calls it on a timer, so it must never prompt.
     fn preflight(&self) -> Result<(), PreflightError>;
+
+    /// One-time startup PROMPT for the OS permissions the engine needs (macOS
+    /// Accessibility). Unlike [`Platform::preflight`] this MAY pop a system dialog
+    /// and register the app in the permission list, so it must be called exactly
+    /// ONCE at startup — never from the re-probe loop. Default: no-op (Linux/Windows
+    /// grant input access via udev / no prompt).
+    fn request_permissions(&self) {}
 }
 
 #[derive(Debug)]

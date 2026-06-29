@@ -57,6 +57,30 @@ unsafe extern "C" {
     // ApplicationServices: read-only Accessibility-trust check (no prompt).
     fn AXIsProcessTrusted() -> Boolean;
 
+    // ApplicationServices: the PROMPTING trust check. Passing the options dict
+    // {kAXTrustedCheckOptionPrompt: true} both (a) REGISTERS this process in
+    // System Settings > Privacy & Security > Accessibility (so the user has a row
+    // to toggle) and (b) shows the one-time "wants to control this computer"
+    // dialog when not yet trusted. NULL options == AXIsProcessTrusted (no row,
+    // no prompt) — which is exactly why the app never appeared in the list.
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> Boolean;
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
+
+    // CoreFoundation: build the 1-entry options dict {prompt: true}. We only ever
+    // take the ADDRESS of the two well-known callback constants (CFDictionaryCreate
+    // copies their contents), so an opaque stand-in struct is enough.
+    static kCFBooleanTrue: CFTypeRef;
+    static kCFTypeDictionaryKeyCallBacks: CfDictionaryCallBacks;
+    static kCFTypeDictionaryValueCallBacks: CfDictionaryCallBacks;
+    fn CFDictionaryCreate(
+        allocator: *const c_void,
+        keys: *const *const c_void,
+        values: *const *const c_void,
+        num_values: isize,
+        key_callbacks: *const CfDictionaryCallBacks,
+        value_callbacks: *const CfDictionaryCallBacks,
+    ) -> CFDictionaryRef;
+
     // ── Accessibility focused-element probe (paste-target detection) ──────────
     // ApplicationServices (HIServices). Used by `focused_element_accepts_paste`
     // to answer "would a paste land in an editable field right now?". Needs the
@@ -152,7 +176,9 @@ unsafe fn cfstr(name: &[u8]) -> CFStringRef {
 /// reads as "no target" (which would show a spurious warning glow).
 ///
 /// Conservative: ANY failure returns false (no target). Apps that don't expose AX focus
-/// (some Electron/Java/custom-drawn UIs) read as "no target".
+/// (some Electron/Java/custom-drawn UIs, including most terminal TTY views) read as "no
+/// target" here — the engine compensates by also treating a frontmost terminal as a paste
+/// target (see `Engine::tick`), so a terminal never shows a spurious "no target" glow.
 pub fn focused_element_accepts_paste() -> bool {
     unsafe {
         let sys = AXUIElementCreateSystemWide();
@@ -283,4 +309,40 @@ impl Drop for CapsReader {
 /// `AXIsProcessTrusted()` — read-only Accessibility trust check (no prompt).
 pub fn ax_is_process_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
+}
+
+/// Opaque stand-in for `CFDictionary{Key,Value}CallBacks` — we only take the
+/// address of the two CF constants and never inspect their fields.
+#[repr(C)]
+struct CfDictionaryCallBacks {
+    _private: [u8; 0],
+}
+
+/// PROMPTING Accessibility trust check. Builds the
+/// `{kAXTrustedCheckOptionPrompt: true}` options dict and calls
+/// `AXIsProcessTrustedWithOptions`, which REGISTERS this process in the
+/// Accessibility list AND shows the one-time grant dialog when not yet trusted —
+/// so a fresh install gives the user a row to toggle instead of forcing a manual
+/// "+ add app". Returns the current trust state (no dialog if already trusted).
+///
+/// Call this ONCE at startup. The hot re-probe loop must keep using the silent
+/// [`ax_is_process_trusted`] so it neither re-prompts nor stalls.
+pub fn ax_prompt_for_trust() -> bool {
+    unsafe {
+        let keys = [kAXTrustedCheckOptionPrompt];
+        let vals = [kCFBooleanTrue];
+        let opts = CFDictionaryCreate(
+            std::ptr::null(),
+            keys.as_ptr(),
+            vals.as_ptr(),
+            1,
+            std::ptr::addr_of!(kCFTypeDictionaryKeyCallBacks),
+            std::ptr::addr_of!(kCFTypeDictionaryValueCallBacks),
+        );
+        let trusted = AXIsProcessTrustedWithOptions(opts) != 0;
+        if !opts.is_null() {
+            CFRelease(opts);
+        }
+        trusted
+    }
 }

@@ -28,7 +28,7 @@ repo (not a personal identity).
    - **License:** MIT (OSI-approved) — `LICENSE` in the repo root.
    - **Description:** Local, on-device voice (STT/TTS) for Claude Code — a Rust engine +
      Windows installer (`apps/windows/installer`) and a macOS app.
-   - **Artifact to sign:** `ds-setup.exe` (Inno Setup installer) produced by the
+   - **Artifact to sign:** `dontspeak-setup.exe` (Inno Setup installer) produced by the
      `Release` workflow's `windows` job.
    - **Build system:** GitHub Actions (public), `release.yml`.
    - Eligibility they check: OSI license ✓, actively maintained ✓, released artifact ✓.
@@ -77,9 +77,17 @@ helper, Kokoro shim and separator model are still bundled, so the layout is sign
 ### Local dev: stable self-signed identity (so TCC grants persist)
 
 Ad-hoc local builds get a fresh cdhash each rebuild, so every **Accessibility / Input
-Monitoring** grant breaks and you must re-grant after every `bundle.sh`. Fix: make a
-self-signed code-signing cert **once**; `find_codesign_id` auto-detects it (no env var),
-giving a stable signature whose TCC grants survive rebuilds.
+Monitoring** grant breaks and you must re-grant after every `bundle.sh`. Fix: a stable
+self-signed code-signing cert whose TCC grants survive rebuilds.
+
+**This is now automatic.** On a clean install, `resolve_sign_identity` (in
+`scripts/lib/common.sh`) calls `ensure_local_sign_identity`, which mints + imports a
+self-signed `DontSpeak Local Dev` cert **once** when no other identity is present;
+`find_codesign_id` then auto-detects it on every later build. No manual step — run
+`./apps/macos/bundle.sh`, grant each permission once, and they stick.
+
+Opt out with `DONTSPEAK_NO_AUTOSIGN=1` (build stays ad-hoc); auto-skipped in dist mode and
+when `DONTSPEAK_CODESIGN_ID` pins an identity. To create the cert by hand instead:
 
 ```sh
 openssl req -x509 -newkey rsa:2048 -nodes -keyout k.key -out c.crt -days 3650 \
@@ -101,7 +109,7 @@ To override (e.g. a differently-named cert): `DONTSPEAK_CODESIGN_ID="…" ./apps
 
 | Secrets present | Windows | macOS |
 | --- | --- | --- |
-| none | unsigned `ds-setup.exe` | ad-hoc DMGs |
+| none | unsigned `dontspeak-setup.exe` | ad-hoc DMGs |
 | Windows only | SignPath-signed installer | ad-hoc DMGs |
 | macOS only | unsigned installer | signed + notarized DMGs |
 | both | signed installer | signed + notarized DMGs |

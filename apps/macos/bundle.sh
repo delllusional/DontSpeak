@@ -23,6 +23,28 @@ APP="${DONTSPEAK_APP_DIR:-$HOME/Applications/DontSpeak.app}"
 # used by dist-dmgs.sh so the bundle layout + signing live in one place.
 source "$DIR/bundle-lib.sh"
 
+# ==> Preflight: REQUIRE the full Xcode toolchain BEFORE the (slow) Rust + swift
+# build, so a fresh machine fails fast with an actionable message instead of dying
+# at step 2. `actool` (the icon compiler) ships ONLY with Xcode.app — NOT the
+# Command Line Tools — so a box where `xcode-select -p` still points at
+# /Library/Developer/CommandLineTools can't compile AppIcon.icon. We hard-require
+# it here (no silent fallback); the fix is a one-time `xcode-select -s`.
+require_xcode() {
+  xcrun -f actool >/dev/null 2>&1 && return 0
+  local hint="/Applications/Xcode.app/Contents/Developer"
+  echo "ERROR: 'actool' not found — the DontSpeak.app build REQUIRES the full Xcode," >&2
+  echo "       not just the Command Line Tools (active dir: $(xcode-select -p 2>/dev/null))." >&2
+  if [ -x "$hint/usr/bin/actool" ]; then
+    echo "       Xcode IS installed but not selected. Fix it once with:" >&2
+    echo "         sudo xcode-select -s $hint" >&2
+  else
+    echo "       Install Xcode from the App Store, then select it once with:" >&2
+    echo "         sudo xcode-select -s /Applications/Xcode.app/Contents/Developer" >&2
+  fi
+  exit 1
+}
+require_xcode
+
 # ==> 0. Build + install the engine BINARIES + hooks FIRST. install-daemon.sh
 # computes the BUILD_ID (git), builds+installs+stable-signs the 5 bins (incl. the
 # ds-helper that step 3c bundles), installs the hooks, and echoes the id as its

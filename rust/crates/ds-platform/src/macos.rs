@@ -87,6 +87,9 @@ fn mac_keycode(base: &KeyBase) -> Option<u16> {
 }
 
 #[cfg(test)]
+// Parity test deliberately co-located with the keycode map above; the platform impls
+// intentionally follow it in this file.
+#[allow(clippy::items_after_test_module)]
 mod keycode_parity {
     use super::*;
     use crate::chord::all_supported_bases;
@@ -266,11 +269,17 @@ impl KeyInjector for MacPlatform {
         if cb.set_text(text.to_string()).is_err() {
             return;
         }
-        for down in [true, false] {
-            if let Ok(ev) = CGEvent::new_keyboard_event(self.source.clone(), KEY_V, down) {
-                ev.set_flags(CGEventFlags::CGEventFlagCommand);
-                ev.post(CGEventTapLocation::Session);
-            }
+        // Cmd+V with the SAME ~24ms down→up hold as `tap_key`: an instant down+up was
+        // being missed by the target app's event loop, so the paste landed only
+        // intermittently (and the auto-submit Return below then submitted nothing).
+        if let Ok(down) = CGEvent::new_keyboard_event(self.source.clone(), KEY_V, true) {
+            down.set_flags(CGEventFlags::CGEventFlagCommand);
+            down.post(CGEventTapLocation::Session);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(24));
+        if let Ok(up) = CGEvent::new_keyboard_event(self.source.clone(), KEY_V, false) {
+            up.set_flags(CGEventFlags::CGEventFlagCommand);
+            up.post(CGEventTapLocation::Session);
         }
         // Restore the user's clipboard off-thread once the async Cmd+V has read ours.
         crate::restore_clipboard_after_paste(prev);
@@ -279,10 +288,14 @@ impl KeyInjector for MacPlatform {
     /// Tap Return once (no modifiers) — the always-listening loop's auto-submit. Same
     /// source/tap as the dictation key; the caller gates on terminal focus.
     fn press_enter(&self) {
-        for down in [true, false] {
-            if let Ok(ev) = CGEvent::new_keyboard_event(self.source.clone(), KEY_RETURN, down) {
-                ev.post(CGEventTapLocation::Session);
-            }
+        // Same ~24ms hold as `tap_key`/`type_text`: an instant down+up Return is liable to
+        // be dropped by the target app's event loop, which would skip the auto-submit.
+        if let Ok(down) = CGEvent::new_keyboard_event(self.source.clone(), KEY_RETURN, true) {
+            down.post(CGEventTapLocation::Session);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(24));
+        if let Ok(up) = CGEvent::new_keyboard_event(self.source.clone(), KEY_RETURN, false) {
+            up.post(CGEventTapLocation::Session);
         }
     }
 }
@@ -356,6 +369,9 @@ impl CapsKeyMonitor for MacPlatform {
 
 impl Platform for MacPlatform {
     fn preflight(&self) -> Result<(), PreflightError> {
+        // SILENT, repeatable trust probe — the caps re-probe loop calls this on a
+        // timer, so it must NOT prompt. The one-time prompt that registers DontSpeak
+        // in the Accessibility list lives in `request_permissions` below.
         if iokit::ax_is_process_trusted() {
             Ok(())
         } else {
@@ -366,6 +382,18 @@ impl Platform for MacPlatform {
                     .into(),
             ))
         }
+    }
+
+    fn request_permissions(&self) {
+        // PROMPTING trust check (startup, once): registers DontSpeak in the
+        // Accessibility list AND shows the one-time grant dialog, so a fresh install
+        // gives the user a row to toggle instead of forcing a manual "+ add app".
+        // We can't defer this to the first Caps-Lock press: the caps key is read via
+        // IOHID, which ITSELF needs this grant (kIOReturnNotPermitted otherwise), so
+        // an untrusted process never sees the press. We ignore the returned state —
+        // preflight()/the re-probe loop own the live gate; this call only surfaces
+        // the dialog + list row.
+        let _ = iokit::ax_prompt_for_trust();
     }
 }
 

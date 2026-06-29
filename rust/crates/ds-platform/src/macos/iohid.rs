@@ -81,7 +81,16 @@ unsafe extern "C" {
         run_loop: CFRunLoopRef,
         run_loop_mode: CFStringRef,
     );
+    // Detach a denied manager from the run loop before releasing it (recreate-on-
+    // retry teardown — see `spawn_caps_hid_monitor`).
+    fn IOHIDManagerUnscheduleFromRunLoop(
+        manager: IoHidManagerRef,
+        run_loop: CFRunLoopRef,
+        run_loop_mode: CFStringRef,
+    );
     fn IOHIDManagerOpen(manager: IoHidManagerRef, options: IoOptionBits) -> IoReturn;
+    // CoreFoundation release for the manager we discard on each failed retry.
+    fn CFRelease(cf: *const c_void);
 
     fn IOHIDValueGetElement(value: IoHidValueRef) -> IoHidElementRef;
     fn IOHIDValueGetIntegerValue(value: IoHidValueRef) -> CFIndex;
@@ -124,44 +133,81 @@ extern "C" fn caps_value_callback(
     }
 }
 
+/// How long the monitor waits between `IOHIDManagerOpen` retries while it's still
+/// being denied (Accessibility not yet granted). Matches the engine's AX re-probe
+/// cadence so the key source and the caps gate (green dot) arm in the same beat.
+const HID_OPEN_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Spawn the dedicated `IOHIDManager` run-loop thread that publishes the PHYSICAL
 /// Caps-key down state into `caps_down` (true = held). Replaces the lock-coupled
 /// CGEvent AlphaShift tap as the HOLD signal source.
 ///
-/// On failure (manager create or — most likely — Accessibility not yet granted) it
-/// logs a one-line diagnostic and leaves `caps_down` at false: the engine keeps
-/// running as a pure RPC host, dictation just never starts until the grant lands.
+/// SELF-HEALING: on a fresh install the Accessibility grant lands AFTER launch, so
+/// the first `IOHIDManagerOpen` returns `kIOReturnNotPermitted`. Rather than give
+/// up (which left caps HOLD dead until an app restart — the gate flipped on via the
+/// AX re-probe, but this source never reopened), we RETRY the open every
+/// `HID_OPEN_RETRY` until it succeeds. So granting access arms dictation live, no
+/// restart. Until then the engine still runs as a pure RPC host (`caps_down` stays
+/// false). A `manager`-create failure is the only unrecoverable case.
 pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
     std::thread::Builder::new()
         .name("ds-caps-hid".into())
         .spawn(move || unsafe {
-            let manager = IOHIDManagerCreate(ptr::null(), KIO_HID_OPTIONS_TYPE_NONE);
-            if manager.is_null() {
-                eprintln!("[dontspeak] IOHIDManagerCreate failed; caps HOLD disabled");
-                return;
-            }
-            // NULL = match all devices; the callback filters to caps usage.
-            IOHIDManagerSetDeviceMatching(manager, ptr::null());
-            // Leak an Arc clone as the callback context; the thread (and thus the
-            // manager + context) lives for the whole process.
+            let run_loop = CFRunLoopGetCurrent();
+            // Leak ONE Arc clone as the callback context, reused across retry
+            // attempts; the manager that finally opens owns it for the process
+            // lifetime. The discarded managers never fire the callback, so handing
+            // them the same pointer is safe — CFRelease frees the manager, not ctx.
             let ctx = Arc::into_raw(caps_down) as *mut c_void;
-            IOHIDManagerRegisterInputValueCallback(manager, caps_value_callback, ctx);
-            IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-            let rc = IOHIDManagerOpen(manager, KIO_HID_OPTIONS_TYPE_NONE);
-            if rc != KERN_SUCCESS {
+            let mut warned = false;
+
+            // RECREATE-on-retry: a manager whose open was denied does NOT pick up a
+            // later grant (the denial sticks to that instance), so we build a FRESH
+            // manager each attempt until one opens — which arms caps HOLD live the
+            // moment Accessibility is granted, with NO app restart. Until then the
+            // engine still runs as a pure RPC host (`caps_down` stays false). Warn
+            // ONCE so a long-untrusted run doesn't spam the log every 2 s.
+            loop {
+                let manager = IOHIDManagerCreate(ptr::null(), KIO_HID_OPTIONS_TYPE_NONE);
+                if manager.is_null() {
+                    if !warned {
+                        eprintln!("[dontspeak] IOHIDManagerCreate failed; retrying caps HOLD");
+                        warned = true;
+                    }
+                    std::thread::sleep(HID_OPEN_RETRY);
+                    continue;
+                }
+                // NULL = match all devices; the callback filters to caps usage.
+                IOHIDManagerSetDeviceMatching(manager, ptr::null());
+                IOHIDManagerRegisterInputValueCallback(manager, caps_value_callback, ctx);
+                IOHIDManagerScheduleWithRunLoop(manager, run_loop, kCFRunLoopDefaultMode);
+                let rc = IOHIDManagerOpen(manager, KIO_HID_OPTIONS_TYPE_NONE);
+                if rc == KERN_SUCCESS {
+                    if warned {
+                        eprintln!("[dontspeak] caps HOLD armed (Accessibility granted)");
+                    }
+                    CFRunLoopRun(); // never returns; owns the manager + leaked ctx.
+                    return;
+                }
                 // 0xE00002E2 = kIOReturnNotPermitted → Accessibility not granted.
                 // Accessibility subsumes Input Monitoring for this read, so the fix is
                 // the Accessibility grant the engine already needs for key injection —
                 // there is no separate Input Monitoring toggle to flip.
-                eprintln!(
-                    "[dontspeak] IOHIDManagerOpen failed (0x{:08X}); grant Accessibility \
-                     in System Settings > Privacy & Security > Accessibility, then reload \
-                     the engine — caps HOLD disabled until then",
-                    rc as u32
-                );
-                return;
+                if !warned {
+                    eprintln!(
+                        "[dontspeak] IOHIDManagerOpen denied (0x{:08X}); waiting for the \
+                         Accessibility grant — caps HOLD arms automatically once granted \
+                         (no restart needed)",
+                        rc as u32
+                    );
+                    warned = true;
+                }
+                // Tear down the denied manager before the next attempt so we don't
+                // leak one per retry.
+                IOHIDManagerUnscheduleFromRunLoop(manager, run_loop, kCFRunLoopDefaultMode);
+                CFRelease(manager);
+                std::thread::sleep(HID_OPEN_RETRY);
             }
-            CFRunLoopRun(); // never returns; owns the manager + leaked context.
         })
         .ok();
 }
