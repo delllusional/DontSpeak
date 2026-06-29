@@ -47,6 +47,7 @@ pub use claude_native::ClaudeNative;
 pub use local::LocalTranscriber;
 pub use parakeet::{Capture, ParakeetTranscriber, resample, resample_to_16k};
 pub use separate::Separator;
+pub use streaming::{OnnxStreamer, StreamSession, StreamingStt};
 pub use system::SystemStt;
 
 #[cfg(target_os = "macos")]

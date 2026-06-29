@@ -64,21 +64,8 @@ pub struct StreamingState {
     h: Vec<f32>,       // [pred_layers, 1, pred_hidden]
     c: Vec<f32>,
     hyp: Vec<i32>,
-    // Capture is at the mic's native rate; the fbank needs a continuous 16 kHz stream. We keep
-    // the whole device-rate buffer and re-resample it each accept (one-shot, artifact-free),
-    // feeding the fbank only the NEW frames up to a tail margin (the resampler's last samples
-    // shift as more audio arrives, so the freshest ~`TAIL_MARGIN_16K` are withheld until they
-    // become interior, or until `finalize`). Cheap relative to the encoder.
-    in_rate: u32,
-    dev_buf: Vec<f32>,  // all device-rate mono samples captured so far
-    fed_16k: usize,     // count of 16 kHz samples already pushed to the fbank
-    audio_ms: f64,      // 16 kHz audio fed (for STTSTATS)
     transcribe_ms: f64, // cumulative encoder+decode model time (for STTSTATS)
 }
-
-/// 16 kHz samples withheld from the fbank at the tail of each accept (the resampler's edge
-/// samples are unstable until more input arrives). ~30 ms.
-const TAIL_MARGIN_16K: usize = 480;
 
 fn meta_str(s: &Session, key: &str) -> Option<String> {
     s.metadata().ok().and_then(|m| m.custom(key))
@@ -168,10 +155,9 @@ impl StreamingModel {
     }
 
     /// Start a new dictation: zeroed encoder cache + decoder LSTM state, seeded by one decoder
-    /// step on the blank/SOS token (mirrors the reference).
-    /// `in_rate` is the capture (mic) sample rate; audio fed to [`accept_audio`] is at this rate
-    /// and resampled to 16 kHz internally (passthrough when already 16 kHz).
-    pub fn new_state(&mut self, in_rate: u32) -> Result<StreamingState, String> {
+    /// step on the blank/SOS token (mirrors the reference). Audio fed to [`accept_16k`](Self::accept_16k)
+    /// must already be 16 kHz mono (the device-rate → 16 kHz resample lives in [`StreamSession`]).
+    pub fn new_state(&mut self) -> Result<StreamingState, String> {
         // Copy the (Copy) metadata out so the &self.meta borrow doesn't span the &mut run_decoder.
         let (blank_id, state_len, c1, c2) = {
             let m = &self.meta;
@@ -190,57 +176,29 @@ impl StreamingModel {
             h,
             c,
             hyp: Vec::new(),
-            in_rate,
-            dev_buf: Vec::new(),
-            fed_16k: 0,
-            audio_ms: 0.0,
             transcribe_ms: 0.0,
         })
     }
 
-    /// Feed a chunk of mono audio at the capture rate (`new_state`'s `in_rate`); resamples to
-    /// 16 kHz, feeds the fbank (withholding the unstable tail), runs any newly-available encoder
-    /// windows, and returns the hypothesis text so far. Cheap to call often.
-    pub fn accept_audio(
+    /// Feed a chunk of 16 kHz mono PCM into the fbank, run any newly-available encoder windows,
+    /// and return the hypothesis text so far. Empty input just returns the current hypothesis.
+    pub fn accept_16k(
         &mut self,
         state: &mut StreamingState,
-        pcm: &[f32],
+        pcm_16k: &[f32],
     ) -> Result<String, String> {
-        state.dev_buf.extend_from_slice(pcm);
-        let full = crate::resample(&state.dev_buf, state.in_rate, 16_000);
-        let stable = full.len().saturating_sub(TAIL_MARGIN_16K);
-        if stable > state.fed_16k {
-            let new = &full[state.fed_16k..stable];
-            state.fbank.accept_waveform(16_000.0, new);
-            state.audio_ms += new.len() as f64 / 16.0;
-            state.fed_16k = stable;
+        if !pcm_16k.is_empty() {
+            state.fbank.accept_waveform(16_000.0, pcm_16k);
             self.drain_windows(state, false)?;
         }
         Ok(self.text(state))
     }
 
-    /// Flush: resample the whole buffer, feed the withheld tail, run the remaining (zero-padded)
-    /// windows, and return the final text.
+    /// Flush: run the remaining (zero-padded) windows and return the final text.
     pub fn finalize(&mut self, state: &mut StreamingState) -> Result<String, String> {
-        let full = crate::resample(&state.dev_buf, state.in_rate, 16_000);
-        if full.len() > state.fed_16k {
-            let new = &full[state.fed_16k..];
-            state.fbank.accept_waveform(16_000.0, new);
-            state.audio_ms += new.len() as f64 / 16.0;
-            state.fed_16k = full.len();
-        }
         state.fbank.input_finished();
         self.drain_windows(state, true)?;
         Ok(self.text(state))
-    }
-
-    /// 16 kHz audio duration fed so far, in ms (for STTSTATS).
-    pub fn audio_ms(state: &StreamingState) -> f64 {
-        state.audio_ms
-    }
-    /// Cumulative encoder+decode model time, in ms (for STTSTATS).
-    pub fn transcribe_ms(state: &StreamingState) -> f64 {
-        state.transcribe_ms
     }
 
     /// Run encoder steps while a full `window_size` of features is available (or, on `flush`, pad
@@ -443,6 +401,137 @@ fn parse_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared streaming layer — reused by EVERY streaming STT backend (ONNX here, the
+// macOS Core ML / FluidAudio backend in `crate::coreml`). Only the per-backend
+// inference differs (the `StreamingStt` trait); the resampling, tail-withholding,
+// audio accounting (`StreamSession`) and the helper's drain→partial→finalize loop
+// + STTSTATS schema are common.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 16 kHz samples withheld at the tail of each `accept` (the one-shot resampler's edge samples
+/// shift as more audio arrives, so the freshest ~30 ms are held back until they become interior
+/// or until `finalize`).
+const TAIL_MARGIN_16K: usize = 480;
+
+/// A streaming speech-to-text backend: fed 16 kHz mono PCM incrementally, yields a growing
+/// hypothesis, and flushes a final transcript. The ONE backend-specific surface — everything
+/// around it (resampling, cadence, partial/STTSTATS emission) is shared.
+pub trait StreamingStt: Send {
+    /// Begin a NEW utterance: clear per-utterance state (caches, hypothesis, timers) while keeping
+    /// the loaded model resident, so a cached backend is reused across dictations without reloading.
+    fn reset(&mut self) -> Result<(), String>;
+    /// Feed 16 kHz mono PCM (may be empty); return the hypothesis text so far.
+    fn accept_16k(&mut self, pcm_16k: &[f32]) -> Result<String, String>;
+    /// Flush remaining audio and return the final transcript.
+    fn finalize(&mut self) -> Result<String, String>;
+    /// Cumulative model-inference time (ms), for the STTSTATS `transcribe_ms` field.
+    fn transcribe_ms(&self) -> f64 {
+        0.0
+    }
+}
+
+/// The ONNX cache-aware streaming backend bound into one owner (model + per-utterance state) so it
+/// fits the [`StreamingStt`] trait object the helper drives.
+pub struct OnnxStreamer {
+    model: StreamingModel,
+    state: StreamingState,
+}
+
+impl OnnxStreamer {
+    /// Load the streaming model from `dir` (int8 by default) and seed a fresh utterance.
+    pub fn load(dir: &Path, int8: bool) -> Result<Self, String> {
+        let mut model = StreamingModel::load(dir, int8)?;
+        let state = model.new_state()?;
+        Ok(Self { model, state })
+    }
+}
+
+impl StreamingStt for OnnxStreamer {
+    fn reset(&mut self) -> Result<(), String> {
+        self.state = self.model.new_state()?;
+        Ok(())
+    }
+    fn accept_16k(&mut self, pcm_16k: &[f32]) -> Result<String, String> {
+        self.model.accept_16k(&mut self.state, pcm_16k)
+    }
+    fn finalize(&mut self) -> Result<String, String> {
+        self.model.finalize(&mut self.state)
+    }
+    fn transcribe_ms(&self) -> f64 {
+        self.state.transcribe_ms
+    }
+}
+
+/// SHARED capture-to-backend plumbing: owns a [`StreamingStt`] backend plus the device-rate →
+/// 16 kHz resampling (one-shot over the whole buffer, withholding the unstable tail) and the
+/// `audio_ms` accounting. Both the ONNX and the macOS Core ML backends run behind this, so the
+/// only thing that ever differs between them is the trait impl.
+pub struct StreamSession {
+    backend: Box<dyn StreamingStt>,
+    in_rate: u32,
+    dev_buf: Vec<f32>, // all device-rate mono samples captured so far
+    fed_16k: usize,    // count of 16 kHz samples already handed to the backend
+    audio_ms: f64,
+}
+
+impl StreamSession {
+    /// Wrap `backend`, feeding it audio captured at `in_rate` (resampled to 16 kHz internally;
+    /// passthrough when already 16 kHz).
+    pub fn new(backend: Box<dyn StreamingStt>, in_rate: u32) -> Self {
+        Self {
+            backend,
+            in_rate,
+            dev_buf: Vec::new(),
+            fed_16k: 0,
+            audio_ms: 0.0,
+        }
+    }
+
+    /// Accept a chunk of device-rate mono audio; resample, hand the new stable 16 kHz frames to
+    /// the backend, and return the hypothesis so far.
+    pub fn accept(&mut self, pcm_device: &[f32]) -> Result<String, String> {
+        self.dev_buf.extend_from_slice(pcm_device);
+        let full = crate::resample(&self.dev_buf, self.in_rate, 16_000);
+        let stable = full.len().saturating_sub(TAIL_MARGIN_16K);
+        let new: &[f32] = if stable > self.fed_16k {
+            &full[self.fed_16k..stable]
+        } else {
+            &[]
+        };
+        if !new.is_empty() {
+            self.audio_ms += new.len() as f64 / 16.0;
+            self.fed_16k = stable;
+        }
+        self.backend.accept_16k(new)
+    }
+
+    /// Flush the withheld tail + the backend, returning the final transcript.
+    pub fn finalize(&mut self) -> Result<String, String> {
+        let full = crate::resample(&self.dev_buf, self.in_rate, 16_000);
+        if full.len() > self.fed_16k {
+            let new = &full[self.fed_16k..];
+            self.audio_ms += new.len() as f64 / 16.0;
+            self.fed_16k = full.len();
+            self.backend.accept_16k(new)?;
+        }
+        self.backend.finalize()
+    }
+
+    /// 16 kHz audio duration fed so far, in ms (STTSTATS).
+    pub fn audio_ms(&self) -> f64 {
+        self.audio_ms
+    }
+    /// Backend model-inference time, in ms (STTSTATS).
+    pub fn transcribe_ms(&self) -> f64 {
+        self.backend.transcribe_ms()
+    }
+    /// Reclaim the backend (to cache the loaded model for the next dictation).
+    pub fn into_backend(self) -> Box<dyn StreamingStt> {
+        self.backend
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,8 +571,8 @@ mod tests {
         let wav = dir.join("test_wavs/0.wav");
         let pcm = read_wav_16k_mono_pcm(&wav);
         let mut model = StreamingModel::load(&dir, true).expect("load");
-        let mut st = model.new_state(16_000).expect("state");
-        model.accept_audio(&mut st, &pcm).expect("accept");
+        let mut st = model.new_state().expect("state");
+        model.accept_16k(&mut st, &pcm).expect("accept");
         let text = model.finalize(&mut st).expect("finalize");
         eprintln!("streaming oracle => {text:?}");
         assert!(

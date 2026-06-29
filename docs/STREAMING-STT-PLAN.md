@@ -1,31 +1,37 @@
 # Cache-aware streaming STT — implementation plan (Tier B)
 
-Status: **IN PROGRESS** (branch `streaming-stt`). The cheap win (adaptive preview back-off) already
-shipped on `main` and is live on every platform. This document plans the *real* fix: process each
+Status: **DONE / shipped** (branch `fluidaudio-streaming`). The cheap win (adaptive preview back-off)
+shipped earlier on `main`. This document is now a record of the *real* fix that followed: process each
 audio frame through the encoder **exactly once**, with a cache, instead of re-encoding the whole
 open tail on every preview tick.
 
 ### Progress
 - [x] **Validated reference** (`scripts/streaming-stt/`): Python onnxruntime+kaldi-native-fbank
       prototype reproduces the oracle transcript exactly. Feature config + tensor contract nailed.
-- [x] **Config flag** `stt_streaming` (default off) plumbed through config + tool catalog.
+- [x] **No config flag** — streaming REPLACED the offline engine outright (unconditional); there is
+      no `stt_streaming` toggle.
 - [x] **Streaming runner** `ds-stt::streaming` (pure Rust over `ort` + `kaldi-native-fbank`):
       cache-aware encoder + LSTM decoder + joiner greedy decode. Oracle Rust test passes
       (DONTSPEAK_STREAMING_MODEL_DIR) — exact transcript, each frame encoded once. **Cross-platform
       by construction** (shared `ds-stt`, no C build deps).
-- [ ] **Model download** (`ds-model`): registry entry (url+digest+size) + spec/presence/dir +
-      prefetch for the 480ms int8 model.
-- [ ] **Wire into `listen.rs`**: stream chunks through `StreamingModel` when `stt_streaming` is on,
-      replacing the committed/preview re-encode loop; offline path stays as fallback.
-- [ ] **macOS CoreML/ANE** (Phase 3): try ORT CoreML EP on the streaming ONNX; else ONNX-CPU.
-- [ ] **Per-platform builds + flip default** after A/B parity.
+- [x] **Model download** (`ds-model`): registry entry (url+digest+size) + spec/presence/dir +
+      prefetch for the 480ms int8 model (`ds-model/src/spec.rs`, `urls.rs`).
+- [x] **Wire into `listen.rs`**: streams chunks through `StreamingModel` unconditionally (both
+      callers route to `try_streaming`), replacing the committed/preview re-encode loop; a
+      whole-buffer one-shot over the same model stays as fallback.
+- [x] **macOS CoreML/ANE** (Phase 3): shipped via FluidAudio's native streaming Core ML
+      (`StreamingEouAsrManager`) behind the `ane` provider (`CoremlStreamer`), NOT the ORT CoreML
+      EP — see `docs/STREAMING-STT-MACOS-PLAN.md` (Mac-side build + EOU model download still pending).
+- [x] **Per-platform builds** — streaming is now the only engine (no flag, no default to flip).
 
 ## 1. Why
 
-Today's STT (`ds-stt/parakeet.rs` → `transcribe-rs` `ParakeetModel`) runs the FastConformer
-**encoder over the whole buffer on every call**. `transcribe-rs` flags this model
-`supports_streaming: false`; its `encode()` has no cache input tensors. The decoder side already
-threads TDT predictor state (`input_states_1/2`), so only the **encoder** is non-incremental.
+The old STT path (`ds-stt/parakeet.rs` → `transcribe-rs` `ParakeetModel`) ran the FastConformer
+**encoder over the whole buffer on every call**. `transcribe-rs` flagged that model
+`supports_streaming: false`; its `encode()` had no cache input tensors. The decoder side already
+threaded TDT predictor state (`input_states_1/2`), so only the **encoder** was non-incremental. That
+path has since been REPLACED by the cache-aware streaming runner (§4); `transcribe-rs` is now used
+only for its `EnergyVad`.
 
 Measured impact (from the `STT listen` debug trace we added): on a 45 s dictation the live overlay
 spent **`preview_ms` ≈ 27 s** re-encoding the growing tail — ~4× the real transcript. The back-off
@@ -72,14 +78,15 @@ anti-pattern; the fix is cache-aware streaming (encoder keeps `cache_last_channe
 
 ## 4. Architecture
 
-New module `ds-stt/src/streaming/` (shared, platform-agnostic core):
+New module `ds-stt/src/streaming.rs` (a single file; shared, platform-agnostic core):
 - `StreamingEncoder` — owns the 3 `ort` sessions + cache tensors (`cache_last_channel`,
   `cache_last_time`, `cache_last_channel_len`). `reset()` zeroes the cache; `push(chunk_16k) ->
   Vec<EncoderFrame>` runs one encoder step and returns new encoded frames.
 - `StreamingDecoder` — TDT/RNNT greedy decode threading predictor state across frames (reuse the
   existing decoder_joint logic; port from `transcribe-rs`'s decode or call its pieces).
 - `StreamingSession` — glue: `feed(&[f32]) -> PartialUpdate { text, is_stable }`, `finalize() ->
-  String`. Emits stable-prefix + tentative-tail using **local-agreement** so partials don't flicker.
+  String`. Emits the full current hypothesis on change; flicker is mitigated only by withholding an
+  unstable audio tail (`StreamSession`'s `TAIL_MARGIN_16K`) — **local-agreement** was not implemented.
 
 Wiring into `listen.rs` (`transcribe_loop`): replace the "drain → accumulate → re-`segment_text`
 the tail every tick" loop with "drain → `session.feed(chunk)` → emit returned partial". The VAD
@@ -108,10 +115,12 @@ boundary detector stays for endpointing/`final_ms` accounting; committed/preview
 
 ## 6. Fallback & safety
 
-- `stt_streaming` config flag; default OFF until Phase 4. Any streaming load/inference error
-  fail-quiets to the existing offline `transcribe-rs` path (no dictation regression — same fail-open
-  philosophy as today).
-- The offline model stays shipped/downloadable as the guaranteed baseline on every platform.
+- There is no `stt_streaming` flag — streaming is unconditional. Any streaming load/inference error
+  fail-quiets to a whole-buffer one-shot over the SAME streaming model (`ParakeetTranscriber` feeds
+  the whole buffer through `StreamingModel`, then finalizes) — no dictation regression, same
+  fail-open philosophy as today.
+- That whole-buffer path is the guaranteed baseline on every platform; there is no separate
+  `transcribe-rs` model asset.
 
 ## 7. Validation (uses the trace we already built)
 

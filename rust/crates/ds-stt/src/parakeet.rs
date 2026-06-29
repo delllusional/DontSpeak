@@ -196,8 +196,8 @@ impl ParakeetTranscriber {
             return Ok(String::new());
         }
         let model = self.model()?;
-        let mut state = model.new_state(TARGET_RATE)?;
-        model.accept_audio(&mut state, pcm)?;
+        let mut state = model.new_state()?;
+        model.accept_16k(&mut state, pcm)?;
         model.finalize(&mut state)
     }
 }

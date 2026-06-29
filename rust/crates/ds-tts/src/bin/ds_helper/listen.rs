@@ -10,7 +10,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use ds_aec::CaptureHandle;
-use ds_stt::streaming::StreamingModel;
+use ds_stt::{OnnxStreamer, StreamSession, StreamingStt};
 
 /// Control flags for the full-duplex concurrent listen thread (set by the stdin
 /// reader, polled by the thread). `start` opens a listen, `stop` (the `lstop` op)
@@ -440,28 +440,50 @@ pub(crate) fn run_listen(
 // Cache-aware streaming dictation (the built-in ONNX "parakeet" engine).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Process-wide lazily-loaded streaming model (one mic / one listen at a time, so a single
-/// shared instance is fine). `None` until the first streaming listen loads it.
-fn streaming_cell() -> &'static Mutex<Option<StreamingModel>> {
-    static CELL: OnceLock<Mutex<Option<StreamingModel>>> = OnceLock::new();
+/// Process-wide cache of the loaded streaming backend, keyed by the provider it was built for
+/// (`ort_cpu`/`ort_cuda` → ONNX, `ane` → Core ML). One mic / one listen at a time, so a single
+/// cached instance is fine; the heavy model stays resident and each listen just `reset`s it.
+type CachedBackend = (String, Box<dyn StreamingStt>);
+fn backend_cell() -> &'static Mutex<Option<CachedBackend>> {
+    static CELL: OnceLock<Mutex<Option<CachedBackend>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))
 }
 
-/// Whether this listen should stream: the resolved STT provider is the cross-platform ONNX path
-/// (`ort_cpu`/`ort_cuda`, carried in `DONTSPEAK_STT_PROVIDER`) — i.e. the built-in "parakeet"
-/// engine, which IS the streaming model now — AND its assets are present. The macOS apple-native
-/// (`ane`) and system engines keep the offline `transcribe_loop`. No config flag: streaming is
-/// simply how the ONNX engine works.
-fn streaming_enabled() -> bool {
-    let provider = std::env::var("DONTSPEAK_STT_PROVIDER").unwrap_or_default();
-    let is_onnx =
-        provider.eq_ignore_ascii_case("ort_cpu") || provider.eq_ignore_ascii_case("ort_cuda");
-    is_onnx && ds_model::parakeet_present()
+/// Build the streaming backend for `provider`, or `None` when this provider doesn't stream / its
+/// assets are missing (→ caller falls back to the offline `transcribe_loop`). ONNX
+/// (`ort_cpu`/`ort_cuda`) → [`OnnxStreamer`]; macOS `ane` → the FluidAudio Core ML streamer. Both
+/// implement [`StreamingStt`], so everything downstream is shared.
+fn build_backend(provider: &str) -> Option<Box<dyn StreamingStt>> {
+    if provider.eq_ignore_ascii_case("ort_cpu") || provider.eq_ignore_ascii_case("ort_cuda") {
+        if !ds_model::parakeet_present() {
+            return None;
+        }
+        let dir = ds_model::parakeet_dir()?;
+        return match OnnxStreamer::load(&dir, true) {
+            Ok(s) => Some(Box::new(s)),
+            Err(e) => {
+                eprintln!("streaming: ONNX load failed, using offline: {e}");
+                None
+            }
+        };
+    }
+    #[cfg(target_os = "macos")]
+    if provider.eq_ignore_ascii_case("ane") {
+        return match ds_stt::coreml::CoremlStreamer::new() {
+            Ok(s) => Some(Box::new(s)),
+            Err(e) => {
+                eprintln!("streaming: Core ML streamer unavailable, using offline: {e}");
+                None
+            }
+        };
+    }
+    None
 }
 
-/// Try to run this listen via the streaming model. Returns `true` if it handled the session
+/// Try to run this listen via the streaming path. Returns `true` if it handled the session
 /// (emitting PARTIAL/STTSTATS/FINAL/LDONE), `false` if streaming is unavailable so the caller
-/// should fall back to the offline [`transcribe_loop`]. Lazy-loads the model on first use.
+/// should fall back to the offline [`transcribe_loop`]. The backend is chosen by the resolved STT
+/// provider and CACHED across listens; the loop, resampling, and STTSTATS are backend-agnostic.
 fn try_streaming(
     rate: u32,
     timeout: std::time::Duration,
@@ -471,31 +493,23 @@ fn try_streaming(
 ) -> bool {
     use std::io::Write;
     use std::time::{Duration, Instant};
-    if !streaming_enabled() {
-        return false;
-    }
-    let cell = streaming_cell();
+    let provider = std::env::var("DONTSPEAK_STT_PROVIDER").unwrap_or_default();
+    let cell = backend_cell();
     let mut guard = cell.lock().unwrap();
-    if guard.is_none() {
-        let Some(dir) = ds_model::parakeet_dir() else {
-            return false;
-        };
-        match StreamingModel::load(&dir, true) {
-            Ok(m) => *guard = Some(m),
-            Err(e) => {
-                eprintln!("{label}: streaming load failed, using offline: {e}");
-                return false;
-            }
-        }
+    // (Re)build when absent or the provider changed since last listen.
+    if guard.as_ref().map(|(p, _)| p != &provider).unwrap_or(true) {
+        *guard = build_backend(&provider).map(|b| (provider.clone(), b));
     }
-    let model = guard.as_mut().expect("just loaded");
-    let mut state = match model.new_state(rate) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{label}: streaming state failed, using offline: {e}");
-            return false;
-        }
+    // Take ownership for this session (restored to the cache at the end).
+    let Some((p, mut backend)) = guard.take() else {
+        return false;
     };
+    drop(guard);
+    if let Err(e) = backend.reset() {
+        eprintln!("{label}: streaming reset failed, using offline: {e}");
+        return false; // broken backend dropped, not re-cached
+    }
+    let mut session = StreamSession::new(backend, rate);
     let flush = || {
         let _ = std::io::stdout().flush();
     };
@@ -511,7 +525,7 @@ fn try_streaming(
         if block.is_empty() {
             continue;
         }
-        match model.accept_audio(&mut state, &block) {
+        match session.accept(&block) {
             Ok(text) => {
                 if text != last_text && !text.trim().is_empty() {
                     println!("PARTIAL {text}");
@@ -524,14 +538,14 @@ fn try_streaming(
         }
     }
     let final_start = Instant::now();
-    let text = model.finalize(&mut state).unwrap_or_else(|e| {
+    let text = session.finalize().unwrap_or_else(|e| {
         eprintln!("{label}: streaming finalize: {e}");
         String::new()
     });
     let final_ms = final_start.elapsed().as_secs_f64() * 1000.0;
     let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let audio_ms = StreamingModel::audio_ms(&state);
-    let transcribe_ms = StreamingModel::transcribe_ms(&state);
+    let audio_ms = session.audio_ms();
+    let transcribe_ms = session.transcribe_ms();
     // STTSTATS schema shared with the offline path; `preview_ms=0` (no re-encode) + `streaming=1`
     // are the success markers in the activity-log `STT listen ...` line under DONTSPEAK_DEBUG.
     println!(
@@ -541,6 +555,8 @@ fn try_streaming(
     println!("FINAL {}", text.replace('\n', " "));
     println!("LDONE");
     flush();
+    // Restore the backend (model stays resident) for the next listen.
+    *cell.lock().unwrap() = Some((p, session.into_backend()));
     true
 }
 

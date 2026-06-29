@@ -32,7 +32,8 @@ use ds_tts::{KokoroTts, SystemTts, Tts};
 pub trait EngineAvailability {
     /// Is a System TTS backend usable on this OS? Drives System → Kokoro.
     fn system_tts_supported(&self) -> bool;
-    /// Is System STT wired on this OS? Always false in Phase 2 (deferred).
+    /// Is System STT (macOS `SFSpeechRecognizer`, via the warm helper) usable on this
+    /// OS? Real on-device probe on macOS; false on Windows/Linux (still deferred there).
     fn system_stt_supported(&self) -> bool;
 }
 
