@@ -1,6 +1,6 @@
-//  LibrariesView.swift
+//  CreditsView.swift
 //
-//  The Libraries tab: the third-party open-source models + runtimes DontSpeak downloads,
+//  The Credits tab: the third-party open-source models + runtimes DontSpeak downloads,
 //  each with its license. The list is the SAME shared catalog every platform renders —
 //  read via the FFI (ds_libraries_json → the shared ds-model `libraries` catalog), already
 //  FILTERED to this platform (so an Apple-Silicon build shows the Core ML / ANE model sets
@@ -74,7 +74,7 @@ private func humanSize(_ bytes: Int) -> String {
     return f.string(fromByteCount: Int64(bytes))
 }
 
-struct LibrariesView: View {
+struct CreditsView: View {
     @State private var libraries: [LibraryInfo] = []
     /// Names of the libraries currently expanded (collapsed by default) — same disclosure
     /// idea as the Tools pane: a tappable header with a rotating chevron.
@@ -85,7 +85,9 @@ struct LibrariesView: View {
         // glass slab + traffic-light strip live once on the `MainWindow` container.
         libraryList
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onAppear { libraries = loadLibraries() }
+            // The catalog is immutable for the process lifetime, so load it ONCE — re-navigating
+            // to this tab re-fires `onAppear` but must not re-run the FFI + JSON decode.
+            .onAppear { if libraries.isEmpty { libraries = loadLibraries() } }
     }
 
     /// The catalog as a Control-Center / HUD layout matching the Tools pane: one glass slab
@@ -130,12 +132,12 @@ struct LibrariesView: View {
             }
 
             HStack(spacing: 14) {
-                if let url = URL(string: lib.homepage), !lib.homepage.isEmpty {
+                if !lib.homepage.isEmpty, let url = URL(string: lib.homepage) {
                     Link(destination: url) {
                         Label(L.t("libraries.homepage"), systemImage: "link")
                     }
                 }
-                if let url = URL(string: lib.licenseURL), !lib.licenseURL.isEmpty {
+                if !lib.licenseURL.isEmpty, let url = URL(string: lib.licenseURL) {
                     Link(destination: url) {
                         Label(L.t("libraries.view_license"), systemImage: "doc.text")
                     }

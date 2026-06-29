@@ -20,6 +20,6 @@ func ffiString(_ call: () -> UnsafeMutablePointer<CChar>?) -> String? {
 /// or a decode mismatch — callers substitute an empty catalog, so a bad read degrades to an
 /// empty screen rather than a crash.
 func ffiDecode<T: Decodable>(_ type: T.Type = T.self, _ call: () -> UnsafeMutablePointer<CChar>?) -> T? {
-    guard let json = ffiString(call), let data = json.data(using: .utf8) else { return nil }
-    return try? JSONDecoder().decode(T.self, from: data)
+    guard let json = ffiString(call) else { return nil }
+    return try? JSONDecoder().decode(T.self, from: Data(json.utf8))
 }

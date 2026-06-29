@@ -1,6 +1,6 @@
-//  LogsView.swift
+//  LogView.swift
 //
-//  The Logs tab: a read-only tail of the COMBINED activity log (the unified log + every
+//  The Log tab: a read-only tail of the COMBINED activity log (the unified log + every
 //  sibling auxiliary log), read via the FFI (ds_logs_json → the shared ds-config combined-log
 //  reader) — the SAME file the engine writes, so it can't drift from what actually happened.
 //  Reloaded each time the tab is shown (no poll timer). A top filter bar narrows lines live;
@@ -22,7 +22,7 @@ private func loadLogLines(maxBytes: UInt32 = 64 * 1024) -> [LogLine] {
     ffiDecode([LogLine].self) { ds_logs_json(maxBytes) } ?? []
 }
 
-struct LogsView: View {
+struct LogView: View {
     @State private var lines: [LogLine] = []
     /// Distinct sources in first-appearance order (empties dropped) — each source's palette
     /// color is its index here, so the coloring is stable + identical to every other platform.
@@ -65,13 +65,16 @@ struct LogsView: View {
 
     @ViewBuilder
     private var logBody: some View {
-        if shown.isEmpty {
+        // Run the filter ONCE per render and reuse it (it was previously read twice — for the
+        // emptiness check and the ForEach — re-filtering every line twice per keystroke).
+        let result = shown
+        if result.isEmpty {
             // Distinguish "nothing logged yet" from "filter matched nothing", like Windows.
             Text(L.t(lines.isEmpty ? "logs.empty" : "logs.no_match"))
                 .glassCaption()
         } else {
             VStack(alignment: .leading, spacing: 2) {
-                ForEach(Array(shown.enumerated()), id: \.offset) { _, line in
+                ForEach(Array(result.enumerated()), id: \.offset) { _, line in
                     lineText(line)
                 }
             }

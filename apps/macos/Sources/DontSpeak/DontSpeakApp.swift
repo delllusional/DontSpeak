@@ -38,7 +38,7 @@ struct DontSpeakApp: App {
         }
         .windowResizability(.contentMinSize)
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 510, height: 600)
+        .defaultSize(width: 510, height: 320)
     }
 
 }
@@ -190,8 +190,15 @@ enum TrayState: Equatable {
     /// so it keeps adapting to the bar / appearance.
     @MainActor func crossfadeImage(muted: Bool) -> NSImage {
         guard self.tint == nil else { return image(muted: muted) }
+        // RESOLVE the dynamic `labelColor` under the menu bar's effective appearance into a
+        // concrete color. `labelColor` is a dynamic catalog color; assigning it inside the
+        // appearance block doesn't resolve it (it stays dynamic and would re-resolve under
+        // whatever appearance is current at draw time). Forcing a colorspace conversion WHILE the
+        // menu-bar appearance is current pins the right light/dark value for the blend frame.
         var color = NSColor.labelColor
-        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance { color = .labelColor }
+        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance {
+            color = NSColor.labelColor.usingColorSpace(.sRGB) ?? .labelColor
+        }
         let g = MenuBarIcon.tintedGlyph(color)
         return muted ? Self.applySlash(to: g, tint: color) : g
     }

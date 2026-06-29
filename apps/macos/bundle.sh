@@ -55,6 +55,15 @@ BUILD_ID="$("$DIR/../../scripts/install-daemon.sh" | tail -1)"
 [ -n "$BUILD_ID" ] || { echo "install-daemon.sh produced no BUILD_ID" >&2; exit 1; }
 echo "   binaries installed; BUILD_ID=$BUILD_ID"
 
+# ==> 0b. Wire the Claude Code voice hooks into ~/.claude/settings.json. install-daemon.sh
+# installs binaries only (its stated contract); the settings.json merge lives in the
+# `dontspeak` binary — a SAFE, additive, idempotent, backed-up merge — and must be invoked
+# here so an app build/deploy wires the hooks too (mirrors scripts/install.sh step 5).
+# Without this, `bundle.sh` leaves the hooks unwired even though the binaries are live.
+echo "==> 0b. wire Claude Code voice hooks → ~/.claude/settings.json"
+"${DONTSPEAK_INSTALL_DIR:-$HOME/.local/bin}/dontspeak" wire-hooks \
+  || echo "   !! wire-hooks failed; run '~/.local/bin/dontspeak wire-hooks' manually" >&2
+
 echo "==> 1. build (Rust staticlib + swift build)"
 "$DIR/build.sh" >/dev/null
 EXE="$DIR/.build/release/DontSpeak"

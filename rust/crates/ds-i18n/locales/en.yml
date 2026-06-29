@@ -25,8 +25,8 @@ common:
   # the platform-idiomatic tray ACTIONS below (Quit vs Exit) stay on separate keys.
   nav_status: Status
   nav_tools: Tools
-  nav_libraries: Libraries
-  nav_logs: Logs
+  nav_credits: Credits
+  nav_log: Log
 
 # ──────────────────────────────── TRAY MENU ─────────────────────────────────
 # macOS status-bar menu + Windows notification-area menu.

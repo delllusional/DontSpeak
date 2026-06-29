@@ -164,9 +164,9 @@ public sealed partial class MainWindow : Window
         var tag = (args.SelectedItem as NavigationViewItem)?.Tag as string;
         if (StatusScroll != null) StatusScroll.Visibility = tag == "status" ? Visibility.Visible : Visibility.Collapsed;
         if (ToolsScroll != null) ToolsScroll.Visibility = tag == "tools" ? Visibility.Visible : Visibility.Collapsed;
-        if (LibrariesScroll != null) LibrariesScroll.Visibility = tag == "libraries" ? Visibility.Visible : Visibility.Collapsed;
-        if (LogsTab != null) LogsTab.Visibility = tag == "logs" ? Visibility.Visible : Visibility.Collapsed;
-        if (tag == "logs") LoadLogs(); // reload each time the tab is shown (no poll timer)
+        if (CreditsScroll != null) CreditsScroll.Visibility = tag == "credits" ? Visibility.Visible : Visibility.Collapsed;
+        if (LogTab != null) LogTab.Visibility = tag == "log" ? Visibility.Visible : Visibility.Collapsed;
+        if (tag == "log") LoadLogs(); // reload each time the tab is shown (no poll timer)
     }
 
     // ── Logs tab: the COMBINED activity log with a top text-filter bar ───────────────────────
@@ -231,7 +231,7 @@ public sealed partial class MainWindow : Window
             LogText.Blocks.Add(para);
         }
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
-            () => LogsScroll?.ChangeView(null, LogsScroll.ScrollableHeight, null, true));
+            () => LogScroll?.ChangeView(null, LogScroll.ScrollableHeight, null, true));
     }
 
     // Level color from the shared source (Brand.LogLevelColor): ERROR/WARN → its color, INFO/
@@ -764,7 +764,7 @@ public sealed partial class MainWindow : Window
                 });
             }
 
-            LibrariesList.Children.Add(new Expander
+            CreditsList.Children.Add(new Expander
             {
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Stretch,

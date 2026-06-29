@@ -29,8 +29,8 @@
         <NavigationView.MenuItems>
             <NavigationViewItem Content="{loc:Loc Key=common.nav_status}" Tag="status" IsSelected="True" />
             <NavigationViewItem Content="{loc:Loc Key=common.nav_tools}" Tag="tools" />
-            <NavigationViewItem Content="{loc:Loc Key=common.nav_logs}" Tag="logs" />
-            <NavigationViewItem Content="{loc:Loc Key=common.nav_libraries}" Tag="libraries" />
+            <NavigationViewItem Content="{loc:Loc Key=common.nav_log}" Tag="log" />
+            <NavigationViewItem Content="{loc:Loc Key=common.nav_credits}" Tag="credits" />
         </NavigationView.MenuItems>
 
         <Grid Margin="20,12,20,20">
@@ -198,21 +198,21 @@
                  SHARED Rust libraries catalog — ds_libraries_json). Header = project name +
                  a license badge; expanding reveals what it's for, links to the project + the
                  license, and the files it fetches. Same "expander list" look as Tools. -->
-            <ScrollViewer x:Name="LibrariesScroll" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+            <ScrollViewer x:Name="CreditsScroll" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
                 <StackPanel Spacing="12" HorizontalAlignment="Stretch">
-                    <StackPanel x:Name="LibrariesList" Spacing="4" />
+                    <StackPanel x:Name="CreditsList" Spacing="4" />
                 </StackPanel>
             </ScrollViewer>
 
-            <!-- ── LOGS — the COMBINED activity log (unified + aux helper, etc.). Reloaded on
+            <!-- ── LOG — the COMBINED activity log (unified + aux helper, etc.). Reloaded on
                  tab-select (no poll timer). A top filter bar narrows lines by free text (matches
                  source/level/message, case-insensitive); below it a glass card with the
                  color-coded (per-source + ERROR/WARN), selectable, wrapped log that scrolls within
                  the window's (Status-locked) height. -->
-            <Grid x:Name="LogsTab" Visibility="Collapsed" RowDefinitions="Auto,*">
+            <Grid x:Name="LogTab" Visibility="Collapsed" RowDefinitions="Auto,*">
                 <TextBox x:Name="LogFilter" Grid.Row="0" Margin="0,0,0,8"
                          TextChanged="LogFilter_TextChanged" />
-                <ScrollViewer x:Name="LogsScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <ScrollViewer x:Name="LogScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto">
                     <Border CornerRadius="8" Padding="12"
                             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">

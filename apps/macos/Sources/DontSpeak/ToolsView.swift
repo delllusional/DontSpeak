@@ -91,7 +91,9 @@ struct ToolsView: View {
         // slab + traffic-light strip live once on the `MainWindow` container.
         toolList
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onAppear { tools = loadTools() }
+            // The catalog is immutable for the process lifetime, so load it ONCE — re-navigating
+            // to this tab re-fires `onAppear` but must not re-run the FFI + JSON decode.
+            .onAppear { if tools.isEmpty { tools = loadTools() } }
     }
 
     /// The tool catalog as a Control-Center / HUD layout matching the Status window: one

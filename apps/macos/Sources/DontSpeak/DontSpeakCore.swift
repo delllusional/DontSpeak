@@ -156,6 +156,15 @@ final class Core {
     /// these stay POLLED (see `permsTask`) rather than pushed over the status stream.
     var perms = Perms()
 
+    /// The app version string ("0.1.0"), resolved ONCE from the shared Rust source. It's constant
+    /// for the process lifetime, so it lives here instead of an `ds_version()` FFI round-trip on
+    /// every Status render. `@ObservationIgnored`: never changes, so it needn't be tracked.
+    @ObservationIgnored let version: String = {
+        guard let ptr = ds_version() else { return L.t("common.dash") }
+        defer { ds_string_free(ptr) }
+        return String(cString: ptr)
+    }()
+
     /// Animates the menu-bar icon (crossfade on state change + breathing while active) off
     /// this Core's activity. `@ObservationIgnored`: the reference never changes; the label
     /// tracks the animator's own `image`. Set at the end of `init` (needs a ready `self`).
@@ -164,7 +173,7 @@ final class Core {
     /// Consumes the status `AsyncStream` on the main actor (applies each snapshot + drives
     /// the dictation overlay). `@ObservationIgnored`: lifecycle handle, not view state.
     @ObservationIgnored private var statusTask: Task<Void, Never>?
-    /// Polls the OS permissions every ~1.5 s — the one thing the push can't carry.
+    /// Polls the OS permissions every ~3 s — the one thing the push can't carry.
     @ObservationIgnored private var permsTask: Task<Void, Never>?
     /// The status continuation, finished on teardown so the consumer loop ends.
     @ObservationIgnored private var continuation: AsyncStream<HealthSnapshot>.Continuation?
@@ -200,7 +209,7 @@ final class Core {
         }
 
         // OS permissions can't be pushed (the engine can't observe System-Settings grants), so
-        // poll them on a cheap, separate cadence — a grant flips the row within ~1.5 s.
+        // poll them on a cheap, separate cadence — a grant flips the row within ~3 s.
         permsTask = Task { [weak self] in
             while !Task.isCancelled {
                 let p = await Task.detached { Core.probePerms() }.value
@@ -273,14 +282,18 @@ final class Core {
     }
 
     /// Apply a FULL status snapshot to the observed groups (NOT perms — those are polled
-    /// separately) and drive the dictation overlay. With `@Observable` only views that read a
-    /// changed group re-render, so the old whole-snapshot dedup guard is gone — just assign.
+    /// separately) and drive the dictation overlay. Each group is assigned only when it actually
+    /// CHANGED: `@Observable`'s generated setters fire `withMutation` on every assignment with no
+    /// equality short-circuit, so an unconditional reassign of all five groups would invalidate
+    /// every group's observers on every push (e.g. a per-utterance `stats` update would also
+    /// re-render the menu bar / tray animator, which only read `activity`). Gating on `!=` (all
+    /// groups are `Equatable`) keeps invalidation granular — the same guard `permsTask` uses.
     private func apply(_ s: HealthSnapshot) {
-        activity = s.activity
-        engineDots = s.engineDots
-        selection = s.engineSelection
-        dictation = s.dictation
-        stats = s.stats
+        if activity != s.activity { activity = s.activity }
+        if engineDots != s.engineDots { engineDots = s.engineDots }
+        if selection != s.engineSelection { selection = s.engineSelection }
+        if dictation != s.dictation { dictation = s.dictation }
+        if stats != s.stats { stats = s.stats }
         DictationPanelController.shared.apply(
             recording: s.dictation.recording,
             awaiting: s.dictation.awaiting,
@@ -367,8 +380,8 @@ final class Core {
     /// the old `[String: Any]` path used instead of blanking the whole status. Does NOT
     /// set `engineRunning`; the caller owns that from `ds_engine_running_global()`.
     private nonisolated static func decodeStatus(_ json: String?) -> (HealthSnapshot, UInt64?)? {
-        guard let json, let data = json.data(using: .utf8),
-              let dto = try? JSONDecoder().decode(ModelStatusDTO.self, from: data)
+        guard let json,
+              let dto = try? JSONDecoder().decode(ModelStatusDTO.self, from: Data(json.utf8))
         else { return nil }
         var s = HealthSnapshot()
         s.engineDots.kokoro = dto.kokoro.engineStatus

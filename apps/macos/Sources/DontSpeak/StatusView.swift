@@ -139,14 +139,6 @@ struct StatusView: View {
     @State private var claudeCodeExpanded = false
     @State private var diarExpanded = false
 
-    /// The app version number ("0.2.0"), from the shared Rust source; a dash if absent.
-    private var versionNumber: String {
-        guard let ptr = ds_version() else { return L.t("common.dash") }
-        defer { ds_string_free(ptr) }
-        return String(cString: ptr)
-    }
-
-
     /// Roll-up grant state of the OS permissions nested under Caps Lock — folded into the
     /// Caps header dot via `capsCombined`. Orange ONLY when a permission is actually DENIED;
     /// a not-yet-requested one (the mic is `.unknown` until first dictation prompts it) is
@@ -201,14 +193,6 @@ struct StatusView: View {
                 }
             }
             .windowContentInset()
-            // Wrap the window to the Status page on first open: this measures the natural content
-            // height (incl. the 16pt top/bottom insets) and sizes the window to it ONCE, so the
-            // last platter sits exactly one side-margin from the bottom instead of floating above
-            // empty space. Measured on the VStack inside the ScrollView, so it's the un-clipped
-            // height; the one-shot resize lives in `WrapWindowToContentHeight`.
-            .background(GeometryReader { proxy in
-                WrapWindowToContentHeight(contentHeight: proxy.size.height)
-            })
         }
         .scrollIndicators(.hidden)
         // Fills the detail pane; the window is resized via the container, not this pane.
@@ -227,7 +211,7 @@ struct StatusView: View {
                     Text(L.t("common.app_name")).glassRowTitle()
                     // The version links to the homepage: its own tap gesture takes clicks
                     // within its bounds, so a tap elsewhere on the row still expands usage.
-                    Text(versionNumber).glassRowDetail()
+                    Text(core.version).glassRowDetail()
                         .contentShape(Rectangle())
                         .busyCursor()
                         .onTapGesture { core.openHomepage() }

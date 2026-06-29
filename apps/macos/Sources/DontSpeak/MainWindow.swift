@@ -16,15 +16,15 @@ import AppKit
 /// The screens in the sidebar, in display order. Titles come from the shared i18n catalog
 /// (`common.nav_*`) so they match the Windows tabs; the SF Symbols are the macOS-native cue.
 enum AppScreen: String, CaseIterable, Identifiable {
-    case status, tools, logs, libraries
+    case status, tools, log, credits
     var id: String { rawValue }
 
     var titleKey: String {
         switch self {
         case .status: return "common.nav_status"
         case .tools: return "common.nav_tools"
-        case .logs: return "common.nav_logs"
-        case .libraries: return "common.nav_libraries"
+        case .log: return "common.nav_log"
+        case .credits: return "common.nav_credits"
         }
     }
 
@@ -32,8 +32,8 @@ enum AppScreen: String, CaseIterable, Identifiable {
         switch self {
         case .status: return "waveform"
         case .tools: return "wrench.and.screwdriver"
-        case .logs: return "doc.plaintext"
-        case .libraries: return "books.vertical"
+        case .log: return "doc.plaintext"
+        case .credits: return "books.vertical"
         }
     }
 }
@@ -65,16 +65,11 @@ struct MainWindow: View {
                 Label(L.t(screen.titleKey), systemImage: screen.systemImage)
                     .tag(screen)
             }
-            // FIXED sidebar width — equal min/ideal/max pins the column so the split divider
-            // can't be dragged: the sidebar is just wide enough for the four labels and never
-            // resizes; only the detail pane takes the window's slack. (Use the range form, NOT
-            // the single-value `navigationSplitViewColumnWidth(_:)` — that variant crashes
-            // AppKit's split-view KVO on window open.)
-            // FIXED sidebar width — equal min/ideal/max pins the column so the split divider
-            // can't be dragged: the sidebar is just wide enough for the four labels and never
-            // resizes; only the detail pane takes the window's slack. (Use the range form, NOT
-            // the single-value `navigationSplitViewColumnWidth(_:)` — that variant crashes
-            // AppKit's split-view KVO on window open.)
+            // FIXED sidebar width — equal min/ideal/max pins the column so it's just wide enough
+            // for the four labels and never resizes; only the detail pane takes the window's
+            // slack. (Use the range form, NOT the single-value `navigationSplitViewColumnWidth(_:)`
+            // — that variant crashes AppKit's split-view KVO on window open. The divider drag
+            // itself is disabled separately via `.lockSidebarDivider()` below.)
             .navigationSplitViewColumnWidth(min: 150, ideal: 150, max: 150)
             // Let the window's glass slab show through the sidebar rather than an opaque list.
             .scrollContentBackground(.hidden)
@@ -103,12 +98,12 @@ struct MainWindow: View {
         }
         .navigationSplitViewStyle(.balanced)
         // Opens COMPACT — a narrow sidebar (~150) over a Status-width detail (~350), so the
-        // window wraps the Status page snugly instead of sprawling. Floors keep both columns
-        // usable; the wider panes (Tools/Libraries) scroll internally and the user can drag the
-        // window out when they want more room. `minHeight` is low so the first-open
-        // wrap-to-Status resize (`WrapWindowToContentHeight`) can shrink to the short Status page
-        // without the content-min floor fighting it.
-        .frame(minWidth: 460, idealWidth: 510, minHeight: 320, idealHeight: 600)
+        // window wraps the Status page snugly instead of sprawling. The ideal height EQUALS the
+        // min, so first-open lands at the minimal snug-to-Status size (the last platter one
+        // side-margin from the bottom); the user drags the window out for the wider panes
+        // (Tools/Credits), which scroll internally. Restoration is disabled (see
+        // `closeOnlyWindow`) so every open uses this size, not the last dragged frame.
+        .frame(minWidth: 460, idealWidth: 510, minHeight: 320, idealHeight: 320)
         // One continuous glass slab behind everything; the host window is itself clear. The
         // TITLE-BAR strip tints to the live state and crossfades between states — the colored
         // traffic-light bar, unchanged, now spanning the full window width.
@@ -116,14 +111,17 @@ struct MainWindow: View {
         .glassWindow()
         // No minimize button (Close + standard resizable zoom), as the old windows had.
         .closeOnlyWindow()
+        // Pin the sidebar/detail divider so it can't be dragged (the fixed column width alone
+        // doesn't stop AppKit's split divider from being grabbed and pushed off-screen).
+        .lockSidebarDivider()
     }
 
     @ViewBuilder private var detail: some View {
         switch core.screen {
         case .status: StatusView()
         case .tools: ToolsView()
-        case .logs: LogsView()
-        case .libraries: LibrariesView()
+        case .log: LogView()
+        case .credits: CreditsView()
         }
     }
 }

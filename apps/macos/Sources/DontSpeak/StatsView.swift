@@ -49,17 +49,10 @@ struct EngineStats: Sendable, Equatable {
         var sttSecs: Double = 0
     }
 
-    /// Which models are currently resident in the warm helper.
-    struct Loaded: Sendable, Equatable {
-        var tts = false
-        var stt = false
-    }
-
     var tts = Tts()
     var stt = Stt()
     var diarization = Diar()
     var lifetime = Lifetime()
-    var loaded = Loaded()
 
     /// Map the decoded `stats` DTO into `EngineStats`. A nil block (absent in the JSON,
     /// or the whole status missing) leaves every field at its struct default; a present
@@ -92,41 +85,10 @@ struct EngineStats: Sendable, Equatable {
             s.lifetime.ttsSecs = l.ttsSecs ?? 0
             s.lifetime.sttSecs = l.sttSecs ?? 0
         }
-        if let l = dto.loaded {
-            s.loaded.tts = l.tts ?? false
-            s.loaded.stt = l.stt ?? false
-        }
         return s
     }
 }
 
-/// A min–avg–max metric on ONE clean row: the title on the left; on the right the
-/// AVERAGE (with its unit) followed by the min–max range as a lighter secondary
-/// qualifier — no units on the range, since it shares the average's. `fmt` formats
-/// each number; `unit` (e.g. "×", " s") is appended to the average only. Styled to
-/// match the panel's other rows (primary value + subheadline secondary qualifier).
-struct StatRange: View {
-    let title: String
-    let lo: Double
-    let avg: Double
-    let hi: Double
-    var unit: String = ""
-    let fmt: (Double) -> String
-
-    var body: some View {
-        LabeledContent {
-            HStack(spacing: 6) {
-                Text(fmt(avg) + unit)
-                Text("\(fmt(lo))–\(fmt(hi))")
-                    .glassRowDetail()
-            }
-            .monospacedDigit()
-        } label: {
-            Text(title).glassRowTitle()
-        }
-    }
-}
-
 // The engine-stats UI lives in the Status window (StatusView): per-engine stats
-// expand under the TTS/STT rows. This file just holds the shared types above
-// (EngineStats + StatRange) that StatusView renders.
+// expand under the TTS/STT rows. This file just holds the shared `EngineStats` type
+// above; StatusView renders the rows via the shared Rust `ds_stats_*` formatters.

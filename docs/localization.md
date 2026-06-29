@@ -46,9 +46,10 @@ can work one screen at a time:
 - `status` — the Status screen: its Engines group (`status.engine.*`), the panel chrome
   (`status.caps_lock`, `status.permission.*`, …), and the stats numbers (`status.stats.*`).
 - `tools` — the Tools screen.
-- `libraries` — the Libraries tab (the downloaded models/runtimes + their licenses,
-  rendered from the shared `ds-model` catalog).
-- `logs` — the Logs tab (the read-only `dontspeak.log` tail; filter/empty/no-match chrome).
+- `libraries` — the Credits tab (the downloaded models/runtimes + their licenses,
+  rendered from the shared `ds-model` catalog; nav label key `common.nav_credits`).
+- `logs` — the Log tab (the read-only `dontspeak.log` tail; filter/empty/no-match chrome;
+  nav label key `common.nav_log`).
 
 ## Key classes
 

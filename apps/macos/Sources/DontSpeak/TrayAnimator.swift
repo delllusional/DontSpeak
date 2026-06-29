@@ -90,6 +90,7 @@ final class TrayAnimator {
     private func sync() {
         let newState = TrayState.current(core)
         let newMuted = core.activity.muted
+        let wasBreathing = breathing
         breathing = TrayState.animated(core)
         settledImage = newState.image(muted: newMuted)
         if newState != shownState || newMuted != shownMuted {
@@ -99,7 +100,13 @@ final class TrayAnimator {
             crossfading = true
             shownState = newState
             shownMuted = newMuted
+            // (`breatheStart` is anchored when this crossfade completes, in `tick`.)
         } else if !crossfading {
+            // No state change and no crossfade in flight. If breathing JUST turned on (e.g. a
+            // `tray_indicator` flip to the `_animated` form for the same colored state), anchor
+            // the breath to NOW so it starts at its peak (full pill) — without this the next
+            // `tick` would read a stale `breatheStart` and jump in at an arbitrary sine phase.
+            if breathing && !wasBreathing { breatheStart = CACurrentMediaTime() }
             image = settledImage
         }
         updateTimer()
@@ -111,8 +118,13 @@ final class TrayAnimator {
         if needed, timer == nil {
             // `.common` so the icon keeps animating while its own menu is open (menu tracking
             // runs the run loop in a non-default mode).
-            let t = Timer(timeInterval: fps, repeats: true) { _ in
-                MainActor.assumeIsolated { [weak self] in self?.tick() }
+            // `[weak self]` MUST be on the OUTER timer block: the timer is a stored property, so
+            // `self → timer → block → self` is a retain cycle if the block holds `self` strongly.
+            // A `[weak self]` on only the inner `assumeIsolated` closure doesn't help — the outer
+            // block still has to capture `self` strongly to form it. Capturing weakly out here
+            // breaks the cycle (and `tick` simply no-ops if `self` is gone).
+            let t = Timer(timeInterval: fps, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.tick() }
             }
             RunLoop.main.add(t, forMode: .common)
             timer = t

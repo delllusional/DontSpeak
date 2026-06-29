@@ -163,18 +163,18 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     stack.add_titled(&scrolled(&content), Some("status"), &t("common.nav_status"));
     stack.add_titled(&scrolled(&build_tools_page()), Some("tools"), &t("common.nav_tools"));
     stack.add_titled(
-        &scrolled(&build_libraries_page()),
-        Some("libraries"),
-        &t("common.nav_libraries"),
+        &scrolled(&build_credits_page()),
+        Some("credits"),
+        &t("common.nav_credits"),
     );
-    // Logs view — a read-only tail of the unified activity log (mirrors the Windows Logs tab).
-    let (logs_scroll, logs_view) = build_logs_page();
-    stack.add_titled(&logs_scroll, Some("logs"), &t("common.nav_logs"));
-    // (Re)load + scroll-to-newest whenever the Logs page is selected (no poll), like Windows.
+    // Log view — a read-only tail of the unified activity log (mirrors the Windows Log tab).
+    let (log_scroll, log_view) = build_log_page();
+    stack.add_titled(&log_scroll, Some("log"), &t("common.nav_log"));
+    // (Re)load + scroll-to-newest whenever the Log page is selected (no poll), like Windows.
     {
-        let lv = logs_view.clone();
+        let lv = log_view.clone();
         stack.connect_visible_child_name_notify(move |s| {
-            if s.visible_child_name().as_deref() == Some("logs") {
+            if s.visible_child_name().as_deref() == Some("log") {
                 load_logs(&lv);
             }
         });
@@ -512,10 +512,10 @@ fn build_tools_page() -> gtk::Widget {
     page_box(&group).upcast()
 }
 
-/// The Libraries page — the shared `ds_libraries_json` catalog (downloaded models +
+/// The Credits page — the shared `ds_libraries_json` catalog (downloaded models +
 /// runtimes), one expander per project (name + usage, license chip), revealing the project /
-/// license links + the files with sizes. Mirrors the Windows Libraries tab.
-fn build_libraries_page() -> gtk::Widget {
+/// license links + the files with sizes. Mirrors the Windows Credits tab.
+fn build_credits_page() -> gtk::Widget {
     let group = adw::PreferencesGroup::builder().build();
     if let Ok(serde_json::Value::Array(projects)) =
         serde_json::from_str(&crate::ffi::libraries_json())
@@ -565,9 +565,9 @@ fn link_row(title: &str, url: &str) -> adw::ActionRow {
     row
 }
 
-/// The Logs page — a read-only, monospace, scrollable text area. Returns the scroller (the
+/// The Log page — a read-only, monospace, scrollable text area. Returns the scroller (the
 /// page widget) + the text view to (re)fill from the log tail.
-fn build_logs_page() -> (gtk::ScrolledWindow, gtk::TextView) {
+fn build_log_page() -> (gtk::ScrolledWindow, gtk::TextView) {
     let view = gtk::TextView::builder()
         .editable(false)
         .cursor_visible(false)
