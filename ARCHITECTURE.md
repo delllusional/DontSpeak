@@ -14,24 +14,30 @@ one signed app bundle — **all TCC grants (Accessibility / Mic) land on that si
 app, granted once** (Accessibility subsumes Input Monitoring for the Caps-key read,
 so no separate Input Monitoring grant is needed). There is no separate daemon and no
 launchd agent: the app is the login item, `engine_start()` on launch,
-`engine_stop()` on quit. The design is portable — a headless host binary
-(`dontspeakd`) is meant to run the same `engine_run` for Linux/CLI, and future
-Windows/Linux apps are intended to link the cdylib and call the same FFI — but
-**only macOS is functional today**: off macOS-arm64 the `ds-platform` backends are
-largely stubs and the headless Linux host does not yet start cleanly, so treat
-Windows/Linux as PLANNED / EXPERIMENTAL (see the platform notes below). Every other
-piece (the hooks, the MCP server) is a thin client that holds no model and talks to
-the engine over a Unix-domain socket (`ds-ipc`, NDJSON).
+`engine_stop()` on quit. The design is portable and **all three platforms ship
+implemented apps + platform backends, built and tested in CI**: a headless host
+binary (`dontspeakd`) runs the same `engine_run` for Linux/CLI, and the Windows
+(`apps/windows/winui/`) and Linux (`apps/linux/gtk/`) apps link the cdylib and call
+the same FFI. The `ds-platform` backends are complete real-API impls on each OS
+(`linux.rs` evdev/uinput/x11rb; `windows.rs` SendInput/GetKeyState/GetForegroundWindow;
+macOS IOKit/CGEvent), and the CI release matrix builds + tests on `ubuntu-latest`,
+`windows-2025`, and `macos-26`. macOS remains the most polished host; the Windows/Linux
+apps are newer (see the platform notes below). Every other piece (the hooks, the MCP
+server) is a thin client that holds no model and talks to the engine over a
+Unix-domain socket (`ds-ipc`, NDJSON).
 
 Our config lives in **`config.toml`** under DontSpeak's data dir (macOS: `~/Library/Application
 Support/DontSpeak/`, alongside the downloaded `models/`) — a neutral home, separate
 from any client. (We never store config in `~/.claude/settings.json`; the engine in fact
 DROPS any stale `dontspeak` block a prior version seeded there, leaving that file purely
 Claude Code's — its hooks and its own `voice` block, which we set separately.) After a
-Caps press the STT **path** is chosen by `stt_engine` alone (`built_in` → our local Parakeet
-STT, **the default**; `claude_code` → delegate to Claude Code's own voice dictation by tapping
-its `voice:pushToTalk` key). Two further selectors gate subsystems (flip via the MCP
-`set_config`); the engine applies changes **surgically** (no full reloads):
+Caps press the STT **path** is resolved from `stt_engine` — an **ordered preference ladder**
+(`ds-config/src/voice.rs`, `pub stt_engine: Vec<SttEngine>`), walked first-usable-rung by
+`resolved_stt` (`built_in` → our local Parakeet STT, **the default**; `system`; `claude_code`
+→ delegate to Claude Code's own voice dictation by tapping its `voice:pushToTalk` key). A legacy
+scalar string still parses. `tts_engine` is the same kind of ladder (`Vec<TtsEngine>`, walked by
+`resolved_tts`). These selectors gate subsystems (flip via the MCP `set_config`); the engine
+applies changes **surgically** (no full reloads):
 
 | setting | subsystem | rebuild trigger |
 | --- | --- | --- |
@@ -51,7 +57,7 @@ Rust workspace under `rust/` (small single-purpose crates) + the SwiftUI app in 
 - **`ds-config`** — paths + our `config.toml` read/write (the config truth) + `~/.claude/settings.json` read/write for Claude Code's hooks and `voice` block (atomic merge) + the config enums.
 - **`ds-ipc`** — the engine↔client RPC protocol over the Unix socket.
 - **`ds-proc`** — pidfile single-speaker + process-group kill (barge-in) + mic-active probe.
-- **`ds-platform`** — per-OS traits (CapsLockReader / KeyInjector / FrontmostWindow / CapsKeyMonitor). macOS impl is shipped; Linux/Windows are cfg-gated stubs.
+- **`ds-platform`** — per-OS traits (CapsLockReader / KeyInjector / FrontmostWindow / CapsKeyMonitor). All three impls are complete real-API backends (macOS IOKit/CGEvent; Linux evdev/uinput/x11rb; Windows SendInput/GetKeyState/GetForegroundWindow), cfg-gated and built/tested in CI.
 - **`ds-model`** — model URLs/paths/pinned digests + a blocking `attohttpc` downloader (atomic temp+rename, retry, sha-verify, ORT `.tgz` extract).
 - **`ds-tts`** — `Tts` trait: `KokoroTts` (native in-process synth, default) + `SystemTts` (`say`).
 - **`ds-stt`** — `Stt` trait: `BuiltIn` (local, bundled Parakeet model — **the default**), `ClaudeNative` (taps Claude Code's `voice:pushToTalk` key — default `Space` — to drive CC's own dictation), `SystemStt` (macOS on-device `SFSpeechRecognizer`).
@@ -59,10 +65,11 @@ Rust workspace under `rust/` (small single-purpose crates) + the SwiftUI app in 
 - **`ds-engines`** — the factory: config enum → `Box<dyn Tts/Stt>`, degrade-to-default-never-silent.
 - **`ds-tools`** — the single MCP tool catalog (`catalog()`), shared by the MCP server and the app's Tools view so the list never drifts.
 - **`ds-i18n`** — the shared UI-string catalog (`locales/en.yml`) every platform UI renders over the FFI. See `docs/localization.md`.
+- **`ds-status`** — the **source of truth** for the `model_status` engine→UI contract (plain serde structs): the engine builds it, `ds-core` ships it as JSON, each platform UI mirrors it. See `STATUS-SCHEMA.md`.
 - **`dontspeakd`** — the **engine**: a library (`engine_run` — Caps loop, TTS queue, RPC server, test-recognition, model status, hot-reload) **plus** a thin headless host binary intended for Linux/CLI (experimental — does not yet start cleanly off macOS). The macOS app hosts the same `engine_run` in-process via `ds-core`.
 - **`ds-core`** — the stable C-ABI staticlib the app links: `ds_engine_start/stop/reload` (host the engine in-process) + read-only probes (engine liveness, model presence, status JSON). Header generated by cbindgen; cdylib for future Win/Linux hosts.
 - **`dontspeak`** — the one multi-call client binary (a client of the engine socket), dispatched by subcommand. ALL transport is stdio — there is no HTTP/remote bridge.
-  - no args → the stdio **MCP server** Claude Code connects to: `speak` / `stop_speak` / `status` / `listen`, `list_voices` / `set_voice`, `set_config` (one atomic setter for all persistent voice settings), `wire_client`, and the diarization tools (`diarize` / `enroll` / `forget_speaker` / `list_speakers`). `set_voice` sets — or, with no `voice`, clears — a transient session override (auto-routed Kokoro/System); `set_config` persists to our `config.toml`.
+  - no args → the stdio **MCP server** Claude Code connects to: `speak` / `stop_speak` / `status` / `listen`, `list_voices` / `set_voice`, `set_config` (one atomic setter for all persistent voice settings), `wire`, and the diarization tools (`diarize` / `enroll` / `forget_speaker` / `list_speakers`). `set_voice` sets — or, with no `voice`, clears — a transient session override (auto-routed Kokoro/System); `set_config` persists to our `config.toml`.
   - `dontspeak notify` (command sink — greet / mark-active / narrate / barge / earcon, replies nothing) and `dontspeak provide` (query — returns the event's `hookSpecificOutput`, e.g. the injected narration spec) → the two Claude Code hook entries, split by contract; each reads the hook JSON on stdin and routes on its event name.
   - `dontspeak wire-hooks` / `wire-desktop` → installer wiring (Claude Code hooks / Claude Desktop MCP registration).
 - **`ds-helper`** (a bin in `ds-tts`) — the **one warm helper child** the engine supervises (`--serve`): it hosts **both** Kokoro TTS (`speak`) and Parakeet STT (`listen`), loading each model once. Bundled in the app on macOS. Its one-shot mode (`ds-helper <text> <voice> <rate>`) is the cold synthesis fallback (the hooks themselves never synthesize — the engine owns playback).
@@ -83,7 +90,7 @@ never silently falls back.
 **TTS** (`Tts`):
 | variant | how |
 | --- | --- |
-| `Kokoro` (default) | native in-process synth: `ort` (ONNX) + `voice-g2p` + `rodio`, via the warm `ds-helper` child. English g2p is pure-Rust (`voice-g2p`); non-English Kokoro voices (es/fr/it/pt/hi/ja/zh) phonemize via an OPTIONAL external `espeak-ng` (GPL — invoked as a separate process, never linked), bridged to Kokoro phonemes. Without espeak-ng, non-English is gated off in favor of System voices. |
+| `Kokoro` (default) | native in-process synth: `ort` (ONNX) + `voice-g2p` + `rodio`, via the warm `ds-helper` child. On macOS there is also a Core ML / ANE path (`ds-tts/src/synth_coreml.rs` + `ane_voices.rs`, FluidAudio's `KokoroAneManager` over the `kokoro-82m-coreml` repo in `ds-model/src/coreml_repo.rs`), selected by the `provider` ladder (`ane` ahead of `ort`). English g2p is pure-Rust (`voice-g2p`); non-English Kokoro voices (es/fr/it/pt/hi/ja/zh) phonemize via an OPTIONAL external `espeak-ng` (GPL — invoked as a separate process, never linked), bridged to Kokoro phonemes. Without espeak-ng, non-English is gated off in favor of System voices. |
 | `System` | macOS `say` |
 
 **STT** (`Stt`):
@@ -93,7 +100,8 @@ never silently falls back.
 | `ClaudeNative` (token `claude_code`) | drives Claude Code's own voice input | one tap of CC's bound `voice:pushToTalk` key (default `Space`, tap toggle), focus-gated | one tap of that key |
 | `System` (token `system`) | macOS on-device `SFSpeechRecognizer` (en-US), via the warm helper like the built-in engine | tell the helper to `listen` (mic + buffer) | end the listen → batch-recognize the buffer on-device → paste it (focus-gated) |
 
-`stt_engine` is the single path selector: `claude_code` ⇒ delegate to Claude Code's own
+`stt_engine` is the ordered path ladder (`resolved_stt` picks the first usable rung):
+`claude_code` ⇒ delegate to Claude Code's own
 voice dictation (we synthesize its bound key); `built_in` ⇒ DontSpeak's built-in (Parakeet)
 engine if its model is present, else degrade to `claude_code`; `system` ⇒ macOS on-device
 `SFSpeechRecognizer` — availability-gated at enable time (authorized + on-device-capable)
@@ -139,12 +147,14 @@ mixer, falls back to `afplay`).
 
 `Parakeet` dictation runs **through the same warm helper child** as TTS, not
 in-process: on Caps-ON the engine tells the helper to `listen` (the helper opens the
-mic with `cpal`, resamples to 16 kHz with `rubato`, and transcribes via
-`transcribe-rs`'s `ParakeetModel` (TDT 0.6b v2 int8) over its `ort` runtime); on Caps-OFF the engine
-ends the listen, joins the final transcript, and pastes it via
-`KeyInjector::type_text` (clipboard paste), focus-gated. One-shot per utterance (no
-streaming partials for dictation). The same helper `listen` path backs the engine's
-"test recognition" panel and the MCP `listen` tool.
+mic with `cpal`, resamples to 16 kHz with `rubato`, and feeds a **streaming cache-aware
+FastConformer transducer** run by `ds-stt::streaming` over the shared `ort` runtime —
+`transcribe-rs` is kept ONLY for its energy VAD now, not inference; on macOS the
+`ane`/Core ML rung uses FluidAudio's `StreamingAsrManager` instead, `ds-stt/src/coreml.rs`).
+Dictation is **streaming**: the helper emits live-preview partial transcripts as audio
+arrives, and on Caps-OFF the engine takes the final transcript and pastes it via
+`KeyInjector::type_text` (clipboard paste), focus-gated. The same helper `listen` path
+backs the engine's "test recognition" panel and the MCP `listen` tool.
 
 ## Models & ONNX runtime
 
@@ -165,28 +175,32 @@ what the model **actually loaded on**, NOT the configured preference — do not 
 
 - **TTS (Kokoro)** builds its own `ort` session, so `KokoroSynth::provider()` records the
   **realized** EP (CPU fallback included); `status::tts_provider_token` maps that live value.
-- **STT (Parakeet)** runs via `transcribe-rs` (which owns its session), so `status::stt_provider_token`
-  mirrors the loader's exact gates: `ane`→`ort_cpu` without the FluidAudio shim, `ort_cuda`→`ort_cpu`
-  without the fetched GPU runtime (`cuda_runtime_present`). A missing runtime shows `ort_cpu`, never a
-  phantom `ort_cuda`.
+- **STT (built-in)** — the streaming FastConformer runner (`ds-stt::streaming` over `ort`, or the
+  FluidAudio Core ML rung) doesn't report its realized EP back to the engine, so
+  `status::stt_provider_token` reconstructs it from the loader's exact gates: `ane`→`ort_cpu` without
+  the FluidAudio shim, `ort_cuda`→`ort_cpu` without the fetched GPU runtime (`cuda_runtime_present`).
+  A missing runtime shows `ort_cpu`, never a phantom `ort_cuda`.
 - **CUDA is on-demand (Windows x86_64 only):** the GPU onnxruntime + cuDNN wheels download into
   `models/cuda/`; `cuda_runtime_present()` gates whether `ort_cuda` is real for BOTH engines.
 - **Known asymmetry:** TTS catches a *session-build* fallback (runtime present but the CUDA EP fails
-  to init); STT cannot — `transcribe-rs` doesn't surface its realized EP. Closing it needs an upstream hook.
+  to init) because the warm Kokoro child reports its live provider; STT cannot — the streaming runner
+  doesn't surface its realized EP, so its token stays gate-derived. Closing it needs the loader to report back.
 
 Guarded by `status::tests::{stt_provider_is_actual_not_naive, tts_provider_reflects_the_childs_realized_runtime}`.
 
 ## FFI
 
-`ds-core` is built as a C-ABI staticlib (macOS app) + cdylib (future
-Win/Linux). The surface is small and handle-free: the engine lifecycle
+`ds-core` is built as a C-ABI staticlib (macOS app) + cdylib (the Windows/Linux
+apps). The surface is small and handle-free (~29 functions): the engine lifecycle
 (`ds_engine_start` / `_stop` / `_reload`); read-only probes
 (`ds_engine_running_global`, `ds_kokoro_present_global`,
-`ds_parakeet_onnx_present_global`, `ds_model_status_json`,
-`ds_tools_json` — the same `ds-tools::catalog()` the MCP exposes); and the one
-engine command the app's panel needs (`ds_set_provider` for the TTS execution
-provider — models download fully automatically, so there's no download command). There are no voice/engine
-config setters — that control lives in the MCP. The committed `dontspeak.h` is
+`ds_parakeet_onnx_present_global`, `ds_model_status_json` / `ds_model_status_wait`,
+`ds_tools_json` — the same `ds-tools::catalog()` the MCP exposes, plus
+`ds_libraries_json` / `ds_logs_json`); engine commands the app panels need
+(`ds_set_provider` for the TTS execution provider, `ds_set_muted`,
+`ds_open_voice_settings` — models download fully automatically, so there's no download
+command); and the i18n family (`ds_set_locale` / `ds_locale` / `ds_t` / `ds_t_args`).
+There are no voice/engine config setters — that control lives in the MCP. The committed `dontspeak.h` is
 **generated by cbindgen** from `src/ffi.rs` (run
 `cargo build -p ds-core --features cbindgen`); panics are caught at the boundary.
 

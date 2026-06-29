@@ -66,9 +66,11 @@ engine-side. Caps-lock reading and mic-active probing also run in-process in the
 ## Setup on a new machine
 
 Run `./scripts/install.sh` from the repo root. It builds the Rust workspace, installs the
-binaries into `~/.local/bin` (override with `DONTSPEAK_INSTALL_DIR`), and **PRINTS** the
-`settings.json` snippet (with the binary paths filled in) for you to merge yourself — it
-does NOT edit your `~/.claude/settings.json`.
+binaries into `~/.local/bin` (override with `DONTSPEAK_INSTALL_DIR`), and **auto-merges**
+the voice hooks into `~/.claude/settings.json` via `dontspeak wire-hooks` — a safe,
+additive, backed-up merge (preview with `wire-hooks --print-only`, undo with
+`wire-hooks --remove`). It also wires OpenAI Codex's hooks into `~/.codex/config.toml`
+(when `~/.codex` exists) and registers the MCP server with Claude Desktop (when installed).
 There is no launchd/systemd agent on macOS: the engine runs in-process inside
 `DontSpeak.app` (built by `apps/macos/bundle.sh`); on Linux the headless `dontspeakd` runs
 as a systemd user service (`apps/linux/enable-daemon.sh`).

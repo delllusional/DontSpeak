@@ -33,19 +33,19 @@ unlike mac (Swift) / Windows (C#) there is no language boundary — the GUI call
 Target distro baseline: **Ubuntu 26.04 LTS** (GTK 4.22, libadwaita 1.9, gtk4-layer-shell
 1.3), Fedora 41+. Both X11 and Wayland sessions supported.
 
-## Reference-port crosscheck (what already exists vs what is stubbed)
+## Reference-port crosscheck (what each platform ships)
 
-| Concern | macOS | Windows | Linux today | Action |
-| --- | --- | --- | --- | --- |
-| Platform input (`ds-platform`) | IOHID/IOKit/CG | LL hook + SendInput + UIA | **stub — `new()` returns Err** | implement evdev/uinput + x11rb |
-| Duplex audio (`ds-aec`) | VPIO | WASAPI | **stub — `Err`** | PipeWire echo-cancel source (+ optional in-proc WebRTC APM) |
-| System TTS | `say` | PowerShell | **`spd-say` already wired** | verify only |
-| System STT | SFSpeech | (deferred) | **none → inert/degrade** | leave inert (correct) |
-| Kokoro/Parakeet helper (cpal/rodio) | ✓ | ✓ | cross-platform, **untested on Linux** | verify ALSA/PipeWire |
-| Model + XDG data dirs | ✓ | ✓ | **already XDG-correct** in `paths.rs` | verify ORT `.so` resolution |
-| Headless host (`dontspeakd`) | n/a | n/a | **blocked at `platform::current()`** | unblocks once platform wired; signals already done |
-| GUI host | SwiftUI | WinUI | **none — `apps/linux/` is scripts only** | new GTK4/libadwaita app |
-| Packaging | dmg/notarize | Inno installer | daemon scripts + udev rule only | install.sh + systemd user unit + .deb/AppImage |
+| Concern | macOS | Windows | Linux (shipped) |
+| --- | --- | --- | --- |
+| Platform input (`ds-platform`) | IOHID/IOKit/CG | LL hook + SendInput + UIA | **evdev/uinput + x11rb** (`linux.rs`; `new()` never fails — capability gaps degrade to a preflight warning) |
+| Duplex audio (`ds-aec`) | VPIO | WASAPI | **PipeWire/PulseAudio `module-echo-cancel` source** (`linux.rs`, wired in `lib.rs`; optional in-proc WebRTC APM behind a feature) |
+| System TTS | `say` | PowerShell | **`spd-say` wired** |
+| System STT | SFSpeech | (deferred) | **none → inert/degrade** (correct) |
+| Kokoro/Parakeet helper (cpal/rodio) | ✓ | ✓ | **cross-platform, runs on Linux** (ALSA/PipeWire) |
+| Model + XDG data dirs | ✓ | ✓ | **XDG-correct** in `paths.rs` |
+| Headless host (`dontspeakd`) | n/a | n/a | **boots and runs** the RPC/TTS/STT service (platform wired; signals done) |
+| GUI host | SwiftUI | WinUI | **GTK4/libadwaita app** (`apps/linux/gtk/`, crate `ds-linux-gtk`) |
+| Packaging | dmg/notarize | Inno installer | **`apps/linux/package.sh`** → `.deb`/`.rpm` (`cargo-deb`/`generate-rpm` metadata in the GTK `Cargo.toml`), `install-gui.sh`, systemd user unit, udev rule, AEC drop-ins |
 
 ## FFI surface the host consumes (already stable, generated `dontspeak.h`)
 
@@ -57,9 +57,13 @@ channel — call on a dedicated thread); control `_set_muted`, `_set_provider`; 
 `_brand_colors_json`, `_version`; i18n `_set_locale`, `_locale`, `_t`, `_t_args`; plus
 `_string_free`. The Linux host links the **cdylib** (already emitted by `ds-core`).
 
-## Phases (build-it-first, validate each before the next)
+## Phases (all four IMPLEMENTED — build-it-first, validated in order)
 
-### Phase 1 — Platform input layer + headless daemon boots (the functional core)
+The four phases below are done; the bullets describe what shipped. Only the
+hardware-gated runtime checks called out in the header remain (bare-metal Caps-LED
+trigger, AEC echo quality, the in-process WebRTC-APM §6A option).
+
+### Phase 1 — Platform input layer + headless daemon boots (the functional core) — DONE
 `ds-platform/src/linux.rs` (deps already declared: `evdev` 0.13, `x11rb` 0.13):
 - `LinuxPlatform::new()` — discover the keyboard evdev node (first device exposing
   `EV_LED`+`LED_CAPSL`), open it, build an `evdev::uinput::VirtualDevice` sink.
@@ -78,14 +82,14 @@ channel — call on a dedicated thread); control `_set_muted`, `_set_provider`; 
 Exit criteria: `dontspeakd` boots on Linux, MCP server answers, Caps dictation pastes into a
 terminal, TTS plays. (Caps LED read needs a real keyboard evdev node — see WSL caveat.)
 
-### Phase 2 — Full-duplex AEC
+### Phase 2 — Full-duplex AEC — DONE (echo *quality* pending a bare-metal mic+speaker run)
 `ds-aec/src/linux.rs`, two-tier (per `docs/FULL-DUPLEX-PORT.md`):
 - Default: open the server-side **`libpipewire-module-echo-cancel`** (WebRTC-backed) named
   cancelled source, capture-only (`owns_render()=false`); fail-quiet → half-duplex gate.
 - Optional `--features webrtc-aec`: in-process `webrtc-audio-processing` (clang/meson/ninja),
   tap TTS render + delay estimate (`owns_render()=true`), matching the macOS VPIO shape.
 
-### Phase 3 — GTK4 + libadwaita GUI host (`apps/linux/gtk/`, new Rust crate)
+### Phase 3 — GTK4 + libadwaita GUI host (`apps/linux/gtk/`, crate `ds-linux-gtk`) — DONE
 - `AdwApplication`: `engine_start` on startup / `engine_stop` on shutdown (track `did_start`).
 - Status push: dedicated thread in `model_status_wait` → `glib` channel → reactive UI state.
 - Tray: `ksni` StatusNotifierItem, state-driven icon (idle/recording=orange/speaking=purple),
@@ -98,12 +102,16 @@ terminal, TTS plays. (Caps LED read needs a real keyboard evdev node — see WSL
 - i18n via `ds_t`; theme via `AdwStyleManager`; autostart via
   `~/.config/autostart/dontspeak.desktop`.
 
-### Phase 4 — Packaging + docs + CI
-- `scripts/install.sh` (local build → `~/.local/bin`, install udev rule, enable systemd
-  **user** service, wire Claude Code hooks via existing `dontspeak wire-hooks`).
-- `ds-daemon.service` (systemd user unit) prebuilt in the package.
-- `.deb` (cargo-deb) and/or AppImage; ALSA/PipeWire + speech-dispatcher listed as deps.
-- Linux section in `docs/BUILD-DEPLOY.md`; `apps/linux/README`; GitHub Actions `ubuntu-latest` job.
+### Phase 4 — Packaging + docs + CI — DONE
+- `apps/linux/install-gui.sh` / `enable-daemon.sh` (local build → `~/.local/bin`, install
+  udev rule, enable the systemd **user** service, wire Claude Code hooks).
+- `ds-daemon.service` (systemd user unit) shipped in the package.
+- `.deb`/`.rpm` via `cargo-deb`/`cargo-generate-rpm` (`[package.metadata.deb]` /
+  `[package.metadata.generate-rpm]` in the GTK `Cargo.toml`, driven by `apps/linux/package.sh`;
+  AppImage optional); ALSA/PipeWire + speech-dispatcher listed as deps.
+- Linux build in CI: `release.yml` has a `linux` job (runs-on `ubuntu-26.04`, runs
+  `apps/linux/package.sh --skip-appimage`, uploads `linux-packages`); `ci.yml` runs the
+  test matrix on `ubuntu-latest` (and on every push). Linux is built and tested in CI.
 
 ## WSL development caveat (this machine)
 

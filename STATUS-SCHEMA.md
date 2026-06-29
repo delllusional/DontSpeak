@@ -12,13 +12,13 @@ platform's UI parses it into its **own hand-written DTOs** that mirror that shap
 
 The Rust `ds-status` round-trip test pins the wire byte-shape; the per-platform mirrors
 are kept in lockstep by reviewing against that crate. The FFI itself is a small hand-rolled
-`extern "C"` surface (`ds-core/src/ffi.rs`, ~20 functions) returning strings/primitives,
+`extern "C"` surface (`ds-core/src/ffi.rs`, ~29 functions) returning strings/primitives,
 with the engine lifecycle owned in one place (`host.rs`).
 
 ## Why hand-written, not codegen (uniffi)
 
 uniffi (and its C# backend `uniffi-bindgen-cs`) was evaluated and **deliberately not adopted**:
-for a ~20-function surface it brings a lot of machinery (per-field serialization runtime,
+for a ~29-function surface it brings a lot of machinery (per-field serialization runtime,
 generated scaffolding, a contract checksum) plus a third-party 0.x C# generator — more than
 this boundary needs. The only real drift risk is the status DTOs, and that's covered by the
 single Rust schema + the contract test at a fraction of the dependency cost. **Don't

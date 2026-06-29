@@ -11,9 +11,10 @@
 > - **§5C** — WinUI: the tray pill (recording-over-speaking, `tray_indicator`-gated)
 >   was already present; added the dictation overlay (`DictationPanel.cs`, a Win32
 >   layered no-activate/click-through/topmost window) + the `dictation` JSON parse.
->   *Not yet compiled* (no .NET SDK on the porting host) — needs a WinUI build.
+>   It is wired into `App.xaml.cs` (instantiated and driven on status updates) — still
+>   needs an on-device WinUI build to verify rendering.
 >
-> Remaining: WebRTC-APM-on-macOS (§4/§4a, step 2) and all of Linux (§6) are not done.
+> Remaining: WebRTC-APM-on-macOS (§4/§4a, step 2). Linux §6 native backend is implemented.
 
 
 Plan for bringing **full-duplex coexist** (dictate / interrupt by Caps tap *while*
@@ -252,12 +253,13 @@ calls `full_duplex_wanted` on Windows.
 
 ## 6. Linux implementation plan
 
-Linux runs **headless** (the standalone `dontspeakd` host — `apps/linux/enable-daemon.sh`
-wires it as a systemd user service — + system keybindings + uinput; there is no GUI app
-today). So Linux coexist is mostly the capture primitive
-+ the (already cross-platform) engine; the panel/tray UX is reduced.
+Linux can run **headless** (the standalone `dontspeakd` host — `apps/linux/enable-daemon.sh`
+wires it as a systemd user service — + system keybindings + uinput) **or** with the native
+GTK4/libadwaita GUI host (`apps/linux/gtk/`, crate `ds-linux-gtk`, with its own tray +
+dictation overlay; see `docs/LINUX-PORT.md`). Either way Linux coexist is mostly the capture
+primitive + the (already cross-platform) engine.
 
-**A. `ds-aec` Linux backend** (`rust/crates/ds-aec/src/linux.rs`).
+**A. `ds-aec` Linux backend** (`rust/crates/ds-aec/src/linux.rs`) — IMPLEMENTED.
 - Preferred: open the **cancelled virtual source** exposed by PipeWire/PulseAudio
   `module-echo-cancel` (§4) by name. `owns_render() = false`; rodio renders normally;
   the WebRTC canceller in the server references the render endpoint. `CaptureHandle`
@@ -271,11 +273,13 @@ today). So Linux coexist is mostly the capture primitive
 
 **B. Helper** — same `owns_render()` generalization (§3); nothing Linux-specific.
 
-**C. UX** — no panel/tray. Options, in order of effort:
-- Minimal: rely on the existing dictation flow; surface the live transcript via the
+**C. UX** — two paths now exist:
+- GUI host (`apps/linux/gtk/`): the GTK4 app provides a state-driven tray + a
+  `gtk4-layer-shell` dictation overlay fed by the same status push (the macOS panel
+  analogue). This is the shipped GUI parity.
+- Headless: rely on the existing dictation flow; surface the live transcript via the
   Claude Code UI / a `libnotify` toast on final. The `model_status.dictation` fields
   are already emitted; a tiny notifier can read them.
-- Later: a small GTK/Qt overlay if a Linux GUI app is ever added.
 
 **D. Gesture** — driven by the daemon's Caps/keybinding path (`ds-platform/linux`,
 uinput). Confirm `caps_lock_on()` works under the user's session (X11 vs Wayland — LED
@@ -349,6 +353,7 @@ concurrent-listen thread holds it.
    on Linux; WebRTC APM as the deterministic alternative.
 6. Linux UX (§6C, notifier).
 
-Windows before Linux (there's a GUI app to validate against; Linux is headless and
-the UX story is thinner). The WebRTC backend lands before either so every platform
-has a proven, deterministic path when the native one is missing or low-quality.
+Windows before Linux (it was sequenced first — at the time Linux had no GUI to validate
+against; a native GTK host has since landed, see §6C). The WebRTC backend lands before
+either so every platform has a proven, deterministic path when the native one is missing
+or low-quality.

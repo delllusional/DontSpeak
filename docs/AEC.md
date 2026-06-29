@@ -1,8 +1,9 @@
 # AEC — Full-Duplex TTS/STT (Acoustic Echo Cancellation)
 
-Status: **macOS + Windows implemented** (`ds-aec/src/macos.rs` — a `VoiceProcessingIO`
+Status: **macOS + Windows + Linux implemented** (`ds-aec/src/macos.rs` — a `VoiceProcessingIO`
 AudioUnit; `ds-aec/src/windows.rs` — WASAPI Communications-category capture, see
-`FULL-DUPLEX-PORT.md`); Linux falls back to the `src/stub.rs` no-op (half-duplex).
+`FULL-DUPLEX-PORT.md`; `ds-aec/src/linux.rs` — a PulseAudio/PipeWire `module-echo-cancel`
+capture-side source); the `src/stub.rs` no-op is only for other platforms (half-duplex).
 Implementation order was macOS first, then Windows, then Linux. Paths below are relative to
 the repo root; the Rust workspace is under `rust/`.
 
@@ -316,13 +317,15 @@ platform never breaks:
 - `rust/crates/dontspeakd/src/listener.rs` — `gate_off` no-op when AEC active;
   `rust/crates/dontspeakd/src/lib.rs` + `ttsq.rs` — bypass the two `mic_active()`
   gates in full-duplex (§5.3) (M3).
-- `rust/crates/ds-config/src/lib.rs` — add the `full_duplex` setting. Four
-  coordinated edits: (a) `#[serde(default)] pub full_duplex: bool` on
-  `VoiceConfig` (~`:563`); (b) the field in `impl Default for VoiceConfig`
-  (~`:617`); (c) a `vo.insert("full_duplex".into(), json!(...))` line in
-  `merge_settings` (~`:740`) so the GUI write path persists it; (d) a
-  `ConfigChange` entry in `changes_since` (~`:570`) so toggling hot-reloads the
-  warm helper (SIGHUP, ~`:352`) instead of needing a restart. Default **off**.
+- `rust/crates/ds-config/src/voice.rs` — add the `full_duplex` setting (config
+  was split out of `lib.rs` into `voice.rs`). (a) `#[serde(default)] pub
+  full_duplex: bool` on `VoiceConfig` (~`:198`); (b) the field in `impl Default
+  for VoiceConfig` (~`:395`); (c) no per-field write edit is needed — `merge_settings`
+  / `voice_to_value` (now in `ds-config/src/wire/settings.rs`) serialize the whole
+  typed `VoiceConfig` via its serde derive, so `full_duplex` persists automatically;
+  `changes_since` (~`:433`) likewise has no `full_duplex` entry — the resolved-mode
+  restart (`restart_if_full_duplex_stale`, §5.5) handles a toggle, not a hot-reload.
+  Default **off**.
 
 ## 6. Windows design (after macOS)
 
@@ -340,16 +343,18 @@ Capture-side only; TTS (rodio) untouched.
 - Quality depends on the endpoint's installed APO, so keep the WebRTC APM (§7)
   as the Windows fallback.
 
-## 7. Linux design (after Windows)
+## 7. Linux design (implemented)
 
 Server-side, app-transparent — both PulseAudio `module-echo-cancel` and PipeWire
 `libpipewire-module-echo-cancel` run the **WebRTC** canceller and expose a
 cancelled virtual source.
 
-- Ship a config drop-in (PulseAudio `module-echo-cancel aec_method=webrtc` /
-  PipeWire `libspa-aec-webrtc`) + docs; the app records the named cancelled
-  source. Zero DSP code.
-- For determinism regardless of the user's server config, optionally link the
+- **Shipped** (`ds-aec/src/linux.rs`): a config drop-in (PulseAudio
+  `module-echo-cancel aec_method=webrtc` / PipeWire `libspa-aec-webrtc`) + docs;
+  the backend opens the named cancelled source via the PulseAudio simple API (which
+  also covers PipeWire through `pipewire-pulse`). Capture-side only — rodio keeps
+  rendering TTS normally (`owns_render() == false`). Zero DSP code.
+- **Still future:** for determinism regardless of the user's server config, optionally link the
   in-process **`webrtc-audio-processing`** (tonarino, `bundled` → needs
   clang/meson/ninja) and feed `process_render_frame` (TTS tap) +
   `process_capture_frame` (mic), maintaining a `set_stream_delay` estimate. This

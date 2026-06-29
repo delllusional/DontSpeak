@@ -18,18 +18,18 @@ model.
 
 ## Status
 
-| Target | dontspeakd platform impl | Compiled here? |
+| Target | dontspeakd platform impl | Built + tested in CI |
 | --- | --- | --- |
-| macOS (Apple Silicon) | IOKit lock-state FFI, core-graphics CGEventPost, NSWorkspace | **YES — compile-verified on this host** |
-| Windows | `windows` crate: GetKeyState / SendInput / GetForegroundWindow | written behind `cfg(target_os="windows")`, **UNCOMPILED** |
-| Linux | evdev (LED) + uinput + x11rb (Wayland degraded) | written behind `cfg(target_os="linux")`, **UNCOMPILED** |
+| macOS (Apple Silicon) | IOKit lock-state FFI, core-graphics CGEventPost, NSWorkspace | **YES — `macos-26`** |
+| Windows | `windows` crate: GetKeyState / SendInput / GetForegroundWindow | **YES — `windows-2025`** |
+| Linux | evdev (LED) + uinput + x11rb (Wayland degraded) | **YES — `ubuntu-latest`** |
 
 `dontspeak` (the hook executor + MCP server) and all shared library crates compile and run
-on macOS. The Windows/Linux platform impls are real-API-behind-`cfg` stubs, not compiled on
-the macOS build host (cannot cross-compile here); they are fleshed out and validated on
-their native hosts.
+on all three OSes. The Windows/Linux platform impls are complete real-API backends behind
+`cfg`; the CI release matrix builds and tests them on `windows-2025` and `ubuntu-latest`
+(macOS is the local build host below).
 
-Build host: cargo (Homebrew), `aarch64-apple-darwin`, HOST TARGET ONLY.
+Build host: cargo (Homebrew), `aarch64-apple-darwin`. The full OS matrix runs in CI.
 
 ## Architecture
 
@@ -49,20 +49,22 @@ rust/
     ds-proc/           # lib: pidfile single-speaker (atomic tempfile) + pgroup kill
     ds-platform/       # lib: CapsLockReader / KeyInjector / FrontmostWindow traits
       build.rs               #      links IOKit + ApplicationServices on macOS
-      src/macos.rs           #      CGEvent (caps read + key tap) + NSWorkspace + AX (compiled)
+      src/macos.rs           #      CGEvent (caps read + key tap) + NSWorkspace + AX
       src/macos/             #      iohid.rs (physical Caps via IOHIDManager) + iokit.rs (LED write)
-      src/windows.rs         #      cfg, uncompiled
-      src/linux.rs           #      cfg, uncompiled
+      src/windows.rs         #      cfg, SendInput/GetKeyState/GetForegroundWindow (CI: windows-2025)
+      src/linux.rs           #      cfg, evdev/uinput/x11rb (CI: ubuntu-latest)
     ds-model/          # lib: download + checksum-verify Kokoro/onnx/Parakeet assets
     ds-tts/            # lib + bin: native Kokoro pipeline + the ds-helper bin
       src/bin/ds_helper/   # one-shot (cold) + `--serve` (warm, JSON protocol) modes
-    ds-stt/            # lib: STT engines — Parakeet pieces (transcribe-rs over the
-                             #      shared ort) + capture, ClaudeNative (CC pushToTalk), SystemStt
+    ds-stt/            # lib: STT engines — streaming FastConformer Parakeet (ds-stt::streaming
+                             #      over the shared ort; macOS Core ML/ANE) + capture, ClaudeNative
+                             #      (CC pushToTalk), SystemStt
     ds-aec/            # lib: the echo-cancelled duplex-audio primitive (macOS VPIO;
                              #      Windows WASAPI; stub elsewhere) for full-duplex coexist
     ds-engines/        # lib: make_stt / make_tts engine factories (config → boxed engine)
     ds-tools/          # lib: the MCP tool catalog (single source for MCP + app Tools view)
     ds-i18n/           # lib: the shared UI string catalog (locales/en.yml) over the FFI
+    ds-status/         # lib: the model_status engine→UI contract (serde source of truth)
     ds-core/           # lib: cdylib/staticlib FFI for the SwiftUI app; engine-client calls
     dontspeakd/               # bin+lib: the engine (caps loop, warm TTS+STT helper, IPC server)
     dontspeak/                # bin: the one multi-call client — no args = stdio MCP server;
@@ -91,7 +93,7 @@ The macOS GUI is the native SwiftUI app in `../apps/macos/` (not a Rust crate); 
   barge-in is `killpg(-pgid, SIGTERM)` on unix (Windows terminates the job leader); pidfile
   writes are atomic (tempfile + rename) so a half-written pgid is never read.
 - **ds-platform** — `CapsLockReader`/`KeyInjector`/`FrontmostWindow` traits + per-OS
-  impls. macOS compiled; Windows/Linux real-API-but-uncompiled behind `cfg`.
+  impls. All three are complete real-API backends behind `cfg`, built + tested in CI.
 - **dontspeakd** — the resident **engine** that owns everything model/engine behind the
   selectors, served over the `ds-ipc` socket: the Caps-Lock loop (30 ms poll that
   **mirrors the latched Caps-Lock LED** — an OFF→ON edge starts a dictation tap, ON→OFF
@@ -124,19 +126,21 @@ The macOS GUI is the native SwiftUI app in `../apps/macos/` (not a Rust crate); 
   JSON protocol on stdin: `speak`/`stop` for Kokoro TTS **and** `listen`/`lstop` for Parakeet
   STT (so STT dictation no longer loads a model in the engine itself). `--serve` does not
   auto-download — it fails if the model is missing.
-- **ds-stt** — the STT engines + Parakeet pieces: `Capture` (mic) + the
-  `transcribe-rs` `ParakeetModel` (TDT 0.6b v2 int8, over the shared `ort`), plus the
-  `ClaudeNative` (taps Claude Code's `voice:pushToTalk` key — read from its keybindings.json,
-  default `Space` — to drive CC's own dictation) and `SystemStt` engines. The Parakeet pieces
-  run inside the warm helper (`--serve listen`) for dictation and inside the engine directly
-  for always-listening mode.
+- **ds-stt** — the STT engines + Parakeet pieces: `Capture` (mic) + the **streaming
+  cache-aware FastConformer transducer** (`ds-stt::streaming` over the shared `ort`; on macOS
+  the `ane` rung uses FluidAudio's `StreamingAsrManager`, `coreml.rs`). `transcribe-rs` is kept
+  ONLY for its energy VAD now (not inference). Plus the `ClaudeNative` (taps Claude Code's
+  `voice:pushToTalk` key — read from its keybindings.json, default `Space` — to drive CC's own
+  dictation) and `SystemStt` engines. The Parakeet pieces run inside the warm helper
+  (`--serve listen`) for dictation and inside the engine directly for always-listening mode.
 - **ds-aec** — the platform duplex-audio primitive (`DuplexAudio`) for full-duplex
   coexist (mic open while TTS plays, with acoustic echo cancellation). macOS = a
   VoiceProcessing I/O AudioUnit (`macos.rs`); Windows = WASAPI Communications-category
   capture (`windows.rs`); `stub.rs` elsewhere. See `../docs/AEC.md` and
   `../docs/FULL-DUPLEX-PORT.md`.
 - **ds-engines** — the `make_stt` / `make_tts` factories that build a boxed engine from
-  config. `make_stt` switches on `stt_engine` alone: `claude_code` ⇒ `ClaudeNative` (taps
+  config. `make_stt` first resolves the `stt_engine` ladder (`cfg.resolved_stt()` — the first
+  usable rung) then maps that single engine: `claude_code` ⇒ `ClaudeNative` (taps
   Claude Code's dictation key); `built_in` ⇒ `ClaudeNative` in this helper-less factory
   (degrade-when-no-model path — the engine itself builds `built_in` as `HelperStt` through the
   warm helper); `off`/`system` ⇒ the inert `SystemStt`. Default `built_in`.
@@ -150,8 +154,9 @@ The macOS GUI is the native SwiftUI app in `../apps/macos/` (not a Rust crate); 
   automatically on first activation. Model **download** file IO lives here (worker threads);
   the engine is the authority on model presence + removability.
 - **ds-model** — downloads + checksum-verifies `kokoro-v1.0.onnx`, `voices-v1.0.bin`,
-  the matching `libonnxruntime` dylib (ONNX Runtime 1.27.0), and the Parakeet v2 bundle
-  (encoder/decoder_joint/preprocessor/vocab), atomic temp+rename.
+  the matching `libonnxruntime` dylib (ONNX Runtime 1.27.0), and the streaming FastConformer
+  Parakeet assets (`encoder.int8.onnx` / `decoder.int8.onnx` / `joiner.int8.onnx` /
+  `tokens.txt`), atomic temp+rename.
 - **ds-tools** — the single source of truth for the **MCP tool catalog**: one
   `catalog()` returning the `{name, description, inputSchema}` array. The MCP server
   (`dontspeak` with no args) and the app's Tools view (`ds_tools_json`) both read it, so
@@ -162,7 +167,7 @@ The macOS GUI is the native SwiftUI app in `../apps/macos/` (not a Rust crate); 
   engine socket. Exposes the `ds-tools` catalog and dispatches each tool over
   `ds-ipc` (`speak`/`stop_speak`/`listen`/`status`, `list_voices`/`set_voice` (set or
   clear the session voice), `set_config` (one atomic setter for the persistent settings),
-  `wire_client`, and the diarization tools).
+  `wire`, and the diarization tools).
 
 ## macOS platform impl (`crates/ds-platform/src/macos.rs` + `macos/`)
 
@@ -278,8 +283,8 @@ Synthesis is **fully in-process**; there is no runtime Python call anywhere. Key
 
 ## Notes / risks
 
-- Windows/Linux platform impls are written but UNCOMPILED here; treat them as drafts until
-  built and exercised on their native hosts (Windows GetForegroundWindow→image-name match and
-  Linux evdev/uinput wiring are TODO).
+- Windows/Linux platform impls are complete real-API backends, built and tested in CI
+  (`windows-2025` / `ubuntu-latest`): Windows GetForegroundWindow→image-name match and Linux
+  evdev/uinput wiring. macOS is the local build host; the other two run in the CI matrix.
 </content>
 </invoke>

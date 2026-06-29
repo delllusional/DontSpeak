@@ -6,13 +6,14 @@ A local voice layer for Claude Code, Codex, and Claude Desktop: your agent speak
 
 - **Speaks the agent's replies** aloud through a local neural voice, or the OS system voice.
 - **Caps Lock to talk** — tap to record, tap again to stop and submit; tap mid-reply to barge in, long-press to cancel and discard.
+- **Hands-free mode** — an optional always-listening mode that dictates continuously without the key (see [docs/ALWAYS-LISTENING.md](docs/ALWAYS-LISTENING.md)).
 - **Driven over MCP** — voices, language, engine, rate, and toggles are all tools your agent can call.
 - **Speaker diarization & speaker-lock** — label enrolled voices and restrict dictation to yours.
 
 ## Models & runtimes
 
 - **TTS** — Kokoro-82M, or the OS system voice.
-- **STT** — Parakeet TDT 0.6b v2, the macOS recognizer, or Claude Code's dictation.
+- **STT** — a built-in streaming recognizer (NeMo FastConformer 480ms across platforms; Parakeet TDT 0.6b v2 via Core ML on macOS), the macOS system recognizer, or Claude Code's dictation.
 - **Diarization / speaker-lock** — pyannote segmentation + WeSpeaker embeddings, with SepFormer separation.
 
 Each model runs on the fastest backend available, picked by the `provider` ladder (`["ane", "ort_cuda", "ort_cpu"]`):

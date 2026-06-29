@@ -23,7 +23,7 @@ If all three pass, proceed to push. If any fails, fix it and re-run from gate 1 
 
 - Confirm there's something to push (`git status`, `git log origin/main..HEAD`). Stage + commit per the user's intent first if there are uncommitted changes (end commit messages with the `Co-Authored-By` trailer).
 - `git push origin <branch>` (default `main`).
-- `origin` is `https://github.com/delllusional/DontSpeak.git`.
+- `origin` is the project's `delllusional/DontSpeak` GitHub repo.
 
 ## Caveats (be honest about these)
 

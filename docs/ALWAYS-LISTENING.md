@@ -21,7 +21,9 @@ Two design decisions shape it:
 1. **Half-duplex, no echo cancellation.** While the TTS queue is busy the mic is
    closed ("listen only when not playing"). We lose mid-sentence barge-in; that is
    an accepted trade. (Muting the mic during TTS is the standard local/edge
-   simplification; AEC / partial-ducking barge-in is a possible later upgrade.)
+   simplification.) AEC / full-duplex has since shipped separately (`ds-aec`, gated
+   by the `full_duplex` config — see `AEC.md`), but always-listening itself still
+   runs this half-duplex gate; folding it onto the AEC path is a later upgrade.
 
 2. **Stopword + trailing-silence confirmation.** Submission fires only when the
    configured stopword is the **final token** of an utterance **and** is followed by
@@ -69,6 +71,8 @@ thin glue on the engine's poll thread (`crate::listener`):
 
 ## Possible later upgrades
 
-Acoustic echo cancellation / true barge-in; Silero VAD (~2 MB ONNX on the shared
+Acoustic echo cancellation / true barge-in — the AEC/full-duplex layer now exists
+(`ds-aec`, gated by `full_duplex`; see `AEC.md`), so this becomes wiring always-listening
+onto it rather than net-new work; Silero VAD (~2 MB ONNX on the shared
 `ort` runtime) for robustness; a pre-roll leading buffer;
 and a GUI control (config + hot-reload drives it for now).

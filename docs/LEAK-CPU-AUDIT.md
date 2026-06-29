@@ -135,7 +135,7 @@ event-driven. Mic *in-use* state and the config file watch **can** be push, and 
    `AudioObjectRemovePropertyListenerBlock` is known-unreliable and clean drop-time removal is
    required. The macOS listener is compile-verified and warrants a quick on-device check.
    (The #8 worker-hold loop can adopt the same watcher next; left as-is for now.)
-2. ✅ **Push config watch** (`ds-daemon::config_watch`) — `notify` (FSEvents / inotify /
+2. ✅ **Push config watch** (`dontspeakd::config_watch`) — `notify` (FSEvents / inotify /
    ReadDirectoryChangesW) on `settings.json`; the `stat()` is now only a 3 s coarse backstop.
 3. **Runtime confirmation pass** on a real build: Instruments (Time Profiler + Energy Log) for
    the Swift idle path, `tokio-console`/`sample` for the daemon poll loops, to quantify the
