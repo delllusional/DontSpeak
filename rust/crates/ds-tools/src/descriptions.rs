@@ -69,7 +69,7 @@ pub const SET_CONFIG: &str = "Atomically update DontSpeak's persistent settings 
 pub const SET_CONFIG_TTS_ENGINE: &str = "Spoken-reply engine PREFERENCE LADDER — an array in \
     descending preference; the first rung usable on this machine wins. Rungs: \"built_in\" (Kokoro) \
     and \"system\" (macOS `say`). Default [\"built_in\", \"system\"] (Kokoro, falling back to the \
-    system voice where Kokoro can't run, e.g. an Intel mac). [] (or \"off\") = no spoken replies.";
+    system voice where Kokoro can't run, e.g. an Intel mac). [] (or [\"off\"]) = no spoken replies.";
 pub const SET_CONFIG_TTS_VOICES: &str = "Ordered Kokoro voice ids for the BUILT-IN engine (the first is \
     the default, the rest a per-terminal round-robin pool). English voices only in this version (ids \
     starting `a`/`b`); other-language ids are rejected. Each is extracted on demand from the local \
@@ -99,7 +99,7 @@ pub const SET_CONFIG_STT_ENGINE: &str = "Dictation engine PREFERENCE LADDER — 
     (macOS 26+ on-device SpeechAnalyzer, en-US), \"claude_code\" (delegate to Claude Code's voice \
     key). Default [\"built_in\", \"system\", \"claude_code\"] — claude_code is always usable and LAST, \
     so dictation still works where the on-device engines can't run (e.g. an Intel mac). [] (or \
-    \"off\") = dictation off (Caps still silences the voice).";
+    [\"off\"]) = dictation off (Caps still silences the voice).";
 pub const SET_CONFIG_CAPTURE_GAIN: &str =
     "Mic gain before STT: \"auto\" (default) or a fixed 0.5–20.0 multiplier.";
 pub const SET_CONFIG_AUTO_SUBMIT: &str = "Press Return after pasting dictation into the focused app. \

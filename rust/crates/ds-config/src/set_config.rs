@@ -373,12 +373,19 @@ mod tests {
         // running engine before persisting — so an unavailable `system` is refused there,
         // not here).
         let mut cfg = VoiceConfig::default();
-        // A scalar string is still accepted (back-compat) and becomes a one-rung ladder.
+        // A one-element array is the canonical shape for a single engine.
         let args: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "stt_engine": "system" })).unwrap();
+            serde_json::from_value(serde_json::json!({ "stt_engine": ["system"] })).unwrap();
         let changes = args.apply(&mut cfg).unwrap();
         assert_eq!(cfg.stt_engine, vec![SttEngine::System]);
         assert_eq!(changes, vec!["stt_engine=[system]".to_string()]);
+
+        // A bare SCALAR string is NO LONGER accepted (arrays-only) — it's a hard error.
+        let err = serde_json::from_value::<SetConfigArgs>(
+            serde_json::json!({ "stt_engine": "system" }),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must be one of"), "got: {err}");
 
         // The array form is the canonical ladder; `off` and dupes drop, order is kept.
         let mut c2 = VoiceConfig::default();

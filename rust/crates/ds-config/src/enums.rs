@@ -793,7 +793,9 @@ where
 // `provider` and `diarizer_provider` ladders). EMPTY = that role is OFF; otherwise the
 // first rung usable on THIS build/platform wins (see `*_usable` above and
 // `VoiceConfig::resolved_tts` / `resolved_stt`). The `Off` variants are KEPT for token /
-// schema / `ALL` stability but are DROPPED from a ladder (a scalar `"off"` ⇒ empty ⇒ off).
+// schema / `ALL` stability but are DROPPED from a ladder (`["off"]` ⇒ empty ⇒ off; `[]` is
+// the only way to disable — a bare scalar string is NOT a one-rung shorthand, it degrades to
+// the default ladder).
 // ─────────────────────────────────────────────────────────────────────────────
 
 // The platform predicates as PURE functions of (os, arch) — `os`/`arch` are
@@ -827,12 +829,11 @@ pub(crate) fn default_stt_engine() -> Vec<SttEngine> {
     vec![SttEngine::BuiltIn, SttEngine::System, SttEngine::ClaudeCode]
 }
 
-/// Fail-open deserialize for `tts_engine` — an ORDERED preference ladder. Accepts:
+/// Fail-open deserialize for `tts_engine` — an ORDERED preference ladder. ARRAYS ONLY:
 ///   • an ARRAY of tokens (`["built_in","system"]`) — known non-`off` tokens kept in order
 ///     (deduped); an empty / all-`off` / all-unknown array ⇒ EMPTY (= off);
-///   • a LEGACY scalar string (`"system"`, `"off"`) — back-compat: `"off"` ⇒ empty,
-///     a known engine ⇒ a one-rung ladder, an unknown string ⇒ the default ladder;
-///   • anything else ⇒ the default ladder.
+///   • anything else (a scalar string, or a wrong-typed value) ⇒ the default ladder. A bare
+///     scalar string is NO LONGER a one-rung shorthand — `[]` is the only way to disable.
 pub(crate) fn de_tts_engine<'de, D>(d: D) -> Result<Vec<TtsEngine>, D::Error>
 where
     D: Deserializer<'de>,
@@ -864,11 +865,6 @@ pub(crate) fn parse_tts_ladder(v: &toml::Value) -> Vec<TtsEngine> {
             }
             out
         }
-        toml::Value::String(s) => match TtsEngine::parse(s) {
-            Some(TtsEngine::Off) => Vec::new(),
-            Some(e) => vec![e],
-            None => default_tts_engine(),
-        },
         _ => default_tts_engine(),
     }
 }
@@ -887,19 +883,15 @@ pub(crate) fn parse_stt_ladder(v: &toml::Value) -> Vec<SttEngine> {
             }
             out
         }
-        toml::Value::String(s) => match SttEngine::parse(s) {
-            Some(SttEngine::Off) => Vec::new(),
-            Some(e) => vec![e],
-            None => default_stt_engine(),
-        },
         _ => default_stt_engine(),
     }
 }
 
-/// STRICT scalar-or-array ladder parse for `set_config` (the MCP API, which validates rather
-/// than failing open). Accepts a single token string OR an array of tokens; an unknown token —
-/// or a non-string array element — is an ERROR listing the valid tokens. The `off` token is
-/// dropped (`"off"` / `["off"]` ⇒ EMPTY ladder = off), and known rungs are de-duped in order.
+/// STRICT array-only ladder parse for `set_config` (the MCP API, which validates rather than
+/// failing open). Requires an ARRAY of tokens — a bare scalar string (or any non-array) is an
+/// ERROR, matching the config-file path where arrays are the single canonical shape. An unknown
+/// token, or a non-string array element, is likewise an ERROR listing the valid tokens. The
+/// `off` token is dropped (`["off"]` ⇒ EMPTY ladder = off), and known rungs are de-duped in order.
 fn strict_ladder<T, F>(
     v: &serde_json::Value,
     parse: F,
@@ -924,20 +916,17 @@ where
             None => Err(err()),
         }
     };
-    match v {
-        serde_json::Value::String(s) => push(s, &mut out)?,
-        serde_json::Value::Array(items) => {
-            for it in items {
-                let s = it.as_str().ok_or_else(err)?;
-                push(s, &mut out)?;
-            }
-        }
-        _ => return Err(err()),
+    let serde_json::Value::Array(items) = v else {
+        return Err(err());
+    };
+    for it in items {
+        let s = it.as_str().ok_or_else(err)?;
+        push(s, &mut out)?;
     }
     Ok(out)
 }
 
-/// Strict deserialize for `set_config`'s `tts_engine` — a scalar-or-array ladder (see
+/// Strict deserialize for `set_config`'s `tts_engine` — an array-only ladder (see
 /// [`strict_ladder`]). `None` when absent.
 pub(crate) fn de_opt_set_tts_engine<'de, D>(d: D) -> Result<Option<Vec<TtsEngine>>, D::Error>
 where
@@ -952,7 +941,7 @@ where
         .map_err(D::Error::custom)
 }
 
-/// Strict deserialize for `set_config`'s `stt_engine` — a scalar-or-array ladder (see
+/// Strict deserialize for `set_config`'s `stt_engine` — an array-only ladder (see
 /// [`strict_ladder`]). `None` when absent.
 pub(crate) fn de_opt_set_stt_engine<'de, D>(d: D) -> Result<Option<Vec<SttEngine>>, D::Error>
 where
@@ -1130,9 +1119,11 @@ mod tests {
             vec![TtsEngine::Kokoro]
         );
         assert!(parse_tts_ladder(&arr(&["festival"])).is_empty());
-        // Legacy SCALAR string: known → one rung; `off` → empty; UNKNOWN → the default ladder.
-        assert_eq!(parse_tts_ladder(&s("system")), vec![TtsEngine::System]);
-        assert!(parse_tts_ladder(&s("off")).is_empty());
+        // ARRAYS ONLY: a bare scalar string is NO LONGER a one-rung shorthand — any scalar
+        // (known token, `off`, or unknown) degrades to the default ladder. `[]` is the only
+        // way to disable.
+        assert_eq!(parse_tts_ladder(&s("system")), default_tts_engine());
+        assert_eq!(parse_tts_ladder(&s("off")), default_tts_engine());
         assert_eq!(parse_tts_ladder(&s("festival")), default_tts_engine());
         // A non-string/array scalar (bool/int) → the default ladder.
         assert_eq!(
@@ -1152,11 +1143,10 @@ mod tests {
             parse_stt_ladder(&arr(&["claude_code", "built_in", "off", "claude_code"])),
             vec![SttEngine::ClaudeCode, SttEngine::BuiltIn]
         );
-        assert_eq!(
-            parse_stt_ladder(&s("claude_code")),
-            vec![SttEngine::ClaudeCode]
-        );
-        assert!(parse_stt_ladder(&s("off")).is_empty());
+        // ARRAYS ONLY: a bare scalar string (known token, `off`, or unknown) is NO LONGER a
+        // one-rung shorthand — it degrades to the default ladder. `[]` is the only disable.
+        assert_eq!(parse_stt_ladder(&s("claude_code")), default_stt_engine());
+        assert_eq!(parse_stt_ladder(&s("off")), default_stt_engine());
         assert_eq!(parse_stt_ladder(&s("deepgram")), default_stt_engine());
         assert_eq!(
             parse_stt_ladder(&toml::Value::Boolean(false)),
@@ -1165,19 +1155,21 @@ mod tests {
     }
 
     #[test]
-    fn strict_ladder_accepts_scalar_or_array_drops_off_and_rejects_bad() {
+    fn strict_ladder_requires_array_drops_off_and_rejects_bad() {
         use serde_json::json;
         let p = |v: serde_json::Value| strict_ladder(&v, SttEngine::parse, SttEngine::Off, "valid");
-        // Scalar string OR array, both accepted.
-        assert_eq!(p(json!("claude_code")), Ok(vec![SttEngine::ClaudeCode]));
+        // ARRAYS ONLY: an array of tokens is accepted (deduped, order kept).
         assert_eq!(
             p(json!(["built_in", "claude_code", "built_in"])),
             Ok(vec![SttEngine::BuiltIn, SttEngine::ClaudeCode])
         );
-        // `off` (scalar or in-array) collapses to an empty ladder = off.
-        assert_eq!(p(json!("off")), Ok(vec![]));
+        // `["off"]` collapses to an empty ladder = off; `[]` is the canonical disable.
         assert_eq!(p(json!(["off"])), Ok(vec![]));
         assert_eq!(p(json!([])), Ok(vec![]));
+        // A bare scalar string is NO LONGER accepted — array-only, so it's an ERROR (matching
+        // the other set_config Vec fields, which serde rejects as "expected a sequence").
+        assert!(p(json!("claude_code")).is_err());
+        assert!(p(json!("off")).is_err());
         // STRICT: an unknown token, or a non-string array element, is an ERROR (unlike the
         // fail-open config-file path).
         assert!(p(json!("deepgram")).is_err());

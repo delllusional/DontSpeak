@@ -102,7 +102,8 @@ pub struct VoiceConfig {
     /// Dictation engine — an ORDERED PREFERENCE LADDER. Walk the list, use the first rung
     /// usable on this build/platform: `built_in` (Parakeet) → `system` (macOS SpeechAnalyzer)
     /// → `claude_code` (delegate to Claude Code), the default. EMPTY = dictation OFF (Caps
-    /// still silences). A legacy scalar string still parses. See [`Self::resolved_stt`].
+    /// still silences). ARRAYS ONLY — a scalar string (or wrong type) degrades to the default
+    /// ladder. See [`Self::resolved_stt`].
     #[serde(default = "default_stt_engine", deserialize_with = "de_stt_engine")]
     pub stt_engine: Vec<SttEngine>,
 
@@ -138,8 +139,8 @@ pub struct VoiceConfig {
     // ── Phase-2: text-to-speech (§A.1 / Config Schema) ──────────────────────
     /// Spoken-reply engine — an ORDERED PREFERENCE LADDER. Walk the list, use the first rung
     /// usable on this build/platform: `built_in` (Kokoro) → `system` (macOS `say` / Windows
-    /// SAPI), the default. EMPTY = spoken replies OFF. A legacy scalar string still parses.
-    /// See [`Self::resolved_tts`].
+    /// SAPI), the default. EMPTY = spoken replies OFF. ARRAYS ONLY — a scalar string (or wrong
+    /// type) degrades to the default ladder. See [`Self::resolved_tts`].
     #[serde(default = "default_tts_engine", deserialize_with = "de_tts_engine")]
     pub tts_engine: Vec<TtsEngine>,
     /// 0.5–2.0, step 0.25; 1.0 = normal. Passed to `Tts::speak(rate)`.
@@ -925,19 +926,20 @@ pub(crate) mod tests {
             p(r#"{"stt_engine":["claude_code","built_in"]}"#),
             vec![SttEngine::ClaudeCode, SttEngine::BuiltIn]
         );
-        // A legacy SCALAR string still parses (back-compat) → a one-rung ladder.
-        assert_eq!(p(r#"{"stt_engine":"system"}"#), vec![SttEngine::System]);
-        // `off` (scalar or in the array) ⇒ EMPTY ladder = dictation off.
-        assert!(p(r#"{"stt_engine":"off"}"#).is_empty());
+        // ARRAYS ONLY: a bare scalar string is NO LONGER a one-rung shorthand — it (known token
+        // or not) degrades to the default ladder. `["off"]`/`[]` are the only way to disable.
+        assert_eq!(p(r#"{"stt_engine":"system"}"#), default);
+        // `["off"]` / empty array ⇒ EMPTY ladder = dictation off.
         assert!(p(r#"{"stt_engine":["off"]}"#).is_empty());
         assert!(p(r#"{"stt_engine":[]}"#).is_empty(), "empty array = off");
-        // Unknown tokens drop from an array; an all-unknown / wrong-typed scalar falls open to
-        // the default ladder (never errors the block).
+        // Unknown tokens drop from an array; an all-unknown / wrong-typed value (incl. a bare
+        // scalar) falls open to the default ladder (never errors the block).
         assert_eq!(
             p(r#"{"stt_engine":["deepgram","built_in"]}"#),
             vec![SttEngine::BuiltIn]
         );
         assert_eq!(p(r#"{"stt_engine":"deepgram"}"#), default);
+        assert_eq!(p(r#"{"stt_engine":"off"}"#), default);
         assert_eq!(p(r#"{"stt_engine":3}"#), default);
     }
 
@@ -951,9 +953,12 @@ pub(crate) mod tests {
             p(r#"{"tts_engine":["system","built_in"]}"#),
             vec![TtsEngine::System, TtsEngine::Kokoro]
         );
-        assert_eq!(p(r#"{"tts_engine":"system"}"#), vec![TtsEngine::System]);
-        assert!(p(r#"{"tts_engine":"off"}"#).is_empty());
+        // ARRAYS ONLY: a bare scalar string degrades to the default ladder (no one-rung
+        // shorthand); `["off"]`/`[]` are the only disable.
+        assert_eq!(p(r#"{"tts_engine":"system"}"#), default);
+        assert!(p(r#"{"tts_engine":["off"]}"#).is_empty());
         assert!(p(r#"{"tts_engine":[]}"#).is_empty(), "empty array = off");
+        assert_eq!(p(r#"{"tts_engine":"off"}"#), default);
         assert_eq!(p(r#"{"tts_engine":"festival"}"#), default);
         assert_eq!(p(r#"{"tts_engine":9}"#), default);
     }
@@ -1266,14 +1271,14 @@ pub(crate) mod tests {
         // A typo'd key is ignored by the typed parse; the known key still loads.
         std::fs::write(
             &paths.config_toml,
-            "narate = \"off\"\nstt_engine = \"built_in\"\n",
+            "narate = \"off\"\nstt_engine = [\"built_in\"]\n",
         )
         .unwrap();
         let cfg = VoiceConfig::load(&paths);
         assert_eq!(
             cfg.stt_engine,
             vec![SttEngine::BuiltIn],
-            "legacy scalar 'built_in' → one-rung ladder"
+            "array ladder ['built_in'] loads as a one-rung ladder"
         );
         assert_eq!(
             cfg.narrate,
