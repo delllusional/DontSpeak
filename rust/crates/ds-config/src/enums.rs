@@ -516,6 +516,54 @@ impl NarrateKind {
     }
 }
 
+/// What the `wire` tool acts on: either the on-disk narration spec or one of the AI-client
+/// integrations DontSpeak can register/remove (the SAME wiring the installer performs). This
+/// is a TOOL-ARGUMENT enum, not a stored config value — it lives here so the single canonical
+/// token set is shared by the `wire` schema (ds-tools, pinned by a parity test) and the
+/// dispatch handler (`dontspeak::tools::call_wire`), which can't then drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireTarget {
+    /// Materialize / remove the user-editable `narration-spec.md` (a config FILE, not a client).
+    NarrationSpec,
+    /// Claude Code's voice hooks in `~/.claude/settings.json`.
+    ClaudeCode,
+    /// The DontSpeak MCP-server entry in Claude Desktop's config.
+    ClaudeDesktop,
+    /// OpenAI Codex's narration hooks in `~/.codex/config.toml`.
+    Codex,
+}
+
+impl WireTarget {
+    /// All variants (canonical-token order, matching the `wire` schema enum); single source
+    /// for the catalog parity test.
+    pub const ALL: &'static [WireTarget] = &[
+        WireTarget::NarrationSpec,
+        WireTarget::ClaudeCode,
+        WireTarget::ClaudeDesktop,
+        WireTarget::Codex,
+    ];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "narration_spec" => Some(WireTarget::NarrationSpec),
+            "claude_code" => Some(WireTarget::ClaudeCode),
+            "claude_desktop" => Some(WireTarget::ClaudeDesktop),
+            "codex" => Some(WireTarget::Codex),
+            _ => None,
+        }
+    }
+
+    /// The canonical token this target serializes to (round-trips through `parse()`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WireTarget::NarrationSpec => "narration_spec",
+            WireTarget::ClaudeCode => "claude_code",
+            WireTarget::ClaudeDesktop => "claude_desktop",
+            WireTarget::Codex => "codex",
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Macros: fail-open deserialize, serialize-as-token, strict deserialize.
 // (Textually scoped — see the module doc on why `enums` is declared first in `lib.rs`.)

@@ -287,6 +287,13 @@ static TOOLS: &[Tool] = &[
     },
 ];
 
+/// The canonical tool names, in catalog (display) order. The single accessor the MCP
+/// dispatch router pins itself against (see the `router_handles_every_catalog_tool` drift
+/// test in `dontspeak::tools`) so a tool added/renamed here can't silently go unrouted.
+pub fn tool_names() -> impl Iterator<Item = &'static str> {
+    TOOLS.iter().map(|t| t.name)
+}
+
 /// The MCP catalog: `[{ name, description, inputSchema }]`, generated from `TOOLS`.
 pub fn catalog() -> Value {
     Value::Array(
@@ -520,6 +527,33 @@ mod tests {
             schema_item_enum("drop_speech_on"),
             toks(DropSpeechKind::ALL, DropSpeechKind::as_str)
         );
+    }
+
+    /// PARITY GUARD: the `wire` tool's `target` enum must list EXACTLY the tokens of
+    /// `ds_config::WireTarget` (the type the dispatch handler matches on), so the authored
+    /// schema strings can't silently drift from the canonical set.
+    #[test]
+    fn wire_target_enum_matches_config_type() {
+        use ds_config::WireTarget;
+
+        fn toks<T: Copy>(all: &[T], as_str: fn(T) -> &'static str) -> Vec<String> {
+            all.iter().map(|&v| as_str(v).to_string()).collect()
+        }
+
+        let cat = catalog();
+        let wire = cat
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "wire")
+            .expect("wire in catalog");
+        let schema_enum: Vec<String> = wire["inputSchema"]["properties"]["target"]["enum"]
+            .as_array()
+            .expect("wire target has an enum array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(schema_enum, toks(WireTarget::ALL, WireTarget::as_str));
     }
 
     /// Map a JSON value to the JSON-Schema scalar `type` token it satisfies.

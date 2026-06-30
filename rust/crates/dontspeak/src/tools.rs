@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ds_config::{Paths, TtsEngine, VoiceConfig};
+use ds_config::{Paths, TtsEngine, VoiceConfig, WireTarget};
 use ds_ipc::{Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -248,11 +248,23 @@ fn call_wire(args: &Value) -> Result<String, String> {
     let a: Args =
         serde_json::from_value(args.clone()).map_err(|e| format!("invalid wire arguments: {e}"))?;
 
+    // One canonical parse of the target token. The unknown-target error references the
+    // canonical set (`WireTarget::ALL`) so the accepted tokens here can't drift from the
+    // `wire` schema enum (which a parity test pins to the same `WireTarget`).
+    let target = WireTarget::parse(&a.target).ok_or_else(|| {
+        let expected = WireTarget::ALL
+            .iter()
+            .map(|t| format!("{:?}", t.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("unknown target {:?}; expected one of {expected}", a.target)
+    })?;
+
     // The narration spec is a CONFIG FILE on disk, not a client wiring — handle it first and
     // return directly. enabled=true materializes the built-in default to the user-editable
     // narration-spec.md (without clobbering an existing edited copy); enabled=false removes
     // the override, reverting to the built-in DEFAULT_NARRATION_SPEC.
-    if a.target == "narration_spec" {
+    if target == WireTarget::NarrationSpec {
         let paths =
             ds_config::Paths::resolve().ok_or_else(|| "cannot resolve config paths".to_string())?;
         let f = &paths.narration_spec;
@@ -285,9 +297,9 @@ fn call_wire(args: &Value) -> Result<String, String> {
         };
     }
 
-    let (label, code) = match a.target.as_str() {
+    let (label, code) = match target {
         // Claude Code's voice hooks in ~/.claude/settings.json (--no-codex = don't touch Codex).
-        "claude_code" => {
+        WireTarget::ClaudeCode => {
             let flags: Vec<String> = if a.enabled {
                 vec!["--no-codex".into()]
             } else {
@@ -297,7 +309,7 @@ fn call_wire(args: &Value) -> Result<String, String> {
         }
         // The MCP-server entry in Claude Desktop's config. wire_desktop self-skips when
         // Desktop is absent, so report that honestly rather than claiming a no-op succeeded.
-        "claude_desktop" => {
+        WireTarget::ClaudeDesktop => {
             if a.enabled
                 && ds_config::Paths::resolve()
                     .map(|p| !p.claude_desktop_present())
@@ -313,7 +325,7 @@ fn call_wire(args: &Value) -> Result<String, String> {
             ("Claude Desktop", wire_desktop::run(&flags))
         }
         // Codex's narration hooks in ~/.codex/config.toml (--codex-only = only Codex).
-        "codex" => {
+        WireTarget::Codex => {
             let flags: Vec<String> = if a.enabled {
                 vec!["--codex-only".into()]
             } else {
@@ -321,11 +333,9 @@ fn call_wire(args: &Value) -> Result<String, String> {
             };
             ("OpenAI Codex", wire_hooks::run(&flags))
         }
-        other => {
-            return Err(format!(
-                "unknown target {other:?}; expected \"narration_spec\", \"claude_code\", \"claude_desktop\", or \"codex\""
-            ));
-        }
+        // Unreachable: an unknown token already errored at `WireTarget::parse` above, and
+        // `NarrationSpec` returned from its dedicated branch before this match.
+        WireTarget::NarrationSpec => unreachable!("narration_spec handled before this match"),
     };
 
     if code != 0 {
@@ -334,7 +344,7 @@ fn call_wire(args: &Value) -> Result<String, String> {
         ));
     }
     let verb = if a.enabled { "Registered" } else { "Removed" };
-    let note = if a.target == "claude_desktop" {
+    let note = if target == WireTarget::ClaudeDesktop {
         " — restart Claude Desktop to load it"
     } else {
         ""
@@ -694,6 +704,34 @@ fn call_dictate(sock: &Path, args: &Value) -> Result<String, String> {
 #[cfg(test)]
 mod drift {
     use super::*;
+
+    /// ROUTER DRIFT GUARD: every tool in the canonical `ds_tools` catalog must be RECOGNIZED
+    /// by the dispatch router in `tools_call`. Adding or renaming a tool in `ds_tools::TOOLS`
+    /// without wiring a match arm here is a TEST FAILURE — nothing else ties the router's
+    /// hardcoded name arms to the catalog.
+    ///
+    /// We drive the REAL router (no extracted name list to duplicate) with a bogus argument
+    /// and NO engine socket, so every path is side-effect-free: the locally-handled tools
+    /// (`list_voices`/`set_config`/`status`/`wire`) trip their `deny_unknown_fields` arg
+    /// structs and error at DESERIALIZE — before any config write or IPC — while the
+    /// engine-bridged tools short-circuit on the `None` socket before `ensure_engine`. The
+    /// only outcome we reject is the router's distinguishable `unknown tool:` sentinel, which
+    /// proves the name reached a real arm rather than the catch-all.
+    #[test]
+    fn router_handles_every_catalog_tool() {
+        let bogus = json!({ "__not_a_real_field__": true });
+        for name in ds_tools::tool_names() {
+            let msg = json!({ "params": { "name": name, "arguments": bogus.clone() } });
+            let resp = tools_call(None, &msg, None);
+            let text = resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                !text.starts_with("unknown tool:"),
+                "dispatch router doesn't handle catalog tool `{name}` (got: {text})"
+            );
+        }
+    }
 
     /// Map a JSON value to the JSON-Schema scalar `type` token it satisfies.
     fn json_type_of(v: &Value) -> &'static str {

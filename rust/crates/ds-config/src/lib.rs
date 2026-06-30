@@ -46,7 +46,7 @@ pub use claude_code::{ClaudeCodeVoice, read_claude_code_voice};
 pub use earcon::{EarconEvent, SystemSound, resolve_cue, system_sounds};
 pub use enums::{
     DiarizerProvider, DropSpeechKind, ListenMode, NarrateKind, Provider, SttEngine, TrayKind,
-    TtsEngine,
+    TtsEngine, WireTarget,
 };
 pub use log::{
     LogLevel, aux_log_path, combined_log_json, log, log_tail, open_aux_log, rotate_if_large,
