@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ds_config::{Paths, VoiceConfig};
+use ds_config::{Paths, Provider, VoiceConfig};
 use ds_model::DownloadTarget;
 
 use crate::config_gate::apple_native_shim_available;
@@ -268,8 +268,24 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
 /// the canonical `ort_cuda` token ([`ds_config::Provider::as_str`], what config and
 /// the `SetProvider` IPC both carry). `auto` is intentionally EXCLUDED: it uses the GPU
 /// only when the runtime is already present and never pulls the large download silently.
-pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg, which: &str) {
-    tts.set_provider(which);
+/// Whether to kick off the one-time ~1.4 GB CUDA-runtime prefetch: ONLY when the resolved
+/// provider IS the CUDA rung, an NVIDIA driver is actually present, and the runtime isn't already
+/// on disk. A pure decision (no probes / IO) so it's unit-tested directly — the caller supplies
+/// the live [`ds_model::cuda_driver_present`] / [`ds_model::cuda_runtime_present`] results. Typed
+/// on [`Provider`], so the CUDA rung is matched by the enum variant, never a stray `"ort_cuda"`
+/// string literal (the regression this guards against). Platform-gated to where the runtime exists.
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
+fn should_prefetch_cuda(which: Provider, driver_present: bool, runtime_present: bool) -> bool {
+    which == Provider::OrtCuda && driver_present && !runtime_present
+}
+
+pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg, which: Provider) {
+    // The warm child / FFI boundary still speaks the canonical token string; convert here, at the
+    // edge, NOT before — the gating logic below compares the typed `Provider`, never a literal.
+    tts.set_provider(which.as_str());
     // Explicitly choosing CUDA while the GPU runtime is absent kicks off a one-time background
     // fetch via the SHARED `start_download` (target "cuda"); its completion hook then restarts
     // the warm child onto the GPU once the runtime lands — the SAME path a missing-model
@@ -281,13 +297,14 @@ pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg
         target_arch = "x86_64"
     ))]
     // Gate the ~1.4 GB fetch on an ACTUAL NVIDIA driver being present (a live `LoadLibrary`/
-    // `dlopen` probe of `nvcuda.dll`/`libcuda.so.1`) — so a box that merely RESOLVES to `ort_cuda`
+    // `dlopen` probe of `nvcuda.dll`/`libcuda.so.1`) — so a box that merely RESOLVES to CUDA
     // (e.g. the default ladder on any x86_64 Windows/Linux) but has no GPU never pulls the runtime;
     // the warm child just falls back to CPU. Evaluated here, live, at apply time — not cached.
-    if which.eq_ignore_ascii_case("ort_cuda")
-        && ds_model::cuda_driver_present()
-        && !ds_model::cuda_runtime_present()
-    {
+    if should_prefetch_cuda(
+        which,
+        ds_model::cuda_driver_present(),
+        ds_model::cuda_runtime_present(),
+    ) {
         start_download(downloads, DownloadTarget::Cuda);
     }
     #[cfg(not(all(
@@ -392,5 +409,29 @@ mod tests {
             pick_download(false, false, true),
             Some(DownloadTarget::ParakeetModel)
         );
+    }
+
+    /// REGRESSION GUARD (fcf2072): the ~1.4 GB CUDA prefetch is gated on the TYPED
+    /// `Provider::OrtCuda` variant — never a `"ort_cuda"` string literal that a typo or rename
+    /// could silently break. Driver-absent and runtime-present must both veto the fetch.
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
+    #[test]
+    fn cuda_prefetch_requires_cuda_rung_driver_and_absent_runtime() {
+        use super::should_prefetch_cuda;
+        use ds_config::Provider;
+
+        // The CUDA rung + a real NVIDIA driver + runtime not yet on disk ⇒ fetch.
+        assert!(should_prefetch_cuda(Provider::OrtCuda, true, false));
+        // No driver ⇒ never fetch (the live probe fcf2072 added is the whole point).
+        assert!(!should_prefetch_cuda(Provider::OrtCuda, false, false));
+        // Runtime already present ⇒ nothing to fetch.
+        assert!(!should_prefetch_cuda(Provider::OrtCuda, true, true));
+        // Every NON-CUDA rung ⇒ never fetch, even with a driver and no runtime.
+        for p in [Provider::OrtCpu, Provider::OrtCoreMl, Provider::Ane] {
+            assert!(!should_prefetch_cuda(p, true, false), "{p:?} must not prefetch");
+        }
     }
 }

@@ -261,7 +261,7 @@ pub fn engine_run(
     // (or on a later reload / IPC request) restarts the child to load it — the shared
     // self-heal that makes a provider switch / fresh install converge without a manual restart.
     set_reload_hook(&downloads, tts.clone(), paths.clone());
-    apply_tts_provider(&tts, &downloads, cfg.tts_provider_token());
+    apply_tts_provider(&tts, &downloads, cfg.resolved_tts_provider());
     reconcile_helper_models(&tts, &cfg);
     // Full-auto: fetch any missing model for an enabled engine right away (no manual
     // Download button). Retried on reload + the slow poll tick below if it fails.
@@ -380,7 +380,7 @@ pub fn engine_run(
             if stt_engine_changed {
                 stt_stats.reset();
             }
-            apply_tts_provider(&tts, &downloads, new_cfg.tts_provider_token());
+            apply_tts_provider(&tts, &downloads, new_cfg.resolved_tts_provider());
             // Newly-activated engine (e.g. user just enabled TTS) → auto-fetch its model.
             auto_download_missing(&downloads, &new_cfg);
             // Advance the mtime watermark. On a stat-tick reload `current` is already fresh;
