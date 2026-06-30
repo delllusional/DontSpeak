@@ -7,7 +7,6 @@
 //  and never the CUDA GPU runtime). It can't drift from what's actually fetched.
 
 import SwiftUI
-import AppKit
 import CDontSpeak
 
 /// One downloaded file of a library, from the catalog's `files` array.
