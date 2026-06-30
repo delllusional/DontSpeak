@@ -188,6 +188,7 @@ pub fn ensure_ort_dylib() -> Result<PathBuf, String> {
 pub fn ensure_ort_dylib_gpu(want_gpu: bool) -> Result<PathBuf, String> {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     if want_gpu
+        && cuda_driver_present()
         && cuda_runtime_present()
         && let Some(gpu_dll) = cuda_onnxruntime_path()
     {
@@ -209,6 +210,7 @@ pub fn ensure_ort_dylib_gpu(want_gpu: bool) -> Result<PathBuf, String> {
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     if want_gpu
+        && cuda_driver_present()
         && cuda_runtime_present()
         && let Some(gpu_so) = cuda_onnxruntime_path()
     {
@@ -458,6 +460,49 @@ pub fn cuda_runtime_present() -> bool {
                     })
                 })
                 .unwrap_or(false)
+    }
+}
+
+/// Whether an NVIDIA GPU **driver** is installed — the cheap, side-effect-free pre-check that
+/// gates the ~1.4 GB CUDA-runtime download AND the GPU-dylib selection. The DRIVER ships
+/// `libcuda.so.1` (Linux) / `nvcuda.dll` (Windows), which are NOT part of the downloadable
+/// onnxruntime-gpu wheels (those carry cudart/cublas/cudnn — the driver comes WITH the card). So
+/// a present driver lib ⇒ a real NVIDIA GPU + driver are installed and CUDA is worth pursuing; if
+/// it's absent, CUDA is unsupported on this box, so we neither pull the big runtime nor try to
+/// load the GPU execution provider — it would only fail and fall back to CPU anyway.
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
+pub fn cuda_driver_present() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // dlopen the driver lib through the loader's normal search path; a non-null handle ⇒ the
+        // NVIDIA driver is installed. Close it again — this is only a presence probe.
+        let name = c"libcuda.so.1";
+        let h = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
+        if h.is_null() {
+            false
+        } else {
+            unsafe { libc::dlclose(h) };
+            true
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::FreeLibrary;
+        use windows::Win32::System::LibraryLoader::LoadLibraryW;
+        use windows::core::w;
+        // LoadLibraryW("nvcuda.dll") through the OS's standard DLL search order (NO hardcoded
+        // path) — a successful load ⇒ the NVIDIA driver is installed. Free it again: this is a
+        // live presence probe, evaluated each time, never cached at a stale moment.
+        match unsafe { LoadLibraryW(w!("nvcuda.dll")) } {
+            Ok(h) => {
+                let _ = unsafe { FreeLibrary(h) };
+                true
+            }
+            Err(_) => false,
+        }
     }
 }
 

@@ -39,6 +39,8 @@ tar = { workspace = true }
 # bzip2/zstd/aes to keep it lean. flate2 is already in the graph.
 [target.'cfg(windows)'.dependencies]
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# LoadLibraryW("nvcuda.dll") — the live NVIDIA-driver presence probe that gates the CUDA download.
+windows = { version = "0.62", features = ["Win32_System_LibraryLoader", "Win32_Foundation"] }
 
 # Linux x86_64 CUDA GPU runtime: the NVIDIA + onnxruntime-gpu wheels are zips (need `zip` to
 # pull the .so's out), and the CUDA provider's dependency libs are preloaded with RTLD_GLOBAL

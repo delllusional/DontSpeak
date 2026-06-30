@@ -84,7 +84,7 @@ pub use spec::{
     target_arch = "x86_64"
 ))]
 pub use ort::{
-    cuda_onnxruntime_path, cuda_runtime_dir, cuda_runtime_present,
+    cuda_driver_present, cuda_onnxruntime_path, cuda_runtime_dir, cuda_runtime_present,
     ensure_cuda_runtime_with_progress,
 };
 

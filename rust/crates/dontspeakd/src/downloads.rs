@@ -258,9 +258,10 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
 
 /// Apply the persisted TTS execution-provider preference (`tts_provider`:
 /// auto|ort_cpu|ort_cuda|ort_coreml|ane) to the warm child via [`TtsManager::set_provider`]. On
-/// Windows, explicitly selecting CUDA while the GPU runtime is absent kicks off a one-time
-/// background ~1.4 GB fetch (progress tracked in `downloads` under "cuda", so
-/// model_status shows it), then restarts the warm child on the GPU once ready.
+/// x86_64 Windows/Linux, resolving to CUDA while the GPU runtime is absent kicks off a one-time
+/// background ~1.4 GB fetch — but ONLY when an NVIDIA driver is actually present
+/// ([`ds_model::cuda_driver_present`]); progress is tracked in `downloads` under "cuda" so
+/// model_status shows it, then the warm child restarts on the GPU once ready.
 ///
 /// The `provider` setting is SHARED by both engines, so this one runtime serves Kokoro TTS
 /// AND Parakeet STT — fetching it here aligns both onto the GPU after the restart. Matches
@@ -279,7 +280,14 @@ pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg
         any(target_os = "windows", target_os = "linux"),
         target_arch = "x86_64"
     ))]
-    if which.eq_ignore_ascii_case("ort_cuda") && !ds_model::cuda_runtime_present() {
+    // Gate the ~1.4 GB fetch on an ACTUAL NVIDIA driver being present (a live `LoadLibrary`/
+    // `dlopen` probe of `nvcuda.dll`/`libcuda.so.1`) — so a box that merely RESOLVES to `ort_cuda`
+    // (e.g. the default ladder on any x86_64 Windows/Linux) but has no GPU never pulls the runtime;
+    // the warm child just falls back to CPU. Evaluated here, live, at apply time — not cached.
+    if which.eq_ignore_ascii_case("ort_cuda")
+        && ds_model::cuda_driver_present()
+        && !ds_model::cuda_runtime_present()
+    {
         start_download(downloads, DownloadTarget::Cuda);
     }
     #[cfg(not(all(
