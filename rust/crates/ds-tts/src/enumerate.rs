@@ -4,8 +4,8 @@
 //! is shared by every consumer instead of re-derived:
 //!   - the SwiftUI/Slint picker (`ds-core` delegates its `kokoro_ids` /
 //!     `system_voices` here), and
-//!   - the MCP server's `list_voices` / `set_voice` tools (which have no access
-//!     to the FFI `ds-core` crate).
+//!   - the MCP server's `list_voices` tool (which has no access to the FFI
+//!     `ds-core` crate).
 //!
 //! Two engines, two id conventions:
 //!   - Kokoro: opaque `<lang><gender>_name` ids read from `voices-v1.0.bin` when

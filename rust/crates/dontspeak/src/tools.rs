@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::engine_launch::ensure_engine;
 use crate::mcp::{ok, tool_result};
-use crate::voices::{resolve_voice_engine, voice_groups};
+use crate::voices::voice_groups;
 use crate::{wire_desktop, wire_hooks};
 
 pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>) -> Value {
@@ -50,10 +50,9 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
             Some(paths) => call_status(&paths, sock, &args),
             None => Err("cannot resolve ~/.claude paths".into()),
         },
-        // Stateful actions bridge to the resident engine. set_voice sets (or, with no
-        // `voice`, clears) a TRANSIENT session override there (not settings.json).
+        // Stateful actions bridge to the resident engine.
         "speak" | "stop_speak" | "listen" | "diarize" | "enroll" | "forget_speaker"
-        | "list_speakers" | "set_voice" => {
+        | "list_speakers" => {
             let Some(sock) = sock else {
                 return ok(
                     id,
@@ -65,7 +64,6 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
             match name {
                 "speak" => call_speak(sock, &args),
                 "stop_speak" => call_stop(sock),
-                "set_voice" => call_set_voice(sock, &args),
                 "diarize" => call_diarize(sock, &args),
                 "enroll" => call_enroll(sock, &args),
                 "forget_speaker" => call_forget_speaker(sock, &args),
@@ -99,13 +97,6 @@ struct SpeakArgs {
     text: Option<String>,
     voice: Option<String>,
     rate: Option<f32>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct SetVoiceArgs {
-    voice: Option<String>,
-    tts_engine: Option<TtsEngine>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -180,7 +171,7 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<String, String> {
 // ── Status (config read + read-only engine probe) ────────────────────────────
 
 /// Report configured engine/voice/rate (from settings.json) plus live engine
-/// state incl. any transient session voice. With `detail`, ALSO fold in the deep
+/// playback state. With `detail`, ALSO fold in the deep
 /// per-engine model lifecycle + stats (the former `model_status` tool). Probes the
 /// engine read-only — never spawns it, so a status check can't start the warm child
 /// or any playback; the `detail` section degrades to a note when the engine is down.
@@ -198,9 +189,8 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<St
                 tts_active,
                 queued,
                 paused,
-                session_voice,
             }) => {
-                json!({ "running": true, "tts_active": tts_active, "queued": queued, "paused": paused, "session_voice": session_voice })
+                json!({ "running": true, "tts_active": tts_active, "queued": queued, "paused": paused })
             }
             Ok(_) => json!({ "running": true, "note": "unexpected engine response" }),
             Err(_) => json!({ "running": false }),
@@ -472,88 +462,6 @@ fn call_stop(sock: &Path) -> Result<String, String> {
     }
 }
 
-/// Set the TRANSIENT session voice override on the engine (not settings.json).
-/// Resolves/validates the voice's engine first, then sends `SetSessionVoice`.
-fn call_set_voice(sock: &Path, args: &Value) -> Result<String, String> {
-    let a: SetVoiceArgs = serde_json::from_value(args.clone())
-        .map_err(|e| format!("invalid set_voice arguments: {e}"))?;
-    let voice = a.voice.unwrap_or_default().trim().to_string();
-    // No `voice` → CLEAR the transient session override (revert to the configured voice).
-    if voice.is_empty() {
-        return match ds_ipc::request(
-            sock,
-            &Request::ClearSessionVoice {
-                session: session_id(),
-            },
-        ) {
-            Ok(_) => Ok("Session voice cleared; replies use the configured voice.".into()),
-            Err(e) => Err(format!("engine unavailable: {e}")),
-        };
-    }
-    // The typed `tts_engine` (already validated to kokoro|system) becomes the engine
-    // hint resolve_voice_engine takes; None → infer from whichever engine has the voice.
-    let explicit = a.tts_engine;
-    let npz_present = ds_tts::ane_voices::voices_npz_present();
-    let (engine, label) = match resolve_voice_engine(&voice, explicit) {
-        Ok(v) => v,
-        Err(e) => {
-            // Fresh install: with the voices npz not downloaded yet the catalog only knows
-            // the 6 offline fallback ids, so a real Kokoro-shaped voice (af_nicole) looks
-            // "unknown". Accept it optimistically — the download is kicked below and it
-            // self-applies once ready. A wrong-shaped id still fails fast.
-            let wants_kokoro = explicit.is_none_or(|e| e == TtsEngine::Kokoro);
-            let kokoro_shaped = ds_tts::enumerate::kokoro_gender(&voice).is_some();
-            if wants_kokoro && kokoro_shaped && !npz_present {
-                (
-                    TtsEngine::Kokoro,
-                    ds_tts::enumerate::kokoro_display_name(&voice),
-                )
-            } else {
-                return Err(e);
-            }
-        }
-    };
-    let mut prep_note = String::new();
-    if engine == TtsEngine::Kokoro {
-        // English-only build: Kokoro ships non-English voices in the pack, but they are
-        // not surfaced by list_voices and cannot be selected.
-        let lang = ds_tts::enumerate::kokoro_language(&voice);
-        if lang != "en" {
-            return Err(format!(
-                "`{voice}` is a {lang} Kokoro voice. This version supports English only — pick an English voice (see list_voices)."
-            ));
-        }
-        if npz_present && ds_tts::ane_voices::materialization_required() {
-            // npz local → on the Apple CoreML/ANE backend extract this voice's ANE pack now
-            // (fast, offline) so it plays this reply; fail loudly rather than silently fall
-            // back to af_heart. The ONNX backend (non-macOS) reads the voice straight from the
-            // npz, so there's nothing to materialize there — and `ane_dir()` needs $HOME, which
-            // is unset on Windows, so calling it off-Apple would spuriously fail.
-            if let Err(e) = ds_tts::ane_voices::ensure_materialized(&voice) {
-                return Err(format!("could not prepare voice `{voice}`: {e}"));
-            }
-        } else if !npz_present {
-            // npz missing → kick the engine's single-flight download (non-blocking, joins
-            // any in-flight one) and set the voice anyway; it self-applies on the next
-            // reply once the pack lands.
-            let _ = ds_ipc::request(sock, &Request::EnsureKokoroVoices);
-            prep_note = " Downloading voice list; applies when ready.".into();
-        }
-    }
-    let engine_tok = engine.brand().to_string();
-    let req = Request::SetSessionVoice {
-        engine: engine_tok.clone(),
-        voice: voice.clone(),
-        session: session_id(),
-    };
-    match ds_ipc::request(sock, &req) {
-        Ok(Response::Done) => Ok(format!("Voice set to {label}.{prep_note}")),
-        Ok(Response::Error { message }) => Err(format!("set_voice failed: {message}")),
-        Ok(_) => Err("set_voice: unexpected response".into()),
-        Err(e) => Err(format!("engine unavailable: {e}")),
-    }
-}
-
 /// One-shot speaker diarization: record the mic for `seconds`, then return who spoke
 /// when. The engine blocks for the record window (≤60s, within the IPC read timeout),
 /// so a single request/response suffices — no streaming/stop dance like `listen`.
@@ -800,14 +708,6 @@ mod drift {
                 text: Some("hi".into()),
                 voice: Some("af_sarah".into()),
                 rate: Some(1.25),
-            })
-            .unwrap(),
-        );
-        assert_tool_matches(
-            "set_voice",
-            serde_json::to_value(SetVoiceArgs {
-                voice: Some("af_sarah".into()),
-                tts_engine: Some(TtsEngine::Kokoro),
             })
             .unwrap(),
         );

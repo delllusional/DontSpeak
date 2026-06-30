@@ -12,14 +12,15 @@
 //!
 //! Tools (the authoritative catalog — names, schemas, descriptions — lives in
 //! `ds_tools::catalog()`; this is just an orientation): speak, stop_speak,
-//! listen, status, list_voices, set_voice (set/clear session voice),
+//! listen, status, list_voices, diarize, enroll, forget_speaker, list_speakers,
 //! set_config, wire.
 //!
 //! `list_voices` is config-DIRECT: it reads DontSpeak's own settings file
 //! (`our config.toml`) to mark the active voice, so it needs no engine
-//! round-trip and works even with no engine running. Persistent writes go through
-//! `set_config` (same file; the engine hot-reloads on its mtime). `set_voice` is
-//! NOT a config write — it sets a TRANSIENT session voice on the running engine.
+//! round-trip and works even with no engine running. The voice itself is a
+//! persistent setting: all config writes (the spoken voice included) go through
+//! `set_config` (same file; the engine hot-reloads on its mtime) — config is the
+//! single source of truth, so there is no transient per-session voice override.
 //!
 //! Transport rules (spec): stdout carries ONLY JSON-RPC messages, one per line;
 //! ALL logging goes to stderr. Each request gets exactly one response (matched by

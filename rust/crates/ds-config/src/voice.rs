@@ -63,8 +63,8 @@ pub struct VoiceConfig {
     /// Ordered list of Kokoro voice ids (e.g. ["af_sarah", "am_adam"]). The FIRST entry
     /// is the default/current voice (`current_voice()`); the rest form a per-terminal pool:
     /// each distinct Claude session (terminal) claims the next untaken voice, so concurrent
-    /// terminals speak with DIFFERENT voices, round-robining (reusing) once exhausted. An
-    /// explicit `set_voice` override still wins over a pool assignment.
+    /// terminals speak with DIFFERENT voices, round-robining (reusing) once exhausted. This
+    /// list is the single source of truth for the spoken voice — edited via `set_config`.
     #[serde(default = "default_voices")]
     pub tts_built_in_voices: Vec<String>,
     /// macOS `say` voice for the SYSTEM engine — the full display name incl. any

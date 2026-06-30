@@ -51,7 +51,7 @@ echo "       (also wires OpenAI Codex's narration hooks → ~/.codex/config.toml
 "$INSTALL_DIR/dontspeak" wire-hooks
 
 # ==> 6. Register the MCP server with Claude CODE (~/.claude.json), so the agent gets the
-# DontSpeak control tools (set_voice, set_config, speak, listen, …) WITHOUT the user ever
+# DontSpeak control tools (set_config, speak, listen, …) WITHOUT the user ever
 # running `claude mcp add` by hand. This is the MCP sibling of the hooks above: hooks make
 # Claude Code SPEAK, this lets it CONTROL speech. Additive, backed-up, re-points on reinstall;
 # self-detects and SKIPS quietly if ~/.claude is absent. Preview: wire-code --print-only;

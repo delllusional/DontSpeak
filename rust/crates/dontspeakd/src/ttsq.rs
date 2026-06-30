@@ -199,15 +199,11 @@ pub struct TtsQueue {
     /// which app is frontmost). Published by the engine poll thread each tick. Init false =
     /// the shipped default (keep speaking); the first poll tick applies the live config.
     pause_in_background: AtomicBool,
-    /// Transient PER-SESSION voice overrides, keyed by Claude session id (the
-    /// empty string is the default/global session). When a reply's session has an
-    /// entry, the queue uses it instead of the configured voice, until cleared or
-    /// engine restart. NOT persisted to settings.json.
-    session_voice: Mutex<HashMap<String, (ds_config::TtsEngine, String)>>,
     /// AUTO voice assignments from the preferred-voices pool, keyed by Claude session id.
-    /// Distinct from `session_voice` (explicit `set_voice` overrides): this is filled
-    /// lazily — the first reply from a new session claims the next untaken pool voice, so
-    /// each terminal speaks with a different voice. In-memory; cleared on engine restart.
+    /// Filled lazily — the first reply from a new session claims the next untaken pool
+    /// voice, so each terminal speaks with a different voice. In-memory; cleared on engine
+    /// restart. The voice itself is a persistent config setting (`tts_built_in_voices`);
+    /// this map only records which pool entry each terminal claimed.
     pool_assignments: Mutex<HashMap<String, String>>,
     /// Which terminal the worker may currently speak for (see [`ActiveSel`]). Read by
     /// the worker at each dequeue; written by the `MarkActive` RPC handler (explicit)
@@ -253,7 +249,6 @@ impl TtsQueue {
             terminal_front: AtomicBool::new(true),
             terminal_seen: AtomicBool::new(false),
             pause_in_background: AtomicBool::new(false),
-            session_voice: Mutex::new(HashMap::new()),
             pool_assignments: Mutex::new(HashMap::new()),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
@@ -498,24 +493,14 @@ impl TtsQueue {
         }
     }
 
-    /// Read-only playback snapshot: `(tts_active, queued, paused, session_voice)`.
-    /// `queued` counts items still waiting in the deque (excludes the one being
-    /// played); `session_voice` is `"<engine>:<voice>"` when an override is set.
-    pub fn snapshot(&self) -> (bool, usize, bool, Option<String>) {
+    /// Read-only playback snapshot: `(tts_active, queued, paused)`.
+    /// `queued` counts items still waiting in the deque (excludes the one being played).
+    pub fn snapshot(&self) -> (bool, usize, bool) {
         let queued = self.items.lock().unwrap().len();
-        // Report the default/global-session override for the status line (the
-        // full per-session map isn't representable in one Option<String>).
-        let session_voice = self
-            .session_voice
-            .lock()
-            .unwrap()
-            .get("")
-            .map(|(e, v)| format!("{}:{}", e.brand(), v));
         (
             self.tts_active.load(Ordering::SeqCst),
             queued,
             self.paused.load(Ordering::SeqCst),
-            session_voice,
         )
     }
 
@@ -550,38 +535,17 @@ impl TtsQueue {
         self.tts.stt_loaded()
     }
 
-    /// Set the transient voice override for `session` (engine + voice). Takes
-    /// effect on that session's next reply; not persisted.
-    pub fn set_session_voice(
-        &self,
-        session: Option<String>,
-        engine: ds_config::TtsEngine,
-        voice: String,
-    ) {
-        self.session_voice
-            .lock()
-            .unwrap()
-            .insert(vkey(&session), (engine, voice));
-    }
-
-    /// Clear `session`'s voice override → that session falls back to the
-    /// configured voice.
-    pub fn clear_session_voice(&self, session: Option<String>) {
-        self.session_voice.lock().unwrap().remove(&vkey(&session));
-    }
-
     /// SessionEnd (window closed for good): per-window barge like [`clear_session`], then
-    /// FORGET this session's transient voice state — its preferred-pool assignment and any
-    /// `set_voice` override — so `pool_assignments` / `session_voice` don't accumulate one
-    /// entry per distinct session for the daemon's lifetime (they were previously only
-    /// reclaimed on engine restart). Called with `Some` session; the `None`/global case
-    /// routes to [`clear`](Self::clear) at the IPC site (nothing session-scoped to forget).
+    /// FORGET this session's preferred-pool assignment so `pool_assignments` doesn't
+    /// accumulate one entry per distinct session for the daemon's lifetime (it was
+    /// previously only reclaimed on engine restart). Called with `Some` session; the
+    /// `None`/global case routes to [`clear`](Self::clear) at the IPC site (nothing
+    /// session-scoped to forget).
     pub fn end_session(&self, session: Option<String>) {
         self.clear_session(session.clone());
         if let Some(s) = &session {
             self.pool_assignments.lock().unwrap().remove(s);
         }
-        self.session_voice.lock().unwrap().remove(&vkey(&session));
     }
 
     /// Get-or-assign this session's voice from the preferred pool (delegates to
@@ -701,25 +665,15 @@ impl TtsQueue {
             }
 
             let cfg = VoiceConfig::load(&self.paths);
-            // Engine + base voice: a transient session override wins over config;
-            // a per-call `item.voice` (e.g. the MCP `speak` voice arg) then
-            // overrides just the voice string within the chosen engine.
-            let (engine, base_voice) = match self
-                .session_voice
-                .lock()
-                .unwrap()
-                .get(&vkey(&item.session))
-                .cloned()
-            {
-                Some((e, v)) => (e, v),
-                // No explicit override: resolve via the SAME shared helper the greeting uses —
-                // System reads `tts_system_voice`; Kokoro claims this terminal's pool voice (the
-                // global/empty session and an empty pool fall back to `current_voice()`). Off /
-                // no usable rung ⇒ a blank voice (speak_one no-ops, value unused).
-                None => self
-                    .resolve_engine_voice(&cfg, &item.session)
-                    .unwrap_or((ds_config::TtsEngine::Off, String::new())),
-            };
+            // Engine + base voice come from config via the SAME shared helper the greeting
+            // uses — System reads `tts_system_voice`; Kokoro claims this terminal's pool voice
+            // (the global/empty session and an empty pool fall back to `current_voice()`). Off /
+            // no usable rung ⇒ a blank voice (speak_one no-ops, value unused). A per-call
+            // `item.voice` (e.g. the MCP `speak` voice arg) then overrides just the voice
+            // string within the chosen engine.
+            let (engine, base_voice) = self
+                .resolve_engine_voice(&cfg, &item.session)
+                .unwrap_or((ds_config::TtsEngine::Off, String::new()));
             let voice = item.voice.clone().unwrap_or(base_voice);
             let rate = item.rate.unwrap_or(cfg.tts_rate);
 

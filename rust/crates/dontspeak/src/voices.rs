@@ -1,5 +1,5 @@
 //! Voice / language enumeration (reads the Kokoro voices bin + `say` directly; no
-//! engine and no config write). Used by the `list_voices` and `set_voice` tools.
+//! engine and no config write). Used by the `list_voices` tool.
 
 use ds_config::TtsEngine;
 use ds_tts::enumerate;
@@ -56,37 +56,4 @@ pub(crate) fn voice_groups(engine: TtsEngine, language: &str) -> Vec<(String, Ve
         }
     }
     groups
-}
-
-/// Resolve `(engine, label)` for a voice id/name: honor an explicit `tts_engine`
-/// hint, else infer from whichever engine actually has the voice. Errors with
-/// guidance when the voice isn't found in the chosen/any engine.
-pub(crate) fn resolve_voice_engine(
-    voice: &str,
-    explicit: Option<TtsEngine>,
-) -> Result<(TtsEngine, String), String> {
-    let kokoro_hit = enumerate::kokoro_voice_ids().iter().any(|id| id == voice);
-    let sys = enumerate::system_voices();
-    let sys_hit = sys
-        .iter()
-        .find(|v| v.id == voice || v.name == voice)
-        .cloned();
-
-    match explicit {
-        Some(TtsEngine::Kokoro) => kokoro_hit
-            .then(|| (TtsEngine::Kokoro, enumerate::kokoro_display_name(voice)))
-            .ok_or_else(|| format!("`{voice}` is not a known Kokoro voice — see list_voices with tts_engine=built_in.")),
-        Some(TtsEngine::System) => sys_hit
-            .map(|v| (TtsEngine::System, v.name))
-            .ok_or_else(|| format!("`{voice}` is not an available System voice — see list_voices with tts_engine=system.")),
-        _ => {
-            if kokoro_hit {
-                Ok((TtsEngine::Kokoro, enumerate::kokoro_display_name(voice)))
-            } else if let Some(v) = sys_hit {
-                Ok((TtsEngine::System, v.name))
-            } else {
-                Err(format!("`{voice}` is not a known Kokoro or System voice — see list_voices."))
-            }
-        }
-    }
 }

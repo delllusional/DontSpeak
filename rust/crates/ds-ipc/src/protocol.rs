@@ -25,26 +25,6 @@ pub enum Request {
     /// Set global MUTE (the tray checkbox; the Caps-tap toggles it engine-side). Muting
     /// silences playback WITHOUT stopping it — the queue keeps draining. → [`Response::Done`].
     SetMuted { on: bool },
-    /// Set a TRANSIENT session voice override (not persisted to settings.json):
-    /// the TTS queue uses `engine` + `voice` for subsequent replies instead of the
-    /// configured voice, until [`Request::ClearSessionVoice`] or engine restart.
-    /// `engine` is "kokoro" or "system". → [`Response::Done`].
-    SetSessionVoice {
-        engine: String,
-        voice: String,
-        /// The Claude session this override is scoped to (`None` = the default,
-        /// machine-global session). AMBIENT: the MCP fills it from
-        /// `CLAUDE_CODE_SESSION_ID`, the hooks from their JSON `session_id` — it is
-        /// never a model-facing tool argument. Absent on the wire ⇒ `None`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session: Option<String>,
-    },
-    /// Clear the session voice override → fall back to the configured voice.
-    /// → [`Response::Done`].
-    ClearSessionVoice {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session: Option<String>,
-    },
     /// A terminal/session just opened (SessionStart hook). If `greet_on_open` is set,
     /// the engine claims this session's pool voice and speaks a short greeting in it.
     /// No-op when greeting is off. `session` is ambient (the hook's `session_id`).
@@ -72,9 +52,9 @@ pub enum Request {
         voice: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rate: Option<f32>,
-        /// The Claude session this reply belongs to (ambient; see SetSessionVoice).
-        /// The engine tags the queued item with it so the per-session voice
-        /// override resolves correctly.
+        /// The Claude session this reply belongs to (ambient; see [`Request::MarkActive`]).
+        /// The engine tags the queued item with it so per-session playback routing (active
+        /// window, pool voice) resolves correctly.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
     },
@@ -92,7 +72,7 @@ pub enum Request {
     /// is cancelled only if it belongs to that session — other windows keep talking.
     /// `None` (absent on the wire) is the GLOBAL hard barge: drop the whole queue and
     /// cancel whatever is playing (caps long-press / a non-session CLI caller).
-    /// `session` is ambient (see [`Request::SetSessionVoice`]), never a tool argument.
+    /// `session` is ambient (see [`Request::MarkActive`]), never a tool argument.
     StopSpeech {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
@@ -100,9 +80,9 @@ pub enum Request {
     /// A window/terminal closed for good (Claude Code `SessionEnd`). Like a per-window
     /// [`StopSpeech`](Request::StopSpeech) (drop this session's queued + in-flight speech),
     /// but ALSO reclaims the session's transient voice state — its preferred-pool
-    /// assignment and any `set_voice` override — so those maps don't grow one entry per
-    /// session for the daemon's lifetime. `None` (no session id) is the global hard barge,
-    /// same as `StopSpeech { None }`, and forgets nothing session-scoped.
+    /// assignment — so that map doesn't grow one entry per session for the daemon's
+    /// lifetime. `None` (no session id) is the global hard barge, same as
+    /// `StopSpeech { None }`, and forgets nothing session-scoped.
     SessionEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
@@ -185,10 +165,6 @@ pub enum Response {
         tts_active: bool,
         queued: usize,
         paused: bool,
-        /// The active transient session voice override (`"<engine>:<voice>"`),
-        /// or `None` when replies use the configured voice.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session_voice: Option<String>,
     },
     /// Generic success terminator for a request that returns no payload.
     Done,
@@ -260,12 +236,6 @@ mod tests {
                 name: "Alex".into(),
             },
             Request::ListSpeakers,
-            Request::SetSessionVoice {
-                engine: "kokoro".into(),
-                voice: "af_sarah".into(),
-                session: Some("sess-1".into()),
-            },
-            Request::ClearSessionVoice { session: None },
             Request::Speak {
                 text: "hello".into(),
                 voice: Some("af_sarah".into()),
@@ -320,7 +290,6 @@ mod tests {
                 tts_active: false,
                 queued: 0,
                 paused: false,
-                session_voice: None
             }
             .is_terminal()
         );

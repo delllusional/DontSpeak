@@ -24,11 +24,10 @@ path = "src/main.rs"
 [dependencies]
 ds-config = { workspace = true }
 ds-ipc = { workspace = true }
-# Voice enumeration (Kokoro bin / `say -v ?`) for the list_voices / set_voice
-# tools — config read+write is the SAME direct path the GUI uses (the engine
-# auto-applies a settings.json change via its mtime-watch), so these two tools
-# need no engine round-trip. ALSO the cold-spawn synth path for the `speak` hooks
-# (`ds_tts::spawn_for`) when the warm engine is down.
+# Voice enumeration (Kokoro bin / `say -v ?`) for the list_voices tool — a config
+# read on the SAME direct path the GUI uses (the engine auto-applies a settings.json
+# change via its mtime-watch), so it needs no engine round-trip. ALSO the cold-spawn
+# synth path for the `speak` hooks (`ds_tts::spawn_for`) when the warm engine is down.
 ds-tts = { workspace = true }
 # The tool catalog (names/descriptions/schemas) is shared with the app's FFI
 # (ds-core) so the list never drifts — this server exposes it, the app shows it.

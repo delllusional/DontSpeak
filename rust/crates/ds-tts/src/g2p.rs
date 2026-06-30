@@ -297,9 +297,9 @@ fn split_trailing_punct(word: &str) -> (&str, &str) {
 //
 // This build supports English only. Kokoro's pack still contains non-English
 // voices (es/fr/it/pt/hi/ja/zh), but they are NOT surfaced by `list_voices` and
-// cannot be selected (`set_voice` rejects them), so every utterance that reaches
-// here is English and uses the pure-Rust `voice-g2p` path above — no external
-// `espeak-ng`, no other-language phonemization.
+// cannot be selected (`set_config` rejects non-English `tts_built_in_voices`), so
+// every utterance that reaches here is English and uses the pure-Rust `voice-g2p`
+// path above — no external `espeak-ng`, no other-language phonemization.
 
 /// Phonemize `text` for a Kokoro `voice`. English-only: the `voice` is accepted
 /// for call-site stability but does not change the language (non-English voices

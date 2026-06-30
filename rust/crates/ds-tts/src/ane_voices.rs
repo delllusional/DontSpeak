@@ -98,69 +98,15 @@ pub fn materialize(voice: &str) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
-/// Like [`materialize`], but first downloads the voices npz (`voices-v1.0.bin`, ~28 MB)
-/// if it isn't on disk yet — so a freshly-requested voice can be extracted even on a
-/// machine that never ran the full Kokoro setup. The big ONNX model is NOT needed for
-/// the ANE path, so only the voice-tensor pack is fetched. Idempotent: returns the
-/// existing pack path when the voice is already materialized.
-pub fn ensure_materialized(voice: &str) -> Result<PathBuf, String> {
-    if let Some(p) = voice_pack_path(voice)
-        && p.is_file()
-    {
-        return Ok(p);
-    }
-    ensure_voices_npz()?;
-    materialize(voice)
-}
-
-/// Does the active TTS backend need a per-voice ANE pack materialized before it can
-/// play a Kokoro voice? Only the Apple CoreML/ANE backend ([`crate::synth_coreml`],
-/// itself `#[cfg(target_os = "macos")]`) consumes these packs; the ONNX backend used
-/// everywhere else reads the voice straight from the npz. So off-Apple this is `false`,
-/// and callers must NOT touch [`materialize`]/[`ane_dir`] — `ane_dir` needs `$HOME`,
-/// which is unset on Windows and would make `set_voice` spuriously fail.
-pub const fn materialization_required() -> bool {
-    cfg!(target_os = "macos")
-}
-
 /// Is the voices npz (`voices-v1.0.bin`) already on disk? Cheap presence probe used to
 /// decide whether a voice can be extracted now or its download must be kicked first.
 pub fn voices_npz_present() -> bool {
     ds_model::model_path(ds_model::KOKORO_VOICES_FILE).is_some_and(|p| p.is_file())
 }
 
-/// Download the voices npz (`voices-v1.0.bin`, ~28 MB) if it isn't already on disk, so
-/// the FULL voice catalog is enumerable/extractable. No-op when present. Does NOT fetch
-/// the ~310 MB ONNX model — only the voice-tensor pack the ANE path needs. Used both by
-/// [`ensure_materialized`] and by `set_voice`'s validation, so requesting a voice that
-/// isn't in the offline fallback list can still resolve on a fresh install.
-pub fn ensure_voices_npz() -> Result<(), String> {
-    if voices_npz_present() {
-        return Ok(());
-    }
-    ds_model::run_setup_kokoro_voices_with_progress(&|_, _| {})
-        .map(|_| ())
-        .map_err(|e| format!("download {}: {e}", ds_model::KOKORO_VOICES_FILE))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn materialization_gated_to_apple_coreml_backend() {
-        // Drift guard for the `set_voice` path: ANE packs exist ONLY for the macOS
-        // CoreML backend (`synth_coreml`, `#[cfg(target_os = "macos")]`). Everywhere
-        // else the ONNX backend reads the voice from the npz, so we must not touch
-        // `ane_dir()` (it needs $HOME, unset on Windows). If this predicate ever drifts
-        // away from the backend's own cfg, `set_voice` regresses to the $HOME failure.
-        assert_eq!(materialization_required(), cfg!(target_os = "macos"));
-        #[cfg(not(target_os = "macos"))]
-        assert!(
-            !materialization_required(),
-            "off-Apple must never materialize ANE packs"
-        );
-    }
 
     #[test]
     fn sanitize_matches_fluidaudio_rules() {

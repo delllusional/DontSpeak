@@ -21,22 +21,13 @@ pub const LIST_VOICES: &str = "List TTS voices grouped by language. Returns \
     and selectable, even though the Kokoro pack also contains other-language voices.";
 pub const LIST_VOICES_ENGINE: &str = "Engine whose voices to list: \"built_in\" (Kokoro) or \"system\" (OS). Default: the configured engine.";
 
-// ── set_voice ────────────────────────────────────────────────────────────────────────
-pub const SET_VOICE: &str = "Set or clear the voice for THIS session (not saved; reverts on engine \
-    restart). Pass voice (an id from list_voices) to set; omit it to clear and revert to the \
-    configured voice. Engine is inferred from the id (\"af_sarah\" → Kokoro, \"Samantha\" → System) \
-    or pass tts_engine. Scoped to this Claude session.";
-pub const SET_VOICE_VOICE: &str = "A voice id from list_voices (e.g. \"af_nicole\", \"af_sarah\" for Kokoro, \"Samantha\" for System). English only — non-English Kokoro voices are rejected in this version. Omit to clear the session override.";
-pub const SET_VOICE_ENGINE: &str =
-    "TTS engine for the voice: \"built_in\" or \"system\"; inferred from the id when omitted.";
-
 // ── listen ───────────────────────────────────────────────────────────────────────────
 pub const LISTEN: &str = "Record the mic and return the transcribed text (local Parakeet STT).";
 pub const LISTEN_SECONDS: &str = "Seconds to record before transcribing (default 10).";
 
 // ── status ───────────────────────────────────────────────────────────────────────────
 pub const STATUS: &str = "Report current state: engine, active voice, default rate, whether speech \
-    is playing (tts_active), queue length, paused, and any session_voice override. Pass detail:true \
+    is playing (tts_active), queue length, and paused. Pass detail:true \
     to also include per-engine model lifecycle, the running map, dictation state, and stats.";
 pub const STATUS_DETAIL: &str = "Also include the full engine lifecycle, the running map, dictation state, and stats. Default false.";
 
@@ -64,8 +55,9 @@ pub const LIST_SPEAKERS: &str = "List the names of enrolled speaker voiceprints.
 
 // ── set_config ───────────────────────────────────────────────────────────────────────
 pub const SET_CONFIG: &str = "Atomically update DontSpeak's persistent settings (config.toml). All \
-    fields optional; provide at least one. Validated, applied together, then hot-reloaded. For a \
-    one-off voice, use set_voice.";
+    fields optional; provide at least one. Validated, applied together, then hot-reloaded. To \
+    change the spoken voice, set tts_built_in_voices (Kokoro) or tts_system_voice (system) here — \
+    it applies immediately.";
 pub const SET_CONFIG_TTS_ENGINE: &str = "Spoken-reply engine PREFERENCE LADDER — an array in \
     descending preference; the first rung usable on this machine wins. Rungs: \"built_in\" (Kokoro) \
     and \"system\" (macOS `say`). Default [\"built_in\", \"system\"] (Kokoro, falling back to the \

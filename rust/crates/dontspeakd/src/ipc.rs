@@ -31,37 +31,17 @@ pub(crate) fn spawn_ipc_server(
             match req {
                 ds_ipc::Request::Ping => emit(&ds_ipc::Response::Pong),
                 ds_ipc::Request::Status => {
-                    let (tts_active, queued, paused, session_voice) = ttsq.snapshot();
+                    let (tts_active, queued, paused) = ttsq.snapshot();
                     emit(&ds_ipc::Response::Status {
                         tts_active,
                         queued,
                         paused,
-                        session_voice,
                     });
-                }
-                ds_ipc::Request::SetSessionVoice {
-                    engine,
-                    voice,
-                    session,
-                } => {
-                    // Unknown engine token degrades to Kokoro; the MCP validates
-                    // the (engine, voice) pair before sending.
-                    let e = if engine.eq_ignore_ascii_case(ds_config::TtsEngine::System.brand()) {
-                        ds_config::TtsEngine::System
-                    } else {
-                        ds_config::TtsEngine::Kokoro
-                    };
-                    ttsq.set_session_voice(session, e, voice);
-                    emit(&ds_ipc::Response::Done);
-                }
-                ds_ipc::Request::ClearSessionVoice { session } => {
-                    ttsq.clear_session_voice(session);
-                    emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::EnsureKokoroVoices => {
                     // Single-flight, non-blocking: kick the voices-npz download only if
                     // absent; `start_download` no-ops when a download is already in flight,
-                    // so a `set_voice` request joins the engine's background download
+                    // so the request joins the engine's background download
                     // instead of racing a second one.
                     let present = ds_model::model_path(ds_model::KOKORO_VOICES_FILE)
                         .is_some_and(|p| p.is_file());
@@ -134,7 +114,7 @@ pub(crate) fn spawn_ipc_server(
                 }
                 ds_ipc::Request::SessionEnd { session } => {
                     // Window closed for good: per-window barge AND forget this session's
-                    // transient voice maps so they don't grow one entry per session forever.
+                    // transient pool-voice assignment so it doesn't grow one entry per session forever.
                     // None (no session id) → global hard barge, nothing session-scoped to forget.
                     match session {
                         None => ttsq.clear(),

@@ -91,8 +91,8 @@ impl SetConfigArgs {
                 );
             }
             // English-only build: Kokoro encodes the language family in the id's leading char
-            // (`a` American + `b` British English). Reject any non-English id so the persistent
-            // pool can't bypass the English-only gate that set_voice/list_voices enforce.
+            // (`a` American + `b` British English). Reject any non-English id here — this is the
+            // gate for the persistent voice pool (`list_voices` only ever surfaces English).
             if let Some(bad) = vs
                 .iter()
                 .find(|s| !matches!(s.as_bytes().first(), Some(b'a') | Some(b'b')))
