@@ -551,43 +551,70 @@ fn call_list_speakers(sock: &Path) -> Result<String, String> {
     }
 }
 
-/// The `listen` tool: record the mic for `seconds` via a live Parakeet recognition
-/// session and return the final transcript. Streams `TestRecognitionStart`, stops it
-/// after the window on a second connection, and drains to the terminal `Transcript`.
+/// Trailing-silence the `listen` tool waits for before it finalizes: once the speaker has
+/// started AND then gone quiet this long, the session is stopped and transcribed. Long
+/// enough that a between-sentence breath doesn't cut a multi-sentence answer short.
+const LISTEN_ENDPOINT_SILENCE: Duration = Duration::from_millis(1500);
+
+/// The `listen` tool: open the mic via a live Parakeet recognition session and return the
+/// final transcript. AUTO-STOPS when the speaker stops talking — so an agent can ask a
+/// question mid-turn and get the spoken answer back without the user pressing a key —
+/// behaving like Caps-Lock dictation rather than a blind fixed window.
+///
+/// End-of-speech is detected from the PARTIAL stream, not raw audio: the engine only emits
+/// a `Partial` when the transcript CHANGES, so partials simply stop arriving once the
+/// speaker pauses. A watchdog (on a second connection, since this one is busy streaming)
+/// sends `TestRecognitionStop` after [`LISTEN_ENDPOINT_SILENCE`] of no new partial — and,
+/// regardless, after the `seconds` hard cap for a user who never stops. This reuses the
+/// existing two-connection stop path; the helper/engine are untouched.
 fn call_dictate(sock: &Path, args: &Value) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
     let a: ListenArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid listen arguments: {e}"))?;
-    let seconds = a.seconds.unwrap_or(10).clamp(1, 60);
+    let max_secs = a.seconds.unwrap_or(30).clamp(1, 60);
 
     let mut client = ds_ipc::connect(sock).map_err(|e| format!("engine unavailable: {e}"))?;
     client
         .send(&Request::TestRecognitionStart)
         .map_err(|e| format!("start dictation: {e}"))?;
 
-    // Stop the session after `seconds` (on a SECOND connection, since this one is busy
-    // streaming) — the engine then runs the final pass and emits Transcript.
-    //
-    // CONC-11: make the timer CANCELLABLE and JOINED so it can neither leak nor fire a
-    // stray TestRecognitionStop after we've already returned. The thread waits on a
-    // channel for up to `seconds`: a normal timeout means "time's up, stop the
-    // session"; a Disconnected (we dropped `cancel_tx` on the way out) means the
-    // dictation already ended (transcript/error/EOF) so it skips the stop and exits.
-    // We always join the handle before returning, so the second connection can't race
-    // a later, unrelated session.
+    // Shared with the watchdog: `spoke` gates the silence rule so LEADING silence (the user
+    // hasn't started) never ends the session early; `quiet_since_ms` is the ms-since-start
+    // stamp of the last transcript change, which the recv loop bumps on every new partial.
+    // (Atomics keep it lock-free; a coarse ms epoch from one `Instant::now()` base is plenty
+    // for a 1.5 s threshold.) The watchdog is CANCELLABLE + JOINED so it can neither leak
+    // nor fire a stray stop onto a later, unrelated session — same contract as the old timer.
+    let base = std::time::Instant::now();
+    let now_ms = move || base.elapsed().as_millis() as u64;
+    let spoke = Arc::new(AtomicBool::new(false));
+    let last_change_ms = Arc::new(AtomicU64::new(0));
     let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
     let sock2 = sock.to_path_buf();
-    let timer = std::thread::spawn(move || {
-        // Timed out → the session is still running; stop it for the final pass.
-        // Cancelled (sender dropped) or signalled → we already finished; do nothing.
-        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-            cancel_rx.recv_timeout(Duration::from_secs(seconds))
-        {
-            let _ = ds_ipc::request(&sock2, &Request::TestRecognitionStop);
+    let (wd_spoke, wd_last) = (spoke.clone(), last_change_ms.clone());
+    let watchdog = std::thread::spawn(move || {
+        let hard_cap = Duration::from_secs(max_secs);
+        loop {
+            // Poll ~10×/s, but exit the instant the recv loop drops `cancel_tx`
+            // (Disconnected) — the dictation already ended, so skip the stop.
+            match cancel_rx.recv_timeout(Duration::from_millis(100)) {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                _ => return, // cancelled/finished
+            }
+            let elapsed = base.elapsed();
+            let went_quiet = wd_spoke.load(Ordering::Relaxed)
+                && elapsed.saturating_sub(Duration::from_millis(wd_last.load(Ordering::Relaxed)))
+                    >= LISTEN_ENDPOINT_SILENCE;
+            if elapsed >= hard_cap || went_quiet {
+                let _ = ds_ipc::request(&sock2, &Request::TestRecognitionStop);
+                return;
+            }
         }
     });
 
-    // Drain the stream to its terminal response, THEN cancel + join the timer so it
-    // never outlives this call (drop runs on every return path of the closure).
+    // Drain the stream to its terminal response, bumping the silence clock on every new,
+    // non-empty partial. THEN cancel + join the watchdog so it never outlives this call.
     let outcome = loop {
         match client.recv() {
             Ok(Response::Transcript { text }) => {
@@ -597,15 +624,24 @@ fn call_dictate(sock: &Path, args: &Value) -> Result<String, String> {
                     text
                 });
             }
+            Ok(Response::Partial { text }) => {
+                // A changed transcript = the speaker is still talking: arm the silence rule
+                // and reset its clock. (The engine only sends a Partial on a real change.)
+                if !text.trim().is_empty() {
+                    spoke.store(true, Ordering::Relaxed);
+                    last_change_ms.store(now_ms(), Ordering::Relaxed);
+                }
+                continue;
+            }
             Ok(Response::Error { message }) => break Err(format!("dictation: {message}")),
-            Ok(_) => continue, // listening / partial — keep reading
+            Ok(_) => continue, // Listening — keep reading
             Err(e) => break Err(format!("dictation stream ended: {e}")),
         }
     };
-    // Cancel the pending timer (drop the sender) and join it so the thread is gone
+    // Cancel the pending watchdog (drop the sender) and join it so the thread is gone
     // before we return — no leak, and no late stop landing on a future session.
     drop(cancel_tx);
-    let _ = timer.join();
+    let _ = watchdog.join();
     outcome
 }
 

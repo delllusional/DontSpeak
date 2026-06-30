@@ -22,8 +22,11 @@ pub const LIST_VOICES: &str = "List TTS voices grouped by language. Returns \
 pub const LIST_VOICES_ENGINE: &str = "Engine whose voices to list: \"built_in\" (Kokoro) or \"system\" (OS). Default: the configured engine.";
 
 // ── listen ───────────────────────────────────────────────────────────────────────────
-pub const LISTEN: &str = "Record the mic and return the transcribed text (local Parakeet STT).";
-pub const LISTEN_SECONDS: &str = "Seconds to record before transcribing (default 10).";
+pub const LISTEN: &str = "Open the mic and return the transcribed text (local Parakeet STT). \
+    Auto-stops when the speaker stops talking, so you can ask a question mid-turn and get the \
+    spoken answer back without the user pressing a key.";
+pub const LISTEN_SECONDS: &str = "Hard upper bound in seconds (default 30). The mic normally \
+    stops on end-of-speech well before this; raise it only for a long expected answer.";
 
 // ── status ───────────────────────────────────────────────────────────────────────────
 pub const STATUS: &str = "Report current state: engine, active voice, default rate, whether speech \
