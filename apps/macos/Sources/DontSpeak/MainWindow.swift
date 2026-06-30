@@ -78,11 +78,14 @@ struct MainWindow: View {
             // slab (behind) and the state-tint strip overlay (in FRONT, full width) still cover the
             // top region, so the strip stays continuous — the sidebar just no longer tucks under it.
             .background { Rectangle().fill(.ultraThinMaterial) }
-            // With the safe area respected, the scroll content already starts below the title bar
-            // (the system reserves the hidden title-bar height). Add only the standard top margin —
-            // the SAME `windowTopInset` the detail uses — so the first row sits one even margin
-            // below the bar, level with the detail's first platter. (No manual `titleBarHeight`.)
-            .contentMargins(.top, Glass.windowTopInset, for: .scrollContent)
+            // Push the first row a small margin below the title-bar bar. `contentMargins(_:for:
+            // .scrollContent)` is a NO-OP on a macOS sidebar List (verified: even +80 moved nothing);
+            // the List DOES honor the safe area (that's how it already clears the title bar), so
+            // extend the top safe area with a clear spacer — it shifts the first row down by exactly
+            // this height. Half the standard inset (8pt) reads level with the detail's first platter.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Color.clear.frame(height: Glass.windowTopInset / 2)
+            }
             // Drop the sidebar-collapse button. It lives in an AppKit toolbar pinned to the
             // title-bar region over the SIDEBAR — that toolbar is what kept the state-tint
             // strip from spanning the full width. With no toolbar, the strip covers the whole
