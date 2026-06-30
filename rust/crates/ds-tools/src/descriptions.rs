@@ -3,122 +3,110 @@
 //! These are the canonical MCP descriptions Claude reads, so they stay clean, concise, and
 //! English; edit them here without touching the catalog wiring. Referenced by name from
 //! `lib.rs`'s `TOOLS`.
+//!
+//! Describe WHAT each tool/setting does, not HOW. No model/runtime/framework names: the
+//! engine behind a setting is per-platform and can change, so the text stays about behavior.
 
 // ── speak ────────────────────────────────────────────────────────────────────────────
-pub const SPEAK: &str = "Speak text aloud via local text-to-speech (Kokoro or the system voice).";
+pub const SPEAK: &str = "Speak text aloud.";
 pub const SPEAK_TEXT: &str = "The text to speak.";
 pub const SPEAK_VOICE: &str = "Voice id (default: the configured voice).";
 pub const SPEAK_RATE: &str = "Speed multiplier 0.5–2.0 (default: from config).";
 
 // ── stop_speak ───────────────────────────────────────────────────────────────────────
-pub const STOP_SPEAK: &str = "Stop any in-progress speech immediately (barge-in).";
+pub const STOP_SPEAK: &str = "Stop any in-progress speech immediately.";
 
 // ── list_voices ──────────────────────────────────────────────────────────────────────
-pub const LIST_VOICES: &str = "List TTS voices grouped by language. Returns \
-    {engine, language, languages:[{language, voices:[{id,label,language_tag,gender,engine,active}]}]}, \
-    where language_tag is the full BCP-47 tag (e.g. \"en-US\"). Optional tts_engine filter; defaults \
-    to the configured engine. This version supports ENGLISH ONLY — only English voices are listed \
-    and selectable, even though the Kokoro pack also contains other-language voices.";
-pub const LIST_VOICES_ENGINE: &str = "Engine whose voices to list: \"built_in\" (Kokoro) or \"system\" (OS). Default: the configured engine.";
+pub const LIST_VOICES: &str = "List available voices, grouped by language (English only in this \
+    build). Optional engine filter; defaults to the configured engine.";
+pub const LIST_VOICES_ENGINE: &str =
+    "Which engine's voices to list: \"built_in\" or \"system\". Default: the configured engine.";
 
 // ── listen ───────────────────────────────────────────────────────────────────────────
-pub const LISTEN: &str = "Open the mic and return the transcribed text (local Parakeet STT). \
-    Auto-stops when the speaker stops talking, so you can ask a question mid-turn and get the \
-    spoken answer back without the user pressing a key.";
-pub const LISTEN_SECONDS: &str = "Hard upper bound in seconds (default 30). The mic normally \
-    stops on end-of-speech well before this; raise it only for a long expected answer.";
+pub const LISTEN: &str = "Open the mic and return the transcribed text. Auto-stops when the \
+    speaker stops talking, so you can ask a question mid-turn and get the spoken answer back \
+    without anyone pressing a key.";
+pub const LISTEN_SECONDS: &str =
+    "Hard upper bound in seconds (default 30); the mic normally stops on end-of-speech first.";
 
 // ── status ───────────────────────────────────────────────────────────────────────────
-pub const STATUS: &str = "Report current state: engine, active voice, default rate, whether speech \
-    is playing (tts_active), queue length, and paused. Pass detail:true \
-    to also include per-engine model lifecycle, the running map, dictation state, and stats.";
-pub const STATUS_DETAIL: &str = "Also include the full engine lifecycle, the running map, dictation state, and stats. Default false.";
+pub const STATUS: &str = "Report current state: engine, active voice, default rate, whether \
+    speech is playing, queue length, and paused. Pass detail:true to also include per-engine \
+    model status, dictation state, and stats.";
+pub const STATUS_DETAIL: &str =
+    "Also include per-engine model status, dictation state, and stats. Default false.";
 
 // ── diarize ──────────────────────────────────────────────────────────────────────────
-pub const DIARIZE: &str = "Record the mic and return speaker diarization (who spoke when): \
-    [{speaker,start,end,name?}] with per-speaker spans in seconds; name is set when a cluster matches \
-    an enrolled voiceprint (see enroll). Requires diarization on (set_config \
-    diarizer_provider=[\"apple_native\"]). macOS-only.";
-pub const DIARIZE_SECONDS: &str = "Seconds to record before diarizing (default 10).";
+pub const DIARIZE: &str = "Record the mic and return who spoke when: per-speaker time spans in \
+    seconds, each labelled with an enrolled name when it matches one (see enroll). Needs \
+    diarization on (set_config diarizer_provider). macOS-only.";
+pub const DIARIZE_SECONDS: &str = "Seconds to record (default 10).";
 
 // ── enroll ───────────────────────────────────────────────────────────────────────────
-pub const ENROLL: &str = "Record the mic and save a speaker voiceprint under name, so future diarize \
-    calls label that person. Re-enrolling the same name replaces it. macOS-only.";
-pub const ENROLL_NAME: &str = "The person's name/label for this voiceprint.";
-pub const ENROLL_SECONDS: &str =
-    "Seconds to record (default 15; longer/varied = a stronger voiceprint).";
+pub const ENROLL: &str = "Record the mic and save a speaker's voiceprint under name, so future \
+    diarize calls label that person. Re-enrolling the same name replaces it. macOS-only.";
+pub const ENROLL_NAME: &str = "Name/label for this voiceprint.";
+pub const ENROLL_SECONDS: &str = "Seconds to record (default 15; longer/varied = stronger).";
 
 // ── forget_speaker ───────────────────────────────────────────────────────────────────
-pub const FORGET_SPEAKER: &str =
-    "Remove an enrolled voiceprint by name (no-op if it isn't enrolled).";
+pub const FORGET_SPEAKER: &str = "Remove an enrolled voiceprint by name (no-op if absent).";
 pub const FORGET_SPEAKER_NAME: &str = "The enrolled name to remove.";
 
 // ── list_speakers ────────────────────────────────────────────────────────────────────
-pub const LIST_SPEAKERS: &str = "List the names of enrolled speaker voiceprints.";
+pub const LIST_SPEAKERS: &str = "List enrolled speaker names.";
 
 // ── set_config ───────────────────────────────────────────────────────────────────────
-pub const SET_CONFIG: &str = "Atomically update DontSpeak's persistent settings (config.toml). All \
-    fields optional; provide at least one. Validated, applied together, then hot-reloaded. To \
-    change the spoken voice, set tts_built_in_voices (Kokoro) or tts_system_voice (system) here — \
-    it applies immediately.";
-pub const SET_CONFIG_TTS_ENGINE: &str = "Spoken-reply engine PREFERENCE LADDER — an array in \
-    descending preference; the first rung usable on this machine wins. Rungs: \"built_in\" (Kokoro) \
-    and \"system\" (macOS `say`). Default [\"built_in\", \"system\"] (Kokoro, falling back to the \
-    system voice where Kokoro can't run, e.g. an Intel mac). [] (or [\"off\"]) = no spoken replies.";
-pub const SET_CONFIG_TTS_VOICES: &str = "Ordered Kokoro voice ids for the BUILT-IN engine (the first is \
-    the default, the rest a per-terminal round-robin pool). English voices only in this version (ids \
-    starting `a`/`b`); other-language ids are rejected. Each is extracted on demand from the local \
-    pack. Built-in only.";
-pub const SET_CONFIG_TTS_SYSTEM_VOICE: &str = "Voice name for the SYSTEM engine (e.g. \"Samantha\"); \
-    empty = OS default. System engine only.";
-pub const SET_CONFIG_TTS_RATE: &str =
-    "Speech rate 0.5–2.0 (1.0 = normal). Applies to both engines.";
-pub const SET_CONFIG_NARRATE: &str = "What to narrate aloud — a set of [\"shorts\", \"digests\"] \
-    (default both). \"digests\": speak the spoken blockquotes Claude writes and inject the narration \
-    spec (gives long replies a spoken digest). \"shorts\": also speak a short, blockquote-free reply on \
-    its own. [] = narrate nothing.";
+pub const SET_CONFIG: &str = "Update persistent settings. All fields optional; provide at least \
+    one. Validated, applied together, then hot-reloaded. To change the voice, set \
+    tts_built_in_voices or tts_system_voice.";
+pub const SET_CONFIG_TTS_ENGINE: &str = "Spoken-reply engine as a preference ladder (first usable \
+    wins): \"built_in\" (on-device) and \"system\" (OS voice). Default [\"built_in\",\"system\"]. \
+    [] or [\"off\"] = no spoken replies.";
+pub const SET_CONFIG_TTS_VOICES: &str = "Ordered voice ids for the built-in engine — first is the \
+    default, the rest a per-terminal pool. English ids only in this build. Built-in only.";
+pub const SET_CONFIG_TTS_SYSTEM_VOICE: &str =
+    "Voice name for the system engine (e.g. \"Samantha\"); empty = OS default. System engine only.";
+pub const SET_CONFIG_TTS_RATE: &str = "Speech rate 0.5–2.0 (1.0 = normal). Both engines.";
+pub const SET_CONFIG_NARRATE: &str = "What to narrate aloud — any of [\"shorts\",\"digests\"] \
+    (default both). \"digests\": speak the spoken digest of long replies. \"shorts\": also speak \
+    short replies in full. [] = nothing.";
 pub const SET_CONFIG_GREET: &str = "Greet each new terminal aloud in its pool voice. Default on.";
-pub const SET_CONFIG_DROP_SPEECH: &str = "Drop a window's pending speech on submit — a set of \
-    \"voice\" (a dictation submit) and \"text\" (you type and press Enter). Default \
-    [\"text\"] (drop only on a typed submit); [] = never. Text needs the UserPromptSubmit hook.";
+pub const SET_CONFIG_DROP_SPEECH: &str = "Drop a window's pending speech on submit — any of \
+    \"voice\" (dictation submit) and \"text\" (typed + Enter). Default [\"text\"]; [] = never. \
+    Text needs the UserPromptSubmit hook.";
 pub const SET_CONFIG_PAUSE_BG: &str =
     "Pause speech while no terminal is frontmost; resume on focus. Default false.";
-pub const SET_CONFIG_EARCON_REPLY: &str = "Reply-done chime (Stop hook): a system-sound name or an \
-    absolute path (.aiff/.wav/.oga); empty = off. Defaults to the OS chime.";
-pub const SET_CONFIG_EARCON_INPUT: &str = "Needs-input cue (Notification hook): a system-sound name or \
-    an absolute path; empty = off (default).";
+pub const SET_CONFIG_EARCON_REPLY: &str =
+    "Reply-done chime: a system-sound name or absolute path; empty = off. Defaults to the OS chime.";
+pub const SET_CONFIG_EARCON_INPUT: &str =
+    "Needs-input cue: a system-sound name or absolute path; empty = off (default).";
 pub const SET_CONFIG_CAPS: &str = "Enable the Caps Lock handler — push-to-talk dictation plus \
     silence/cancel. Default on. With stt_engine=off, Caps still silences the voice.";
-pub const SET_CONFIG_STT_ENGINE: &str = "Dictation engine PREFERENCE LADDER — an array in descending \
-    preference; the first rung usable on this machine wins. Rungs: \"built_in\" (Parakeet), \"system\" \
-    (macOS 26+ on-device SpeechAnalyzer, en-US), \"claude_code\" (delegate to Claude Code's voice \
-    key). Default [\"built_in\", \"system\", \"claude_code\"] — claude_code is always usable and LAST, \
-    so dictation still works where the on-device engines can't run (e.g. an Intel mac). [] (or \
-    [\"off\"]) = dictation off (Caps still silences the voice).";
+pub const SET_CONFIG_STT_ENGINE: &str = "Dictation engine as a preference ladder (first usable \
+    wins): \"built_in\" (on-device), \"system\" (OS recognizer), \"claude_code\" (Claude Code's \
+    voice key). Default [\"built_in\",\"system\",\"claude_code\"]. [] or [\"off\"] = dictation off.";
 pub const SET_CONFIG_CAPTURE_GAIN: &str =
-    "Mic gain before STT: \"auto\" (default) or a fixed 0.5–20.0 multiplier.";
-pub const SET_CONFIG_AUTO_SUBMIT: &str = "Press Return after pasting dictation into the focused app. \
-    Default true; false = insert only, you press Return.";
-pub const SET_CONFIG_PROVIDER: &str = "Ordered compute-backend ladder for Kokoro (TTS) and Parakeet \
-    (STT) (default [\"ane\",\"ort_cuda\",\"ort_cpu\"]): \"ane\" (Apple Neural Engine), \"ort_cuda\" \
-    (NVIDIA GPU, TTS only), \"ort_coreml\" (macOS, TTS only), \"ort_cpu\". First usable rung wins; \
-    unusable rungs are skipped.";
-pub const SET_CONFIG_DIARIZER: &str = "Diarization runtime — the single \"apple_native\" rung (macOS). \
-    Doubles as the switch: [\"apple_native\"] = on, [] = off (default).";
+    "Mic gain before recognition: \"auto\" (default) or a fixed 0.5–20.0 multiplier.";
+pub const SET_CONFIG_AUTO_SUBMIT: &str =
+    "Press Return after pasting dictation. Default true; false = insert only.";
+pub const SET_CONFIG_PROVIDER: &str = "Compute-backend ladder for speech output and recognition \
+    (first usable wins): \"ane\" (on-device accelerator), \"ort_cuda\" (GPU), \"ort_coreml\" \
+    (platform accelerator), \"ort_cpu\" (CPU). Default [\"ane\",\"ort_cuda\",\"ort_cpu\"].";
+pub const SET_CONFIG_DIARIZER: &str =
+    "Diarization runtime + on/off switch: [\"apple_native\"] = on, [] = off (default). macOS.";
 pub const SET_CONFIG_CLUSTERING: &str =
     "Diarization sensitivity 0.5–0.9 (default 0.7); lower splits more speakers apart.";
-pub const SET_CONFIG_SPEAKER_THRESH: &str = "Cosine cutoff 0.0–1.0 (default 0.65) for labelling a \
-    cluster with an enrolled name; higher = stricter.";
-pub const SET_CONFIG_SPEAKER_LOCK: &str = "Transcribe ONLY enrolled speaker(s) — needs diarization on \
-    and ≥1 enrolled voice; other voices are dropped. Parakeet only. Default off.";
-pub const SET_CONFIG_TRAY: &str = "When the menu-bar pill colors and whether it breathes — a set \
-    (default [\"stt\",\"tts_animated\"]): \"stt\"/\"tts\" color it statically, \"stt_animated\"/\
-    \"tts_animated\" also pulse. [] = never color.";
+pub const SET_CONFIG_SPEAKER_THRESH: &str = "Match cutoff 0.0–1.0 (default 0.65) for labelling a \
+    span with an enrolled name; higher = stricter.";
+pub const SET_CONFIG_SPEAKER_LOCK: &str = "Transcribe only enrolled speaker(s) — needs diarization \
+    on and ≥1 enrolled voice; other voices are dropped. Built-in dictation only. Default off.";
+pub const SET_CONFIG_TRAY: &str = "Menu-bar pill: which states color it and whether it pulses — \
+    any of [\"stt\",\"tts\",\"stt_animated\",\"tts_animated\"] (default [\"stt\",\"tts_animated\"]). \
+    [] = never color.";
 
 // ── wire ─────────────────────────────────────────────────────────────────────────────
-pub const WIRE: &str = "Write a config to disk, or register/remove a client integration (the same \
-    setup the installer does, anytime). Targets: \"narration_spec\" (write narration-spec.md), \
-    \"claude_code\" (voice hooks in settings.json), \"claude_desktop\" (the MCP entry), \"codex\" \
-    (narration hooks in config.toml). Additive and backed-up; enabled=false removes only our entry.";
+pub const WIRE: &str = "Write a config file, or register/remove a client integration (the same \
+    setup the installer does, anytime). Targets: \"narration_spec\", \"claude_code\", \
+    \"claude_desktop\", \"codex\". Additive and backed up; enabled=false removes only our entry.";
 pub const WIRE_TARGET: &str = "What to wire: the narration spec, or a client integration.";
-pub const WIRE_ENABLED: &str = "true = register/wire, false = remove.";
+pub const WIRE_ENABLED: &str = "true = register, false = remove.";
