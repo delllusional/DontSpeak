@@ -13,6 +13,7 @@
 import SwiftUI
 import AppKit
 import CDontSpeak
+import DontSpeakLogic
 
 /// Lifecycle state of an engine/model, shown as one right-aligned dot. Color AND
 /// shape both carry the meaning (readable when color-blind):
@@ -325,13 +326,25 @@ private struct CapsLockRow: View {
     @Environment(Core.self) private var core
     @State private var expanded = false
 
+    /// Whether the Microphone permission row is shown (and its grant folded into the header dot):
+    /// only for the STT engines DontSpeak captures audio for. Hidden when dictation is `off` (the
+    /// mic is never opened) or `claude_code` (Claude Code owns its own mic) — see
+    /// `dontSpeakUsesMicrophone`.
+    private var showsMicrophone: Bool {
+        dontSpeakUsesMicrophone(sttEngine: core.selection.sttEngine)
+    }
+
     /// Roll-up grant state of the OS permissions nested below — folded into the header dot via
     /// `capsCombined`. Orange ONLY when a permission is actually DENIED; a not-yet-requested one
     /// (the mic is `.unknown` until first dictation prompts it) is not a problem the user must act
-    /// on, so it must not flag the header. (Input Monitoring is intentionally absent: Accessibility
+    /// on, so it must not flag the header. The mic grant is included ONLY when its row is shown
+    /// (`showsMicrophone`) — for `off`/`claude_code` DontSpeak never opens the mic, so a stale
+    /// denial must not flag this header. (Input Monitoring is intentionally absent: Accessibility
     /// subsumes it, so it never needs a separate grant.)
     private var permsRollup: Grant {
-        [core.perms.accessibility, core.perms.microphone].contains(.denied) ? .denied : .granted
+        var grants = [core.perms.accessibility]
+        if showsMicrophone { grants.append(core.perms.microphone) }
+        return grants.contains(.denied) ? .denied : .granted
     }
 
     /// The header dot's combined state: the live caps loop (running / blocked / idle) folded
@@ -366,9 +379,13 @@ private struct CapsLockRow: View {
                 PlatterDivider()
                 PermRow(name: L.t("status.permission.accessibility"), grant: core.perms.accessibility,
                         purpose: L.t("status.permission.accessibility_purpose"), pane: "Privacy_Accessibility")
-                PlatterDivider()
-                PermRow(name: L.t("status.permission.microphone"), grant: core.perms.microphone,
-                        purpose: L.t("status.permission.microphone_purpose"), pane: "Privacy_Microphone")
+                // Mic row only for engines DontSpeak captures audio for — hidden for `off` (mic
+                // never opened) and `claude_code` (Claude Code owns its own mic).
+                if showsMicrophone {
+                    PlatterDivider()
+                    PermRow(name: L.t("status.permission.microphone"), grant: core.perms.microphone,
+                            purpose: L.t("status.permission.microphone_purpose"), pane: "Privacy_Microphone")
+                }
             }
         }
     }
