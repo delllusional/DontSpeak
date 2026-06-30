@@ -12,7 +12,8 @@
 # Defining either twice is exactly what this file exists to prevent.
 #
 # Provides (all safe to call after sourcing): sed_escape, bak, compute_build_id,
-# find_codesign_id, resolve_sign_identity. Sourcing also normalizes PATH (below).
+# find_codesign_id, resolve_sign_identity, swift_build_resilient. Sourcing also
+# normalizes PATH (below).
 
 # Prepend the usual toolchain dirs (cargo + Homebrew) so cargo/swift/magick resolve the
 # same way under launchd/cron/IDE shells that don't load an interactive login PATH.
@@ -109,4 +110,32 @@ resolve_sign_identity() {
   ensure_local_sign_identity
   local id; id="$(find_codesign_id)"
   printf '%s' "${id:--}"
+}
+
+# swift_build_resilient PKG_DIR SWIFT_BUILD_ARGS… — `swift build ARGS…` in PKG_DIR with
+# ONE self-healing retry for a STALE module cache. SwiftPM bakes the absolute checkout
+# path into the precompiled .pcm files under .build/*/ModuleCache; if that tree was ever
+# built from a DIFFERENT path (a moved/copied checkout, a git worktree, a renamed parent
+# dir, or a sibling like DontSpeak-private) the next build here dies with
+#   "compiled with module cache path '…' but the path is currently '…'".
+# We clear the stale ModuleCache and retry ONLY for that signature, so a healthy build
+# never pays the (full-recompile) clear cost — every OTHER failure passes straight
+# through unchanged. Build output is buffered to a temp log (kept simple + correct under
+# `set -e` / bash 3.2 — no pipefail dependency) then echoed on the function's stdout, so
+# callers route it exactly as they did the bare `swift build` (e.g. append `>&2`).
+swift_build_resilient() {
+  local pkg="$1"; shift
+  local log; log="$(mktemp)"
+  if ( cd "$pkg" && swift build "$@" ) >"$log" 2>&1; then
+    cat "$log"; rm -f "$log"; return 0
+  fi
+  cat "$log"
+  if grep -q "module cache path" "$log"; then
+    echo "   stale Swift module cache — clearing .build ModuleCache and retrying once" >&2
+    rm -f "$log"
+    find "$pkg/.build" -type d -name ModuleCache -prune -exec rm -rf {} + 2>/dev/null || true
+    ( cd "$pkg" && swift build "$@" )
+    return $?
+  fi
+  rm -f "$log"; return 1
 }

@@ -61,7 +61,9 @@ build_smkokoro_dylib() {
     return 0
   fi
   local pkg="$BUNDLE_LIB_DIR/SmKokoro"
-  if ! ( cd "$pkg" && swift build -c release --arch arm64 --product smkokoro >&2 ); then
+  # swift_build_resilient (common.sh) self-heals a stale .build module cache; >&2 keeps the
+  # build chatter off this function's stdout (which returns the dylib path).
+  if ! swift_build_resilient "$pkg" -c release --arch arm64 --product smkokoro >&2; then
     echo "   WARN: libsmkokoro build failed — apple-native TTS unavailable in this build" >&2
     return 0
   fi

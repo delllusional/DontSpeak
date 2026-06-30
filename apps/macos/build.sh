@@ -21,6 +21,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUST_DIR="$(cd "$HERE/../../rust" && pwd)"
 
+# Shared helpers (swift_build_resilient — self-heals a stale .build module cache; also
+# normalizes PATH for cargo/swift). ../../scripts/lib from apps/macos.
+. "$HERE/../../scripts/lib/common.sh"
+
 echo "==> [1/2] Building Rust FFI staticlib (release-ffi profile)…"
 ( cd "$RUST_DIR" && cargo build --profile release-ffi -p ds-core )
 
@@ -37,7 +41,7 @@ echo "==> [2/2] Building the SwiftUI app (swift build -c release)…"
 # ⇒ no relink) and the app silently keeps the OLD engine. Drop the linked binary so
 # swift build always relinks against the freshly-built libds_core.a.
 rm -f "$HERE/.build/release/DontSpeak"
-( cd "$HERE" && swift build -c release )
+swift_build_resilient "$HERE" -c release
 
 APP_BIN="$HERE/.build/release/DontSpeak"
 echo
