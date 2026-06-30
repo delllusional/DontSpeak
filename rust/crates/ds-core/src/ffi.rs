@@ -169,11 +169,28 @@ pub extern "C" fn ds_model_status_wait(since: u64, timeout_ms: u32) -> *mut c_ch
 /// The tool catalog for the app's Tools window — a JSON array of
 /// `{name, description, params:[…]}` with the args as an ORDERED array (the UI form of
 /// the SAME `ds-tools` catalog the MCP server exposes, so it never drifts from what Claude
-/// can call). Owned `char*`, free with `ds_string_free`. HANDLE-FREE — no engine.
+/// can call). Each param is enriched with a localized `detail` qualifier (enum allowed-values
+/// or a numeric range) via [`status_fmt::tool_param_detail`], so every host renders the SAME
+/// pre-built string instead of re-deriving it. Owned `char*`, free with `ds_string_free`.
+/// HANDLE-FREE — no engine.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_tools_json() -> *mut c_char {
     guard_val(to_cstring("[]"), || {
-        to_cstring(ds_tools::catalog_ui().to_string())
+        let mut catalog = ds_tools::catalog_ui();
+        if let Some(tools) = catalog.as_array_mut() {
+            for tool in tools {
+                let Some(params) = tool.get_mut("params").and_then(|p| p.as_array_mut()) else {
+                    continue;
+                };
+                for param in params {
+                    let detail = crate::status_fmt::tool_param_detail(param);
+                    if let Some(obj) = param.as_object_mut() {
+                        obj.insert("detail".into(), serde_json::Value::String(detail));
+                    }
+                }
+            }
+        }
+        to_cstring(catalog.to_string())
     })
 }
 

@@ -150,6 +150,43 @@ pub fn stats_count(count: u64, audio_secs: f64) -> String {
     )
 }
 
+/// Format a JSON number without a trailing ".0" when it's whole (2.0 → "2", 0.7 → "0.7").
+fn num(v: f64) -> String {
+    if v == v.round() {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
+/// The localized CONSTRAINT qualifier for one UI-catalog param: an enum's allowed values
+/// ("one of: a, b, c" via `tools.param.one_of`), else a numeric `minimum`–`maximum` range
+/// ("lo–hi"), else "" when the param carries no constraint. Built from a param object of the
+/// `ds_tools::catalog_ui` shape (`enum`/`minimum`/`maximum` keys). Was hand-duplicated as the
+/// Swift `toToolParam` + C# `ParamDetail` builders (and omitted entirely on Linux); now ONE
+/// mapping every host reads pre-built from `ds_tools_json`.
+pub fn tool_param_detail(param: &serde_json::Value) -> String {
+    if let Some(vals) = param
+        .get("enum")
+        .and_then(|e| e.as_array())
+        .filter(|v| !v.is_empty())
+    {
+        let joined = vals
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return fill("tools.param.one_of", &[("values", &joined)]);
+    }
+    match (
+        param.get("minimum").and_then(|m| m.as_f64()),
+        param.get("maximum").and_then(|m| m.as_f64()),
+    ) {
+        (Some(lo), Some(hi)) => format!("{}–{}", num(lo), num(hi)),
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +249,27 @@ mod tests {
         );
         // Count + audio seconds (rounded).
         assert_eq!(stats_count(12, 45.4), "12  45 s");
+    }
+
+    #[test]
+    fn tool_param_detail_qualifiers() {
+        use serde_json::json;
+        // An enum → localized "one of: …" (authored order preserved).
+        assert_eq!(
+            tool_param_detail(&json!({"enum": ["list", "enroll", "forget"]})),
+            "one of: list, enroll, forget"
+        );
+        // A numeric range → "lo–hi", whole numbers without a trailing ".0".
+        assert_eq!(tool_param_detail(&json!({"minimum": 0.5, "maximum": 0.9})), "0.5–0.9");
+        assert_eq!(tool_param_detail(&json!({"minimum": 1.0, "maximum": 10.0})), "1–10");
+        // Enum wins over a range if both are (somehow) present.
+        assert_eq!(
+            tool_param_detail(&json!({"enum": ["a"], "minimum": 1.0, "maximum": 2.0})),
+            "one of: a"
+        );
+        // No constraint, an empty enum, or a lone bound → no qualifier.
+        assert_eq!(tool_param_detail(&json!({"type": "string"})), "");
+        assert_eq!(tool_param_detail(&json!({"enum": []})), "");
+        assert_eq!(tool_param_detail(&json!({"minimum": 1.0})), "");
     }
 }

@@ -41,30 +41,19 @@ private struct ParamDTO: Decodable {
     let type: String?
     let required: Bool?
     let description: String?
-    let `enum`: [String]?
-    let minimum: Double?
-    let maximum: Double?
+    /// The localized constraint qualifier (enum "one of: …" / numeric "lo–hi" / ""),
+    /// pre-built by the shared `status_fmt::tool_param_detail` — no host-side derivation.
+    let detail: String?
 }
 
-/// Format a JSON number without a trailing ".0" when it's whole (2.0 → "2").
-private func num(_ v: Double) -> String {
-    v == v.rounded() ? String(Int(v)) : String(v)
-}
-
-/// Map one decoded param to its view model, building the `detail` qualifier: an
-/// enum's allowed values ("one of: …"), else a numeric min–max range.
+/// Map one decoded param to its view model. The `detail` qualifier is already built and
+/// localized by the engine (`ds_tools_json`), so the host just carries it through.
 private func toToolParam(_ p: ParamDTO) -> ToolParam {
-    var detail = ""
-    if let e = p.enum, !e.isEmpty {
-        detail = L.t("tools.param.one_of", ["values": e.joined(separator: ", ")])
-    } else if let lo = p.minimum, let hi = p.maximum {
-        detail = "\(num(lo))–\(num(hi))"
-    }
-    return ToolParam(
+    ToolParam(
         name: p.name,
         type: p.type ?? "any",
         required: p.required ?? false,
-        detail: detail,
+        detail: p.detail ?? "",
         description: p.description ?? ""
     )
 }

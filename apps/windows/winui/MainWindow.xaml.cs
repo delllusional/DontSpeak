@@ -649,7 +649,7 @@ public sealed partial class MainWindow : Window
                     var req = new TextBlock { Text = p.Required ? Loc.T("tools.param.required") : Loc.T("tools.param.optional"), FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
                     if (p.Required) req.Foreground = Orange; else req.Opacity = 0.6;   // required pops in the brand caution tint
                     head.Children.Add(req);
-                    var detail = ParamDetail(p);
+                    var detail = p.Detail ?? "";
                     if (detail.Length > 0)
                         head.Children.Add(new TextBlock { Text = detail, FontSize = 12, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center });
 
@@ -789,19 +789,6 @@ public sealed partial class MainWindow : Window
         [property: JsonPropertyName("url")] string? Url,
         [property: JsonPropertyName("size_bytes")] long? SizeBytes);
 
-    /// <summary>A constraint qualifier for a tool param, mirroring the macOS toToolParam:
-    /// an enum becomes "one of: a, b, c"; a numeric min/max becomes "lo–hi". Empty when the
-    /// param carries no constraint. Rendered as its own muted run in the param's header line.</summary>
-    private static string ParamDetail(ToolParamDto p)
-    {
-        if (p.EnumValues is { Count: > 0 } vals)
-            return Loc.T("tools.param.one_of",
-                new Dictionary<string, string> { ["values"] = string.Join(", ", vals) });
-        if (p.Minimum is double lo && p.Maximum is double hi)
-            return $"{lo:0.##}–{hi:0.##}";
-        return "";
-    }
-
     // Typed wire shape of the tools catalog — mirrors the macOS ToolDTO/ParamDTO and the
     // Rust ds-tools `catalog_ui` source of truth (an ordered array of tools, each
     // with an ordered `params` array). Decoded case-insensitively; missing keys default.
@@ -815,7 +802,7 @@ public sealed partial class MainWindow : Window
         [property: JsonPropertyName("type")] string? Type,
         [property: JsonPropertyName("required")] bool Required,
         [property: JsonPropertyName("description")] string? Description,
-        [property: JsonPropertyName("enum")] List<string>? EnumValues,
-        [property: JsonPropertyName("minimum")] double? Minimum,
-        [property: JsonPropertyName("maximum")] double? Maximum);
+        // The localized constraint qualifier (enum "one of: …" / numeric "lo–hi" / ""),
+        // pre-built by the shared status_fmt::tool_param_detail — no host-side derivation.
+        [property: JsonPropertyName("detail")] string? Detail);
 }

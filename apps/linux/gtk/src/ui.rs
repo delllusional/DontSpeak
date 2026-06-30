@@ -548,12 +548,18 @@ fn build_tools_page() -> gtk::Widget {
                     } else {
                         t("tools.param.optional")
                     };
+                    // The localized constraint qualifier (enum "one of: …" / numeric "lo–hi"),
+                    // pre-built by the shared status_fmt::tool_param_detail — same string the
+                    // macOS/Windows hosts show, no Linux-local derivation.
+                    let detail = p["detail"].as_str().unwrap_or("");
                     let pdesc = p["description"].as_str().unwrap_or("");
-                    let sub = if pdesc.is_empty() {
-                        format!("{ptype} · {req}")
-                    } else {
-                        format!("{ptype} · {req} — {pdesc}")
-                    };
+                    let mut sub = format!("{ptype} · {req}");
+                    if !detail.is_empty() {
+                        sub.push_str(&format!(" · {detail}"));
+                    }
+                    if !pdesc.is_empty() {
+                        sub.push_str(&format!(" — {pdesc}"));
+                    }
                     let prow = adw::ActionRow::builder()
                         .title(p["name"].as_str().unwrap_or(""))
                         .subtitle(&sub)

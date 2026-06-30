@@ -31,6 +31,9 @@ ds-tools = { workspace = true }
 # The shared localization catalog, exposed to every platform UI over the C ABI
 # (ds_t / ds_set_locale).
 ds-i18n = { workspace = true }
+# Walk + enrich the UI tool catalog (ds_tools_json) with a localized per-param
+# `detail` qualifier so every host renders it identically.
+serde_json = { workspace = true }
 # The full engine, hosted in-process by a native app via the C ABI
 # (ds_engine_start/stop/reload). Pulls the TTS/STT/platform stack.
 dontspeakd = { workspace = true }
