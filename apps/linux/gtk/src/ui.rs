@@ -89,8 +89,7 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         .title(app_name.as_str())
         .subtitle(version.as_str())
         .build();
-    let engine = status_dot();
-    status_row.add_suffix(&engine);
+    let engine = expander_indicator(&status_row);
 
     // Lifetime totals — "TTS all-time" / "STT all-time" (role + lifetime keys), revealed on expand.
     let tts_life = format!("{} {}", t("status.engine.role_tts"), t("status.stats.lifetime_all_time"));
@@ -108,11 +107,10 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     //    failures), built from the shared `status_fmt` formatters + shared stat snapshots. ────
     let voice_group = adw::PreferencesGroup::new();
 
-    let tts_dot = status_dot();
     let tts_row = adw::ExpanderRow::builder()
         .title(t("status.engine.role_tts").as_str())
         .build();
-    tts_row.add_suffix(&tts_dot);
+    let tts_dot = expander_indicator(&tts_row);
     let tts_runtime = value_label();
     tts_row.add_row(&action_row(&t("status.engine.role_runtime"), &tts_runtime));
     let tts_realtime = value_label();
@@ -127,11 +125,10 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     tts_row.add_row(&tts_failures_row);
     voice_group.add(&tts_row);
 
-    let stt_dot = status_dot();
     let stt_row = adw::ExpanderRow::builder()
         .title(t("status.engine.role_stt").as_str())
         .build();
-    stt_row.add_suffix(&stt_dot);
+    let stt_dot = expander_indicator(&stt_row);
     let stt_runtime = value_label();
     stt_row.add_row(&action_row(&t("status.engine.role_runtime"), &stt_runtime));
     let stt_realtime = value_label();
@@ -156,20 +153,21 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     caps_group.add(&caps_row);
     content.append(&caps_group);
 
-    // ── Three views: Status (this panel) / Tools / Libraries — an AdwViewStack driven by an
+    // ── Four views: Status (this panel) / Tools / Log / Credits — an AdwViewStack driven by an
     //    AdwInlineViewSwitcher (libadwaita 1.7's segmented switcher), the GNOME idiom for a
-    //    handful of top-level pages (HIG: 3–5 views). The switcher sits centered in the header. ─
+    //    handful of top-level pages (HIG: 3–5 views). The switcher sits centered in the header.
+    //    Order matches the macOS + Windows tabs: Log sits before Credits. ─
     let stack = adw::ViewStack::new();
     stack.add_titled(&scrolled(&content), Some("status"), &t("common.nav_status"));
     stack.add_titled(&scrolled(&build_tools_page()), Some("tools"), &t("common.nav_tools"));
+    // Log view — a read-only tail of the unified activity log (mirrors the Windows Log tab).
+    let (log_scroll, log_view) = build_log_page();
+    stack.add_titled(&log_scroll, Some("log"), &t("common.nav_log"));
     stack.add_titled(
         &scrolled(&build_credits_page()),
         Some("credits"),
         &t("common.nav_credits"),
     );
-    // Log view — a read-only tail of the unified activity log (mirrors the Windows Log tab).
-    let (log_scroll, log_view) = build_log_page();
-    stack.add_titled(&log_scroll, Some("log"), &t("common.nav_log"));
     // (Re)load + scroll-to-newest whenever the Log page is selected (no poll), like Windows.
     {
         let lv = log_view.clone();
@@ -433,6 +431,54 @@ fn status_dot() -> gtk::Image {
     dot
 }
 
+/// Hide an `AdwExpanderRow`'s built-in disclosure arrow (the symbolic `expander-row-arrow`
+/// image) by walking the template tree and dropping it from layout with `set_visible(false)` —
+/// unlike CSS `opacity`, this also frees the ~16px slot it reserves, so a trailing suffix sits
+/// flush at the row's edge (keeping the status dots aligned with the non-expander rows).
+fn hide_expander_arrow(row: &adw::ExpanderRow) {
+    fn find_arrow(w: &gtk::Widget) -> Option<gtk::Widget> {
+        if w.has_css_class("expander-row-arrow") {
+            return Some(w.clone());
+        }
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            if let Some(found) = find_arrow(&c) {
+                return Some(found);
+            }
+            child = c.next_sibling();
+        }
+        None
+    }
+    if let Some(arrow) = find_arrow(row.upcast_ref::<gtk::Widget>()) {
+        arrow.set_visible(false);
+    }
+}
+
+/// The right-side indicator for an expandable status row: the shared [`status_dot`] while the
+/// row is collapsed, a chevron once it's expanded (the dot "turns into" the chevron, occupying
+/// the same slot). The row's native expander arrow is hidden, so a bare dot is the only thing
+/// on the right until you open the row. Returns the dot `Image` so the caller can keep
+/// recoloring it with [`set_dot`].
+fn expander_indicator(row: &adw::ExpanderRow) -> gtk::Image {
+    hide_expander_arrow(row);
+    let dot = status_dot();
+    let chevron = gtk::Image::from_icon_name("pan-up-symbolic");
+    chevron.set_pixel_size(12);
+    chevron.set_valign(gtk::Align::Center);
+    let stack = gtk::Stack::new();
+    stack.add_named(&dot, Some("dot"));
+    stack.add_named(&chevron, Some("chevron"));
+    stack.set_visible_child_name("dot");
+    row.add_suffix(&stack);
+    let stack = stack.downgrade();
+    row.connect_expanded_notify(move |r| {
+        if let Some(stack) = stack.upgrade() {
+            stack.set_visible_child_name(if r.is_expanded() { "chevron" } else { "dot" });
+        }
+    });
+    dot
+}
+
 /// Recolor a dot from an `EngineObj.state` lifecycle token (the shared engine→app contract):
 /// running → green (`.success`), warming/downloading/blocked → orange (`.warning`),
 /// failed → red (`.error`), missing/idle/other → gray (`.dim-label`). Mirrors the
@@ -513,8 +559,9 @@ fn build_tools_page() -> gtk::Widget {
 }
 
 /// The Credits page — the shared `ds_libraries_json` catalog (downloaded models +
-/// runtimes), one expander per project (name + usage, license chip), revealing the project /
-/// license links + the files with sizes. Mirrors the Windows Credits tab.
+/// runtimes), one expander per project (name + usage), revealing the project page link, the
+/// license (its name links to the license page), and the files with sizes. Mirrors the Windows
+/// Credits tab.
 fn build_credits_page() -> gtk::Widget {
     let group = adw::PreferencesGroup::builder().build();
     if let Ok(serde_json::Value::Array(projects)) =
@@ -525,15 +572,17 @@ fn build_credits_page() -> gtk::Widget {
                 .title(p["name"].as_str().unwrap_or(""))
                 .subtitle(p["usage"].as_str().unwrap_or(""))
                 .build();
-            let chip = gtk::Label::new(p["license"].as_str());
-            chip.add_css_class("dim-label");
-            chip.set_valign(gtk::Align::Center);
-            row.add_suffix(&chip);
             if let Some(hp) = p["homepage"].as_str().filter(|s| !s.is_empty()) {
                 row.add_row(&link_row(&t("libraries.homepage"), hp));
             }
-            if let Some(lu) = p["license_url"].as_str().filter(|s| !s.is_empty()) {
-                row.add_row(&link_row(&t("libraries.view_license"), lu));
+            // The license is a link row LABELED with the license name itself (e.g. "MIT",
+            // "Apache-2.0"), opening its license page — the same external-link affordance as the
+            // project page row.
+            if let (Some(lic), Some(lu)) = (
+                p["license"].as_str().filter(|s| !s.is_empty()),
+                p["license_url"].as_str().filter(|s| !s.is_empty()),
+            ) {
+                row.add_row(&link_row(lic, lu));
             }
             if let Some(files) = p["files"].as_array() {
                 for f in files {

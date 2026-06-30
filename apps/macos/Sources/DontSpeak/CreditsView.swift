@@ -108,9 +108,9 @@ struct CreditsView: View {
     }
 
     /// One collapsible library: a tappable header (just the name + a rotating chevron — the
-    /// license now rides the "view license" link in the expanded body, so the collapsed row
-    /// stays clean) that reveals what it's for, its links, and the files it fetches — the shared
-    /// `DisclosureRow`, the same disclosure look the Tools pane uses.
+    /// collapsed row stays clean) that reveals what it's for, the project link, the license (its
+    /// name links to the license page), and the files it fetches — the shared `DisclosureRow`,
+    /// the same disclosure look the Tools pane uses.
     @ViewBuilder
     private func libraryRow(_ lib: LibraryInfo) -> some View {
         DisclosureRow(expanded: $expanded, id: lib.name) {
@@ -136,13 +136,11 @@ struct CreditsView: View {
                         Label(L.t("libraries.homepage"), systemImage: "link")
                     }
                 }
-                if !lib.licenseURL.isEmpty, let url = URL(string: lib.licenseURL) {
-                    // The link is LABELED with the actual license (e.g. "MIT", "Apache-2.0"),
-                    // which used to sit as a badge on the collapsed row; falls back to the
-                    // generic "View License" only when the catalog has no license name.
+                // The license LINK is labeled with the license name itself (e.g. "MIT",
+                // "Apache-2.0") and opens its license page.
+                if !lib.license.isEmpty, !lib.licenseURL.isEmpty, let url = URL(string: lib.licenseURL) {
                     Link(destination: url) {
-                        Label(lib.license.isEmpty ? L.t("libraries.view_license") : lib.license,
-                              systemImage: "doc.text")
+                        Label(lib.license, systemImage: "doc.text")
                     }
                 }
             }

@@ -196,9 +196,9 @@
             <!-- ── LIBRARIES ──────────────────────────────────────────────────
                  One Fluent Expander per downloaded project (built in LoadLibraries from the
                  SHARED Rust libraries catalog — ds_libraries_json). Header = project name;
-                 expanding reveals what it's for, links to the project + the license (that link
-                 is labeled with the license name), and the files it fetches. Same "expander
-                 list" look as Tools. -->
+                 expanding reveals what it's for, a link to the project, the license (its name
+                 links to the license page), and the files it fetches. Same "expander list" look
+                 as Tools. -->
             <ScrollViewer x:Name="CreditsScroll" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
                 <StackPanel Spacing="12" HorizontalAlignment="Stretch">
                     <StackPanel x:Name="CreditsList" Spacing="4" />

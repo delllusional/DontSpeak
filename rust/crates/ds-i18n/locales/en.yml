@@ -175,7 +175,6 @@ tools:
 libraries:
   files: Files
   homepage: Project page
-  view_license: View license
 
 # ──────────────────────────────────── LOGS ──────────────────────────────────
 # The Logs tab: a read-only tail of the unified activity log (dontspeak.log), reloaded each time

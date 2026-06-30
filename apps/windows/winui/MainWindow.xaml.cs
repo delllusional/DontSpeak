@@ -678,10 +678,9 @@ public sealed partial class MainWindow : Window
     /// (<c>ds_libraries_json</c> → ds-model's <c>libraries::catalog</c>) — the
     /// downloaded models + runtimes, each with its license, collected from the same registry
     /// every platform fetches from, so the credits can't drift from what ships. One native
-    /// Fluent Expander per project (header = name; expanding reveals what it's for, links to the
-    /// project + the license — that link is labeled with the license name — and the files it
-    /// fetches) — the same
-    /// "expander list" look as the Tools tab.</summary>
+    /// Fluent Expander per project (header = name; expanding reveals what it's for, a link to the
+    /// project, the license (its name links to the license page), and the files it fetches) — the
+    /// same "expander list" look as the Tools tab.</summary>
     private void LoadLibraries()
     {
         string json = Native.LibrariesJson();
@@ -702,18 +701,16 @@ public sealed partial class MainWindow : Window
             if (usage.Length > 0)
                 body.Children.Add(new TextBlock { Text = usage, TextWrapping = TextWrapping.Wrap, Opacity = 0.75 });
 
-            // Project + license links — standard HyperlinkButtons (NavigateUri opens the
-            // default browser on click; no code-behind needed), inline/zero-padding so they
-            // read as links, not buttons.
+            // Project + license links — standard HyperlinkButtons (NavigateUri opens the default
+            // browser on click; no code-behind needed), inline/zero-padding so they read as
+            // links. The license link is LABELED with the license name itself (e.g. "MIT",
+            // "Apache-2.0") and opens its license page.
             var links = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16 };
             if (!string.IsNullOrEmpty(p.Homepage) && Uri.TryCreate(p.Homepage, UriKind.Absolute, out var hp))
                 links.Children.Add(new HyperlinkButton { Content = Loc.T("libraries.homepage"), NavigateUri = hp, Padding = new Thickness(0), MinWidth = 0, MinHeight = 0 });
-            // The license link is LABELED with the actual license (e.g. "MIT", "Apache-2.0"),
-            // which used to sit as a chip on the collapsed header; falls back to the generic
-            // "View License" only when the catalog has no license name.
             var lic = p.License ?? "";
-            if (!string.IsNullOrEmpty(p.LicenseUrl) && Uri.TryCreate(p.LicenseUrl, UriKind.Absolute, out var lu))
-                links.Children.Add(new HyperlinkButton { Content = lic.Length > 0 ? lic : Loc.T("libraries.view_license"), NavigateUri = lu, Padding = new Thickness(0), MinWidth = 0, MinHeight = 0 });
+            if (lic.Length > 0 && !string.IsNullOrEmpty(p.LicenseUrl) && Uri.TryCreate(p.LicenseUrl, UriKind.Absolute, out var lu))
+                links.Children.Add(new HyperlinkButton { Content = lic, NavigateUri = lu, Padding = new Thickness(0), MinWidth = 0, MinHeight = 0 });
             if (links.Children.Count > 0) body.Children.Add(links);
 
             // The files this project downloads (name + size when known).
@@ -751,8 +748,8 @@ public sealed partial class MainWindow : Window
                 }
             }
 
-            // Header: just the project name — the license now rides the "view license" link in
-            // the expanded body, so the collapsed header stays clean.
+            // Header: just the project name — the license name links to its license page in the
+            // expanded body, so the collapsed header stays clean.
             var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
             header.Children.Add(new TextBlock { Text = name, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
 
