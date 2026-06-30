@@ -325,34 +325,36 @@ impl Provider {
     /// macOS: ANE (FluidAudio native) or CPU. Windows: CUDA (Parakeet GPU EP) or CPU.
     /// Elsewhere: CPU only. (`OrtCoreMl` is TTS-only — never STT.)
     pub(crate) fn stt_usable(self) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            matches!(self, Provider::Ane | Provider::OrtCpu)
-        }
-        #[cfg(target_os = "windows")]
-        {
-            matches!(self, Provider::OrtCuda | Provider::OrtCpu)
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            matches!(self, Provider::OrtCpu)
+        self.stt_usable_on(std::env::consts::OS)
+    }
+
+    /// [`stt_usable`](Provider::stt_usable) as a PURE function of the target `os` — the single
+    /// source the resolver and the cross-platform fallback tests both walk (so an `ort_cuda`
+    /// first rung is provably skipped off Windows on a single host). macOS: ANE (FluidAudio
+    /// native) or CPU. Windows: CUDA (Parakeet GPU EP) or CPU. Elsewhere: CPU only. (`OrtCoreMl`
+    /// is TTS-only — never STT.) Provider usability depends only on the OS, not the arch.
+    pub(crate) fn stt_usable_on(self, os: &str) -> bool {
+        match os {
+            "macos" => matches!(self, Provider::Ane | Provider::OrtCpu),
+            "windows" => matches!(self, Provider::OrtCuda | Provider::OrtCpu),
+            _ => matches!(self, Provider::OrtCpu),
         }
     }
 
     /// Whether this rung can serve TTS (Kokoro) on the CURRENT platform. macOS: ANE
     /// (native), the ort CoreML EP, or CPU. Windows: CUDA or CPU. Elsewhere: CPU only.
     pub(crate) fn tts_usable(self) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            matches!(self, Provider::Ane | Provider::OrtCoreMl | Provider::OrtCpu)
-        }
-        #[cfg(target_os = "windows")]
-        {
-            matches!(self, Provider::OrtCuda | Provider::OrtCpu)
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            matches!(self, Provider::OrtCpu)
+        self.tts_usable_on(std::env::consts::OS)
+    }
+
+    /// [`tts_usable`](Provider::tts_usable) as a PURE function of the target `os` — see
+    /// [`stt_usable_on`](Provider::stt_usable_on). macOS: ANE, the ort CoreML EP, or CPU.
+    /// Windows: CUDA or CPU. Elsewhere: CPU only.
+    pub(crate) fn tts_usable_on(self, os: &str) -> bool {
+        match os {
+            "macos" => matches!(self, Provider::Ane | Provider::OrtCoreMl | Provider::OrtCpu),
+            "windows" => matches!(self, Provider::OrtCuda | Provider::OrtCpu),
+            _ => matches!(self, Provider::OrtCpu),
         }
     }
 }
@@ -1031,6 +1033,41 @@ mod tests {
         assert!(!SttEngine::System.stt_usable_on("windows", "x86_64"));
         assert!(!SttEngine::System.stt_usable_on("linux", "aarch64"));
         assert!(!TtsEngine::System.tts_usable_on("linux", "x86_64"));
+    }
+
+    #[test]
+    fn provider_ladder_falls_back_per_platform() {
+        // A cuda-FIRST ladder (`["ort_cuda", "ort_cpu"]`): CUDA leads, with `ort_cpu` as the
+        // universal fallback. CUDA is a real rung ONLY on Windows; everywhere else the resolver
+        // must SKIP it and land on the next usable rung — proving an `ort_cuda` first item
+        // degrades gracefully instead of dead-ending. This is the cross-platform analogue of
+        // the live `model_status` check (which showed `ort_cpu` on macOS).
+        let ladder = [Provider::OrtCuda, Provider::OrtCpu];
+        let resolve_tts = |os: &str| ladder.iter().copied().find(|p| p.tts_usable_on(os));
+        let resolve_stt = |os: &str| ladder.iter().copied().find(|p| p.stt_usable_on(os));
+        // Windows: CUDA is usable → it WINS (no fallback).
+        assert_eq!(resolve_tts("windows"), Some(Provider::OrtCuda));
+        assert_eq!(resolve_stt("windows"), Some(Provider::OrtCuda));
+        // macOS + Linux: CUDA is NOT usable → fall back to the next rung, `ort_cpu`.
+        for os in ["macos", "linux"] {
+            assert_eq!(resolve_tts(os), Some(Provider::OrtCpu), "tts {os}");
+            assert_eq!(resolve_stt(os), Some(Provider::OrtCpu), "stt {os}");
+        }
+        // A lone `["ort_cuda"]` ladder dead-ends off Windows — the RESOLVER (`resolved_*_provider`)
+        // is what supplies the `OrtCpu` default there; the raw `find` returns None, confirming
+        // CUDA itself is genuinely unusable (not silently treated as usable).
+        let cuda_only = [Provider::OrtCuda];
+        assert_eq!(
+            cuda_only.iter().copied().find(|p| p.tts_usable_on("macos")),
+            None
+        );
+        // Host agreement: the cfg-gated host fns must match the pure `_on` for THIS os, so the
+        // two never drift (the live engine walks the host fns).
+        let os = std::env::consts::OS;
+        for p in Provider::ALL.iter().copied() {
+            assert_eq!(p.stt_usable(), p.stt_usable_on(os), "stt {p:?}");
+            assert_eq!(p.tts_usable(), p.tts_usable_on(os), "tts {p:?}");
+        }
     }
 
     #[test]

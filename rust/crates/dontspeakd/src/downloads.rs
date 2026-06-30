@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ds_config::VoiceConfig;
+use ds_config::{Paths, VoiceConfig};
 
 use crate::config_gate::apple_native_shim_available;
 use crate::logging::log;
@@ -19,8 +19,53 @@ pub(crate) struct DownloadState {
     pub done: u64,
     pub total: u64,
     pub last_error: Option<(String, String)>,
+    /// Warm-child reload hook, wired ONCE at boot via [`set_reload_hook`]: the warm-child
+    /// owner plus the config paths. On a SUCCESSFUL download, [`start_download`] restarts the
+    /// warm child iff it hosts the freshly-downloaded model (see [`download_needs_child_reload`])
+    /// — the shared, cross-platform self-heal so a provider switch or a fresh install loads the
+    /// new model WITHOUT a manual restart. Both `None` in tests / before boot wires them.
+    pub warm: Option<Arc<TtsManager>>,
+    pub paths: Option<Paths>,
 }
 pub(crate) type DownloadProg = Arc<Mutex<DownloadState>>;
+
+/// Wire the warm-child reload hook (call ONCE at boot, after the warm-child owner exists).
+/// Lets [`start_download`] restart the child to load a model that finished downloading after
+/// the child was already started (a provider switch / fresh install) — the SHARED self-heal
+/// used on every platform and by every download caller. See [`download_needs_child_reload`].
+pub(crate) fn set_reload_hook(dl: &DownloadProg, warm: Arc<TtsManager>, paths: Paths) {
+    let mut s = dl.lock().unwrap();
+    s.warm = Some(warm);
+    s.paths = Some(paths);
+}
+
+/// Map a completed download `target` to whether the WARM CHILD hosts a model it produced —
+/// the pure core of [`download_needs_child_reload`], split out so it is unit-testable on ANY
+/// host without building a platform-resolved `VoiceConfig`. The warm child hosts Kokoro TTS
+/// and/or Parakeet STT; a `cuda` runtime fetch means whichever of those runs must restart to
+/// bind the GPU execution provider. `diarization` (a separate Core ML path) and unknown
+/// targets never touch the warm child.
+fn target_hosts_engine(target: &str, kokoro: bool, parakeet: bool) -> bool {
+    match target {
+        "kokoro" | "kokoro_voices" => kokoro,
+        "parakeet" => parakeet,
+        "all" | "cuda" => kokoro || parakeet,
+        _ => false,
+    }
+}
+
+/// Whether a just-COMPLETED download of `target` requires restarting the warm child so it
+/// loads the freshly-arrived model(s). SHARED across platforms: the platform/provider
+/// differences are already folded into `cfg.resolved_tts()` / `resolved_stt()`, so this
+/// decision is identical everywhere — the only per-platform variance lives in those resolvers
+/// (covered by their own tests). See [`target_hosts_engine`] for the pure mapping.
+pub(crate) fn download_needs_child_reload(target: &str, cfg: &VoiceConfig) -> bool {
+    target_hosts_engine(
+        target,
+        cfg.resolved_tts() == Some(ds_config::TtsEngine::Kokoro),
+        cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn),
+    )
+}
 
 /// Kick off a background download for `which` ("kokoro"|"parakeet"|"all") unless
 /// one is already running. Returns immediately; progress is observed via
@@ -44,6 +89,11 @@ pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
     let dl = dl.clone();
     let which = which.to_string();
     std::thread::spawn(move || {
+        // Grab the warm-child reload hook up front (wired once at boot); used after the fetch.
+        let (warm, paths) = {
+            let s = dl.lock().unwrap();
+            (s.warm.clone(), s.paths.clone())
+        };
         let prog = |done: u64, total: u64| {
             let mut s = dl.lock().unwrap();
             s.done = done;
@@ -55,6 +105,27 @@ pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
             // but not the 310 MB ONNX model. Requested by `EnsureKokoroVoices`.
             "kokoro_voices" => ds_model::run_setup_kokoro_voices_with_progress(&prog).map(|_| ()),
             "parakeet" => ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ()),
+            // Shared GPU runtime (~1.4 GB) for the ONNX CUDA EP — drives BOTH engines. Folded
+            // in here (not a bespoke thread in `apply_tts_provider`) so the completion hook
+            // below restarts the warm child onto the GPU UNIFORMLY, exactly like a model fetch.
+            "cuda" => {
+                #[cfg(all(
+                    any(target_os = "windows", target_os = "linux"),
+                    target_arch = "x86_64"
+                ))]
+                {
+                    ds_model::ensure_cuda_runtime_with_progress(&prog).map(|_| ())
+                }
+                #[cfg(not(all(
+                    any(target_os = "windows", target_os = "linux"),
+                    target_arch = "x86_64"
+                )))]
+                {
+                    Err(std::io::Error::other(
+                        "cuda runtime is x86_64 windows/linux only",
+                    ))
+                }
+            }
             // Diarization Core ML models — we fetch them OURSELVES (real %) into the dir the
             // shim loads from offline, like Kokoro/Parakeet. macOS-only (ANE shim).
             "diarization" => {
@@ -75,11 +146,28 @@ pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
                 ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ())
             }
         })();
-        let mut s = dl.lock().unwrap();
-        s.active_target = String::new();
-        if let Err(e) = result {
-            log(&format!("WARN: model download ({which}) failed: {e}"));
-            s.last_error = Some((which, e.to_string()));
+        {
+            let mut s = dl.lock().unwrap();
+            s.active_target = String::new();
+            if let Err(e) = &result {
+                log(&format!("WARN: model download ({which}) failed: {e}"));
+                s.last_error = Some((which.clone(), e.to_string()));
+            }
+        }
+        // SHARED self-heal (every platform, every caller): the warm child may have been started
+        // BEFORE this model existed (a provider switch or a fresh install), so it couldn't load
+        // it. Now that the fetch succeeded, restart the child so it picks the model up — no
+        // manual restart needed. No-op when the child is stopped or the target isn't one it
+        // hosts (`download_needs_child_reload`). Config is read LIVE so a mid-download config
+        // change is honored.
+        if result.is_ok()
+            && let (Some(tts), Some(paths)) = (warm, paths)
+            && download_needs_child_reload(&which, &VoiceConfig::load(&paths))
+            && tts.reload_models()
+        {
+            log(&format!(
+                "warm child restarted to load freshly-downloaded '{which}'"
+            ));
         }
     });
 }
@@ -172,48 +260,18 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
 /// only when the runtime is already present and never pulls the large download silently.
 pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg, which: &str) {
     tts.set_provider(which);
+    // Explicitly choosing CUDA while the GPU runtime is absent kicks off a one-time background
+    // fetch via the SHARED `start_download` (target "cuda"); its completion hook then restarts
+    // the warm child onto the GPU once the runtime lands — the SAME path a missing-model
+    // download takes, so there is no bespoke per-platform restart here. `start_download`
+    // single-flights, so a switch while a fetch is already running is a no-op. Platform-gated
+    // because the CUDA runtime only exists on x86_64 Windows/Linux.
     #[cfg(all(
         any(target_os = "windows", target_os = "linux"),
         target_arch = "x86_64"
     ))]
     if which.eq_ignore_ascii_case("ort_cuda") && !ds_model::cuda_runtime_present() {
-        {
-            let mut s = downloads.lock().unwrap();
-            if !s.active_target.is_empty() {
-                return; // a download is already in flight
-            }
-            s.active_target = "cuda".to_string();
-            s.done = 0;
-            s.total = 0;
-            s.last_error = None;
-        }
-        let tts = tts.clone();
-        let dl = downloads.clone();
-        // Restart on the SAME preference token once the runtime lands, so it resolves to
-        // CUDA (resolve_provider matches `ort_cuda`/`auto`, not a bare `cuda`).
-        let pref = which.to_string();
-        std::thread::spawn(move || {
-            let prog = |done: u64, total: u64| {
-                let mut s = dl.lock().unwrap();
-                s.done = done;
-                s.total = total;
-            };
-            let r = ds_model::ensure_cuda_runtime_with_progress(&prog);
-            {
-                let mut s = dl.lock().unwrap();
-                s.active_target = String::new();
-                if let Err(e) = &r {
-                    log(&format!("WARN: cuda runtime download failed: {e}"));
-                    s.last_error = Some(("cuda".to_string(), e.to_string()));
-                }
-            }
-            if r.is_ok() {
-                log("cuda runtime ready — restarting warm child on GPU");
-                // Restart so BOTH engines come up on the GPU (the child reloads Kokoro and
-                // Parakeet, picking up DONTSPEAK_PROVIDER + DONTSPEAK_STT_PROVIDER fresh).
-                tts.set_provider(&pref); // now resolves to CUDA → restart on GPU
-            }
-        });
+        start_download(downloads, "cuda");
     }
     #[cfg(not(all(
         any(target_os = "windows", target_os = "linux"),
@@ -224,7 +282,40 @@ pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg
 
 #[cfg(test)]
 mod tests {
-    use super::{ane_needs_voices_npz, pick_download};
+    use super::{ane_needs_voices_npz, pick_download, target_hosts_engine};
+
+    #[test]
+    fn target_hosts_engine_maps_downloads_to_warm_child() {
+        // The SHARED, platform-agnostic restart decision: given which engines the warm child
+        // resolves to host (kokoro / parakeet booleans — the per-platform part lives in
+        // `resolved_tts`/`resolved_stt`, tested separately), a completed download target maps
+        // to "must restart the child" iff the child hosts a model that target produced.
+
+        // Kokoro targets (full ONNX model + the voices-only pack) restart iff Kokoro TTS runs.
+        assert!(target_hosts_engine("kokoro", true, false));
+        assert!(target_hosts_engine("kokoro_voices", true, false));
+        assert!(!target_hosts_engine("kokoro", false, true));
+        assert!(!target_hosts_engine("kokoro_voices", false, false));
+
+        // The Parakeet ONNX target restarts iff the built-in (Parakeet) STT runs.
+        assert!(target_hosts_engine("parakeet", false, true));
+        assert!(!target_hosts_engine("parakeet", true, false));
+
+        // The combined model fetch AND the shared CUDA runtime restart iff EITHER engine runs —
+        // both engines share the warm child and the compute provider.
+        for t in ["all", "cuda"] {
+            assert!(target_hosts_engine(t, true, false), "{t} (tts only)");
+            assert!(target_hosts_engine(t, false, true), "{t} (stt only)");
+            assert!(target_hosts_engine(t, true, true), "{t} (both)");
+            assert!(!target_hosts_engine(t, false, false), "{t} (neither)");
+        }
+
+        // Diarization is a SEPARATE Core ML path (not the warm child); unknown/empty targets
+        // never trigger a restart even when both engines run.
+        for t in ["diarization", "", "bogus"] {
+            assert!(!target_hosts_engine(t, true, true), "{t}");
+        }
+    }
 
     #[test]
     fn ane_path_still_needs_the_voices_npz() {

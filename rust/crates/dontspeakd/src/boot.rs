@@ -15,7 +15,7 @@ use crate::config_gate::{
     helper_stt_provider, helper_uses_stt, normalize_long_press, reconcile_helper_models,
     reload_watermark, should_reload_on_mtime,
 };
-use crate::downloads::{DownloadState, apply_tts_provider, auto_download_missing};
+use crate::downloads::{DownloadState, apply_tts_provider, auto_download_missing, set_reload_hook};
 use crate::engine::{Engine, PasteBuf, PasteState};
 use crate::ipc::spawn_ipc_server;
 use crate::listener;
@@ -257,6 +257,10 @@ pub fn engine_run(
     // Apply the persisted execution-provider preference before the warm child
     // starts; on Windows "ort_cuda" downloads the GPU runtime (background) then restarts
     // BOTH engines onto the GPU (the shared `provider` drives Kokoro TTS + Parakeet STT).
+    // Wire the warm-child reload hook BEFORE any download can start, so a model fetched here
+    // (or on a later reload / IPC request) restarts the child to load it — the shared
+    // self-heal that makes a provider switch / fresh install converge without a manual restart.
+    set_reload_hook(&downloads, tts.clone(), paths.clone());
     apply_tts_provider(&tts, &downloads, cfg.tts_provider_token());
     reconcile_helper_models(&tts, &cfg);
     // Full-auto: fetch any missing model for an enabled engine right away (no manual

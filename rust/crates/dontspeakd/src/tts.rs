@@ -394,6 +394,22 @@ impl TtsManager {
         self.stt_stats.reset();
     }
 
+    /// Restart the warm child to pick up models that finished downloading AFTER it started —
+    /// the self-heal a background fetch calls on success (see
+    /// [`crate::downloads::start_download`]). Distinct from [`set_provider`](Self::set_provider)
+    /// and [`restart_if_full_duplex_stale`](Self::restart_if_full_duplex_stale), which restart
+    /// only on a provider/mode CHANGE: here the provider is UNCHANGED but the model files just
+    /// appeared (a provider switch or fresh install started the child before they existed), so
+    /// we restart unconditionally — gated only on the child running (else the next start loads
+    /// whatever is present). Returns whether a restart happened.
+    pub(crate) fn reload_models(&self) -> bool {
+        if !self.is_running() {
+            return false; // stopped → the next start loads whatever is now present
+        }
+        self.restart_child();
+        true
+    }
+
     /// Set whether the warm child should run in full-duplex AEC mode (the engine
     /// passes `full_duplex && Parakeet STT`, see `full_duplex_wanted`). Stores the preference only; the
     /// next (re)start uses it. Pair with [`restart_if_full_duplex_stale`](Self::restart_if_full_duplex_stale)
