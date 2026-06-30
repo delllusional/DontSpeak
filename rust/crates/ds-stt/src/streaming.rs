@@ -120,7 +120,7 @@ impl StreamingModel {
             .map(|o| o.name().to_string())
             .collect();
 
-        let tokens_path = dir.join("tokens.txt");
+        let tokens_path = dir.join(ds_model::PARAKEET_TOKENS_FILE);
         let tokens = parse_tokens(
             &std::fs::read_to_string(&tokens_path)
                 .map_err(|e| format!("read {}: {e}", tokens_path.display()))?,
