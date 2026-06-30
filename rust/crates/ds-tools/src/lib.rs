@@ -71,8 +71,8 @@ const fn p(name: &'static str, ty: PType, required: bool, description: &'static 
 /// from, and the exact order the Tools window shows. Ordered so related tools sit
 /// together: spoken output (speak · stop_speak · list_voices), then voice
 /// input (listen), then runtime state (status), then speaker diarization (diarize ·
-/// enroll · forget_speaker · list_speakers), then config (set_config) and the setup
-/// tool that writes config / wires clients (wire).
+/// speakers — the voiceprint library it labels with), then config (set_config) and the
+/// setup tool that writes config / wires clients (wire).
 static TOOLS: &[Tool] = &[
     // Spoken output: say something, then the voice it's said in.
     Tool {
@@ -125,25 +125,21 @@ static TOOLS: &[Tool] = &[
         params: &[p("seconds", PType::Int(1, 60), false, DIARIZE_SECONDS)],
         min_one: false,
     },
+    // Manage the enrolled-voiceprint library that diarize uses to put names to speakers:
+    // one action-dispatched tool (list / enroll / forget) instead of three.
     Tool {
-        name: "enroll",
-        description: ENROLL,
+        name: "speakers",
+        description: SPEAKERS,
         params: &[
-            p("name", PType::Str, true, ENROLL_NAME),
-            p("seconds", PType::Int(1, 60), false, ENROLL_SECONDS),
+            p(
+                "action",
+                PType::Enum(&["list", "enroll", "forget"]),
+                true,
+                SPEAKERS_ACTION,
+            ),
+            p("name", PType::Str, false, SPEAKERS_NAME),
+            p("seconds", PType::Int(1, 60), false, SPEAKERS_SECONDS),
         ],
-        min_one: false,
-    },
-    Tool {
-        name: "forget_speaker",
-        description: FORGET_SPEAKER,
-        params: &[p("name", PType::Str, true, FORGET_SPEAKER_NAME)],
-        min_one: false,
-    },
-    Tool {
-        name: "list_speakers",
-        description: LIST_SPEAKERS,
-        params: &[],
         min_one: false,
     },
     // Persistent settings, then one-time client wiring.
@@ -415,7 +411,7 @@ mod tests {
     fn catalog_is_a_nonempty_array_of_named_tools() {
         let c = catalog();
         let arr = c.as_array().expect("catalog is a JSON array");
-        assert_eq!(arr.len(), 11, "expected 11 tools");
+        assert_eq!(arr.len(), 9, "expected 9 tools");
         for t in arr {
             assert!(
                 t.get("name").and_then(|v| v.as_str()).is_some(),
@@ -439,7 +435,7 @@ mod tests {
     fn catalog_ui_params_are_ordered() {
         let ui = catalog_ui();
         let arr = ui.as_array().expect("ui catalog is an array");
-        assert_eq!(arr.len(), 11, "same 11 tools as the MCP catalog");
+        assert_eq!(arr.len(), 9, "same 9 tools as the MCP catalog");
 
         let speak = arr
             .iter()

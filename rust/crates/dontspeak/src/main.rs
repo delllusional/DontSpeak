@@ -12,8 +12,7 @@
 //!
 //! Tools (the authoritative catalog — names, schemas, descriptions — lives in
 //! `ds_tools::catalog()`; this is just an orientation): speak, stop_speak,
-//! listen, status, list_voices, diarize, enroll, forget_speaker, list_speakers,
-//! set_config, wire.
+//! listen, status, list_voices, diarize, speakers, set_config, wire.
 //!
 //! `list_voices` is config-DIRECT: it reads DontSpeak's own settings file
 //! (`our config.toml`) to mark the active voice, so it needs no engine

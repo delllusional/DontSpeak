@@ -51,8 +51,7 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
             None => Err("cannot resolve ~/.claude paths".into()),
         },
         // Stateful actions bridge to the resident engine.
-        "speak" | "stop_speak" | "listen" | "diarize" | "enroll" | "forget_speaker"
-        | "list_speakers" => {
+        "speak" | "stop_speak" | "listen" | "diarize" | "speakers" => {
             let Some(sock) = sock else {
                 return ok(
                     id,
@@ -65,9 +64,7 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
                 "speak" => call_speak(sock, &args),
                 "stop_speak" => call_stop(sock),
                 "diarize" => call_diarize(sock, &args),
-                "enroll" => call_enroll(sock, &args),
-                "forget_speaker" => call_forget_speaker(sock, &args),
-                "list_speakers" => call_list_speakers(sock),
+                "speakers" => call_speakers(sock, &args),
                 _ => call_dictate(sock, &args),
             }
         }
@@ -119,15 +116,10 @@ struct DiarizeArgs {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct EnrollArgs {
+struct SpeakersArgs {
+    action: Option<String>,
     name: Option<String>,
     seconds: Option<u64>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct ForgetSpeakerArgs {
-    name: Option<String>,
 }
 
 fn call_list_voices(paths: &Paths, args: &Value) -> Result<String, String> {
@@ -495,16 +487,37 @@ fn call_diarize(sock: &Path, args: &Value) -> Result<String, String> {
     }
 }
 
+/// The `speakers` tool: manage the enrolled-voiceprint library `diarize` labels with.
+/// `action` selects the operation; `name` is required for enroll/forget. Each branch is a
+/// thin bridge to the same engine requests the three former tools used (Enroll /
+/// ForgetSpeaker / ListSpeakers) — the protocol is unchanged.
+fn call_speakers(sock: &Path, args: &Value) -> Result<String, String> {
+    let a: SpeakersArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid speakers arguments: {e}"))?;
+    // Schema can't express "name required only for enroll/forget", so validate per action
+    // here (same approach as set_config's cross-field checks).
+    let need_name = || -> Result<String, String> {
+        let name = a.name.clone().unwrap_or_default().trim().to_string();
+        if name.is_empty() {
+            Err("speakers: `name` is required for this action".into())
+        } else {
+            Ok(name)
+        }
+    };
+    match a.action.as_deref().unwrap_or("").trim() {
+        "list" => list_speakers(sock),
+        "enroll" => enroll_speaker(sock, need_name()?, a.seconds.unwrap_or(15).clamp(1, 60)),
+        "forget" => forget_speaker(sock, need_name()?),
+        "" => Err("speakers: `action` is required (list | enroll | forget)".into()),
+        other => Err(format!(
+            "speakers: unknown action `{other}` (use list | enroll | forget)"
+        )),
+    }
+}
+
 /// Enroll a voiceprint: record `seconds`, extract an embedding, persist it under `name`.
 /// Blocks for the record window (≤60s, within the IPC read timeout).
-fn call_enroll(sock: &Path, args: &Value) -> Result<String, String> {
-    let a: EnrollArgs = serde_json::from_value(args.clone())
-        .map_err(|e| format!("invalid enroll arguments: {e}"))?;
-    let name = a.name.unwrap_or_default().trim().to_string();
-    if name.is_empty() {
-        return Err("enroll: `name` is required".into());
-    }
-    let seconds = a.seconds.unwrap_or(15).clamp(1, 60);
+fn enroll_speaker(sock: &Path, name: String, seconds: u64) -> Result<String, String> {
     match ds_ipc::request(sock, &Request::Enroll { name, seconds }) {
         Ok(Response::Enrolled { name }) => Ok(format!("Enrolled voiceprint for \"{name}\".")),
         Ok(Response::Error { message }) => Err(format!("enroll failed: {message}")),
@@ -514,29 +527,23 @@ fn call_enroll(sock: &Path, args: &Value) -> Result<String, String> {
 }
 
 /// Remove an enrolled voiceprint by name (no-op if absent).
-fn call_forget_speaker(sock: &Path, args: &Value) -> Result<String, String> {
-    let a: ForgetSpeakerArgs = serde_json::from_value(args.clone())
-        .map_err(|e| format!("invalid forget_speaker arguments: {e}"))?;
-    let name = a.name.unwrap_or_default().trim().to_string();
-    if name.is_empty() {
-        return Err("forget_speaker: `name` is required".into());
-    }
+fn forget_speaker(sock: &Path, name: String) -> Result<String, String> {
     match ds_ipc::request(sock, &Request::ForgetSpeaker { name: name.clone() }) {
         Ok(Response::Done) => Ok(format!(
             "Removed enrolled voiceprint \"{name}\" (if it existed)."
         )),
-        Ok(Response::Error { message }) => Err(format!("forget_speaker failed: {message}")),
-        Ok(_) => Err("forget_speaker: unexpected response".into()),
+        Ok(Response::Error { message }) => Err(format!("forget failed: {message}")),
+        Ok(_) => Err("forget: unexpected response".into()),
         Err(e) => Err(format!("engine unavailable: {e}")),
     }
 }
 
 /// List enrolled speaker names.
-fn call_list_speakers(sock: &Path) -> Result<String, String> {
+fn list_speakers(sock: &Path) -> Result<String, String> {
     match ds_ipc::request(sock, &Request::ListSpeakers) {
         Ok(Response::Speakers { names }) => {
             if names.is_empty() {
-                Ok("No speakers enrolled. Use `enroll` to add one.".into())
+                Ok("No speakers enrolled. Use action=enroll to add one.".into())
             } else {
                 Ok(format!(
                     "Enrolled speakers ({}): {}",
@@ -545,8 +552,8 @@ fn call_list_speakers(sock: &Path) -> Result<String, String> {
                 ))
             }
         }
-        Ok(Response::Error { message }) => Err(format!("list_speakers failed: {message}")),
-        Ok(_) => Err("list_speakers: unexpected response".into()),
+        Ok(Response::Error { message }) => Err(format!("list failed: {message}")),
+        Ok(_) => Err("list: unexpected response".into()),
         Err(e) => Err(format!("engine unavailable: {e}")),
     }
 }
@@ -767,17 +774,11 @@ mod drift {
             serde_json::to_value(DiarizeArgs { seconds: Some(10) }).unwrap(),
         );
         assert_tool_matches(
-            "enroll",
-            serde_json::to_value(EnrollArgs {
+            "speakers",
+            serde_json::to_value(SpeakersArgs {
+                action: Some("enroll".into()),
                 name: Some("Alex".into()),
                 seconds: Some(15),
-            })
-            .unwrap(),
-        );
-        assert_tool_matches(
-            "forget_speaker",
-            serde_json::to_value(ForgetSpeakerArgs {
-                name: Some("Alex".into()),
             })
             .unwrap(),
         );

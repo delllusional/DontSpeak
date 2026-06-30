@@ -42,18 +42,14 @@ pub const DIARIZE: &str = "Record the mic and return who spoke when: per-speaker
     diarization on (set_config diarizer_provider). macOS-only.";
 pub const DIARIZE_SECONDS: &str = "Seconds to record (default 10).";
 
-// ── enroll ───────────────────────────────────────────────────────────────────────────
-pub const ENROLL: &str = "Record the mic and save a speaker's voiceprint under name, so future \
-    diarize calls label that person. Re-enrolling the same name replaces it. macOS-only.";
-pub const ENROLL_NAME: &str = "Name/label for this voiceprint.";
-pub const ENROLL_SECONDS: &str = "Seconds to record (default 15; longer/varied = stronger).";
-
-// ── forget_speaker ───────────────────────────────────────────────────────────────────
-pub const FORGET_SPEAKER: &str = "Remove an enrolled voiceprint by name (no-op if absent).";
-pub const FORGET_SPEAKER_NAME: &str = "The enrolled name to remove.";
-
-// ── list_speakers ────────────────────────────────────────────────────────────────────
-pub const LIST_SPEAKERS: &str = "List enrolled speaker names.";
+// ── speakers ─────────────────────────────────────────────────────────────────────────
+pub const SPEAKERS: &str = "Manage the enrolled voiceprints diarize uses to put names to \
+    speakers. action=list shows enrolled names; action=enroll records the mic and learns name \
+    (re-enrolling replaces it); action=forget removes name. macOS-only.";
+pub const SPEAKERS_ACTION: &str = "What to do: \"list\", \"enroll\", or \"forget\".";
+pub const SPEAKERS_NAME: &str = "Speaker name — required for enroll and forget.";
+pub const SPEAKERS_SECONDS: &str =
+    "Seconds to record for enroll (default 15; longer/varied = stronger). Ignored otherwise.";
 
 // ── set_config ───────────────────────────────────────────────────────────────────────
 pub const SET_CONFIG: &str = "Update persistent settings. All fields optional; provide at least \
