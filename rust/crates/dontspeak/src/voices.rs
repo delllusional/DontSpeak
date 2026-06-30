@@ -63,7 +63,7 @@ pub(crate) fn voice_groups(engine: TtsEngine, language: &str) -> Vec<(String, Ve
 /// guidance when the voice isn't found in the chosen/any engine.
 pub(crate) fn resolve_voice_engine(
     voice: &str,
-    explicit: Option<&str>,
+    explicit: Option<TtsEngine>,
 ) -> Result<(TtsEngine, String), String> {
     let kokoro_hit = enumerate::kokoro_voice_ids().iter().any(|id| id == voice);
     let sys = enumerate::system_voices();
@@ -73,10 +73,10 @@ pub(crate) fn resolve_voice_engine(
         .cloned();
 
     match explicit {
-        Some(e) if e.eq_ignore_ascii_case("kokoro") => kokoro_hit
+        Some(TtsEngine::Kokoro) => kokoro_hit
             .then(|| (TtsEngine::Kokoro, enumerate::kokoro_display_name(voice)))
             .ok_or_else(|| format!("`{voice}` is not a known Kokoro voice — see list_voices with tts_engine=built_in.")),
-        Some(e) if e.eq_ignore_ascii_case("system") => sys_hit
+        Some(TtsEngine::System) => sys_hit
             .map(|v| (TtsEngine::System, v.name))
             .ok_or_else(|| format!("`{voice}` is not an available System voice — see list_voices with tts_engine=system.")),
         _ => {

@@ -472,7 +472,7 @@ pub(crate) fn model_status_json(
         // engine is selected (parakeet vs system) without inferring it from the dots.
         stt_engine: resolved_stt
             .map(|e| e.as_str())
-            .unwrap_or("off")
+            .unwrap_or(ds_config::SttEngine::Off.as_str())
             .to_string(),
         // The ACTUAL STT runtime for the built_in (Parakeet) engine — "ane" (FluidAudio
         // Core ML / ANE — the neural engine), "ort_cuda" (ort, NVIDIA GPU) or "ort_cpu" (ort,
@@ -491,7 +491,7 @@ pub(crate) fn model_status_json(
         // TTS row adapts the same way the STT row does (built_in → Kokoro, system → System).
         tts_engine: resolved_tts
             .map(|e| e.as_str())
-            .unwrap_or("off")
+            .unwrap_or(ds_config::TtsEngine::Off.as_str())
             .to_string(),
         // The ACTUAL TTS runtime the warm Kokoro child is on, as a config-style TOKEN
         // (`ane`/`ort_coreml`/`ort_cuda`/`ort_cpu`) so it matches `stt_provider`'s vocabulary
@@ -630,8 +630,8 @@ fn stt_provider_token(
     match resolved_stt {
         Some(SttEngine::BuiltIn) => Some(
             match resolved_provider {
-                Provider::Ane if !shim_ok => "ort_cpu",
-                Provider::OrtCuda if !cuda_present => "ort_cpu",
+                Provider::Ane if !shim_ok => Provider::OrtCpu.as_str(),
+                Provider::OrtCuda if !cuda_present => Provider::OrtCpu.as_str(),
                 other => other.as_str(),
             }
             .to_string(),
@@ -648,14 +648,14 @@ fn tts_provider_token(
     resolved_tts: Option<ds_config::TtsEngine>,
     child_provider: &str,
 ) -> Option<String> {
-    use ds_config::TtsEngine;
+    use ds_config::{Provider, TtsEngine};
     match resolved_tts {
         Some(TtsEngine::Kokoro) => Some(
             match child_provider {
-                "CoreML-ANE" => "ane",
-                "CoreML" => "ort_coreml",
-                "CUDA" => "ort_cuda",
-                _ => "ort_cpu",
+                "CoreML-ANE" => Provider::Ane.as_str(),
+                "CoreML" => Provider::OrtCoreMl.as_str(),
+                "CUDA" => Provider::OrtCuda.as_str(),
+                _ => Provider::OrtCpu.as_str(),
             }
             .to_string(),
         ),

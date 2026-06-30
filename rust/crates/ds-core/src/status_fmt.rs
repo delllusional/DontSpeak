@@ -112,12 +112,17 @@ pub fn duration_live(secs: f64) -> String {
 /// anything else passes through verbatim. The engine-runtime detail shown under the
 /// TTS/STT rows — was hand-duplicated in the Swift + C# hosts; now ONE mapping for all three.
 pub fn runtime_label(provider: &str) -> String {
-    let key = match provider {
-        "ane" => "status.engine.coreml_ane",
-        "ort_coreml" => "status.engine.coreml",
-        "ort_cuda" => "status.engine.cuda",
-        "ort_cpu" => "status.engine.cpu",
-        other => return other.to_string(),
+    use ds_config::Provider;
+    let key = if provider == Provider::Ane.as_str() {
+        "status.engine.coreml_ane"
+    } else if provider == Provider::OrtCoreMl.as_str() {
+        "status.engine.coreml"
+    } else if provider == Provider::OrtCuda.as_str() {
+        "status.engine.cuda"
+    } else if provider == Provider::OrtCpu.as_str() {
+        "status.engine.cpu"
+    } else {
+        return provider.to_string();
     };
     ds_i18n::t(key)
 }

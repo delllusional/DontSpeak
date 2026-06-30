@@ -46,7 +46,7 @@ pub(crate) fn spawn_ipc_server(
                 } => {
                     // Unknown engine token degrades to Kokoro; the MCP validates
                     // the (engine, voice) pair before sending.
-                    let e = if engine.eq_ignore_ascii_case("system") {
+                    let e = if engine.eq_ignore_ascii_case(ds_config::TtsEngine::System.brand()) {
                         ds_config::TtsEngine::System
                     } else {
                         ds_config::TtsEngine::Kokoro

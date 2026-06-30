@@ -492,7 +492,7 @@ fn call_set_voice(sock: &Path, args: &Value) -> Result<String, String> {
     }
     // The typed `tts_engine` (already validated to kokoro|system) becomes the engine
     // hint resolve_voice_engine takes; None → infer from whichever engine has the voice.
-    let explicit = a.tts_engine.map(|e| e.brand());
+    let explicit = a.tts_engine;
     let npz_present = ds_tts::ane_voices::voices_npz_present();
     let (engine, label) = match resolve_voice_engine(&voice, explicit) {
         Ok(v) => v,
@@ -501,7 +501,7 @@ fn call_set_voice(sock: &Path, args: &Value) -> Result<String, String> {
             // the 6 offline fallback ids, so a real Kokoro-shaped voice (af_nicole) looks
             // "unknown". Accept it optimistically — the download is kicked below and it
             // self-applies once ready. A wrong-shaped id still fails fast.
-            let wants_kokoro = explicit.is_none_or(|e| e.eq_ignore_ascii_case("kokoro"));
+            let wants_kokoro = explicit.is_none_or(|e| e == TtsEngine::Kokoro);
             let kokoro_shaped = ds_tts::enumerate::kokoro_gender(&voice).is_some();
             if wants_kokoro && kokoro_shaped && !npz_present {
                 (
