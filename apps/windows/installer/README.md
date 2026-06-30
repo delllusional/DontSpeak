@@ -43,19 +43,21 @@ Prereqs (one-time on the build machine):
   (`winget install -e --id JRSoftware.InnoSetup`).
 
 ```powershell
-pwsh windows/installer/build.ps1
-# → windows/installer/Output/dontspeak-setup.exe
+pwsh apps/windows/installer/build.ps1
+# → apps/windows/installer/Output/dontspeak-setup.exe
 ```
 
 `build.ps1` does: `cargo build --release` (core + helper + mcp) → `dotnet publish`
 the WinUI app framework-dependent (the `StripUnusedWindowsAI` csproj target trims the
-unused Windows-ML DLLs) → stage the payload → `ISCC dontspeak.iss`.
+unused Windows-ML DLLs) → stage the payload → `ISCC dontspeak.iss`. `build-portable.ps1`
+produces the portable `.zip` instead (both share `build-common.ps1`).
 
 The `payload/` and `Output/` folders are build artifacts (git-ignored).
 
-The modern wizard's branded **Welcome** page uses committed BMPs (`wizard-large*.bmp`,
-`wizard-small*.bmp`, two sizes each for high-DPI). Regenerate with
-`python windows/installer/gen_wizard_images.py` (needs **ImageMagick** on PATH): it
+The modern wizard's branded **Welcome** page uses committed images: BMP for the large
+panel (`wizard-large.bmp`, `wizard-large-2x.bmp`) and PNG for the small header
+(`wizard-small.png`, `wizard-small-2x.png`), two sizes each for high-DPI. Regenerate with
+`python apps/windows/installer/gen_wizard_images.py` (needs **ImageMagick** on PATH): it
 rasterizes the **real** app glyph from `apps/macos/AppIcon.icon/Assets/Foreground.svg` and
 reads the gradient straight from `assets/icon.svg`, so the images can't drift from the
 app icon. The intro text is in the `.iss` `[Messages]` `WelcomeLabel1/2`.

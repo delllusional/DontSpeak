@@ -39,42 +39,17 @@ nothing. The engine **restarts the warm helper when that resolved mode changes**
 the Parakeet path, and with the flag unset the rodio/cpal half-duplex path is
 byte-identical to today.
 
-## 2. Current state (what we change)
+## 2. Current state
 
-Strict half-duplex gating, already in place:
-
-- `rust/crates/dontspeakd/src/listener.rs` — `Listener::tick(tts_busy)` calls
-  `gate_off()`, which **drops the cpal `Capture`** (`self.capture.take()`,
-  ~`:130`) when TTS is busy. `tts_busy` is computed in
-  `rust/crates/dontspeakd/src/lib.rs` (~`:662`) from `ttsq.is_busy()`
-  (`ttsq.rs:227`).
-- `rust/crates/dontspeakd/src/ttsq.rs` — the inverse gate: the worker (~`:268`)
-  checks `ds_platform::mic_active()` and holds/drops narration (up to
-  `MIC_WAIT_MAX`) while the mic is live.
-- `rust/crates/dontspeakd/src/lib.rs` (~`:234`) — `spawn_mic_barge_watcher`
-  bargges on the **idle→active edge** of `mic_active()`.
-
-Audio paths (all separate today):
-
-- **Capture (STT):** `rust/crates/ds-stt/src/parakeet.rs` — `Capture` opens
-  **cpal** `default_input_device()` at the device-native rate/format, downmixes
-  to mono f32 by channel-averaging, accumulates; `resample_to_16k()` (rubato,
-  builds a **fresh** resampler per call, `:292/:299`) on stop → Parakeet.
-  `Capture` is `!Send` (cpal stream) so it's created/consumed on one thread.
-- **Playback (TTS):** `rust/crates/ds-tts/src/play.rs` — **macOS one-shot:
-  `afplay` subprocess** ; **non-macOS: `rodio`**. Kokoro synth emits **24 kHz
-  mono f32** (`rust/crates/ds-tts/src/vocab.rs` `SAMPLE_RATE = 24_000`).
-- **The warm path** the engine actually uses:
-  `rust/crates/ds-tts/src/bin/ds_helper/serve.rs` `serve()` — **one process, one
-  thread**: a persistent **rodio** sink for TTS (even on macOS — afplay is only
-  the one-shot fallback), and STT via `run_listen()` opening a cpal `Capture`.
-  TTS and STT are **mutually exclusive** there: one `Job` (Speak | Listen | …) at
-  a time, and the loop **blocks** in `player.sleep_until_end()` (~`:583`) during
-  TTS.
-
-The core problem for AEC: **capture and playback go through different libraries
-on different clocks** (and the macOS one-shot path is even a different process).
-A userspace canceller would have to time-align them itself. We avoid that by
+Strict half-duplex gating is the baseline AEC layers on top of: `listener.rs`
+`Listener::tick(tts_busy)` drops the cpal `Capture` while TTS is busy; `ttsq.rs`'s worker
+checks `ds_platform::mic_active()` and holds narration while the mic is live;
+`lib.rs::spawn_mic_barge_watcher` barges on the idle→active edge of `mic_active()`. Capture
+(cpal `default_input_device()` → mono f32 → rubato resample to 16k → Parakeet) and playback
+(Kokoro 24 kHz mono → rodio sink, or macOS `afplay` one-shot fallback) go through
+**different libraries on different clocks**, and the warm helper (`ds_helper/serve.rs`)
+runs them **mutually exclusive** (one `Job` at a time, blocking in `sleep_until_end()`).
+That cross-clock split is exactly what makes a userspace canceller hard — we avoid it by
 using the OS where it owns both streams.
 
 ## 3. The one constraint that dictates the design
@@ -103,231 +78,65 @@ Note the asymmetry: **Windows & Linux are capture-side only and don't touch the
 TTS path.** **macOS is the crux** because native VPIO must own *both* streams in
 one AudioUnit, replacing both afplay/rodio and the cpal capture.
 
-## 5. macOS design (implemented first)
+## 5. macOS design
 
-### 5.1 New crate `ds-aec`
+### 5.1 Crate `ds-aec`
 
-A small crate owning the platform duplex-audio primitive. Public surface
-(platform-agnostic; macOS impl first, a stub elsewhere returning "unsupported"):
+A small crate owning the platform duplex-audio primitive. The macOS impl wraps a single
+`coreaudio::audio_unit::AudioUnit` of `IOType::VoiceProcessingIO` exposing a `DuplexAudio`
+type: `open()`, `capture_rate()`, `render_push(pcm_24k)` (far-end reference, non-blocking
+into a lock-free render ring), `capture_drain()` (echo-cancelled mono f32 since last call),
+`render_pending()`, `render_clear()`. The render/input callbacks run on the CoreAudio
+**realtime thread**, so each direction uses a lock-free SPSC ring (`ringbuf::HeapRb`) — no
+`Mutex` on the audio path — and the 24k↔unit↔16k streaming resamplers run on the **helper**
+thread, never in the callbacks. VPIO is opinionated (forces mono, ~48 kHz): read back the
+negotiated `sample_rate()` rather than assuming it. Open VPIO only when full-duplex is
+wanted (it changes channels/gain/ducking session-wide); on split devices (e.g. AirPods mic
+→ MacBook speakers) detect the aggregate mismatch and fall back to half-duplex. Per the
+macOS-26 CoreAudio teardown abort, keep the `!Send` `AudioUnit` on the helper's playback
+thread and `_exit` on quit rather than dropping it.
 
-```rust
-// rust/crates/ds-aec/src/lib.rs
-pub struct DuplexAudio { /* platform impl */ }
+### 5.3 The `mic_active()` hazard (rationale)
 
-impl DuplexAudio {
-    /// Open the echo-cancelled duplex unit (mic capture + speaker render).
-    pub fn open() -> Result<Self, String>;
-    /// The unit's negotiated capture sample rate (VPIO picks it; ~48 kHz).
-    pub fn capture_rate(&self) -> u32;
-    /// Push TTS PCM to be rendered — the *far-end reference* the AEC subtracts
-    /// from capture. Caller supplies 24 kHz mono f32; the impl resamples to the
-    /// unit rate with a LONG-LIVED streaming resampler. Non-blocking (writes to
-    /// the lock-free render ring).
-    pub fn render_push(&self, pcm_24k: &[f32]);
-    /// Drain echo-cancelled mono f32 captured since last call (at `capture_rate()`),
-    /// like `Capture::drain_new`. Feed through a long-lived 16 kHz resampler.
-    pub fn capture_drain(&self) -> Vec<f32>;
-    /// Whether the render ring still has unplayed samples (is TTS still sounding).
-    pub fn render_pending(&self) -> bool;
-    /// Drop queued render audio immediately (barge-in / stop).
-    pub fn render_clear(&self);
-}
-```
+`ds_platform::mic_active()` (macOS = CoreAudio
+`kAudioDevicePropertyDeviceIsRunningSomewhere`) reads **true whenever any input stream is
+live**. With an always-on VPIO unit it is **true for the helper's entire lifetime**, which
+breaks BOTH `mic_active()`-keyed gates:
 
-The macOS impl wraps a single **`coreaudio::audio_unit::AudioUnit`** of
-`IOType::VoiceProcessingIO` (`coreaudio-rs 0.14.2`, pinned in `ds-aec/Cargo.toml`):
-
-- Construct `AudioUnit::new_uninitialized(IOType::VoiceProcessingIO)`.
-- `set_property(kAudioOutputUnitProperty_EnableIO, …)` on the **input** element
-  (`Scope::Input`, `Element::Input` = bus 1) = 1 and the **output** element
-  (`Scope::Output`, `Element::Output` = bus 0) = 1.
-- `set_property(kAudioUnitProperty_StreamFormat, …)` mono f32 non-interleaved on
-  capture (`Scope::Output, Element::Input`) and render
-  (`Scope::Input, Element::Output`); then `initialize()`. **Read back
-  `sample_rate()`** — VPIO is opinionated and may force its own (treat ~48 kHz as
-  negotiated, not chosen).
-- `set_render_callback` drains the playback ring → speaker.
-- `set_input_callback` copies AEC-cleaned mic frames → capture ring. **M1 must
-  confirm both callbacks coexist on one VPIO unit** (they set different
-  properties in `coreaudio-rs 0.14.2`, but this is the linchpin of the design).
-- `start()`.
-
-**Realtime safety.** The render/input callbacks run on the CoreAudio **realtime
-thread**, not the helper thread. They must NOT take a lock that the helper thread
-can hold → use a **lock-free SPSC ring** (`ringbuf::HeapRb`), one per direction
-(playback: helper produces / RT consumes; capture: RT produces / helper
-consumes). No `Mutex<VecDeque>` on the audio path — that's an RT-safety/priority-
-inversion violation. The resamplers (24k→unit on render, unit→16k on capture) run
-on the **helper** thread, not in the callbacks.
-
-C constants come from **`objc2-audio-toolbox 0.3`** (0.14.x dropped
-`coreaudio::sys`). Cargo (added in M1):
-
-```toml
-coreaudio-rs = "0.14.2"
-objc2-audio-toolbox = { version = "0.3", default-features = false,
-    features = ["std", "AudioOutputUnit", "AudioUnitProperties"] }
-ringbuf = "0.5"
-```
-
-### 5.2 macOS gotchas (budget for these)
-
-- **VPIO forces mono + ~48 kHz**; accept the unit's negotiated format, resample
-  our 24 kHz render up and the capture down to 16 kHz — with **persistent**
-  streaming resamplers (NOT per-call `resample_to_16k`, which allocates a fresh
-  rubato resampler every invocation — fine for one-shot stop today, wrong for a
-  continuous drain loop).
-- **Expected baseline gain drop** when voice processing is on (Apple says so;
-  disabling AGC doesn't fix it). May need a small make-up gain before Parakeet —
-  but note make-up gain also amplifies residual echo (see §5.3 self-barge risk).
-- **Ducking** of other audio (`AUVoiceIOOtherAudioDuckingConfiguration`,
-  macOS 14+) — tune if it ducks too hard.
-- **Split devices** (AirPods mic → MacBook speakers) cause aggregate-device
-  channel mismatches; detect + fall back to half-duplex.
-- **Instantiate VPIO only when full-duplex is wanted** (Mozilla's pattern) — it
-  changes channels/gain/ducking for the whole session.
-- The existing macOS-26 CoreAudio teardown abort (why `play.rs` uses afplay and
-  the helper `_exit`s) applies here too: keep the `AudioUnit` (which is `!Send`,
-  like the cpal stream today) on the helper's playback thread and `_exit` on quit
-  rather than dropping it.
-
-### 5.3 The `mic_active()` hazard (BLOCKER — must be handled)
-
-`ds_platform::mic_active()` (`rust/crates/ds-platform/src/lib.rs` ~`:177`, macOS =
-CoreAudio `kAudioDevicePropertyDeviceIsRunningSomewhere`) reads **true whenever
-any input stream is live**. With an always-on VPIO unit it is **true for the
-helper's entire lifetime**, which breaks BOTH `mic_active()`-keyed gates:
-
-1. **TTS hold-gate** in `ttsq.rs` (~`:268`): permanently-true ⇒ all narration
-   dropped, every reply delayed `MIC_WAIT_MAX` then played anyway — defeating the
-   whole point of full-duplex.
-2. **Mic-barge watcher** in `lib.rs` (~`:234`): the idle→active edge fires once
-   at VPIO open and `prev` sticks true forever ⇒ no further barge, `resume()`
-   never fires.
+1. **TTS hold-gate** in `ttsq.rs`: permanently-true ⇒ all narration dropped, every reply
+   delayed `MIC_WAIT_MAX` then played anyway — defeating the whole point of full-duplex.
+2. **Mic-barge watcher** in `lib.rs`: the idle→active edge fires once at VPIO open and
+   `prev` sticks true forever ⇒ no further barge, `resume()` never fires.
 
 **Therefore: in full-duplex mode, BOTH `mic_active()`-based mechanisms must be
 bypassed.** The TTS worker must not hold on `mic_active()`, and barge must be
 driven instead from the **AEC-cleaned `capture_drain` energy** (the `listen.rs`
 `Endpointer`/`frame_rms`). Likewise `listener.rs::gate_off` must become a no-op
-when AEC is active. This is gated by the `full_duplex` config (§7) so the
+when AEC is active. This is gated by the `full_duplex` config (§8) so the
 half-duplex code paths are untouched when AEC is off.
 
 ### 5.4 Self-barge-from-echo risk
 
-AEC is *suppression*, not perfect cancellation; residual echo remains (worse with
-§5.2 make-up gain). If the barge endpointer is fed the cleaned `capture_drain`
-naively, residual TTS echo can falsely trip the VAD and self-barge the reply.
-Mitigations (required for M3): feed the endpointer from `capture_drain`; require
-energy **sustained for N ms** before barging; calibrate a residual-echo floor
-(raise the VAD threshold while `render_pending()`); confirm via the existing
-stopword/trailing-silence logic in `listen.rs` before acting.
+AEC is *suppression*, not perfect cancellation; residual echo remains (worse with any
+make-up gain). If the barge endpointer is fed the cleaned `capture_drain` naively, residual
+TTS echo can falsely trip the VAD and self-barge the reply. Mitigations: feed the
+endpointer from `capture_drain`; require energy **sustained for N ms** before barging;
+calibrate a residual-echo floor (raise the VAD threshold while `render_pending()`); confirm
+via the existing stopword/trailing-silence logic in `listen.rs` before acting.
 
-### 5.5 Integration into the warm helper (milestoned)
+### 5.5 Coexist (shipped)
 
-`serve()` today is mutually exclusive (one `Job` at a time, blocking in
-`sleep_until_end()`). Full-duplex keeps the VPIO unit **always open and
-capturing** on the helper thread (its callbacks run on the RT thread,
-independent of whatever job the helper loop is in). Rolled out so the primary
-platform never breaks:
+Full-duplex COEXIST is verified on-device — dictate while the voice speaks, no echo bleed.
+The helper runs a `concurrent_listen_loop` thread that drains the echo-cancelled VPIO
+capture and emits `PARTIAL`/`FINAL`/`LDONE` while the playback thread renders TTS; the
+engine (`tts.rs`) demuxes the helper's stdout into a speak slot vs a listen slot so a
+`speak` and a `listen` are in flight at once (a listen ends via `lstop`, never cancelling a
+concurrent reply). The Caps gesture model: idle tap → dictate while voice plays; idle
+long-press → cancel voice + dictate; dictating short-press → submit; dictating long-press →
+discard. The two `mic_active()` gates are bypassed in full-duplex (§5.3, keyed off
+`full_duplex_active()`).
 
-- **M1 — `ds-aec` core + probe (no engine change). ✅ DONE.** Built the crate
-  (`DuplexAudio` over a single VPIO `AudioUnit`, lock-free `ringbuf` rings,
-  streaming `LinearResampler`) + `ds-aec-probe`. On-device run confirmed: VPIO
-  opens at 48 kHz; **both render and input callbacks coexist on one unit and
-  fire** (the linchpin risk — resolved); captured RMS of our own 0.3-amplitude
-  tone is suppressed to ~0.001–0.016 (≈0.0003 room floor when quiet) — ~20–40 dB
-  of echo cancellation. Fully self-contained, no engine wiring.
-- **M2 — drop-in duplex unit, behaviour unchanged. ✅ DONE.** macOS only, behind
-  the `full_duplex` flag: the helper routes the rodio output sink **and** the cpal
-  `Capture` through one `DuplexAudio` when `DONTSPEAK_FULL_DUPLEX` is set. The VPIO
-  captures continuously from `open()`, but the helper **ignores `capture_drain`
-  except during a Listen job**, so user-visible behaviour stays half-duplex while
-  the AEC path runs end to end. The engine (`tts.rs` + `ds-config`) sets the env
-  **only when `full_duplex` AND `stt == parakeet` AND TTS is on (Kokoro)**
-  (`full_duplex_wanted`) and restarts the warm helper
-  when that resolves differently (`set_full_duplex_pref` /
-  `restart_if_full_duplex_stale`), scoping AEC to the Parakeet path; the `claude_code`
-  path is untouched. With the flag unset the rodio+cpal path is byte-identical to before.
-  Builds clean; 39 ds-config + 34 dontspeakd tests pass. Remaining: expose
-  `full_duplex` in the app UI / MCP `set_config`, and on-device verify.
-- **M3 — full-duplex COEXIST (dictate while the voice speaks). ✅ DONE** (verified
-  on-device — dictation captured cleanly with TTS playing, no echo bleed).
-
-  The implicit **voice-barge-from-echo** design (a `BargeDetector` watching the
-  cleaned capture, a `BARGE` protocol line, `take_barged()`/`voice_barge()`) was
-  **dropped** — it was redundant once true coexist landed. Instead the user dictates
-  OVER the reply and explicitly cancels the voice with a Caps long-press. What
-  shipped:
-  - ✅ **Concurrent speak + listen over a stdout demux.** The helper runs a
-    dedicated `concurrent_listen_loop` thread that drains the echo-cancelled VPIO
-    capture and emits `PARTIAL`/`FINAL`/`LDONE` WHILE the playback thread renders
-    TTS (`DONE`). The engine (`tts.rs`) owns a persistent stdout reader that demuxes
-    every line into a speak slot (`DONE`/`STATS`/`ERR`) vs a listen slot
-    (`LDONE`/`PARTIAL`/`FINAL`/`STTSTATS`/`STTERR`), so a `speak` and a `listen` are
-    in flight at once. A listen ends with the `lstop` op (not `stop`), so ending
-    dictation never cancels a concurrent reply.
-  - ✅ **Engine doesn't barge on a dictation tap** in full-duplex (`start_recording`
-    skips `q.clear()`/`barge_in`), so the reply keeps playing while you dictate.
-  - ✅ **Bypass the `mic_active()` gates** in full-duplex (§5.3): the queue worker
-    skips its `mic_active()` reply-hold and `spawn_mic_barge_watcher` stands down
-    (both keyed off `TtsManager::full_duplex_active()`), since the VPIO mic is always
-    live and would otherwise gate/barge spuriously.
-  - ✅ **Caps gesture model (full-duplex):** idle tap → start dictation (voice keeps
-    playing); idle long-press → cancel the voice + dictate; dictating short-press →
-    submit (single press, no confirm tap); dictating long-press → discard (voice
-    keeps playing). The submit is keyed off the steady `!down` state, not the release
-    edge, so a fast tap can't lose it. Pure `long_press_action()` is unit-tested.
-  - ✅ **Menu-bar pill:** recording (orange) overrides speaking (purple) while you
-    dictate, driven by the engine DICTATION state (not the always-on VPIO mic).
-  - ✅ **Dictation panel** appears the moment recording starts (gated on the
-    `dictation.local_stt` flag), showing only the transcript text.
-  - ✅ **Verified on-device:** with TTS rendering through VPIO, a Caps-tap dictation
-    produced clean partials of the user's voice (RMS ~0.08) while the reply played —
-    AEC kept the playback out of the mic (user-confirmed, no bleed).
-
-  Fixed during first live attempt — **render-ring overflow ("choking")**: the VPIO
-  render ring was 2 s, but the helper synthesizes a whole reply up front and Kokoro
-  outpaces real time, so everything past 2 s was dropped → choppy/truncated
-  playback. Enlarged the render ring to 90 s (`RENDER_CAP`; capture ring stays 2 s).
-  Also fixed — **render chopping under load**: ORT's spinning thread-pool starved
-  the VPIO RT render thread; running synth on the CoreML execution provider in
-  full-duplex keeps cores free and the render smooth.
-  Also note: the app narrates Claude's replies via the streaming MessageDisplay
-  pipeline (same Kokoro voice), which collides with a test helper's playback —
-  silence it (`narrate=false`, or `tts_engine=off`, or `stop_speak`) while testing
-  the helper directly.
-
-### 5.6 What changes, by file
-
-- **new** `rust/crates/ds-aec/{Cargo.toml,src/lib.rs,src/macos.rs,src/bin/probe.rs}`
-  — the duplex primitive + probe (M1).
-- `rust/Cargo.toml` — add `coreaudio-rs`, `objc2-audio-toolbox`, `ringbuf` to
-  `[workspace.dependencies]`; add `crates/ds-aec` to `members`.
-- `rust/crates/ds-tts/Cargo.toml` — depend on `ds-aec` (M2).
-- `rust/crates/ds-tts/src/bin/ds_helper/` — macOS: route render + capture
-  through `DuplexAudio` when `DONTSPEAK_FULL_DUPLEX` is set (M2); the concurrent
-  `concurrent_listen_loop` thread drains the echo-cancelled mic while TTS renders,
-  terminating with `LDONE` so the engine can demux it from speak output (M3).
-- `rust/crates/dontspeakd/src/{lib.rs,tts.rs}` — `full_duplex_wanted(cfg)` =
-  `full_duplex && stt==Parakeet && tts_on(Kokoro)` drives `DONTSPEAK_FULL_DUPLEX`
-  on the warm helper in `start()`; `set_full_duplex_pref` +
-  `restart_if_full_duplex_stale` restart a running helper when that resolved mode
-  changes (mirror `set_provider`'s stop+start). This is what scopes AEC to the
-  Parakeet+Kokoro path (M2).
-- `rust/crates/dontspeakd/src/listener.rs` — `gate_off` no-op when AEC active;
-  `rust/crates/dontspeakd/src/lib.rs` + `ttsq.rs` — bypass the two `mic_active()`
-  gates in full-duplex (§5.3) (M3).
-- `rust/crates/ds-config/src/voice.rs` — add the `full_duplex` setting (config
-  was split out of `lib.rs` into `voice.rs`). (a) `#[serde(default)] pub
-  full_duplex: bool` on `VoiceConfig` (~`:198`); (b) the field in `impl Default
-  for VoiceConfig` (~`:395`); (c) no per-field write edit is needed — `merge_settings`
-  / `voice_to_value` (now in `ds-config/src/wire/settings.rs`) serialize the whole
-  typed `VoiceConfig` via its serde derive, so `full_duplex` persists automatically;
-  `changes_since` (~`:433`) likewise has no `full_duplex` entry — the resolved-mode
-  restart (`restart_if_full_duplex_stale`, §5.5) handles a toggle, not a hot-reload.
-  Default **off**.
-
-## 6. Windows design (after macOS)
+## 6. Windows design
 
 Capture-side only; TTS (rodio) untouched.
 

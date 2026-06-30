@@ -73,101 +73,10 @@ rust/
 ```
 
 The macOS GUI is the native SwiftUI app in `../apps/macos/` (not a Rust crate); it links the
-`ds-core` FFI staticlib.
-
-### Crate roles
-
-- **ds-config** — resolves the fixed live locations (the data dir `config.toml`,
-  `speak-hook.pid`, `dontspeak.sock`, the unified `~/Library/Logs/dontspeak.log`) and reads
-  OUR `"dontspeak"` block from `~/.claude/settings.json` (separate from Claude Code's own
-  `voice` block, which DontSpeak never writes — the `claude_code` STT engine only reads
-  it); model assets resolve to the per-OS data dir via `directories` (not bundled). Owns the
-  subsystem selectors (`caps_enabled`, `stt_engine`, `tts_engine`), the `ConfigChange` /
-  `changes_since` diff the engine uses to reload surgically, and the IPC wire form.
-- **ds-ipc** — newline-delimited-JSON RPC over the Unix-domain socket: the
-  `Request`/`Response` protocol, a blocking server (the engine hosts it), and a client (the
-  SwiftUI app via `ds-core`, and the hooks). One JSON request per line; streaming
-  requests (download progress, STT partials) emit several lines then a terminal one. A
-  missing socket means "engine down", and every call is fallible so clients no-op.
-- **ds-proc** — the single-speaker contract: the pidfile holds a process-GROUP id,
-  barge-in is `killpg(-pgid, SIGTERM)` on unix (Windows terminates the job leader); pidfile
-  writes are atomic (tempfile + rename) so a half-written pgid is never read.
-- **ds-platform** — `CapsLockReader`/`KeyInjector`/`FrontmostWindow` traits + per-OS
-  impls. All three are complete real-API backends behind `cfg`, built + tested in CI.
-- **dontspeakd** — the resident **engine** that owns everything model/engine behind the
-  selectors, served over the `ds-ipc` socket: the Caps-Lock loop (30 ms poll that
-  **mirrors the latched Caps-Lock LED** — an OFF→ON edge starts a dictation tap, ON→OFF
-  stops it; the physical key via `IOHIDManager` is used only to detect a long-press reset);
-  the **one warm helper child** it supervises (`ds-helper --serve`, spawned/killed by
-  the `tts_engine` / `stt_engine` selectors) hosting **both** Kokoro TTS and Parakeet STT;
-  test recognition; and model presence + removability. Its `reload()` is **surgical**: it
-  diffs incoming config via `changes_since` and touches only what changed. Accessibility
-  denial is **non-fatal** — the engine runs without AX trust and the caps loop self-gates on
-  `AXIsProcessTrusted()` (re-probed each reload, so granting trust later is picked up without
-  a restart).
-- **dontspeak `notify`** — the **command** hook sink (SessionStart / UserPromptSubmit /
-  SessionEnd / MessageDisplay / Stop / Notification). It reads the hook JSON on stdin, routes
-  on `hook_event_name`, runs the side effect (greet / mark-active / narrate / barge / earcon)
-  via a best-effort socket ping to the warm engine, and replies with nothing. No synthesis
-  here — the engine owns playback; engine down ⇒ no-op (never blocks Claude). The
-  `MessageDisplay` route is the **single narration pipeline**: it accumulates each streamed
-  assistant message per `message_id` and forwards EVERY completed top-level blockquote to the
-  engine's `SpeakNarration` queue — prose, the lines Claude leads each tool step with, and the
-  final reply alike (no separate Stop/PostToolUse path, no final-reply dedup).
-- **dontspeak `provide`** — the lone **query** hook (UserPromptSubmit): re-reads the `narrate`
-  setting each turn and returns the narration spec as `hookSpecificOutput` when on. The only
-  hook Claude Code blocks on.
-- **ds-tts** — the TTS engines + native Kokoro pipeline: `vocab`/`voices`/`trim`,
-  `g2p` (English phonemization via `voice-g2p`, espeak-free), `numbers`/`batch` (text
-  normalization + chunking), `synth` (the `ort` session I/O), `play` (`rodio` streaming), and
-  the `ds-helper` bin. The helper has two modes: a one-shot `ds-helper <text>
-  <voice> <rate>` (the cold fallback for synthesis, own process group) and `ds-helper
-  --serve`, the **warm child** the engine supervises — it loads the model once and speaks a
-  JSON protocol on stdin: `speak`/`stop` for Kokoro TTS **and** `listen`/`lstop` for Parakeet
-  STT (so STT dictation no longer loads a model in the engine itself). `--serve` does not
-  auto-download — it fails if the model is missing.
-- **ds-stt** — the STT engines + Parakeet pieces: `Capture` (mic) + the **streaming
-  cache-aware FastConformer transducer** (`ds-stt::streaming` over the shared `ort`; on macOS
-  the `ane` rung uses FluidAudio's `StreamingAsrManager`, `coreml.rs`). `transcribe-rs` is kept
-  ONLY for its energy VAD now (not inference). Plus the `ClaudeNative` (taps Claude Code's
-  `voice:pushToTalk` key — read from its keybindings.json, default `Space` — to drive CC's own
-  dictation) and `SystemStt` engines. The Parakeet pieces run inside the warm helper
-  (`--serve listen`) for dictation and inside the engine directly for always-listening mode.
-- **ds-aec** — the platform duplex-audio primitive (`DuplexAudio`) for full-duplex
-  coexist (mic open while TTS plays, with acoustic echo cancellation). macOS = a
-  VoiceProcessing I/O AudioUnit (`macos.rs`); Windows = WASAPI Communications-category
-  capture (`windows.rs`); `stub.rs` elsewhere. See `../docs/AEC.md` and
-  `../docs/FULL-DUPLEX-PORT.md`.
-- **ds-engines** — the `make_stt` / `make_tts` factories that build a boxed engine from
-  config. `make_stt` first resolves the `stt_engine` ladder (`cfg.resolved_stt()` — the first
-  usable rung) then maps that single engine: `claude_code` ⇒ `ClaudeNative` (taps
-  Claude Code's dictation key); `built_in` ⇒ `ClaudeNative` in this helper-less factory
-  (degrade-when-no-model path — the engine itself builds `built_in` as `HelperStt` through the
-  warm helper); `off`/`system` ⇒ the inert `SystemStt`. Default `built_in`.
-- **ds-core** — the C ABI (`cdylib`/`staticlib`) the macOS SwiftUI app links. Small and
-  handle-free: engine lifecycle (`ds_engine_start` / `_stop` / `_reload`), read-only
-  probes (`ds_*_present_global`, `ds_engine_running_global`,
-  `ds_model_status_json`, `ds_tools_json`), the i18n FFI (`ds_t` /
-  `ds_t_args` / `ds_set_locale`), and one engine command (`ds_set_provider`)
-  + `ds_set_muted`. There are no voice/engine config setters — that control is in the
-  MCP — and no download command: the engine fetches a missing model for any enabled engine
-  automatically on first activation. Model **download** file IO lives here (worker threads);
-  the engine is the authority on model presence + removability.
-- **ds-model** — downloads + checksum-verifies `kokoro-v1.0.onnx`, `voices-v1.0.bin`,
-  the matching `libonnxruntime` dylib (ONNX Runtime 1.27.0), and the streaming FastConformer
-  Parakeet assets (`encoder.int8.onnx` / `decoder.int8.onnx` / `joiner.int8.onnx` /
-  `tokens.txt`), atomic temp+rename.
-- **ds-tools** — the single source of truth for the **MCP tool catalog**: one
-  `catalog()` returning the `{name, description, inputSchema}` array. The MCP server
-  (`dontspeak` with no args) and the app's Tools view (`ds_tools_json`) both read it, so
-  the list never drifts.
-- **ds-i18n** — the shared UI-string catalog (`locales/en.yml`, embedded via
-  `rust-i18n`) rendered by every platform UI over the FFI. See `../docs/localization.md`.
-- **dontspeak (no args)** — the stdio **MCP server** Claude Code connects to; a client of the
-  engine socket. Exposes the `ds-tools` catalog and dispatches each tool over
-  `ds-ipc` (`speak`/`stop_speak`/`listen`/`status`, `list_voices`/`set_voice` (set or
-  clear the session voice), `set_config` (one atomic setter for the persistent settings),
-  `wire`, and the diarization tools).
+`ds-core` FFI staticlib. For the cross-cutting roles of each crate (engine, hooks,
+FFI surface, pluggable engines) see [../ARCHITECTURE.md](../ARCHITECTURE.md); the tree
+comments above are the quick reference and the rest of this file covers
+workspace-specific build/impl detail.
 
 ## macOS platform impl (`crates/ds-platform/src/macos.rs` + `macos/`)
 
