@@ -22,6 +22,13 @@ pub struct Paths {
     /// `claude_code` STT engine to learn which key `voice:pushToTalk` is bound to. DontSpeak
     /// never writes it.
     pub keybindings_json: PathBuf,
+    /// Claude CODE's user-scope config (`~/.claude.json`) — where `wire-code` adds (or
+    /// removes) the `mcpServers.dontspeak` stdio entry so the `claude` CLI and Claude Code
+    /// sessions spawn our MCP bridge and can call `speak`/`listen`/… as tools. The Claude
+    /// CODE sibling of `wire-desktop` (which targets Desktop's separate config); like it,
+    /// this is MCP registration ONLY — narration is wired separately via `wire-hooks` into
+    /// `settings_json`. (Distinct from `claude_dir`, the `~/.claude` DIRECTORY.)
+    pub claude_code_config: PathBuf,
     /// Side file holding the running `ds-narrate` pid (for `--stop`).
     pub narrate_pid: PathBuf,
     /// Side file holding the running `dontspeakd` engine pid (for the GUI's
@@ -108,6 +115,7 @@ impl Paths {
             log_file: log_path(&base, &state_dir),
             settings_json: claude_dir.join("settings.json"),
             keybindings_json: claude_dir.join("keybindings.json"),
+            claude_code_config: home.join(".claude.json"),
             narrate_pid: state_dir.join("narrate.pid"),
             engine_pid: state_dir.join("dontspeakd.pid"),
             engine_sock: state_dir.join("dontspeak.sock"),
@@ -147,6 +155,7 @@ impl Paths {
             log_file: home.join("dontspeak.log"),
             settings_json: claude_dir.join("settings.json"),
             keybindings_json: claude_dir.join("keybindings.json"),
+            claude_code_config: home.join(".claude.json"),
             narrate_pid: ds_dir.join("narrate.pid"),
             engine_pid: ds_dir.join("dontspeakd.pid"),
             engine_sock: ds_dir.join("dontspeak.sock"),

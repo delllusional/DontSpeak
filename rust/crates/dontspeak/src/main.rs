@@ -44,8 +44,10 @@ mod mcp;
 mod narrate;
 mod tools;
 mod voices;
+mod wire_code;
 mod wire_desktop;
 mod wire_hooks;
+mod wire_mcp;
 
 // Re-exports reached via `crate::` by the hook/installer subcommands.
 pub(crate) use mcp::SERVER_NAME;
@@ -61,6 +63,7 @@ fn main() {
     //                                   event's `hookSpecificOutput` JSON (UserPromptSubmit →
     //                                   the narration spec). The only entry Claude Code waits on.
     //   `dontspeak wire-hooks [...]`   — the cross-platform Claude Code hook installer.
+    //   `dontspeak wire-code [...]`    — register the MCP server in Claude CODE's ~/.claude.json.
     //   `dontspeak wire-desktop [...]` — register the MCP server in Claude DESKTOP's config.
     // With no argv it is the stdio MCP server (the default, spawned by Claude Code / the app).
     // ALL communication is stdio: the MCP tool surface (JSON-RPC over stdio) and the two
@@ -80,6 +83,9 @@ fn main() {
     }
     if argv.get(1).map(String::as_str) == Some("wire-hooks") {
         std::process::exit(wire_hooks::run(&argv[2..]));
+    }
+    if argv.get(1).map(String::as_str) == Some("wire-code") {
+        std::process::exit(wire_code::run(&argv[2..]));
     }
     if argv.get(1).map(String::as_str) == Some("wire-desktop") {
         std::process::exit(wire_desktop::run(&argv[2..]));

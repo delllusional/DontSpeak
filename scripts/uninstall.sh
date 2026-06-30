@@ -39,18 +39,21 @@ pkill -f "DontSpeak.app/Contents/MacOS/DontSpeak" 2>/dev/null || true
 pkill -f "ds-helper" 2>/dev/null || true
 pkill -x dontspeakd 2>/dev/null || true
 
-echo "==> 2. un-wire the Claude Code hooks + Codex + Claude Desktop MCP (before deleting the binary)"
+echo "==> 2. un-wire the Claude Code hooks + Codex + Claude Code/Desktop MCP (before deleting the binary)"
 if [ -x "$INSTALL_DIR/dontspeak" ]; then
-  # wire-hooks --remove strips Claude Code (settings.json) AND Codex (~/.codex/config.toml);
-  # Claude Desktop's mcpServers.dontspeak entry is a SEPARATE config the binary only touches
-  # via wire-desktop, so it MUST be un-wired here too or it dangles at a deleted binary path.
+  # wire-hooks --remove strips Claude Code (settings.json) AND Codex (~/.codex/config.toml).
+  # The mcpServers.dontspeak registrations are SEPARATE configs the binary only touches via
+  # wire-code (~/.claude.json) and wire-desktop (claude_desktop_config.json), so BOTH MUST be
+  # un-wired here too or they dangle at a deleted binary path.
   "$INSTALL_DIR/dontspeak" wire-hooks --remove 2>/dev/null \
     || echo "   (wire-hooks --remove failed or nothing to remove)"
+  "$INSTALL_DIR/dontspeak" wire-code --remove 2>/dev/null \
+    || echo "   (wire-code --remove failed or nothing to remove)"
   "$INSTALL_DIR/dontspeak" wire-desktop --remove 2>/dev/null \
     || echo "   (wire-desktop --remove failed or nothing to remove)"
 else
   echo "   (no $INSTALL_DIR/dontspeak — skipping hook removal; strip mcpServers.dontspeak"
-  echo "    from ~/Library/Application Support/Claude/claude_desktop_config.json by hand)"
+  echo "    from ~/.claude.json and claude_desktop_config.json by hand)"
 fi
 
 echo "==> 3. remove the app bundle + installed engine binaries"

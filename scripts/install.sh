@@ -50,13 +50,23 @@ echo "==> 5. wire Claude Code voice hooks → ~/.claude/settings.json"
 echo "       (also wires OpenAI Codex's narration hooks → ~/.codex/config.toml if ~/.codex exists)"
 "$INSTALL_DIR/dontspeak" wire-hooks
 
-# ==> 6. Register the MCP server with Claude DESKTOP, if it's installed. Desktop has no
+# ==> 6. Register the MCP server with Claude CODE (~/.claude.json), so the agent gets the
+# DontSpeak control tools (set_voice, set_config, speak, listen, …) WITHOUT the user ever
+# running `claude mcp add` by hand. This is the MCP sibling of the hooks above: hooks make
+# Claude Code SPEAK, this lets it CONTROL speech. Additive, backed-up, re-points on reinstall;
+# self-detects and SKIPS quietly if ~/.claude is absent. Preview: wire-code --print-only;
+# undo: wire-code --remove.
+echo
+echo "==> 6. register MCP server with Claude Code → ~/.claude.json"
+"$INSTALL_DIR/dontspeak" wire-code || true
+
+# ==> 7. Register the MCP server with Claude DESKTOP, if it's installed. Desktop has no
 # hook system, so this is registration ONLY — it adds mcpServers.dontspeak to
 # ~/Library/Application Support/Claude/claude_desktop_config.json (additive, backed-up,
 # re-points on reinstall). wire-desktop self-detects and SKIPS quietly if Desktop is
 # absent, so this is safe to always run. Preview: wire-desktop --print-only; undo: --remove.
 echo
-echo "==> 6. register MCP server with Claude Desktop (only if installed)"
+echo "==> 7. register MCP server with Claude Desktop (only if installed)"
 "$INSTALL_DIR/dontspeak" wire-desktop || true
 
 cat <<EOF
@@ -67,6 +77,9 @@ Done. Installed:
     undo any time with: $INSTALL_DIR/dontspeak wire-hooks --remove)
   • ~/.codex/config.toml narration hooks (only if ~/.codex exists; skip with
     'wire-hooks --no-codex', or wire later with 'wire-hooks --codex-only')
+  • Claude Code MCP server (mcpServers.dontspeak in ~/.claude.json; registered via
+    'dontspeak wire-code' — start a NEW Claude Code session to load it; undo with
+    'dontspeak wire-code --remove')
   • Claude Desktop MCP server (only if Desktop is installed; registered via
     'dontspeak wire-desktop' → claude_desktop_config.json — restart Desktop to
     load it; undo with 'dontspeak wire-desktop --remove')
