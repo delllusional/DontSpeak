@@ -16,7 +16,7 @@ A local voice layer for Claude Code, Codex, and Claude Desktop: your agent speak
 - **STT** — a built-in streaming recognizer (NeMo FastConformer 80ms across platforms; Parakeet TDT 0.6b v2 via Core ML on macOS), the macOS system recognizer, or Claude Code's dictation.
 - **Diarization / speaker-lock** — pyannote segmentation + WeSpeaker embeddings, with SepFormer separation.
 
-Each model runs on the fastest backend available, picked by the `provider` ladder (`["ane", "ort_cuda", "ort_cpu"]`):
+Each model runs on the fastest backend available, picked by the `provider` ladder (`["ane", "cuda", "cpu"]`):
 
 | Platform | Backend |
 |---|---|
@@ -26,7 +26,7 @@ Each model runs on the fastest backend available, picked by the `provider` ladde
 
 ## MCP tools
 
-`speak` · `stop_speak` · `listen` · `status` · `list_voices` · `set_config` · `wire` · `diarize` · `speakers`
+`speak` · `stop_speech` · `listen` · `get_status` · `list_voices` · `set_config` · `setup_integration` · `diarize` · `manage_speakers`
 
 ## License
 

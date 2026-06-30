@@ -476,9 +476,9 @@ pub(crate) fn model_status_json(
             .unwrap_or(ds_config::SttEngine::Off.as_str())
             .to_string(),
         // The ACTUAL STT runtime for the built_in (Parakeet) engine — "ane" (FluidAudio
-        // Core ML / ANE — the neural engine), "ort_cuda" (ort, NVIDIA GPU) or "ort_cpu" (ort,
+        // Core ML / ANE — the neural engine), "cuda" (ort, NVIDIA GPU) or "cpu" (ort,
         // CPU). Like the TTS `tts_provider`, this is HONEST about fallback: `ane` degrades to
-        // ort_cpu when the FluidAudio shim is absent, and `ort_cuda` degrades to ort_cpu when the
+        // cpu when the FluidAudio shim is absent, and `cuda` degrades to cpu when the
         // GPU runtime isn't fetched — the SAME checks the loaders use (`for_provider` on
         // SMKOKORO_DYLIB_PATH, the GPU-runtime probe), so engine + helper agree. Null for
         // system/claude_code.
@@ -495,7 +495,7 @@ pub(crate) fn model_status_json(
             .unwrap_or(ds_config::TtsEngine::Off.as_str())
             .to_string(),
         // The ACTUAL TTS runtime the warm Kokoro child is on, as a config-style TOKEN
-        // (`ane`/`ort_coreml`/`ort_cuda`/`ort_cpu`) so it matches `stt_provider`'s vocabulary
+        // (`ane`/`coreml`/`cuda`/`cpu`) so it matches `stt_provider`'s vocabulary
         // AND round-trips with the `tts_provider` setting. Mapped from the live PROVIDER the
         // child reports ("CoreML-ANE"/"CoreML"/"CUDA"/"CPU"). Null for the system (`say`) engine.
         tts_provider: tts_provider_token(resolved_tts, tts.provider().as_str()),
@@ -613,13 +613,13 @@ pub(crate) fn model_status_json(
 }
 
 /// The STT runtime TOKEN the UI shows — the ACTUAL runtime, NOT the naive resolved preference.
-/// `ane` degrades to `ort_cpu` when the FluidAudio shim is absent, and `ort_cuda` degrades to
-/// `ort_cpu` when the GPU runtime isn't fetched — the SAME gates the loaders use (`for_provider`,
+/// `ane` degrades to `cpu` when the FluidAudio shim is absent, and `cuda` degrades to
+/// `cpu` when the GPU runtime isn't fetched — the SAME gates the loaders use (`for_provider`,
 /// the GPU-runtime probe), so the row matches what really loaded. `None` for non-built_in engines
 /// (claude_code/system/off have no local Parakeet runtime). Pure (callers pass the live
 /// `shim_ok`/`cuda_present`) so the "actual, not naive" invariant is unit-tested — see
 /// [`provider_token_tests`]. (NOTE: the streaming runner currently builds CPU-only ort sessions —
-/// int8 dynamic-quant isn't GPU-accelerated — so an `ort_cuda` token reflects the resolved
+/// int8 dynamic-quant isn't GPU-accelerated — so an `cuda` token reflects the resolved
 /// PREFERENCE; STT compute is on CPU regardless until/unless a GPU EP is wired for streaming.)
 fn stt_provider_token(
     resolved_stt: Option<ds_config::SttEngine>,
@@ -707,21 +707,21 @@ mod tests {
 
     #[test]
     fn stt_provider_is_actual_not_naive() {
-        // GUARD against the "UI claims CUDA but runs CPU" trap: ort_cuda DEGRADES to ort_cpu when
+        // GUARD against the "UI claims CUDA but runs CPU" trap: cuda DEGRADES to cpu when
         // the GPU runtime isn't fetched — NOT the naive resolved preference.
         let b = Some(SttEngine::BuiltIn);
         assert_eq!(
             stt_provider_token(b, Provider::OrtCuda, false, false).as_deref(),
-            Some("ort_cpu")
+            Some("cpu")
         );
         assert_eq!(
             stt_provider_token(b, Provider::OrtCuda, false, true).as_deref(),
-            Some("ort_cuda")
+            Some("cuda")
         );
-        // ane degrades to ort_cpu without the FluidAudio shim; ort_cpu is always itself.
+        // ane degrades to cpu without the FluidAudio shim; cpu is always itself.
         assert_eq!(
             stt_provider_token(b, Provider::Ane, false, false).as_deref(),
-            Some("ort_cpu")
+            Some("cpu")
         );
         assert_eq!(
             stt_provider_token(b, Provider::Ane, true, false).as_deref(),
@@ -729,7 +729,7 @@ mod tests {
         );
         assert_eq!(
             stt_provider_token(b, Provider::OrtCpu, true, true).as_deref(),
-            Some("ort_cpu")
+            Some("cpu")
         );
         // No local runtime for the delegate/OS engines or when TTS/STT is off.
         assert_eq!(
@@ -746,8 +746,8 @@ mod tests {
     fn tts_provider_reflects_the_childs_realized_runtime() {
         // The token is what the warm child ACTUALLY loaded, not a preference.
         let k = Some(TtsEngine::Kokoro);
-        assert_eq!(tts_provider_token(k, "CUDA").as_deref(), Some("ort_cuda"));
-        assert_eq!(tts_provider_token(k, "CPU").as_deref(), Some("ort_cpu"));
+        assert_eq!(tts_provider_token(k, "CUDA").as_deref(), Some("cuda"));
+        assert_eq!(tts_provider_token(k, "CPU").as_deref(), Some("cpu"));
         assert_eq!(tts_provider_token(k, "CoreML-ANE").as_deref(), Some("ane"));
         assert_eq!(tts_provider_token(Some(TtsEngine::System), "CUDA"), None);
         assert_eq!(tts_provider_token(None, "CUDA"), None);

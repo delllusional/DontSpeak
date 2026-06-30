@@ -26,7 +26,7 @@ fn load_synth() -> Result<KokoroSynth, String> {
     // CPU-fallback on fail.
     let want_gpu = {
         let pref = std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into());
-        pref.eq_ignore_ascii_case("ort_cuda") || pref.eq_ignore_ascii_case("auto")
+        pref.eq_ignore_ascii_case("cuda") || pref.eq_ignore_ascii_case("auto")
     };
     ds_model::ensure_ort_dylib_gpu(want_gpu)?;
     let model_bytes = std::fs::read(&model_path).map_err(|e| format!("read model: {e}"))?;

@@ -120,7 +120,7 @@ pub fn duration_live(secs: f64) -> String {
     take(sys::ds_duration_live(secs))
 }
 
-/// Localized RUNTIME label for a resolved provider token (ort_cpu/ort_cuda/ort_coreml/ane).
+/// Localized RUNTIME label for a resolved provider token (cpu/cuda/coreml/ane).
 /// The SAME shared formatter the macOS/Windows hosts call — no Linux-local mapping.
 pub fn runtime_label(provider: &str) -> String {
     let c = CString::new(provider).unwrap_or_default();

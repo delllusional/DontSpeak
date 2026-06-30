@@ -245,7 +245,7 @@ pub fn engine_run(
     tts.set_full_duplex_pref(full_duplex_wanted(&cfg));
     tts.set_stt_provider_pref(helper_stt_provider(&cfg));
     // Preload STT in parallel with the TTS load only when STT is the built-in (Parakeet)
-    // engine — `helper_stt_provider` resolves to "ort_cpu" even for Off/ClaudeCode, so it
+    // engine — `helper_stt_provider` resolves to "cpu" even for Off/ClaudeCode, so it
     // can't gate this.
     tts.set_stt_wanted(helper_uses_stt(&cfg));
     // Warm Kokoro only when TTS is on AND Kokoro is the engine (System uses `say`,
@@ -255,7 +255,7 @@ pub fn engine_run(
     // Make the helper's resident models match the selection at boot (preload the
     // selected engine, free the other) so the UI's "loaded" is right from the start.
     // Apply the persisted execution-provider preference before the warm child
-    // starts; on Windows "ort_cuda" downloads the GPU runtime (background) then restarts
+    // starts; on Windows "cuda" downloads the GPU runtime (background) then restarts
     // BOTH engines onto the GPU (the shared `provider` drives Kokoro TTS + Parakeet STT).
     // Wire the warm-child reload hook BEFORE any download can start, so a model fetched here
     // (or on a later reload / IPC request) restarts the child to load it — the shared

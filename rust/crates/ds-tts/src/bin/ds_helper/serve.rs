@@ -244,7 +244,7 @@ pub(crate) fn serve() -> ! {
     // and neither blocks the other. The ONNX bootstrap's `ORT_DYLIB_PATH` write is serialized
     // by a Once in the model layer, so the two parallel loads don't race the env.
     // DONTSPEAK_STT_PROVIDER picks the local backend: "ane" → FluidAudio Core ML / ANE,
-    // "ort_cpu" → portable ONNX Parakeet. Shared (Arc<Mutex>) so the preload thread, the
+    // "cpu" → portable ONNX Parakeet. Shared (Arc<Mutex>) so the preload thread, the
     // full-duplex concurrent-listen thread, and the request loop all reach it.
     let parakeet_dir = ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE)
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))

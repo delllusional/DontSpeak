@@ -178,11 +178,11 @@ what the model **actually loaded on**, NOT the configured preference — do not 
   **realized** EP (CPU fallback included); `status::tts_provider_token` maps that live value.
 - **STT (built-in)** — the streaming FastConformer runner (`ds-stt::streaming` over `ort`, or the
   FluidAudio Core ML rung) doesn't report its realized EP back to the engine, so
-  `status::stt_provider_token` reconstructs it from the loader's exact gates: `ane`→`ort_cpu` without
-  the FluidAudio shim, `ort_cuda`→`ort_cpu` without the fetched GPU runtime (`cuda_runtime_present`).
-  A missing runtime shows `ort_cpu`, never a phantom `ort_cuda`.
+  `status::stt_provider_token` reconstructs it from the loader's exact gates: `ane`→`cpu` without
+  the FluidAudio shim, `cuda`→`cpu` without the fetched GPU runtime (`cuda_runtime_present`).
+  A missing runtime shows `cpu`, never a phantom `cuda`.
 - **CUDA is on-demand (Windows x86_64 only):** the GPU onnxruntime + cuDNN wheels download into
-  `models/cuda/`; `cuda_runtime_present()` gates whether `ort_cuda` is real for BOTH engines.
+  `models/cuda/`; `cuda_runtime_present()` gates whether `cuda` is real for BOTH engines.
 - **Known asymmetry:** TTS catches a *session-build* fallback (runtime present but the CUDA EP fails
   to init) because the warm Kokoro child reports its live provider; STT cannot — the streaming runner
   doesn't surface its realized EP, so its token stays gate-derived. Closing it needs the loader to report back.

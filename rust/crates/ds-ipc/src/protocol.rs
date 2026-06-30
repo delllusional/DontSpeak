@@ -122,8 +122,8 @@ pub enum Request {
     WaitModelStatus { since: u64, timeout_ms: u64 },
     /// Set the TTS execution provider for THIS session and RESTART the warm Kokoro
     /// child so the new ONNX session uses it; the engine resets its TTS stats so the
-    /// app's range bars reflect only the new provider. `which` = "ort_cpu" | "ort_cuda" |
-    /// "ort_coreml" | "ane" | "auto". Transient (not persisted). → [`Response::Done`].
+    /// app's range bars reflect only the new provider. `which` = "cpu" | "cuda" |
+    /// "coreml" | "ane" | "auto". Transient (not persisted). → [`Response::Done`].
     SetProvider { which: String },
     /// Ask the engine to exit cleanly over IPC; replies [`Response::Done`] just
     /// before shutting down. NOTE: the engine runs in-process inside the native
@@ -253,7 +253,7 @@ mod tests {
             Request::TestRecognitionStart,
             Request::ModelStatus,
             Request::SetProvider {
-                which: "ort_coreml".into(),
+                which: "coreml".into(),
             },
             Request::AuthorizeSystemStt,
             Request::Earcon {

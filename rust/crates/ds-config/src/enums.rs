@@ -296,9 +296,9 @@ impl Provider {
 
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "ort_cpu" => Some(Provider::OrtCpu),
-            "ort_cuda" => Some(Provider::OrtCuda),
-            "ort_coreml" => Some(Provider::OrtCoreMl),
+            "cpu" => Some(Provider::OrtCpu),
+            "cuda" => Some(Provider::OrtCuda),
+            "coreml" => Some(Provider::OrtCoreMl),
             "ane" => Some(Provider::Ane),
             _ => None,
         }
@@ -308,9 +308,9 @@ impl Provider {
     /// string the warm child's `DONTSPEAK_PROVIDER` env expects).
     pub fn as_str(self) -> &'static str {
         match self {
-            Provider::OrtCpu => "ort_cpu",
-            Provider::OrtCuda => "ort_cuda",
-            Provider::OrtCoreMl => "ort_coreml",
+            Provider::OrtCpu => "cpu",
+            Provider::OrtCuda => "cuda",
+            Provider::OrtCoreMl => "coreml",
             Provider::Ane => "ane",
         }
     }
@@ -324,7 +324,7 @@ impl Provider {
     }
 
     /// [`stt_usable`](Provider::stt_usable) as a PURE function of the target `os` — the single
-    /// source the resolver and the cross-platform fallback tests both walk (so an `ort_cuda`
+    /// source the resolver and the cross-platform fallback tests both walk (so an `cuda`
     /// first rung is provably skipped off Windows on a single host). macOS: ANE (FluidAudio
     /// native) or CPU. Windows/Linux: CUDA (Parakeet GPU EP) or CPU. Elsewhere: CPU only.
     /// (`OrtCoreMl` is TTS-only — never STT.) Provider usability depends only on the OS, not arch.
@@ -653,7 +653,7 @@ macro_rules! strict_de {
 strict_de!(SttEngine, "off|built_in|system|claude_code");
 strict_de!(TtsEngine, "off|built_in|system");
 strict_de!(ListenMode, "record_submit|always");
-strict_de!(Provider, "ort_cpu|ort_cuda|ort_coreml|ane");
+strict_de!(Provider, "cpu|cuda|coreml|ane");
 strict_de!(TrayKind, "stt|tts");
 strict_de!(DropSpeechKind, "voice|text");
 strict_de!(DiarizerProvider, "apple_native");
@@ -726,7 +726,7 @@ pub(crate) fn default_provider() -> Vec<Provider> {
 }
 
 /// Fail-open deserialize for `provider` — now an ORDERED PRIORITY array of [`Provider`] rungs
-/// (config `provider = ["ane", "ort_cuda", "ort_cpu"]`); the first rung usable on this
+/// (config `provider = ["ane", "cuda", "cpu"]`); the first rung usable on this
 /// platform wins. Keeps known tokens in order (deduped), drops unknown ones. Unlike the
 /// narrate/tray sets, an EMPTY result is NOT "disabled" — there is always a compute backend —
 /// so an empty array, an all-unknown array, or any non-array value falls open to
@@ -1069,11 +1069,11 @@ mod tests {
 
     #[test]
     fn provider_ladder_falls_back_per_platform() {
-        // A cuda-FIRST ladder (`["ort_cuda", "ort_cpu"]`): CUDA leads, with `ort_cpu` as the
+        // A cuda-FIRST ladder (`["cuda", "cpu"]`): CUDA leads, with `cpu` as the
         // universal fallback. CUDA is a real rung on Windows AND Linux (x86_64 ONNX-runtime GPU
         // EP); on macOS the resolver must SKIP it and land on the next usable rung — proving an
-        // `ort_cuda` first item degrades gracefully instead of dead-ending. This is the
-        // cross-platform analogue of the live `model_status` check (which showed `ort_cpu` on macOS).
+        // `cuda` first item degrades gracefully instead of dead-ending. This is the
+        // cross-platform analogue of the live `model_status` check (which showed `cpu` on macOS).
         let ladder = [Provider::OrtCuda, Provider::OrtCpu];
         let resolve_tts = |os: &str| ladder.iter().copied().find(|p| p.tts_usable_on(os));
         let resolve_stt = |os: &str| ladder.iter().copied().find(|p| p.stt_usable_on(os));
@@ -1082,10 +1082,10 @@ mod tests {
             assert_eq!(resolve_tts(os), Some(Provider::OrtCuda), "tts {os}");
             assert_eq!(resolve_stt(os), Some(Provider::OrtCuda), "stt {os}");
         }
-        // macOS: CUDA is NOT usable → fall back to the next rung, `ort_cpu`.
+        // macOS: CUDA is NOT usable → fall back to the next rung, `cpu`.
         assert_eq!(resolve_tts("macos"), Some(Provider::OrtCpu));
         assert_eq!(resolve_stt("macos"), Some(Provider::OrtCpu));
-        // A lone `["ort_cuda"]` ladder dead-ends on macOS — the RESOLVER (`resolved_*_provider`)
+        // A lone `["cuda"]` ladder dead-ends on macOS — the RESOLVER (`resolved_*_provider`)
         // is what supplies the `OrtCpu` default there; the raw `find` returns None, confirming
         // CUDA itself is genuinely unusable (not silently treated as usable).
         let cuda_only = [Provider::OrtCuda];

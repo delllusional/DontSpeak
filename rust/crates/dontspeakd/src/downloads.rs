@@ -257,7 +257,7 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
 }
 
 /// Apply the persisted TTS execution-provider preference (`tts_provider`:
-/// auto|ort_cpu|ort_cuda|ort_coreml|ane) to the warm child via [`TtsManager::set_provider`]. On
+/// auto|cpu|cuda|coreml|ane) to the warm child via [`TtsManager::set_provider`]. On
 /// x86_64 Windows/Linux, resolving to CUDA while the GPU runtime is absent kicks off a one-time
 /// background ~1.4 GB fetch — but ONLY when an NVIDIA driver is actually present
 /// ([`ds_model::cuda_driver_present`]); progress is tracked in `downloads` under "cuda" so
@@ -265,14 +265,14 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
 ///
 /// The `provider` setting is SHARED by both engines, so this one runtime serves Kokoro TTS
 /// AND Parakeet STT — fetching it here aligns both onto the GPU after the restart. Matches
-/// the canonical `ort_cuda` token ([`ds_config::Provider::as_str`], what config and
+/// the canonical `cuda` token ([`ds_config::Provider::as_str`], what config and
 /// the `SetProvider` IPC both carry). `auto` is intentionally EXCLUDED: it uses the GPU
 /// only when the runtime is already present and never pulls the large download silently.
 /// Whether to kick off the one-time ~1.4 GB CUDA-runtime prefetch: ONLY when the resolved
 /// provider IS the CUDA rung, an NVIDIA driver is actually present, and the runtime isn't already
 /// on disk. A pure decision (no probes / IO) so it's unit-tested directly — the caller supplies
 /// the live [`ds_model::cuda_driver_present`] / [`ds_model::cuda_runtime_present`] results. Typed
-/// on [`Provider`], so the CUDA rung is matched by the enum variant, never a stray `"ort_cuda"`
+/// on [`Provider`], so the CUDA rung is matched by the enum variant, never a stray `"cuda"`
 /// string literal (the regression this guards against). Platform-gated to where the runtime exists.
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),
@@ -412,7 +412,7 @@ mod tests {
     }
 
     /// REGRESSION GUARD (fcf2072): the ~1.4 GB CUDA prefetch is gated on the TYPED
-    /// `Provider::OrtCuda` variant — never a `"ort_cuda"` string literal that a typo or rename
+    /// `Provider::OrtCuda` variant — never a `"cuda"` string literal that a typo or rename
     /// could silently break. Driver-absent and runtime-present must both veto the fetch.
     #[cfg(all(
         any(target_os = "windows", target_os = "linux"),

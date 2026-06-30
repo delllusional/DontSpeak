@@ -13,7 +13,7 @@ pub const SPEAK_TEXT: &str = "The text to speak.";
 pub const SPEAK_VOICE: &str = "Voice id (default: the configured voice).";
 pub const SPEAK_RATE: &str = "Speed multiplier 0.5–2.0 (default: from config).";
 
-// ── stop_speak ───────────────────────────────────────────────────────────────────────
+// ── stop_speech ───────────────────────────────────────────────────────────────────────
 pub const STOP_SPEAK: &str = "Stop any in-progress speech immediately.";
 
 // ── list_voices ──────────────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ pub const LISTEN: &str = "Open the mic and return the transcribed text. Auto-sto
 pub const LISTEN_SECONDS: &str =
     "Hard upper bound in seconds (default 30); the mic normally stops on end-of-speech first.";
 
-// ── status ───────────────────────────────────────────────────────────────────────────
+// ── get_status ───────────────────────────────────────────────────────────────────────────
 pub const STATUS: &str = "Report current state: engine, active voice, default rate, whether \
     speech is playing, queue length, and paused. Pass detail:true to also include per-engine \
     model status, dictation state, and stats.";
@@ -42,7 +42,7 @@ pub const DIARIZE: &str = "Record the mic and return who spoke when: per-speaker
     diarization on (set_config diarizer_provider). macOS-only.";
 pub const DIARIZE_SECONDS: &str = "Seconds to record (default 10).";
 
-// ── speakers ─────────────────────────────────────────────────────────────────────────
+// ── manage_speakers ─────────────────────────────────────────────────────────────────────────
 pub const SPEAKERS: &str = "Manage the enrolled voiceprints diarize uses to put names to \
     speakers. action=list shows enrolled names; action=enroll records the mic and learns name \
     (re-enrolling replaces it); action=forget removes name. macOS-only.";
@@ -86,8 +86,8 @@ pub const SET_CONFIG_CAPTURE_GAIN: &str =
 pub const SET_CONFIG_AUTO_SUBMIT: &str =
     "Press Return after pasting dictation. Default true; false = insert only.";
 pub const SET_CONFIG_PROVIDER: &str = "Compute-backend ladder for speech output and recognition \
-    (first usable wins): \"ane\" (on-device accelerator), \"ort_cuda\" (GPU), \"ort_coreml\" \
-    (platform accelerator), \"ort_cpu\" (CPU). Default [\"ane\",\"ort_cuda\",\"ort_cpu\"].";
+    (first usable wins): \"ane\" (on-device accelerator), \"cuda\" (GPU), \"coreml\" \
+    (platform accelerator), \"cpu\" (CPU). Default [\"ane\",\"cuda\",\"cpu\"].";
 pub const SET_CONFIG_DIARIZER: &str =
     "Diarization runtime + on/off switch: [\"apple_native\"] = on, [] = off (default). macOS.";
 pub const SET_CONFIG_CLUSTERING: &str =
@@ -100,7 +100,7 @@ pub const SET_CONFIG_TRAY: &str = "Menu-bar pill: which states color it and whet
     any of [\"stt\",\"tts\",\"stt_animated\",\"tts_animated\"] (default [\"stt\",\"tts_animated\"]). \
     [] = never color.";
 
-// ── wire ─────────────────────────────────────────────────────────────────────────────
+// ── setup_integration ─────────────────────────────────────────────────────────────────────────────
 pub const WIRE: &str = "Write a config file, or register/remove a client integration (the same \
     setup the installer does, anytime). Targets: \"narration_spec\", \"claude_code\", \
     \"claude_desktop\", \"codex\". Additive and backed up; enabled=false removes only our entry.";

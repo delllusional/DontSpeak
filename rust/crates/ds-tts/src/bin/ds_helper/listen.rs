@@ -454,7 +454,7 @@ pub(crate) fn run_listen(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Process-wide cache of the loaded streaming backend, keyed by the provider it was built for
-/// (`ort_cpu`/`ort_cuda` → ONNX, `ane` → Core ML). One mic / one listen at a time, so a single
+/// (`cpu`/`cuda` → ONNX, `ane` → Core ML). One mic / one listen at a time, so a single
 /// cached instance is fine; the heavy model stays resident and each listen just `reset`s it.
 type CachedBackend = (String, Box<dyn StreamingStt>);
 fn backend_cell() -> &'static Mutex<Option<CachedBackend>> {
@@ -464,10 +464,10 @@ fn backend_cell() -> &'static Mutex<Option<CachedBackend>> {
 
 /// Build the streaming backend for `provider`, or `None` when this provider doesn't stream / its
 /// assets are missing (→ caller falls back to the offline `transcribe_loop`). ONNX
-/// (`ort_cpu`/`ort_cuda`) → [`OnnxStreamer`]; macOS `ane` → the FluidAudio Core ML streamer. Both
+/// (`cpu`/`cuda`) → [`OnnxStreamer`]; macOS `ane` → the FluidAudio Core ML streamer. Both
 /// implement [`StreamingStt`], so everything downstream is shared.
 fn build_backend(provider: &str) -> Option<Box<dyn StreamingStt>> {
-    if provider.eq_ignore_ascii_case("ort_cpu") || provider.eq_ignore_ascii_case("ort_cuda") {
+    if provider.eq_ignore_ascii_case("cpu") || provider.eq_ignore_ascii_case("cuda") {
         if !ds_model::parakeet_present() {
             return None;
         }

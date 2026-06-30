@@ -59,7 +59,7 @@ impl KokoroSynth {
     /// so `ort` (load-dynamic) can resolve libonnxruntime. Errors (no dylib, bad
     /// model, bad voices) are returned for the caller to fail-quiet.
     pub fn load(model_bytes: &[u8], voices_npz: &[u8]) -> Result<Self, String> {
-        // Execution provider from DONTSPEAK_PROVIDER: "ort_cpu" | "ort_cuda" | "ort_coreml"
+        // Execution provider from DONTSPEAK_PROVIDER: "cpu" | "cuda" | "coreml"
         // | "auto" (the `ane` token never reaches here — it routes to the native FluidAudio
         // backend in the helper, not KokoroSynth). On Windows `auto` PREFERS CUDA (NVIDIA
         // GPU — 2.8-4.6x faster for Kokoro, validated). On macOS `auto` stays CPU (the ort
@@ -69,9 +69,9 @@ impl KokoroSynth {
             Ok(s) => Ok(s),
             // A GPU-preferred session that fails to BUILD (driver/op/version issue)
             // retries once on CPU so TTS never breaks — GPU is a best-effort speedup.
-            Err(e) if !pref.eq_ignore_ascii_case("ort_cpu") => {
+            Err(e) if !pref.eq_ignore_ascii_case("cpu") => {
                 eprintln!("dontspeak/synth: provider '{pref}' failed ({e}); falling back to CPU");
-                Self::load_with_provider(model_bytes, voices_npz, "ort_cpu")
+                Self::load_with_provider(model_bytes, voices_npz, "cpu")
             }
             Err(e) => Err(e),
         }
@@ -99,7 +99,7 @@ impl KokoroSynth {
         let mut builder = {
             use ort::execution_providers::CUDAExecutionProvider;
             let want_gpu =
-                pref.eq_ignore_ascii_case("auto") || pref.eq_ignore_ascii_case("ort_cuda");
+                pref.eq_ignore_ascii_case("auto") || pref.eq_ignore_ascii_case("cuda");
             let gpu = if want_gpu {
                 (|| -> ort::Result<_> {
                     let b = Session::builder()?;
@@ -127,7 +127,7 @@ impl KokoroSynth {
             // on-device; it benches slightly slower, which is why "auto" picks CPU
             // in the half-duplex/rodio path that isn't sensitive to this).
             let full_duplex = std::env::var_os("DONTSPEAK_FULL_DUPLEX").is_some();
-            let want_coreml = pref.eq_ignore_ascii_case("ort_coreml")
+            let want_coreml = pref.eq_ignore_ascii_case("coreml")
                 || (full_duplex && pref.eq_ignore_ascii_case("auto"));
             let gpu = if want_coreml {
                 (|| -> ort::Result<_> {
@@ -155,7 +155,7 @@ impl KokoroSynth {
         let mut builder = {
             use ort::execution_providers::CUDAExecutionProvider;
             let want_gpu =
-                pref.eq_ignore_ascii_case("auto") || pref.eq_ignore_ascii_case("ort_cuda");
+                pref.eq_ignore_ascii_case("auto") || pref.eq_ignore_ascii_case("cuda");
             let gpu = if want_gpu {
                 (|| -> ort::Result<_> {
                     let b = Session::builder()?;

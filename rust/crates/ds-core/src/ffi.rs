@@ -341,8 +341,8 @@ pub extern "C" fn ds_duration_live(secs: f64) -> *mut c_char {
     })
 }
 
-/// Localized RUNTIME label for a resolved provider token ("ane"|"ort_coreml"|"ort_cuda"|
-/// "ort_cpu"; unknown passes through). The TTS/STT runtime detail. Owned `char*`, free with
+/// Localized RUNTIME label for a resolved provider token ("ane"|"coreml"|"cuda"|
+/// "cpu"; unknown passes through). The TTS/STT runtime detail. Owned `char*`, free with
 /// `ds_string_free`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_runtime_label(provider: *const c_char) -> *mut c_char {
@@ -382,8 +382,8 @@ pub extern "C" fn ds_stats_count(count: u64, audio_secs: f64) -> *mut c_char {
     })
 }
 
-/// Set the TTS execution provider for this session: `which` is "ort_cpu" | "ort_cuda" |
-/// "ort_coreml" | "ane" | "auto" (NULL/unknown → "auto"). The engine restarts the warm Kokoro child on
+/// Set the TTS execution provider for this session: `which` is "cpu" | "cuda" |
+/// "coreml" | "ane" | "auto" (NULL/unknown → "auto"). The engine restarts the warm Kokoro child on
 /// the new provider and resets its TTS stats (only if the active provider actually
 /// changed). Returns 1 if the request reached the engine, else 0. The new provider
 /// + fresh stats then show up via `ds_model_status_json`.

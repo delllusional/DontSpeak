@@ -21,7 +21,7 @@ fn shim_available() -> bool {
 /// The active local transcriber. Same lazy-load surface as
 /// [`ParakeetTranscriber`] so call sites are backend-agnostic.
 pub enum LocalTranscriber {
-    /// Cross-platform Parakeet — the streaming FastConformer over `ort` (the `ort_cpu` provider).
+    /// Cross-platform Parakeet — the streaming FastConformer over `ort` (the `cpu` provider).
     /// Boxed: `ParakeetTranscriber` is much larger than the Core ML variant, so storing
     /// it inline made every `LocalTranscriber` as big as it (clippy `large_enum_variant`).
     /// Box keeps the enum small; the lazy-load surface is unchanged because the box
@@ -41,7 +41,7 @@ impl LocalTranscriber {
     /// `SFSpeechRecognizer` (the `system` ENGINE, not a Parakeet runtime); `"ane"` →
     /// FluidAudio Core ML / ANE (macOS only), but only when the shim is actually present,
     /// else it falls back to the ONNX Parakeet so a missing shim degrades gracefully;
-    /// anything else (incl. `"ort_cpu"`) → the portable ONNX Parakeet. The engine reports
+    /// anything else (incl. `"cpu"`) → the portable ONNX Parakeet. The engine reports
     /// the same shim-aware runtime, so the status row stays honest.
     pub fn for_provider(provider: &str, parakeet_dir: PathBuf) -> Self {
         #[cfg(target_os = "macos")]

@@ -163,7 +163,7 @@ public sealed record EngineSelection
     //   stt_engine: claude_code (delegate) | built_in (Parakeet) | system (OS recognizer)
     //   tts_engine: built_in (Kokoro)      | system  (OS voice)
     public string SttEngine = "claude_code", TtsEngine = "built_in";
-    // The active runtime/EP token for the built_in models (ort_cpu | ort_cuda | ort_coreml
+    // The active runtime/EP token for the built_in models (cpu | cuda | coreml
     // | ane), shown as the "Runtime" line inside the Kokoro/Parakeet stats. Empty = none.
     public string SttProvider = "", TtsProvider = "";
     // The human key label DontSpeak synthesizes for Claude Code dictation (e.g. "Space");

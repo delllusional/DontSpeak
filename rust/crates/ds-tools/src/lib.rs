@@ -69,10 +69,10 @@ const fn p(name: &'static str, ty: PType, required: bool, description: &'static 
 
 /// The whole catalog, in display order — the ONE source both consumer shapes generate
 /// from, and the exact order the Tools window shows. Ordered so related tools sit
-/// together: spoken output (speak · stop_speak · list_voices), then voice
-/// input (listen), then runtime state (status), then speaker diarization (diarize ·
-/// speakers — the voiceprint library it labels with), then config (set_config) and the
-/// setup tool that writes config / wires clients (wire).
+/// together: spoken output (speak · stop_speech · list_voices), then voice
+/// input (listen), then runtime state (get_status), then speaker diarization (diarize ·
+/// manage_speakers — the voiceprint library it labels with), then config (set_config) and
+/// the setup tool that writes config / registers client integrations (setup_integration).
 static TOOLS: &[Tool] = &[
     // Spoken output: say something, then the voice it's said in.
     Tool {
@@ -88,7 +88,7 @@ static TOOLS: &[Tool] = &[
     // Spoken output: halt playback, then list the voices replies can use (the voice
     // itself is a persistent setting — see `set_config`'s tts_built_in_voices).
     Tool {
-        name: "stop_speak",
+        name: "stop_speech",
         description: STOP_SPEAK,
         params: &[],
         min_one: false,
@@ -113,7 +113,7 @@ static TOOLS: &[Tool] = &[
     },
     // Runtime introspection.
     Tool {
-        name: "status",
+        name: "get_status",
         description: STATUS,
         params: &[p("detail", PType::Bool, false, STATUS_DETAIL)],
         min_one: false,
@@ -128,7 +128,7 @@ static TOOLS: &[Tool] = &[
     // Manage the enrolled-voiceprint library that diarize uses to put names to speakers:
     // one action-dispatched tool (list / enroll / forget) instead of three.
     Tool {
-        name: "speakers",
+        name: "manage_speakers",
         description: SPEAKERS,
         params: &[
             p(
@@ -215,7 +215,7 @@ static TOOLS: &[Tool] = &[
             // ── Compute backend ──
             p(
                 "provider",
-                PType::EnumArray(&["ane", "ort_cuda", "ort_coreml", "ort_cpu"]),
+                PType::EnumArray(&["ane", "cuda", "coreml", "cpu"]),
                 false,
                 SET_CONFIG_PROVIDER,
             ),
@@ -255,7 +255,7 @@ static TOOLS: &[Tool] = &[
         min_one: true,
     },
     Tool {
-        name: "wire",
+        name: "setup_integration",
         description: WIRE,
         params: &[
             p(
@@ -528,7 +528,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|t| t["name"] == "wire")
+            .find(|t| t["name"] == "setup_integration")
             .expect("wire in catalog");
         let schema_enum: Vec<String> = wire["inputSchema"]["properties"]["target"]["enum"]
             .as_array()

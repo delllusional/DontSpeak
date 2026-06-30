@@ -43,15 +43,15 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
         // Write a config to disk or register/remove a client integration (no engine needed;
         // edits client configs via the SAME wire_hooks/wire_desktop entry points the
         // installer uses, and writes the narration spec to the user data dir).
-        "wire" => call_wire(&args),
+        "setup_integration" => call_wire(&args),
         // Read-only introspection: config (settings.json) + live engine state.
         // Does NOT spawn the engine — a status check must not start playback.
-        "status" => match Paths::resolve() {
+        "get_status" => match Paths::resolve() {
             Some(paths) => call_status(&paths, sock, &args),
             None => Err("cannot resolve ~/.claude paths".into()),
         },
         // Stateful actions bridge to the resident engine.
-        "speak" | "stop_speak" | "listen" | "diarize" | "speakers" => {
+        "speak" | "stop_speech" | "listen" | "diarize" | "manage_speakers" => {
             let Some(sock) = sock else {
                 return ok(
                     id,
@@ -62,9 +62,9 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
             ensure_engine(sock);
             match name {
                 "speak" => call_speak(sock, &args),
-                "stop_speak" => call_stop(sock),
+                "stop_speech" => call_stop(sock),
                 "diarize" => call_diarize(sock, &args),
-                "speakers" => call_speakers(sock, &args),
+                "manage_speakers" => call_speakers(sock, &args),
                 _ => call_dictate(sock, &args),
             }
         }
@@ -762,7 +762,7 @@ mod drift {
             .unwrap(),
         );
         assert_tool_matches(
-            "status",
+            "get_status",
             serde_json::to_value(StatusArgs { detail: Some(true) }).unwrap(),
         );
         assert_tool_matches(
@@ -774,7 +774,7 @@ mod drift {
             serde_json::to_value(DiarizeArgs { seconds: Some(10) }).unwrap(),
         );
         assert_tool_matches(
-            "speakers",
+            "manage_speakers",
             serde_json::to_value(SpeakersArgs {
                 action: Some("enroll".into()),
                 name: Some("Alex".into()),

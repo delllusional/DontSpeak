@@ -147,10 +147,10 @@ pub struct VoiceConfig {
     #[serde(default = "default_rate")]
     pub tts_rate: f32,
     /// SHARED on-device compute backend for BOTH Kokoro TTS and Parakeet STT — an ORDERED
-    /// PRIORITY ladder, `provider = ["ane", "ort_cuda", "ort_cpu"]` (the default). Each engine
+    /// PRIORITY ladder, `provider = ["ane", "cuda", "cpu"]` (the default). Each engine
     /// walks the list and picks the FIRST rung usable on this platform (rungs: `ane` = macOS
-    /// FluidAudio native ANE, `ort_cuda` = NVIDIA GPU, `ort_coreml` = macOS ort CoreML EP
-    /// (TTS-only, explicit), `ort_cpu`). Empty / all-unknown → the default ladder (there is
+    /// FluidAudio native ANE, `cuda` = NVIDIA GPU, `coreml` = macOS ort CoreML EP
+    /// (TTS-only, explicit), `cpu`). Empty / all-unknown → the default ladder (there is
     /// always a backend). Resolves to a single token for the warm child via `DONTSPEAK_PROVIDER`
     /// (TTS, [`Self::tts_provider_token`]) and `DONTSPEAK_STT_PROVIDER` (STT,
     /// [`Self::resolved_stt_provider`]).
@@ -268,7 +268,7 @@ pub struct ConfigChange {
     /// `listen_mode` flipped — start/stop the always-listening loop.
     pub listen_mode_changed: bool,
     /// `provider` (the shared compute ladder) changed — switch the warm child's runtime
-    /// (and fetch the GPU runtime first when the resolved rung becomes "ort_cuda").
+    /// (and fetch the GPU runtime first when the resolved rung becomes "cuda").
     pub provider_changed: bool,
 }
 
@@ -566,7 +566,7 @@ impl VoiceConfig {
     }
 
     /// The single `DONTSPEAK_PROVIDER` token the warm child should run TTS on — the resolved
-    /// TTS rung as its canonical string (e.g. "ane" / "ort_cuda" / "ort_cpu").
+    /// TTS rung as its canonical string (e.g. "ane" / "cuda" / "cpu").
     pub fn tts_provider_token(&self) -> &'static str {
         self.resolved_tts_provider().as_str()
     }
@@ -700,13 +700,14 @@ pub(crate) mod tests {
         let default = vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu];
         // An explicit ordered ladder keeps its order (deduped); known tokens only.
         assert_eq!(
-            prov(r#"{"provider":["ort_cuda","ane","ort_cpu"]}"#),
+            prov(r#"{"provider":["cuda","ane","cpu"]}"#),
             vec![Provider::OrtCuda, Provider::Ane, Provider::OrtCpu]
         );
-        assert_eq!(prov(r#"{"provider":["ort_cpu"]}"#), vec![Provider::OrtCpu]);
-        // Unknown tokens dropped; the old bare `coreml`/`cuda`/`auto` tokens are now unknown
-        // (renamed, no back-compat) — left with nothing → falls back to the default ladder.
-        assert_eq!(prov(r#"{"provider":["coreml","auto"]}"#), default);
+        assert_eq!(prov(r#"{"provider":["cpu"]}"#), vec![Provider::OrtCpu]);
+        // Unknown tokens dropped; `auto` and the old prefixed `ort_cpu`/`ort_cuda`/`ort_coreml`
+        // tokens are now unknown (renamed to bare cpu/cuda/coreml, no back-compat) — left with
+        // nothing → falls back to the default ladder.
+        assert_eq!(prov(r#"{"provider":["ort_coreml","auto"]}"#), default);
         // Empty array, all-unknown, and any non-array all fall open to the default ladder
         // (compute is never "off").
         assert_eq!(prov(r#"{"provider":[]}"#), default);

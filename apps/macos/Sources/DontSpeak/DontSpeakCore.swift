@@ -80,14 +80,14 @@ struct EngineSelection: Sendable, Equatable {
     /// The ACTIVE STT engine token (claude_code|built_in|system) — picks which engine
     /// the single STT status row reflects.
     var sttEngine = "built_in"
-    /// The ACTUAL STT runtime for the built_in engine — "ane" (Core ML / ANE) or "ort_cpu"
+    /// The ACTUAL STT runtime for the built_in engine — "ane" (Core ML / ANE) or "cpu"
     /// (CPU); honest about the shim-absent fallback, like ttsProvider. Nil for
     /// system/claude_code. Shown in the Parakeet expander.
     var sttProvider: String? = nil
     /// The ACTIVE TTS engine token (built_in|system) — picks which engine the TTS row
     /// reflects (built_in → Kokoro, system → System `say`).
     var ttsEngine = "built_in"
-    /// The ACTUAL TTS runtime for Kokoro, as a token — "ane"/"ort_coreml"/"ort_cuda"/"ort_cpu"
+    /// The ACTUAL TTS runtime for Kokoro, as a token — "ane"/"coreml"/"cuda"/"cpu"
     /// (same vocabulary as sttProvider). Nil for the system engine. Shown in the Kokoro expander.
     var ttsProvider: String? = nil
     /// The keypress label DontSpeak synthesizes into Claude Code (its bound voice key),
@@ -317,7 +317,7 @@ final class Core {
         }
     }
 
-    /// Switch the TTS execution provider ("auto"|"ort_cpu"|"ort_cuda"|"ort_coreml"|"ane"). The engine
+    /// Switch the TTS execution provider ("auto"|"cpu"|"cuda"|"coreml"|"ane"). The engine
     /// restarts the warm child on the new provider and resets its stats (only if
     /// the active provider actually changed); the next push reflects it.
     func setProvider(_ which: String) {

@@ -111,7 +111,7 @@ pub fn duration_live(secs: f64) -> String {
 }
 
 /// The localized RUNTIME label for a resolved execution-provider token:
-/// `ane` → Core ML/ANE, `ort_coreml`/`ort_cuda`/`ort_cpu` → the matching ORT label;
+/// `ane` → Core ML/ANE, `coreml`/`cuda`/`cpu` → the matching ORT label;
 /// anything else passes through verbatim. The engine-runtime detail shown under the
 /// TTS/STT rows — was hand-duplicated in the Swift + C# hosts; now ONE mapping for all three.
 pub fn runtime_label(provider: &str) -> String {
@@ -190,9 +190,9 @@ mod tests {
 
     #[test]
     fn runtime_label_maps_known_providers() {
-        assert_eq!(runtime_label("ort_cpu"), "ORT CPU");
-        assert_eq!(runtime_label("ort_cuda"), "ORT CUDA");
-        assert_eq!(runtime_label("ort_coreml"), "ORT Core ML");
+        assert_eq!(runtime_label("cpu"), "ORT CPU");
+        assert_eq!(runtime_label("cuda"), "ORT CUDA");
+        assert_eq!(runtime_label("coreml"), "ORT Core ML");
         assert_eq!(runtime_label("ane"), "FluidAudio ANE");
         // Unknown passes through verbatim.
         assert_eq!(runtime_label("whatever"), "whatever");

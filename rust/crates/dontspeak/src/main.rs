@@ -11,8 +11,9 @@
 //! client of the SAME engine the hooks and SwiftUI app use (one warm owner, in sync).
 //!
 //! Tools (the authoritative catalog — names, schemas, descriptions — lives in
-//! `ds_tools::catalog()`; this is just an orientation): speak, stop_speak,
-//! listen, status, list_voices, diarize, speakers, set_config, wire.
+//! `ds_tools::catalog()`; this is just an orientation): speak, stop_speech,
+//! listen, get_status, list_voices, diarize, manage_speakers, set_config,
+//! setup_integration.
 //!
 //! `list_voices` is config-DIRECT: it reads DontSpeak's own settings file
 //! (`our config.toml`) to mark the active voice, so it needs no engine

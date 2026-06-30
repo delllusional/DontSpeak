@@ -207,18 +207,18 @@ pub struct TtsManager {
     /// The warm child's active ONNX execution provider ("CPU"/"CoreML"), reported
     /// via its `PROVIDER` line at startup. For the engine stats.
     provider: Mutex<String>,
-    /// The user's provider PREFERENCE ("auto"|"ort_cpu"|"ort_cuda"|"ort_coreml"|"ane") —
+    /// The user's provider PREFERENCE ("auto"|"cpu"|"cuda"|"coreml"|"ane") —
     /// drives the `DONTSPEAK_PROVIDER` env when (re)starting the warm child.
     provider_pref: Mutex<String>,
     /// Whether the next warm child should run in full-duplex AEC mode — the engine
-    /// sets this to `full_duplex && stt provider == ort_cpu`. Drives the
+    /// sets this to `full_duplex && stt provider == cpu`. Drives the
     /// `DONTSPEAK_FULL_DUPLEX` env when (re)starting the child.
     full_duplex_pref: Mutex<bool>,
     /// The full-duplex mode the CURRENTLY running child was started with, so a
     /// changed `full_duplex_pref` can trigger exactly one restart (mirrors how
     /// `provider` tracks the running provider for `set_provider`).
     full_duplex_active: Mutex<bool>,
-    /// The local STT engine the next warm child should use ("ort_cpu"|"ane"),
+    /// The local STT engine the next warm child should use ("cpu"|"ane"),
     /// from `stt_provider`. Drives the `DONTSPEAK_STT_PROVIDER` env when (re)starting.
     stt_provider_pref: Mutex<String>,
     /// The STT engine the CURRENTLY running child was started with, so a changed
@@ -226,7 +226,7 @@ pub struct TtsManager {
     stt_provider_active: Mutex<String>,
     /// Whether STT (Parakeet) should be PRELOADED in the warm child — `helper_uses_stt(cfg)`,
     /// i.e. STT is the built-in engine. `stt_provider_pref` is NOT a usable on/off signal
-    /// (it resolves to "ort_cpu" even for Off/ClaudeCode), so this is tracked separately and
+    /// (it resolves to "cpu" even for Off/ClaudeCode), so this is tracked separately and
     /// drives `DONTSPEAK_STT_PRELOAD`, which gates the helper's parallel STT-preload thread.
     stt_wanted: Mutex<bool>,
     /// Which models are CURRENTLY resident in the warm helper. Kokoro is eager (true
@@ -366,7 +366,7 @@ impl TtsManager {
         self.provider.lock().unwrap().clone()
     }
 
-    /// Switch the execution-provider preference ("auto"|"ort_cpu"|"ort_cuda"|"ort_coreml"|"ane"). Restarts
+    /// Switch the execution-provider preference ("auto"|"cpu"|"cuda"|"coreml"|"ane"). Restarts
     /// the warm child ONLY when the RESOLVED provider differs from the active one
     /// (so picking "auto" while already on CPU is a no-op). Returns true if it
     /// actually restarted — the caller then resets the TTS stats.
@@ -418,7 +418,7 @@ impl TtsManager {
         *self.full_duplex_pref.lock().unwrap() = on;
     }
 
-    /// Set which local STT engine the warm child should use ("ort_cpu"|"ane").
+    /// Set which local STT engine the warm child should use ("cpu"|"ane").
     /// Stores the preference only; [`restart_if_full_duplex_stale`](Self::restart_if_full_duplex_stale)
     /// applies a change to an already-running child.
     pub fn set_stt_provider_pref(&self, engine: &str) {
@@ -433,7 +433,7 @@ impl TtsManager {
 
     /// Restart the warm child iff it is running with a mode that no longer matches the
     /// preference — either the full-duplex flag (toggled, or STT moved to/from a local
-    /// engine) or the local STT engine itself (ort_cpu ↔ ane, so the child picks
+    /// engine) or the local STT engine itself (cpu ↔ ane, so the child picks
     /// up the new `DONTSPEAK_STT_PROVIDER`). No-op when stopped or already matching — safe
     /// to call on every config reload.
     pub fn restart_if_full_duplex_stale(&self) {
@@ -451,11 +451,11 @@ impl TtsManager {
     }
 
     /// The provider a preference RESOLVES to right now — what the warm child will
-    /// actually report. "ort_cuda"/"auto" only become CUDA once the GPU runtime is
+    /// actually report. "cuda"/"auto" only become CUDA once the GPU runtime is
     /// present (else the helper falls back to CPU), so resolving against presence
     /// keeps `set_provider` from restart-looping while the runtime downloads.
     fn resolve_provider(which: &str) -> &'static str {
-        if which.eq_ignore_ascii_case("ort_coreml") {
+        if which.eq_ignore_ascii_case("coreml") {
             return "CoreML";
         }
         // `ane` AND `auto` resolve to the FluidAudio Core ML / ANE backend on macOS (the
@@ -475,7 +475,7 @@ impl TtsManager {
         ))]
         {
             let wants_cuda =
-                which.eq_ignore_ascii_case("ort_cuda") || which.eq_ignore_ascii_case("auto");
+                which.eq_ignore_ascii_case("cuda") || which.eq_ignore_ascii_case("auto");
             if wants_cuda && ds_model::cuda_runtime_present() {
                 return "CUDA";
             }
@@ -548,12 +548,12 @@ impl TtsManager {
         if full_duplex {
             cmd.env("DONTSPEAK_FULL_DUPLEX", "1");
         }
-        // Which local STT engine the child should serve ("ort_cpu"|"ane").
+        // Which local STT engine the child should serve ("cpu"|"ane").
         let stt_provider = self.stt_provider_pref.lock().unwrap().clone();
         cmd.env("DONTSPEAK_STT_PROVIDER", &stt_provider);
         // Whether the child should PRELOAD STT in parallel with the TTS load (gates its
         // STT-preload thread). Only when STT is the built-in engine — `stt_provider` alone
-        // can't tell, since it resolves to "ort_cpu" even for Off/ClaudeCode.
+        // can't tell, since it resolves to "cpu" even for Off/ClaudeCode.
         if *self.stt_wanted.lock().unwrap() {
             cmd.env("DONTSPEAK_STT_PRELOAD", "1");
         }
