@@ -23,7 +23,7 @@ pub struct Paths {
     /// never writes it.
     pub keybindings_json: PathBuf,
     /// Claude CODE's user-scope config (`~/.claude.json`) — where `wire-code` adds (or
-    /// removes) the `mcpServers.dontspeak` stdio entry so the `claude` CLI and Claude Code
+    /// removes) the `mcpServers.DontSpeak` stdio entry so the `claude` CLI and Claude Code
     /// sessions spawn our MCP bridge and can call `speak`/`listen`/… as tools. The Claude
     /// CODE sibling of `wire-desktop` (which targets Desktop's separate config); like it,
     /// this is MCP registration ONLY — narration is wired separately via `wire-hooks` into
@@ -76,7 +76,7 @@ pub struct Paths {
     /// CODE's `~/.claude`.)
     pub claude_desktop_dir: PathBuf,
     /// Claude Desktop's `claude_desktop_config.json` — where `wire-desktop` adds (or
-    /// removes) the `mcpServers.dontspeak` stdio entry so Desktop can spawn our MCP
+    /// removes) the `mcpServers.DontSpeak` stdio entry so Desktop can spawn our MCP
     /// bridge. Desktop has no hook system, so this is registration ONLY (no narration).
     pub claude_desktop_config: PathBuf,
     /// OpenAI Codex CLI's config dir (`~/.codex`). Its existence is how `wire-hooks`

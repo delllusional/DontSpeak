@@ -1,6 +1,6 @@
 //! Shared core for the two MCP-registration subcommands — `wire-code` (Claude CODE's
 //! `~/.claude.json`) and `wire-desktop` (Claude DESKTOP's `claude_desktop_config.json`).
-//! Both register the IDENTICAL stdio `mcpServers.dontspeak` entry and differ only in WHICH
+//! Both register the IDENTICAL stdio `mcpServers.DontSpeak` entry and differ only in WHICH
 //! config file, how they detect the client, and the user-facing labels — so the one
 //! read → merge/strip → backup → atomic-write flow lives here ONCE rather than being copied
 //! per client. It reuses the SAME `ds-config` primitives the hook installer uses
@@ -77,7 +77,7 @@ pub fn resolve_self_command() -> Option<String> {
         .map(|e| e.to_string_lossy().into_owned())
 }
 
-/// Register (or, with `remove`, un-register) our stdio `mcpServers.dontspeak` entry in
+/// Register (or, with `remove`, un-register) our stdio `mcpServers.DontSpeak` entry in
 /// `target.config`, or PREVIEW the result with `print_only`. The ONE flow shared by
 /// `wire-code` and `wire-desktop`:
 ///   presence-gate → parse (a malformed file is left UNTOUCHED) → merge/strip via `ds-config`
@@ -235,12 +235,12 @@ mod tests {
         assert_eq!(apply(&target(&cfg, true), false, false), 0);
         let v = read(&cfg);
         assert!(
-            v["mcpServers"]["dontspeak"]["command"]
+            v["mcpServers"]["DontSpeak"]["command"]
                 .as_str()
                 .unwrap()
                 .contains("dontspeak")
         );
-        assert!(v["mcpServers"]["dontspeak"].get("args").is_none());
+        assert!(v["mcpServers"]["DontSpeak"].get("args").is_none());
         // Re-wire: still exactly one entry (idempotent re-point, not a duplicate).
         assert_eq!(apply(&target(&cfg, true), false, false), 0);
         assert_eq!(read(&cfg)["mcpServers"].as_object().unwrap().len(), 1);
@@ -262,7 +262,7 @@ mod tests {
         assert_eq!(apply(&target(&cfg, true), false, false), 0);
         let v = read(&cfg);
         // Ours added…
-        assert!(v["mcpServers"]["dontspeak"]["command"].is_string());
+        assert!(v["mcpServers"]["DontSpeak"]["command"].is_string());
         // …the sibling server AND the unrelated top-level key are untouched.
         assert_eq!(v["mcpServers"]["keepme"]["command"], "/usr/bin/keep");
         assert_eq!(v["projects"]["/x"]["history"], json!([]));
@@ -275,7 +275,7 @@ mod tests {
         std::fs::write(
             &cfg,
             json!({ "mcpServers": {
-                "dontspeak": { "command": "/old/dontspeak" },
+                "DontSpeak": { "command": "/old/dontspeak" },
                 "keepme": { "command": "/usr/bin/keep" }
             }})
             .to_string(),
@@ -283,7 +283,7 @@ mod tests {
         .unwrap();
         assert_eq!(apply(&target(&cfg, true), true, false), 0);
         let v = read(&cfg);
-        assert!(v["mcpServers"].get("dontspeak").is_none());
+        assert!(v["mcpServers"].get("DontSpeak").is_none());
         assert_eq!(v["mcpServers"]["keepme"]["command"], "/usr/bin/keep");
     }
 

@@ -61,7 +61,7 @@ echo "==> 6. register MCP server with Claude Code → ~/.claude.json"
 "$INSTALL_DIR/dontspeak" wire-code || true
 
 # ==> 7. Register the MCP server with Claude DESKTOP, if it's installed. Desktop has no
-# hook system, so this is registration ONLY — it adds mcpServers.dontspeak to
+# hook system, so this is registration ONLY — it adds mcpServers.DontSpeak to
 # ~/Library/Application Support/Claude/claude_desktop_config.json (additive, backed-up,
 # re-points on reinstall). wire-desktop self-detects and SKIPS quietly if Desktop is
 # absent, so this is safe to always run. Preview: wire-desktop --print-only; undo: --remove.
@@ -77,7 +77,7 @@ Done. Installed:
     undo any time with: $INSTALL_DIR/dontspeak wire-hooks --remove)
   • ~/.codex/config.toml narration hooks (only if ~/.codex exists; skip with
     'wire-hooks --no-codex', or wire later with 'wire-hooks --codex-only')
-  • Claude Code MCP server (mcpServers.dontspeak in ~/.claude.json; registered via
+  • Claude Code MCP server (mcpServers.DontSpeak in ~/.claude.json; registered via
     'dontspeak wire-code' — start a NEW Claude Code session to load it; undo with
     'dontspeak wire-code --remove')
   • Claude Desktop MCP server (only if Desktop is installed; registered via

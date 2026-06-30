@@ -12,7 +12,7 @@ use crate::tools;
 /// MCP protocol revision we implement (date-based). We echo the client's version
 /// when it matches; otherwise we answer with this one and let the client decide.
 pub(crate) const PROTOCOL_VERSION: &str = "2025-11-25";
-pub(crate) const SERVER_NAME: &str = "dontspeak";
+pub(crate) const SERVER_NAME: &str = "DontSpeak";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Run the stdio MCP server loop: read newline-delimited JSON-RPC from stdin, route

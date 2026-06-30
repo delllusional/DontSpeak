@@ -42,7 +42,7 @@ pkill -x dontspeakd 2>/dev/null || true
 echo "==> 2. un-wire the Claude Code hooks + Codex + Claude Code/Desktop MCP (before deleting the binary)"
 if [ -x "$INSTALL_DIR/dontspeak" ]; then
   # wire-hooks --remove strips Claude Code (settings.json) AND Codex (~/.codex/config.toml).
-  # The mcpServers.dontspeak registrations are SEPARATE configs the binary only touches via
+  # The mcpServers.DontSpeak registrations are SEPARATE configs the binary only touches via
   # wire-code (~/.claude.json) and wire-desktop (claude_desktop_config.json), so BOTH MUST be
   # un-wired here too or they dangle at a deleted binary path.
   "$INSTALL_DIR/dontspeak" wire-hooks --remove 2>/dev/null \
@@ -52,7 +52,7 @@ if [ -x "$INSTALL_DIR/dontspeak" ]; then
   "$INSTALL_DIR/dontspeak" wire-desktop --remove 2>/dev/null \
     || echo "   (wire-desktop --remove failed or nothing to remove)"
 else
-  echo "   (no $INSTALL_DIR/dontspeak — skipping hook removal; strip mcpServers.dontspeak"
+  echo "   (no $INSTALL_DIR/dontspeak — skipping hook removal; strip mcpServers.DontSpeak"
   echo "    from ~/.claude.json and claude_desktop_config.json by hand)"
 fi
 

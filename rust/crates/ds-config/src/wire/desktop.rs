@@ -3,7 +3,7 @@
 //! Claude Desktop has no hook system, so its DontSpeak integration is purely
 //! registering the stdio MCP bridge as a server — Claude then calls speak/listen/…
 //! on demand (no auto-narration). The config is the standard MCP shape:
-//!   { "mcpServers": { "dontspeak": { "command": "`<abs path>`", "args": [...] } } }
+//!   { "mcpServers": { "DontSpeak": { "command": "`<abs path>`", "args": [...] } } }
 //! We edit it the same way as settings.json: additive (preserve other servers/keys),
 //! our entry OVERWRITTEN so a reinstall re-points `command`, malformed file left to the
 //! caller to bail on. PURE — no disk.
