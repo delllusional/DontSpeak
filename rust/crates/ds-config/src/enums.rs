@@ -259,8 +259,8 @@ impl DiarizerProvider {
 /// One rung of the SHARED on-device compute ladder for BOTH the Kokoro TTS and Parakeet
 /// STT models (§A.1). The `provider` field is a `Vec<Provider>` priority ladder (default
 /// ANE → CUDA → CPU, see `default_provider`); each engine walks it and skips rungs it
-/// can't use on this platform (macOS STT lands on ANE; Windows STT follows CUDA → CPU like
-/// TTS, since Parakeet gained a CUDA EP). The `Ort*` variants are ONNX Runtime execution
+/// can't use on this platform (macOS STT lands on ANE; Windows/Linux x86_64 STT follows CUDA →
+/// CPU like TTS, since Parakeet gained a CUDA EP). The `Ort*` variants are ONNX Runtime execution
 /// providers (Kokoro drives its own ort session, so each is a real choice): `OrtCuda`
 /// (NVIDIA GPU) triggers a one-time ~1.4 GB GPU-runtime download; `OrtCoreMl` is the ort
 /// CoreML EP (macOS). `Ane` is the one NON-ort backend (FluidAudio native Core ML on the
@@ -317,7 +317,7 @@ impl Provider {
 
     /// Whether this rung can serve STT on the CURRENT platform — the predicate the
     /// `provider` priority array is walked with (see [`crate::VoiceConfig::resolved_stt_provider`]).
-    /// macOS: ANE (FluidAudio native) or CPU. Windows: CUDA (Parakeet GPU EP) or CPU.
+    /// macOS: ANE (FluidAudio native) or CPU. Windows/Linux: CUDA (Parakeet GPU EP) or CPU.
     /// Elsewhere: CPU only. (`OrtCoreMl` is TTS-only — never STT.)
     pub(crate) fn stt_usable(self) -> bool {
         self.stt_usable_on(std::env::consts::OS)
@@ -326,29 +326,29 @@ impl Provider {
     /// [`stt_usable`](Provider::stt_usable) as a PURE function of the target `os` — the single
     /// source the resolver and the cross-platform fallback tests both walk (so an `ort_cuda`
     /// first rung is provably skipped off Windows on a single host). macOS: ANE (FluidAudio
-    /// native) or CPU. Windows: CUDA (Parakeet GPU EP) or CPU. Elsewhere: CPU only. (`OrtCoreMl`
-    /// is TTS-only — never STT.) Provider usability depends only on the OS, not the arch.
+    /// native) or CPU. Windows/Linux: CUDA (Parakeet GPU EP) or CPU. Elsewhere: CPU only.
+    /// (`OrtCoreMl` is TTS-only — never STT.) Provider usability depends only on the OS, not arch.
     pub(crate) fn stt_usable_on(self, os: &str) -> bool {
         match os {
             "macos" => matches!(self, Provider::Ane | Provider::OrtCpu),
-            "windows" => matches!(self, Provider::OrtCuda | Provider::OrtCpu),
+            "windows" | "linux" => matches!(self, Provider::OrtCuda | Provider::OrtCpu),
             _ => matches!(self, Provider::OrtCpu),
         }
     }
 
     /// Whether this rung can serve TTS (Kokoro) on the CURRENT platform. macOS: ANE
-    /// (native), the ort CoreML EP, or CPU. Windows: CUDA or CPU. Elsewhere: CPU only.
+    /// (native), the ort CoreML EP, or CPU. Windows/Linux: CUDA or CPU. Elsewhere: CPU only.
     pub(crate) fn tts_usable(self) -> bool {
         self.tts_usable_on(std::env::consts::OS)
     }
 
     /// [`tts_usable`](Provider::tts_usable) as a PURE function of the target `os` — see
     /// [`stt_usable_on`](Provider::stt_usable_on). macOS: ANE, the ort CoreML EP, or CPU.
-    /// Windows: CUDA or CPU. Elsewhere: CPU only.
+    /// Windows/Linux: CUDA or CPU. Elsewhere: CPU only.
     pub(crate) fn tts_usable_on(self, os: &str) -> bool {
         match os {
             "macos" => matches!(self, Provider::Ane | Provider::OrtCoreMl | Provider::OrtCpu),
-            "windows" => matches!(self, Provider::OrtCuda | Provider::OrtCpu),
+            "windows" | "linux" => matches!(self, Provider::OrtCuda | Provider::OrtCpu),
             _ => matches!(self, Provider::OrtCpu),
         }
     }
@@ -1070,22 +1070,22 @@ mod tests {
     #[test]
     fn provider_ladder_falls_back_per_platform() {
         // A cuda-FIRST ladder (`["ort_cuda", "ort_cpu"]`): CUDA leads, with `ort_cpu` as the
-        // universal fallback. CUDA is a real rung ONLY on Windows; everywhere else the resolver
-        // must SKIP it and land on the next usable rung — proving an `ort_cuda` first item
-        // degrades gracefully instead of dead-ending. This is the cross-platform analogue of
-        // the live `model_status` check (which showed `ort_cpu` on macOS).
+        // universal fallback. CUDA is a real rung on Windows AND Linux (x86_64 ONNX-runtime GPU
+        // EP); on macOS the resolver must SKIP it and land on the next usable rung — proving an
+        // `ort_cuda` first item degrades gracefully instead of dead-ending. This is the
+        // cross-platform analogue of the live `model_status` check (which showed `ort_cpu` on macOS).
         let ladder = [Provider::OrtCuda, Provider::OrtCpu];
         let resolve_tts = |os: &str| ladder.iter().copied().find(|p| p.tts_usable_on(os));
         let resolve_stt = |os: &str| ladder.iter().copied().find(|p| p.stt_usable_on(os));
-        // Windows: CUDA is usable → it WINS (no fallback).
-        assert_eq!(resolve_tts("windows"), Some(Provider::OrtCuda));
-        assert_eq!(resolve_stt("windows"), Some(Provider::OrtCuda));
-        // macOS + Linux: CUDA is NOT usable → fall back to the next rung, `ort_cpu`.
-        for os in ["macos", "linux"] {
-            assert_eq!(resolve_tts(os), Some(Provider::OrtCpu), "tts {os}");
-            assert_eq!(resolve_stt(os), Some(Provider::OrtCpu), "stt {os}");
+        // Windows + Linux: CUDA is usable → it WINS (no fallback).
+        for os in ["windows", "linux"] {
+            assert_eq!(resolve_tts(os), Some(Provider::OrtCuda), "tts {os}");
+            assert_eq!(resolve_stt(os), Some(Provider::OrtCuda), "stt {os}");
         }
-        // A lone `["ort_cuda"]` ladder dead-ends off Windows — the RESOLVER (`resolved_*_provider`)
+        // macOS: CUDA is NOT usable → fall back to the next rung, `ort_cpu`.
+        assert_eq!(resolve_tts("macos"), Some(Provider::OrtCpu));
+        assert_eq!(resolve_stt("macos"), Some(Provider::OrtCpu));
+        // A lone `["ort_cuda"]` ladder dead-ends on macOS — the RESOLVER (`resolved_*_provider`)
         // is what supplies the `OrtCpu` default there; the raw `find` returns None, confirming
         // CUDA itself is genuinely unusable (not silently treated as usable).
         let cuda_only = [Provider::OrtCuda];
