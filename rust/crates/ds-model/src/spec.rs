@@ -201,10 +201,17 @@ pub struct PrefetchItem {
 }
 
 /// The files a component still NEEDS downloaded — already-present, sha-valid assets
-/// are omitted, so re-running the installer downloads nothing. `what` =
-/// "onnx" | "kokoro" | "parakeet" | "cuda". This is the SINGLE source of the
-/// installer's download list; the URLs/SHAs never leave ds-model.
+/// are omitted, so re-running the installer downloads nothing. `what` is a
+/// [`DownloadTarget`](crate::target::DownloadTarget) wire token — only `onnx` |
+/// `kokoro_model` (or the legacy `kokoro`) | `kokoro_voices` | `parakeet` | `cuda` |
+/// `dotnet` | `winapp` produce items; every other (or unknown) token yields `vec![]`.
+/// This is the SINGLE source of the installer's download list; the URLs/SHAs never
+/// leave ds-model.
 pub fn prefetch_items(what: &str) -> Vec<PrefetchItem> {
+    use crate::target::DownloadTarget;
+    let Some(target) = DownloadTarget::parse(what) else {
+        return vec![]; // unknown token ⇒ nothing to prefetch (was the old `_` arm)
+    };
     let item = |url: &str, sha: &str| PrefetchItem {
         url: url.to_string(),
         basename: url_basename(url).to_string(),
@@ -216,13 +223,13 @@ pub fn prefetch_items(what: &str) -> Vec<PrefetchItem> {
             .unwrap_or(false);
         (!present).then(|| item(&spec.url, &spec.sha256))
     };
-    match what {
+    match target {
         // NOTE: the onnx dylib and the CUDA runtime below are gated on EXISTENCE, not a
         // pinned SHA/version (unlike the SHA-checked model specs). So if ONNXRUNTIME_VERSION
         // or CUDA_WHEELS is ever bumped, a reinstall will NOT re-fetch them while the old
         // files still exist — the user must clear model_dir() (or the app's runtime
         // onnxruntime_dylib_version_ok() check will flag onnx and offer a re-download).
-        "onnx" => {
+        DownloadTarget::Onnx => {
             if onnxruntime_dylib_path()
                 .map(|p| p.is_file())
                 .unwrap_or(false)
@@ -234,11 +241,15 @@ pub fn prefetch_items(what: &str) -> Vec<PrefetchItem> {
                 None => vec![],
             }
         }
-        "kokoro" => [kokoro_onnx_spec(), kokoro_voices_spec()]
+        DownloadTarget::KokoroModel => [kokoro_onnx_spec(), kokoro_voices_spec()]
             .iter()
             .filter_map(&spec_item)
             .collect(),
-        "parakeet" => [
+        DownloadTarget::KokoroVoices => [kokoro_voices_spec()]
+            .iter()
+            .filter_map(&spec_item)
+            .collect(),
+        DownloadTarget::Parakeet => [
             parakeet_encoder_spec(),
             parakeet_decoder_spec(),
             parakeet_joiner_spec(),
@@ -251,7 +262,7 @@ pub fn prefetch_items(what: &str) -> Vec<PrefetchItem> {
             any(target_os = "windows", target_os = "linux"),
             target_arch = "x86_64"
         ))]
-        "cuda" => {
+        DownloadTarget::Cuda => {
             if crate::ort::cuda_runtime_present() {
                 return vec![];
             }
@@ -266,9 +277,11 @@ pub fn prefetch_items(what: &str) -> Vec<PrefetchItem> {
         // itself, so these are returned UNCONDITIONALLY and carry no sha (aka.ms permalinks
         // are not sha-pinnable — see urls.rs).
         #[cfg(target_os = "windows")]
-        "dotnet" => vec![item(crate::urls::DOTNET_DESKTOP_RUNTIME_URL, "")],
+        DownloadTarget::Dotnet => vec![item(crate::urls::DOTNET_DESKTOP_RUNTIME_URL, "")],
         #[cfg(target_os = "windows")]
-        "winapp" => vec![item(crate::urls::WINDOWS_APP_RUNTIME_URL, "")],
+        DownloadTarget::Winapp => vec![item(crate::urls::WINDOWS_APP_RUNTIME_URL, "")],
+        // Models / All / Diarization (and, off-Windows, Dotnet/Winapp; off-x86_64, Cuda) had
+        // no dedicated arm before and returned vec![] via the `_` default — KEEP that exactly.
         _ => vec![],
     }
 }

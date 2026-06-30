@@ -12,6 +12,7 @@ use crate::config_gate::{
     parakeet_available,
 };
 use crate::downloads::DownloadProg;
+use ds_model::DownloadTarget;
 use crate::engine::{PasteState, dictation_preview};
 use crate::stats;
 use crate::tts::TtsManager;
@@ -283,23 +284,23 @@ pub(crate) fn model_status_json(
     // as downloading too.
     let (dl_target, dl_done, dl_total, dl_err) = {
         let s = downloads.lock().unwrap();
-        (
-            s.active_target.clone(),
-            s.done,
-            s.total,
-            s.last_error.clone(),
-        )
+        (s.active_target, s.done, s.total, s.last_error.clone())
     };
     let dl_frac = if dl_total > 0 {
         dl_done as f64 / dl_total as f64
     } else {
         0.0
     };
-    let downloading = |eng: &str| !dl_target.is_empty() && (dl_target == eng || dl_target == "all");
-    let dl_err_for = |eng: &str| {
+    // An active "all" fetch counts as downloading EVERY model it produces; otherwise the row
+    // matches its own target. (Note: the voices-only `KokoroVoices` fetch does NOT light the
+    // Kokoro row here — that ANE-path ring is driven by `tts.tts_downloading()` below, exactly
+    // as before the rename.)
+    let downloading =
+        |eng: DownloadTarget| dl_target == Some(eng) || dl_target == Some(DownloadTarget::All);
+    let dl_err_for = |eng: DownloadTarget| {
         dl_err
             .as_ref()
-            .filter(|(t, _)| t == eng || t == "all")
+            .filter(|(t, _)| *t == eng || *t == DownloadTarget::All)
             .map(|(_, m)| m.clone())
     };
     // Build one engine object with a lifecycle `state` (the app maps it 1:1 to a
@@ -347,7 +348,7 @@ pub(crate) fn model_status_json(
     // downloaded"), but that's the `missing` state (offer Download), not a failure — so
     // ignore the load error unless the model is present (else the row reads red "failed"
     // instead of the download affordance). A genuine download failure always surfaces.
-    let kokoro_error = dl_err_for("kokoro").or_else(|| {
+    let kokoro_error = dl_err_for(DownloadTarget::KokoroModel).or_else(|| {
         if kokoro_present {
             tts.last_error()
         } else {
@@ -370,8 +371,9 @@ pub(crate) fn model_status_json(
     // premature "starting"/green (a partial download dir can't be told from a complete one on
     // disk). The ONNX path keeps its download-manager ring. GREEN = `tts_loaded`/`stt_loaded`,
     // which the helper sets only AFTER the model is resident + warm.
-    let kokoro_dling = downloading("kokoro") || tts.tts_downloading();
-    let parakeet_dling = (stt_uses_onnx && downloading("parakeet")) || tts.stt_downloading();
+    let kokoro_dling = downloading(DownloadTarget::KokoroModel) || tts.tts_downloading();
+    let parakeet_dling =
+        (stt_uses_onnx && downloading(DownloadTarget::Parakeet)) || tts.stt_downloading();
 
     let status = ModelStatus {
         // Removable only on the ONNX path (apple-native has no DontSpeak-managed Kokoro
@@ -397,7 +399,7 @@ pub(crate) fn model_status_json(
             stt_uses_onnx && parakeet_present && !kokoro_warm,
             parakeet_dling,
             if stt_uses_onnx {
-                dl_err_for("parakeet")
+                dl_err_for(DownloadTarget::Parakeet)
             } else {
                 None
             },
@@ -416,8 +418,8 @@ pub(crate) fn model_status_json(
         diarization: engine_obj(
             diar_present,
             false,
-            downloading("diarization"),
-            dl_err_for("diarization"),
+            downloading(DownloadTarget::Diarization),
+            dl_err_for(DownloadTarget::Diarization),
             cfg.stt_speaker_lock && cfg.diarization_on() && diar_present,
             cfg.stt_speaker_lock,
             dl_frac,

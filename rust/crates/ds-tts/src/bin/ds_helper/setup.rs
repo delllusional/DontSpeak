@@ -16,17 +16,20 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         || -> std::io::Result<()> { ds_model::ensure_cuda_runtime_with_progress(&p).map(|_| ()) };
     #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
     let cuda = || -> std::io::Result<()> { Ok(()) };
-    let r = match what {
-        "onnx" => ds_model::ensure_onnxruntime_with_progress(&p).map(|_| ()), // the base runtime
-        "kokoro" => ds_model::run_setup_kokoro_with_progress(&p).map(|_| ()), // kokoro (+ ensures onnx)
-        "parakeet" => ds_model::run_setup_parakeet_with_progress(&p).map(|_| ()), // parakeet (+ onnx)
-        "models" => models(),
-        "cuda" => cuda(),
+    use ds_model::DownloadTarget;
+    let r = match DownloadTarget::parse(what) {
+        Some(DownloadTarget::Onnx) => ds_model::ensure_onnxruntime_with_progress(&p).map(|_| ()), // the base runtime
+        // `kokoro_model` (or the legacy `kokoro` alias) — the full Kokoro model (+ ensures onnx).
+        Some(DownloadTarget::KokoroModel) => ds_model::run_setup_kokoro_with_progress(&p).map(|_| ()),
+        Some(DownloadTarget::Parakeet) => ds_model::run_setup_parakeet_with_progress(&p).map(|_| ()), // parakeet (+ onnx)
+        Some(DownloadTarget::Models) => models(),
+        Some(DownloadTarget::Cuda) => cuda(),
         // Windows installer prerequisites (.NET / Windows App Runtime): the installer
         // downloads + runs these itself via the URLs from ds-model's manifest — ds-model
         // never installs them — so prefetch is a no-op here (guards against a stray
         // --install-prefetched falling through to the model fetch).
-        "dotnet" | "winapp" => Ok(()),
+        Some(DownloadTarget::Dotnet) | Some(DownloadTarget::Winapp) => Ok(()),
+        // "all" and any other/unknown token ⇒ both models + the CUDA runtime (the old default).
         _ => models().and_then(|_| cuda()),
     };
     match r {

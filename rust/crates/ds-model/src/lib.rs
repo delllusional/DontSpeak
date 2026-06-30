@@ -52,6 +52,9 @@ pub mod libraries;
 pub mod ort;
 pub mod setup;
 pub mod spec;
+/// The canonical [`DownloadTarget`] enum — the single definition of every download/prefetch
+/// target token, parsed-to and matched-on by all three dispatchers (see the module docs).
+pub mod target;
 /// THE single registry of every download URL + SHA-256 + size (see the module docs).
 pub mod urls;
 
@@ -67,6 +70,7 @@ pub use setup::{
     run_setup_kokoro, run_setup_kokoro_voices_with_progress, run_setup_kokoro_with_progress,
     run_setup_parakeet, run_setup_parakeet_with_progress,
 };
+pub use target::DownloadTarget;
 pub use spec::{
     DownloadFile, KOKORO_ONNX_FILE, KOKORO_VOICES_FILE, ModelSpec, PARAKEET_DECODER_FILE,
     PARAKEET_ENCODER_FILE, PARAKEET_JOINER_FILE, PARAKEET_TOKENS_FILE, PrefetchItem, kokoro_files,

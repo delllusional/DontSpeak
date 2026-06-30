@@ -66,7 +66,7 @@ pub(crate) fn spawn_ipc_server(
                     let present = ds_model::model_path(ds_model::KOKORO_VOICES_FILE)
                         .is_some_and(|p| p.is_file());
                     if !present {
-                        start_download(&downloads, "kokoro_voices");
+                        start_download(&downloads, ds_model::DownloadTarget::KokoroVoices);
                     }
                     emit(&ds_ipc::Response::Done);
                 }

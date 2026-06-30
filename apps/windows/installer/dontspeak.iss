@@ -182,7 +182,7 @@ Filename: "{tmp}\{code:WinAppExeName}"; Parameters: "--quiet"; \
 Filename: "{app}\ds-helper.exe"; Parameters: "--install-prefetched ""{tmp}"" onnx"; \
   StatusMsg: "Installing ONNX runtime..."; \
   Flags: runhidden waituntilterminated runasoriginaluser; Components: onnx
-Filename: "{app}\ds-helper.exe"; Parameters: "--install-prefetched ""{tmp}"" kokoro"; \
+Filename: "{app}\ds-helper.exe"; Parameters: "--install-prefetched ""{tmp}"" kokoro_model"; \
   StatusMsg: "Installing Kokoro (text-to-speech)..."; \
   Flags: runhidden waituntilterminated runasoriginaluser; Components: onnx\kokoro
 Filename: "{app}\ds-helper.exe"; Parameters: "--install-prefetched ""{tmp}"" parakeet"; \
@@ -507,7 +507,7 @@ begin
   DownloadPage.Clear;
   NeedDownload := False;  QueuedCount := 0;
   QueueComponent('onnx', 'onnx');
-  QueueComponent('onnx\kokoro', 'kokoro');
+  QueueComponent('onnx\kokoro', 'kokoro_model');
   QueueComponent('onnx\parakeet', 'parakeet');
   QueueComponent('onnx\cuda', 'cuda');
   { Prerequisite runtimes — same in-wizard download UX as the models (silent install runs

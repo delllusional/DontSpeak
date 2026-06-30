@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use ds_config::{Paths, VoiceConfig};
+use ds_model::DownloadTarget;
 
 use crate::config_gate::apple_native_shim_available;
 use crate::logging::log;
@@ -10,15 +11,16 @@ use crate::tts::TtsManager;
 
 /// Background model-download progress, polled via `model_status` so the app's
 /// status dots can show an orange progress ring (downloading) and a red dot
-/// (a failed download). `active_target` is "" when idle, else the in-flight
-/// "kokoro"|"parakeet"|"all"; `last_error` is the (target, message) of the most
-/// recent FAILED download, kept until a new download for that target starts.
+/// (a failed download). `active_target` is `None` when idle, else the in-flight
+/// [`DownloadTarget`] (e.g. `KokoroModel`/`Parakeet`/`All`); `last_error` is the
+/// (target, message) of the most recent FAILED download, kept until a new download
+/// for that target starts.
 #[derive(Default)]
 pub(crate) struct DownloadState {
-    pub active_target: String,
+    pub active_target: Option<DownloadTarget>,
     pub done: u64,
     pub total: u64,
-    pub last_error: Option<(String, String)>,
+    pub last_error: Option<(DownloadTarget, String)>,
     /// Warm-child reload hook, wired ONCE at boot via [`set_reload_hook`]: the warm-child
     /// owner plus the config paths. On a SUCCESSFUL download, [`start_download`] restarts the
     /// warm child iff it hosts the freshly-downloaded model (see [`download_needs_child_reload`])
@@ -45,11 +47,11 @@ pub(crate) fn set_reload_hook(dl: &DownloadProg, warm: Arc<TtsManager>, paths: P
 /// and/or Parakeet STT; a `cuda` runtime fetch means whichever of those runs must restart to
 /// bind the GPU execution provider. `diarization` (a separate Core ML path) and unknown
 /// targets never touch the warm child.
-fn target_hosts_engine(target: &str, kokoro: bool, parakeet: bool) -> bool {
+fn target_hosts_engine(target: DownloadTarget, kokoro: bool, parakeet: bool) -> bool {
     match target {
-        "kokoro" | "kokoro_voices" => kokoro,
-        "parakeet" => parakeet,
-        "all" | "cuda" => kokoro || parakeet,
+        DownloadTarget::KokoroModel | DownloadTarget::KokoroVoices => kokoro,
+        DownloadTarget::Parakeet => parakeet,
+        DownloadTarget::All | DownloadTarget::Cuda => kokoro || parakeet,
         _ => false,
     }
 }
@@ -59,7 +61,7 @@ fn target_hosts_engine(target: &str, kokoro: bool, parakeet: bool) -> bool {
 /// differences are already folded into `cfg.resolved_tts()` / `resolved_stt()`, so this
 /// decision is identical everywhere — the only per-platform variance lives in those resolvers
 /// (covered by their own tests). See [`target_hosts_engine`] for the pure mapping.
-pub(crate) fn download_needs_child_reload(target: &str, cfg: &VoiceConfig) -> bool {
+pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceConfig) -> bool {
     target_hosts_engine(
         target,
         cfg.resolved_tts() == Some(ds_config::TtsEngine::Kokoro),
@@ -67,27 +69,27 @@ pub(crate) fn download_needs_child_reload(target: &str, cfg: &VoiceConfig) -> bo
     )
 }
 
-/// Kick off a background download for `which` ("kokoro"|"parakeet"|"all") unless
-/// one is already running. Returns immediately; progress is observed via
-/// `model_status`. Each model setup also pulls the shared onnxruntime dylib.
-pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
+/// Kick off a background download for `which` (e.g. [`DownloadTarget::KokoroModel`] /
+/// [`DownloadTarget::Parakeet`] / [`DownloadTarget::All`]) unless one is already running.
+/// Returns immediately; progress is observed via `model_status`. Each model setup also pulls
+/// the shared onnxruntime dylib.
+pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
     {
         let mut s = dl.lock().unwrap();
-        if !s.active_target.is_empty() {
+        if s.active_target.is_some() {
             return; // a download is already in flight
         }
-        s.active_target = which.to_string();
+        s.active_target = Some(which);
         s.done = 0;
         s.total = 0;
         // clear a prior failure for this target (or for "all")
         if let Some((t, _)) = &s.last_error
-            && (t == which || which == "all" || t == "all")
+            && (*t == which || which == DownloadTarget::All || *t == DownloadTarget::All)
         {
             s.last_error = None;
         }
     }
     let dl = dl.clone();
-    let which = which.to_string();
     std::thread::spawn(move || {
         // Grab the warm-child reload hook up front (wired once at boot); used after the fetch.
         let (warm, paths) = {
@@ -99,16 +101,18 @@ pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
             s.done = done;
             s.total = total;
         };
-        let result: std::io::Result<()> = (|| match which.as_str() {
-            "kokoro" => ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ()),
+        let result: std::io::Result<()> = (|| match which {
+            DownloadTarget::KokoroModel => ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ()),
             // Voice-tensor pack only (~28 MB) — the ANE/Core ML path needs the voices npz
             // but not the 310 MB ONNX model. Requested by `EnsureKokoroVoices`.
-            "kokoro_voices" => ds_model::run_setup_kokoro_voices_with_progress(&prog).map(|_| ()),
-            "parakeet" => ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ()),
+            DownloadTarget::KokoroVoices => {
+                ds_model::run_setup_kokoro_voices_with_progress(&prog).map(|_| ())
+            }
+            DownloadTarget::Parakeet => ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ()),
             // Shared GPU runtime (~1.4 GB) for the ONNX CUDA EP — drives BOTH engines. Folded
             // in here (not a bespoke thread in `apply_tts_provider`) so the completion hook
             // below restarts the warm child onto the GPU UNIFORMLY, exactly like a model fetch.
-            "cuda" => {
+            DownloadTarget::Cuda => {
                 #[cfg(all(
                     any(target_os = "windows", target_os = "linux"),
                     target_arch = "x86_64"
@@ -128,7 +132,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
             }
             // Diarization Core ML models — we fetch them OURSELVES (real %) into the dir the
             // shim loads from offline, like Kokoro/Parakeet. macOS-only (ANE shim).
-            "diarization" => {
+            DownloadTarget::Diarization => {
                 #[cfg(target_os = "macos")]
                 {
                     ds_model::coreml_repo::ensure_coreml_repo(
@@ -141,6 +145,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
                     Err(std::io::Error::other("diarization is macOS-only"))
                 }
             }
+            // "all" (and any other target without a bespoke fetch) ⇒ both ONNX models.
             _ => {
                 ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ())?;
                 ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ())
@@ -148,10 +153,13 @@ pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
         })();
         {
             let mut s = dl.lock().unwrap();
-            s.active_target = String::new();
+            s.active_target = None;
             if let Err(e) = &result {
-                log(&format!("WARN: model download ({which}) failed: {e}"));
-                s.last_error = Some((which.clone(), e.to_string()));
+                log(&format!(
+                    "WARN: model download ({}) failed: {e}",
+                    which.as_str()
+                ));
+                s.last_error = Some((which, e.to_string()));
             }
         }
         // SHARED self-heal (every platform, every caller): the warm child may have been started
@@ -162,11 +170,12 @@ pub(crate) fn start_download(dl: &DownloadProg, which: &str) {
         // change is honored.
         if result.is_ok()
             && let (Some(tts), Some(paths)) = (warm, paths)
-            && download_needs_child_reload(&which, &VoiceConfig::load(&paths))
+            && download_needs_child_reload(which, &VoiceConfig::load(&paths))
             && tts.reload_models()
         {
             log(&format!(
-                "warm child restarted to load freshly-downloaded '{which}'"
+                "warm child restarted to load freshly-downloaded '{}'",
+                which.as_str()
             ));
         }
     });
@@ -189,12 +198,12 @@ fn pick_download(
     need_kokoro: bool,
     need_kokoro_voices: bool,
     need_parakeet: bool,
-) -> Option<&'static str> {
+) -> Option<DownloadTarget> {
     match (need_kokoro, need_kokoro_voices, need_parakeet) {
-        (true, _, true) => Some("all"),
-        (true, _, false) => Some("kokoro"),
-        (false, true, _) => Some("kokoro_voices"),
-        (false, false, true) => Some("parakeet"),
+        (true, _, true) => Some(DownloadTarget::All),
+        (true, _, false) => Some(DownloadTarget::KokoroModel),
+        (false, true, _) => Some(DownloadTarget::KokoroVoices),
+        (false, false, true) => Some(DownloadTarget::Parakeet),
         (false, false, false) => None,
     }
 }
@@ -271,7 +280,7 @@ pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg
         target_arch = "x86_64"
     ))]
     if which.eq_ignore_ascii_case("ort_cuda") && !ds_model::cuda_runtime_present() {
-        start_download(downloads, "cuda");
+        start_download(downloads, DownloadTarget::Cuda);
     }
     #[cfg(not(all(
         any(target_os = "windows", target_os = "linux"),
@@ -283,6 +292,7 @@ pub(crate) fn apply_tts_provider(tts: &Arc<TtsManager>, downloads: &DownloadProg
 #[cfg(test)]
 mod tests {
     use super::{ane_needs_voices_npz, pick_download, target_hosts_engine};
+    use ds_model::DownloadTarget;
 
     #[test]
     fn target_hosts_engine_maps_downloads_to_warm_child() {
@@ -292,28 +302,33 @@ mod tests {
         // to "must restart the child" iff the child hosts a model that target produced.
 
         // Kokoro targets (full ONNX model + the voices-only pack) restart iff Kokoro TTS runs.
-        assert!(target_hosts_engine("kokoro", true, false));
-        assert!(target_hosts_engine("kokoro_voices", true, false));
-        assert!(!target_hosts_engine("kokoro", false, true));
-        assert!(!target_hosts_engine("kokoro_voices", false, false));
+        assert!(target_hosts_engine(DownloadTarget::KokoroModel, true, false));
+        assert!(target_hosts_engine(DownloadTarget::KokoroVoices, true, false));
+        assert!(!target_hosts_engine(DownloadTarget::KokoroModel, false, true));
+        assert!(!target_hosts_engine(DownloadTarget::KokoroVoices, false, false));
 
         // The Parakeet ONNX target restarts iff the built-in (Parakeet) STT runs.
-        assert!(target_hosts_engine("parakeet", false, true));
-        assert!(!target_hosts_engine("parakeet", true, false));
+        assert!(target_hosts_engine(DownloadTarget::Parakeet, false, true));
+        assert!(!target_hosts_engine(DownloadTarget::Parakeet, true, false));
 
         // The combined model fetch AND the shared CUDA runtime restart iff EITHER engine runs —
         // both engines share the warm child and the compute provider.
-        for t in ["all", "cuda"] {
-            assert!(target_hosts_engine(t, true, false), "{t} (tts only)");
-            assert!(target_hosts_engine(t, false, true), "{t} (stt only)");
-            assert!(target_hosts_engine(t, true, true), "{t} (both)");
-            assert!(!target_hosts_engine(t, false, false), "{t} (neither)");
+        for t in [DownloadTarget::All, DownloadTarget::Cuda] {
+            assert!(target_hosts_engine(t, true, false), "{t:?} (tts only)");
+            assert!(target_hosts_engine(t, false, true), "{t:?} (stt only)");
+            assert!(target_hosts_engine(t, true, true), "{t:?} (both)");
+            assert!(!target_hosts_engine(t, false, false), "{t:?} (neither)");
         }
 
-        // Diarization is a SEPARATE Core ML path (not the warm child); unknown/empty targets
-        // never trigger a restart even when both engines run.
-        for t in ["diarization", "", "bogus"] {
-            assert!(!target_hosts_engine(t, true, true), "{t}");
+        // Diarization is a SEPARATE Core ML path (not the warm child); other non-hosting
+        // targets (the bare runtime / installer groups) never trigger a restart even when
+        // both engines run.
+        for t in [
+            DownloadTarget::Diarization,
+            DownloadTarget::Onnx,
+            DownloadTarget::Models,
+        ] {
+            assert!(!target_hosts_engine(t, true, true), "{t:?}");
         }
     }
 
@@ -347,15 +362,27 @@ mod tests {
     #[test]
     fn ane_voices_npz_is_queued_not_skipped() {
         // Fresh ANE install: full ONNX Kokoro NOT needed, but the voices npz IS. The policy
-        // must queue the voices-only fetch ("kokoro_voices") instead of downloading nothing.
-        assert_eq!(pick_download(false, true, false), Some("kokoro_voices"));
+        // must queue the voices-only fetch (`KokoroVoices`) instead of downloading nothing.
+        assert_eq!(
+            pick_download(false, true, false),
+            Some(DownloadTarget::KokoroVoices)
+        );
         // With Parakeet ONNX also missing, the small npz lands first (it gates the active
         // voice); Parakeet follows on the next poll tick.
-        assert_eq!(pick_download(false, true, true), Some("kokoro_voices"));
+        assert_eq!(
+            pick_download(false, true, true),
+            Some(DownloadTarget::KokoroVoices)
+        );
         // Regression guards on the pre-existing mappings.
         assert_eq!(pick_download(false, false, false), None);
-        assert_eq!(pick_download(true, false, false), Some("kokoro"));
-        assert_eq!(pick_download(true, false, true), Some("all"));
-        assert_eq!(pick_download(false, false, true), Some("parakeet"));
+        assert_eq!(
+            pick_download(true, false, false),
+            Some(DownloadTarget::KokoroModel)
+        );
+        assert_eq!(pick_download(true, false, true), Some(DownloadTarget::All));
+        assert_eq!(
+            pick_download(false, false, true),
+            Some(DownloadTarget::Parakeet)
+        );
     }
 }
