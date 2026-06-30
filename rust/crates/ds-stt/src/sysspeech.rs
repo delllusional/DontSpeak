@@ -9,14 +9,17 @@
 //! the OS's. `requiresOnDeviceRecognition` keeps audio on the machine; when the locale
 //! has no on-device model the engine reports UNAVAILABLE rather than falling back.
 
-use std::ffi::{CStr, c_char};
+use std::ffi::c_void;
 
 use libloading::{Library, Symbol};
 
+use crate::shim::StrCb;
+
 type SysAvailFn = unsafe extern "C" fn() -> i32;
 type SysAuthorizeFn = unsafe extern "C" fn() -> i32;
-type SysTranscribeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut *mut c_char) -> i32;
-type FreeStrFn = unsafe extern "C" fn(*mut c_char);
+// Transcription still BLOCKS and returns its status; the text comes back through a borrowed
+// callback (copied out by `crate::shim::collect_str`), so there's no out-param and no smk_free_str.
+type SysTranscribeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
 
 /// Usability of the System STT engine, mapped from the shim's `smk_sys_available` code.
 /// Mirrors Parakeet's present/warming/ready split so the status dot reads the same way.
@@ -127,30 +130,12 @@ impl SystemTranscriber {
         }
         self.ensure_lib()?;
         let lib = self.lib.as_ref().expect("lib opened above");
-        let mut out: *mut c_char = std::ptr::null_mut();
-        // SAFETY: pointers valid for the call; on rc==0 the shim hands back a malloc'd
-        // C string we copy then free via smk_free_str.
-        let rc = unsafe {
-            let tr: Symbol<SysTranscribeFn> = lib
-                .get(b"smk_sys_transcribe\0")
-                .map_err(|e| format!("smk_sys_transcribe symbol: {e}"))?;
-            tr(pcm.as_ptr(), pcm.len(), 16_000, &mut out)
-        };
-        if rc != 0 {
-            return Err(format!("smk_sys_transcribe failed (rc={rc})"));
-        }
-        if out.is_null() {
-            return Ok(String::new());
-        }
-        let text = unsafe { CStr::from_ptr(out) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe {
-            if let Ok(free) = lib.get::<FreeStrFn>(b"smk_free_str\0") {
-                free(out);
-            }
-        }
-        Ok(text)
+        let tr: Symbol<SysTranscribeFn> = unsafe { lib.get(b"smk_sys_transcribe\0") }
+            .map_err(|e| format!("smk_sys_transcribe symbol: {e}"))?;
+        // The shim borrows the transcript to our sink, which copies it out (no smk_free_str).
+        // The call blocks; `pcm` lives across it.
+        crate::shim::collect_str(|ctx, cb| unsafe { tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) })
+            .map_err(|rc| format!("smk_sys_transcribe failed (rc={rc})"))
     }
 }
 

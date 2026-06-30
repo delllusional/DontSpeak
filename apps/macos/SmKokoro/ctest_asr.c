@@ -1,5 +1,7 @@
 // Phase STT-1 ABI check: dlopen libsmkokoro.dylib, load a 16 kHz mono int16 WAV,
 // and transcribe it through the C ABI (smk_asr_init + smk_transcribe).
+// The transcript is BORROWED to a callback fired synchronously during the call (see
+// include/smkokoro.h) — we copy it out there; nothing to free.
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -7,9 +9,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef void (*str_cb)(void *, const char *);
+
 typedef int32_t (*asr_init_fn)(const char *, int32_t);
-typedef int32_t (*transcribe_fn)(const float *, size_t, int32_t, char **);
-typedef void (*free_str_fn)(char *);
+typedef int32_t (*transcribe_fn)(const float *, size_t, int32_t, void *, str_cb);
+
+// Copies the borrowed transcript out into a fixed buffer for the duration of the callback.
+static void on_str(void *ctx, const char *text) {
+    char *dst = (char *)ctx;
+    dst[0] = '\0';
+    if (text) { strncpy(dst, text, 4095); dst[4095] = '\0'; }
+}
 
 // Minimal WAV loader: scan for the "data" chunk, read int16 PCM → float [-1,1].
 static float *load_wav_16k(const char *path, size_t *out_n) {
@@ -47,8 +57,7 @@ int main(int argc, char **argv) {
     if (!h) { printf("dlopen failed: %s\n", dlerror()); return 1; }
     asr_init_fn smk_asr_init = (asr_init_fn)dlsym(h, "smk_asr_init");
     transcribe_fn smk_transcribe = (transcribe_fn)dlsym(h, "smk_transcribe");
-    free_str_fn smk_free_str = (free_str_fn)dlsym(h, "smk_free_str");
-    if (!smk_asr_init || !smk_transcribe || !smk_free_str) { printf("dlsym failed\n"); return 2; }
+    if (!smk_asr_init || !smk_transcribe) { printf("dlsym failed\n"); return 2; }
 
     size_t n = 0;
     float *samples = load_wav_16k(wav, &n);
@@ -59,13 +68,10 @@ int main(int argc, char **argv) {
     printf("smk_asr_init = %d (downloads Parakeet on first run)\n", r);
     if (r != 0) return 4;
 
-    char *text = NULL;
-    r = smk_transcribe(samples, n, 16000, &text);
+    char text[4096] = {0};
+    r = smk_transcribe(samples, n, 16000, text, on_str);
     printf("smk_transcribe = %d\n", r);
-    if (r == 0 && text) {
-        printf("TRANSCRIPT: %s\n", text);
-        smk_free_str(text);
-    }
+    if (r == 0) printf("TRANSCRIPT: %s\n", text);
     free(samples);
     return r;
 }

@@ -5,23 +5,26 @@
 //! (`preload`/`unload`/`transcribe_pcm_16k`) so the helper can hold either behind
 //! [`crate::local::LocalTranscriber`].
 
-use std::ffi::{CStr, c_char};
+use std::ffi::{c_char, c_void};
 
 use libloading::{Library, Symbol};
 
+use crate::shim::StrCb;
 use crate::streaming::StreamingStt;
 
+// Text-returning calls still BLOCK and return their status; the transcript comes back through a
+// borrowed callback (copied out by `crate::shim::collect_str`), so there's no out-param and no
+// `smk_free_str`. init/shutdown/start carry no buffer, so they keep the plain int32 ABI.
 type AsrInitFn = unsafe extern "C" fn(*const c_char, i32) -> i32;
-type TranscribeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut *mut c_char) -> i32;
-type FreeStrFn = unsafe extern "C" fn(*mut c_char);
+type TranscribeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
 type AsrShutdownFn = unsafe extern "C" fn();
 
-// Streaming ASR C ABI (FluidAudio `StreamingAsrManager` behind the shim). `start` begins a new
+// Streaming ASR C ABI (FluidAudio `StreamingEouAsrManager` behind the shim). `start` begins a new
 // utterance, `push` feeds a 16 kHz chunk and returns the hypothesis-so-far, `finish` flushes the
-// final transcript. Strings are malloc'd by the shim and freed via `smk_free_str`.
+// final transcript.
 type StreamStartFn = unsafe extern "C" fn(*const c_char) -> i32;
-type StreamPushFn = unsafe extern "C" fn(*const f32, usize, i32, *mut *mut c_char) -> i32;
-type StreamFinishFn = unsafe extern "C" fn(*mut *mut c_char) -> i32;
+type StreamPushFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
+type StreamFinishFn = unsafe extern "C" fn(*mut c_void, StrCb) -> i32;
 
 /// Parakeet ASR behind the C ABI. Models download on first `preload`/transcribe.
 pub struct CoremlTranscriber {
@@ -93,30 +96,12 @@ impl CoremlTranscriber {
         }
         self.preload()?;
         let lib = self.lib.as_ref().expect("lib loaded above");
-        let mut out: *mut c_char = std::ptr::null_mut();
-        // SAFETY: pointers valid for the call; on rc==0 the shim hands back a malloc'd
-        // C string we copy then free via smk_free_str.
-        let rc = unsafe {
-            let tr: Symbol<TranscribeFn> = lib
-                .get(b"smk_transcribe\0")
-                .map_err(|e| format!("smk_transcribe symbol: {e}"))?;
-            tr(pcm.as_ptr(), pcm.len(), 16_000, &mut out)
-        };
-        if rc != 0 {
-            return Err(format!("smk_transcribe failed (rc={rc})"));
-        }
-        if out.is_null() {
-            return Ok(String::new());
-        }
-        let text = unsafe { CStr::from_ptr(out) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe {
-            if let Ok(free) = lib.get::<FreeStrFn>(b"smk_free_str\0") {
-                free(out);
-            }
-        }
-        Ok(text)
+        let tr: Symbol<TranscribeFn> = unsafe { lib.get(b"smk_transcribe\0") }
+            .map_err(|e| format!("smk_transcribe symbol: {e}"))?;
+        // The shim borrows the transcript to our sink, which copies it out (no smk_free_str).
+        // The call blocks; `pcm` lives across it.
+        crate::shim::collect_str(|ctx, cb| unsafe { tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) })
+            .map_err(|rc| format!("smk_transcribe failed (rc={rc})"))
     }
 }
 
@@ -130,23 +115,6 @@ impl Drop for CoremlTranscriber {
     fn drop(&mut self) {
         self.unload();
     }
-}
-
-/// Read a malloc'd C string out of a `*mut *mut c_char` shim out-param, copying it to an owned
-/// `String` and freeing the original via `smk_free_str`. Null → empty.
-fn take_shim_str(lib: &Library, out: *mut c_char) -> String {
-    if out.is_null() {
-        return String::new();
-    }
-    let text = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe {
-        if let Ok(free) = lib.get::<FreeStrFn>(b"smk_free_str\0") {
-            free(out);
-        }
-    }
-    text
 }
 
 /// Cache-aware STREAMING Core ML / ANE backend — FluidAudio's `StreamingAsrManager` behind the
@@ -176,18 +144,10 @@ impl CoremlStreamer {
     }
 
     fn push(&self, sym: &[u8], pcm: &[f32]) -> Result<String, String> {
-        let mut out: *mut c_char = std::ptr::null_mut();
-        let rc = unsafe {
-            let f: Symbol<StreamPushFn> = self
-                .lib
-                .get(sym)
-                .map_err(|e| format!("{} symbol: {e}", String::from_utf8_lossy(sym)))?;
-            f(pcm.as_ptr(), pcm.len(), 16_000, &mut out)
-        };
-        if rc != 0 {
-            return Err(format!("{} failed (rc={rc})", String::from_utf8_lossy(sym)));
-        }
-        Ok(take_shim_str(&self.lib, out))
+        let f: Symbol<StreamPushFn> = unsafe { self.lib.get(sym) }
+            .map_err(|e| format!("{} symbol: {e}", String::from_utf8_lossy(sym)))?;
+        crate::shim::collect_str(|ctx, cb| unsafe { f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) })
+            .map_err(|rc| format!("{} failed (rc={rc})", String::from_utf8_lossy(sym)))
     }
 }
 
@@ -213,17 +173,9 @@ impl StreamingStt for CoremlStreamer {
     }
 
     fn finalize(&mut self) -> Result<String, String> {
-        let mut out: *mut c_char = std::ptr::null_mut();
-        let rc = unsafe {
-            let f: Symbol<StreamFinishFn> = self
-                .lib
-                .get(b"smk_asr_stream_finish\0")
-                .map_err(|e| format!("smk_asr_stream_finish symbol: {e}"))?;
-            f(&mut out)
-        };
-        if rc != 0 {
-            return Err(format!("smk_asr_stream_finish failed (rc={rc})"));
-        }
-        Ok(take_shim_str(&self.lib, out))
+        let f: Symbol<StreamFinishFn> = unsafe { self.lib.get(b"smk_asr_stream_finish\0") }
+            .map_err(|e| format!("smk_asr_stream_finish symbol: {e}"))?;
+        crate::shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
+            .map_err(|rc| format!("smk_asr_stream_finish failed (rc={rc})"))
     }
 }

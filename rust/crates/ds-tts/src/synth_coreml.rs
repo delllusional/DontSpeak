@@ -10,20 +10,15 @@
 //! `SMKOKORO_DYLIB_PATH` (set by the macOS app, mirroring `ORT_DYLIB_PATH`). Models
 //! download on first use. See `apps/macos/SmKokoro/include/smkokoro.h`.
 
-use std::ffi::{CString, c_char};
+use std::ffi::{CString, c_char, c_void};
 
+use ds_stt::shim::PcmCb;
 use libloading::{Library, Symbol};
 
 type InitFn = unsafe extern "C" fn(*const c_char, i32) -> i32;
-type SynthFn = unsafe extern "C" fn(
-    *const c_char,
-    *const c_char,
-    f32,
-    *mut *mut f32,
-    *mut usize,
-    *mut i32,
-) -> i32;
-type FreeFn = unsafe extern "C" fn(*mut f32);
+// Synthesis still BLOCKS and returns its status; the PCM comes back through a borrowed callback
+// (copied out by `ds_stt::shim::collect_pcm`), so there is no out-param and no `smk_free`.
+type SynthFn = unsafe extern "C" fn(*const c_char, *const c_char, f32, *mut c_void, PcmCb) -> i32;
 type ShutdownFn = unsafe extern "C" fn();
 
 /// FluidAudio's guaranteed English voice — used when the requested voice has no
@@ -121,79 +116,17 @@ impl CoremlKokoro {
     fn synthesize_one(&self, text: &str, voice: &str, speed: f32) -> Result<Vec<f32>, String> {
         let c_text = CString::new(text).map_err(|_| "text contains NUL".to_string())?;
         let c_voice = CString::new(voice).map_err(|_| "voice contains NUL".to_string())?;
-        let mut out_pcm: *mut f32 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut out_sr: i32 = 0;
-        // SAFETY CONTRACT (ptr, len, ownership):
-        //   • All in-pointers (`c_text`, `c_voice`, the three `&mut` out-slots) are
-        //     valid for the duration of this call; the shim writes the out-slots only.
-        //   • On rc==0 with out_len>0 the shim hands back `out_pcm`, a buffer of
-        //     EXACTLY `out_len` contiguous f32 it allocated; OWNERSHIP transfers to us,
-        //     so we copy it out and MUST free it via the matching `smk_free` (the same
-        //     allocator) — never `Vec::from_raw_parts`/`Box`, never double-free.
-        //   • On rc!=0, OR a null `out_pcm`, OR out_len==0 the buffer is NOT valid /
-        //     not owned: we must neither read a slice from it NOR free it.
-        let rc = unsafe {
-            let synth: Symbol<SynthFn> = self
-                .lib
-                .get(b"smk_synthesize_text\0")
-                .map_err(|e| format!("smk_synthesize_text symbol: {e}"))?;
-            synth(
-                c_text.as_ptr(),
-                c_voice.as_ptr(),
-                speed,
-                &mut out_pcm,
-                &mut out_len,
-                &mut out_sr,
-            )
-        };
-        // Defensive guards BEFORE building any slice or freeing (a bogus buffer must
-        // never be read or freed). Order matters: bail on a non-success rc first.
-        if rc != 0 {
-            return Err(format!("smk_synthesize_text failed (rc={rc})"));
-        }
-        // A null pointer is never a valid buffer. With len==0 it's the benign
-        // "no audio" case (return empty, nothing to free); with len>0 the shim
-        // contradicted itself (len>0 but no buffer) — refuse rather than deref null.
-        if out_pcm.is_null() {
-            if out_len == 0 {
-                return Ok(Vec::new());
-            }
-            return Err(format!(
-                "smk_synthesize_text returned null buffer with len={out_len}"
-            ));
-        }
-        // Non-null but empty: nothing to copy; do NOT free (we never read/own it).
-        if out_len == 0 {
-            return Ok(Vec::new());
-        }
-        // Sanity-bound `out_len` against an absurd max so a garbage length can't make
-        // `from_raw_parts` span the whole address space (UB) before we ever read it.
-        // 24 kHz mono f32 → ~96 KB/s; 1 GiB of samples is ~3 h of audio, far past any
-        // single utterance, so anything beyond this is a corrupt length, not real PCM.
-        const MAX_SAMPLES: usize = 256 * 1024 * 1024; // 256 Mi f32 = 1 GiB
-        if out_len > MAX_SAMPLES {
-            // An implausible length means the out-slots are corrupt, so `out_pcm` may
-            // be garbage too. Deliberately DO NOT free it: freeing a bogus pointer is
-            // UB / a crash, whereas leaking on this should-never-happen corrupt path is
-            // harmless. Refuse to read it either way.
-            return Err(format!(
-                "smk_synthesize_text returned implausible len={out_len}"
-            ));
-        }
-        // Copy out, then free the shim-owned buffer. (out_sr is 24_000 for Kokoro;
-        // the rest of the pipeline assumes 24 kHz, so we don't resample.)
-        // SAFETY: out_pcm is non-null, out_len is in (0, MAX_SAMPLES] f32, and the
-        // shim guarantees that many contiguous, initialized f32 on rc==0 (see contract
-        // above); the buffer outlives this read since we free it only afterwards.
-        let pcm = unsafe { std::slice::from_raw_parts(out_pcm, out_len) }.to_vec();
-        unsafe {
-            // SAFETY: allocator-matched free of the shim-owned buffer, exactly once.
-            if let Ok(free) = self.lib.get::<FreeFn>(b"smk_free\0") {
-                free(out_pcm);
-            }
-        }
-        Ok(pcm)
+        let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"smk_synthesize_text\0") }
+            .map_err(|e| format!("smk_synthesize_text symbol: {e}"))?;
+        // The shim BORROWS the PCM to our sink, which copies it into a `Vec<f32>` while the shim
+        // still owns it — so there's no ownership transfer, no `smk_free`, and no raw-pointer/len
+        // guards here. The call blocks; `c_text`/`c_voice` live across it. The sample rate is
+        // 24_000 for Kokoro (the pipeline assumes 24 kHz, so we don't resample); an empty/no-audio
+        // result comes back as an empty Vec.
+        ds_stt::shim::collect_pcm(|ctx, cb| unsafe {
+            synth(c_text.as_ptr(), c_voice.as_ptr(), speed, ctx, cb)
+        })
+        .map_err(|rc| format!("smk_synthesize_text failed (rc={rc})"))
     }
 }
 

@@ -7,9 +7,70 @@
 //! same image). (The shim still ships TTS symbols, but apple-native Kokoro TTS was
 //! removed, so nothing here loads them anymore.)
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_void};
 
 use libloading::Library;
+
+// ── borrowed-result callbacks ──────────────────────────────────────────────────────────
+//
+// The buffer-returning shim calls (synthesize/transcribe/diarize/embed) still BLOCK and still
+// return their status code; what changed is how the RESULT crosses the boundary. Instead of
+// handing back an owned buffer the caller must free (the old `float**`/`char**` out-param +
+// `smk_free`/`smk_free_str` dance, with its two allocator families and pointer/len guards),
+// the shim BORROWS the buffer to a callback it fires once, synchronously, before returning.
+// We copy it out inside the callback — so there is no ownership transfer and nothing to free.
+//
+// Because the callback fires synchronously on THIS thread during the call, the context is just
+// a `&mut Option<…>` on our stack: no channel, no Box, no Send/Sync concerns.
+
+/// C borrowed-result callbacks (mirror the typedefs in smkokoro.h). The buffer is valid only
+/// for the duration of the call.
+pub type PcmCb = unsafe extern "C" fn(*mut c_void, *const f32, usize, i32);
+pub type StrCb = unsafe extern "C" fn(*mut c_void, *const c_char);
+
+unsafe extern "C" fn pcm_sink(ctx: *mut c_void, ptr: *const f32, len: usize, _rate: i32) {
+    let slot = unsafe { &mut *(ctx as *mut Option<Vec<f32>>) };
+    *slot = Some(if ptr.is_null() || len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
+    });
+}
+
+unsafe extern "C" fn str_sink(ctx: *mut c_void, ptr: *const c_char) {
+    let slot = unsafe { &mut *(ctx as *mut Option<String>) };
+    *slot = Some(if ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    });
+}
+
+/// Invoke a buffer-returning shim fn that delivers its PCM through a synchronous borrowed
+/// callback. `call` runs it with our sink + ctx and returns the shim's status code; the result
+/// is copied out during the call. `Ok(samples)` on status 0 (empty if the shim produced none),
+/// `Err(rc)` otherwise.
+pub fn collect_pcm(call: impl FnOnce(*mut c_void, PcmCb) -> i32) -> Result<Vec<f32>, i32> {
+    let mut out: Option<Vec<f32>> = None;
+    let rc = call(&mut out as *mut _ as *mut c_void, pcm_sink);
+    if rc != 0 {
+        return Err(rc);
+    }
+    Ok(out.unwrap_or_default())
+}
+
+/// Like [`collect_pcm`] but for a UTF-8 string result. `Ok(text)` on status 0, `Err(rc)` otherwise.
+pub fn collect_str(call: impl FnOnce(*mut c_void, StrCb) -> i32) -> Result<String, i32> {
+    let mut out: Option<String> = None;
+    let rc = call(&mut out as *mut _ as *mut c_void, str_sink);
+    if rc != 0 {
+        return Err(rc);
+    }
+    Ok(out.unwrap_or_default())
+}
 
 /// The Core ML model directory to hand the shim's `smk_*_init` (its `modelDir` argument),
 /// as a `CString`. Returns the DontSpeak-controlled [`ds_config::coreml_dir`] (created

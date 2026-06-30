@@ -135,18 +135,20 @@ pub use coreml_impl::CoremlDiarizer;
 /// as the apple-native Kokoro TTS + Parakeet STT backends). macOS only.
 #[cfg(target_os = "macos")]
 mod coreml_impl {
-    use std::ffi::{CStr, c_char};
+    use std::ffi::{c_char, c_void};
 
     use libloading::{Library, Symbol};
 
     use super::{DiarizationOutput, Diarizer, parse_output};
+    use crate::shim::{PcmCb, StrCb};
 
+    // diarize/embed still BLOCK and return their status; the JSON / embedding comes back through a
+    // borrowed callback (copied out by `crate::shim::collect_{str,pcm}`), so there's no out-param
+    // and no `smk_free_str` / `smk_free`. init/download/shutdown carry no buffer → plain int32.
     type DiarInitFn = unsafe extern "C" fn(*const c_char, f32) -> i32;
-    type DiarizeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut *mut c_char) -> i32;
-    type EmbedFn = unsafe extern "C" fn(*const f32, usize, i32, *mut *mut f32, *mut usize) -> i32;
+    type DiarizeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
+    type EmbedFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, PcmCb) -> i32;
     type DownloadFn = unsafe extern "C" fn() -> i32;
-    type FreeStrFn = unsafe extern "C" fn(*mut c_char);
-    type FreeFloatFn = unsafe extern "C" fn(*mut f32);
     type DiarShutdownFn = unsafe extern "C" fn();
 
     /// Pyannote + WeSpeaker diarization over Core ML / ANE. Models download on first
@@ -217,29 +219,14 @@ mod coreml_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
-            let mut out: *mut c_char = std::ptr::null_mut();
-            // SAFETY: pointers valid for the call; on rc==0 the shim hands back a
-            // malloc'd C string we copy then free via smk_free_str.
-            let rc = unsafe {
-                let dz: Symbol<DiarizeFn> = lib
-                    .get(b"smk_diarize\0")
-                    .map_err(|e| format!("smk_diarize symbol: {e}"))?;
-                dz(pcm.as_ptr(), pcm.len(), 16_000, &mut out)
-            };
-            if rc != 0 {
-                return Err(format!("smk_diarize failed (rc={rc})"));
-            }
-            if out.is_null() {
-                return Ok(DiarizationOutput::default());
-            }
-            let json = unsafe { CStr::from_ptr(out) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe {
-                if let Ok(free) = lib.get::<FreeStrFn>(b"smk_free_str\0") {
-                    free(out);
-                }
-            }
+            let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"smk_diarize\0") }
+                .map_err(|e| format!("smk_diarize symbol: {e}"))?;
+            // The shim borrows the JSON to our sink, which copies it out (no smk_free_str).
+            // The call blocks; `pcm` lives across it.
+            let json = crate::shim::collect_str(|ctx, cb| unsafe {
+                dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+            })
+            .map_err(|rc| format!("smk_diarize failed (rc={rc})"))?;
             parse_output(&json)
         }
 
@@ -249,27 +236,16 @@ mod coreml_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
-            let mut out: *mut f32 = std::ptr::null_mut();
-            let mut len: usize = 0;
-            // SAFETY: pointers valid for the call; on rc==0 the shim hands back a
-            // malloc'd float array of `len` we copy then free via smk_free.
-            let rc = unsafe {
-                let ex: Symbol<EmbedFn> = lib
-                    .get(b"smk_diar_embed\0")
-                    .map_err(|e| format!("smk_diar_embed symbol: {e}"))?;
-                ex(pcm.as_ptr(), pcm.len(), 16_000, &mut out, &mut len)
-            };
-            if rc != 0 {
-                return Err(format!("smk_diar_embed failed (rc={rc})"));
-            }
-            if out.is_null() || len == 0 {
+            let ex: Symbol<EmbedFn> = unsafe { lib.get(b"smk_diar_embed\0") }
+                .map_err(|e| format!("smk_diar_embed symbol: {e}"))?;
+            // The shim borrows the embedding to our sink, which copies it out (no smk_free).
+            // The call blocks; `pcm` lives across it.
+            let emb = crate::shim::collect_pcm(|ctx, cb| unsafe {
+                ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+            })
+            .map_err(|rc| format!("smk_diar_embed failed (rc={rc})"))?;
+            if emb.is_empty() {
                 return Err("embed: empty embedding".into());
-            }
-            let emb = unsafe { std::slice::from_raw_parts(out, len) }.to_vec();
-            unsafe {
-                if let Ok(free) = lib.get::<FreeFloatFn>(b"smk_free\0") {
-                    free(out);
-                }
             }
             Ok(emb)
         }

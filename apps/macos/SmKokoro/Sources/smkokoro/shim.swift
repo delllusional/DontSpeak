@@ -33,6 +33,17 @@ private func runBlocking<T>(_ op: @escaping @Sendable () async throws -> T) -> R
 
 private enum SmkError: Error { case noResult, notInitialized, nilText, nilDir, badAudio }
 
+// MARK: - borrowed-result callbacks
+//
+// Buffer-returning calls still BLOCK (via `runBlocking`) and still return their status code as
+// the C return value. What changed is result delivery: instead of allocating an owned buffer
+// the caller must free (`smk_free`/`smk_free_str`), they BORROW the result to one of these
+// callbacks — fired once, synchronously, on this same thread before the function returns. The
+// Rust side copies it out during the call, so there is no ownership transfer and nothing to
+// free. The callback runs only on the success (rc 0) path. These types mirror smkokoro.h.
+public typealias SmkPcmCb = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Float>?, Int, Int32) -> Void
+public typealias SmkStrCb = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
+
 // MARK: - shared state
 
 private final class ShimState: @unchecked Sendable {
@@ -93,9 +104,8 @@ public func smk_synthesize_text(
     _ text: UnsafePointer<CChar>?,
     _ voice: UnsafePointer<CChar>?,
     _ speed: Float,
-    _ outPcm: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
-    _ outLen: UnsafeMutablePointer<Int>?,
-    _ outSampleRate: UnsafeMutablePointer<Int32>?
+    _ ctx: UnsafeMutableRawPointer?,
+    _ cb: SmkPcmCb?
 ) -> Int32 {
     state.lock.lock()
     let mgr = state.manager
@@ -105,24 +115,13 @@ public func smk_synthesize_text(
     let v = cString(voice)
     switch runBlocking({ try await mgr.synthesizeDetailed(text: t, voice: v, speed: speed) }) {
     case .success(let r):
-        let n = r.samples.count
-        let buf = UnsafeMutablePointer<Float>.allocate(capacity: max(n, 1))
-        r.samples.withUnsafeBufferPointer { src in
-            if let base = src.baseAddress { buf.update(from: base, count: n) }
-        }
-        outPcm?.pointee = buf
-        outLen?.pointee = n
-        outSampleRate?.pointee = Int32(r.sampleRate)
+        // Borrow the samples to the callback (it copies them out); no ownership transfer.
+        r.samples.withUnsafeBufferPointer { cb?(ctx, $0.baseAddress, $0.count, Int32(r.sampleRate)) }
         return 0
     case .failure(let e):
         logErr("smk_synthesize error: \(e)")
         return 1
     }
-}
-
-@_cdecl("smk_free")
-public func smk_free(_ ptr: UnsafeMutablePointer<Float>?) {
-    ptr?.deallocate()
 }
 
 @_cdecl("smk_shutdown")
@@ -177,7 +176,8 @@ public func smk_transcribe(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
-    _ outText: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+    _ ctx: UnsafeMutableRawPointer?,
+    _ cb: SmkStrCb?
 ) -> Int32 {
     asr.lock.lock()
     let mgr = asr.manager
@@ -187,7 +187,7 @@ public func smk_transcribe(
         return 2
     }
     guard let samples, n > 0 else {
-        outText?.pointee = strdup("")
+        "".withCString { cb?(ctx, $0) }
         return 0
     }
     let audio = Array(UnsafeBufferPointer(start: samples, count: n))
@@ -198,17 +198,12 @@ public func smk_transcribe(
         return result.text
     }) {
     case .success(let text):
-        outText?.pointee = strdup(text)
+        text.withCString { cb?(ctx, $0) }
         return 0
     case .failure(let e):
         logErr("smk_transcribe error: \(e)")
         return 1
     }
-}
-
-@_cdecl("smk_free_str")
-public func smk_free_str(_ ptr: UnsafeMutablePointer<CChar>?) {
-    if let ptr { free(ptr) }
 }
 
 @_cdecl("smk_asr_shutdown")
@@ -273,7 +268,8 @@ public func smk_asr_stream_push(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
-    _ outText: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+    _ ctx: UnsafeMutableRawPointer?,
+    _ cb: SmkStrCb?
 ) -> Int32 {
     streamAsr.lock.lock()
     let mgr = streamAsr.manager
@@ -307,7 +303,7 @@ public func smk_asr_stream_push(
         return await mgr.getPartialTranscript()
     }) {
     case .success(let text):
-        outText?.pointee = strdup(text)
+        text.withCString { cb?(ctx, $0) }
         return 0
     case .failure(let e):
         logErr("smk_asr_stream_push error: \(e)")
@@ -318,18 +314,19 @@ public func smk_asr_stream_push(
 /// Flush the stream and return the final transcript. Caller frees *out via smk_free_str.
 @_cdecl("smk_asr_stream_finish")
 public func smk_asr_stream_finish(
-    _ outText: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+    _ ctx: UnsafeMutableRawPointer?,
+    _ cb: SmkStrCb?
 ) -> Int32 {
     streamAsr.lock.lock()
     let mgr = streamAsr.manager
     streamAsr.lock.unlock()
     guard let mgr else {
-        outText?.pointee = strdup("")
+        "".withCString { cb?(ctx, $0) }
         return 0
     }
     switch runBlocking({ () -> String in try await mgr.finish() }) {
     case .success(let text):
-        outText?.pointee = strdup(text)
+        text.withCString { cb?(ctx, $0) }
         return 0
     case .failure(let e):
         logErr("smk_asr_stream_finish error: \(e)")
@@ -413,13 +410,14 @@ public func smk_sys_transcribe(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
-    _ outText: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+    _ ctx: UnsafeMutableRawPointer?,
+    _ cb: SmkStrCb?
 ) -> Int32 {
     guard #available(macOS 26, *) else { return 3 }
-    guard let samples, n > 0 else { outText?.pointee = strdup(""); return 0 }
+    guard let samples, n > 0 else { "".withCString { cb?(ctx, $0) }; return 0 }
     let pcm = Array(UnsafeBufferPointer(start: samples, count: n))
     switch runBlocking({ try await sysTranscribe(pcm, sampleRate: Double(sampleRate)) }) {
-    case .success(let text): outText?.pointee = strdup(text); return 0
+    case .success(let text): text.withCString { cb?(ctx, $0) }; return 0
     case .failure(let e): logErr("smk_sys_transcribe error: \(e)"); return 1
     }
 }
@@ -566,7 +564,8 @@ public func smk_diarize(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
-    _ outJson: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+    _ ctx: UnsafeMutableRawPointer?,
+    _ cb: SmkStrCb?
 ) -> Int32 {
     _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
     diar.lock.lock()
@@ -577,7 +576,7 @@ public func smk_diarize(
         return 2
     }
     guard let samples, n > 0 else {
-        outJson?.pointee = strdup("{\"segments\":[]}")
+        "{\"segments\":[]}".withCString { cb?(ctx, $0) }
         return 0
     }
     let audio = Array(UnsafeBufferPointer(start: samples, count: n))
@@ -610,7 +609,7 @@ public func smk_diarize(
             "segments": segs,
             "speakers": speakers,
         ])
-        outJson?.pointee = strdup(String(decoding: data, as: UTF8.self))
+        String(decoding: data, as: UTF8.self).withCString { cb?(ctx, $0) }
         return 0
     } catch {
         logErr("smk_diarize error: \(error)")
@@ -633,8 +632,8 @@ public func smk_diar_embed(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
-    _ outFloats: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
-    _ outLen: UnsafeMutablePointer<Int>?
+    _ ctx: UnsafeMutableRawPointer?,
+    _ cb: SmkPcmCb?
 ) -> Int32 {
     _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
     diar.lock.lock()
@@ -648,13 +647,8 @@ public func smk_diar_embed(
     let audio = Array(UnsafeBufferPointer(start: samples, count: n))
     do {
         let emb = try mgr.extractSpeakerEmbedding(from: audio)
-        let count = emb.count
-        let buf = UnsafeMutablePointer<Float>.allocate(capacity: max(count, 1))
-        emb.withUnsafeBufferPointer { src in
-            if let base = src.baseAddress { buf.update(from: base, count: count) }
-        }
-        outFloats?.pointee = buf
-        outLen?.pointee = count
+        // Borrow the embedding to the callback (sample_rate is irrelevant for an embedding).
+        emb.withUnsafeBufferPointer { cb?(ctx, $0.baseAddress, $0.count, 0) }
         return 0
     } catch {
         logErr("smk_diar_embed error: \(error)")
