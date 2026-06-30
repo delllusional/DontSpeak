@@ -27,8 +27,11 @@ pub enum DownloadTarget {
     /// the shared voices npz that sources every other voice.
     KokoroVoices,
     /// The FULL Parakeet streaming-STT asset set (encoder + decoder + joiner + tokens, plus
-    /// the shared onnxruntime dylib on supported platforms).
-    Parakeet,
+    /// the shared onnxruntime dylib on supported platforms). Wire token `"parakeet_model"` —
+    /// renamed from the legacy `"parakeet"` to disambiguate the download target from the engine
+    /// brand "parakeet"; the old `"parakeet"` token is still accepted by
+    /// [`parse`](DownloadTarget::parse) for back-compat.
+    ParakeetModel,
     /// The shared GPU runtime (~1.4 GB CUDA EP wheels) — drives BOTH engines (x86_64
     /// Windows/Linux only).
     Cuda,
@@ -55,7 +58,7 @@ impl DownloadTarget {
             DownloadTarget::Onnx => "onnx",
             DownloadTarget::KokoroModel => "kokoro_model",
             DownloadTarget::KokoroVoices => "kokoro_voices",
-            DownloadTarget::Parakeet => "parakeet",
+            DownloadTarget::ParakeetModel => "parakeet_model",
             DownloadTarget::Cuda => "cuda",
             DownloadTarget::Diarization => "diarization",
             DownloadTarget::All => "all",
@@ -65,16 +68,17 @@ impl DownloadTarget {
         }
     }
 
-    /// Parse a wire token into a target. Also accepts the legacy alias `"kokoro"` for
-    /// [`DownloadTarget::KokoroModel`] — back-compat for any external CLI caller (and the
-    /// Windows installer's `--install-prefetched`/`--print-manifest kokoro` steps) that
-    /// predates the `kokoro` → `kokoro_model` rename. Returns `None` for an unknown token.
+    /// Parse a wire token into a target. Also accepts the legacy aliases `"kokoro"` →
+    /// [`KokoroModel`](DownloadTarget::KokoroModel) and `"parakeet"` →
+    /// [`ParakeetModel`](DownloadTarget::ParakeetModel) — back-compat for any external CLI caller
+    /// (and the Windows installer's `--install-prefetched`/`--print-manifest` steps) that predates
+    /// the `kokoro`/`parakeet` → `*_model` renames. Returns `None` for an unknown token.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "onnx" => DownloadTarget::Onnx,
             "kokoro_model" | "kokoro" => DownloadTarget::KokoroModel,
             "kokoro_voices" => DownloadTarget::KokoroVoices,
-            "parakeet" => DownloadTarget::Parakeet,
+            "parakeet_model" | "parakeet" => DownloadTarget::ParakeetModel,
             "cuda" => DownloadTarget::Cuda,
             "diarization" => DownloadTarget::Diarization,
             "all" => DownloadTarget::All,
@@ -103,7 +107,7 @@ mod tests {
             DownloadTarget::Onnx,
             DownloadTarget::KokoroModel,
             DownloadTarget::KokoroVoices,
-            DownloadTarget::Parakeet,
+            DownloadTarget::ParakeetModel,
             DownloadTarget::Cuda,
             DownloadTarget::Diarization,
             DownloadTarget::All,
@@ -117,10 +121,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_kokoro_alias_maps_to_kokoro_model() {
+    fn legacy_model_aliases_map_to_renamed_targets() {
         assert_eq!(DownloadTarget::parse("kokoro"), Some(DownloadTarget::KokoroModel));
-        // The canonical token is the renamed one.
+        assert_eq!(DownloadTarget::parse("parakeet"), Some(DownloadTarget::ParakeetModel));
+        // The canonical tokens are the renamed ones.
         assert_eq!(DownloadTarget::KokoroModel.as_str(), "kokoro_model");
+        assert_eq!(DownloadTarget::ParakeetModel.as_str(), "parakeet_model");
     }
 
     #[test]

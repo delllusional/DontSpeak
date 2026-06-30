@@ -185,7 +185,7 @@ Filename: "{app}\ds-helper.exe"; Parameters: "--install-prefetched ""{tmp}"" onn
 Filename: "{app}\ds-helper.exe"; Parameters: "--install-prefetched ""{tmp}"" kokoro_model"; \
   StatusMsg: "Installing Kokoro (text-to-speech)..."; \
   Flags: runhidden waituntilterminated runasoriginaluser; Components: onnx\kokoro
-Filename: "{app}\ds-helper.exe"; Parameters: "--install-prefetched ""{tmp}"" parakeet"; \
+Filename: "{app}\ds-helper.exe"; Parameters: "--install-prefetched ""{tmp}"" parakeet_model"; \
   StatusMsg: "Installing Parakeet (speech-to-text)..."; \
   Flags: runhidden waituntilterminated runasoriginaluser; Components: onnx\parakeet
 Filename: "{app}\ds-helper.exe"; Parameters: "--install-prefetched ""{tmp}"" cuda"; \
@@ -508,7 +508,7 @@ begin
   NeedDownload := False;  QueuedCount := 0;
   QueueComponent('onnx', 'onnx');
   QueueComponent('onnx\kokoro', 'kokoro_model');
-  QueueComponent('onnx\parakeet', 'parakeet');
+  QueueComponent('onnx\parakeet', 'parakeet_model');
   QueueComponent('onnx\cuda', 'cuda');
   { Prerequisite runtimes — same in-wizard download UX as the models (silent install runs
     in the Run section), URLs from ds-model (NO hardcoded URL, NO winget). Each is queued only

@@ -50,7 +50,7 @@ pub(crate) fn set_reload_hook(dl: &DownloadProg, warm: Arc<TtsManager>, paths: P
 fn target_hosts_engine(target: DownloadTarget, kokoro: bool, parakeet: bool) -> bool {
     match target {
         DownloadTarget::KokoroModel | DownloadTarget::KokoroVoices => kokoro,
-        DownloadTarget::Parakeet => parakeet,
+        DownloadTarget::ParakeetModel => parakeet,
         DownloadTarget::All | DownloadTarget::Cuda => kokoro || parakeet,
         _ => false,
     }
@@ -70,7 +70,7 @@ pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceCon
 }
 
 /// Kick off a background download for `which` (e.g. [`DownloadTarget::KokoroModel`] /
-/// [`DownloadTarget::Parakeet`] / [`DownloadTarget::All`]) unless one is already running.
+/// [`DownloadTarget::ParakeetModel`] / [`DownloadTarget::All`]) unless one is already running.
 /// Returns immediately; progress is observed via `model_status`. Each model setup also pulls
 /// the shared onnxruntime dylib.
 pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
@@ -108,7 +108,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             DownloadTarget::KokoroVoices => {
                 ds_model::run_setup_kokoro_voices_with_progress(&prog).map(|_| ())
             }
-            DownloadTarget::Parakeet => ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ()),
+            DownloadTarget::ParakeetModel => ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ()),
             // Shared GPU runtime (~1.4 GB) for the ONNX CUDA EP — drives BOTH engines. Folded
             // in here (not a bespoke thread in `apply_tts_provider`) so the completion hook
             // below restarts the warm child onto the GPU UNIFORMLY, exactly like a model fetch.
@@ -203,7 +203,7 @@ fn pick_download(
         (true, _, true) => Some(DownloadTarget::All),
         (true, _, false) => Some(DownloadTarget::KokoroModel),
         (false, true, _) => Some(DownloadTarget::KokoroVoices),
-        (false, false, true) => Some(DownloadTarget::Parakeet),
+        (false, false, true) => Some(DownloadTarget::ParakeetModel),
         (false, false, false) => None,
     }
 }
@@ -308,8 +308,8 @@ mod tests {
         assert!(!target_hosts_engine(DownloadTarget::KokoroVoices, false, false));
 
         // The Parakeet ONNX target restarts iff the built-in (Parakeet) STT runs.
-        assert!(target_hosts_engine(DownloadTarget::Parakeet, false, true));
-        assert!(!target_hosts_engine(DownloadTarget::Parakeet, true, false));
+        assert!(target_hosts_engine(DownloadTarget::ParakeetModel, false, true));
+        assert!(!target_hosts_engine(DownloadTarget::ParakeetModel, true, false));
 
         // The combined model fetch AND the shared CUDA runtime restart iff EITHER engine runs —
         // both engines share the warm child and the compute provider.
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(pick_download(true, false, true), Some(DownloadTarget::All));
         assert_eq!(
             pick_download(false, false, true),
-            Some(DownloadTarget::Parakeet)
+            Some(DownloadTarget::ParakeetModel)
         );
     }
 }

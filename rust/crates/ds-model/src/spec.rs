@@ -249,7 +249,7 @@ pub fn prefetch_items(what: &str) -> Vec<PrefetchItem> {
             .iter()
             .filter_map(&spec_item)
             .collect(),
-        DownloadTarget::Parakeet => [
+        DownloadTarget::ParakeetModel => [
             parakeet_encoder_spec(),
             parakeet_decoder_spec(),
             parakeet_joiner_spec(),

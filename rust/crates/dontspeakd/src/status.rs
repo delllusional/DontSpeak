@@ -373,7 +373,7 @@ pub(crate) fn model_status_json(
     // which the helper sets only AFTER the model is resident + warm.
     let kokoro_dling = downloading(DownloadTarget::KokoroModel) || tts.tts_downloading();
     let parakeet_dling =
-        (stt_uses_onnx && downloading(DownloadTarget::Parakeet)) || tts.stt_downloading();
+        (stt_uses_onnx && downloading(DownloadTarget::ParakeetModel)) || tts.stt_downloading();
 
     let status = ModelStatus {
         // Removable only on the ONNX path (apple-native has no DontSpeak-managed Kokoro
@@ -399,7 +399,7 @@ pub(crate) fn model_status_json(
             stt_uses_onnx && parakeet_present && !kokoro_warm,
             parakeet_dling,
             if stt_uses_onnx {
-                dl_err_for(DownloadTarget::Parakeet)
+                dl_err_for(DownloadTarget::ParakeetModel)
             } else {
                 None
             },

@@ -21,7 +21,7 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         Some(DownloadTarget::Onnx) => ds_model::ensure_onnxruntime_with_progress(&p).map(|_| ()), // the base runtime
         // `kokoro_model` (or the legacy `kokoro` alias) — the full Kokoro model (+ ensures onnx).
         Some(DownloadTarget::KokoroModel) => ds_model::run_setup_kokoro_with_progress(&p).map(|_| ()),
-        Some(DownloadTarget::Parakeet) => ds_model::run_setup_parakeet_with_progress(&p).map(|_| ()), // parakeet (+ onnx)
+        Some(DownloadTarget::ParakeetModel) => ds_model::run_setup_parakeet_with_progress(&p).map(|_| ()), // parakeet (+ onnx)
         Some(DownloadTarget::Models) => models(),
         Some(DownloadTarget::Cuda) => cuda(),
         // Windows installer prerequisites (.NET / Windows App Runtime): the installer
