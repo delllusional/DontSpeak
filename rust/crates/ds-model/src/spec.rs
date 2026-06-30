@@ -203,8 +203,8 @@ pub struct PrefetchItem {
 /// The files a component still NEEDS downloaded — already-present, sha-valid assets
 /// are omitted, so re-running the installer downloads nothing. `what` is a
 /// [`DownloadTarget`](crate::target::DownloadTarget) wire token — only `onnx` |
-/// `kokoro_model` (or the legacy `kokoro`) | `kokoro_voices` | `parakeet` | `cuda` |
-/// `dotnet` | `winapp` produce items; every other (or unknown) token yields `vec![]`.
+/// `kokoro_model` | `kokoro_voices` | `parakeet_model` | `cuda` | `dotnet` | `winapp`
+/// produce items; every other (or unknown) token yields `vec![]`.
 /// This is the SINGLE source of the installer's download list; the URLs/SHAs never
 /// leave ds-model.
 pub fn prefetch_items(what: &str) -> Vec<PrefetchItem> {

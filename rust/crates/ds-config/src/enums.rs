@@ -64,9 +64,9 @@ impl SttEngine {
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "off" => Some(SttEngine::Off),
-            "built_in" | "builtin" | "built-in" => Some(SttEngine::BuiltIn),
+            "built_in" => Some(SttEngine::BuiltIn),
             "system" => Some(SttEngine::System),
-            "claude_code" | "claude-code" | "claudecode" => Some(SttEngine::ClaudeCode),
+            "claude_code" => Some(SttEngine::ClaudeCode),
             _ => None,
         }
     }
@@ -133,7 +133,7 @@ impl TtsEngine {
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "off" => Some(TtsEngine::Off),
-            "built_in" | "builtin" | "built-in" => Some(TtsEngine::Kokoro),
+            "built_in" => Some(TtsEngine::Kokoro),
             "system" => Some(TtsEngine::System),
             _ => None,
         }
@@ -198,11 +198,8 @@ pub enum ListenMode {
 impl ListenMode {
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "record_submit" | "record-submit" | "recordsubmit" | "record" | "ptt" | "push" => {
-                Some(ListenMode::RecordSubmit)
-            }
-            "always" | "always_listening" | "always-listening" | "hands_free" | "hands-free"
-            | "live" => Some(ListenMode::Always),
+            "record_submit" => Some(ListenMode::RecordSubmit),
+            "always" => Some(ListenMode::Always),
             _ => None,
         }
     }
@@ -237,9 +234,7 @@ impl DiarizerProvider {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "apple_native" | "applenative" | "coreml" | "core_ml" => {
-                Some(DiarizerProvider::AppleNative)
-            }
+            "apple_native" => Some(DiarizerProvider::AppleNative),
             _ => None,
         }
     }

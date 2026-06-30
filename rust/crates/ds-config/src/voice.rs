@@ -852,11 +852,13 @@ pub(crate) mod tests {
         let p = |j: &str| serde_json::from_str::<VoiceConfig>(j).unwrap().listen_mode;
         assert_eq!(p(r#"{"listen_mode":"always"}"#), ListenMode::Always);
         assert_eq!(
-            p(r#"{"listen_mode":"always-listening"}"#),
-            ListenMode::Always
-        );
-        assert_eq!(
             p(r#"{"listen_mode":"record_submit"}"#),
+            ListenMode::RecordSubmit
+        );
+        // Each mode has ONE canonical token (no aliases): the old `always-listening` spelling
+        // is now an unknown token and degrades to the default.
+        assert_eq!(
+            p(r#"{"listen_mode":"always-listening"}"#),
             ListenMode::RecordSubmit
         );
         // Unknown / wrong-typed degrade to the default, never error the block.

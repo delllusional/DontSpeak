@@ -18,9 +18,8 @@ pub enum DownloadTarget {
     Onnx,
     /// The FULL native-Kokoro asset set: the ~310 MB `kokoro-v1.0.onnx` model PLUS the
     /// ~28 MB voices pack (and, on supported platforms, the shared onnxruntime dylib).
-    /// Wire token `"kokoro_model"` — renamed from the legacy `"kokoro"` to disambiguate
-    /// the download target from the engine brand "kokoro"; the old `"kokoro"` token is
-    /// still accepted by [`parse`](DownloadTarget::parse) for back-compat.
+    /// Wire token `"kokoro_model"` — the `_model` suffix disambiguates this download target
+    /// from the engine brand "kokoro".
     KokoroModel,
     /// The ~28 MB Kokoro voices pack ONLY (`voices-v1.0.bin`), for the Apple ANE / Core ML
     /// path which self-manages the model chain but ships only `af_heart` and so still needs
@@ -28,9 +27,7 @@ pub enum DownloadTarget {
     KokoroVoices,
     /// The FULL Parakeet streaming-STT asset set (encoder + decoder + joiner + tokens, plus
     /// the shared onnxruntime dylib on supported platforms). Wire token `"parakeet_model"` —
-    /// renamed from the legacy `"parakeet"` to disambiguate the download target from the engine
-    /// brand "parakeet"; the old `"parakeet"` token is still accepted by
-    /// [`parse`](DownloadTarget::parse) for back-compat.
+    /// the `_model` suffix disambiguates this download target from the engine brand "parakeet".
     ParakeetModel,
     /// The shared GPU runtime (~1.4 GB CUDA EP wheels) — drives BOTH engines (x86_64
     /// Windows/Linux only).
@@ -68,17 +65,14 @@ impl DownloadTarget {
         }
     }
 
-    /// Parse a wire token into a target. Also accepts the legacy aliases `"kokoro"` →
-    /// [`KokoroModel`](DownloadTarget::KokoroModel) and `"parakeet"` →
-    /// [`ParakeetModel`](DownloadTarget::ParakeetModel) — back-compat for any external CLI caller
-    /// (and the Windows installer's `--install-prefetched`/`--print-manifest` steps) that predates
-    /// the `kokoro`/`parakeet` → `*_model` renames. Returns `None` for an unknown token.
+    /// Parse a wire token into a target. Each target has exactly ONE canonical token (no
+    /// legacy aliases). Returns `None` for an unknown token.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "onnx" => DownloadTarget::Onnx,
-            "kokoro_model" | "kokoro" => DownloadTarget::KokoroModel,
+            "kokoro_model" => DownloadTarget::KokoroModel,
             "kokoro_voices" => DownloadTarget::KokoroVoices,
-            "parakeet_model" | "parakeet" => DownloadTarget::ParakeetModel,
+            "parakeet_model" => DownloadTarget::ParakeetModel,
             "cuda" => DownloadTarget::Cuda,
             "diarization" => DownloadTarget::Diarization,
             "all" => DownloadTarget::All,
@@ -121,12 +115,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_model_aliases_map_to_renamed_targets() {
-        assert_eq!(DownloadTarget::parse("kokoro"), Some(DownloadTarget::KokoroModel));
-        assert_eq!(DownloadTarget::parse("parakeet"), Some(DownloadTarget::ParakeetModel));
-        // The canonical tokens are the renamed ones.
+    fn model_targets_have_one_canonical_token_no_legacy_aliases() {
         assert_eq!(DownloadTarget::KokoroModel.as_str(), "kokoro_model");
         assert_eq!(DownloadTarget::ParakeetModel.as_str(), "parakeet_model");
+        // The pre-rename bare brand tokens are NOT accepted (single canonical name, no aliases).
+        assert_eq!(DownloadTarget::parse("kokoro"), None);
+        assert_eq!(DownloadTarget::parse("parakeet"), None);
     }
 
     #[test]
