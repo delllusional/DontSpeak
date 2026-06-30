@@ -293,101 +293,20 @@ fn split_trailing_punct(word: &str) -> (&str, &str) {
     (trimmed_end, trailing)
 }
 
-// ── Multilingual G2P via external espeak-ng (non-English Kokoro voices) ───────
+// ── G2P entry point keyed by voice (ENGLISH-ONLY build) ──────────────────────
 //
-// Kokoro's non-English voices (es/fr/it/pt/hi, plus ja/zh) were trained on
-// espeak-ng phonemes (via misaki). English stays on the pure-Rust `voice-g2p`
-// path above (no espeak); other languages shell out to a USER-INSTALLED
-// `espeak-ng` (GPL — kept at arm's length as a separate process, never linked)
-// and bridge its IPA into Kokoro's phoneme set with `voice_g2p::espeak_ipa_to_kokoro`.
+// This build supports English only. Kokoro's pack still contains non-English
+// voices (es/fr/it/pt/hi/ja/zh), but they are NOT surfaced by `list_voices` and
+// cannot be selected (`set_voice` rejects them), so every utterance that reaches
+// here is English and uses the pure-Rust `voice-g2p` path above — no external
+// `espeak-ng`, no other-language phonemization.
 
-/// Is an external `espeak-ng` binary available on PATH?
-///
-/// NOT cached: it's a cheap PATH lookup (`espeak-ng --version`) on the non-English
-/// path only (which then shells out to espeak-ng anyway, so the relative cost is
-/// negligible). A process-lifetime `OnceLock` cache meant the long-lived warm
-/// `ds-helper --serve` never noticed an espeak-ng install made MID-SESSION —
-/// the helper is restarted only on a provider / full-duplex / stt-engine preference
-/// change (see `dontspeakd::tts`), NOT on an espeak install — so a stale cached miss
-/// would persist until the next unrelated restart. Re-probing each call fixes that.
-pub fn espeak_available() -> bool {
-    std::process::Command::new("espeak-ng")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Map a Kokoro language subtag (from `enumerate::kokoro_language`) to the
-/// matching `espeak-ng -v` voice code. `None` for English (handled by the pure
-/// path) and for families espeak can't cover.
-pub fn kokoro_lang_to_espeak(subtag: &str) -> Option<&'static str> {
-    match subtag {
-        "es" => Some("es"),
-        "fr" => Some("fr-fr"),
-        "it" => Some("it"),
-        "pt" => Some("pt-br"), // Kokoro's `p` family is Brazilian Portuguese
-        "hi" => Some("hi"),
-        "ja" => Some("ja"),
-        "zh" => Some("cmn"), // Mandarin
-        _ => None,
-    }
-}
-
-/// Phonemize `text` for a specific Kokoro `voice`: English uses the pure-Rust
-/// path; other languages use external espeak-ng when available, falling back to
-/// the English path if espeak is missing/unmapped (callers gate non-English on
-/// `espeak_available()`, so that fallback is a defensive last resort).
-pub fn phonemize_for(text: &str, voice: &str) -> String {
-    let lang = crate::enumerate::kokoro_language(voice);
-    // English never shells out; only a non-English mapped voice needs the espeak probe.
-    let espeak_ok = needs_espeak(voice) && espeak_available();
-    phonemize_lang(text, lang, espeak_ok)
-}
-
-/// Like [`phonemize_for`] but with a PRE-PROBED espeak availability. Hot callers that split
-/// ONE utterance into many chunks must probe [`espeak_available`] once (gated on
-/// [`needs_espeak`]) and pass the result here, rather than re-spawning `espeak-ng --version`
-/// per chunk. `espeak_ok` is ignored for English (the pure path).
-pub fn phonemize_for_with(text: &str, voice: &str, espeak_ok: bool) -> String {
-    phonemize_lang(text, crate::enumerate::kokoro_language(voice), espeak_ok)
-}
-
-/// Whether `voice` is a non-English voice that espeak can phonemize — i.e. whether probing
-/// `espeak_available()` for it is even worthwhile. Lets a caller skip the probe entirely for
-/// English (and unmapped) voices.
-pub fn needs_espeak(voice: &str) -> bool {
-    let lang = crate::enumerate::kokoro_language(voice);
-    lang != "en" && kokoro_lang_to_espeak(lang).is_some()
-}
-
-fn phonemize_lang(text: &str, lang: &str, espeak_ok: bool) -> String {
-    if lang == "en" {
-        return phonemize(text);
-    }
-    match kokoro_lang_to_espeak(lang) {
-        Some(ev) if espeak_ok => phonemize_espeak(text, ev).unwrap_or_else(|| phonemize(text)),
-        _ => phonemize(text),
-    }
-}
-
-/// Run `espeak-ng --ipa -q -v <lang>` over `text` and bridge its IPA into the
-/// Kokoro phoneme set. `None` if espeak errors or yields nothing.
-fn phonemize_espeak(text: &str, espeak_lang: &str) -> Option<String> {
-    let out = std::process::Command::new("espeak-ng")
-        .args(["--ipa", "-q", "-v", espeak_lang, text])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let ipa = String::from_utf8_lossy(&out.stdout);
-    let ipa = ipa.trim();
-    if ipa.is_empty() {
-        return None;
-    }
-    let mapped = voice_g2p::espeak_ipa_to_kokoro(ipa);
-    (!mapped.trim().is_empty()).then_some(mapped)
+/// Phonemize `text` for a Kokoro `voice`. English-only: the `voice` is accepted
+/// for call-site stability but does not change the language (non-English voices
+/// are gated out at selection time), so this always uses the pure-Rust English
+/// path. `voice` is intentionally unused.
+pub fn phonemize_for(text: &str, _voice: &str) -> String {
+    phonemize(text)
 }
 
 #[cfg(test)]
@@ -395,17 +314,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kokoro_lang_to_espeak_maps_supported_families() {
-        assert_eq!(kokoro_lang_to_espeak("es"), Some("es"));
-        assert_eq!(kokoro_lang_to_espeak("pt"), Some("pt-br"));
-        assert_eq!(kokoro_lang_to_espeak("zh"), Some("cmn"));
-        assert_eq!(kokoro_lang_to_espeak("en"), None); // pure-Rust path
-        assert_eq!(kokoro_lang_to_espeak("other"), None);
-    }
-
-    #[test]
-    fn phonemize_for_english_voice_uses_pure_path() {
-        // English voice never touches espeak — same as phonemize().
+    fn phonemize_for_uses_pure_english_path() {
+        // English-only build: phonemize_for is the pure-Rust path regardless of voice.
         assert_eq!(
             phonemize_for("Hello world", "af_sarah"),
             phonemize("Hello world")

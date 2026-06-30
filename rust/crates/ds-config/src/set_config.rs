@@ -90,6 +90,17 @@ impl SetConfigArgs {
                     "`tts_built_in_voices` must be a non-empty array of non-empty voice ids".into(),
                 );
             }
+            // English-only build: Kokoro encodes the language family in the id's leading char
+            // (`a` American + `b` British English). Reject any non-English id so the persistent
+            // pool can't bypass the English-only gate that set_voice/list_voices enforce.
+            if let Some(bad) = vs
+                .iter()
+                .find(|s| !matches!(s.as_bytes().first(), Some(b'a') | Some(b'b')))
+            {
+                return Err(format!(
+                    "`{bad}` is not an English Kokoro voice. This version supports English only (ids starting `a`/`b`); see list_voices."
+                ));
+            }
             changes.push(format!("tts_built_in_voices=[{}]", vs.join(", ")));
             cfg.tts_built_in_voices = vs;
         }
@@ -427,5 +438,22 @@ mod tests {
         let args: SetConfigArgs =
             serde_json::from_value(serde_json::json!({ "tts_built_in_voices": [] })).unwrap();
         assert!(args.apply(&mut cfg).is_err());
+    }
+
+    #[test]
+    fn set_config_args_non_english_voices_rejected() {
+        // English-only build: a Spanish Kokoro id (`ef_dora`) must be rejected, while English
+        // ids (`a`/`b` families) are accepted.
+        let mut cfg = VoiceConfig::default();
+        let bad: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_built_in_voices": ["ef_dora"] }))
+                .unwrap();
+        assert!(bad.apply(&mut cfg).is_err());
+
+        let good: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "tts_built_in_voices": ["af_sarah", "bm_george"] }),
+        )
+        .unwrap();
+        assert!(good.apply(&mut cfg).is_ok());
     }
 }

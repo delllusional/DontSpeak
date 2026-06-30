@@ -935,11 +935,9 @@ pub(crate) fn serve() -> ! {
         match synth {
             // ONNX Kokoro: per SHARED text chunk, ramped phoneme-batch streaming.
             Backend::Ort(synth) => {
-                // Probe espeak availability ONCE per utterance (skipped entirely for English),
-                // not once per chunk — each probe spawns `espeak-ng --version`.
-                let espeak_ok = g2p::needs_espeak(&voice) && g2p::espeak_available();
+                // English-only build: pure-Rust g2p, no espeak probe.
                 'ort: for chunk in chunk_text(&text) {
-                    let phonemes = g2p::phonemize_for_with(&chunk, &voice, espeak_ok);
+                    let phonemes = g2p::phonemize_for(&chunk, &voice);
                     for batch in stream_batches(&phonemes) {
                         if cancel.load(Ordering::SeqCst) {
                             break 'ort;

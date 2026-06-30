@@ -102,7 +102,6 @@ static TOOLS: &[Tool] = &[
                 false,
                 LIST_VOICES_ENGINE,
             ),
-            p("language", PType::Str, false, LIST_VOICES_LANGUAGE),
         ],
         min_one: false,
     },

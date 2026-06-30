@@ -5,84 +5,53 @@ use ds_config::TtsEngine;
 use ds_tts::enumerate;
 use serde_json::{Value, json};
 
-/// Distinct strings in first-seen order, then sorted — the set of language subtags
-/// present in an engine's voices when listing across all languages.
-fn distinct_sorted(items: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for it in items {
-        if !out.contains(&it) {
-            out.push(it);
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Build voice groups for `engine`, grouped by language subtag and sorted, filtered
-/// to one `language` primary subtag — or, when `language` is `None`, every language
-/// the engine offers. Each group is `(subtag, voices)`; empty groups are dropped, so
-/// an explicit filter that matches nothing yields no group. The voices carry no
-/// `language` field of their own — the group's subtag is the language.
-pub(crate) fn voice_groups(engine: TtsEngine, language: Option<&str>) -> Vec<(String, Vec<Value>)> {
+/// Build voice groups for `engine`, filtered to one `language` primary subtag. Each
+/// group is `(subtag, voices)`; an empty group (no voice matches) is dropped, so a
+/// language the engine doesn't offer yields no group. The voices carry no `language`
+/// field of their own — the group's subtag is the language. This build is English-only,
+/// so the sole caller passes `"en"`.
+pub(crate) fn voice_groups(engine: TtsEngine, language: &str) -> Vec<(String, Vec<Value>)> {
     let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
     match engine {
         // Off has no voices to list.
         TtsEngine::Off => {}
         TtsEngine::Kokoro => {
             let ids = enumerate::kokoro_voice_ids();
-            let langs = match language {
-                Some(l) => vec![l.to_string()],
-                None => distinct_sorted(
-                    ids.iter()
-                        .map(|id| enumerate::kokoro_language(id).to_string()),
-                ),
-            };
-            for lang in langs {
-                let voices: Vec<Value> = enumerate::kokoro_choices_from(&ids, &lang)
-                    .into_iter()
-                    .map(|c| {
-                        json!({
-                            "id": c.id,
-                            "label": c.label,
-                            "language_tag": enumerate::kokoro_language_tag(&c.id),
-                            "gender": enumerate::gender_str(enumerate::kokoro_gender(&c.id)),
-                            "engine": "kokoro",
-                        })
+            let voices: Vec<Value> = enumerate::kokoro_choices_from(&ids, language)
+                .into_iter()
+                .map(|c| {
+                    json!({
+                        "id": c.id,
+                        "label": c.label,
+                        "language_tag": enumerate::kokoro_language_tag(&c.id),
+                        "gender": enumerate::gender_str(enumerate::kokoro_gender(&c.id)),
+                        "engine": "kokoro",
                     })
-                    .collect();
-                if !voices.is_empty() {
-                    groups.push((lang, voices));
-                }
+                })
+                .collect();
+            if !voices.is_empty() {
+                groups.push((language.to_string(), voices));
             }
         }
         TtsEngine::System => {
             let sys = enumerate::system_voices();
-            let langs = match language {
-                Some(l) => vec![l.to_string()],
-                None => distinct_sorted(
-                    sys.iter()
-                        .map(|v| enumerate::primary_subtag(&v.language_tag)),
-                ),
-            };
-            for lang in langs {
-                let voices: Vec<Value> = enumerate::system_choices_from(&sys, &lang)
-                    .into_iter()
-                    .map(|c| {
-                        let voice = sys.iter().find(|v| v.id == c.id);
-                        let gender = voice.and_then(|v| enumerate::gender_str(v.gender));
-                        let language_tag = voice.map(|v| v.language_tag.clone());
-                        json!({
-                            "id": c.id,
-                            "label": c.label,
-                            "language_tag": language_tag,
-                            "gender": gender,
-                            "engine": "system",
-                        })
+            let voices: Vec<Value> = enumerate::system_choices_from(&sys, language)
+                .into_iter()
+                .map(|c| {
+                    let voice = sys.iter().find(|v| v.id == c.id);
+                    let gender = voice.and_then(|v| enumerate::gender_str(v.gender));
+                    let language_tag = voice.map(|v| v.language_tag.clone());
+                    json!({
+                        "id": c.id,
+                        "label": c.label,
+                        "language_tag": language_tag,
+                        "gender": gender,
+                        "engine": "system",
                     })
-                    .collect();
-                if !voices.is_empty() {
-                    groups.push((lang, voices));
-                }
+                })
+                .collect();
+            if !voices.is_empty() {
+                groups.push((language.to_string(), voices));
             }
         }
     }

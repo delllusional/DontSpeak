@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use ds_config::{Paths, TtsEngine, VoiceConfig};
 use ds_ipc::{Request, Response};
-use ds_tts::g2p;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -113,7 +112,6 @@ struct SetVoiceArgs {
 #[serde(default, deny_unknown_fields)]
 struct ListVoicesArgs {
     tts_engine: Option<TtsEngine>,
-    language: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -151,15 +149,9 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<String, String> {
         .tts_engine
         .or_else(|| cfg.resolved_tts())
         .unwrap_or(ds_config::TtsEngine::Kokoro);
-    // Default to English; pass `language: "all"` to list every language.
-    let lang_arg = a
-        .language
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("en");
-    let filter = (!lang_arg.eq_ignore_ascii_case("all")).then_some(lang_arg);
-    let mut groups = voice_groups(engine, filter);
+    // This build supports English only: always list English voices, regardless of any
+    // other languages present in the Kokoro pack (they are intentionally not surfaced).
+    let mut groups = voice_groups(engine, "en");
     // Mark the configured voice active (a transient session override is reported
     // separately by `status`, which probes the engine).
     let current = cfg.current_voice();
@@ -179,7 +171,7 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<String, String> {
         .collect();
     let out = json!({
         "engine": engine.brand(),
-        "language": lang_arg,
+        "language": "en",
         "languages": languages,
     });
     Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
@@ -221,7 +213,6 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<St
         // The Kokoro voice pool, shared by both TTS backends (no separate apple-native set).
         "voices": cfg.active_voices().to_vec(),
         "rate": cfg.tts_rate,
-        "espeak_ng": g2p::espeak_available(),
         "state": state,
     });
     // `detail`: fold in the deep per-engine model lifecycle + stats (engine-sourced, so it
@@ -514,11 +505,12 @@ fn call_set_voice(sock: &Path, args: &Value) -> Result<String, String> {
     };
     let mut prep_note = String::new();
     if engine == TtsEngine::Kokoro {
-        // A non-English Kokoro voice needs espeak-ng (English uses the pure-Rust g2p).
+        // English-only build: Kokoro ships non-English voices in the pack, but they are
+        // not surfaced by list_voices and cannot be selected.
         let lang = ds_tts::enumerate::kokoro_language(&voice);
-        if lang != "en" && !g2p::espeak_available() {
+        if lang != "en" {
             return Err(format!(
-                "`{voice}` is a {lang} Kokoro voice, which needs espeak-ng to pronounce correctly. Install it (`brew install espeak-ng`) and restart the engine, or pick a System voice for {lang} (see list_voices tts_engine=system language={lang})."
+                "`{voice}` is a {lang} Kokoro voice. This version supports English only — pick an English voice (see list_voices)."
             ));
         }
         if npz_present && ds_tts::ane_voices::materialization_required() {
@@ -785,7 +777,6 @@ mod drift {
             "list_voices",
             serde_json::to_value(ListVoicesArgs {
                 tts_engine: Some(TtsEngine::Kokoro),
-                language: Some("en".into()),
             })
             .unwrap(),
         );

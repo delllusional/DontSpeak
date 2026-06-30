@@ -16,20 +16,17 @@ pub const STOP_SPEAK: &str = "Stop any in-progress speech immediately (barge-in)
 // ── list_voices ──────────────────────────────────────────────────────────────────────
 pub const LIST_VOICES: &str = "List TTS voices grouped by language. Returns \
     {engine, language, languages:[{language, voices:[{id,label,language_tag,gender,engine,active}]}]}, \
-    where language_tag is the full BCP-47 tag (e.g. \"en-US\"). Optional tts_engine and language \
-    filters; defaults to the configured engine and English. The built_in (Kokoro) list is the FULL \
-    Kokoro library (~54 voices) — ANY id is selectable; the engine extracts that one voice on demand \
-    from the local pack (also on ANE, where only one ships preinstalled).";
+    where language_tag is the full BCP-47 tag (e.g. \"en-US\"). Optional tts_engine filter; defaults \
+    to the configured engine. This version supports ENGLISH ONLY — only English voices are listed \
+    and selectable, even though the Kokoro pack also contains other-language voices.";
 pub const LIST_VOICES_ENGINE: &str = "Engine whose voices to list: \"built_in\" (Kokoro) or \"system\" (OS). Default: the configured engine.";
-pub const LIST_VOICES_LANGUAGE: &str =
-    "BCP-47 primary subtag (e.g. \"en\", \"fr\", \"ja\") or \"all\". Default: \"en\".";
 
 // ── set_voice ────────────────────────────────────────────────────────────────────────
 pub const SET_VOICE: &str = "Set or clear the voice for THIS session (not saved; reverts on engine \
     restart). Pass voice (an id from list_voices) to set; omit it to clear and revert to the \
     configured voice. Engine is inferred from the id (\"af_sarah\" → Kokoro, \"Samantha\" → System) \
     or pass tts_engine. Scoped to this Claude session.";
-pub const SET_VOICE_VOICE: &str = "A voice id from list_voices (e.g. \"af_nicole\", \"af_sarah\" for Kokoro, \"Samantha\" for System). Any Kokoro id works — extracted on demand, never silently dropped to a System voice. Omit to clear the session override.";
+pub const SET_VOICE_VOICE: &str = "A voice id from list_voices (e.g. \"af_nicole\", \"af_sarah\" for Kokoro, \"Samantha\" for System). English only — non-English Kokoro voices are rejected in this version. Omit to clear the session override.";
 pub const SET_VOICE_ENGINE: &str =
     "TTS engine for the voice: \"built_in\" or \"system\"; inferred from the id when omitted.";
 
@@ -74,8 +71,9 @@ pub const SET_CONFIG_TTS_ENGINE: &str = "Spoken-reply engine PREFERENCE LADDER �
     and \"system\" (macOS `say`). Default [\"built_in\", \"system\"] (Kokoro, falling back to the \
     system voice where Kokoro can't run, e.g. an Intel mac). [] (or \"off\") = no spoken replies.";
 pub const SET_CONFIG_TTS_VOICES: &str = "Ordered Kokoro voice ids for the BUILT-IN engine (the first is \
-    the default, the rest a per-terminal round-robin pool). Any id from list_voices' built_in catalog \
-    (the full Kokoro library) works — each is extracted on demand from the local pack. Built-in only.";
+    the default, the rest a per-terminal round-robin pool). English voices only in this version (ids \
+    starting `a`/`b`); other-language ids are rejected. Each is extracted on demand from the local \
+    pack. Built-in only.";
 pub const SET_CONFIG_TTS_SYSTEM_VOICE: &str = "Voice name for the SYSTEM engine (e.g. \"Samantha\"); \
     empty = OS default. System engine only.";
 pub const SET_CONFIG_TTS_RATE: &str =
