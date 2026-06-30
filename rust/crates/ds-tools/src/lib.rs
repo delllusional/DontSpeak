@@ -95,14 +95,12 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "list_voices",
         description: LIST_VOICES,
-        params: &[
-            p(
-                "tts_engine",
-                PType::Enum(&["built_in", "system"]),
-                false,
-                LIST_VOICES_ENGINE,
-            ),
-        ],
+        params: &[p(
+            "tts_engine",
+            PType::Enum(&["built_in", "system"]),
+            false,
+            LIST_VOICES_ENGINE,
+        )],
         min_one: false,
     },
     Tool {
