@@ -17,7 +17,8 @@ use crate::engine::{PasteState, dictation_preview};
 use crate::stats;
 use crate::tts::TtsManager;
 use ds_status::{
-    CapsEvent as CapsEventDto, DiarStats, Dictation, EngineObj, Loaded, ModelStatus, Running, Stats,
+    CapsEvent as CapsEventDto, DiarStats, Dictation, EngineObj, EngineState, Loaded, ModelStatus,
+    Running, Stats,
 };
 
 /// Epoch milliseconds, for ordering caps events the app displays as a live log.
@@ -319,7 +320,7 @@ pub(crate) fn model_status_json(
         EngineObj {
             present,
             removable,
-            state: state.to_string(),
+            state: state.as_str().to_string(),
             progress: if dling { progress } else { 0.0 },
             error,
             dl_index,
@@ -672,28 +673,29 @@ fn diarization_present() -> bool {
     ds_model::coreml_repo::coreml_repo_present(&ds_model::coreml_repo::DIARIZER_COREML)
 }
 
-/// PURE lifecycle-state string (the app maps it 1:1 to a status dot). Precedence:
+/// PURE lifecycle-state (the app maps it 1:1 to a status dot). Precedence:
 /// `downloading > failed > missing > running > warming > idle`. Extracted so the ordering —
-/// in particular "a model still downloading is NEVER green/running" — is unit-tested.
+/// in particular "a model still downloading is NEVER green/running" — is unit-tested. Returns
+/// the canonical [`EngineState`]; the caller stores its `.as_str()` into the wire DTO.
 pub(crate) fn engine_state(
     present: bool,
     dling: bool,
     has_error: bool,
     running: bool,
     enabled: bool,
-) -> &'static str {
+) -> EngineState {
     if dling {
-        "downloading"
+        EngineState::Downloading
     } else if has_error {
-        "failed"
+        EngineState::Failed
     } else if !present {
-        "missing"
+        EngineState::Missing
     } else if running {
-        "running"
+        EngineState::Running
     } else if enabled {
-        "warming"
+        EngineState::Warming
     } else {
-        "idle"
+        EngineState::Idle
     }
 }
 
@@ -701,6 +703,7 @@ pub(crate) fn engine_state(
 mod tests {
     use super::{engine_state, stt_provider_token, tts_provider_token};
     use ds_config::{Provider, SttEngine, TtsEngine};
+    use ds_status::EngineState;
 
     #[test]
     fn stt_provider_is_actual_not_naive() {
@@ -756,16 +759,37 @@ mod tests {
         // DOWNLOADING signal, `running` from tts_loaded/stt_loaded (set only after the model
         // is resident + warm) — so on a clean install: downloading ⇒ orange "Downloading…",
         // then (briefly) warming ⇒ "Starting…", then running ⇒ green. Never green mid-fetch.
-        assert_eq!(engine_state(true, true, true, true, true), "downloading"); // dling wins
-        assert_eq!(engine_state(false, false, true, true, true), "failed"); // error over missing
-        assert_eq!(engine_state(false, false, false, false, true), "missing");
-        assert_eq!(engine_state(true, false, false, true, true), "running");
+        assert_eq!(
+            engine_state(true, true, true, true, true),
+            EngineState::Downloading
+        ); // dling wins
+        assert_eq!(
+            engine_state(false, false, true, true, true),
+            EngineState::Failed
+        ); // error over missing
+        assert_eq!(
+            engine_state(false, false, false, false, true),
+            EngineState::Missing
+        );
+        assert_eq!(
+            engine_state(true, false, false, true, true),
+            EngineState::Running
+        );
         // Downloaded, loading into memory (not yet `running`) ⇒ "warming" = "Starting…".
-        assert_eq!(engine_state(true, false, false, false, true), "warming");
-        assert_eq!(engine_state(true, false, false, false, false), "idle");
+        assert_eq!(
+            engine_state(true, false, false, false, true),
+            EngineState::Warming
+        );
+        assert_eq!(
+            engine_state(true, false, false, false, false),
+            EngineState::Idle
+        );
         // The regression guard: a helper DOWNLOADING signal forces "downloading" even if the
         // present/running flags say otherwise (e.g. a non-empty partial dir on disk).
-        assert_eq!(engine_state(true, true, false, false, true), "downloading");
+        assert_eq!(
+            engine_state(true, true, false, false, true),
+            EngineState::Downloading
+        );
     }
 
     #[test]
@@ -778,10 +802,10 @@ mod tests {
         let tts = engine_state(
             true, /* dling */ false, false, /* running */ true, true,
         );
-        assert_eq!((tts, stt), ("running", "downloading"));
+        assert_eq!((tts, stt), (EngineState::Running, EngineState::Downloading));
         // ...and the reverse pairing (TTS still fetching while STT is warm) holds too.
         let tts = engine_state(true, true, false, false, true);
         let stt = engine_state(true, false, false, true, true);
-        assert_eq!((tts, stt), ("downloading", "running"));
+        assert_eq!((tts, stt), (EngineState::Downloading, EngineState::Running));
     }
 }

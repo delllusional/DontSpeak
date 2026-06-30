@@ -288,8 +288,9 @@ pub extern "C" fn ds_t_args(key: *const c_char, args_json: *const c_char) -> *mu
 // macOS SwiftUI app and the Windows WinUI app call these instead of reimplementing
 // them. Culture-sensitive NUMBER formatting (RTF ranges, MB/GB, %) stays in each UI.
 
-/// Localized hover word for an engine lifecycle state. `state` is the raw model-status
-/// string ("running"|"idle"|"warming"|"downloading"|"failed"|"blocked"|"missing"),
+/// Localized hover word for an engine lifecycle state. `state` is the model-status token from
+/// the canonical [`ds_status::EngineState`] vocabulary ("running"|"idle"|"warming"|
+/// "downloading"|"failed"|"blocked"|"missing"),
 /// `progress` the 0..1 download fraction (only used for "downloading"), `why` the
 /// failure reason (only used for "failed"; empty → the generic default). Owned `char*`,
 /// free with `ds_string_free`. HANDLE-FREE.

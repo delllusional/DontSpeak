@@ -8,7 +8,7 @@
 //! libadwaita semantic style classes), exactly like the macOS/Windows hosts, never as words.
 
 use adw::prelude::*;
-use ds_status::{EngineObj, ModelStatus};
+use ds_status::{EngineObj, EngineState, ModelStatus};
 
 use crate::status::Snapshot;
 
@@ -371,7 +371,16 @@ fn engine_subtitle(name: &str, state: &str, obj: Option<&EngineObj>, extra: Opti
 
 /// The not-ready (download / warm / fail) lifecycle tokens that get a status NOTE.
 fn is_trouble(state: &str) -> bool {
-    matches!(state, "missing" | "downloading" | "warming" | "failed" | "blocked")
+    matches!(
+        EngineState::parse(state),
+        Some(
+            EngineState::Missing
+                | EngineState::Downloading
+                | EngineState::Warming
+                | EngineState::Failed
+                | EngineState::Blocked
+        )
+    )
 }
 
 /// The selected TTS engine's `EngineObj` (for its progress/error), or None for off.
@@ -487,10 +496,10 @@ fn set_dot(dot: &gtk::Image, state: &str) {
     for c in ["success", "warning", "error", "dim-label"] {
         dot.remove_css_class(c);
     }
-    dot.add_css_class(match state {
-        "running" => "success",
-        "warming" | "downloading" | "blocked" => "warning",
-        "failed" => "error",
+    dot.add_css_class(match EngineState::parse(state) {
+        Some(EngineState::Running) => "success",
+        Some(EngineState::Warming | EngineState::Downloading | EngineState::Blocked) => "warning",
+        Some(EngineState::Failed) => "error",
         _ => "dim-label",
     });
 }

@@ -12,9 +12,13 @@
 //! serde field names ARE the wire keys. `Option<String>` serializes to JSON `null`
 //! (never omitted): the apps read every key unconditionally.
 
+mod state;
+pub use state::EngineState;
+
 /// One engine row (Kokoro / Parakeet / diarization / system / claude_code /
-/// tts_system). `state` is the lifecycle token the app maps 1:1 to a status dot:
-/// "downloading" | "failed" | "missing" | "running" | "warming" | "idle".
+/// tts_system). `state` is the lifecycle token the app maps 1:1 to a status dot; its
+/// canonical vocabulary is [`EngineState`] (the producer stores `EngineState::as_str`
+/// here, Rust consumers route the token back through [`EngineState::parse`]).
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct EngineObj {
     pub present: bool,
@@ -163,7 +167,7 @@ mod tests {
         EngineObj {
             present: false,
             removable: false,
-            state: "missing".to_string(),
+            state: EngineState::Missing.as_str().to_string(),
             progress: 0.0,
             error: None,
             dl_index: 0,

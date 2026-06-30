@@ -22,8 +22,9 @@ fn fill(key: &str, pairs: &[(&str, &str)]) -> String {
 }
 
 /// The engine's status NOTE — the one-line message shown in a row's expanded section when the
-/// engine isn't ready. `state` is the raw model-status string ("warming"|"downloading"|"failed"|
-/// "blocked"|"missing"); `progress` is the 0..1 download fraction (only used for "downloading");
+/// engine isn't ready. `state` is the model-status token, classified through
+/// [`ds_status::EngineState`] (a note is shown for `Missing`/`Warming`/`Blocked`/`Downloading`/
+/// `Failed`); `progress` is the 0..1 download fraction (only used for "downloading");
 /// `why` is the failure reason (only used for "failed"; empty → the generic default reason). The
 /// ready states ("running"|"idle") — and anything unrecognized — have no note and return "".
 pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
@@ -41,11 +42,12 @@ pub fn engine_state_word_files(
     file_index: i64,
     file_count: i64,
 ) -> String {
-    match state {
-        "missing" => ds_i18n::t("status.engine.status.missing"),
-        "warming" => ds_i18n::t("status.engine.status.warming"),
-        "blocked" => ds_i18n::t("status.engine.status.blocked"),
-        "downloading" => {
+    use ds_status::EngineState;
+    match EngineState::parse(state) {
+        Some(EngineState::Missing) => ds_i18n::t("status.engine.status.missing"),
+        Some(EngineState::Warming) => ds_i18n::t("status.engine.status.warming"),
+        Some(EngineState::Blocked) => ds_i18n::t("status.engine.status.blocked"),
+        Some(EngineState::Downloading) => {
             let pct = (progress * 100.0).round() as i64;
             let base = if pct <= 0 {
                 // Unknown/zero progress — FluidAudio's ANE/Core ML fetches don't report a
@@ -63,13 +65,14 @@ pub fn engine_state_word_files(
                 base
             }
         }
-        "failed" => {
+        Some(EngineState::Failed) => {
             if why.is_empty() {
                 ds_i18n::t("status.engine.reason.default")
             } else {
                 fill("status.engine.status.failed", &[("why", why)])
             }
         }
+        // The ready states ("running"/"idle") — and any unrecognized token — have no note.
         _ => String::new(),
     }
 }

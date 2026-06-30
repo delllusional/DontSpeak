@@ -22,6 +22,9 @@ crate-type = ["lib", "staticlib", "cdylib"]
 ds-config = { workspace = true }
 ds-ipc = { workspace = true }
 ds-model = { workspace = true }
+# The canonical engine→app lifecycle-state vocabulary (EngineState): the shared
+# status-panel formatters classify the model_status `state` token through it.
+ds-status = { workspace = true }
 # The shared tool catalog exposed to the app's Tools window (same list the MCP
 # server gives Claude — see ds-tools).
 ds-tools = { workspace = true }
