@@ -73,20 +73,16 @@ struct MainWindow: View {
             .navigationSplitViewColumnWidth(min: 150, ideal: 150, max: 150)
             // Let the window's glass slab show through the sidebar rather than an opaque list.
             .scrollContentBackground(.hidden)
-            // Run the sidebar column the FULL window height — UP UNDER the title-bar strip — so
-            // the left column reads like the System Settings sidebar (continuous from the top,
-            // with the state-tint strip just washing over its top edge rather than stopping at a
-            // seam). `ignoresSafeArea` bleeds the column material past the title-bar safe area;
-            // the strip overlay (added in `windowGlass`, in FRONT) still spans the full width, so
-            // its coloring stays unbroken. The rows themselves still start below the bar via the
-            // content margin below.
-            .background { Rectangle().fill(.ultraThinMaterial).ignoresSafeArea() }
-            // Because the column bleeds UNDER the title-bar strip, its scroll content starts at the
-            // very window top — so the first row would tuck under the traffic lights. Inset it by
-            // the title-bar height PLUS the standard top margin, so the first row clears the bar and
-            // lands LEVEL with the detail's first platter (which gets `windowTopInset` below the
-            // title-bar safe area).
-            .contentMargins(.top, titleBarHeight + Glass.windowTopInset, for: .scrollContent)
+            // Let the sidebar material RESPECT the title-bar safe area (no `ignoresSafeArea`), so
+            // it stops at the bar instead of bleeding up under the traffic lights. The window glass
+            // slab (behind) and the state-tint strip overlay (in FRONT, full width) still cover the
+            // top region, so the strip stays continuous — the sidebar just no longer tucks under it.
+            .background { Rectangle().fill(.ultraThinMaterial) }
+            // With the safe area respected, the scroll content already starts below the title bar
+            // (the system reserves the hidden title-bar height). Add only the standard top margin —
+            // the SAME `windowTopInset` the detail uses — so the first row sits one even margin
+            // below the bar, level with the detail's first platter. (No manual `titleBarHeight`.)
+            .contentMargins(.top, Glass.windowTopInset, for: .scrollContent)
             // Drop the sidebar-collapse button. It lives in an AppKit toolbar pinned to the
             // title-bar region over the SIDEBAR — that toolbar is what kept the state-tint
             // strip from spanning the full width. With no toolbar, the strip covers the whole
