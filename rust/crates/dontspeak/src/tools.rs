@@ -477,13 +477,13 @@ fn call_mute(sock: &Path, args: &Value) -> Result<String, String> {
     let Some(on) = a.on else {
         return Err("`on` is required (true = mute, false = unmute)".into());
     };
-    // Spell out the consequence so the model relays it: while muted the user hears nothing,
-    // so a spoken reply they were waiting on must be surfaced in text.
+    // Plain state confirmation. The "user hears nothing, so put it in text" coaching lives in
+    // the UserPromptSubmit push-hook (fires when the user muted and the model is unaware) and
+    // the tool description — no need to repeat it here, where the model just caused the mute.
     let done = if on {
-        "Muted — spoken replies and narration now play silently; the user will NOT hear \
-         anything until you unmute. If a spoken answer was expected, tell them in text."
+        "Muted — spoken output is now silent."
     } else {
-        "Unmuted — spoken output is audible again."
+        "Unmuted — audible again."
     };
     match ds_ipc::request(sock, &Request::SetMuted { on }) {
         Ok(_) => Ok(done.into()),
@@ -612,8 +612,8 @@ const LISTEN_ENDPOINT_SILENCE: Duration = Duration::from_millis(1500);
 /// regardless, after the `seconds` hard cap for a user who never stops. This reuses the
 /// existing two-connection stop path; the helper/engine are untouched.
 fn call_dictate(sock: &Path, args: &Value) -> Result<String, String> {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     let a: ListenArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid listen arguments: {e}"))?;
