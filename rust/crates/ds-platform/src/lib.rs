@@ -1,13 +1,12 @@
 //! Platform abstraction for the dontspeak engine.
 //!
-//! Four capability traits split the OS-specific surface the engine needs:
-//!   * [`CapsLockReader`]  — poll the native Caps Lock TOGGLE/lock state.
+//! Three capability traits split the OS-specific surface the engine needs:
 //!   * [`KeyInjector`]     — synthesize the dictation key tap (down+up) that toggles recording.
 //!   * [`FrontmostWindow`] — is a terminal the frontmost app? (focus gate)
-//!   * [`CapsKeyMonitor`]  — physical Caps key down-state (§F long-press) + the
-//!     LED-off write (drift-recovery force-reset).
+//!   * [`CapsKeyMonitor`]  — physical Caps key down/up edges (the gesture source) + the
+//!     Caps LED write (driven as a pure output).
 //!
-//! [`Platform`] aggregates all four plus a one-time `preflight()` (permission
+//! [`Platform`] aggregates all three plus a one-time `preflight()` (permission
 //! check). The free functions [`current()`] (the platform impl for the build
 //! target) and [`mic_active()`] (system mic-in-use probe) dispatch to the per-OS
 //! modules. The OS-independent [`KeyChord`]/[`KeyBase`] keybinding parser lives in
@@ -15,7 +14,7 @@
 //!
 //! Compile status:
 //! - macOS: implemented & compile-verified on the Apple-Silicon build host
-//!   (IOKit lock-state FFI, core-graphics CGEventPost, NSWorkspace).
+//!   (core-graphics CGEventPost, IOKit Caps-LED write, NSWorkspace).
 //! - Windows: written behind cfg(target_os="windows"); UNCOMPILED here.
 //! - Linux: written behind cfg(target_os="linux"); UNCOMPILED here.
 
@@ -37,22 +36,6 @@ pub struct CapsEdge {
     pub down: bool,
     /// When the transition was observed (hook-callback time).
     pub at: Instant,
-}
-
-/// Reads the live Caps Lock lock-state (the LED/toggle, NOT a key-down event).
-pub trait CapsLockReader {
-    /// `Some(true)` if caps is ON, `Some(false)` if OFF, `None` on a transient
-    /// read failure (the engine skips that tick rather than guessing).
-    fn read(&self) -> Option<bool>;
-
-    /// The LATCHED Caps-Lock LED / lock state (true == ON), distinct from the
-    /// momentary `CapsKeyMonitor::caps_physically_down`. The OS latches this bit,
-    /// so even a tap too fast to be observed as a momentary key-down is reflected
-    /// on the NEXT poll — this is the edge signal the "full mirror" engine tick
-    /// follows (OFF→ON starts recording, ON→OFF stops). Distinct from `read()`,
-    /// which on macOS returns the physical-key down state (HOLD semantics), not
-    /// the latched lock.
-    fn caps_lock_on(&self) -> bool;
 }
 
 /// Injects the keypress that drives Claude Code voice dictation: TAP — one keypress
@@ -143,10 +126,9 @@ pub trait FrontmostWindow {
     }
 }
 
-/// Physical Caps-Lock key down-duration + LED-off write — the NEW signal §F
-/// needs for long-press detection, which the lock-state poll (`CapsLockReader`)
-/// cannot observe (toggling the lock flips the bit instantly regardless of how
-/// long you hold the key).
+/// Physical Caps-Lock key down-duration + LED write — the signal §F needs for
+/// long-press detection (measured off how long the physical key is held), plus
+/// the Caps LED output the engine drives on each gesture edge.
 pub trait CapsKeyMonitor {
     /// Whether the Caps Lock key is physically held *right now*, independent of
     /// the LED/toggle state. The engine stamps the first true and fires a reset
@@ -178,7 +160,7 @@ pub trait CapsKeyMonitor {
 }
 
 /// One platform's full capability set.
-pub trait Platform: CapsLockReader + KeyInjector + FrontmostWindow + CapsKeyMonitor {
+pub trait Platform: KeyInjector + FrontmostWindow + CapsKeyMonitor {
     /// One-time startup check (e.g. macOS Accessibility trust). Returns an
     /// error the engine prints before exiting non-zero. SILENT and repeatable —
     /// the caps re-probe loop calls it on a timer, so it must never prompt.
@@ -203,7 +185,7 @@ impl fmt::Display for PreflightError {
 impl Error for PreflightError {}
 
 // ---- per-OS modules --------------------------------------------------------
-// Key synthesis (`KeyInjector`) + Caps-Lock LED (`CapsLockReader`/`CapsKeyMonitor`) are
+// Key synthesis (`KeyInjector`) + Caps-Lock LED (`CapsKeyMonitor`) are
 // implemented NATIVELY per OS below — one correct, self-maintained impl each, no library.
 
 #[cfg(target_os = "macos")]

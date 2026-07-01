@@ -22,22 +22,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
-// The core-graphics 0.25 crate exposes CGEventSourceCreate + the CGEventFlags
-// bitset (incl. CGEventFlagAlphaShift, the Caps-Lock lock bit) but NOT the
-// `CGEventSourceFlagsState` query. Bind it directly: it returns the CURRENT
-// modifier-flag state for a source state id, from which we mask the AlphaShift
-// (Caps-Lock LOCK) bit. CGEventSourceStateID is #[repr(C)] in the crate, so it
-// is ABI-compatible with the framework's `CGEventSourceStateID` parameter.
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGEventSourceFlagsState(state_id: CGEventSourceStateID) -> CGEventFlags;
-}
 
 use objc2_app_kit::NSWorkspace;
 
 use crate::{
-    CapsKeyMonitor, CapsLockReader, FrontmostWindow, KeyBase, KeyChord, KeyInjector, Platform,
-    PreflightError, TERM_BUNDLES,
+    CapsKeyMonitor, FrontmostWindow, KeyBase, KeyChord, KeyInjector, Platform, PreflightError,
+    TERM_BUNDLES,
 };
 
 /// kVK_ANSI_V — for the synthetic Cmd+V paste in `type_text` (§C.3).
@@ -117,11 +107,11 @@ pub struct MacPlatform {
     /// write can't reliably do on external/Bluetooth keyboards. `None` if the HID
     /// manager wouldn't open (then only the lock-state write drives the LED).
     led: Option<led::CapsLed>,
-    /// The CGEventSource the dictation tap is posted through. MUST be `HIDSystemState` —
-    /// the SAME source the Caps-Lock LED is read from (`caps_lock_on`) — so a synthesized
-    /// keypress can't desync the Caps-Lock state the recording edge-detector follows. (A
-    /// key posted through a DIFFERENT source clobbers the Caps LED → a spurious stop ~120ms
-    /// after each start; this coupling is exactly why key injection here can't be generic.)
+    /// The CGEventSource the dictation tap is posted through. MUST be `HIDSystemState` so a
+    /// synthesized keypress can't clobber the Caps-Lock LED the engine drives as its recording
+    /// indicator. (A key posted through a DIFFERENT source flips the Caps lock/LED → a spurious
+    /// toggle ~120 ms after each start; this coupling is exactly why key injection here can't
+    /// be generic.)
     source: CGEventSource,
     /// Physical Caps-key down state, published by the IOHIDManager monitor thread
     /// (`iohid::spawn_caps_hid_monitor`). Read synchronously by `read()` (HOLD
@@ -135,8 +125,8 @@ impl MacPlatform {
         let caps = iokit::CapsReader::open()
             .ok_or_else(|| PreflightError("cannot open IOHIDSystem".into()))?;
         // .hidSystemState source: session-level events that flow to the focused app's PTY,
-        // AND the same source `caps_lock_on()` reads — so the dictation tap stays in sync
-        // with the Caps-Lock LED the recording edge-detector follows.
+        // AND the source whose Caps-Lock LED the engine drives — so the dictation tap can't
+        // clobber the recording indicator.
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .map_err(|_| PreflightError("cannot create CGEventSource".into()))?;
         let caps_down = Arc::new(AtomicBool::new(false));
@@ -172,37 +162,6 @@ impl Drop for MacPlatform {
         // Hand the Caps key back to the OS on clean shutdown. (A hard SIGKILL skips this —
         // the remap is per-login and is cleared on the next clean run / logout / reboot.)
         capskey::release_caps_key();
-    }
-}
-
-impl CapsLockReader for MacPlatform {
-    /// Caps state for the record trigger — the PHYSICAL key down/up published by
-    /// the `IOHIDManager` monitor (`iohid.rs`), giving HOLD semantics (held =
-    /// recording), NOT `IOHIDGetModifierLockState`.
-    ///
-    /// The polled lock-state read does NOT track the Caps key on every machine
-    /// (validated on this host: it stays `false` through real toggles the OS and
-    /// terminal both register) — typically an external/Bluetooth keyboard whose
-    /// modifier-lock state never syncs to `IOHIDSystem`, even though its key events
-    /// still flow. The engine then never saw an edge and never started recording.
-    /// `IOHIDManager` reads the value straight off the device's HID input reports —
-    /// the physical Caps key directly, bypassing the unreliable lock-state layer.
-    /// `set_caps_lock` still drives the LED via IOKit; only the READ moves to the
-    /// HID monitor.
-    fn read(&self) -> Option<bool> {
-        Some(self.caps_down.load(Ordering::Relaxed))
-    }
-
-    /// The LATCHED Caps-Lock LED/lock state, read via
-    /// `CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)` masked with
-    /// `kCGEventFlagMaskAlphaShift`. Unlike the per-keyboard `IOHIDGetModifierLockState`
-    /// (which never syncs on this host's external keyboard), the HID-system flag
-    /// state DOES reflect the OS-latched Caps-Lock bit set by any keyboard, so a
-    /// tap too fast to be observed as a momentary key-down is still seen here on
-    /// the next poll — exactly the edge signal the engine's full-mirror tick needs.
-    fn caps_lock_on(&self) -> bool {
-        let flags = unsafe { CGEventSourceFlagsState(CGEventSourceStateID::HIDSystemState) };
-        flags.contains(CGEventFlags::CGEventFlagAlphaShift)
     }
 }
 

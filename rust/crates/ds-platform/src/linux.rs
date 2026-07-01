@@ -2,13 +2,10 @@
 //!
 //! Mirrors the macOS design (LED poll), NOT the Windows key-suppress hook:
 //!
-//! * Caps lock state (`caps_lock_on`/`read`): read the LATCHED LED bit from the
-//!   keyboard `evdev` device (EV_LED / LED_CAPSL) via the `EVIOCGLED` ioctl — the
-//!   true lock state, exactly like the macOS `CGEventSourceFlagsState` LED poll. The
-//!   kernel latches the bit, so a tap too fast to see as a momentary key-down is still
-//!   reflected on the next poll — the edge the engine's full-mirror tick follows. We do
-//!   NOT grab/suppress the key (so the user's own Caps still works); the engine simply
-//!   mirrors the LED. Reading evdev needs membership in the `input` group (udev-rule.txt).
+//! * Caps LED (`set_caps_lock`): a pure OUTPUT — the engine writes EV_LED/LED_CAPSL
+//!   on each gesture edge (lit = recording), never reading the state back. We do NOT
+//!   grab/suppress the key, so the user's own Caps still works. Reading the physical
+//!   Caps key (below) needs membership in the `input` group (udev-rule.txt).
 //! * Physical down (`caps_physically_down`, §F long-press): the LED can't tell hold
 //!   duration, so we drain EV_KEY/KEY_CAPSLOCK events (non-blocking) each tick and cache
 //!   the last down/up — the macOS IOHIDManager analogue.
@@ -37,8 +34,7 @@ use evdev::{
 };
 
 use crate::{
-    CapsKeyMonitor, CapsLockReader, FrontmostWindow, KeyBase, KeyChord, KeyInjector, Platform,
-    PreflightError,
+    CapsKeyMonitor, FrontmostWindow, KeyBase, KeyChord, KeyInjector, Platform, PreflightError,
 };
 
 /// WM_CLASS values (lowercased, second/class field) that count as "a terminal is
@@ -234,18 +230,6 @@ impl LinuxPlatform {
                 .unwrap_or(false)
     }
 
-    /// The latched Caps LED via the `EVIOCGLED` ioctl — current regardless of whether the
-    /// event queue has been drained (the ioctl reads kernel state directly). `None` when
-    /// no keyboard is open or the read fails.
-    fn led_caps_on(&self) -> Option<bool> {
-        self.kbd
-            .as_ref()?
-            .borrow()
-            .get_led_state()
-            .ok()
-            .map(|leds| leds.contains(LedCode::LED_CAPSL))
-    }
-
     /// Drain any pending EV_KEY events, updating the cached physical Caps-down state.
     /// Non-blocking: `WouldBlock` (no events) leaves the cache untouched.
     fn pump_caps_events(&self) {
@@ -289,20 +273,6 @@ impl LinuxPlatform {
             ),
         ];
         let _ = uinput.borrow_mut().emit(&events);
-    }
-}
-
-impl CapsLockReader for LinuxPlatform {
-    fn read(&self) -> Option<bool> {
-        // The latched LED bit (lock state) — same source `caps_lock_on` uses.
-        self.led_caps_on()
-    }
-
-    fn caps_lock_on(&self) -> bool {
-        // The LATCHED Caps-Lock LED is the true lock state on Linux (EV_LED / LED_CAPSL),
-        // the edge the engine's full-mirror tick follows. No keyboard / a transient ioctl
-        // failure reads as OFF (the engine then simply doesn't record — never a false record).
-        self.led_caps_on().unwrap_or(false)
     }
 }
 

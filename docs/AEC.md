@@ -131,10 +131,10 @@ The helper runs a `concurrent_listen_loop` thread that drains the echo-cancelled
 capture and emits `PARTIAL`/`FINAL`/`LDONE` while the playback thread renders TTS; the
 engine (`tts.rs`) demuxes the helper's stdout into a speak slot vs a listen slot so a
 `speak` and a `listen` are in flight at once (a listen ends via `lstop`, never cancelling a
-concurrent reply). The Caps gesture model: idle tap → dictate while voice plays; idle
-long-press → cancel voice + dictate; dictating short-press → submit; dictating long-press →
-discard. The two `mic_active()` gates are bypassed in full-duplex (§5.3, keyed off
-`full_duplex_active()`).
+concurrent reply). The full-duplex nuance: an idle Caps tap dictates **while the voice
+keeps speaking** (no barge-in — the VPIO AEC keeps playback out of the mic); only a
+long-press silences the voice. The full gesture table is in the README. The two
+`mic_active()` gates are bypassed in full-duplex (§5.3, keyed off `full_duplex_active()`).
 
 ## 6. Windows design
 

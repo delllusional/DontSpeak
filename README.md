@@ -10,6 +10,18 @@ A local voice layer for Claude Code, Codex, and Claude Desktop: your agent speak
 - **Driven over MCP** — voices, language, engine, rate, and toggles are all tools your agent can call.
 - **Speaker diarization & speaker-lock** — label enrolled voices and restrict dictation to yours.
 
+## Caps Lock gestures
+
+The Caps-Lock LED is the state light: **lit = recording, dark = idle.**
+
+| Gesture | Dark (idle) | Lit (recording) |
+|---|---|---|
+| **Single tap** | Start recording (or pause the voice if dictation is off) | Stop and submit |
+| **Long press** | Silence the voice | Discard and silence |
+| **Double tap** | Skip the current spoken message | Skip the current spoken message |
+
+Double tap only counts while the voice is speaking. Hands-free [always-listening mode](docs/ALWAYS-LISTENING.md) ignores the Caps key. Long-press threshold: `long_press_ms`.
+
 ## Models & runtimes
 
 - **TTS** — Kokoro-82M, or the OS system voice.

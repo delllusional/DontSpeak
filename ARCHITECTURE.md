@@ -110,18 +110,32 @@ and INERT (no degrade to `claude_code`) when unavailable, so it never silently f
 
 ## Caps-Lock dictation
 
-Caps Lock is a **tap toggle**: one tap starts recording, the next submits. The
-engine polls the **latched Caps-Lock LED** every 30 ms — read via
-`CGEventSourceFlagsState(HIDSystemState)` masked with the AlphaShift bit — and
-recording strictly **mirrors** that LED: an OFF→ON edge starts, ON→OFF stops. The
-OS latches the LED, so even a tap too fast to register as a momentary key-down
-still flips the bit and is caught on the next poll, and the LED can never drift out
-of sync with recording. `IOHIDManager` watches the **physical** key separately
-(covered by the Accessibility grant — which subsumes Input Monitoring) solely to
-detect a **long press** (≥
-`long_press_ms`), which force-resets to idle and drives the LED off. For the `claude_code`
-STT path, `start()`/`stop()` each emit one focus-gated tap of Claude Code's bound
-`voice:pushToTalk` key (default `Space`), toggling CC's own recording. No DriverKit.
+Caps Lock is a **tap toggle**. The user-facing gesture semantics (tap, long-press,
+double-tap, voice-only mode) live in the README's *Caps Lock gestures* table — this
+covers the mechanism.
+
+The gesture machine is driven off the **physical** Caps key (down / hold / up),
+**not** the OS lock latch. A quick press-and-release is a **tap** (toggle recording —
+start when idle, stop-and-submit when recording); a hold past `long_press_ms` is a
+**long-press** that force-resets to idle. The Caps LED is a pure **output** we drive
+on these edges (`led::CapsLed` on macOS, an IOCTL on Windows, `EV_LED` on Linux) — it
+is never read back to decide state, so it can't drift out of sync with recording.
+(The old model mirrored recording off the latched LED; it was replaced to kill the
+latch/LED desync — see `engine.rs`.)
+
+The key is fed to the machine one of two ways:
+
+- **Event-driven** (Windows low-level hook): a lossless queue replays every real
+  transition, so a down+up inside one tick is two edges — a tap faster than the poll
+  is never dropped.
+- **Polled** (macOS / Linux): sample the physical-key `AtomicBool` every 30 ms
+  (`IOHIDManager` on macOS, covered by the Accessibility grant) and synthesize one
+  edge when it changed. A sub-poll tap too fast to be seen as a key-down is missed —
+  tap again.
+
+For the `claude_code` STT path, `start()`/`stop()` each emit one focus-gated tap of
+Claude Code's bound `voice:pushToTalk` key (default `Space`), toggling CC's own
+recording. No DriverKit.
 
 ## TTS pipeline
 

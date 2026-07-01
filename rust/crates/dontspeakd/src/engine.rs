@@ -1123,7 +1123,7 @@ mod tests {
     }
     use crate::config_gate::DEFAULT_LONG_PRESS_MS;
     use ds_platform::{
-        CapsKeyMonitor, CapsLockReader, FrontmostWindow, KeyInjector, PreflightError,
+        CapsKeyMonitor, FrontmostWindow, KeyInjector, PreflightError,
     };
     use std::cell::Cell;
 
@@ -1148,17 +1148,6 @@ mod tests {
         type_text_calls: Cell<u32>,
     }
 
-    impl CapsLockReader for MockPlatform {
-        fn read(&self) -> Option<bool> {
-            Some(self.lock_state.get())
-        }
-        /// The latched LED the full-mirror tick follows. Tests drive it via
-        /// `lock_state` (and `set_caps_lock` writes the same Cell), so a force-reset's
-        /// LED-OFF write is reflected here too.
-        fn caps_lock_on(&self) -> bool {
-            self.lock_state.get()
-        }
-    }
     impl KeyInjector for MockPlatform {
         // A `tap_key` is one discrete press+release, so it bumps BOTH the down and up
         // counters the caps-state-machine tests assert on — keeping every existing

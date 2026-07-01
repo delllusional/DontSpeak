@@ -1,8 +1,8 @@
 //! Windows platform impl — written behind cfg(target_os="windows").
 //! UNCOMPILED on the macOS build host; types/APIs not yet exercised.
 //!
-//! * Caps lock state: `GetKeyState(VK_CAPITAL) & 0x0001` (low bit = toggle/LED
-//!   state, exactly the lock state the engine polls).
+//! * Caps LED: `set_caps_lock` drives the physical Caps light out-of-band via
+//!   `IOCTL_KEYBOARD_SET_INDICATORS` — a pure output, never a toggle read.
 //! * Dictation key: `SendInput` presses the chord (modifiers + base key) then
 //!   releases — one discrete tap that toggles recording.
 //! * Frontmost: `GetForegroundWindow` + `GetWindowThreadProcessId`, then resolve
@@ -20,8 +20,8 @@ use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-    SendInput, VIRTUAL_KEY, VK_CAPITAL,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+    VIRTUAL_KEY, VK_CAPITAL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
@@ -31,8 +31,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PWSTR;
 
 use crate::{
-    CapsEdge, CapsKeyMonitor, CapsLockReader, FrontmostWindow, KeyBase, KeyChord, KeyInjector,
-    Platform, PreflightError,
+    CapsEdge, CapsKeyMonitor, FrontmostWindow, KeyBase, KeyChord, KeyInjector, Platform,
+    PreflightError,
 };
 
 const VK_RETURN: u16 = 0x0D; // Enter/Return — the auto-submit keystroke
@@ -224,24 +224,6 @@ impl WindowsPlatform {
         unsafe {
             SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
         }
-    }
-}
-
-impl CapsLockReader for WindowsPlatform {
-    fn read(&self) -> Option<bool> {
-        // Low-order bit = toggle (lock) state.
-        let s = unsafe { GetKeyState(VK_CAPITAL.0 as i32) };
-        Some((s & 0x0001) != 0)
-    }
-
-    /// The LATCHED Caps-Lock toggle/LED state: `GetKeyState(VK_CAPITAL) & 0x0001`
-    /// (low bit = toggle/lock state). The OS latches this bit, so a tap is observed
-    /// on the next poll even if no momentary key-down was seen — the edge signal the
-    /// engine's full-mirror tick follows. UNCOMPILED on the macOS build host;
-    /// verify at port time.
-    fn caps_lock_on(&self) -> bool {
-        let s = unsafe { GetKeyState(VK_CAPITAL.0 as i32) };
-        (s & 0x0001) != 0
     }
 }
 

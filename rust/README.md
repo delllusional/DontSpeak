@@ -47,11 +47,11 @@ rust/
       src/server.rs
       src/client.rs
     ds-proc/           # lib: pidfile single-speaker (atomic tempfile) + pgroup kill
-    ds-platform/       # lib: CapsLockReader / KeyInjector / FrontmostWindow traits
+    ds-platform/       # lib: KeyInjector / FrontmostWindow / CapsKeyMonitor traits
       build.rs               #      links IOKit + ApplicationServices on macOS
-      src/macos.rs           #      CGEvent (caps read + key tap) + NSWorkspace + AX
+      src/macos.rs           #      CGEvent (key tap) + NSWorkspace + AX
       src/macos/             #      iohid.rs (physical Caps via IOHIDManager) + iokit.rs (LED write)
-      src/windows.rs         #      cfg, SendInput/GetKeyState/GetForegroundWindow (CI: windows-2025)
+      src/windows.rs         #      cfg, SendInput/GetForegroundWindow (CI: windows-2025)
       src/linux.rs           #      cfg, evdev/uinput/x11rb (CI: ubuntu-latest)
     ds-model/          # lib: download + checksum-verify Kokoro/onnx/Parakeet assets
     ds-tts/            # lib + bin: native Kokoro pipeline + the ds-helper bin
@@ -80,19 +80,17 @@ workspace-specific build/impl detail.
 
 ## macOS platform impl (`crates/ds-platform/src/macos.rs` + `macos/`)
 
-- **Caps-Lock state.** Two reads with distinct jobs:
-  - **Latched LED** (`macos.rs`, `caps_lock_on()`): the recording mirror. We bind
-    `CGEventSourceFlagsState(HIDSystemState)` directly (the `core-graphics` crate exposes the
-    flag bitset but not this query) and mask the `AlphaShift` (Caps-Lock lock) bit. This
-    reflects the OS-latched bit set by **any** keyboard, so even a tap too fast to see as a
-    key-down is caught on the next poll.
+- **Caps-Lock state.** One read + one write:
   - **Physical key** (`iohid.rs`, via `IOHIDManager`): the down/up of the actual Caps key,
-    published to an `AtomicBool` from a dedicated run-loop thread. Used only to detect the
-    long-press reset (covered by the **Accessibility** grant, which subsumes Input Monitoring).
-  > The per-keyboard lock read `IOHIDGetModifierLockState` is deliberately NOT used for the
-  > read: it never tracks toggles on some external keyboards. IOKit (`iokit.rs`) is kept only
-  > for the LED **write** (`IOHIDSetModifierLockState`, driving the LED off on long-press
-  > reset); the IOKit framework is linked in `build.rs`.
+    published to an `AtomicBool` from a dedicated run-loop thread. This is the **gesture
+    source** — the engine derives the whole tap / long-press machine from these edges
+    (covered by the **Accessibility** grant, which subsumes Input Monitoring). There is no
+    latch/lock-state read: an earlier `caps_lock_on()` poll (via `CGEventSourceFlagsState`)
+    drove a latch-mirror model that has been removed.
+  - **LED write** (`macos.rs` `set_caps_lock`): the Caps LED is a pure **output** the engine
+    drives on each gesture edge (lit = recording), never read back. `led.rs`'s HID writer
+    lights the LED on every keyboard; `iokit.rs`'s lock-coupled `IOHIDSetModifierLockState` is
+    the fallback and drives the LED off on the long-press reset. IOKit is linked in `build.rs`.
 - **Dictation key tap** (`macos.rs` `tap_key`, via the `core-graphics` crate): a
   `CGEvent::new_keyboard_event` for the configured `voice:pushToTalk` chord (default `Space`,
   modifiers from the `KeyChord`) on the `HIDSystemState` source, posted with
