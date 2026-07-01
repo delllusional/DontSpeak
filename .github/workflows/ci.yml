@@ -162,4 +162,6 @@ jobs:
       - name: dotnet test (WinUI app)
         if: runner.os == 'Windows'
         shell: bash
-        run: dotnet test apps/windows/winui.tests/DontSpeak.WinUI.Tests.csproj -c Release -p:Platform=x64
+        run: >
+          dotnet test apps/windows/winui.tests/DontSpeak.WinUI.Tests.csproj
+          -c Release -p:Platform=x64 --blame-hang --blame-hang-timeout 3m

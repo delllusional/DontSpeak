@@ -30,6 +30,9 @@ jobs:
   compile:
     name: dotnet build (winui)
     runs-on: windows-2025
+    # A hung testhost (e.g. a runtime bootstrap waiting on UI) must fail, not spin for
+    # GitHub's 6-hour default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v5
@@ -42,4 +45,6 @@ jobs:
       # The xunit pure-seam tests (HealthSnapshot parse, tray indicator mapping) — they run
       # without ds_core.dll or the Windows App Runtime, so no Rust build is needed here either.
       - name: dotnet test (x64, Release)
-        run: dotnet test apps/windows/winui.tests/DontSpeak.WinUI.Tests.csproj -c Release -p:Platform=x64
+        run: >
+          dotnet test apps/windows/winui.tests/DontSpeak.WinUI.Tests.csproj
+          -c Release -p:Platform=x64 --blame-hang --blame-hang-timeout 3m

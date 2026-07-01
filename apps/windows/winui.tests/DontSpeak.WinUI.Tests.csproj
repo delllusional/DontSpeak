@@ -18,6 +18,11 @@
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
     <EnableMsixTooling>true</EnableMsixTooling>
+    <!-- The Windows App SDK injects a Bootstrap.Initialize module initializer into
+         exe-shaped unpackaged projects (the test host is an exe). On a runner without
+         the Windows App Runtime installed it BLOCKS at testhost startup (hung CI job).
+         Nothing in these tests touches WinRT, so skip the bootstrap entirely. -->
+    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
