@@ -1,3 +1,4 @@
+#Requires -Version 5
 <#
   DontSpeak one-command installer — Windows.
 
@@ -18,6 +19,7 @@
     DONTSPEAK_DRY_RUN=1       resolve + print the plan, download nothing
 #>
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
 $repo = if ($env:DONTSPEAK_REPO) { $env:DONTSPEAK_REPO } else { 'delllusional/DontSpeak' }
 $api  = "https://api.github.com/repos/$repo/releases/latest"
 $dry  = $env:DONTSPEAK_DRY_RUN -eq '1'

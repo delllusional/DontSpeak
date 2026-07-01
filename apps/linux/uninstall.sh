@@ -19,7 +19,8 @@ for a in "$@"; do
   case "$a" in
     --udev) RM_UDEV=1 ;;
     -h | --help)
-      grep '^#' "$0" | sed 's/^# \{0,1\}//'
+      # Header comment only, minus the shebang: from line 2, stop at the first non-# line.
+      awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"
       exit 0
       ;;
     *) echo "uninstall: ignoring unknown arg '$a'" >&2 ;;

@@ -44,6 +44,11 @@ fi
 asset_url() {  # $1 = extended-regex matching the asset filename
   pat="$1"
   if [ -n "${DONTSPEAK_DOWNLOAD_BASE:-}" ]; then
+    case "$pat" in *\[*)
+      # A character class means a VERSIONED name (the Linux tarball) — un-escaping it
+      # would build a garbage URL. Fail loudly instead of 404ing on nonsense.
+      die "DONTSPEAK_DOWNLOAD_BASE can't resolve the versioned asset '$pat' — unset it on Linux" ;;
+    esac
     lit=$(printf '%s' "$pat" | sed 's/\\//g')   # unescape the ERE to a literal name
     printf '%s/%s\n' "${DONTSPEAK_DOWNLOAD_BASE%/}" "$lit"; return 0
   fi
@@ -71,7 +76,9 @@ verify_sha() {  # $1 = file, $2 = checksums url  (skips cleanly if unavailable)
 }
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+# Signals too: a Ctrl-C mid-download must not leave the mktemp dir behind (POSIX sh
+# doesn't run the EXIT trap on an unhandled signal).
+trap 'rm -rf "$TMP"' EXIT INT TERM HUP
 
 OS=$(uname -s)
 ARCH=$(uname -m)

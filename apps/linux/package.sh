@@ -27,7 +27,12 @@ REPO="$(cd "$HERE/../.." && pwd)"
 GTK_DIR="$HERE/gtk"
 OUTDIR="${OUTDIR:-$REPO/dist}"
 SKIP_APPIMAGE=0
-for a in "$@"; do case "$a" in --skip-appimage) SKIP_APPIMAGE=1 ;; -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac; done
+for a in "$@"; do case "$a" in
+  --skip-appimage) SKIP_APPIMAGE=1 ;;
+  # Header comment only, minus the shebang: from line 2, stop at the first non-# line.
+  -h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
+  *) echo "package.sh: unknown option '$a' (try --help)" >&2; exit 2 ;;
+esac; done
 
 # Strip any stray CR (a CRLF Cargo.toml — e.g. a Windows-checkout working tree — would
 # otherwise put a carriage return into every artifact filename).
@@ -57,7 +62,7 @@ done
 # ── 2. portable tarball (always) ─────────────────────────────────────────────────────────
 echo "==> [2/5] portable tarball"
 PKG="dontspeak-$VERSION-$ARCH"
-STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
+STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT INT TERM HUP
 ROOT="$STAGE/$PKG"
 install -d "$ROOT/bin" "$ROOT/share/applications" "$ROOT/share/icons/hicolor/scalable/apps" "$ROOT/udev"
 install -m0755 "$GREL/ds-gtk" "$RREL/dontspeak" "$RREL/ds-helper" "$ROOT/bin/"
@@ -137,4 +142,4 @@ fi
 
 echo
 echo "==> Done. Artifacts in $OUTDIR:"
-ls -lh "$OUTDIR" 2>/dev/null | grep -E "dontspeak|DontSpeak" || true
+ls -lh "$OUTDIR"/*ontSpeak* "$OUTDIR"/*ontspeak* 2>/dev/null || true

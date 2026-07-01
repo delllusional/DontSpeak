@@ -16,7 +16,6 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/.." && pwd)"
 INSTALL_DIR="${DONTSPEAK_INSTALL_DIR:-$HOME/.local/bin}"
 APPS_DIR="$HOME/.local/share/applications"
 AUTOSTART=0; DO_AEC=0; DO_UDEV=1
