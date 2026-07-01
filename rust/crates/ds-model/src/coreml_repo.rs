@@ -110,7 +110,7 @@ fn parakeet_eou_target() -> Option<PathBuf> {
 
 /// The exact dir FluidAudio's `StreamingEouAsrManager.loadModels(from:)` reads the streaming
 /// `.mlmodelc` set + `vocab.json` from (handed to the shim's `smk_asr_stream_start`). The download
-/// writes the repo's `320ms/` subtree under [`parakeet_eou_target`], so the loadable dir is that
+/// writes the repo's `320ms/` subtree under `parakeet_eou_target`, so the loadable dir is that
 /// subfolder. ONE source of truth so the download target and the shim load path (via
 /// `ds_stt::coreml::CoremlStreamer`) can't drift.
 pub fn parakeet_eou_dir() -> Option<PathBuf> {
@@ -135,7 +135,7 @@ fn diarizer_target() -> Option<PathBuf> {
     Some(ds_config::coreml_dir()?.join(DIARIZER_COREML_DIR_NAME))
 }
 
-/// Public accessor for the diarizer model dir (== [`diarizer_target`]) — the ONE place
+/// Public accessor for the diarizer model dir (== `diarizer_target`) — the ONE place
 /// Rust consumers resolve where the two diarization `.mlmodelc` live.
 pub fn diarizer_dir() -> Option<PathBuf> {
     diarizer_target()
@@ -393,7 +393,7 @@ pub fn ensure_coreml_repo(repo: &CoremlRepo, progress: &dyn Fn(u64, u64)) -> std
 
 /// Download a SET of repos as one unit, reporting ONE overall byte-weighted bar:
 /// `progress(done_bytes, total_bytes)` where BOTH are summed across every file of every repo —
-/// so the UI shows a single monotonic "Downloading <pct>%" over the WHOLE set (a true global
+/// so the UI shows a single monotonic "Downloading `<pct>`%" over the WHOLE set (a true global
 /// percent, not a per-file percent that resets each file). Writes each repo's completion marker
 /// once its files are all present.
 pub fn ensure_coreml_repos(

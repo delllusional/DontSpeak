@@ -282,7 +282,7 @@ pub fn coreml_model_present_in(dir: &Path, needle: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// As [`coreml_model_present_in`], probing [`coreml_dir`] — the ONE folder every Core ML
+/// As `coreml_model_present_in`, probing [`coreml_dir`] — the ONE folder every Core ML
 /// model now downloads to. `false` if the cache dir can't resolve.
 pub fn coreml_model_present(needle: &str) -> bool {
     coreml_dir()

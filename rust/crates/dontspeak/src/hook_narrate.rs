@@ -165,7 +165,7 @@ pub fn speak_reply(paths: &Paths, payload: &str) {
 ///   • `streamed` — a MessageDisplay pass already narrated this turn (Claude Code); re-voicing
 ///     here is the double-narration bug, so we suppress it,
 ///   • no usable final text.
-/// Otherwise the whole reply is fed through a fresh [`Accum`] as ONE final batch, yielding the
+/// Otherwise the whole reply is fed through a fresh `Accum` as ONE final batch, yielding the
 /// exact runs the streaming path would emit (every top-level blockquote in order; or, under
 /// `short`, a brief blockquote-less reply whole) — so a Codex reply is voiced just like a
 /// Claude Code one.

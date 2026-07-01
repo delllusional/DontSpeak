@@ -1,8 +1,8 @@
 //! The typed `model_status` schema — THE single source of truth for the engine → app
 //! status contract.
 //!
-//! The engine ([`dontspeakd::status`]) BUILDS a [`ModelStatus`] and serializes it to the
-//! `model_status` JSON. The C ABI ([`ds_core`]) ships that JSON to each platform's UI,
+//! The engine (`dontspeakd::status`) BUILDS a [`ModelStatus`] and serializes it to the
+//! `model_status` JSON. The C ABI (`ds_core`) ships that JSON to each platform's UI,
 //! which deserializes it into ITS OWN hand-written DTOs (winui `Native.cs`, macOS) that mirror
 //! THIS shape. So the Rust side has one definition; the per-platform mirrors are hand-kept in
 //! lockstep with it (reviewed against this file), with the round-trip contract test below

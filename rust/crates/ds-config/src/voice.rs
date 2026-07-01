@@ -420,7 +420,7 @@ impl VoiceConfig {
     }
 
     /// The TTS engine that actually runs on THIS build/platform: walk the `tts_engine`
-    /// preference ladder and take the first rung usable here (see [`TtsEngine::tts_usable`]).
+    /// preference ladder and take the first rung usable here (see `TtsEngine::tts_usable`).
     /// `None` = spoken replies off (empty ladder, or no usable rung — e.g. `["built_in"]` on
     /// an x86_64 mac). A STATIC preference: runtime model gating still applies downstream.
     pub fn resolved_tts(&self) -> Option<TtsEngine> {
@@ -428,7 +428,7 @@ impl VoiceConfig {
     }
 
     /// The STT engine that actually runs on THIS build/platform: the first usable rung of the
-    /// `stt_engine` preference ladder (see [`SttEngine::stt_usable`]). `None` = dictation off.
+    /// `stt_engine` preference ladder (see `SttEngine::stt_usable`). `None` = dictation off.
     /// With the default ladder this resolves to `claude_code` wherever the on-device engines
     /// can't run (it's always usable and LAST), so dictation degrades rather than dying.
     pub fn resolved_stt(&self) -> Option<SttEngine> {

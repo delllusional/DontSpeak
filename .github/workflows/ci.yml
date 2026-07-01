@@ -66,6 +66,22 @@ jobs:
         # surfaces ALL lints in one run instead of stopping at the first.
         run: cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings
 
+  # Rustdoc gate: deny broken intra-doc links and malformed HTML in doc comments — the
+  # docs are the contributor-facing API surface, so keep every link resolving. Needs the
+  # same ALSA/PulseAudio dev libs as clippy (cargo doc compiles the dependency graph).
+  doc:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linux audio deps (ALSA + PulseAudio)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpulse-dev pkg-config
+      - name: cargo doc -D warnings
+        working-directory: rust
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
   # Pick the OS matrix: Linux-only by default, all three when full-matrix is requested
   # (the release gate). push/PR events have no `inputs`, so they fall to Linux-only.
   setup:

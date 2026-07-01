@@ -170,9 +170,9 @@ pub extern "C" fn ds_model_status_wait(since: u64, timeout_ms: u32) -> *mut c_ch
 /// `{name, description, params:[…]}` with the args as an ORDERED array (the UI form of
 /// the SAME `ds-tools` catalog the MCP server exposes, so it never drifts from what Claude
 /// can call). Each param is enriched with a localized `detail` qualifier (enum allowed-values
-/// or a numeric range) via [`status_fmt::tool_param_detail`], so every host renders the SAME
-/// pre-built string instead of re-deriving it. Owned `char*`, free with `ds_string_free`.
-/// HANDLE-FREE — no engine.
+/// or a numeric range) via [`crate::status_fmt::tool_param_detail`], so every host renders
+/// the SAME pre-built string instead of re-deriving it. Owned `char*`, free with
+/// `ds_string_free`. HANDLE-FREE — no engine.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_tools_json() -> *mut c_char {
     guard_val(to_cstring("[]"), || {
@@ -347,7 +347,7 @@ pub extern "C" fn ds_runtime_label(provider: *const c_char) -> *mut c_char {
     })
 }
 
-/// A stat RANGE string — "avg<unit>  ·  lo–hi". `precision` = decimals; `unit_key` = the
+/// A stat RANGE string — "avg`<unit>`  ·  lo–hi". `precision` = decimals; `unit_key` = the
 /// catalog key for the trailing unit ("status.stats.unit.times" / ".seconds"). Owned `char*`,
 /// free with `ds_string_free`. HANDLE-FREE.
 #[unsafe(no_mangle)]
@@ -369,7 +369,7 @@ pub extern "C" fn ds_stats_range(
     })
 }
 
-/// A COUNT + audio-duration stat string — "<count>  <audio_secs> s". Owned `char*`, free with
+/// A COUNT + audio-duration stat string — "`<count>`  <audio_secs> s". Owned `char*`, free with
 /// `ds_string_free`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_stats_count(count: u64, audio_secs: f64) -> *mut c_char {

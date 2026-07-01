@@ -30,7 +30,7 @@ fn fill(key: &str, pairs: &[(&str, &str)]) -> String {
 ///
 /// This is the ONE cross-platform formatter for a row's status word: macOS SwiftUI, Linux GTK
 /// and Windows WinUI ALL call it over the C ABI ([`crate::ffi::ds_engine_state_word`]), so the
-/// download wording ("Downloading <pct>%") can NEVER diverge between platforms. `progress` is a
+/// download wording ("Downloading `<pct>`%") can NEVER diverge between platforms. `progress` is a
 /// single OVERALL byte-weighted percent across the whole model set (see
 /// `ds_model::coreml_repo::ensure_coreml_repos`), NOT a per-file percent.
 pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
@@ -117,7 +117,7 @@ pub fn runtime_label(provider: &str) -> String {
     ds_i18n::t(key)
 }
 
-/// A stat RANGE — "avg<unit>  ·  lo–hi" (e.g. "1.23×  ·  1.00–1.50", "0.5 s  ·  0.3–0.8").
+/// A stat RANGE — "avg`<unit>`  ·  lo–hi" (e.g. "1.23×  ·  1.00–1.50", "0.5 s  ·  0.3–0.8").
 /// `precision` = decimal places; `unit_key` = the catalog key for the unit shown after the
 /// average ("status.stats.unit.times" → "×", "status.stats.unit.seconds" → " s"). Returns the
 /// COMPLETE string. Replaces the per-platform `Range()` (C#) / `StatRange` (Swift) builders.
@@ -126,7 +126,7 @@ pub fn stats_range(lo: f64, avg: f64, hi: f64, precision: usize, unit_key: &str)
     format!("{avg:.precision$}{unit}  ·  {lo:.precision$}–{hi:.precision$}")
 }
 
-/// A COUNT + audio-duration stat — "<count>  <audio_secs> s" (e.g. "12  45 s"), using the
+/// A COUNT + audio-duration stat — "`<count>`  <audio_secs> s" (e.g. "12  45 s"), using the
 /// "status.stats.audio_secs" template for the seconds part. Replaces the per-platform
 /// `CountText()` (C#) / `countRow()` (Swift) builders.
 pub fn stats_count(count: u64, audio_secs: f64) -> String {

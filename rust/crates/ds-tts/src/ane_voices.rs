@@ -6,7 +6,7 @@
 //! already hold all 54 of those tensors locally inside the ONNX `voices-v1.0.bin`
 //! that the Kokoro backend downloads regardless — so rather than depend on
 //! upstream hosting per-voice ANE `.bin` files, we extract the requested voice
-//! straight from that npz (via [`crate::voices::voice_pack_bytes`], a targeted
+//! straight from that npz (via `crate::voices::voice_pack_bytes`, a targeted
 //! raw byte-slice extractor sharing the low-level npz/npy helpers) and write it
 //! into FluidAudio's on-disk cache.
 //!

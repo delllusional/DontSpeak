@@ -30,7 +30,7 @@
 /// Phonemize already-normalized English `text` to a Kokoro-compatible phoneme
 /// string. Never shells espeak; never returns an error. An OOV word the misaki
 /// dict can't resolve is recovered by a tiered ESPEAK-FREE fallback (name lexicon
-/// → neural predictor → letter-by-letter spelling; see [`phonemize_word`]) so it
+/// → neural predictor → letter-by-letter spelling; see `phonemize_word`) so it
 /// is pronounced/approximated audibly, NEVER silent — the cross-platform parity
 /// fix for the macOS neural-G2P path. (Without this, an OOV proper noun like
 /// "Nicole" degrades to empty phonemes and vanishes whenever espeak-ng is absent.)

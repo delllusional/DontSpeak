@@ -44,7 +44,7 @@ pub(crate) enum Backend {
 
 impl Backend {
     /// The REALIZED provider for the engine stats / `PROVIDER` line (CPU/CoreML/CUDA for ONNX,
-    /// CoreML-ANE for the apple-native backend) — the shared [`RealizedProvider`] type.
+    /// CoreML-ANE for the apple-native backend) — the shared `RealizedProvider` type.
     pub(crate) fn provider(&self) -> ds_config::RealizedProvider {
         match self {
             Backend::Ort(s) => s.provider(),

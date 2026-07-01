@@ -159,7 +159,8 @@ pub struct ParakeetTranscriber {
 
 impl ParakeetTranscriber {
     /// Build a transcriber for the streaming model assets in `model_dir`. Cheap — the model is
-    /// not loaded until the first [`preload`](Self::preload) / [`transcribe_pcm_16k`].
+    /// not loaded until the first [`preload`](Self::preload) /
+    /// [`transcribe_pcm_16k`](Self::transcribe_pcm_16k).
     pub fn new(model_dir: PathBuf) -> Self {
         Self {
             model_dir,

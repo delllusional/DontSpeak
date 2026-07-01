@@ -141,7 +141,7 @@ pub const ONNXRUNTIME_DIST_SHA256: &str =
 
 /// The onnxruntime-gpu version shipped for the CUDA path — DELIBERATELY decoupled from the CPU
 /// [`ONNXRUNTIME_VERSION`] (1.27.0): onnxruntime-gpu ≥ 1.27 requires CUDA 13 (a newer driver than
-/// Pascal-era cards run), so the GPU path stays on the LAST CUDA-12 line. The [`CUDA_WHEELS`]
+/// Pascal-era cards run), so the GPU path stays on the LAST CUDA-12 line. The `CUDA_WHEELS`
 /// `onnxruntime_gpu` URL MUST embed this version — enforced by
 /// `cuda_pin_tests::cuda_wheels_are_consistent_and_complete`.
 pub const CUDA_ONNXRUNTIME_VERSION: &str = "1.26.0";
@@ -430,7 +430,7 @@ pub const ONNX_RUNTIME: Project = Project {
 
 /// NVIDIA CUDA runtime libraries (optional GPU acceleration; NVIDIA CUDA Toolkit EULA).
 /// Windows/Linux x64 (see `platforms`). Files (the cuda/cublas/cufft/nvrtc/nvjitlink wheels)
-/// are assembled in the collector from the cfg-gated [`CUDA_WHEELS`]. The METADATA below
+/// are assembled in the collector from the cfg-gated `CUDA_WHEELS`. The METADATA below
 /// compiles on every target (plain strings) so the data-driven catalog can reference it
 /// unconditionally and filter by `platforms`; only the file-assembly stays cfg-gated.
 pub const NVIDIA_CUDA: Project = Project {
@@ -445,7 +445,7 @@ pub const NVIDIA_CUDA: Project = Project {
 
 /// NVIDIA cuDNN (optional GPU acceleration; NVIDIA cuDNN SLA — separate, stricter terms
 /// than the CUDA EULA). Windows/Linux x64 (see `platforms`); the cuDNN wheel from the
-/// cfg-gated [`CUDA_WHEELS`]. Metadata compiles everywhere; only file-assembly is cfg-gated.
+/// cfg-gated `CUDA_WHEELS`. Metadata compiles everywhere; only file-assembly is cfg-gated.
 pub const NVIDIA_CUDNN: Project = Project {
     name: "NVIDIA cuDNN",
     usage: "GPU deep-learning primitives (optional)",

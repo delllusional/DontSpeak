@@ -68,8 +68,9 @@ fn coreml_project_obj(r: &crate::coreml_repo::CoremlRepo) -> Value {
 /// license_url, files:[{name, url, size_bytes?}]}`, in display order — system libraries (CUDA,
 /// cuDNN) → runtime (ONNX Runtime) → portable models (Kokoro, Parakeet) → Apple-native Core ML
 /// sets, lowest-level first. The per-platform rule is DATA: each [`Project`] declares its
-/// `platforms` and the Core ML sets are [`Platform::APPLE_NATIVE`], so the collector just
-/// filters — no scattered `#[cfg]` deciding what to show. (The CUDA file *URLs* live in the
+/// `platforms` and the Core ML sets are [`Platform::APPLE_NATIVE`](urls::Platform::APPLE_NATIVE),
+/// so the collector just filters — no scattered `#[cfg]` deciding what to show. (The CUDA
+/// file *URLs* live in the
 /// cfg-gated `CUDA_WHEELS`, so only their file-assembly stays cfg-gated; the applicability
 /// decision is the data above.) Built entirely from the [`crate::urls`] / [`crate::coreml_repo`]
 /// registries, so it can never drift from what's actually fetched.

@@ -6,8 +6,8 @@
 //!   • `codex`          → narration hooks (`~/.codex/config.toml`)        [Codex has no MCP]
 //!
 //! Every surface REUSES the shared cores — the `ds-config` hook/MCP shapers, the
-//! [`wire_mcp::apply`](crate::wire_mcp::apply) read→merge→backup→atomic-write flow, and the
-//! [`wire_hooks`](crate::wire_hooks) writers — so nothing is copy-pasted per client, and this
+//! [`wire_mcp::apply`] read→merge→backup→atomic-write flow, and the
+//! [`wire_hooks`] writers — so nothing is copy-pasted per client, and this
 //! install-time entry and the `setup_integration` tool drive the IDENTICAL code (they can't drift).
 //! Additive + idempotent + backed-up; a client that isn't installed is a clean skip (exit 0).
 

@@ -75,7 +75,7 @@ pub struct VadBoundaryDetector {
 
 impl VadBoundaryDetector {
     /// Build a detector for a `rate` Hz mono stream. The VAD frame is `rate`-scaled
-    /// to [`FRAME_MS`].
+    /// to `FRAME_MS`.
     pub fn new(rate: u32) -> Self {
         let frame = ((rate as usize * FRAME_MS) / 1000).max(1);
         let inner = EnergyVad::new(frame, SPEECH_RMS);
