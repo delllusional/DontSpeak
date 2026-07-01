@@ -36,14 +36,24 @@ private struct LibraryDTO: Decodable {
     let usage: String?
     let homepage: String?
     let license: String?
-    let license_url: String?
+    let licenseURL: String?
     let files: [LibraryFileDTO]?
+
+    enum CodingKeys: String, CodingKey {
+        case name, usage, homepage, license, files
+        case licenseURL = "license_url"
+    }
 }
 
 private struct LibraryFileDTO: Decodable {
     let name: String
     let url: String?
-    let size_bytes: Int?
+    let sizeBytes: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case name, url
+        case sizeBytes = "size_bytes"
+    }
 }
 
 /// Read the catalog from the FFI and decode it into typed `LibraryInfo`s. Display order is
@@ -56,9 +66,9 @@ private func loadLibraries() -> [LibraryInfo] {
             usage: d.usage ?? "",
             homepage: d.homepage ?? "",
             license: d.license ?? "",
-            licenseURL: d.license_url ?? "",
+            licenseURL: d.licenseURL ?? "",
             files: (d.files ?? []).map {
-                LibraryFile(name: $0.name, url: $0.url ?? "", sizeBytes: $0.size_bytes)
+                LibraryFile(name: $0.name, url: $0.url ?? "", sizeBytes: $0.sizeBytes)
             }
         )
     }

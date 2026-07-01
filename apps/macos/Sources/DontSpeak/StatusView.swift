@@ -530,6 +530,9 @@ private struct SttStatsContent: View {
             statRangeRow(
                 L.t("status.stats.realtime"), s.rtfMin, s.rtfAvg, s.rtfMax, 2, "status.stats.unit.times")
             statCountRow(L.t("status.stats.transcribed"), s.transcriptions, s.audioSecs)
+            if s.failures > 0 {
+                LabeledContent(L.t("status.stats.failures"), value: "\(s.failures)").foregroundStyle(.red)
+            }
         }
     }
 }

@@ -295,12 +295,15 @@ final class DictationPanelController {
         recording: Bool, awaiting: Bool, text: String, target: String?, local: Bool, hasTarget: Bool,
         promptGlow: Bool
     ) {
-        model.recording = recording
-        model.awaiting = awaiting
-        model.text = text
-        model.target = (target?.isEmpty == false) ? target : nil
-        model.hasTarget = hasTarget
-        model.promptGlow = promptGlow
+        // != guards (same as Core.apply): pushes arrive on every status tick, and writing an
+        // unchanged value into an @Observable property still invalidates its observers.
+        let target = (target?.isEmpty == false) ? target : nil
+        if model.recording != recording { model.recording = recording }
+        if model.awaiting != awaiting { model.awaiting = awaiting }
+        if model.text != text { model.text = text }
+        if model.target != target { model.target = target }
+        if model.hasTarget != hasTarget { model.hasTarget = hasTarget }
+        if model.promptGlow != promptGlow { model.promptGlow = promptGlow }
 
         // Show as soon as a LOCAL (Parakeet) dictation starts recording — immediate
         // feedback ("Listening…") the moment you tap Caps, not after the first

@@ -57,12 +57,22 @@ public enum LogCatalog {
     /// (the same fields, same semantics as the Windows filter). A blank/whitespace query keeps
     /// every line.
     public static func filter(_ lines: [LogLine], query: String) -> [LogLine] {
+        filterIndexed(lines, query: query).map(\.line)
+    }
+
+    /// As `filter`, but each surviving line keeps its index in the ORIGINAL array — a stable
+    /// row identity for UI diffing. (Offsets into the *filtered* array renumber on every
+    /// filter keystroke, so identical rows read as new to the differ.)
+    public static func filterIndexed(
+        _ lines: [LogLine], query: String
+    ) -> [(index: Int, line: LogLine)] {
         let q = query.trimmingCharactersInWhitespace().lowercased()
-        guard !q.isEmpty else { return lines }
-        return lines.filter {
-            $0.text.lowercased().contains(q)
-                || $0.source.lowercased().contains(q)
-                || $0.level.lowercased().contains(q)
+        let all = lines.enumerated().map { (index: $0.offset, line: $0.element) }
+        guard !q.isEmpty else { return all }
+        return all.filter {
+            $0.line.text.lowercased().contains(q)
+                || $0.line.source.lowercased().contains(q)
+                || $0.line.level.lowercased().contains(q)
         }
     }
 }

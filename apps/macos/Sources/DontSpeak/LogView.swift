@@ -29,7 +29,9 @@ struct LogView: View {
     @State private var orderedSources: [String] = []
     @State private var filter: String = ""
 
-    private var shown: [LogLine] { LogCatalog.filter(lines, query: filter) }
+    private var shown: [(index: Int, line: LogLine)] {
+        LogCatalog.filterIndexed(lines, query: filter)
+    }
 
     var body: some View {
         // The Logs pane of the merged sidebar window — a filter bar over a scrollable colored
@@ -73,8 +75,10 @@ struct LogView: View {
                 .glassCaption()
         } else {
             VStack(alignment: .leading, spacing: 2) {
-                ForEach(Array(result.enumerated()), id: \.offset) { _, line in
-                    lineText(line)
+                // id = the line's index in the UNFILTERED load (stable while typing in the
+                // filter box), not its offset in the filtered slice.
+                ForEach(result, id: \.index) { row in
+                    lineText(row.line)
                 }
             }
             .font(.system(.caption, design: .monospaced))

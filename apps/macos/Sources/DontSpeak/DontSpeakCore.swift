@@ -597,28 +597,19 @@ struct LifetimeStatsDTO: Decodable {
     }
 }
 
-/// Which models are resident in the warm helper.
-struct LoadedStatsDTO: Decodable {
-    var tts: Bool?
-    var stt: Bool?
-}
-
-/// Speaker-diarization stat block.
+/// Speaker-diarization stat block. The wire also carries `present`, `speaker_threshold`
+/// and a `loaded` block — nothing in this app renders them, so they aren't decoded.
 struct DiarizationStatsDTO: Decodable {
     var enabled: Bool?
-    var present: Bool?
     var runtime: String?
     var speakers: [String]?
     var clusteringThreshold: Double?
-    var speakerThreshold: Double?
 
     enum CodingKeys: String, CodingKey {
         case enabled
-        case present
         case runtime
         case speakers
         case clusteringThreshold = "clustering_threshold"
-        case speakerThreshold = "speaker_threshold"
     }
 }
 
@@ -627,7 +618,6 @@ struct StatsDTO: Decodable {
     var tts: TtsStatsDTO?
     var stt: SttStatsDTO?
     var lifetime: LifetimeStatsDTO?
-    var loaded: LoadedStatsDTO?
     var diarization: DiarizationStatsDTO?
 }
 

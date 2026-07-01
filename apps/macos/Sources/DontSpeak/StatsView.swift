@@ -2,8 +2,8 @@
 //
 //  Live engine stats for power users: the TTS realtime factor (synth time vs
 //  audio produced — the speech analog of tokens/sec), time-to-first-audio, how
-//  much has been spoken, failures, and which models are resident. All measured by
-//  the engine and read from the same model_status push (no extra round-trip).
+//  much has been spoken/transcribed, and failures. All measured by the engine
+//  and read from the same model_status push (no extra round-trip).
 
 import SwiftUI
 
@@ -31,6 +31,7 @@ struct EngineStats: Sendable, Equatable {
         var rtfMax: Double = 0
         var transcriptions: Int = 0
         var audioSecs: Double = 0
+        var failures: Int = 0
     }
 
     /// Speaker diarization (on-demand): whether enabled + the enrolled voiceprint names
@@ -80,6 +81,7 @@ struct EngineStats: Sendable, Equatable {
             s.stt.rtfMax = t.rtfMax ?? 0
             s.stt.transcriptions = t.transcriptions ?? 0
             s.stt.audioSecs = t.audioSecs ?? 0
+            s.stt.failures = t.failures ?? 0
         }
         if let d = dto.diarization {
             s.diarization.enabled = d.enabled ?? false

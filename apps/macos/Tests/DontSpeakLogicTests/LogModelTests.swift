@@ -85,4 +85,12 @@ final class LogModelTests: XCTestCase {
     func testFilterNoMatchIsEmpty() {
         XCTAssertTrue(LogCatalog.filter(sample, query: "zzz").isEmpty)
     }
+
+    /// Surviving lines keep their index in the ORIGINAL array (the stable row identity the
+    /// UI diffs by), not their position in the filtered result.
+    func testFilterIndexedKeepsOriginalIndices() {
+        let r = LogCatalog.filterIndexed(sample, query: "n")  // "seNtence" (0) + "loNg" (2)
+        XCTAssertEqual(r.map(\.index), [0, 2])
+        XCTAssertEqual(r.map(\.line), [sample[0], sample[2]])
+    }
 }

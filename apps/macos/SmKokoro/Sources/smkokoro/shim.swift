@@ -20,6 +20,10 @@ import Speech
 
 private final class Box<T>: @unchecked Sendable { var value: Result<T, Error>? }
 
+/// Parks the CALLING thread on a semaphore until `op` completes. Only safe because every
+/// caller is a C entry point invoked from a Rust worker thread — NEVER call this from a
+/// Swift concurrency task: blocking a cooperative-pool thread on work that needs the same
+/// pool can deadlock.
 private func runBlocking<T>(_ op: @escaping @Sendable () async throws -> T) -> Result<T, Error> {
     let sem = DispatchSemaphore(value: 0)
     let box = Box<T>()
