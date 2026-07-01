@@ -1,10 +1,9 @@
 using System;
-using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 
 namespace DontSpeak;
 
-// Shared Win32 interop for the GDI+/layered-window UI pieces (DictationPanel, TrayIcon):
+// Shared Win32 interop for the hand-rolled UI pieces (DictationPanel, TrayIcon):
 // the window-class registration, DC, and DIB-section P/Invokes + their structs that were
 // otherwise duplicated in each file. Component-specific imports still live with their
 // component. Pull these in with `using static DontSpeak.Win32;`.
@@ -12,9 +11,6 @@ namespace DontSpeak;
 /// <summary>WndProc signature for the hand-rolled Win32 windows (the layered overlay + the
 /// tray's owner window). Held in a field by each owner so the GC can't collect the thunk.</summary>
 internal delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct POINT { public int x; public int y; }
 
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
 internal struct WNDCLASS
@@ -52,21 +48,6 @@ internal struct BITMAPINFO
 {
     public BITMAPINFOHEADER bmiHeader;
     public uint bmiColors0;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct SIZE { public int cx; public int cy; }
-
-/// <summary>The per-blit alpha-blend for <c>UpdateLayeredWindow</c>: per-pixel
-/// (premultiplied) alpha via <c>AlphaFormat = AC_SRC_ALPHA</c>, optionally scaled by
-/// the whole-layer <c>SourceConstantAlpha</c> (the fade).</summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct BLENDFUNCTION
-{
-    public byte BlendOp;
-    public byte BlendFlags;
-    public byte SourceConstantAlpha;
-    public byte AlphaFormat;
 }
 
 internal static class Win32
@@ -130,22 +111,4 @@ internal static class Win32
     internal static extern int SetCurrentProcessExplicitAppUserModelID(
         [MarshalAs(UnmanagedType.LPWStr)] string appID);
 
-    // The layered-window blit for the dictation overlay.
-    [DllImport("user32.dll")]
-    internal static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst,
-        ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint dwFlags);
-
-    /// <summary>A rounded-rectangle GDI+ path with corner radius <paramref name="r"/> —
-    /// the Win11 card shape used by the dictation overlay (card + glow rings).</summary>
-    internal static GraphicsPath RoundedRect(float x, float y, float w, float h, float r)
-    {
-        float d = r * 2f;
-        var p = new GraphicsPath();
-        p.AddArc(x, y, d, d, 180, 90);                 // top-left
-        p.AddArc(x + w - d, y, d, d, 270, 90);         // top-right
-        p.AddArc(x + w - d, y + h - d, d, d, 0, 90);   // bottom-right
-        p.AddArc(x, y + h - d, d, d, 90, 90);          // bottom-left
-        p.CloseFigure();
-        return p;
-    }
 }

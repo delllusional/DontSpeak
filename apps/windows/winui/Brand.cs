@@ -27,8 +27,6 @@ internal static class Brand
     public static GdiColor SeedPurpleGdi => Gdi(SeedPurple);
     /// <summary><see cref="MicOrange"/> as a GDI+ color (the tray "recording" glyph ink).</summary>
     public static GdiColor MicOrangeGdi => Gdi(MicOrange);
-    /// <summary><see cref="Warning"/> as a GDI+ color (the dictation no-target glow).</summary>
-    public static GdiColor WarningGdi => Gdi(Warning);
 
     /// <summary>Logs-tab source palette — distinct, theme-neutral colors from the SAME shared
     /// Rust source (<c>ds_log_colors_json</c>) every platform reads; a UI assigns each

@@ -20,7 +20,6 @@ internal static class Native
 
     [DllImport(Dll)] private static extern byte ds_engine_start();
     [DllImport(Dll)] private static extern byte ds_engine_stop();
-    [DllImport(Dll)] private static extern byte ds_engine_running_global();
     [DllImport(Dll)] private static extern IntPtr ds_model_status_json();
     [DllImport(Dll)] private static extern IntPtr ds_model_status_wait(ulong since, uint timeoutMs);
     [DllImport(Dll)] private static extern IntPtr ds_tools_json();
@@ -43,7 +42,6 @@ internal static class Native
 
     public static bool EngineStart() => ds_engine_start() != 0;
     public static bool EngineStop() => ds_engine_stop() != 0;
-    public static bool EngineRunning() => ds_engine_running_global() != 0;
 
     /// <summary>Mute/unmute the voice (silences playback without stopping it) — the same C ABI
     /// the macOS tray "Mute" toggle calls. Returns true if the request reached the engine
@@ -74,8 +72,10 @@ internal static class Native
     /// platform's Libraries tab calls, so sizes agree byte-for-byte (shared with macOS/Linux).</summary>
     public static string HumanSize(ulong bytes) => TakeString(ds_human_size(bytes));
 
-    /// <summary>The product version (shared Rust workspace version), e.g. "0.2.0".</summary>
-    public static string Version() => TakeString(ds_version());
+    /// <summary>The product version (shared Rust workspace version), e.g. "0.2.0". Cached —
+    /// it can't change while the process lives, and ApplyStatus reads it on every push.</summary>
+    public static string Version() => _version ??= TakeString(ds_version());
+    private static string? _version;
 
     /// <summary>The product homepage URL (dontspeak.org) — the SAME shared source of truth
     /// the macOS app links to; the version label opens it in the default browser.</summary>
@@ -219,13 +219,6 @@ public sealed record LifetimeStats
     public double TtsSecs, SttSecs;
 }
 
-/// <summary>Whether each local model is currently resident in memory
-/// (mirrors the macOS EngineStats.loaded group).</summary>
-public sealed record LoadedStats
-{
-    public bool Tts, Stt;
-}
-
 /// <summary>A parsed snapshot of the engine's model-status JSON (mirrors HealthSnapshot).</summary>
 internal sealed class HealthSnapshot
 {
@@ -260,11 +253,10 @@ internal sealed class HealthSnapshot
         return TrayIcon.IconState.Idle;
     }
     // Per-engine stats for the expandable Kokoro/Parakeet rows, grouped into cohesive
-    // sub-records that mirror the macOS EngineStats split (tts / stt / lifetime / loaded).
+    // sub-records that mirror the macOS EngineStats split (tts / stt / lifetime).
     public TtsStats Tts = new();
     public SttStats Stt = new();
     public LifetimeStats Lifetime = new();
-    public LoadedStats Loaded = new();
 
     // The engine's push sequence (status.rs StatusGate): the app echoes it back as
     // `since` to the next ModelStatusWait so the call blocks until the NEXT change.
@@ -305,7 +297,7 @@ internal sealed class HealthSnapshot
                 s.Activity.Speaking = r.TtsActive;
                 s.Activity.Muted = r.Muted;
             }
-            // Only override the default {"stt","tts"} when the key is actually present
+            // Only override the default {"stt","tts_animated"} when the key is actually present
             // (absent ⇒ DTO field is null ⇒ keep the default), mirroring the old guard.
             if (dto.TrayIndicator is { } ti)
                 s.Activity.TrayIndicator = ti.Where(t => t is not null).Cast<string>().ToArray();
@@ -332,11 +324,6 @@ internal sealed class HealthSnapshot
             s.EngineDots.TtsSystem = ToEngine(dto.TtsSystem);
             if (dto.Stats is { } stats)
             {
-                if (stats.Loaded is { } loaded)
-                {
-                    s.Loaded.Tts = loaded.Tts;
-                    s.Loaded.Stt = loaded.Stt;
-                }
                 if (stats.Tts is { } tts)
                 {
                     s.Tts.RtfAvg = tts.RtfAvg; s.Tts.RtfMin = tts.RtfMin; s.Tts.RtfMax = tts.RtfMax;
@@ -460,7 +447,6 @@ internal sealed record StatsDto
     [JsonPropertyName("tts")] public TtsStatsDto? Tts { get; init; }
     [JsonPropertyName("stt")] public SttStatsDto? Stt { get; init; }
     [JsonPropertyName("lifetime")] public LifetimeDto? Lifetime { get; init; }
-    [JsonPropertyName("loaded")] public LoadedDto? Loaded { get; init; }
     [JsonPropertyName("diarization")] public DiarizationStatsDto? Diarization { get; init; }
 }
 
@@ -491,12 +477,6 @@ internal sealed record LifetimeDto
 {
     [JsonPropertyName("tts_secs")] public long TtsSecs { get; init; }
     [JsonPropertyName("stt_secs")] public long SttSecs { get; init; }
-}
-
-internal sealed record LoadedDto
-{
-    [JsonPropertyName("tts")] public bool Tts { get; init; }
-    [JsonPropertyName("stt")] public bool Stt { get; init; }
 }
 
 internal sealed record DiarizationStatsDto

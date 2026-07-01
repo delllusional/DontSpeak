@@ -33,13 +33,11 @@ internal static class BrandGlyph
 
     /// <summary>Render the mark into a <paramref name="size"/>×<paramref name="size"/>
     /// straight-alpha BGRA buffer (top-down rows — what an HICON DIB expects): the one-color
-    /// <paramref name="ink"/> line-art bubble + "</>", fit to FILL the cell (no tile, no padding).</summary>
-    internal static byte[] RenderBgra(int size, Color ink) => RenderBgra(size, ink, muted: false);
-
-    /// <summary>As <see cref="RenderBgra(int,Color)"/>, but when <paramref name="muted"/> draws a
-    /// diagonal "muted" slash across the glyph (the Windows analogue of the macOS slashed
-    /// menu-bar icon): a clear knockout channel cut through the mark with the ink slash in it,
-    /// so it reads as crossed-out at tray size in either theme.</summary>
+    /// <paramref name="ink"/> line-art bubble + "&lt;/&gt;", fit to FILL the cell (no tile, no
+    /// padding). When <paramref name="muted"/>, a diagonal "muted" slash is drawn across the
+    /// glyph (the Windows analogue of the macOS slashed menu-bar icon): a clear knockout
+    /// channel cut through the mark with the ink slash in it, so it reads as crossed-out at
+    /// tray size in either theme.</summary>
     internal static byte[] RenderBgra(int size, Color ink, bool muted)
     {
         int w = size, h = size;

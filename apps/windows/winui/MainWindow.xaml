@@ -17,6 +17,11 @@
          The stripe lives here (not in PaneFooter) so it reserves NO space in the tab
          row — a wide stripe can't crowd the Status / Tools tabs into the overflow. -->
     <Grid>
+    <Grid.Resources>
+        <!-- The ONE monospaced stack for numbers/logs: Windows 11's modern mono UI font,
+             falling back to Consolas (pre-Win11) — same stack as MainWindow.xaml.cs `Mono`. -->
+        <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas</FontFamily>
+    </Grid.Resources>
     <NavigationView x:Name="Nav"
                     PaneDisplayMode="Top"
                     IsSettingsVisible="False"
@@ -62,7 +67,7 @@
                                     <loc:CursorHyperlinkButton x:Name="VersionLink" Padding="0" MinWidth="0" MinHeight="0"
                                                      VerticalAlignment="Center" Background="Transparent"
                                                      Click="VersionLink_Click">
-                                        <TextBlock x:Name="VersionText" Opacity="0.55" FontFamily="Consolas"
+                                        <TextBlock x:Name="VersionText" Opacity="0.55" FontFamily="{StaticResource MonoFont}"
                                                    Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
                                     </loc:CursorHyperlinkButton>
                                 </StackPanel>
@@ -76,7 +81,7 @@
                                         <TextBlock Text="{loc:Loc Key=status.engine.role_tts}" Opacity="0.6" />
                                         <TextBlock Text="{loc:Loc Key=status.stats.lifetime_all_time}" Opacity="0.45" />
                                     </StackPanel>
-                                    <TextBlock x:Name="TtsAllTime" Grid.Column="1" HorizontalAlignment="Right" FontFamily="Consolas" />
+                                    <TextBlock x:Name="TtsAllTime" Grid.Column="1" HorizontalAlignment="Right" FontFamily="{StaticResource MonoFont}" />
                                 </Grid>
                                 <!-- STT · all-time (seconds heard) -->
                                 <Grid ColumnDefinitions="Auto,*">
@@ -84,7 +89,7 @@
                                         <TextBlock Text="{loc:Loc Key=status.engine.role_stt}" Opacity="0.6" />
                                         <TextBlock Text="{loc:Loc Key=status.stats.lifetime_all_time}" Opacity="0.45" />
                                     </StackPanel>
-                                    <TextBlock x:Name="SttAllTime" Grid.Column="1" HorizontalAlignment="Right" FontFamily="Consolas" />
+                                    <TextBlock x:Name="SttAllTime" Grid.Column="1" HorizontalAlignment="Right" FontFamily="{StaticResource MonoFont}" />
                                 </Grid>
                             </StackPanel>
                         </StackPanel>
@@ -217,7 +222,7 @@
                     <Border CornerRadius="8" Padding="12"
                             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                        <RichTextBlock x:Name="LogText" FontFamily="Cascadia Mono, Consolas"
+                        <RichTextBlock x:Name="LogText" FontFamily="{StaticResource MonoFont}"
                                        FontSize="12" IsTextSelectionEnabled="True"
                                        TextWrapping="Wrap" LineHeight="18" />
                     </Border>

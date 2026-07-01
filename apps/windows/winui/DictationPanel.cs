@@ -328,6 +328,7 @@ internal sealed class DictationPanel : IDisposable
                     {
                         if (_shownNative) { HideWindow(); _shownNative = false; }
                         ClearTiles(); // free the transitioning-word glyph cache between dictations
+                        _wordW.Clear(); // and the word-width cache — it grows per distinct word
                     }
                     else
                     {
