@@ -84,6 +84,16 @@ assemble_app() {
   # The engine spawns its warm Kokoro child as a sibling of the app binary, so the
   # helper must live next to it in Contents/MacOS.
   cp "$helper" "$app/Contents/MacOS/ds-helper"
+  # Ship the multi-call CLI (MCP server + hooks + `wire`) INSIDE the bundle when built
+  # (DONTSPEAK_CLI_BIN, set by dist-dmgs.sh). A drag-installed .app has no ~/.local/bin
+  # copy, so this is what the one-command installer runs `wire --all` with, and what the
+  # MCP registration points at. Signed below (dev: --deep; dist: sign_app_dist). Absent →
+  # unchanged (the dev bundle.sh installs dontspeak to ~/.local/bin separately).
+  local cli="${DONTSPEAK_CLI_BIN:-}"
+  if [ -n "$cli" ] && [ -f "$cli" ]; then
+    cp "$cli" "$app/Contents/MacOS/dontspeak"
+    echo "   bundled dontspeak CLI ← $cli"
+  fi
   # Bundle the FluidAudio Core ML / ANE Kokoro shim (apple-native TTS) when built. The
   # app points SMKOKORO_DYLIB_PATH at it; absent → the helper uses the ONNX path. Signed
   # below: --deep (dev) covers Frameworks; sign_app_dist (dist) signs it explicitly.
@@ -168,6 +178,10 @@ sign_app_dist() {
     codesign "${opts[@]}" "$app/Contents/Frameworks/libsmkokoro.dylib"
   # The helper loads the third-party dylib too, so it needs the same entitlements.
   codesign "${opts[@]}" --entitlements "$ent" "$app/Contents/MacOS/ds-helper"
+  # The bundled CLI (when shipped) — a nested Mach-O must be signed before the outer app,
+  # else notarization rejects the bundle. No entitlements needed (MCP/hook client).
+  [ -f "$app/Contents/MacOS/dontspeak" ] &&
+    codesign "${opts[@]}" "$app/Contents/MacOS/dontspeak"
   codesign "${opts[@]}" --entitlements "$ent" --identifier app.dontspeak.org "$app"
   codesign --verify --strict --verbose=1 "$app" >&2
 }

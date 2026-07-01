@@ -12,10 +12,10 @@
 # arch, links the Swift app, and reuses the shared assemble_app
 # (bundle-lib.sh) to produce a signed .app, then a styled DMG.
 #
-# The DMG ships only what the app itself needs: the app binary (which hosts the engine
+# The DMG ships what the app needs plus the CLI: the app binary (hosts the engine
 # in-process via the linked staticlib) + ds-helper (the Kokoro synth child) + the
-# icon. The CLI/MCP bins (dontspeak, ds-helper) are installed separately by the
-# CLI installer, not shipped here.
+# multi-call `dontspeak` CLI (MCP server + hooks + `wire`, so a drag-installed .app can
+# self-wire without a separate ~/.local/bin copy) + the icon.
 #
 # Output: $OUTDIR/DontSpeak-<arch>.dmg   (default OUTDIR=~/Desktop)
 # Requires: a cargo that can target each arch — a NATIVE slice (host == target, e.g.
@@ -87,10 +87,16 @@ build_arch() {   # $1 display arch, $2 rust triple, $3 swift arch
   local SLIB="$RUST/target/$TRIPLE/release-ffi/libds_core.a"
   [ -f "$SLIB" ] || { echo "no staticlib $SLIB" >&2; exit 1; }
 
-  echo "==> [2/6] cargo ds-helper ($TRIPLE)"
+  echo "==> [2/6] cargo ds-helper + dontspeak ($TRIPLE)"
   ( cd "$RUST" && "$CARGO" build --release --target "$TRIPLE" -p ds-tts --bin ds-helper )
   local HELPER="$RUST/target/$TRIPLE/release/ds-helper"
   [ -f "$HELPER" ] || { echo "no helper $HELPER" >&2; exit 1; }
+  # The multi-call CLI (MCP server + hooks + `wire`) — shipped inside the .app so a
+  # drag-installed bundle can self-wire (assemble_app reads DONTSPEAK_CLI_BIN).
+  ( cd "$RUST" && "$CARGO" build --release --target "$TRIPLE" -p dontspeak --bin dontspeak )
+  local CLI="$RUST/target/$TRIPLE/release/dontspeak"
+  [ -f "$CLI" ] || { echo "no dontspeak CLI $CLI" >&2; exit 1; }
+  export DONTSPEAK_CLI_BIN="$CLI"
 
   # Package.swift force_loads ../../rust/target/release-ffi/libds_core.a — stage the
   # arch-specific lib there so `swift build --arch` links the matching slice. (Restored

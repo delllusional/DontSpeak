@@ -2,6 +2,23 @@
 
 A local voice layer for Claude Code, Codex, and Claude Desktop: your agent speaks its replies aloud, and you dictate back with one key.
 
+## Install
+
+One command — it downloads the prebuilt app for your OS, wires the MCP server + voice hooks into every client, and launches it (the voice models download themselves on first run):
+
+```sh
+# macOS / Linux
+curl -fsSL https://dontspeak.org/install.sh | sh
+```
+```powershell
+# Windows (PowerShell)
+irm https://dontspeak.org/install.ps1 | iex
+```
+
+Or just tell your agent: **"install DontSpeak from dontspeak.org"** — Claude Code fetches [the recipe](https://dontspeak.org/install.md) and does it. Start a new session afterwards so the MCP server loads.
+
+**Build from source (developers):** `git clone https://github.com/delllusional/DontSpeak && cd DontSpeak && ./scripts/install.sh` (needs a Rust toolchain).
+
 ## What it does
 
 - **Speaks the agent's replies** aloud through a local neural voice, or the OS system voice.

@@ -313,8 +313,16 @@ jobs:
             artifacts/macos-dmgs/*.dmg
             artifacts/linux-packages/*
           )
+          # checksums.txt — sha256 of every published asset, by basename, so the
+          # dontspeak.org install scripts can verify each download. Built from the SAME
+          # FILES list, then shipped alongside them as one more release asset.
+          : > checksums.txt
+          for f in "${FILES[@]}"; do
+            [ -f "$f" ] || continue
+            ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) >> "$GITHUB_WORKSPACE/checksums.txt"
+          done
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "DontSpeak ${GITHUB_REF_NAME}" \
             --generate-notes \
-            "${FILES[@]}"
+            "${FILES[@]}" checksums.txt

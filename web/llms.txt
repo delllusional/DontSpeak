@@ -1,0 +1,24 @@
+# DontSpeak
+
+> A local voice layer for Claude Code, Codex, and Claude Desktop: your AI agent speaks its
+> replies aloud through a local neural voice, and you dictate back with one key. It runs a
+> native host app (speech engine in-process, on-device models) plus an MCP server that any
+> MCP-capable client can call. Everything runs locally; models download on first launch.
+
+To install, prefer prebuilt binaries from the latest GitHub Release — do not build from
+source unless asked. A one command install works on every OS:
+
+- macOS / Linux: `curl -fsSL https://dontspeak.org/install.sh | sh`
+- Windows (PowerShell): `irm https://dontspeak.org/install.ps1 | iex`
+
+## Docs
+
+- [Install guide (agent-readable)](https://dontspeak.org/install.md): full install recipe,
+  what it does, post-install steps, uninstall, and the from-source path.
+- [install.sh](https://dontspeak.org/install.sh): macOS + Linux bootstrap script.
+- [install.ps1](https://dontspeak.org/install.ps1): Windows bootstrap script.
+
+## Source
+
+- [GitHub repository](https://github.com/delllusional/DontSpeak): source, releases, and the
+  `scripts/install.sh` from-source build for developers.
