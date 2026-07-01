@@ -383,31 +383,24 @@ fn download_one(
     }
 }
 
-/// Download a SINGLE Core ML repo, reporting ONE overall 0..1 bar (as `/10_000`) — for callers
-/// that want an aggregate, not per-file, progress (the engine-side download manager / the
-/// diarization fetch). A thin AGGREGATE ADAPTER over the one universal downloader
-/// [`ensure_coreml_repos`]: every file of every set goes through the SAME code; this only
-/// collapses the per-file `(index, count, fraction)` into a smooth overall fraction.
+/// Download a SINGLE Core ML repo, reporting ONE overall 0..1 byte-progress bar — a thin
+/// single-repo wrapper over the universal [`ensure_coreml_repos`] (identical byte-weighted
+/// aggregate), for callers that fetch exactly one repo (the engine-side download manager / the
+/// diarization fetch).
 pub fn ensure_coreml_repo(repo: &CoremlRepo, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
-    ensure_coreml_repos(&[repo], &|file_done, file_total, idx, count| {
-        let done_files = idx.saturating_sub(1) as f64;
-        let file_frac = file_done as f64 / file_total.max(1) as f64;
-        let frac = ((done_files + file_frac) / count.max(1) as f64).clamp(0.0, 1.0);
-        progress((frac * 10_000.0) as u64, 10_000);
-    })
+    ensure_coreml_repos(&[repo], progress)
 }
 
-/// Download a SET of repos as one unit, reporting PER-FILE progress:
-/// `progress(file_done, file_total, file_index, file_count)` — `file_done`/`file_total` are the
-/// CURRENT file's own bytes (its own 0→100%), `file_index` is its 1-based position across the
-/// whole set and `file_count` the total. So the UI can show "3/22 · 49%": which file of how
-/// many, and THAT file's percent (not a confusing cross-file aggregate). Writes each repo's
-/// completion marker once its files are all present.
+/// Download a SET of repos as one unit, reporting ONE overall byte-weighted bar:
+/// `progress(done_bytes, total_bytes)` where BOTH are summed across every file of every repo —
+/// so the UI shows a single monotonic "Downloading <pct>%" over the WHOLE set (a true global
+/// percent, not a per-file percent that resets each file). Writes each repo's completion marker
+/// once its files are all present.
 pub fn ensure_coreml_repos(
     repos: &[&CoremlRepo],
-    progress: &dyn Fn(u64, u64, u64, u64),
+    progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
-    // Resolve every not-yet-present repo's tree first so file_count is exact up front.
+    // Resolve every not-yet-present repo's tree first so the total byte count is exact up front.
     let mut plan: Vec<(&CoremlRepo, PathBuf, Vec<TreeFile>)> = Vec::new();
     for r in repos {
         if coreml_repo_present(r) {
@@ -419,25 +412,35 @@ pub fn ensure_coreml_repos(
         let files = fetch_tree(r)?;
         plan.push((r, target, files));
     }
-    let file_count: u64 = plan.iter().map(|(_, _, f)| f.len() as u64).sum();
-    if file_count == 0 {
-        progress(1, 1, 1, 1);
+    // Denominator = sum of every file's size across the whole set (each floored at 1 so a
+    // zero-length/unknown entry still advances the bar as it completes).
+    let total_bytes: u64 = plan
+        .iter()
+        .flat_map(|(_, _, f)| f.iter())
+        .map(|f| f.size.max(1))
+        .sum();
+    if total_bytes == 0 {
+        progress(1, 1);
         return Ok(());
     }
-    let mut idx: u64 = 0;
+    // Numerator = bytes finished so far: every completed file's full size plus the current
+    // file's in-flight bytes, so the overall percent only ever moves forward.
+    let mut done_bytes: u64 = 0;
     for (r, target, files) in &plan {
         for f in files {
-            idx += 1;
             let dest = target.join(&f.path);
-            let total = f.size.max(1);
+            let size = f.size.max(1);
+            let base = done_bytes;
             if already_have(&dest, f) {
-                progress(total, total, idx, file_count);
+                done_bytes = base + size;
+                progress(done_bytes, total_bytes);
                 continue;
             }
             download_one(r, f, &dest, &|done, _t| {
-                progress(done.min(total), total, idx, file_count);
+                progress((base + done.min(size)).min(total_bytes), total_bytes);
             })?;
-            progress(total, total, idx, file_count);
+            done_bytes = base + size;
+            progress(done_bytes, total_bytes);
         }
         // All of this repo's files are present → mark it complete (revision-pinned).
         std::fs::write(target.join(READY_MARKER), r.revision)?;

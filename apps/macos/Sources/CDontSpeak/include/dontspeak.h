@@ -162,16 +162,9 @@ char *ds_t_args(const char *key, const char *args_json);
 // `progress` the 0..1 download fraction (only used for "downloading"), `why` the
 // failure reason (only used for "failed"; empty → the generic default). Owned `char*`,
 // free with `ds_string_free`. HANDLE-FREE.
+// `progress` is a single OVERALL byte-weighted percent across the whole model set (not per-file).
+// The ONE state->word formatter shared by every UI (macOS/Linux/Windows).
 char *ds_engine_state_word(const char *state, double progress, const char *why);
-
-// As [`ds_engine_state_word`], plus the in-flight download's `file_index`/`file_count`
-// so a multi-file model set reads "<index>/<count> · Downloading <pct>%". `0`/`0` → plain.
-// Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
-char *ds_engine_state_word_files(const char *state,
-                                       double progress,
-                                       const char *why,
-                                       int64_t file_index,
-                                       int64_t file_count);
 
 // Localized lifetime duration down to seconds, leading zero-units dropped
 // (e.g. "12m 04s", "1d 02h 03m 04s"). Owned `char*`, free with
@@ -190,6 +183,11 @@ char *ds_stats_range(double lo, double avg, double hi, uint32_t precision, const
 // A COUNT + audio-duration stat string "<count>  <audio_secs> s". Owned `char*`, free with
 // `ds_string_free`. HANDLE-FREE.
 char *ds_stats_count(uint64_t count, double audio_secs);
+
+// A human-readable file size — decimal units, "1.4 GB" / "325 MB" / "12 KB" / "512 B". The ONE
+// size formatter shared by every UI's Libraries/Credits tab. Owned `char*`, free with
+// `ds_string_free`. HANDLE-FREE.
+char *ds_human_size(uint64_t bytes);
 
 // Set the TTS execution provider for this session: `which` is "cpu" | "cuda" |
 // "coreml" | "ane" | "auto" (NULL/unknown → "auto"). The engine restarts the warm Kokoro child on

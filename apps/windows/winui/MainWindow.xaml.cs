@@ -740,7 +740,7 @@ public sealed partial class MainWindow : Window
                     row.Children.Add(new TextBlock { Text = fname, FontFamily = Mono, FontSize = 12, TextWrapping = TextWrapping.Wrap, Opacity = 0.8 });
                     if (f.SizeBytes is long sz && sz > 0)
                     {
-                        var sizeTb = new TextBlock { Text = HumanSize(sz), FontSize = 12, Opacity = 0.5, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) };
+                        var sizeTb = new TextBlock { Text = Native.HumanSize((ulong)sz), FontSize = 12, Opacity = 0.5, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) };
                         Grid.SetColumn(sizeTb, 1);
                         row.Children.Add(sizeTb);
                     }
@@ -761,16 +761,6 @@ public sealed partial class MainWindow : Window
                 Content = body,
             });
         }
-    }
-
-    /// <summary>Bytes → a compact human size (GB/MB/KB) for the per-file size labels.</summary>
-    private static string HumanSize(long bytes)
-    {
-        double b = bytes;
-        if (b >= 1024d * 1024 * 1024) return $"{b / (1024d * 1024 * 1024):0.0} GB";
-        if (b >= 1024d * 1024) return $"{b / (1024d * 1024):0.0} MB";
-        if (b >= 1024d) return $"{b / 1024d:0} KB";
-        return $"{bytes} B";
     }
 
     // Typed wire shape of the license catalog — mirrors the Rust ds-model

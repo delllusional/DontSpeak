@@ -58,28 +58,25 @@ fn child_env(
     ]
 }
 
-/// Parse the optional `<file_done> <file_total> <file_index> <file_count>` payload of a
-/// `DOWNLOADING tts/stt …` line. `""` (the bare signal) → `None`; index/count default to 0 if a
-/// shorter (legacy `<done> <total>`) line arrives.
-fn parse_dl(rest: &str) -> Option<(u64, u64, u64, u64)> {
+/// Parse the optional `<done_bytes> <total_bytes>` payload of a `DOWNLOADING tts/stt …` line.
+/// `""` (the bare signal) → `None`.
+fn parse_dl(rest: &str) -> Option<(u64, u64)> {
     let mut it = rest.split_whitespace();
-    let fd = it.next()?.parse().ok()?;
-    let ft = it.next()?.parse().ok()?;
-    let idx = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let cnt = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    Some((fd, ft, idx, cnt))
+    let done = it.next()?.parse().ok()?;
+    let total = it.next()?.parse().ok()?;
+    Some((done, total))
 }
 
-/// `(file_done, file_total, file_index, file_count)` of an in-flight Core ML download — the
-/// dot shows "<index>/<count> · <pct>%" from it. All-zero when idle.
-type DlProgress = (u64, u64, u64, u64);
+/// `(done_bytes, total_bytes)` overall byte-progress of an in-flight Core ML download — the
+/// dot shows "Downloading <pct>%" from it. All-zero when idle.
+type DlProgress = (u64, u64);
 
 /// THE one model-lifecycle line handler, generic over the engine `kind` ("tts" / "stt" / …) so
 /// EVERY engine's download → warm → ready transition is driven by the SAME code (no per-engine
 /// copy-paste), and `start()`'s pre-READY wait loop + the post-READY reader thread stay in
 /// lockstep (a parallel preload's signals can land on either side of READY). Handles the
 /// "in progress" lines:
-///   `DOWNLOADING <kind> <fd> <ft> <idx> <cnt>` → downloading + per-file progress;
+///   `DOWNLOADING <kind> <done> <total>`       → downloading + overall byte-progress;
 ///   `WARMING <kind>`                           → loading/warming (clears downloading →
 ///                                                 "Starting…").
 /// The terminal "loaded" line (`READY` for TTS, `STTLOADED` for STT) is the caller's, via
@@ -104,7 +101,7 @@ fn apply_dl_progress(
         }
     } else if line.strip_prefix("WARMING ") == Some(kind) {
         downloading.store(false, Ordering::Relaxed);
-        *dl.lock().unwrap() = (0, 0, 0, 0);
+        *dl.lock().unwrap() = (0, 0);
     } else {
         return false;
     }
@@ -124,7 +121,7 @@ fn mark_loaded(
     gate: Option<&StatusGate>,
 ) {
     downloading.store(false, Ordering::Relaxed);
-    *dl.lock().unwrap() = (0, 0, 0, 0);
+    *dl.lock().unwrap() = (0, 0);
     loaded.store(true, Ordering::Relaxed);
     if let Some(g) = gate {
         g.bump();
@@ -273,12 +270,13 @@ pub struct TtsManager {
     /// `Arc` reader-thread-set twin for Parakeet STT — set on `DOWNLOADING stt`, cleared on
     /// `STTLOADED`.
     stt_downloading: Arc<AtomicBool>,
-    /// Latest `(file_done, file_total, file_index, file_count)` for the apple-native Core ML
-    /// download the WARM CHILD does itself, reported via `DOWNLOADING tts/stt <fd> <ft> <idx>
-    /// <cnt>` — surfaced as "<idx>/<cnt> · <this file's %>" on the engine row. `stt_dl` is an
-    /// `Arc` (the reader thread sets it). Reset to all-zero on READY / STTLOADED.
-    tts_dl: Mutex<(u64, u64, u64, u64)>,
-    stt_dl: Arc<Mutex<(u64, u64, u64, u64)>>,
+    /// Latest `(done_bytes, total_bytes)` overall byte-progress for the apple-native Core ML
+    /// download the WARM CHILD does itself, reported via `DOWNLOADING tts/stt <done> <total>`
+    /// (summed across the whole model set) — surfaced as a single "Downloading <pct>%" on the
+    /// engine row. `stt_dl` is an `Arc` (the reader thread sets it). Reset to `(0, 0)` on
+    /// READY / STTLOADED.
+    tts_dl: Mutex<(u64, u64)>,
+    stt_dl: Arc<Mutex<(u64, u64)>>,
     /// Global MUTE: when true the warm child plays silence (queue still drains; only the audio
     /// is zeroed). Toggled by a Caps-tap (dictation off) and the tray checkbox. Read by the
     /// status snapshot; pushed to the child via the `mute` op.
@@ -324,8 +322,8 @@ impl TtsManager {
             stt_loaded: Arc::new(AtomicBool::new(false)),
             tts_downloading: AtomicBool::new(false),
             stt_downloading: Arc::new(AtomicBool::new(false)),
-            tts_dl: Mutex::new((0, 0, 0, 0)),
-            stt_dl: Arc::new(Mutex::new((0, 0, 0, 0))),
+            tts_dl: Mutex::new((0, 0)),
+            stt_dl: Arc::new(Mutex::new((0, 0))),
             muted: AtomicBool::new(false),
             gate: OnceLock::new(),
         }
@@ -360,33 +358,25 @@ impl TtsManager {
     pub fn stt_downloading(&self) -> bool {
         self.stt_downloading.load(Ordering::Relaxed)
     }
-    /// Apple-native Kokoro (TTS) CURRENT-FILE download fraction 0..1 (0 when unknown/idle).
+    /// Apple-native Kokoro (TTS) OVERALL download fraction 0..1 across the whole model set (0
+    /// when unknown/idle).
     pub fn tts_dl_progress(&self) -> f64 {
-        let (d, t, _, _) = *self.tts_dl.lock().unwrap();
+        let (d, t) = *self.tts_dl.lock().unwrap();
         if t > 0 {
             (d as f64 / t as f64).clamp(0.0, 1.0)
         } else {
             0.0
         }
     }
-    /// (file_index, file_count) of the in-flight apple-native TTS download — 0/0 when idle.
-    pub fn tts_dl_files(&self) -> (u64, u64) {
-        let (_, _, i, c) = *self.tts_dl.lock().unwrap();
-        (i, c)
-    }
-    /// Apple-native Parakeet (STT) CURRENT-FILE download fraction 0..1 (0 when unknown/idle).
+    /// Apple-native Parakeet (STT) OVERALL download fraction 0..1 across the whole model set (0
+    /// when unknown/idle).
     pub fn stt_dl_progress(&self) -> f64 {
-        let (d, t, _, _) = *self.stt_dl.lock().unwrap();
+        let (d, t) = *self.stt_dl.lock().unwrap();
         if t > 0 {
             (d as f64 / t as f64).clamp(0.0, 1.0)
         } else {
             0.0
         }
-    }
-    /// (file_index, file_count) of the in-flight apple-native STT download — 0/0 when idle.
-    pub fn stt_dl_files(&self) -> (u64, u64) {
-        let (_, _, i, c) = *self.stt_dl.lock().unwrap();
-        (i, c)
     }
 
     /// The warm child's active ONNX execution provider ("CPU" until a child reports
@@ -818,7 +808,7 @@ impl TtsManager {
         lifetime: Arc<crate::stats::LifetimeSeconds>,
         stt_loaded: Arc<AtomicBool>,
         stt_downloading: Arc<AtomicBool>,
-        stt_dl: Arc<Mutex<(u64, u64, u64, u64)>>,
+        stt_dl: Arc<Mutex<(u64, u64)>>,
         stt_realized: Arc<Mutex<String>>,
         gate: Option<Arc<StatusGate>>,
     ) {
@@ -1390,32 +1380,32 @@ mod dl_lifecycle_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
-    fn apply_dl_progress_is_kind_scoped_and_parses_per_file() {
+    fn apply_dl_progress_is_kind_scoped_and_parses_overall_bytes() {
         let dling = AtomicBool::new(false);
-        let dl = Mutex::new((0u64, 0, 0, 0));
+        let dl = Mutex::new((0u64, 0));
         // A "stt" line is IGNORED by the "tts" handler (kind scoping — no cross-talk).
         assert!(!apply_dl_progress(
-            "DOWNLOADING stt 1 2 3 4",
+            "DOWNLOADING stt 1 2",
             "tts",
             &dling,
             &dl,
             None
         ));
         assert!(!dling.load(Ordering::Relaxed));
-        // The matching kind sets downloading + the per-file (done, total, index, count).
+        // The matching kind sets downloading + the overall (done_bytes, total_bytes).
         assert!(apply_dl_progress(
-            "DOWNLOADING tts 10 100 3 22",
+            "DOWNLOADING tts 4096 8192",
             "tts",
             &dling,
             &dl,
             None
         ));
         assert!(dling.load(Ordering::Relaxed));
-        assert_eq!(*dl.lock().unwrap(), (10, 100, 3, 22));
+        assert_eq!(*dl.lock().unwrap(), (4096, 8192));
         // WARMING <kind> clears downloading + progress (→ the dot reads "Starting…").
         assert!(apply_dl_progress("WARMING tts", "tts", &dling, &dl, None));
         assert!(!dling.load(Ordering::Relaxed));
-        assert_eq!(*dl.lock().unwrap(), (0, 0, 0, 0));
+        assert_eq!(*dl.lock().unwrap(), (0, 0));
         // The bare signal (no payload) still flips downloading.
         assert!(apply_dl_progress(
             "DOWNLOADING tts",
@@ -1439,15 +1429,15 @@ mod dl_lifecycle_tests {
     #[test]
     fn apply_dl_progress_drives_stt_identically() {
         let dling = AtomicBool::new(false);
-        let dl = Mutex::new((0u64, 0, 0, 0));
+        let dl = Mutex::new((0u64, 0));
         assert!(apply_dl_progress(
-            "DOWNLOADING stt 5 50 1 4",
+            "DOWNLOADING stt 5 50",
             "stt",
             &dling,
             &dl,
             None
         ));
-        assert_eq!(*dl.lock().unwrap(), (5, 50, 1, 4));
+        assert_eq!(*dl.lock().unwrap(), (5, 50));
         assert!(apply_dl_progress("WARMING stt", "stt", &dling, &dl, None));
         assert!(!dling.load(Ordering::Relaxed));
         // The "tts" twin is ignored by the "stt" handler — same generic code, kind-scoped.
@@ -1457,11 +1447,11 @@ mod dl_lifecycle_tests {
     #[test]
     fn mark_loaded_greens_and_clears_progress() {
         let dling = AtomicBool::new(true);
-        let dl = Mutex::new((10u64, 100, 2, 5));
+        let dl = Mutex::new((10u64, 100));
         let loaded = AtomicBool::new(false);
         mark_loaded(&dling, &dl, &loaded, None);
         assert!(!dling.load(Ordering::Relaxed));
-        assert_eq!(*dl.lock().unwrap(), (0, 0, 0, 0));
+        assert_eq!(*dl.lock().unwrap(), (0, 0));
         assert!(loaded.load(Ordering::Relaxed));
     }
 }

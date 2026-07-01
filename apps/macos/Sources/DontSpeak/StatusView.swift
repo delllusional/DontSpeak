@@ -27,8 +27,8 @@ import DontSpeakLogic
 enum EngineStatus: Equatable, Sendable {
     case missing
     case idle
-    /// (progress 0…1, current file index, total file count) — index/count 0 when single-file.
-    case downloading(Double, Int, Int)
+    /// progress 0…1 — the OVERALL byte-weighted download percent across the whole model set.
+    case downloading(Double)
     case warming
     case running
     case failed(String)
@@ -39,12 +39,10 @@ enum EngineStatus: Equatable, Sendable {
     /// so the state→word mapping lives in ONE place for every UI. Shown via `troubleNote` in
     /// the row's expansion when the engine isn't ready (there is no hover tooltip anymore).
     var word: String {
-        func w(_ state: String, _ progress: Double = 0, _ why: String = "",
-               _ idx: Int = 0, _ cnt: Int = 0) -> String {
+        func w(_ state: String, _ progress: Double = 0, _ why: String = "") -> String {
             state.withCString { sp in
                 why.withCString { wp in
-                    guard let ptr = ds_engine_state_word_files(
-                        sp, progress, wp, Int64(idx), Int64(cnt)) else { return state }
+                    guard let ptr = ds_engine_state_word(sp, progress, wp) else { return state }
                     defer { ds_string_free(ptr) }
                     return String(cString: ptr)
                 }
@@ -53,7 +51,7 @@ enum EngineStatus: Equatable, Sendable {
         switch self {
         case .missing: return w("missing")
         case .idle: return w("idle")
-        case .downloading(let p, let idx, let cnt): return w("downloading", p, "", idx, cnt)
+        case .downloading(let p): return w("downloading", p, "")
         case .warming: return w("warming")
         case .running: return w("running")
         case .failed(let why): return w("failed", 0, why)
@@ -88,7 +86,7 @@ struct StatusDot: View {
                 Circle().strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1.5)
             case .idle:
                 Circle().fill(Color.secondary.opacity(0.45))
-            case .downloading(let p, _, _):
+            case .downloading(let p):
                 ZStack {
                     Circle().strokeBorder(Color.smWarning.opacity(0.25), lineWidth: 2)
                     Circle()

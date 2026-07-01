@@ -178,8 +178,8 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
 // platform that needs a blanket "unsupported" stub.
 /// Apple-native ONLY: download the Core ML repos for `kind` ("tts" / "stt") OURSELVES — so the
 /// engine shows a real % and FluidAudio (which now runs offline, `enforceOffline`) only LOADS.
-/// Emits `DOWNLOADING <kind>` immediately (dot flips), then `DOWNLOADING <kind> <fd> <ft> <idx>
-/// <cnt>` per file as bytes arrive. No-op without the ANE shim (the ONNX path is fetched
+/// Emits `DOWNLOADING <kind>` immediately (dot flips), then `DOWNLOADING <kind> <done> <total>`
+/// (overall bytes across the whole set) as bytes arrive. No-op without the ANE shim (the ONNX path is fetched
 /// engine-side) or when every repo is already present. Returns false on a download error (the
 /// caller's load then surfaces the real failure).
 fn ensure_coreml_models(kind: &str) -> bool {
@@ -206,10 +206,10 @@ fn ensure_coreml_models(kind: &str) -> bool {
     println!("DOWNLOADING {kind}");
     let _ = std::io::stdout().flush();
     eprintln!("dontspeak/helper: fetching {kind} Core ML model(s) before warm");
-    // Per-file: `<file_done> <file_total> <file_index> <file_count>` → the dot shows
-    // "<index>/<count> · <this file's %>".
-    let prog = |fd: u64, ft: u64, idx: u64, cnt: u64| {
-        println!("DOWNLOADING {kind} {fd} {ft} {idx} {cnt}");
+    // One overall byte-weighted bar for the whole set: `<done_bytes> <total_bytes>` → the dot
+    // shows a single monotonic "Downloading <pct>%".
+    let prog = |done: u64, total: u64| {
+        println!("DOWNLOADING {kind} {done} {total}");
         let _ = std::io::stdout().flush();
     };
     match ensure_coreml_repos(repos, &prog) {

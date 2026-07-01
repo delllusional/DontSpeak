@@ -24,15 +24,11 @@ pub struct EngineObj {
     pub present: bool,
     pub removable: bool,
     pub state: String,
+    /// Overall download fraction 0..1 — byte-weighted across the WHOLE model set (a single
+    /// global percent, NOT per-file). `0.0` unless the row is `downloading`.
     pub progress: f64,
     /// `null` when there is no error.
     pub error: Option<String>,
-    /// In-flight download FILE position (1-based) + total file count, so a multi-file model
-    /// set shows "<index>/<count> · Downloading <pct>%". `0`/`0` when not a multi-file fetch.
-    #[serde(default)]
-    pub dl_index: u64,
-    #[serde(default)]
-    pub dl_count: u64,
 }
 
 /// The flat "running" map the MCP `status`/`model_status` tools read.
@@ -170,8 +166,6 @@ mod tests {
             state: EngineState::Missing.as_str().to_string(),
             progress: 0.0,
             error: None,
-            dl_index: 0,
-            dl_count: 0,
         }
     }
 

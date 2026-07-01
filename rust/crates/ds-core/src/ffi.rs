@@ -308,9 +308,10 @@ pub extern "C" fn ds_t_args(key: *const c_char, args_json: *const c_char) -> *mu
 /// Localized hover word for an engine lifecycle state. `state` is the model-status token from
 /// the canonical [`ds_status::EngineState`] vocabulary ("running"|"idle"|"warming"|
 /// "downloading"|"failed"|"blocked"|"missing"),
-/// `progress` the 0..1 download fraction (only used for "downloading"), `why` the
+/// `progress` the 0..1 OVERALL download fraction — byte-weighted across the whole model set, a
+/// single global percent (only used for "downloading"), `why` the
 /// failure reason (only used for "failed"; empty → the generic default). Owned `char*`,
-/// free with `ds_string_free`. HANDLE-FREE.
+/// free with `ds_string_free`. HANDLE-FREE. The ONE state→word formatter shared by every UI.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_state_word(
     state: *const c_char,
@@ -322,28 +323,6 @@ pub extern "C" fn ds_engine_state_word(
             &cstr_or_empty(state),
             progress,
             &cstr_or_empty(why),
-        ))
-    })
-}
-
-/// As [`ds_engine_state_word`], plus the in-flight download's `file_index`/`file_count`
-/// so a multi-file model set reads "<index>/<count> · Downloading <pct>%". `0`/`0` → plain.
-/// Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
-#[unsafe(no_mangle)]
-pub extern "C" fn ds_engine_state_word_files(
-    state: *const c_char,
-    progress: f64,
-    why: *const c_char,
-    file_index: i64,
-    file_count: i64,
-) -> *mut c_char {
-    guard_val(to_cstring(""), || {
-        to_cstring(crate::status_fmt::engine_state_word_files(
-            &cstr_or_empty(state),
-            progress,
-            &cstr_or_empty(why),
-            file_index,
-            file_count,
         ))
     })
 }
@@ -396,6 +375,16 @@ pub extern "C" fn ds_stats_range(
 pub extern "C" fn ds_stats_count(count: u64, audio_secs: f64) -> *mut c_char {
     guard_val(to_cstring(""), || {
         to_cstring(crate::status_fmt::stats_count(count, audio_secs))
+    })
+}
+
+/// A human-readable file size — decimal units, "1.4 GB" / "325 MB" / "12 KB" / "512 B". The ONE
+/// size formatter shared by every UI's Libraries/Credits tab. Owned `char*`, free with
+/// `ds_string_free`. HANDLE-FREE.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_human_size(bytes: u64) -> *mut c_char {
+    guard_val(to_cstring(""), || {
+        to_cstring(crate::status_fmt::human_size(bytes))
     })
 }
 

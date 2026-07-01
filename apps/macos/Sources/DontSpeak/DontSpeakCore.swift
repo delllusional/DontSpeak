@@ -477,16 +477,15 @@ final class Core {
 // booleans kokoro/parakeet/system/… — the engine dots already carry those); `Decodable` ignores
 // unknown keys, so omitting them is safe.
 
-/// One engine's lifecycle block: `{present, removable, state, progress, error, dl_index, dl_count}`.
+/// One engine's lifecycle block: `{present, removable, state, progress, error}`.
 struct EngineObjDTO: Decodable {
     var present: Bool?
     var removable: Bool?
     var state: String?
+    /// Overall download fraction 0…1 — byte-weighted across the whole model set (a single global
+    /// percent, not per-file). Only meaningful while `state == "downloading"`.
     var progress: Double?
     var error: String?
-    /// Multi-file download position: current file index (1-based) + total count (0/0 if single).
-    var dl_index: Int?
-    var dl_count: Int?
 }
 
 extension Optional where Wrapped == EngineObjDTO {
@@ -495,7 +494,7 @@ extension Optional where Wrapped == EngineObjDTO {
     var engineStatus: EngineStatus {
         guard let obj = self, let state = obj.state else { return .missing }
         switch state {
-        case "downloading": return .downloading(obj.progress ?? 0, obj.dl_index ?? 0, obj.dl_count ?? 0)
+        case "downloading": return .downloading(obj.progress ?? 0)
         case "warming": return .warming
         case "running": return .running
         case "failed": return .failed(obj.error ?? L.t("status.engine.reason.default"))

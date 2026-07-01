@@ -64,13 +64,12 @@ private func loadLibraries() -> [LibraryInfo] {
     }
 }
 
-/// Human file size ("310 MB") from a byte count — file-style (decimal) units, matching the
-/// "~310 MB" sizing the download manifest shows.
+/// Human file size ("325 MB") from a byte count — resolved by the shared Rust formatter
+/// (`ds_human_size`, decimal units) so every platform's Libraries/Credits tab agrees.
 private func humanSize(_ bytes: Int) -> String {
-    let f = ByteCountFormatter()
-    f.countStyle = .file
-    f.allowsNonnumericFormatting = false
-    return f.string(fromByteCount: Int64(bytes))
+    guard let ptr = ds_human_size(UInt64(max(0, bytes))) else { return "" }
+    defer { ds_string_free(ptr) }
+    return String(cString: ptr)
 }
 
 struct CreditsView: View {

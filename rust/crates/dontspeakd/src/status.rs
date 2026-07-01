@@ -311,19 +311,15 @@ pub(crate) fn model_status_json(
                       error: Option<String>,
                       running: bool,
                       enabled: bool,
-                      progress: f64,
-                      dl_files: (u64, u64)|
+                      progress: f64|
      -> EngineObj {
         let state = engine_state(present, dling, error.is_some(), running, enabled);
-        let (dl_index, dl_count) = if dling { dl_files } else { (0, 0) };
         EngineObj {
             present,
             removable,
             state: state.as_str().to_string(),
             progress: if dling { progress } else { 0.0 },
             error,
-            dl_index,
-            dl_count,
         }
     };
     // Apple-native Kokoro/Parakeet download % comes from the warm child (it fetches the Core ML
@@ -388,7 +384,6 @@ pub(crate) fn model_status_json(
             tts.tts_loaded(),
             kokoro_enabled,
             kokoro_progress,
-            tts.tts_dl_files(),
         ),
         // Parakeet STT — one engine, runtime chosen by `stt_provider`. With the ONNX
         // runtime it has downloadable model files (removable only when the warm Kokoro
@@ -406,7 +401,6 @@ pub(crate) fn model_status_json(
             tts.stt_loaded() && parakeet_enabled,
             parakeet_enabled,
             parakeet_progress,
-            tts.stt_dl_files(),
         ),
         // Speaker diarization / speaker-LOCK (FluidAudio Core ML, self-managed cache like
         // apple-native Parakeet — never removable). The dot tracks the speaker-LOCK feature
@@ -423,7 +417,6 @@ pub(crate) fn model_status_json(
             cfg.stt_speaker_lock && cfg.diarization_on() && diar_present,
             cfg.stt_speaker_lock,
             dl_frac,
-            (0, 0),
         ),
         // System STT (macOS 26 on-device SpeechAnalyzer) — the OS owns the model, so
         // there's nothing for DontSpeak to remove and no download RING (no progress): never
@@ -440,7 +433,6 @@ pub(crate) fn model_status_json(
             system_running,
             system_enabled,
             0.0,
-            (0, 0),
         ),
         // claude_code STT — Claude Code does the (cloud) transcription; nothing to download
         // or remove. "present" = CC voice on + key synthesizable; the `error` carries the
@@ -453,7 +445,6 @@ pub(crate) fn model_status_json(
             claude_code_running,
             claude_code_enabled,
             0.0,
-            (0, 0),
         ),
         // System TTS (macOS `say`) — the speech-OUT analogue of the System STT row, so the
         // adaptive TTS row can show "System" (green when selected + TTS on) instead of a
@@ -466,7 +457,6 @@ pub(crate) fn model_status_json(
             tts_system_running,
             tts_system_running,
             0.0,
-            (0, 0),
         ),
         // The ACTIVE STT engine token, so the app's single STT row can reflect whichever
         // engine is selected (parakeet vs system) without inferring it from the dots.

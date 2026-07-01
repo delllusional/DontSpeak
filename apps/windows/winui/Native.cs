@@ -36,6 +36,7 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_runtime_label([MarshalAs(UnmanagedType.LPUTF8Str)] string provider);
     [DllImport(Dll)] private static extern IntPtr ds_stats_range(double lo, double avg, double hi, uint precision, [MarshalAs(UnmanagedType.LPUTF8Str)] string unitKey);
     [DllImport(Dll)] private static extern IntPtr ds_stats_count(ulong count, double audioSecs);
+    [DllImport(Dll)] private static extern IntPtr ds_human_size(ulong bytes);
     [DllImport(Dll)] private static extern void ds_string_free(IntPtr s);
     [DllImport(Dll)] private static extern byte ds_set_muted(byte on);
     [DllImport(Dll)] private static extern byte ds_open_voice_settings();
@@ -67,6 +68,10 @@ internal static class Native
 
     /// <summary>A COUNT + audio-duration stat string "&lt;count&gt;  &lt;secs&gt; s" (shared formatter).</summary>
     public static string StatsCount(ulong count, double audioSecs) => TakeString(ds_stats_count(count, audioSecs));
+
+    /// <summary>A human-readable file size "325 MB" / "12 KB" — the shared decimal formatter every
+    /// platform's Libraries tab calls, so sizes agree byte-for-byte (shared with macOS/Linux).</summary>
+    public static string HumanSize(ulong bytes) => TakeString(ds_human_size(bytes));
 
     /// <summary>The product version (shared Rust workspace version), e.g. "0.2.0".</summary>
     public static string Version() => TakeString(ds_version());

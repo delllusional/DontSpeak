@@ -138,3 +138,9 @@ pub fn stats_range(lo: f64, avg: f64, hi: f64, precision: u32, unit_key: &str) -
 pub fn stats_count(count: u64, audio_secs: f64) -> String {
     take(sys::ds_stats_count(count, audio_secs))
 }
+
+/// A human-readable file size "325 MB" / "12 KB" (shared decimal formatter). The SAME builder
+/// the Swift/C# hosts call, so every Libraries tab agrees byte-for-byte.
+pub fn human_size(bytes: u64) -> String {
+    take(sys::ds_human_size(bytes))
+}

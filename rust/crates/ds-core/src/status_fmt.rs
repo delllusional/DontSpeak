@@ -27,20 +27,16 @@ fn fill(key: &str, pairs: &[(&str, &str)]) -> String {
 /// `Failed`); `progress` is the 0..1 download fraction (only used for "downloading");
 /// `why` is the failure reason (only used for "failed"; empty → the generic default reason). The
 /// ready states ("running"|"idle") — and anything unrecognized — have no note and return "".
-pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
-    engine_state_word_files(state, progress, why, 0, 0)
-}
-
-/// As [`engine_state_word`], but with the in-flight download's `file_index`/`file_count` so a
-/// multi-file model set reads "<index>/<count> · Downloading <pct>%" — the user sees WHICH file
-/// of how many, and that file's own percent (not a confusing cross-file aggregate). `0`/`0`
-/// (single file / unknown) falls back to the plain percent.
-pub fn engine_state_word_files(
+///
+/// This is the ONE cross-platform formatter for a row's status word: macOS SwiftUI, Linux GTK
+/// and Windows WinUI ALL call it over the C ABI ([`crate::ffi::ds_engine_state_word`]), so the
+/// download wording ("Downloading <pct>%") can NEVER diverge between platforms. `progress` is a
+/// single OVERALL byte-weighted percent across the whole model set (see
+/// `ds_model::coreml_repo::ensure_coreml_repos`), NOT a per-file percent.
+pub fn engine_state_word(
     state: &str,
     progress: f64,
     why: &str,
-    file_index: i64,
-    file_count: i64,
 ) -> String {
     use ds_status::EngineState;
     match EngineState::parse(state) {
@@ -49,7 +45,7 @@ pub fn engine_state_word_files(
         Some(EngineState::Blocked) => ds_i18n::t("status.engine.status.blocked"),
         Some(EngineState::Downloading) => {
             let pct = (progress * 100.0).round() as i64;
-            let base = if pct <= 0 {
+            if pct <= 0 {
                 // Unknown/zero progress — FluidAudio's ANE/Core ML fetches don't report a
                 // fraction — so show an indeterminate label instead of a misleading "0%".
                 ds_i18n::t("status.engine.status.downloading_indeterminate")
@@ -58,11 +54,6 @@ pub fn engine_state_word_files(
                     "status.engine.status.downloading",
                     &[("pct", &pct.to_string())],
                 )
-            };
-            if file_count > 1 && file_index > 0 {
-                format!("{file_index}/{file_count} · {base}")
-            } else {
-                base
             }
         }
         Some(EngineState::Failed) => {
@@ -150,6 +141,25 @@ pub fn stats_count(count: u64, audio_secs: f64) -> String {
     )
 }
 
+/// A human-readable file SIZE — decimal (SI, ÷1000) units to match the "file size" convention
+/// (Apple's `ByteCountFormatter(.file)` is decimal too): "1.4 GB", "325 MB", "12 KB", "512 B".
+/// GB/MB carry one decimal, KB none. Replaces the three drifted per-platform size formatters
+/// (Swift `humanSize`, GTK `human_size`, WinUI `HumanSize` — which used binary ÷1024, disagreeing
+/// with the other two) so every host's Libraries/Credits tab shows the SAME size for the SAME
+/// `size_bytes` from `ds_libraries_json`. The `.`-decimal separator matches `stats_range`.
+pub fn human_size(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b >= 1_000_000_000.0 {
+        format!("{:.1} GB", b / 1_000_000_000.0)
+    } else if b >= 1_000_000.0 {
+        format!("{:.1} MB", b / 1_000_000.0)
+    } else if b >= 1_000.0 {
+        format!("{:.0} KB", b / 1_000.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Format a JSON number without a trailing ".0" when it's whole (2.0 → "2", 0.7 → "0.7").
 fn num(v: f64) -> String {
     if v == v.round() {
@@ -205,24 +215,33 @@ mod tests {
         // Ready states have no note.
         assert_eq!(engine_state_word("running", 0.0, ""), "");
         assert_eq!(engine_state_word("idle", 0.0, ""), "");
+        // ONE overall byte-weighted percent across the whole model set — no per-file prefix. This
+        // is the single formatter every platform (macOS/Linux/Windows) renders, so the wording
+        // is identical everywhere.
         assert_eq!(engine_state_word("downloading", 0.5, ""), "Downloading 50%");
+        // Rounds the global fraction (e.g. 5/22 of the bytes ≈ 23%).
+        assert_eq!(
+            engine_state_word("downloading", 5.0 / 22.0, ""),
+            "Downloading 23%"
+        );
         // Zero/unknown progress (FluidAudio ANE fetch) → indeterminate, not a stuck "0%".
         assert_eq!(engine_state_word("downloading", 0.0, ""), "Downloading…");
-        // Multi-file set → "<index>/<count> · " prefix with the CURRENT file's percent.
-        assert_eq!(
-            engine_state_word_files("downloading", 0.5, "", 3, 22),
-            "3/22 · Downloading 50%"
-        );
-        // Single file (count ≤ 1) → no prefix.
-        assert_eq!(
-            engine_state_word_files("downloading", 0.5, "", 1, 1),
-            "Downloading 50%"
-        );
         assert_eq!(engine_state_word("failed", 0.0, ""), "Failed to start");
         assert_eq!(
             engine_state_word("failed", 0.0, "no model"),
             "Failed — no model"
         );
+    }
+
+    #[test]
+    fn human_size_uses_decimal_units_shared_by_every_platform() {
+        // Decimal (÷1000) base — one formatter, so macOS/Linux/Windows agree byte-for-byte.
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(12_000), "12 KB");
+        assert_eq!(human_size(325_000_000), "325.0 MB");
+        assert_eq!(human_size(1_400_000_000), "1.4 GB");
+        // Boundary: exactly 1000 rolls over to KB (not "1000 B").
+        assert_eq!(human_size(1_000), "1 KB");
     }
 
     #[test]

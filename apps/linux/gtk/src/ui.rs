@@ -606,7 +606,7 @@ fn build_credits_page() -> gtk::Widget {
                         .build();
                     if let Some(sz) = f["size_bytes"].as_u64().filter(|&s| s > 0) {
                         let lbl = value_label();
-                        lbl.set_text(&human_size(sz));
+                        lbl.set_text(&crate::ffi::human_size(sz));
                         frow.add_suffix(&lbl);
                     }
                     row.add_row(&frow);
@@ -668,16 +668,3 @@ fn load_logs(view: &gtk::TextView) {
     });
 }
 
-/// Bytes → a compact human size ("325 MB", "8 MB", "9 kB"), matching the download labels.
-fn human_size(bytes: u64) -> String {
-    let b = bytes as f64;
-    if b >= 1_000_000_000.0 {
-        format!("{:.1} GB", b / 1_000_000_000.0)
-    } else if b >= 1_000_000.0 {
-        format!("{:.0} MB", b / 1_000_000.0)
-    } else if b >= 1_000.0 {
-        format!("{:.0} kB", b / 1_000.0)
-    } else {
-        format!("{bytes} B")
-    }
-}
