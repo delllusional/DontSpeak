@@ -287,7 +287,11 @@ internal sealed class TrayIcon : IDisposable
         var buf = BrandGlyph.RenderBgra(size, ink, muted);
         Marshal.Copy(buf, 0, bits, buf.Length);
 
-        var mask = new byte[(W / 8) * H]; // 1bpp mask, all 0 — the 32bpp alpha drives transparency
+        // 1bpp mask, all 0 — the 32bpp alpha drives transparency. CreateBitmap reads
+        // WORD-aligned scanlines, so size by the padded stride: W/8 under-allocates at
+        // e.g. 125%/150% DPI (W = 20/24) and the native side overreads the heap.
+        int maskStride = (W + 15) / 16 * 2;
+        var mask = new byte[maskStride * H];
         IntPtr hbmMask = CreateBitmap(W, H, 1, 1, mask);
         var ii = new ICONINFO { fIcon = true, hbmMask = hbmMask, hbmColor = color };
         IntPtr icon = CreateIconIndirect(ref ii);
