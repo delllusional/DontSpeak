@@ -91,6 +91,15 @@ case "$OS" in
     out="$TMP/app"; mkdir -p "$out"
     ditto -x -k "$zip" "$out"          # the zip holds DontSpeak.app/ at its root
     [ -d "$out/DontSpeak.app" ] || die "unexpected archive layout (no DontSpeak.app)"
+    # Re-run/upgrade path: quit a running instance (app + engine + warm helper) before
+    # replacing the bundle — same sequence as scripts/uninstall.sh. Swapping the bundle
+    # under a live process leaves the old version running against deleted files.
+    if [ -d "/Applications/DontSpeak.app" ]; then
+      osascript -e 'quit app "DontSpeak"' 2>/dev/null || true
+      sleep 1
+      pkill -f "DontSpeak.app/Contents/MacOS/DontSpeak" 2>/dev/null || true
+      pkill -f "ds-helper" 2>/dev/null || true
+    fi
     rm -rf "/Applications/DontSpeak.app"
     cp -R "$out/DontSpeak.app" /Applications/
 
