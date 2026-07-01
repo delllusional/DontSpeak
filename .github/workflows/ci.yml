@@ -1,9 +1,9 @@
 name: CI
 
-# Run the project's ACTUAL test suite. The real tests live in the Rust workspace
-# (cargo test --workspace); the macOS SwiftPM package and the WinUI app have no test
-# targets today, so those steps auto-skip rather than fail (no placeholder/dummy
-# tests) and pick tests up automatically if/when they're added.
+# Run the project's ACTUAL test suite. The bulk lives in the Rust workspace
+# (cargo test --workspace); the macOS SwiftPM package adds DontSpeakLogicTests (run on
+# the macOS leg). The WinUI app has no test projects today, so that step auto-skips
+# rather than fail (no placeholder/dummy tests) and picks tests up if/when added.
 #
 # Cost/coverage split:
 #   • Per commit / PR  → Linux only (fast; covers the platform-agnostic majority).
