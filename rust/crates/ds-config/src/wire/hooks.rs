@@ -1,9 +1,9 @@
 //! Claude Code hook wiring — the SINGLE cross-platform source of truth for the
 //! DontSpeak voice hooks in ~/.claude/settings.json. Replaces the old per-platform
-//! copies (macOS claude/settings.snippet.json, Windows wire-hooks.ps1 +
-//! windows/settings.snippet.json, linux/settings.snippet.json), which had drifted.
-//! PURE merge/strip here (no disk); the `ds-mcp wire-hooks` subcommand owns
-//! path resolution, backup, and the atomic write. Mirrors `merge_settings`'
+//! copies (macOS claude/settings.snippet.json, Windows settings.snippet.json,
+//! linux/settings.snippet.json), which had drifted. PURE merge/strip here (no disk); the
+//! `dontspeak wire claude_code` orchestrator (via `wire_hooks::claude_code_hooks`) owns path
+//! resolution, backup, and the atomic write. Mirrors `merge_settings`'
 //! coerce-to-object / get-or-create / additive discipline so unrelated keys (Claude
 //! Code's own hooks, permissions, model) are never clobbered.
 
@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 
 /// The base names (no extension) of every executable DontSpeak installs into a binary
 /// directory it controls TODAY — the CURRENT set, used by the installers' stale-binary
-/// cleanup as the "keep" list. `dontspeak wire-hooks` prunes any `dontspeak*` executable in
+/// cleanup as the "keep" list. `dontspeak wire`'s housekeeping prunes any `dontspeak*` executable in
 /// the install dir that is NOT in this set (see its `prune_stale_bins`); the Windows Inno
 /// `[InstallDelete]` mirrors it (it must enumerate names declaratively, pre-copy, in the
 /// ELEVATED context — it can't call into this user-context binary to clear `{app}` under
@@ -107,7 +107,7 @@ fn canonical_hook_groups(spec: &HookSpec) -> Vec<(&'static str, Value)> {
 /// survive. The `voice` block is only CREATED when absent (never overrides an
 /// existing mode). PURE — no disk. (Not self-healing: a hook-shape change like
 /// dropping SessionStart's `provide` banner reaches existing installs via a clean
-/// re-wire — `wire-hooks --remove` then `wire-hooks` — not an in-place merge.)
+/// re-wire — `wire claude_code --remove` then `wire claude_code` — not an in-place merge.)
 pub fn merge_hooks(mut root: Value, spec: &HookSpec) -> Value {
     if !root.is_object() {
         root = Value::Object(Map::new());

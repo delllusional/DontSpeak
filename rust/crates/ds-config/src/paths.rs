@@ -22,12 +22,12 @@ pub struct Paths {
     /// `claude_code` STT engine to learn which key `voice:pushToTalk` is bound to. DontSpeak
     /// never writes it.
     pub keybindings_json: PathBuf,
-    /// Claude CODE's user-scope config (`~/.claude.json`) — where `wire-code` adds (or
+    /// Claude CODE's user-scope config (`~/.claude.json`) — where `wire claude_code` adds (or
     /// removes) the `mcpServers.DontSpeak` stdio entry so the `claude` CLI and Claude Code
-    /// sessions spawn our MCP bridge and can call `speak`/`listen`/… as tools. The Claude
-    /// CODE sibling of `wire-desktop` (which targets Desktop's separate config); like it,
-    /// this is MCP registration ONLY — narration is wired separately via `wire-hooks` into
-    /// `settings_json`. (Distinct from `claude_dir`, the `~/.claude` DIRECTORY.)
+    /// sessions spawn our MCP bridge and can call `speak`/`listen`/… as tools. This is the MCP
+    /// half of `wire claude_code` (the other half being the `settings_json` hooks); the same
+    /// shared MCP core targets Desktop's separate config. (Distinct from `claude_dir`, the
+    /// `~/.claude` DIRECTORY.)
     pub claude_code_config: PathBuf,
     /// Side file holding the running `ds-narrate` pid (for `--stop`).
     pub narrate_pid: PathBuf,
@@ -71,18 +71,18 @@ pub struct Paths {
     pub narration_spec: PathBuf,
     /// Claude DESKTOP's config dir — `BaseDirs::config_dir()/Claude`, which is
     /// `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows),
-    /// `~/.config/Claude` (Linux). Its existence is how `wire-desktop` detects that
+    /// `~/.config/Claude` (Linux). Its existence is how `wire claude_desktop` detects that
     /// Claude Desktop has run at least once. (Distinct from `claude_dir` = Claude
     /// CODE's `~/.claude`.)
     pub claude_desktop_dir: PathBuf,
-    /// Claude Desktop's `claude_desktop_config.json` — where `wire-desktop` adds (or
+    /// Claude Desktop's `claude_desktop_config.json` — where `wire claude_desktop` adds (or
     /// removes) the `mcpServers.DontSpeak` stdio entry so Desktop can spawn our MCP
     /// bridge. Desktop has no hook system, so this is registration ONLY (no narration).
     pub claude_desktop_config: PathBuf,
-    /// OpenAI Codex CLI's config dir (`~/.codex`). Its existence is how `wire-hooks`
-    /// auto-detects Codex and decides whether to wire the narration hooks.
+    /// OpenAI Codex CLI's config dir (`~/.codex`). Its existence is how `wire codex`
+    /// presence-gates the narration-hook wiring (a clean skip when Codex isn't installed).
     pub codex_dir: PathBuf,
-    /// Codex's `~/.codex/config.toml` — where `wire-hooks` adds (or removes) the
+    /// Codex's `~/.codex/config.toml` — where `wire codex` adds (or removes) the
     /// `UserPromptSubmit`→`provide` (narration spec) and `Stop`→`notify` (speak reply) hooks.
     pub codex_config: PathBuf,
 }

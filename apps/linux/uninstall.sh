@@ -43,10 +43,12 @@ pkill -x ds-gtk 2>/dev/null || true
 pkill -f "ds-helper" 2>/dev/null || true
 pkill -x dontspeakd 2>/dev/null || true
 
-echo "==> 2. un-wire the Claude Code hooks (before deleting the binary)"
+echo "==> 2. un-wire all client integrations (before deleting the binary)"
 if [ -x "$INSTALL_DIR/dontspeak" ]; then
-  "$INSTALL_DIR/dontspeak" wire-hooks --remove 2>/dev/null \
-    || echo "   (wire-hooks --remove failed or nothing to remove)"
+  for client in claude_code claude_desktop codex; do
+    "$INSTALL_DIR/dontspeak" wire "$client" --remove 2>/dev/null \
+      || echo "   (wire $client --remove failed or nothing to remove)"
+  done
 else
   echo "   (no $INSTALL_DIR/dontspeak — skipping hook removal)"
 fi

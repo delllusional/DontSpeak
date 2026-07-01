@@ -69,7 +69,7 @@ rust/
     dontspeakd/               # bin+lib: the engine (caps loop, warm TTS+STT helper, IPC server)
     dontspeak/                # bin: the one multi-call client — no args = stdio MCP server;
                              #      `notify` = command hook sink; `provide` = query hook;
-                             #      wire-hooks / wire-desktop installers. Stdio only.
+                             #      `wire <client>` per-client installer. Stdio only.
 ```
 
 The macOS GUI is the native SwiftUI app in `../apps/macos/` (not a Rust crate); it links the
@@ -118,7 +118,7 @@ event's `hookSpecificOutput`). Both route internally on `hook_event_name`. See
 ### settings.json wiring
 
 Exec-form hooks (the binary in `command`, the subcommand in `args`), wired by `dontspeak
-wire-hooks` — the single cross-platform definition + safe merge in `ds-config`
+wire claude_code` — the single cross-platform definition + safe merge in `ds-config`
 (`merge_hooks`/`strip_hooks`). `../claude/settings.snippet.json` mirrors what it writes;
 abbreviated:
 

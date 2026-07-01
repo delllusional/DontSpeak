@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::engine_launch::ensure_engine;
 use crate::mcp::{ok, tool_result};
 use crate::voices::voice_groups;
-use crate::{wire_desktop, wire_hooks};
+use crate::wire;
 
 pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>) -> Value {
     let params = msg.get("params");
@@ -41,8 +41,8 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
             None => Err("cannot resolve ~/.claude paths".into()),
         },
         // Write a config to disk or register/remove a client integration (no engine needed;
-        // edits client configs via the SAME wire_hooks/wire_desktop entry points the
-        // installer uses, and writes the narration spec to the user data dir).
+        // edits client configs via the SAME `wire <client>` orchestrator the installer uses,
+        // and writes the narration spec to the user data dir).
         "setup_integration" => call_wire(&args),
         // Read-only introspection: config (settings.json) + live engine state.
         // Does NOT spawn the engine — a status check must not start playback.
@@ -227,11 +227,11 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<St
 //    nudged to apply NOW, falling back to its mtime-watch if it's down) ──────────
 
 /// Register or remove the DontSpeak integration for one AI client, at runtime. SHARED
-/// LOGIC: this is a thin adapter that maps (client, enabled) to flags and calls the SAME
-/// `wire_hooks::run` / `wire_desktop::run` entry points the installers use —
-/// never a reimplementation, so install-time and tool-time wiring can't drift. Per-client
-/// flags scope each change so it never touches the other clients; `enabled=false` removes
-/// only our entries (additive + backed-up, like the installer).
+/// LOGIC: this is a thin adapter that maps (client, enabled) to the SAME per-client
+/// `wire::run` orchestrator the installers use — never a reimplementation, so install-time and
+/// tool-time wiring can't drift. Each client's wire scopes its own surfaces (Claude Code = hooks +
+/// MCP, Desktop = MCP, Codex = hooks); `enabled=false` removes only our entries (additive +
+/// backed-up, like the installer).
 fn call_wire(args: &Value) -> Result<String, String> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -291,18 +291,23 @@ fn call_wire(args: &Value) -> Result<String, String> {
         };
     }
 
-    let (label, code) = match target {
-        // Claude Code's voice hooks in ~/.claude/settings.json (--no-codex = don't touch Codex).
-        WireTarget::ClaudeCode => {
-            let flags: Vec<String> = if a.enabled {
-                vec!["--no-codex".into()]
-            } else {
-                vec!["--remove".into(), "--no-codex".into()]
-            };
-            ("Claude Code", wire_hooks::run(&flags))
+    // Build the per-client `wire <client> [--remove]` argv and run the SAME orchestrator the
+    // installers use. `wire` self-skips a client that isn't installed; for Desktop/Codex we
+    // pre-check presence so an `enabled=true` on an absent client reports honestly instead of
+    // claiming a no-op wire succeeded.
+    let flags = |client: &str| -> Vec<String> {
+        if a.enabled {
+            vec![client.into()]
+        } else {
+            vec![client.into(), "--remove".into()]
         }
-        // The MCP-server entry in Claude Desktop's config. wire_desktop self-skips when
-        // Desktop is absent, so report that honestly rather than claiming a no-op succeeded.
+    };
+    // `target.as_str()` is the canonical `WireTarget` token the `wire` orchestrator parses back —
+    // the ONE token vocabulary, never a re-typed literal here.
+    let (label, code) = match target {
+        // Claude Code = voice hooks (settings.json) + MCP server (~/.claude.json), in ONE step.
+        WireTarget::ClaudeCode => ("Claude Code", wire::run(&flags(target.as_str()))),
+        // Claude Desktop = MCP server only.
         WireTarget::ClaudeDesktop => {
             if a.enabled
                 && ds_config::Paths::resolve()
@@ -311,21 +316,18 @@ fn call_wire(args: &Value) -> Result<String, String> {
             {
                 return Ok("Claude Desktop is not installed — nothing to register.".into());
             }
-            let flags: Vec<String> = if a.enabled {
-                vec![]
-            } else {
-                vec!["--remove".into()]
-            };
-            ("Claude Desktop", wire_desktop::run(&flags))
+            ("Claude Desktop", wire::run(&flags(target.as_str())))
         }
-        // Codex's narration hooks in ~/.codex/config.toml (--codex-only = only Codex).
+        // Codex = narration hooks only.
         WireTarget::Codex => {
-            let flags: Vec<String> = if a.enabled {
-                vec!["--codex-only".into()]
-            } else {
-                vec!["--remove".into(), "--codex-only".into()]
-            };
-            ("OpenAI Codex", wire_hooks::run(&flags))
+            if a.enabled
+                && ds_config::Paths::resolve()
+                    .map(|p| !p.codex_dir.exists())
+                    .unwrap_or(true)
+            {
+                return Ok("OpenAI Codex is not installed — nothing to wire.".into());
+            }
+            ("OpenAI Codex", wire::run(&flags(target.as_str())))
         }
         // Unreachable: an unknown token already errored at `WireTarget::parse` above, and
         // `NarrationSpec` returned from its dedicated branch before this match.

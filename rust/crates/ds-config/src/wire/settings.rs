@@ -8,7 +8,7 @@
 //! Claude Code's own `voice` block is the user's — DontSpeak never writes it (read-only).
 //!
 //! The atomic-write + timestamped-backup helpers also live here: they are the crash-safe
-//! primitives shared by `write_settings` and the `wire-hooks` / `wire-desktop` subcommands.
+//! primitives shared by `write_settings` and the `wire <client>` orchestrator's hook + MCP writes.
 
 use std::io::{self, Write};
 
@@ -81,7 +81,7 @@ pub fn write_settings(paths: &Paths, voice: &VoiceConfig) -> io::Result<()> {
 /// Atomically write a JSON value to `path`: pretty-print (+ trailing newline), write a
 /// temp file in the SAME directory, then `rename` it onto the target (atomic on one
 /// filesystem) so a reader never observes a half-written document. Shared by
-/// [`write_settings`] and the `wire-hooks` subcommand.
+/// [`write_settings`] and the `wire <client>` orchestrator's hook + MCP writes.
 pub fn atomic_write_json(path: &std::path::Path, value: &Value) -> io::Result<()> {
     let pretty = serde_json::to_string_pretty(value)? + "\n";
     let dir = path

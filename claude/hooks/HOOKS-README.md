@@ -43,8 +43,8 @@ reply ding defaults to the OS chime (`ding`/`Tink`/`message` on Windows/macOS/Li
 needs-input cue ships off.
 
 **OpenAI Codex** uses the very same binary and `hook_event_name` contract, wired into
-`~/.codex/config.toml` (auto-detected by `wire-hooks` when `~/.codex` exists; force with
-`--codex-only`, skip with `--no-codex`). Codex has no `MessageDisplay` stream, so it wires
+`~/.codex/config.toml` by `dontspeak wire codex` (presence-gated: a clean skip when `~/.codex`
+doesn't exist). Codex has no `MessageDisplay` stream, so it wires
 two events instead: `UserPromptSubmit` → `provide` injects the narration spec (so Codex
 *writes* the spoken-line blockquotes), and `Stop` → `notify` speaks the final reply (the
 whole `last_assistant_message`, run through the same blockquote/short logic as streaming).
@@ -67,10 +67,11 @@ engine-side. Caps-lock reading and mic-active probing also run in-process in the
 
 Run `./scripts/install.sh` from the repo root. It builds the Rust workspace, installs the
 binaries into `~/.local/bin` (override with `DONTSPEAK_INSTALL_DIR`), and **auto-merges**
-the voice hooks into `~/.claude/settings.json` via `dontspeak wire-hooks` — a safe,
-additive, backed-up merge (preview with `wire-hooks --print-only`, undo with
-`wire-hooks --remove`). It also wires OpenAI Codex's hooks into `~/.codex/config.toml`
-(when `~/.codex` exists) and registers the MCP server with Claude Desktop (when installed).
+each client's whole integration via `dontspeak wire <client>` — a safe, additive, backed-up
+merge (preview with `--print-only`, undo with `--remove`). `wire claude_code` merges the voice
+hooks into `~/.claude/settings.json` AND registers the MCP server in `~/.claude.json`;
+`wire codex` wires Codex's hooks (when `~/.codex` exists); `wire claude_desktop` registers the
+MCP server with Claude Desktop (when installed).
 There is no launchd/systemd agent on macOS: the engine runs in-process inside
 `DontSpeak.app` (built by `apps/macos/bundle.sh`); on Linux the headless `dontspeakd` runs
 as a systemd user service (`apps/linux/enable-daemon.sh`).

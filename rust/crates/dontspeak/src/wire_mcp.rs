@@ -1,51 +1,22 @@
-//! Shared core for the two MCP-registration subcommands — `wire-code` (Claude CODE's
-//! `~/.claude.json`) and `wire-desktop` (Claude DESKTOP's `claude_desktop_config.json`).
-//! Both register the IDENTICAL stdio `mcpServers.DontSpeak` entry and differ only in WHICH
-//! config file, how they detect the client, and the user-facing labels — so the one
-//! read → merge/strip → backup → atomic-write flow lives here ONCE rather than being copied
-//! per client. It reuses the SAME `ds-config` primitives the hook installer uses
-//! (`merge_mcp_server`/`strip_mcp_server`, `backup_before_write`, `atomic_write_json`), so an
-//! MCP registration is crash-safe in exactly the way a `wire-hooks` settings.json write is.
-//! The two subcommands are thin adapters: each builds a [`Target`] and calls [`apply`].
+//! Shared MCP-registration core for the [`wire`](crate::wire) orchestrator — used for BOTH Claude
+//! CODE (`~/.claude.json`, [`code_target`]) and Claude DESKTOP (`claude_desktop_config.json`,
+//! [`desktop_target`]). Both register the IDENTICAL stdio `mcpServers.DontSpeak` entry and differ
+//! only in WHICH config file, how they detect the client, and the user-facing labels — so the one
+//! read → merge/strip → backup → atomic-write flow lives here ONCE rather than being copied per
+//! client. It reuses the SAME `ds-config` primitives the hook writers use
+//! (`merge_mcp_server`/`strip_mcp_server`, `backup_before_write`, `atomic_write_json`), so an MCP
+//! registration is crash-safe in exactly the way a settings.json hook write is. Each client builds
+//! a [`Target`] (via [`code_target`]/[`desktop_target`]) and calls [`apply`].
 
 use std::path::Path;
 
 use ds_config::Paths;
 use serde_json::Value;
 
-/// Outcome of CLI flag parsing: either `--help` was shown (the caller exits 0 without doing
-/// anything) or we resolved the two booleans the flow needs.
-pub enum Flags {
-    /// `--help`/`-h` was passed; usage was printed. Caller returns 0.
-    Help,
-    /// Normal run with the parsed toggles.
-    Run { remove: bool, print_only: bool },
-}
-
-/// Parse the `[--remove] [--print-only]` flags both MCP subcommands accept. Unknown args are
-/// warned and ignored (matching `wire-hooks`), never fatal. `tool` names the subcommand in
-/// the usage/warning lines.
-pub fn parse_flags(tool: &str, args: &[String]) -> Flags {
-    let mut remove = false;
-    let mut print_only = false;
-    for a in args {
-        match a.as_str() {
-            "--remove" => remove = true,
-            "--print-only" | "--print" => print_only = true,
-            "-h" | "--help" => {
-                eprintln!("usage: dontspeak {tool} [--remove] [--print-only]");
-                return Flags::Help;
-            }
-            other => eprintln!("{tool}: ignoring unknown arg {other:?}"),
-        }
-    }
-    Flags::Run { remove, print_only }
-}
-
 /// One client's registration target — the config file plus the client-specific gating and
 /// labels that specialize the shared flow. Built by each subcommand from its [`Paths`].
 pub struct Target<'a> {
-    /// Subcommand name for log lines, e.g. `"wire-code"`.
+    /// Label for log lines (the `wire` orchestrator sets `"wire"`).
     pub tool: &'a str,
     /// The config file to edit (Code's `~/.claude.json`, Desktop's `claude_desktop_config.json`).
     pub config: &'a Path,
@@ -62,8 +33,8 @@ pub struct Target<'a> {
 /// Resolve the absolute path to register as the MCP `command`: prefer the stable install
 /// location (`~/.local/bin/dontspeak`) so the entry survives rebuilds at the same path, else
 /// THIS executable (the macOS app bundle or a dev build). `None` only if neither resolves.
-/// (Same intent as `wire-hooks`' `sibling_bin`, without the Windows-shadowing guard the hook
-/// installer needs — the MCP `command` is fine pointing at either deployed path.)
+/// (Same intent as the hook writer's `sibling_bin`, without the Windows-shadowing guard the hook
+/// path needs — the MCP `command` is fine pointing at either deployed path.)
 pub fn resolve_self_command() -> Option<String> {
     let file = format!("dontspeak{}", std::env::consts::EXE_SUFFIX);
     if let Some(p) = Paths::resolve() {
@@ -77,9 +48,38 @@ pub fn resolve_self_command() -> Option<String> {
         .map(|e| e.to_string_lossy().into_owned())
 }
 
+/// The Claude **Code** MCP target — the server entry in `~/.claude.json`, gated on the `~/.claude`
+/// dir (which the Claude Code hook wire creates just before us). Built here so the `wire`
+/// orchestrator composes `claude_code` = hooks + this MCP registration from ONE shared flow.
+pub fn code_target(paths: &Paths) -> Target<'_> {
+    Target {
+        tool: "wire",
+        config: &paths.claude_code_config,
+        present: paths.claude_dir.exists(),
+        absent_hint: format!("Claude Code not detected ({})", paths.claude_dir.display()),
+        load_hint: "start a new Claude Code session to load the server",
+    }
+}
+
+/// The Claude **Desktop** MCP target — `claude_desktop_config.json`, gated on
+/// [`Paths::claude_desktop_present`] so we never scatter a stray `Claude/` config dir on a machine
+/// without Desktop. Desktop has no hook system, so `claude_desktop` = this MCP registration only.
+pub fn desktop_target(paths: &Paths) -> Target<'_> {
+    Target {
+        tool: "wire",
+        config: &paths.claude_desktop_config,
+        present: paths.claude_desktop_present(),
+        absent_hint: format!(
+            "Claude Desktop not detected ({})",
+            paths.claude_desktop_dir.display()
+        ),
+        load_hint: "quit and reopen Claude Desktop to load the server",
+    }
+}
+
 /// Register (or, with `remove`, un-register) our stdio `mcpServers.DontSpeak` entry in
-/// `target.config`, or PREVIEW the result with `print_only`. The ONE flow shared by
-/// `wire-code` and `wire-desktop`:
+/// `target.config`, or PREVIEW the result with `print_only`. The ONE flow shared by the `wire`
+/// orchestrator's Claude Code + Desktop MCP surfaces ([`code_target`]/[`desktop_target`]):
 ///   presence-gate → parse (a malformed file is left UNTOUCHED) → merge/strip via `ds-config`
 ///   → either print, or back-up-then-atomic-write.
 /// Additive + idempotent (our entry is overwritten so a reinstall re-points `command`; every
@@ -140,7 +140,7 @@ pub fn apply(target: &Target, remove: bool, print_only: bool) -> i32 {
         return 0;
     }
 
-    // Timestamped backup before overwriting — the SAME shared helper `wire-hooks` uses. Surface
+    // Timestamped backup before overwriting — the SAME shared helper the hook writer uses. Surface
     // (don't swallow) a copy failure, then proceed: the user is warned the overwrite has no
     // recoverable copy, rather than the write being silently blocked.
     if let Err(e) = ds_config::backup_before_write(cfg, "json") {
@@ -189,42 +189,6 @@ mod tests {
 
     fn read(cfg: &Path) -> Value {
         serde_json::from_str(&std::fs::read_to_string(cfg).unwrap()).unwrap()
-    }
-
-    #[test]
-    fn parse_flags_reads_toggles_and_help_and_ignores_unknown() {
-        assert!(matches!(
-            parse_flags("t", &["--remove".into()]),
-            Flags::Run {
-                remove: true,
-                print_only: false
-            }
-        ));
-        assert!(matches!(
-            parse_flags("t", &["--print-only".into()]),
-            Flags::Run {
-                remove: false,
-                print_only: true
-            }
-        ));
-        // `--print` is an accepted alias of `--print-only`.
-        assert!(matches!(
-            parse_flags("t", &["--print".into()]),
-            Flags::Run {
-                print_only: true,
-                ..
-            }
-        ));
-        assert!(matches!(parse_flags("t", &["--help".into()]), Flags::Help));
-        assert!(matches!(parse_flags("t", &["-h".into()]), Flags::Help));
-        // Unknown args are warned-and-ignored, never fatal.
-        assert!(matches!(
-            parse_flags("t", &["--nope".into()]),
-            Flags::Run {
-                remove: false,
-                print_only: false
-            }
-        ));
     }
 
     #[test]

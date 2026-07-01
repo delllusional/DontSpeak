@@ -113,7 +113,7 @@ Name: "integrations\claude"; Description: "Claude Code — register the MCP + wi
 Name: "integrations\codex"; Description: "OpenAI Codex — wire the narration hooks"
 ; Claude Desktop: register the dontspeak stdio MCP server in %APPDATA%\Claude\claude_desktop_config.json
 ; so Desktop can call speak/listen on demand (no hooks → registration only). No Types → OFF by
-; default, but [Code] CurPageChanged PRE-CHECKS it when Claude Desktop is detected; wire-desktop
+; default, but [Code] CurPageChanged PRE-CHECKS it when Claude Desktop is detected; wire claude_desktop
 ; self-skips if it's absent.
 Name: "integrations\claudedesktop"; Description: "Claude Desktop — register the voice MCP server"
 
@@ -126,7 +126,7 @@ Name: "integrations\claudedesktop"; Description: "Claude Desktop — register th
 ; binary. Models live in %LOCALAPPDATA%\DontSpeak\models, not {app}, so this touches no user data.
 ;
 ; The CURRENT names mirror ds_config::INSTALLED_BINS (rust/crates/ds-config/src/lib.rs) —
-; the one source of truth the cross-platform `wire-hooks` prune uses directly; it runs as
+; the one source of truth the cross-platform `wire` prune uses directly; it runs as
 ; the NON-elevated user and can't clear {app} under Program Files, so this elevated,
 ; pre-copy delete is duplicated here declaratively. Keep in sync. (dontspeakd is a no-op on
 ; Windows — not shipped here.)
@@ -192,28 +192,26 @@ Filename: "{app}\ds-helper.exe"; Parameters: "--install-prefetched ""{tmp}"" cud
   StatusMsg: "Installing CUDA GPU runtime..."; \
   Flags: runhidden waituntilterminated runasoriginaluser; Components: onnx\cuda
 
-; --- Claude Code integration (optional component). Register the dontspeak MCP for the user
-;     (best-effort; needs the `claude` CLI) — remove-then-add so it always RE-POINTS at THIS
-;     install — AND wire the voice hooks into %USERPROFILE%\.claude\settings.json. Both run
-;     AS THE ORIGINAL USER so they touch the user's config, not the elevating admin's. ---
-Filename: "{cmd}"; Parameters: "/c claude mcp remove dontspeak 2>nul & claude mcp add --scope user dontspeak ""{app}\dontspeak.exe"" & exit 0"; \
-  Flags: runhidden waituntilterminated runasoriginaluser; Components: integrations\claude
-Filename: "{app}\dontspeak.exe"; Parameters: "wire-hooks --no-codex"; \
-  StatusMsg: "Wiring Claude Code voice hooks..."; \
+; --- Claude Code integration (optional component). `wire claude_code` does the WHOLE
+;     integration in ONE step — voice hooks into %USERPROFILE%\.claude\settings.json AND the
+;     stdio MCP server into %USERPROFILE%\.claude.json (additive, backed-up, re-points on
+;     reinstall). No external `claude` CLI needed. AS THE ORIGINAL USER so it touches the user's
+;     config, not the elevating admin's. ---
+Filename: "{app}\dontspeak.exe"; Parameters: "wire claude_code"; \
+  StatusMsg: "Wiring Claude Code (voice hooks + MCP server)..."; \
   Flags: runhidden waituntilterminated runasoriginaluser; Components: integrations\claude
 
-; --- Codex integration (optional component). Wire ONLY the narration hooks into
-;     %USERPROFILE%\.codex\config.toml (--codex-only leaves settings.json untouched), as the
-;     original user so it lands in the user's config. ---
-Filename: "{app}\dontspeak.exe"; Parameters: "wire-hooks --codex-only"; \
+; --- Codex integration (optional component). `wire codex` wires the narration hooks into
+;     %USERPROFILE%\.codex\config.toml, as the original user; self-skips if ~/.codex is absent. ---
+Filename: "{app}\dontspeak.exe"; Parameters: "wire codex"; \
   StatusMsg: "Wiring Codex narration hooks..."; \
   Flags: runhidden waituntilterminated runasoriginaluser; Components: integrations\codex
 
-; --- Claude Desktop integration (optional component). Register the dontspeak stdio MCP
-;     server in %APPDATA%\Claude\claude_desktop_config.json (additive, backed-up, re-points
-;     on reinstall). AS THE ORIGINAL USER so it edits the user's %APPDATA%, not the elevating
-;     admin's. wire-desktop self-skips if Claude Desktop isn't actually present. ---
-Filename: "{app}\dontspeak.exe"; Parameters: "wire-desktop"; \
+; --- Claude Desktop integration (optional component). `wire claude_desktop` registers the
+;     dontspeak stdio MCP server in %APPDATA%\Claude\claude_desktop_config.json (additive,
+;     backed-up, re-points on reinstall). AS THE ORIGINAL USER so it edits the user's %APPDATA%,
+;     not the elevating admin's. Self-skips if Claude Desktop isn't actually present. ---
+Filename: "{app}\dontspeak.exe"; Parameters: "wire claude_desktop"; \
   StatusMsg: "Registering the MCP server with Claude Desktop..."; \
   Flags: runhidden waituntilterminated runasoriginaluser; Components: integrations\claudedesktop
 
@@ -252,15 +250,15 @@ Type: files; Name: "{userdesktop}\DontSpeak.lnk"
 Filename: "powershell.exe"; \
   Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command ""Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DontSpeak' -ErrorAction SilentlyContinue"""; \
   Flags: runhidden; RunOnceId: "RemoveAutostart"
-; Strip the DontSpeak voice hooks from settings.json (only OUR groups; a no-op if absent).
-Filename: "{app}\dontspeak.exe"; Parameters: "wire-hooks --remove"; \
-  Flags: runhidden; RunOnceId: "UnwireHooks"
-; Unregister the dontspeak MCP server from Claude Desktop's config (only OUR entry; no-op if absent).
-Filename: "{app}\dontspeak.exe"; Parameters: "wire-desktop --remove"; \
-  Flags: runhidden; RunOnceId: "UnwireDesktop"
-; Unregister the MCP from Claude Code (best-effort; needs the `claude` CLI).
-Filename: "{cmd}"; Parameters: "/c claude mcp remove dontspeak 2>nul & exit 0"; \
-  Flags: runhidden; RunOnceId: "RemoveMcp"
+; Strip each client's WHOLE DontSpeak integration (only OUR entries; a no-op if absent):
+; claude_code = voice hooks (settings.json) + MCP server (~/.claude.json); claude_desktop = MCP;
+; codex = narration hooks. No external `claude` CLI needed.
+Filename: "{app}\dontspeak.exe"; Parameters: "wire claude_code --remove"; \
+  Flags: runhidden; RunOnceId: "UnwireClaudeCode"
+Filename: "{app}\dontspeak.exe"; Parameters: "wire claude_desktop --remove"; \
+  Flags: runhidden; RunOnceId: "UnwireClaudeDesktop"
+Filename: "{app}\dontspeak.exe"; Parameters: "wire codex --remove"; \
+  Flags: runhidden; RunOnceId: "UnwireCodex"
 
 [Code]
 var

@@ -17,7 +17,7 @@
 # Prerequisites:
 #   - the Rust dontspeakd binary built + installed (see above)
 #   - ~/.claude/keybindings.json has "ctrl+g": "voice:pushToTalk"
-#   - ~/.claude/settings.json seeded by `dontspeak wire-hooks` (voice + dontspeak blocks)
+#   - ~/.claude/settings.json seeded by `dontspeak wire` (voice + dontspeak blocks)
 #   - /dev/uinput udev rule installed (see udev-rule.txt)
 
 set -eu
@@ -64,7 +64,7 @@ if ! jq '.. | objects | .["ctrl+g"]?' ~/.claude/keybindings.json 2>/dev/null | g
     log "Add it manually (see keybindings.snippet.json — it goes under bindings[].bindings)"
 fi
 
-# Settings seeding is owned by the installer's `dontspeak wire-hooks` step (it seeds
+# Settings seeding is owned by the installer's `dontspeak wire` step (it seeds
 # our `dontspeak` block AND sets Claude Code's `voice` to {enabled:true, mode:tap} for the
 # claude_native path). This script only manages the daemon — it never touches settings.json.
 

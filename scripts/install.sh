@@ -8,9 +8,9 @@
 # the TCC grants survive rebuilds), and installs the thin hook wrappers.
 # Logging is ~/Library/Logs/dontspeak.log with in-process rotation (no conf needed).
 #
-# This wrapper adds the things specific to a fresh CLI install: merging the voice
-# hooks into ~/.claude/settings.json via `dontspeak wire-hooks` (additive, backed-up;
-# preview with --print-only, undo with --remove) and the next-steps notes.
+# This wrapper adds the things specific to a fresh CLI install: wiring each client's whole
+# integration via `dontspeak wire <client>` (Claude Code = hooks + MCP, Desktop = MCP, Codex =
+# hooks; additive, backed-up; preview with --print-only, undo with --remove) and the next-steps notes.
 #
 # ENGINE HOST: on macOS the engine runs IN-PROCESS inside DontSpeak.app (built via
 # apps/macos/bundle.sh) — it owns the RPC socket, hosts TTS/STT, and catches Caps-Lock,
@@ -18,9 +18,9 @@
 # the headless dontspeakd is the engine host (systemd: apps/linux/enable-daemon.sh). The
 # hooks work without either (warm socket if up, else a cold one-shot synth).
 #
-# SAFETY: idempotent. Touches ~/.claude/hooks (backed up), $INSTALL_DIR, and merges
-# the voice hooks into ~/.claude/settings.json via `dontspeak wire-hooks` — an
-# additive, backed-up, malformed-safe merge that never clobbers your other keys.
+# SAFETY: idempotent. Touches ~/.claude/hooks (backed up), $INSTALL_DIR, and wires each client's
+# integration via `dontspeak wire <client>` — additive, backed-up, malformed-safe merges that
+# never clobber your other keys.
 set -euo pipefail
 
 # This installer lives in scripts/; the repo root is one level up. The shared helpers
@@ -41,48 +41,34 @@ BUILD_ID="$(DONTSPEAK_INSTALL_DIR="$INSTALL_DIR" bash "$REPO/scripts/install-dae
 echo "==> binaries + hooks installed (BUILD_ID=$BUILD_ID)"
 
 # ==> 5. Wire the Claude Code voice hooks into ~/.claude/settings.json. The
-# dontspeak binary owns the ONE cross-platform hook definition + a SAFE merge
-# (additive, idempotent, timestamped backup first, malformed file left untouched), so
-# every platform installs the identical set. Preview without writing:
-#   $INSTALL_DIR/dontspeak wire-hooks --print-only      (undo: wire-hooks --remove)
+# The dontspeak binary owns the ONE cross-platform per-client integration definition + a SAFE
+# merge (additive, idempotent, timestamped backup first, malformed file left untouched), so every
+# platform installs the identical set. `wire <client>` does that client's WHOLE integration in one
+# step — Claude Code = voice hooks + MCP server; Desktop = MCP server; Codex = narration hooks.
+# Preview with --print-only; undo with --remove; a client that isn't installed is a clean skip.
 echo
-echo "==> 5. wire Claude Code voice hooks → ~/.claude/settings.json"
-echo "       (also wires OpenAI Codex's narration hooks → ~/.codex/config.toml if ~/.codex exists)"
-"$INSTALL_DIR/dontspeak" wire-hooks
+echo "==> 5. wire Claude Code (voice hooks → ~/.claude/settings.json + MCP server → ~/.claude.json)"
+"$INSTALL_DIR/dontspeak" wire claude_code
 
-# ==> 6. Register the MCP server with Claude CODE (~/.claude.json), so the agent gets the
-# DontSpeak control tools (set_config, speak, listen, …) WITHOUT the user ever
-# running `claude mcp add` by hand. This is the MCP sibling of the hooks above: hooks make
-# Claude Code SPEAK, this lets it CONTROL speech. Additive, backed-up, re-points on reinstall;
-# self-detects and SKIPS quietly if ~/.claude is absent. Preview: wire-code --print-only;
-# undo: wire-code --remove.
 echo
-echo "==> 6. register MCP server with Claude Code → ~/.claude.json"
-"$INSTALL_DIR/dontspeak" wire-code || true
+echo "==> 6. wire Claude Desktop MCP server (only if Desktop is installed)"
+"$INSTALL_DIR/dontspeak" wire claude_desktop || true
 
-# ==> 7. Register the MCP server with Claude DESKTOP, if it's installed. Desktop has no
-# hook system, so this is registration ONLY — it adds mcpServers.DontSpeak to
-# ~/Library/Application Support/Claude/claude_desktop_config.json (additive, backed-up,
-# re-points on reinstall). wire-desktop self-detects and SKIPS quietly if Desktop is
-# absent, so this is safe to always run. Preview: wire-desktop --print-only; undo: --remove.
 echo
-echo "==> 7. register MCP server with Claude Desktop (only if installed)"
-"$INSTALL_DIR/dontspeak" wire-desktop || true
+echo "==> 7. wire OpenAI Codex narration hooks (only if ~/.codex exists)"
+"$INSTALL_DIR/dontspeak" wire codex || true
 
 cat <<EOF
 
 Done. Installed:
   • $INSTALL_DIR/{dontspeakd,dontspeak,ds-helper}
-  • ~/.claude/settings.json voice hooks (merged via 'dontspeak wire-hooks';
-    undo any time with: $INSTALL_DIR/dontspeak wire-hooks --remove)
-  • ~/.codex/config.toml narration hooks (only if ~/.codex exists; skip with
-    'wire-hooks --no-codex', or wire later with 'wire-hooks --codex-only')
-  • Claude Code MCP server (mcpServers.DontSpeak in ~/.claude.json; registered via
-    'dontspeak wire-code' — start a NEW Claude Code session to load it; undo with
-    'dontspeak wire-code --remove')
-  • Claude Desktop MCP server (only if Desktop is installed; registered via
-    'dontspeak wire-desktop' → claude_desktop_config.json — restart Desktop to
-    load it; undo with 'dontspeak wire-desktop --remove')
+  • Claude Code: ~/.claude/settings.json voice hooks + ~/.claude.json MCP server (wired via
+    'dontspeak wire claude_code' — start a NEW Claude Code session to load the MCP server;
+    undo any time with 'dontspeak wire claude_code --remove')
+  • Claude Desktop MCP server (only if Desktop is installed; 'dontspeak wire claude_desktop'
+    → claude_desktop_config.json — restart Desktop to load it; undo with '… --remove')
+  • ~/.codex/config.toml narration hooks (only if ~/.codex exists; 'dontspeak wire codex';
+    undo with 'dontspeak wire codex --remove')
   • logs: ~/Library/Logs/dontspeak.log (in-process rotation, no sudo)
 
 Next steps:

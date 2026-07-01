@@ -30,7 +30,7 @@ $stage = "$PSScriptRoot\payload"
 $outDir = "$PSScriptRoot\Output"
 
 # 1/4 — the in-process engine cdylib, the warm-synth helper, and the merged dontspeak bin
-# (MCP server + Claude Code hook executor + wire-hooks/wire-desktop). See build-common.ps1.
+# (MCP server + Claude Code hook executor + wire). See build-common.ps1.
 Write-Host "==> 1/4  cargo build --release ($($Arch): core + helper + dontspeak)" -ForegroundColor Cyan
 Invoke-CargoRelease -Repo $repo -CargoTargetArg $b.CargoTargetArg -RustTarget $b.RustTarget
 
@@ -42,7 +42,7 @@ if ($LASTEXITCODE) { throw "dotnet publish failed" }
 Write-Host "==> 3/4  stage payload (+ dontspeak + icon)" -ForegroundColor Cyan
 Copy-Item "$($b.Rel)\dontspeak.exe" "$stage\" -Force
 # The dontspeak bin is also the hook executor. Hooks are wired into
-# settings.json by `dontspeak.exe wire-hooks` (the single cross-platform installer step).
+# settings.json by `dontspeak.exe wire` (the single cross-platform installer step).
 Copy-Item "$repo\apps\windows\winui\AppIcon.ico" "$stage\" -Force
 "    payload: {0} MB, {1} files" -f `
     [math]::Round((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum/1MB), `

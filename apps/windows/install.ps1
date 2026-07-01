@@ -4,7 +4,7 @@
 #   dontspeakd.exe, dontspeak.exe, ds-helper.exe
 # into one install dir (default %USERPROFILE%\.local\bin, override with
 # $env:DONTSPEAK_INSTALL_DIR), merges the keybindings snippet, wires the voice hooks via
-# `dontspeak.exe wire-hooks` (the single cross-platform definition — no placeholder
+# `dontspeak.exe wire` (the single cross-platform definition — no placeholder
 # substitution here any more), and PRINTS the next steps.
 # There is no more speak.py / uv / Kokoro model download — the Rust dontspeak.exe
 # does in-process Kokoro synth and fetches its model assets to the per-OS data dir on
@@ -16,7 +16,7 @@
 #   2. Copy hooks -> %USERPROFILE%\.claude\hooks\ with the binary path substituted
 #   3. Install keybindings.json (space:null, ctrl+g:voice:pushToTalk)
 #   4. Wire the voice hooks into %USERPROFILE%\.claude\settings.json via
-#      `dontspeak.exe wire-hooks` (the single cross-platform hook definition + merge)
+#      `dontspeak.exe wire` (the single cross-platform hook definition + merge)
 #   5. Report any missing prerequisites (cargo / pwsh)
 #
 # Run:  pwsh -NoProfile -ExecutionPolicy Bypass -File install.ps1
@@ -91,7 +91,7 @@ function Merge-Keybindings {
 }
 
 # NOTE: hook wiring into ~/.claude/settings.json is NOT done here — it's the shared,
-# cross-platform `dontspeak.exe wire-hooks` (Rust) step below, the SINGLE source of
+# cross-platform `dontspeak.exe wire` (Rust) step below, the SINGLE source of
 # truth for the hook set + merge on every platform. (A PowerShell `Merge-Hooks` used to
 # live here and drifted from the Rust merge; it's gone — never reintroduce a per-platform
 # copy.) Our own settings live in ~/.dontspeak/config.toml, also written via the Rust core.
@@ -112,7 +112,7 @@ Write-Host "    install dir: $INSTALL_DIR"
 # Mirrors scripts/install.sh: plain --release for the daemon + the merged dontspeak bin + the
 # kokoro helper bin (the kokoro helper is a [[bin]] in ds-tts, so `-p ds-tts` MUST be in
 # scope to select --bin ds-helper). The merged dontspeak bin is the MCP server,
-# the hook executor, and the wire-hooks/wire-desktop tool, dispatched by subcommand.
+# the hook executor, and the wire tool, dispatched by subcommand.
 # Windows ships the daemon + the dontspeak bin + the kokoro helper; there is no GUI (the
 # old Slint ds-gui was removed — macOS uses the SwiftUI app, which Windows has no
 # analog for yet).
@@ -163,22 +163,9 @@ foreach ($b in $bins) {
 # has no Windows analog; macOS scripts/install.sh ad-hoc signs via codesign).
 
 # ── 0e. register the MCP server with Claude Code (the control surface) ───────────────────
-# Mirrors the macOS README step "register dontspeak -> dontspeak". Best-effort: if the
-# `claude` CLI isn't on PATH we just print the command to run by hand. User scope (-s user)
-# so the `dontspeak` tools are available in every project.
-Write-Host ""
-Write-Host "==> 0e. register the dontspeak MCP server"
-$MCP_BIN = Join-Path $INSTALL_DIR 'dontspeak.exe'
-if (Get-Command claude -ErrorAction SilentlyContinue) {
-    # Remove any prior registration so a re-run updates the path instead of erroring.
-    & claude mcp remove --scope user dontspeak 2>$null | Out-Null
-    & claude mcp add --scope user dontspeak -- "$MCP_BIN"
-    if ($LASTEXITCODE -eq 0) { Write-Host "    registered MCP server 'dontspeak' -> $MCP_BIN (user scope)" }
-    else { Write-Host "    !! 'claude mcp add' failed; register by hand:  claude mcp add --scope user dontspeak -- `"$MCP_BIN`"" }
-} else {
-    Write-Host "    !! 'claude' CLI not found; register by hand:"
-    Write-Host "       claude mcp add --scope user dontspeak -- `"$MCP_BIN`""
-}
+# The dontspeak MCP server is registered together with the voice hooks by
+# `dontspeak.exe wire claude_code` in step 3 below (which owns the ~/.claude.json merge) —
+# no external `claude` CLI needed, and it's the SAME cross-platform path macOS/Linux use.
 
 # ── 0f. WinUI app — the resident host + Fluent UI (needs the .NET SDK) ────────────────────
 # The macOS SwiftUI-app analogue, and the Windows resident host: it shows the tray icon,
@@ -228,12 +215,14 @@ if (Test-Path -LiteralPath $KEYBINDS) {
 
 # ── 3. settings deep-merge ───────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "==> 3. wire Claude Code voice hooks -> $SETTINGS"
-# Single cross-platform installer step: dontspeak owns the ONE hook definition + a
-# SAFE merge (additive, idempotent, timestamped backup first, malformed file left
-# untouched), so the wired set never drifts from macOS/Linux.
-# (undo: dontspeak.exe wire-hooks --remove)
-& (Join-Path $INSTALL_DIR 'dontspeak.exe') wire-hooks
+Write-Host "==> 3. wire client integrations (Claude Code hooks + MCP, Desktop MCP, Codex hooks)"
+# One cross-platform per-client step: dontspeak owns the ONE integration definition + a SAFE
+# merge (additive, idempotent, timestamped backup first, malformed file left untouched), so the
+# wired set never drifts from macOS/Linux. `wire claude_code` does hooks AND the ~/.claude.json
+# MCP registration together; Desktop/Codex self-skip if absent.
+# (undo: dontspeak.exe wire <client> --remove)
+$_dsBin = Join-Path $INSTALL_DIR 'dontspeak.exe'
+foreach ($client in 'claude_code', 'claude_desktop', 'codex') { & $_dsBin wire $client }
 
 # NOTE: there is NO Kokoro/speak.py step anymore. The Rust dontspeak.exe does
 # in-process Kokoro synthesis and downloads its model assets (onnx + voices + the

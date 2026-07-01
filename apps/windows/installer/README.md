@@ -35,7 +35,8 @@ app and brings up everything it needs.
 - On the final **Select Additional Tasks** page: a **desktop shortcut** and **"Start
   DontSpeak when I sign in"** (the latter writes the same HKCU `Run` value the in-app
   "Start at login" toggle uses, so they stay in sync). Plus a Start-menu shortcut
-  (brand icon) and best-effort `claude mcp add --scope user dontspeak …` (as the real user).
+  (brand icon) and the selected client integrations via `dontspeak.exe wire <client>` (as the
+  real user) — Claude Code wires its hooks + MCP server with no external `claude` CLI needed.
 
 ## Build it
 Prereqs (one-time on the build machine):

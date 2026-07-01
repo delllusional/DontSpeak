@@ -112,7 +112,7 @@ try {
 
     # Ensure Claude Code's OWN voice block is enabled + tap (the claude_native path drives
     # CC's dictation via Ctrl+G, which needs CC in tap mode). Our own config lives under the
-    # separate `dontspeak` block, seeded by install's wire-hooks.
+    # separate `dontspeak` block, seeded by install's wire.
     if (-not $json.PSObject.Properties['voice']) {
         $json | Add-Member -NotePropertyName 'voice' -NotePropertyValue ([pscustomobject]@{ enabled = $true; mode = 'tap' })
     } else {
@@ -120,7 +120,7 @@ try {
         if ($json.voice.PSObject.Properties['mode'])    { $json.voice.mode = 'tap' }    else { $json.voice | Add-Member -NotePropertyName 'mode' -NotePropertyValue 'tap' }
     }
 
-    # NOTE: the voice HOOKS are wired by `dontspeak.exe wire-hooks` (step 1b below) —
+    # NOTE: the voice HOOKS are wired by `dontspeak.exe wire` (step 1b below) —
     # the SINGLE cross-platform source of truth for the full canonical hook set + a safe
     # merge. This used to hand-roll just the Stop + PostToolUse hooks here (2 of the 8),
     # which could drift from the Rust merge and, if enable.ps1 was run without install.ps1,
@@ -140,11 +140,13 @@ try {
 
 # ── 1b. Wire the voice hooks via the shared cross-platform installer step ─────────────────
 Write-Host ""
-Write-Host "==> 1b. Wire Claude Code voice hooks (dontspeak.exe wire-hooks)"
+Write-Host "==> 1b. Wire client integrations (Claude Code hooks + MCP, Desktop MCP, Codex hooks)"
 $MCP_BIN = Join-Path $INSTALL_DIR 'dontspeak.exe'
 if (Test-Path -LiteralPath $MCP_BIN) {
-    & $MCP_BIN wire-hooks
-    if ($LASTEXITCODE -ne 0) { Write-Host "    !! wire-hooks exited $LASTEXITCODE; check the engine log" }
+    foreach ($client in 'claude_code', 'claude_desktop', 'codex') {
+        & $MCP_BIN wire $client
+        if ($LASTEXITCODE -ne 0) { Write-Host "    !! wire $client exited $LASTEXITCODE; check the engine log" }
+    }
 } else {
     Write-Host "    !! $MCP_BIN not found — run install.ps1 first to install the binaries + wire hooks."
 }

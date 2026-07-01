@@ -18,8 +18,8 @@ that "didn't work" was simply never deployed to the running helper).
 - **Hook / MCP-surface change** (anything in the `dontspeak` binary — the `notify`/`provide`
   hook routing, `mcp`/`tools`, config parsing read by the hook): `install-daemon.sh` is
   enough. The hooks invoke
-  `~/.local/bin/dontspeak` fresh each time, so it's live immediately (re-run `wire-hooks` only
-  if the hook SET changed).
+  `~/.local/bin/dontspeak` fresh each time, so it's live immediately (re-run `wire claude_code`
+  only if the hook SET changed).
 - **Engine or helper change** (anything in `dontspeakd`, `ds-tts` helper, `ds-stt`,
   the TTS queue/synth/chunking, IPC handlers): you **MUST** run the full **`./apps/macos/bundle.sh`**
   (then relaunch the app). `install-daemon.sh` does NOT update the bundled helper or the

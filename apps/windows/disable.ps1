@@ -52,11 +52,13 @@ try {
 # Without this the Stop/PostToolUse hooks stay in settings.json and re-spawn the engine on
 # demand (via `dontspeak speak` → MCP/IPC), so "disabled" voice could come back to life.
 Write-Host ""
-Write-Host "==> 2. Unwire Claude Code voice hooks (dontspeak.exe wire-hooks --remove)"
+Write-Host "==> 2. Unwire all client integrations (dontspeak.exe wire <client> --remove)"
 $MCP_BIN = Join-Path $INSTALL_DIR 'dontspeak.exe'
 if (Test-Path -LiteralPath $MCP_BIN) {
-    & $MCP_BIN wire-hooks --remove
-    if ($LASTEXITCODE -ne 0) { Write-Host "    !! wire-hooks --remove exited $LASTEXITCODE" }
+    foreach ($client in 'claude_code', 'claude_desktop', 'codex') {
+        & $MCP_BIN wire $client --remove
+        if ($LASTEXITCODE -ne 0) { Write-Host "    !! wire $client --remove exited $LASTEXITCODE" }
+    }
 } else {
     Write-Host "    (dontspeak.exe not found; leaving settings.json hooks as-is)"
 }

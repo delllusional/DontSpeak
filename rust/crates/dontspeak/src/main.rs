@@ -45,8 +45,7 @@ mod mcp;
 mod narrate;
 mod tools;
 mod voices;
-mod wire_code;
-mod wire_desktop;
+mod wire;
 mod wire_hooks;
 mod wire_mcp;
 
@@ -63,9 +62,10 @@ fn main() {
     //   `dontspeak provide`            — QUERY hook: read the hook JSON on stdin, print the
     //                                   event's `hookSpecificOutput` JSON (UserPromptSubmit →
     //                                   the narration spec). The only entry Claude Code waits on.
-    //   `dontspeak wire-hooks [...]`   — the cross-platform Claude Code hook installer.
-    //   `dontspeak wire-code [...]`    — register the MCP server in Claude CODE's ~/.claude.json.
-    //   `dontspeak wire-desktop [...]` — register the MCP server in Claude DESKTOP's config.
+    //   `dontspeak wire <client> [--remove]` — the ONE per-client integration installer: it
+    //                                   wires (or removes) EVERYTHING that client needs in a
+    //                                   single step — claude_code = hooks + MCP, claude_desktop
+    //                                   = MCP, codex = hooks. See `wire.rs`.
     // With no argv it is the stdio MCP server (the default, spawned by Claude Code / the app).
     // ALL communication is stdio: the MCP tool surface (JSON-RPC over stdio) and the two
     // Claude Code hook verbs above. There is no HTTP transport.
@@ -82,14 +82,8 @@ fn main() {
         }
         std::process::exit(0);
     }
-    if argv.get(1).map(String::as_str) == Some("wire-hooks") {
-        std::process::exit(wire_hooks::run(&argv[2..]));
-    }
-    if argv.get(1).map(String::as_str) == Some("wire-code") {
-        std::process::exit(wire_code::run(&argv[2..]));
-    }
-    if argv.get(1).map(String::as_str) == Some("wire-desktop") {
-        std::process::exit(wire_desktop::run(&argv[2..]));
+    if argv.get(1).map(String::as_str) == Some("wire") {
+        std::process::exit(wire::run(&argv[2..]));
     }
 
     // No subcommand: run the stdio MCP server loop.
