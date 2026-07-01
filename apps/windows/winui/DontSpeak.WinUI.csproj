@@ -30,11 +30,12 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
     <!-- .NET code-quality (CAxxxx) + code-style (IDExxxx) analyzers at the recommended
-         level; style rules enforced at build (not just in the IDE). Warnings stay
-         warnings for now — flip to TreatWarningsAsErrors once CI proves the build is
-         warning-clean (there is no local Windows build on the dev Mac). -->
+         level; style rules enforced at build (not just in the IDE), and every warning is
+         an ERROR — the per-commit csharp.yml job is the gate (there is no local Windows
+         build on the dev Mac). Deliberate opt-outs live in this dir's .editorconfig. -->
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <!-- Unpackaged: no MSIX identity; the bootstrapper auto-initializes the
          installed Windows App Runtime at startup. -->
     <WindowsPackageType>None</WindowsPackageType>
@@ -59,6 +60,12 @@
     <Content Include="AppIcon.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The xunit project (../winui.tests) exercises internal seams (HealthSnapshot parse,
+         the tray indicator mapping) directly. -->
+    <InternalsVisibleTo Include="DontSpeak.WinUI.Tests" />
   </ItemGroup>
 
   <ItemGroup>

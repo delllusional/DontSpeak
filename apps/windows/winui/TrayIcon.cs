@@ -154,7 +154,7 @@ internal sealed class TrayIcon : IDisposable
     /// per icon, carrying "ExecutablePath"); IsPromoted=1 pins it. We only SET the flag here
     /// (the library owns the icon registration, so we don't re-add it); the shell applies it
     /// on its next read. Returns true once our entry exists (found → stop retrying).</summary>
-    public bool PromoteInTray()
+    public static bool PromoteInTray()
     {
         var exe = Environment.ProcessPath;
         if (string.IsNullOrEmpty(exe)) return true;
@@ -279,7 +279,7 @@ internal sealed class TrayIcon : IDisposable
 
         IntPtr hdc = GetDC(IntPtr.Zero);
         IntPtr color = CreateDIBSection(hdc, ref bmi, 0, out IntPtr bits, IntPtr.Zero, 0);
-        ReleaseDC(IntPtr.Zero, hdc);
+        _ = ReleaseDC(IntPtr.Zero, hdc);
         if (color == IntPtr.Zero) return LoadIconW(IntPtr.Zero, IDI_APPLICATION);
 
         // Render the mark to a straight-alpha BGRA buffer (shared with the window glyph) and

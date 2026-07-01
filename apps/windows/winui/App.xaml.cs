@@ -19,6 +19,8 @@ namespace DontSpeak;
 ///     keeps running. Exit is the tray's Exit item.
 ///   • leaves ALL runtime control (voice/engine/rate/toggles) to DontSpeak.
 /// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable",
+    Justification = "App lives for the whole process; the tray/panel are torn down by ExitApp, not a Dispose call")]
 public partial class App : Application
 {
     private MainWindow? _window;
@@ -45,7 +47,7 @@ public partial class App : Application
     {
         // Claim our app identity FIRST — before any window/tray/UI — so the taskbar and Task
         // Manager group this process as "DontSpeak" (see AppUserModelId). Best-effort.
-        try { Win32.SetCurrentProcessExplicitAppUserModelID(AppUserModelId); } catch { }
+        try { _ = Win32.SetCurrentProcessExplicitAppUserModelID(AppUserModelId); } catch { }
         EnablePortableModelDir();
         InitializeComponent();
     }
@@ -254,7 +256,7 @@ public partial class App : Application
         // Pin the icon onto the taskbar (out of the Win11 overflow). The shell creates
         // the NotifyIconSettings entry a beat after NIM_ADD, so retry on the first dozen
         // status pushes until PromoteInTray finds + promotes it.
-        if (_promoteTries < 12 && _tray != null && _tray.PromoteInTray())
+        if (_promoteTries < 12 && _tray != null && TrayIcon.PromoteInTray())
             _promoteTries = 12;
         else
             _promoteTries++;

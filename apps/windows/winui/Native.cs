@@ -275,7 +275,12 @@ internal sealed class HealthSnapshot
     /// <summary>Parse a model-status JSON string into a snapshot. Shared by the polling
     /// <see cref="Probe"/> and the push loop (which already holds the JSON from a blocking
     /// ModelStatusWait, so it must not re-fetch).</summary>
-    public static HealthSnapshot FromJson(string json)
+    public static HealthSnapshot FromJson(string json) => FromJson(json, Native.EngineStateWord);
+
+    /// <summary>As <see cref="FromJson(string)"/>, with the per-engine status-word formatter
+    /// injected: production passes the shared Rust formatter (`ds_engine_state_word`); the
+    /// unit tests pass a stub so the PARSE logic runs without ds_core.dll.</summary>
+    public static HealthSnapshot FromJson(string json, Func<string, double, string, string> stateWord)
     {
         var s = new HealthSnapshot();
         if (string.IsNullOrWhiteSpace(json) || json == "{}") return s;
@@ -317,11 +322,11 @@ internal sealed class HealthSnapshot
             s.EngineSelection.SttProvider = dto.SttProvider ?? "";
             s.EngineSelection.TtsProvider = dto.TtsProvider ?? "";
             s.EngineSelection.ClaudeCodeKey = dto.ClaudeCodeKey ?? "";
-            s.EngineDots.Kokoro = ToEngine(dto.Kokoro);
-            s.EngineDots.Parakeet = ToEngine(dto.Parakeet);
-            s.EngineDots.ClaudeCode = ToEngine(dto.ClaudeCode);
-            s.EngineDots.System = ToEngine(dto.System);
-            s.EngineDots.TtsSystem = ToEngine(dto.TtsSystem);
+            s.EngineDots.Kokoro = ToEngine(dto.Kokoro, stateWord);
+            s.EngineDots.Parakeet = ToEngine(dto.Parakeet, stateWord);
+            s.EngineDots.ClaudeCode = ToEngine(dto.ClaudeCode, stateWord);
+            s.EngineDots.System = ToEngine(dto.System, stateWord);
+            s.EngineDots.TtsSystem = ToEngine(dto.TtsSystem, stateWord);
             if (dto.Stats is { } stats)
             {
                 if (stats.Tts is { } tts)
@@ -353,10 +358,10 @@ internal sealed class HealthSnapshot
     /// drives the <see cref="EngineState"/> enum (1:1 with dontspeakd's engine_obj states) and
     /// the hover word comes from the shared Rust formatter (one mapping for every UI). A
     /// missing object reads as Missing, exactly as the old TryGetProperty walk did.</summary>
-    private static EngineInfo ToEngine(EngineObjDto? o)
+    private static EngineInfo ToEngine(EngineObjDto? o, Func<string, double, string, string> stateWord)
     {
         if (o is null)
-            return new EngineInfo(EngineState.Missing, 0, Native.EngineStateWord("missing", 0, ""));
+            return new EngineInfo(EngineState.Missing, 0, stateWord("missing", 0, ""));
         var state = o.State ?? "";
         var pct = o.Progress;
         var why = o.Error ?? "";
@@ -369,7 +374,7 @@ internal sealed class HealthSnapshot
             "downloading" => EngineState.Downloading,
             _ => EngineState.Missing,
         };
-        return new EngineInfo(es, pct, Native.EngineStateWord(state, pct, why));
+        return new EngineInfo(es, pct, stateWord(state, pct, why));
     }
 }
 

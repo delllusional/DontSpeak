@@ -157,13 +157,9 @@ jobs:
             echo "no Swift test targets in apps/macos/Package.swift — skipping"
           fi
 
-      # WinUI app: run dotnet test only if a test project exists.
-      - name: dotnet test (WinUI app, if any)
+      # WinUI app: the xunit pure-seam tests (apps/windows/winui.tests). Target the csproj
+      # directly — `dotnet test <dir>` needs a solution, which apps/windows doesn't have.
+      - name: dotnet test (WinUI app)
         if: runner.os == 'Windows'
         shell: bash
-        run: |
-          if ls apps/windows/**/*[Tt]est*.csproj >/dev/null 2>&1; then
-            dotnet test apps/windows
-          else
-            echo "no .NET test projects under apps/windows — skipping"
-          fi
+        run: dotnet test apps/windows/winui.tests/DontSpeak.WinUI.Tests.csproj -c Release -p:Platform=x64

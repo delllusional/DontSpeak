@@ -39,3 +39,7 @@ jobs:
       # exercised by build-portable.ps1); x64 matches the csproj's default RuntimeIdentifier.
       - name: dotnet build (x64, Release)
         run: dotnet build apps/windows/winui/DontSpeak.WinUI.csproj -c Release -p:Platform=x64
+      # The xunit pure-seam tests (HealthSnapshot parse, tray indicator mapping) — they run
+      # without ds_core.dll or the Windows App Runtime, so no Rust build is needed here either.
+      - name: dotnet test (x64, Release)
+        run: dotnet test apps/windows/winui.tests/DontSpeak.WinUI.Tests.csproj -c Release -p:Platform=x64

@@ -137,7 +137,7 @@ public sealed partial class MainWindow : Window
     {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         long style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
-        SetWindowLongPtr(hwnd, GWL_STYLE, (IntPtr)(style & ~(WS_MINIMIZEBOX | WS_MAXIMIZEBOX)));
+        SetWindowLongPtr(hwnd, GWL_STYLE, unchecked((IntPtr)(style & ~(WS_MINIMIZEBOX | WS_MAXIMIZEBOX))));
         SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     }
@@ -260,7 +260,7 @@ public sealed partial class MainWindow : Window
         return brush;
     }
 
-    private List<LogLine> ParseLogs(string json)
+    private static List<LogLine> ParseLogs(string json)
     {
         if (string.IsNullOrWhiteSpace(json)) return new();
         try
@@ -378,7 +378,8 @@ public sealed partial class MainWindow : Window
             TtsFirst.Text = Native.StatsRange(s.Tts.FirstMinMs / 1000, s.Tts.FirstAvgMs / 1000, s.Tts.FirstMaxMs / 1000, 1, "status.stats.unit.seconds");
             TtsSpoken.Text = Native.StatsCount((ulong)s.Tts.Utterances, s.Tts.AudioSecs);
             TtsFailuresRow.Visibility = s.Tts.Failures > 0 ? Visibility.Visible : Visibility.Collapsed;
-            if (s.Tts.Failures > 0) TtsFailures.Text = s.Tts.Failures.ToString();
+            if (s.Tts.Failures > 0)
+                TtsFailures.Text = s.Tts.Failures.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
         // STT expansion. A not-ready engine shows its state word as the note (same slot as the
@@ -543,7 +544,7 @@ public sealed partial class MainWindow : Window
     private void TtsHeader_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => ToggleStats(TtsStats);
     private void SttHeader_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => ToggleStats(SttStats);
     private void CapsHeader_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => ToggleStats(CapsStats);
-    private void ToggleStats(FrameworkElement panel)
+    private static void ToggleStats(FrameworkElement panel)
     {
         panel.Visibility = panel.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
         // (The Status content panel's SizeChanged re-caps the window height after this re-layouts.)
