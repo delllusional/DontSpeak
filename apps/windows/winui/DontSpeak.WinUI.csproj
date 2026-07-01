@@ -29,6 +29,12 @@
     <!-- TrayIcon.cs draws the status-dot icon directly into a 32bpp DIB section. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
+    <!-- .NET code-quality (CAxxxx) + code-style (IDExxxx) analyzers at the recommended
+         level; style rules enforced at build (not just in the IDE). Warnings stay
+         warnings for now — flip to TreatWarningsAsErrors once CI proves the build is
+         warning-clean (there is no local Windows build on the dev Mac). -->
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <!-- Unpackaged: no MSIX identity; the bootstrapper auto-initializes the
          installed Windows App Runtime at startup. -->
     <WindowsPackageType>None</WindowsPackageType>
@@ -63,10 +69,10 @@
     <!-- 2.4.2-dev: 2.4.1 placed the tray flyout BELOW a bottom taskbar; the dev build adds
          the bottom-taskbar placement fix (opens upward). Pin to the stable 2.4.2 once it ships. -->
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.4.2-dev.22" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.*" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" />
     <!-- GDI+ (System.Drawing) renders the brand SVG glyph into the tray icon's DIB
          for all three states; Windows-only, fine for this win-x64 WinUI app. -->
-    <PackageReference Include="System.Drawing.Common" Version="10.0.*" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.9" />
     <!-- Win2D: GPU (Direct2D) immediate-mode rendering for the dictation overlay. Used
          OFF-SCREEN (CanvasRenderTarget, no compositor) to rasterize the card, glow, and
          the per-word blur-replace cross-fade with a real GaussianBlurEffect, then the
