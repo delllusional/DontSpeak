@@ -328,10 +328,10 @@ final class Core {
     }
 
     /// Toggle global mute (the tray "Mute" checkbox). Mutes/unmutes the warm child's playback
-    /// without stopping it; optimistically flips the published flag so the menu reflects it
-    /// instantly, then confirms on the next push.
+    /// without stopping it, then `refresh()` reads the flag back so the menu-bar icon reflects
+    /// the engine's state — the SAME status-driven path the `mute` MCP tool takes. The read-back
+    /// is instant in practice, so no optimistic local echo is needed.
     func setMuted(_ on: Bool) {
-        activity.muted = on
         Task { [weak self] in
             await Task.detached { _ = ds_set_muted(on ? 1 : 0) }.value
             self?.refresh()

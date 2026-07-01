@@ -31,11 +31,12 @@ pub(crate) fn spawn_ipc_server(
             match req {
                 ds_ipc::Request::Ping => emit(&ds_ipc::Response::Pong),
                 ds_ipc::Request::Status => {
-                    let (tts_active, queued, paused) = ttsq.snapshot();
+                    let (tts_active, queued, paused, muted) = ttsq.snapshot();
                     emit(&ds_ipc::Response::Status {
                         tts_active,
                         queued,
                         paused,
+                        muted,
                     });
                 }
                 ds_ipc::Request::EnsureKokoroVoices => {

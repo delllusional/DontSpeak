@@ -16,6 +16,12 @@ pub const SPEAK_RATE: &str = "Speed multiplier 0.5–2.0 (default: from config).
 // ── stop_speech ───────────────────────────────────────────────────────────────────────
 pub const STOP_SPEAK: &str = "Stop any in-progress speech immediately.";
 
+// ── mute ─────────────────────────────────────────────────────────────────────────────
+pub const MUTE: &str = "Silence or restore ALL spoken output — the app's global mute. on:true \
+    mutes: replies and narration still queue but play SILENTLY, so the user hears nothing until \
+    on:false. Persists, unlike the one-shot stop_speech; get_status shows the muted state.";
+pub const MUTE_ON: &str = "true = mute (all speech silent; user hears nothing); false = unmute.";
+
 // ── list_voices ──────────────────────────────────────────────────────────────────────
 pub const LIST_VOICES: &str = "List available voices, grouped by language (English only in this \
     build). Optional engine filter; defaults to the configured engine.";
@@ -31,8 +37,8 @@ pub const LISTEN_SECONDS: &str =
 
 // ── get_status ───────────────────────────────────────────────────────────────────────────
 pub const STATUS: &str = "Report current state: engine, active voice, default rate, whether \
-    speech is playing, queue length, and paused. Pass detail:true to also include per-engine \
-    model status, dictation state, and stats.";
+    speech is playing, queue length, paused, and muted (output silenced). Pass detail:true to \
+    also include per-engine model status, dictation state, and stats.";
 pub const STATUS_DETAIL: &str =
     "Also include per-engine model status, dictation state, and stats. Default false.";
 

@@ -70,7 +70,7 @@ const fn p(name: &'static str, ty: PType, required: bool, description: &'static 
 /// The whole catalog, in display order — the ONE source both consumer shapes generate
 /// from, and the exact order the Tools window shows. Ordered to lead with the two core
 /// actions (speak · listen) so the highest-frequency tools sit first (primacy), then the
-/// interrupt (stop_speech), then read-only introspection (get_status · list_voices), then
+/// output-control pair (stop_speech · mute), then read-only introspection (get_status · list_voices), then
 /// speaker diarization (diarize · manage_speakers — the voiceprint library it labels with),
 /// and finally the rare admin tools (set_config, then the one-time client wiring
 /// setup_integration) in the low-attention tail.
@@ -98,6 +98,13 @@ static TOOLS: &[Tool] = &[
         name: "stop_speech",
         description: STOP_SPEAK,
         params: &[],
+        min_one: false,
+    },
+    // Persistent silence toggle for all spoken output (the global mute the app also drives).
+    Tool {
+        name: "mute",
+        description: MUTE,
+        params: &[p("on", PType::Bool, true, MUTE_ON)],
         min_one: false,
     },
     // Read-only introspection: current runtime state, then the voices replies can use (the
@@ -412,7 +419,7 @@ mod tests {
     fn catalog_is_a_nonempty_array_of_named_tools() {
         let c = catalog();
         let arr = c.as_array().expect("catalog is a JSON array");
-        assert_eq!(arr.len(), 9, "expected 9 tools");
+        assert_eq!(arr.len(), 10, "expected 10 tools");
         for t in arr {
             assert!(
                 t.get("name").and_then(|v| v.as_str()).is_some(),
@@ -436,7 +443,7 @@ mod tests {
     fn catalog_ui_params_are_ordered() {
         let ui = catalog_ui();
         let arr = ui.as_array().expect("ui catalog is an array");
-        assert_eq!(arr.len(), 9, "same 9 tools as the MCP catalog");
+        assert_eq!(arr.len(), 10, "same 10 tools as the MCP catalog");
 
         let speak = arr
             .iter()

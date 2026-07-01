@@ -160,11 +160,14 @@ pub enum Response {
     /// Reply to [`Request::Ping`].
     Pong,
     /// Reply to [`Request::Status`] (TERMINAL): live TTS-queue playback state.
-    /// `paused` is set during a record-barge hold.
+    /// `paused` is set during a record-barge hold; `muted` is the global mute
+    /// (the same flag the tray checkbox / Caps-Lock toggle / `SetMuted` drive) —
+    /// when true, output keeps queuing but plays SILENTLY.
     Status {
         tts_active: bool,
         queued: usize,
         paused: bool,
+        muted: bool,
     },
     /// Generic success terminator for a request that returns no payload.
     Done,
@@ -290,6 +293,7 @@ mod tests {
                 tts_active: false,
                 queued: 0,
                 paused: false,
+                muted: false,
             }
             .is_terminal()
         );

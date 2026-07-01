@@ -493,14 +493,16 @@ impl TtsQueue {
         }
     }
 
-    /// Read-only playback snapshot: `(tts_active, queued, paused)`.
-    /// `queued` counts items still waiting in the deque (excludes the one being played).
-    pub fn snapshot(&self) -> (bool, usize, bool) {
+    /// Read-only playback snapshot: `(tts_active, queued, paused, muted)`.
+    /// `queued` counts items still waiting in the deque (excludes the one being played);
+    /// `muted` is the global mute (output plays silently while set).
+    pub fn snapshot(&self) -> (bool, usize, bool, bool) {
         let queued = self.items.lock().unwrap().len();
         (
             self.tts_active.load(Ordering::SeqCst),
             queued,
             self.paused.load(Ordering::SeqCst),
+            self.tts.is_muted(),
         )
     }
 

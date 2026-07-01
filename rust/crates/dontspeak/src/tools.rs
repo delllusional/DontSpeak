@@ -51,7 +51,7 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
             None => Err("cannot resolve ~/.claude paths".into()),
         },
         // Stateful actions bridge to the resident engine.
-        "speak" | "stop_speech" | "listen" | "diarize" | "manage_speakers" => {
+        "speak" | "stop_speech" | "mute" | "listen" | "diarize" | "manage_speakers" => {
             let Some(sock) = sock else {
                 return ok(
                     id,
@@ -63,6 +63,7 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
             match name {
                 "speak" => call_speak(sock, &args),
                 "stop_speech" => call_stop(sock),
+                "mute" => call_mute(sock, &args),
                 "diarize" => call_diarize(sock, &args),
                 "manage_speakers" => call_speakers(sock, &args),
                 _ => call_dictate(sock, &args),
@@ -94,6 +95,12 @@ struct SpeakArgs {
     text: Option<String>,
     voice: Option<String>,
     rate: Option<f32>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct MuteArgs {
+    on: Option<bool>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -181,8 +188,13 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<St
                 tts_active,
                 queued,
                 paused,
+                muted,
             }) => {
-                json!({ "running": true, "tts_active": tts_active, "queued": queued, "paused": paused })
+                // `muted`: when true, replies/narration still queue but play SILENTLY — the
+                // reason the user may hear nothing. Surfaced here (not just in `detail`) so the
+                // model can notice it and tell the user, since the narration hook path that
+                // actually speaks replies never calls a tool that could report it.
+                json!({ "running": true, "tts_active": tts_active, "queued": queued, "paused": paused, "muted": muted })
             }
             Ok(_) => json!({ "running": true, "note": "unexpected engine response" }),
             Err(_) => json!({ "running": false }),
@@ -450,6 +462,31 @@ fn call_stop(sock: &Path) -> Result<String, String> {
         },
     ) {
         Ok(_) => Ok("Stopped.".into()),
+        Err(e) => Err(format!("engine unavailable: {e}")),
+    }
+}
+
+/// The `mute` tool: toggle the GLOBAL mute. Bridges to the engine over the SAME
+/// `SetMuted` request the app's tray checkbox / Caps-Lock toggle use (via `ds_core::ds_set_muted`)
+/// — one canonical path (`SetMuted` → `ttsq.set_muted` → `tts.set_muted`), so tool-driven and
+/// app-driven mute can't diverge. Distinct from `stop_speech`: mute PERSISTS and silences future
+/// output too (the queue keeps draining, just inaudibly), where stop is a one-shot barge.
+fn call_mute(sock: &Path, args: &Value) -> Result<String, String> {
+    let a: MuteArgs =
+        serde_json::from_value(args.clone()).map_err(|e| format!("invalid mute arguments: {e}"))?;
+    let Some(on) = a.on else {
+        return Err("`on` is required (true = mute, false = unmute)".into());
+    };
+    // Spell out the consequence so the model relays it: while muted the user hears nothing,
+    // so a spoken reply they were waiting on must be surfaced in text.
+    let done = if on {
+        "Muted — spoken replies and narration now play silently; the user will NOT hear \
+         anything until you unmute. If a spoken answer was expected, tell them in text."
+    } else {
+        "Unmuted — spoken output is audible again."
+    };
+    match ds_ipc::request(sock, &Request::SetMuted { on }) {
+        Ok(_) => Ok(done.into()),
         Err(e) => Err(format!("engine unavailable: {e}")),
     }
 }
@@ -764,6 +801,10 @@ mod drift {
         assert_tool_matches(
             "get_status",
             serde_json::to_value(StatusArgs { detail: Some(true) }).unwrap(),
+        );
+        assert_tool_matches(
+            "mute",
+            serde_json::to_value(MuteArgs { on: Some(true) }).unwrap(),
         );
         assert_tool_matches(
             "listen",
