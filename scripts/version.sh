@@ -14,5 +14,8 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cargo="$here/../rust/Cargo.toml"
-v="$(grep -m1 '^version = "' "$cargo" 2>/dev/null | sed -E 's/version = "([^"]+)"/\1/')"
+# `|| v=""` keeps the documented 0.0.0 fallback alive: under `set -e -o pipefail` a
+# missing file / no match would otherwise exit the script (status 2, empty output)
+# before the printf runs.
+v="$(grep -m1 '^version = "' "$cargo" 2>/dev/null | sed -E 's/version = "([^"]+)"/\1/')" || v=""
 printf '%s' "${v:-0.0.0}"
