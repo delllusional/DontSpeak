@@ -26,7 +26,7 @@ Each model runs on the fastest backend available, picked by the `provider` ladde
 
 ## MCP tools
 
-`speak` · `stop_speech` · `listen` · `get_status` · `list_voices` · `set_config` · `setup_integration` · `diarize` · `manage_speakers`
+`speak` · `listen` · `stop_speech` · `get_status` · `list_voices` · `diarize` · `manage_speakers` · `set_config` · `setup_integration`
 
 ## License
 

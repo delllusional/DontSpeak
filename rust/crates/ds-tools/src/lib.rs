@@ -68,13 +68,14 @@ const fn p(name: &'static str, ty: PType, required: bool, description: &'static 
 }
 
 /// The whole catalog, in display order — the ONE source both consumer shapes generate
-/// from, and the exact order the Tools window shows. Ordered so related tools sit
-/// together: spoken output (speak · stop_speech · list_voices), then voice
-/// input (listen), then runtime state (get_status), then speaker diarization (diarize ·
-/// manage_speakers — the voiceprint library it labels with), then config (set_config) and
-/// the setup tool that writes config / registers client integrations (setup_integration).
+/// from, and the exact order the Tools window shows. Ordered to lead with the two core
+/// actions (speak · listen) so the highest-frequency tools sit first (primacy), then the
+/// interrupt (stop_speech), then read-only introspection (get_status · list_voices), then
+/// speaker diarization (diarize · manage_speakers — the voiceprint library it labels with),
+/// and finally the rare admin tools (set_config, then the one-time client wiring
+/// setup_integration) in the low-attention tail.
 static TOOLS: &[Tool] = &[
-    // Spoken output: say something, then the voice it's said in.
+    // Core action: say something.
     Tool {
         name: "speak",
         description: SPEAK,
@@ -85,12 +86,26 @@ static TOOLS: &[Tool] = &[
         ],
         min_one: false,
     },
-    // Spoken output: halt playback, then list the voices replies can use (the voice
-    // itself is a persistent setting — see `set_config`'s tts_built_in_voices).
+    // Core action: hear something back (dictation).
+    Tool {
+        name: "listen",
+        description: LISTEN,
+        params: &[p("seconds", PType::Int(1, 60), false, LISTEN_SECONDS)],
+        min_one: false,
+    },
+    // Interrupt spoken output.
     Tool {
         name: "stop_speech",
         description: STOP_SPEAK,
         params: &[],
+        min_one: false,
+    },
+    // Read-only introspection: current runtime state, then the voices replies can use (the
+    // voice itself is a persistent setting — see `set_config`'s tts_built_in_voices).
+    Tool {
+        name: "get_status",
+        description: STATUS,
+        params: &[p("detail", PType::Bool, false, STATUS_DETAIL)],
         min_one: false,
     },
     Tool {
@@ -102,20 +117,6 @@ static TOOLS: &[Tool] = &[
             false,
             LIST_VOICES_ENGINE,
         )],
-        min_one: false,
-    },
-    // Voice input (dictation).
-    Tool {
-        name: "listen",
-        description: LISTEN,
-        params: &[p("seconds", PType::Int(1, 60), false, LISTEN_SECONDS)],
-        min_one: false,
-    },
-    // Runtime introspection.
-    Tool {
-        name: "get_status",
-        description: STATUS,
-        params: &[p("detail", PType::Bool, false, STATUS_DETAIL)],
         min_one: false,
     },
     // ── Speaker diarization (who spoke when) + voiceprint enrollment ──
