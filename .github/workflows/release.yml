@@ -203,6 +203,10 @@ jobs:
       - name: Build app zips (signed + notarized when configured)
         env:
           DONTSPEAK_DIST: ${{ steps.sign.outputs.on == 'true' && '1' || '0' }}
+          # Headless runner: never auto-mint a self-signed local-dev cert + codesign with it —
+          # that blocks on a keychain-authorization GUI prompt forever. Ad-hoc sign instead when
+          # not doing a real Developer-ID dist build. (No-op in dist mode, which skips autosign.)
+          DONTSPEAK_NO_AUTOSIGN: '1'
           DONTSPEAK_CODESIGN_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
           DONTSPEAK_APPLE_ID: ${{ secrets.APPLE_ID }}
           DONTSPEAK_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
