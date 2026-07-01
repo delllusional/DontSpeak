@@ -114,9 +114,10 @@ internal sealed class TrayIcon : IDisposable
     /// immediately (don't wait for the next poll), and sync the menu checkmark.</summary>
     private void SetMuted(bool muted)
     {
-        Native.SetMuted(muted);
-        _muted = muted;
-        if (_muteItem != null) _muteItem.IsChecked = muted;
+        // Only cache the new state if the request reached the engine — otherwise the
+        // icon would show muted while audio keeps playing (until the next poll).
+        if (Native.SetMuted(muted)) _muted = muted;
+        if (_muteItem != null) _muteItem.IsChecked = _muted;
         ApplyIcon();
     }
 

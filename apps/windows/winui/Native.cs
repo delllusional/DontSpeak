@@ -46,7 +46,8 @@ internal static class Native
     public static bool EngineRunning() => ds_engine_running_global() != 0;
 
     /// <summary>Mute/unmute the voice (silences playback without stopping it) — the same C ABI
-    /// the macOS tray "Mute" toggle calls. Returns the resulting muted state.</summary>
+    /// the macOS tray "Mute" toggle calls. Returns true if the request reached the engine
+    /// (false = engine down), NOT the resulting muted state.</summary>
     public static bool SetMuted(bool on) => ds_set_muted((byte)(on ? 1 : 0)) != 0;
 
     /// <summary>Open the OS system-voice settings page (Windows: Time &amp; language ▸ Speech)
