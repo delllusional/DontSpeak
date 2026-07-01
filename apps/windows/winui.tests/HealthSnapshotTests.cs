@@ -99,7 +99,9 @@ public class HealthSnapshotTests
     [InlineData("something_new", EngineState.Missing)]
     public void EngineStateStringMapsToEnum(string state, EngineState expected)
     {
-        var s = Parse($$"""{"kokoro": {"state": "{{state}}", "progress": 0.5}}""");
+        // The space before the final brace keeps the JSON's `}}` from reading as the
+        // $$-interpolation's closing delimiter (CS9007).
+        var s = Parse($$"""{"kokoro": {"state": "{{state}}", "progress": 0.5} }""");
         Assert.Equal(expected, s.EngineDots.Kokoro.State);
         Assert.Equal(0.5, s.EngineDots.Kokoro.Progress);
         Assert.Equal(EngineState.Missing, s.EngineDots.Parakeet.State); // absent object
