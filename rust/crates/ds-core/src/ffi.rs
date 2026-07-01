@@ -428,3 +428,48 @@ pub extern "C" fn ds_string_free(s: *mut c_char) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// End-to-end: the UI tool catalog the hosts read (`ds_tools_json`) enriches EVERY param
+    /// with a `detail` string, and constraint params carry the shared localized qualifier — so
+    /// no host has to rebuild it. Guards the FFI enrichment, not just the formatter helper.
+    #[test]
+    fn ds_tools_json_enriches_every_param_with_detail() {
+        let ptr = ds_tools_json();
+        let json = unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        ds_string_free(ptr);
+
+        let catalog: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let tools = catalog.as_array().expect("catalog is an array");
+        let mut saw_enum = false;
+        for tool in tools {
+            for param in tool["params"].as_array().unwrap_or(&Vec::new()) {
+                // Every param gets the key (even when empty) so hosts read it unconditionally.
+                let detail = param
+                    .get("detail")
+                    .and_then(|d| d.as_str())
+                    .expect("param has a detail field");
+                // A param with an `enum` MUST surface the localized "one of: …" qualifier.
+                if param
+                    .get("enum")
+                    .and_then(|e| e.as_array())
+                    .is_some_and(|v| !v.is_empty())
+                {
+                    saw_enum = true;
+                    assert!(
+                        detail.starts_with("one of: "),
+                        "enum param {} → {detail:?}",
+                        param["name"]
+                    );
+                }
+            }
+        }
+        assert!(saw_enum, "catalog has at least one enum param to qualify");
+    }
+}
