@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -69,6 +70,21 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // Fail diagnosably if the engine DLL is absent — a partial install, or a from-source
+        // C# build without the Rust artifacts (the csproj copies ds_core.dll only if it
+        // exists). Everything downstream P/Invokes it (HealthSnapshot.Probe below, Brand's
+        // static ctor via TrayIcon/MainWindow), which would otherwise die with a raw
+        // unhandled DllNotFoundException and no window.
+        if (!NativeLibrary.TryLoad("ds_core.dll", out _))
+        {
+            _ = Win32.MessageBoxW(IntPtr.Zero,
+                "ds_core.dll was not found next to the app, so the voice engine cannot start.\n\n" +
+                "Reinstall DontSpeak (irm https://dontspeak.org/install.ps1 | iex). Building from " +
+                "source? Build the Rust engine first — see apps/windows/installer/build-portable.ps1.",
+                "DontSpeak", Win32.MB_OK | Win32.MB_ICONERROR);
+            Exit(); return;
+        }
+
         // Single instance: a second launch (e.g. clicking the app while it's
         // resident in the tray) just exits and leaves the running one.
         _instanceMutex = new Mutex(true, "DontSpeak.WinUI.SingleInstance", out bool createdNew);

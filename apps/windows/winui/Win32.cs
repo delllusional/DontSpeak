@@ -74,6 +74,11 @@ internal static class Win32
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     internal static extern IntPtr GetModuleHandleW(string? name);
 
+    internal const uint MB_OK = 0x0, MB_ICONERROR = 0x10;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern int MessageBoxW(IntPtr hwnd, string text, string caption, uint type);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     internal static extern ushort RegisterClassW(ref WNDCLASS wc);
 
