@@ -139,14 +139,23 @@ pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime
 pub const ONNXRUNTIME_DIST_SHA256: &str =
     "547e40a48f1fe73e3f812d7c88a948612c23f896b91e4e2ee1e232d7b468246f";
 
+/// The onnxruntime-gpu version shipped for the CUDA path — DELIBERATELY decoupled from the CPU
+/// [`ONNXRUNTIME_VERSION`] (1.27.0): onnxruntime-gpu ≥ 1.27 requires CUDA 13 (a newer driver than
+/// Pascal-era cards run), so the GPU path stays on the LAST CUDA-12 line. The [`CUDA_WHEELS`]
+/// `onnxruntime_gpu` URL MUST embed this version — enforced by
+/// `cuda_pin_tests::cuda_wheels_are_consistent_and_complete`.
+pub const CUDA_ONNXRUNTIME_VERSION: &str = "1.26.0";
+
 // ── Windows CUDA GPU runtime — pinned PyPI wheels (each a zip), fetched on demand ──
-// EXACT version combo, validated together on Pascal (newer combos drop Pascal / fail the
-// cuDNN RNN path). (url, sha256) pairs; ~1.4 GB total.
+// onnxruntime-gpu 1.26.0 (the LAST CUDA-12 line; 1.27 drops CUDA 12 for CUDA 13) + CUDA 12.6 +
+// cuDNN 9.5.1.17 + curand 10.3.7.77. Kept on the CUDA-12 line so it runs on Pascal-era drivers
+// (e.g. 560.x / CUDA 12.6). onnxruntime-gpu DECLARES curand as a CUDA dep, so it MUST be shipped or
+// the provider fails to initialize (Win32 1114). (url, sha256) pairs; ~1.5 GB total.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub const CUDA_WHEELS: &[(&str, &str)] = &[
     (
-        "https://files.pythonhosted.org/packages/d2/07/036825cbe30f91ea8574a18a759beccd0ea31b7b71e17f6a9ee9304b51d2/onnxruntime_gpu-1.24.4-cp311-cp311-win_amd64.whl",
-        "1a799a16e5f1ff4d6a9e5f72d750849ab0fe534da8d323ae4a5d8d8bb7daeca8",
+        "https://files.pythonhosted.org/packages/ef/26/a417b7a1cdbbf56a389bfcd399255be23f30e5721e3e519472fe8dde9c99/onnxruntime_gpu-1.26.0-cp311-cp311-win_amd64.whl",
+        "cc5329aad02d9745cc3ae9cdb185bfa1aad242a7bf89b8c471280002ec40f98a",
     ),
     (
         "https://files.pythonhosted.org/packages/fa/76/4c80fa138333cc975743fd0687a745fccb30d167f906f13c1c7f9a85e5ea/nvidia_cuda_runtime_cu12-12.6.77-py3-none-win_amd64.whl",
@@ -159,6 +168,10 @@ pub const CUDA_WHEELS: &[(&str, &str)] = &[
     (
         "https://files.pythonhosted.org/packages/7d/ec/ce1629f1e478bb5ccd208986b5f9e0316a78538dd6ab1d0484f012f8e2a1/nvidia_cufft_cu12-11.3.3.83-py3-none-win_amd64.whl",
         "7a64a98ef2a7c47f905aaf8931b69a3a43f27c55530c698bb2ed7c75c0b42cb7",
+    ),
+    (
+        "https://files.pythonhosted.org/packages/a9/a8/0cd0cec757bd4b4b4ef150fca62ec064db7d08a291dced835a0be7d2c147/nvidia_curand_cu12-10.3.7.77-py3-none-win_amd64.whl",
+        "6d6d935ffba0f3d439b7cd968192ff068fafd9018dbf1b85b37261b13cfc9905",
     ),
     (
         "https://files.pythonhosted.org/packages/b6/b2/3f60d15f037fa5419d9d7f788b100ef33ea913ae5315c87ca6d6fa606c35/nvidia_cudnn_cu12-9.5.1.17-py3-none-win_amd64.whl",
@@ -174,14 +187,15 @@ pub const CUDA_WHEELS: &[(&str, &str)] = &[
     ),
 ];
 
-// ── Linux x86_64 CUDA GPU runtime — the SAME Pascal-validated version combo as Windows, as
-// manylinux wheels (each a zip). onnxruntime-gpu 1.24.4 (cuda12) + CUDA 12.6 + cuDNN 9.5.1.17.
-// (url, sha256) pairs; ~1.4 GB total. We pull every *.so out (archive::extract_all_sos).
+// ── Linux x86_64 CUDA GPU runtime — the SAME CUDA-12 version combo as Windows, as manylinux
+// wheels (each a zip). onnxruntime-gpu 1.26.0 (cuda12) + CUDA 12.6 + cuDNN 9.5.1.17 + curand
+// 10.3.7.77 (a DECLARED onnxruntime-gpu dep — must be shipped or the provider fails to init).
+// (url, sha256) pairs; ~1.5 GB total. We pull every *.so out (archive::extract_all_sos).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub const CUDA_WHEELS: &[(&str, &str)] = &[
     (
-        "https://files.pythonhosted.org/packages/9f/13/e080d758f2b60f71abe518c707135fb121d6a3019e0761ead89b5283ac3d/onnxruntime_gpu-1.24.4-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-        "c2a698659271c28220b3f56fe9b63f70eae3b3c36afa544201bf750b929a36dc",
+        "https://files.pythonhosted.org/packages/dc/0f/696b4f94a282952239ffed39db78cb17a00ad993acd929cfac010a09759b/onnxruntime_gpu-1.26.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "4fa231294c2643911d2a7d16469c4808b0bdcdc4b5f4063d3a53744ce25b683a",
     ),
     (
         "https://files.pythonhosted.org/packages/f0/62/65c05e161eeddbafeca24dc461f47de550d9fa8a7e04eb213e32b55cfd99/nvidia_cuda_runtime_cu12-12.6.77-py3-none-manylinux2014_x86_64.whl",
@@ -194,6 +208,10 @@ pub const CUDA_WHEELS: &[(&str, &str)] = &[
     (
         "https://files.pythonhosted.org/packages/1f/13/ee4e00f30e676b66ae65b4f08cb5bcbb8392c03f54f2d5413ea99a5d1c80/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
         "4d2dd21ec0b88cf61b62e6b43564355e5222e4a3fb394cac0db101f2dd0d4f74",
+    ),
+    (
+        "https://files.pythonhosted.org/packages/73/1b/44a01c4e70933637c93e6e1a8063d1e998b50213a6b65ac5a9169c47e98e/nvidia_curand_cu12-10.3.7.77-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "a42cd1344297f70b9e39a1e4f467a4e1c10f1da54ff7a85c12197f6c652c8bdf",
     ),
     (
         "https://files.pythonhosted.org/packages/2a/78/4535c9c7f859a64781e43c969a3a7e84c54634e319a996d43ef32ce46f83/nvidia_cudnn_cu12-9.5.1.17-py3-none-manylinux_2_28_x86_64.whl",
@@ -438,3 +456,71 @@ pub const NVIDIA_CUDNN: Project = Project {
     platforms: Platform::WITH_CUDA,
     files: &[],
 };
+
+// The CUDA wheel-set drift guard runs only where CUDA_WHEELS exists (x64 Windows/Linux); CI's
+// full matrix covers the windows-2025 leg, so it executes there.
+#[cfg(all(
+    test,
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
+mod cuda_pin_tests {
+    use super::*;
+    use crate::download::url_basename;
+
+    /// The CUDA wheel set is INTERNALLY consistent and COMPLETE: the onnxruntime-gpu wheel matches
+    /// the pinned [`CUDA_ONNXRUNTIME_VERSION`], every wheel is a CUDA-12 (`_cu12`) build (never a
+    /// `cu13` wheel that would need a driver Pascal-era cards can't run), and every CUDA library
+    /// onnxruntime-gpu links is actually shipped. This is the anti-drift guard: it FAILS if someone
+    /// bumps the onnxruntime-gpu URL without the const, mixes in a cu13 wheel, or DROPS a required
+    /// dependency — the exact class of bug that left `nvidia_curand_cu12` un-shipped and broke the
+    /// GPU provider's init (Win32 1114) despite the driver + card being fine.
+    #[test]
+    fn cuda_wheels_are_consistent_and_complete() {
+        let bases: Vec<&str> = CUDA_WHEELS.iter().map(|(u, _)| url_basename(u)).collect();
+
+        // onnxruntime-gpu present, and pinned to CUDA_ONNXRUNTIME_VERSION (single source of truth).
+        let ort = bases
+            .iter()
+            .find(|b| b.starts_with("onnxruntime_gpu"))
+            .expect("an onnxruntime_gpu wheel in CUDA_WHEELS");
+        assert!(
+            ort.contains(&format!("onnxruntime_gpu-{CUDA_ONNXRUNTIME_VERSION}-")),
+            "onnxruntime-gpu wheel `{ort}` does not match CUDA_ONNXRUNTIME_VERSION `{CUDA_ONNXRUNTIME_VERSION}`"
+        );
+
+        // The whole set is the CUDA-12 line — a stray cu13 wheel would need a newer driver.
+        for b in &bases {
+            assert!(
+                !b.contains("cu13"),
+                "unexpected CUDA-13 wheel `{b}` — the GPU path is CUDA-12 only (driver ceiling)"
+            );
+        }
+
+        // Every CUDA library onnxruntime-gpu links MUST be shipped, or the provider fails to init
+        // (Win32 1114) — this is exactly the curand gap that motivated the guard.
+        for needed in [
+            "nvidia_cuda_runtime",
+            "nvidia_cublas",
+            "nvidia_cufft",
+            "nvidia_curand",
+            "nvidia_cudnn",
+            "nvidia_cuda_nvrtc",
+            "nvidia_nvjitlink",
+        ] {
+            assert!(
+                bases.iter().any(|b| b.starts_with(needed)),
+                "CUDA wheel set is missing a `{needed}` wheel (onnxruntime-gpu links it)"
+            );
+        }
+
+        // Every pin is a well-formed (https URL, 64-hex sha256) pair.
+        for (u, sha) in CUDA_WHEELS {
+            assert!(u.starts_with("https://"), "wheel URL is not https: {u}");
+            assert!(
+                sha.len() == 64 && sha.bytes().all(|c| c.is_ascii_hexdigit()),
+                "malformed sha256 for {u}"
+            );
+        }
+    }
+}

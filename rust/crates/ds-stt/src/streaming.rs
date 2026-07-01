@@ -50,6 +50,10 @@ pub struct StreamingModel {
     dec_out_names: Vec<String>,
     meta: Meta,
     tokens: Vec<String>,
+    /// The REALIZED ort execution provider — what the sessions ACTUALLY loaded on, CPU fallback
+    /// included. Reported up (via `STT_PROVIDER`) so the STT status row shows the same realized
+    /// token TTS does, from the same [`ds_model::cuda_session_builder`] path. Shared type.
+    provider: ds_config::RealizedProvider,
 }
 
 /// Per-utterance streaming state: feature buffer, encoder cache, decoder LSTM state, and the
@@ -76,23 +80,50 @@ fn meta_usize(s: &Session, key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn build(path: &Path) -> Result<Session, String> {
+/// Build one streaming session for `path` via the ONE GPU-aware builder shared with Kokoro TTS
+/// ([`ds_model::cuda_session_builder`]): registers the CUDA EP when `want_gpu` (the shared
+/// `provider` ladder resolved STT to `cuda`, carried in `DONTSPEAK_STT_PROVIDER`), best-effort with
+/// a silent CPU fallback. Returns the session AND the realized [`RealizedProvider`] — the same
+/// shared type Kokoro reports, so STT and TTS report through ONE path and can't drift. (int8 ops
+/// ORT can't place on CUDA fall back to CPU per-op; the graph parts it can offload run on GPU.)
+fn build(path: &Path, want_gpu: bool) -> Result<(Session, ds_config::RealizedProvider), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    Session::builder()
-        .map_err(|e| format!("ort builder: {e}"))?
+    let (mut builder, realized) = ds_model::cuda_session_builder(want_gpu)?;
+    let session = builder
         .commit_from_memory(&bytes)
-        .map_err(|e| format!("ort load {}: {e}", path.display()))
+        .map_err(|e| format!("ort load {}: {e}", path.display()))?;
+    Ok((session, realized))
 }
 
 impl StreamingModel {
-    /// Load the encoder/decoder/joiner ONNX (int8 by default) + `tokens.txt` from `dir`.
-    /// `int8` picks `*.int8.onnx`; otherwise the fp32 `*.onnx`.
+    /// Load the encoder/decoder/joiner ONNX (int8 by default) + `tokens.txt` from `dir`, honoring
+    /// the resolved STT provider (`DONTSPEAK_STT_PROVIDER`). Mirrors Kokoro TTS's CPU RETRY: if the
+    /// GPU load fails (e.g. a device-init failure that surfaces at session-commit, Win32 1114), it
+    /// retries on CPU so dictation never dies where CPU would have worked.
     pub fn load(dir: &Path, int8: bool) -> Result<Self, String> {
-        ds_model::ensure_ort_dylib()?;
+        let want_gpu = ds_config::provider_pref_wants_gpu(
+            &std::env::var("DONTSPEAK_STT_PROVIDER").unwrap_or_default(),
+        );
+        match Self::load_on(dir, int8, want_gpu) {
+            Ok(m) => Ok(m),
+            Err(e) if want_gpu => {
+                eprintln!("dontspeak/helper: STT GPU load failed ({e}); retrying on CPU");
+                Self::load_on(dir, int8, false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The actual load, on the EXPLICIT `want_gpu`. Routes the ort bootstrap through the GPU-aware
+    /// entry so STT and TTS pick the SAME onnxruntime (first engine to warm wins the shared runtime).
+    fn load_on(dir: &Path, int8: bool, want_gpu: bool) -> Result<Self, String> {
+        ds_model::ensure_ort_dylib_gpu(want_gpu)?;
         let sfx = if int8 { ".int8" } else { "" };
-        let encoder = build(&dir.join(format!("encoder{sfx}.onnx")))?;
-        let decoder = build(&dir.join(format!("decoder{sfx}.onnx")))?;
-        let joiner = build(&dir.join(format!("joiner{sfx}.onnx")))?;
+        // All three sessions build over the SAME shared ort runtime, so they realize the same EP;
+        // the encoder's is representative.
+        let (encoder, provider) = build(&dir.join(format!("encoder{sfx}.onnx")), want_gpu)?;
+        let (decoder, _) = build(&dir.join(format!("decoder{sfx}.onnx")), want_gpu)?;
+        let (joiner, _) = build(&dir.join(format!("joiner{sfx}.onnx")), want_gpu)?;
 
         let vocab = meta_usize(&encoder, "vocab_size", 1024);
         let meta = Meta {
@@ -138,7 +169,13 @@ impl StreamingModel {
             dec_out_names,
             meta,
             tokens,
+            provider,
         })
+    }
+
+    /// The REALIZED ort execution provider these sessions loaded on.
+    pub fn provider(&self) -> ds_config::RealizedProvider {
+        self.provider
     }
 
     /// Build the kaldi log-mel fbank matching the reference (Slaney mel default; only `use_energy`

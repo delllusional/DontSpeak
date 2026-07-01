@@ -62,8 +62,8 @@ pub mod urls;
 pub use download::{ensure, ensure_with_progress, set_prefetch_source, url_basename};
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
 pub use ort::{
-    ONNXRUNTIME_VERSION, ensure_onnxruntime, ensure_onnxruntime_with_progress, ensure_ort_dylib,
-    ensure_ort_dylib_gpu, onnxruntime_dylib_file, onnxruntime_dylib_path,
+    ONNXRUNTIME_VERSION, cuda_session_builder, ensure_onnxruntime, ensure_onnxruntime_with_progress,
+    ensure_ort_dylib, ensure_ort_dylib_gpu, onnxruntime_dylib_file, onnxruntime_dylib_path,
     onnxruntime_dylib_version_ok, set_ort_dylib_path,
 };
 pub use setup::{

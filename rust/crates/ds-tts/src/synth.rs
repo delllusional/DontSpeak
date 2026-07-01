@@ -42,13 +42,14 @@ pub struct KokoroSynth {
     // the synthesis hot loop. Only a 256-float row is read per forward pass (`style_row`).
     voices: HashMap<String, Arc<Vec<f32>>>,
     output_name: String,
-    /// The active execution provider ("CPU" or "CoreML"), for the engine stats.
-    provider: &'static str,
+    /// The REALIZED execution provider this synth loaded on, for the engine stats / the child's
+    /// `PROVIDER` line — the shared [`RealizedProvider`](ds_config::RealizedProvider) type STT uses.
+    provider: ds_config::RealizedProvider,
 }
 
 impl KokoroSynth {
-    /// The active ONNX execution provider ("CPU" or "CoreML").
-    pub fn provider(&self) -> &'static str {
+    /// The REALIZED execution provider this synth loaded on.
+    pub fn provider(&self) -> ds_config::RealizedProvider {
         self.provider
     }
 }
@@ -89,37 +90,23 @@ impl KokoroSynth {
             .into_iter()
             .map(|(name, style)| (name, Arc::new(style)))
             .collect();
-        let mut provider = "CPU";
-        let cpu_builder = || Session::builder().map_err(|e| format!("ort session builder: {e}"));
+        // Each cfg branch binds BOTH the session builder AND the realized `provider` token, so
+        // there's no dead pre-init to overwrite (exactly one branch compiles per target).
 
-        // Windows `auto`/`cuda` → CUDA (NVIDIA GPU), best-effort with CPU fallback.
-        // ort's builder methods return the builder INSIDE their error (for recovery),
-        // so chain them with `?` in a closure that yields ort::Result.
-        #[cfg(target_os = "windows")]
-        let mut builder = {
-            use ort::execution_providers::CUDAExecutionProvider;
-            let want_gpu =
-                pref.eq_ignore_ascii_case("auto") || pref.eq_ignore_ascii_case("cuda");
-            let gpu = if want_gpu {
-                (|| -> ort::Result<_> {
-                    let b = Session::builder()?;
-                    Ok(b.with_execution_providers([CUDAExecutionProvider::default().build()])?)
-                })()
-                .ok()
-            } else {
-                None
-            };
-            match gpu {
-                Some(b) => {
-                    provider = "CUDA";
-                    b
-                }
-                None => cpu_builder()?,
-            }
+        // Windows / Linux x86_64 `auto`/`cuda` → CUDA (NVIDIA GPU), via the ONE GPU-aware builder
+        // shared with Parakeet STT (`ds_model::cuda_session_builder`) — the CUDA-EP registration +
+        // silent-CPU-fallback + failure logging live THERE, not copy-pasted per engine, so TTS and
+        // STT can't drift into different GPU behavior.
+        // Windows (any arch — win-arm64 is a real release target) + Linux x86_64. On win-arm64
+        // `cuda_session_builder`'s inner cfg is stripped, so it just returns a CPU builder — safe.
+        #[cfg(any(target_os = "windows", all(target_os = "linux", target_arch = "x86_64")))]
+        let (mut builder, provider) = {
+            let want_gpu = ds_config::provider_pref_wants_gpu(pref);
+            ds_model::cuda_session_builder(want_gpu)?
         };
 
         #[cfg(target_os = "macos")]
-        let mut builder = {
+        let (mut builder, provider) = {
             use ort::execution_providers::CoreMLExecutionProvider;
             // FULL-DUPLEX prefers CoreML even for "auto": running Kokoro on the CPU
             // saturates the cores and starves VPIO's real-time render thread, which
@@ -139,38 +126,11 @@ impl KokoroSynth {
                 None
             };
             match gpu {
-                Some(b) => {
-                    provider = "CoreML";
-                    b
-                }
-                None => cpu_builder()?,
-            }
-        };
-
-        // Linux x86_64 `auto`/`cuda` → CUDA (NVIDIA GPU), best-effort with CPU fallback — the
-        // SAME structure as the Windows block above (one CUDA-enabled build for every box). On
-        // a machine without the GPU runtime/driver, ORT_DYLIB_PATH is the CPU dylib, so the
-        // CUDA EP fails to register and we fall through to CPU.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        let mut builder = {
-            use ort::execution_providers::CUDAExecutionProvider;
-            let want_gpu =
-                pref.eq_ignore_ascii_case("auto") || pref.eq_ignore_ascii_case("cuda");
-            let gpu = if want_gpu {
-                (|| -> ort::Result<_> {
-                    let b = Session::builder()?;
-                    Ok(b.with_execution_providers([CUDAExecutionProvider::default().build()])?)
-                })()
-                .ok()
-            } else {
-                None
-            };
-            match gpu {
-                Some(b) => {
-                    provider = "CUDA";
-                    b
-                }
-                None => cpu_builder()?,
+                Some(b) => (b, ds_config::RealizedProvider::CoreMl),
+                None => (
+                    Session::builder().map_err(|e| format!("ort session builder: {e}"))?,
+                    ds_config::RealizedProvider::Cpu,
+                ),
             }
         };
 
@@ -179,9 +139,10 @@ impl KokoroSynth {
             not(any(target_os = "windows", target_os = "macos")),
             not(all(target_os = "linux", target_arch = "x86_64"))
         ))]
-        let mut builder = {
+        let (mut builder, provider) = {
             let _ = &pref;
-            cpu_builder()?
+            let b = Session::builder().map_err(|e| format!("ort session builder: {e}"))?;
+            (b, ds_config::RealizedProvider::Cpu)
         };
 
         // Full-duplex on CPU: keep Kokoro off the CoreAudio REAL-TIME render thread
@@ -194,7 +155,9 @@ impl KokoroSynth {
         //     and the ring is huge, because it's deadline jitter, not throughput).
         // (Half-duplex uses rodio, which buffers; CoreML/CUDA offload off the CPU.)
         #[cfg(target_os = "macos")]
-        if provider == "CPU" && std::env::var_os("DONTSPEAK_FULL_DUPLEX").is_some() {
+        if provider == ds_config::RealizedProvider::Cpu
+            && std::env::var_os("DONTSPEAK_FULL_DUPLEX").is_some()
+        {
             let cores = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4);

@@ -204,9 +204,14 @@ pub struct TtsManager {
     /// Persisted lifetime seconds (spoken + heard), bumped from the same reader as
     /// the live stats. Survives across sessions — see [`crate::stats::LifetimeSeconds`].
     lifetime: Arc<crate::stats::LifetimeSeconds>,
-    /// The warm child's active ONNX execution provider ("CPU"/"CoreML"), reported
+    /// The warm child's active TTS ONNX execution provider ("CPU"/"CoreML"/"CUDA"), reported
     /// via its `PROVIDER` line at startup. For the engine stats.
     provider: Mutex<String>,
+    /// The warm child's active STT execution provider ("CPU"/"CUDA"/"CoreML-ANE"/"System"),
+    /// reported via its `STT_PROVIDER` line — the SAME realized-EP channel as `provider`, so the
+    /// STT status row shows what ACTUALLY loaded (not a preference), mapped through the one shared
+    /// `realized_ort_token`. Starts "CPU".
+    stt_realized: Arc<Mutex<String>>,
     /// The user's provider PREFERENCE ("auto"|"cpu"|"cuda"|"coreml"|"ane") —
     /// drives the `DONTSPEAK_PROVIDER` env when (re)starting the warm child.
     provider_pref: Mutex<String>,
@@ -218,8 +223,9 @@ pub struct TtsManager {
     /// changed `full_duplex_pref` can trigger exactly one restart (mirrors how
     /// `provider` tracks the running provider for `set_provider`).
     full_duplex_active: Mutex<bool>,
-    /// The local STT engine the next warm child should use ("cpu"|"ane"),
-    /// from `stt_provider`. Drives the `DONTSPEAK_STT_PROVIDER` env when (re)starting.
+    /// The local STT backend the next warm child should use — the resolved provider token
+    /// ("cpu"|"cuda"|"ane"|"system"), from `helper_stt_provider`. Drives the
+    /// `DONTSPEAK_STT_PROVIDER` env when (re)starting.
     stt_provider_pref: Mutex<String>,
     /// The STT engine the CURRENTLY running child was started with, so a changed
     /// `stt_provider_pref` triggers exactly one restart (mirrors `full_duplex_active`).
@@ -285,6 +291,7 @@ impl TtsManager {
             stt_stats,
             lifetime,
             provider: Mutex::new("CPU".to_string()),
+            stt_realized: Arc::new(Mutex::new("CPU".to_string())),
             provider_pref: Mutex::new("auto".to_string()),
             full_duplex_pref: Mutex::new(false),
             full_duplex_active: Mutex::new(false),
@@ -366,6 +373,13 @@ impl TtsManager {
         self.provider.lock().unwrap().clone()
     }
 
+    /// The warm child's REALIZED STT execution provider ("CPU"/"CUDA"/"CoreML-ANE"/"System"), from
+    /// its `STT_PROVIDER` line — what the STT sessions ACTUALLY loaded on, the STT counterpart to
+    /// [`provider`](Self::provider). "CPU" until a child reports otherwise.
+    pub fn stt_realized_provider(&self) -> String {
+        self.stt_realized.lock().unwrap().clone()
+    }
+
     /// Switch the execution-provider preference ("auto"|"cpu"|"cuda"|"coreml"|"ane"). Restarts
     /// the warm child ONLY when the RESOLVED provider differs from the active one
     /// (so picking "auto" while already on CPU is a no-op). Returns true if it
@@ -376,7 +390,7 @@ impl TtsManager {
         if !self.is_running() {
             return false; // takes effect on next start; nothing active to change
         }
-        if resolved == self.provider() {
+        if resolved == ds_config::RealizedProvider::parse(&self.provider()) {
             return false; // already running on this provider
         }
         self.restart_child();
@@ -418,7 +432,8 @@ impl TtsManager {
         *self.full_duplex_pref.lock().unwrap() = on;
     }
 
-    /// Set which local STT engine the warm child should use ("cpu"|"ane").
+    /// Set which local STT backend the warm child should use — the resolved provider token
+    /// ("cpu"|"cuda"|"ane"|"system").
     /// Stores the preference only; [`restart_if_full_duplex_stale`](Self::restart_if_full_duplex_stale)
     /// applies a change to an already-running child.
     pub fn set_stt_provider_pref(&self, engine: &str) {
@@ -454,33 +469,36 @@ impl TtsManager {
     /// actually report. "cuda"/"auto" only become CUDA once the GPU runtime is
     /// present (else the helper falls back to CPU), so resolving against presence
     /// keeps `set_provider` from restart-looping while the runtime downloads.
-    fn resolve_provider(which: &str) -> &'static str {
+    fn resolve_provider(which: &str) -> ds_config::RealizedProvider {
+        use ds_config::RealizedProvider;
         if which.eq_ignore_ascii_case("coreml") {
-            return "CoreML";
+            return RealizedProvider::CoreMl;
         }
         // `ane` AND `auto` resolve to the FluidAudio Core ML / ANE backend on macOS (the
         // shared ladder's top rung) — but only when its shim dylib is actually present (set
         // by the app); otherwise the helper falls back to the ONNX CPU path, so resolve to
-        // "CPU" to match what the child will report and avoid a needless restart.
+        // CPU to match what the child will report and avoid a needless restart.
         #[cfg(target_os = "macos")]
         if which.eq_ignore_ascii_case("ane") || which.eq_ignore_ascii_case("auto") {
             let have_dylib = std::env::var_os("SMKOKORO_DYLIB_PATH")
                 .map(|p| std::path::Path::new(&p).exists())
                 .unwrap_or(false);
-            return if have_dylib { "CoreML-ANE" } else { "CPU" };
+            return if have_dylib {
+                RealizedProvider::CoreMlAne
+            } else {
+                RealizedProvider::Cpu
+            };
         }
         #[cfg(all(
             any(target_os = "windows", target_os = "linux"),
             target_arch = "x86_64"
         ))]
         {
-            let wants_cuda =
-                which.eq_ignore_ascii_case("cuda") || which.eq_ignore_ascii_case("auto");
-            if wants_cuda && ds_model::cuda_runtime_present() {
-                return "CUDA";
+            if ds_config::provider_pref_wants_gpu(which) && ds_model::cuda_runtime_present() {
+                return RealizedProvider::Cuda;
             }
         }
-        "CPU"
+        RealizedProvider::Cpu
     }
 
     /// True when a warm child is running.
@@ -617,6 +635,10 @@ impl TtsManager {
                         mark_loaded(&self.stt_downloading, &self.stt_dl, &self.stt_loaded, gate);
                         continue;
                     }
+                    if let Some(p) = l.strip_prefix("STT_PROVIDER ") {
+                        *self.stt_realized.lock().unwrap() = p.trim().to_string();
+                        continue;
+                    }
                     if let Some(p) = l.strip_prefix("PROVIDER ") {
                         *self.provider.lock().unwrap() = p.trim().to_string();
                         continue;
@@ -659,6 +681,11 @@ impl TtsManager {
             let stt_loaded = self.stt_loaded.clone();
             let stt_downloading = self.stt_downloading.clone();
             let stt_dl = self.stt_dl.clone();
+            // STT preloads on a PARALLEL thread, so its `STT_PROVIDER` line often lands AFTER READY
+            // (and always for a lazy `load stt`) — i.e. in THIS persistent reader, not start()'s
+            // pre-READY wait loop. Clone the realized-provider slot in so the reader can capture it;
+            // without this the STT status row stays "CPU" while STT actually ran on the GPU.
+            let stt_realized = self.stt_realized.clone();
             // The status push-gate, so STT download progress in the reader pushes LIVE (like the
             // TTS path in start()'s wait loop) instead of waiting for the poll — otherwise the
             // Parakeet % sticks between polls then jumps when a file completes.
@@ -676,6 +703,7 @@ impl TtsManager {
                     stt_loaded,
                     stt_downloading,
                     stt_dl,
+                    stt_realized,
                     gate,
                 );
             })
@@ -710,6 +738,11 @@ impl TtsManager {
         self.stt_loaded.store(false, Ordering::Relaxed);
         self.tts_downloading.store(false, Ordering::Relaxed);
         self.stt_downloading.store(false, Ordering::Relaxed);
+        // The realized STT provider goes with the dead child. Reset it so a restart whose STT
+        // preload FAILS (emits no `STT_PROVIDER`) can't leave a stale token — e.g. the old child's
+        // "CUDA" — to be read before the new child reports. (The status row is gated on
+        // `stt_loaded` too, but keep the slot strictly fresh.)
+        *self.stt_realized.lock().unwrap() = "CPU".to_string();
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -763,6 +796,7 @@ impl TtsManager {
         stt_loaded: Arc<AtomicBool>,
         stt_downloading: Arc<AtomicBool>,
         stt_dl: Arc<Mutex<(u64, u64, u64, u64)>>,
+        stt_realized: Arc<Mutex<String>>,
         gate: Option<Arc<StatusGate>>,
     ) {
         let push_listen = |evt: ListenEvt| {
@@ -852,6 +886,11 @@ impl TtsManager {
                         // The live push is built into apply_dl_progress (same as the wait loop).
                     } else if l == "STTLOADED" {
                         mark_loaded(&stt_downloading, &stt_dl, &stt_loaded, gate.as_deref());
+                    } else if let Some(p) = l.strip_prefix("STT_PROVIDER ") {
+                        // The REALIZED STT EP (mirrors the pre-READY parse in start()). Post-READY is
+                        // the COMMON path — the parallel preload usually reports after READY — so
+                        // this is what keeps the STT status row honest on a GPU box.
+                        *stt_realized.lock().unwrap() = p.trim().to_string();
                     // ── diarize events ───────────────────────────────────────────
                     } else if let Some(rest) = l.strip_prefix("DIAR ") {
                         diarize_slot.0.lock().unwrap().result = Some(Ok(rest.to_string()));

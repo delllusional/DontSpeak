@@ -270,9 +270,13 @@ pub(crate) fn serve() -> ! {
             // warmup inference, so STTLOADED honestly means resident + warm).
             println!("WARMING stt");
             let _ = std::io::stdout().flush();
-            match transcriber.lock().unwrap().preload() {
+            let mut t = transcriber.lock().unwrap();
+            match t.preload() {
                 Ok(()) => {
+                    // STT_PROVIDER mirrors the TTS `PROVIDER` line: the REALIZED ort EP the STT
+                    // sessions loaded on, so the engine reports the same realized runtime for both.
                     println!("STTLOADED");
+                    println!("STT_PROVIDER {}", t.provider().as_str());
                     let _ = std::io::stdout().flush();
                 }
                 Err(e) => eprintln!("dontspeak/helper: preload stt failed: {e}"),
@@ -297,7 +301,7 @@ pub(crate) fn serve() -> ! {
             // PROVIDER (before READY) lets the engine report the active execution provider.
             // READY is emitted LATER — only after the audio OUTPUT is opened + primed below —
             // so green honestly means "warm AND able to make sound", not just "model loaded".
-            println!("PROVIDER {}", s.provider());
+            println!("PROVIDER {}", s.provider().as_str());
             let _ = std::io::stdout().flush();
             Some(s)
         }
@@ -832,9 +836,11 @@ pub(crate) fn serve() -> ! {
                     continue;
                 }
                 ensure_coreml_models("stt");
-                match transcriber.lock().unwrap().preload() {
+                let mut t = transcriber.lock().unwrap();
+                match t.preload() {
                     Ok(()) => {
                         println!("STTLOADED");
+                        println!("STT_PROVIDER {}", t.provider().as_str());
                         let _ = std::io::stdout().flush();
                     }
                     Err(e) => eprintln!("dontspeak/helper: preload stt failed: {e}"),

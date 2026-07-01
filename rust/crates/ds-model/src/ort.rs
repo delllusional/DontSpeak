@@ -274,6 +274,50 @@ fn preload_cuda_libs(dir: &std::path::Path) {
     });
 }
 
+/// Make an ORT [`SessionBuilder`](ort::session::builder::SessionBuilder) with the CUDA execution
+/// provider registered, and the [`RealizedProvider`](ds_config::RealizedProvider) it loaded on. THE
+/// single GPU-aware session-builder shared by Kokoro TTS (`ds_tts::synth`) and Parakeet STT
+/// (`ds_stt::streaming`), so the CUDA-EP registration + CPU fallback lives in ONE place instead of
+/// being copy-pasted per engine — the two can't drift into different GPU behavior.
+///
+/// It only ATTEMPTS CUDA when `want_gpu` AND the GPU runtime + NVIDIA driver are actually present
+/// (the SAME gate [`ensure_ort_dylib_gpu`] uses to pick the GPU dylib). This is load-bearing for
+/// HONESTY: `resolved_*_provider` returns `cuda` on every x64 box as a static preference, so without
+/// this gate a CPU-only user (no ~1.5 GB GPU runtime) would report `Cuda` while the session actually
+/// ran on CPU — the "UI claims CUDA but runs CPU" trap. Gated, a returned `Cuda` means the runtime +
+/// driver are installed AND the EP registered. When the runtime IS present but the EP still fails
+/// (driver/runtime mismatch, provider-DLL init — Win32 1114) the REAL ort error is logged before the
+/// CPU fallback, so that genuine failure stays diagnosable. `want_gpu` is ignored off Windows/Linux-
+/// x64 (no CUDA EP there); the caller's macOS Core ML path is separate.
+pub fn cuda_session_builder(
+    want_gpu: bool,
+) -> Result<(ort::session::builder::SessionBuilder, ds_config::RealizedProvider), String> {
+    use ds_config::RealizedProvider;
+    #[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+    if want_gpu && cuda_runtime_present() && cuda_driver_present() {
+        use ort::execution_providers::CUDAExecutionProvider;
+        // ort's builder methods return the builder INSIDE their error (for recovery), so chain
+        // them with `?` in a closure that yields ort::Result and match on the whole GPU attempt.
+        match (|| -> ort::Result<_> {
+            let b = ort::session::Session::builder()?;
+            // `.error_on_failure()`: WITHOUT it, ort registers the CUDA EP best-effort and returns
+            // Ok even when registration SOFT-fails (device/provider unavailable), so the session
+            // would silently commit on CPU while we returned `Cuda` — a mislabel. With it, a
+            // registration failure propagates as `Err`, so the CPU fallback below fires AND the token
+            // returned is honestly `Cpu`.
+            Ok(b.with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])?)
+        })() {
+            Ok(b) => return Ok((b, RealizedProvider::Cuda)),
+            Err(e) => {
+                eprintln!("dontspeak/helper: CUDA EP registration failed — running on CPU: {e}")
+            }
+        }
+    }
+    let _ = want_gpu;
+    let b = ort::session::Session::builder().map_err(|e| format!("ort session builder: {e}"))?;
+    Ok((b, RealizedProvider::Cpu))
+}
+
 /// Point `ort` (load-dynamic) at `path` by writing `ORT_DYLIB_PATH`. The SINGLE
 /// place this env var is set: [`ensure_ort_dylib`] routes the CPU/version-gated
 /// dylib through here, and the Windows-CUDA path (which resolves its own GPU dylib,

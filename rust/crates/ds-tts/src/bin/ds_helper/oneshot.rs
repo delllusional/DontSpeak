@@ -24,10 +24,9 @@ fn load_synth() -> Result<KokoroSynth, String> {
     // present, else the version-gated CPU dylib. `ensure_ort_dylib_gpu` sets ORT_DYLIB_PATH
     // and the CUDA loader search path itself. synth.rs then registers the CUDA EP,
     // CPU-fallback on fail.
-    let want_gpu = {
-        let pref = std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into());
-        pref.eq_ignore_ascii_case("cuda") || pref.eq_ignore_ascii_case("auto")
-    };
+    let want_gpu = ds_config::provider_pref_wants_gpu(
+        &std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into()),
+    );
     ds_model::ensure_ort_dylib_gpu(want_gpu)?;
     let model_bytes = std::fs::read(&model_path).map_err(|e| format!("read model: {e}"))?;
     let voices_bytes = std::fs::read(&voices_path).map_err(|e| format!("read voices: {e}"))?;
@@ -44,9 +43,9 @@ pub(crate) enum Backend {
 }
 
 impl Backend {
-    /// Provider label for the engine stats / `PROVIDER` line ("CPU"/"CoreML"/"CUDA"
-    /// for ONNX, "CoreML-ANE" for the apple-native backend).
-    pub(crate) fn provider(&self) -> &'static str {
+    /// The REALIZED provider for the engine stats / `PROVIDER` line (CPU/CoreML/CUDA for ONNX,
+    /// CoreML-ANE for the apple-native backend) — the shared [`RealizedProvider`] type.
+    pub(crate) fn provider(&self) -> ds_config::RealizedProvider {
         match self {
             Backend::Ort(s) => s.provider(),
             #[cfg(target_os = "macos")]

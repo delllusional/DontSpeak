@@ -270,10 +270,11 @@ pub enum Provider {
     /// ONNX Runtime, CPU execution provider.
     #[default]
     OrtCpu,
-    /// ONNX Runtime, CUDA execution provider (NVIDIA GPU) — for Kokoro TTS's ort session over the
-    /// shared warm-helper runtime. (The streaming Parakeet STT runner is CPU-only for now — int8
-    /// dynamic-quant isn't GPU-accelerated — so for STT this token reflects the resolved
-    /// preference, not the realized EP.)
+    /// ONNX Runtime, CUDA execution provider (NVIDIA GPU) — drives BOTH ort engines over the
+    /// shared warm-helper runtime: Kokoro TTS (`synth.rs`) and the streaming Parakeet STT runner
+    /// (`streaming.rs`), each registering the CUDA EP best-effort with a CPU fallback. (STT ships
+    /// int8 models, so ORT places what it can on the GPU and runs the int8 ops it can't per-op on
+    /// CPU — the token is still the realized runtime, gated on the GPU runtime being present.)
     OrtCuda,
     /// ONNX Runtime, CoreML execution provider (macOS) — ort offloading ops to Core ML.
     /// TTS only; explicit (NOT in the default ladder, as it benches slower than CPU for
@@ -351,6 +352,81 @@ impl Provider {
             "windows" | "linux" => matches!(self, Provider::OrtCuda | Provider::OrtCpu),
             _ => matches!(self, Provider::OrtCpu),
         }
+    }
+}
+
+/// Whether an execution-provider PREFERENCE token (the `DONTSPEAK_PROVIDER` /
+/// `DONTSPEAK_STT_PROVIDER` value a warm child reads) requests the NVIDIA GPU. THE single
+/// definition, shared by Kokoro TTS and Parakeet STT so the "wants CUDA?" decision can't drift per
+/// engine (`ds_model::cuda_session_builder` and both engines' load paths route through it).
+pub fn provider_pref_wants_gpu(pref: &str) -> bool {
+    pref.eq_ignore_ascii_case("cuda") || pref.eq_ignore_ascii_case("auto")
+}
+
+/// The REALIZED on-device execution provider a warm-child engine ACTUALLY loaded on — the SINGLE
+/// source of truth for the "what actually ran" token vocabulary that Kokoro TTS and Parakeet STT
+/// report across the process boundary (the child's `PROVIDER` / `STT_PROVIDER` stdout line).
+///
+/// Distinct from [`Provider`] (the config PREFERENCE ladder, lowercase tokens): this is the realized
+/// backend — it includes `CoreMlAne`/`System`, which have no config-ladder rung — and serializes as
+/// the canonical UPPERCASE token via [`as_str`](RealizedProvider::as_str). Producers return this
+/// enum and stringify ONCE at the IPC edge; the status layer [`parse`](RealizedProvider::parse)s it
+/// back and maps to a config [`Provider`] via [`to_provider`](RealizedProvider::to_provider) — so a
+/// token typo is a compile error, not a silent "UI claims CUDA but runs CPU" mislabel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealizedProvider {
+    /// ONNX Runtime CUDA execution provider (NVIDIA GPU).
+    Cuda,
+    /// ONNX Runtime CPU execution provider — the universal fallback.
+    Cpu,
+    /// ONNX Runtime CoreML execution provider (macOS ort offload).
+    CoreMl,
+    /// FluidAudio native Core ML on the Apple Neural Engine (macOS).
+    CoreMlAne,
+    /// macOS on-device `SFSpeechRecognizer` (the `system` STT engine; no ort runtime).
+    System,
+}
+
+impl RealizedProvider {
+    /// The canonical UPPERCASE wire token (round-trips through [`parse`](RealizedProvider::parse)).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RealizedProvider::Cuda => "CUDA",
+            RealizedProvider::Cpu => "CPU",
+            RealizedProvider::CoreMl => "CoreML",
+            RealizedProvider::CoreMlAne => "CoreML-ANE",
+            RealizedProvider::System => "System",
+        }
+    }
+
+    /// Parse a wire token; anything unrecognized → [`Cpu`](RealizedProvider::Cpu) (a missing/renamed
+    /// token degrades to CPU, never a false GPU claim).
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "CUDA" => RealizedProvider::Cuda,
+            "CoreML" => RealizedProvider::CoreMl,
+            "CoreML-ANE" => RealizedProvider::CoreMlAne,
+            "System" => RealizedProvider::System,
+            _ => RealizedProvider::Cpu,
+        }
+    }
+
+    /// Map to the config [`Provider`] token vocabulary for the status row (`System` has no ort rung,
+    /// so it reads as CPU — the OS recognizer isn't an ort runtime).
+    pub fn to_provider(self) -> Provider {
+        match self {
+            RealizedProvider::Cuda => Provider::OrtCuda,
+            RealizedProvider::CoreMl => Provider::OrtCoreMl,
+            RealizedProvider::CoreMlAne => Provider::Ane,
+            RealizedProvider::Cpu | RealizedProvider::System => Provider::OrtCpu,
+        }
+    }
+}
+
+impl std::fmt::Display for RealizedProvider {
+    /// Writes the canonical wire token — so `println!("PROVIDER {}", p)` and the like stay terse.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -964,6 +1040,47 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DRIFT GUARD for the realized-EP token vocabulary: every `RealizedProvider` round-trips
+    /// through `as_str()`/`parse()`, `parse()` degrades unknown tokens to CPU (never a false GPU
+    /// claim), and `to_provider()` maps onto the config ladder as expected. This is the single
+    /// source of truth the TTS + STT producers and the status consumer all share, so this test
+    /// failing is the ONLY way the shared vocabulary can change — it can't drift silently per site.
+    #[test]
+    fn realized_provider_vocabulary_is_stable() {
+        use RealizedProvider::*;
+        // Exhaustive round-trip (the match forces every variant to be considered).
+        for rp in [Cuda, Cpu, CoreMl, CoreMlAne, System] {
+            assert_eq!(RealizedProvider::parse(rp.as_str()), rp, "round-trip {rp:?}");
+        }
+        // Pinned wire tokens (a rename here is a deliberate, visible change).
+        assert_eq!(Cuda.as_str(), "CUDA");
+        assert_eq!(Cpu.as_str(), "CPU");
+        assert_eq!(CoreMl.as_str(), "CoreML");
+        assert_eq!(CoreMlAne.as_str(), "CoreML-ANE");
+        assert_eq!(System.as_str(), "System");
+        // Unknown / casing drift → CPU, never a spurious GPU/ANE claim.
+        assert_eq!(RealizedProvider::parse("cuda"), Cpu);
+        assert_eq!(RealizedProvider::parse("Cuda"), Cpu);
+        assert_eq!(RealizedProvider::parse(""), Cpu);
+        assert_eq!(RealizedProvider::parse("bogus"), Cpu);
+        // Mapping to the config Provider vocabulary (System has no ort rung → CPU).
+        assert_eq!(Cuda.to_provider(), Provider::OrtCuda);
+        assert_eq!(CoreMl.to_provider(), Provider::OrtCoreMl);
+        assert_eq!(CoreMlAne.to_provider(), Provider::Ane);
+        assert_eq!(Cpu.to_provider(), Provider::OrtCpu);
+        assert_eq!(System.to_provider(), Provider::OrtCpu);
+    }
+
+    #[test]
+    fn provider_pref_wants_gpu_tokens() {
+        assert!(provider_pref_wants_gpu("cuda"));
+        assert!(provider_pref_wants_gpu("CUDA"));
+        assert!(provider_pref_wants_gpu("auto"));
+        assert!(!provider_pref_wants_gpu("cpu"));
+        assert!(!provider_pref_wants_gpu("ane"));
+        assert!(!provider_pref_wants_gpu(""));
+    }
 
     fn arr(toks: &[&str]) -> toml::Value {
         toml::Value::Array(

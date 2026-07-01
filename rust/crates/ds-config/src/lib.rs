@@ -45,8 +45,8 @@ pub use brand::{DISPLAY_NAME, VERSION, name_version};
 pub use claude_code::{ClaudeCodeVoice, read_claude_code_voice};
 pub use earcon::{EarconEvent, SystemSound, resolve_cue, system_sounds};
 pub use enums::{
-    DiarizerProvider, DropSpeechKind, ListenMode, NarrateKind, Provider, SttEngine, TrayKind,
-    TtsEngine, WireTarget,
+    DiarizerProvider, DropSpeechKind, ListenMode, NarrateKind, Provider, RealizedProvider, SttEngine,
+    TrayKind, TtsEngine, WireTarget, provider_pref_wants_gpu,
 };
 pub use log::{
     LogLevel, aux_log_path, combined_log_json, log, log_tail, open_aux_log, rotate_if_large,

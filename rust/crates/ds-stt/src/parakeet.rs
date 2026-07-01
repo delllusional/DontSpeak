@@ -182,6 +182,14 @@ impl ParakeetTranscriber {
         self.model().map(|_| ())
     }
 
+    /// The realized ort EP the streaming model loaded on; CPU before it's loaded.
+    pub fn provider(&self) -> ds_config::RealizedProvider {
+        self.model
+            .as_ref()
+            .map(|m| m.provider())
+            .unwrap_or(ds_config::RealizedProvider::Cpu)
+    }
+
     /// Free the cached model if loaded, returning whether anything was freed.
     pub fn unload(&mut self) -> bool {
         self.model.take().is_some()

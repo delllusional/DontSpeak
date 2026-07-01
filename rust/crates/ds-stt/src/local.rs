@@ -56,6 +56,20 @@ impl LocalTranscriber {
         LocalTranscriber::ParakeetOnnx(Box::new(ParakeetTranscriber::new(parakeet_dir)))
     }
 
+    /// The realized runtime this backend loaded on, in the SAME token vocabulary Kokoro TTS reports
+    /// via its `PROVIDER` line ("CUDA"/"CPU" for the ONNX Parakeet path; "CoreML-ANE" for Core ML /
+    /// ANE; "System" for the OS recognizer) — so the STT status row maps through the ONE shared
+    /// `realized_ort_token` path TTS uses, and the two can't drift apart.
+    pub fn provider(&self) -> ds_config::RealizedProvider {
+        match self {
+            LocalTranscriber::ParakeetOnnx(m) => m.provider(),
+            #[cfg(target_os = "macos")]
+            LocalTranscriber::Coreml(_) => ds_config::RealizedProvider::CoreMlAne,
+            #[cfg(target_os = "macos")]
+            LocalTranscriber::System(_) => ds_config::RealizedProvider::System,
+        }
+    }
+
     pub fn preload(&mut self) -> Result<(), String> {
         match self {
             LocalTranscriber::ParakeetOnnx(m) => m.preload(),

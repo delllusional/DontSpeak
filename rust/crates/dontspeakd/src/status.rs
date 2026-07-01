@@ -8,8 +8,7 @@ use std::time::Duration;
 use ds_config::{Paths, VoiceConfig};
 
 use crate::config_gate::{
-    apple_native_shim_available, caps_loop_enabled, cuda_runtime_present, kokoro_present_for,
-    parakeet_available,
+    apple_native_shim_available, caps_loop_enabled, kokoro_present_for, parakeet_available,
 };
 use crate::downloads::DownloadProg;
 use ds_model::DownloadTarget;
@@ -475,19 +474,12 @@ pub(crate) fn model_status_json(
             .map(|e| e.as_str())
             .unwrap_or(ds_config::SttEngine::Off.as_str())
             .to_string(),
-        // The ACTUAL STT runtime for the built_in (Parakeet) engine — "ane" (FluidAudio
-        // Core ML / ANE — the neural engine), "cuda" (ort, NVIDIA GPU) or "cpu" (ort,
-        // CPU). Like the TTS `tts_provider`, this is HONEST about fallback: `ane` degrades to
-        // cpu when the FluidAudio shim is absent, and `cuda` degrades to cpu when the
-        // GPU runtime isn't fetched — the SAME checks the loaders use (`for_provider` on
-        // SMKOKORO_DYLIB_PATH, the GPU-runtime probe), so engine + helper agree. Null for
+        // The ACTUAL STT runtime for the built_in (Parakeet) engine, from the warm child's
+        // realized `STT_PROVIDER` line — "ane"/"cuda"/"cpu" — the SAME realized-EP channel and
+        // shared `realized_ort_token` mapping as `tts_provider` below, so the two rows can't drift.
+        // The child already reports the honest backend (CPU/ANE fallback included). Null for
         // system/claude_code.
-        stt_provider: stt_provider_token(
-            resolved_stt,
-            cfg.resolved_stt_provider(),
-            apple_native_shim_available(),
-            cuda_runtime_present(),
-        ),
+        stt_provider: stt_provider_token(resolved_stt, &tts.stt_realized_provider()),
         // The ACTIVE TTS engine token ("built_in" = Kokoro, "system" = `say`), so the app's
         // TTS row adapts the same way the STT row does (built_in → Kokoro, system → System).
         tts_engine: resolved_tts
@@ -612,54 +604,45 @@ pub(crate) fn model_status_json(
     serde_json::to_value(status).unwrap()
 }
 
-/// The STT runtime TOKEN the UI shows — the ACTUAL runtime, NOT the naive resolved preference.
-/// `ane` degrades to `cpu` when the FluidAudio shim is absent, and `cuda` degrades to
-/// `cpu` when the GPU runtime isn't fetched — the SAME gates the loaders use (`for_provider`,
-/// the GPU-runtime probe), so the row matches what really loaded. `None` for non-built_in engines
-/// (claude_code/system/off have no local Parakeet runtime). Pure (callers pass the live
-/// `shim_ok`/`cuda_present`) so the "actual, not naive" invariant is unit-tested — see
-/// [`provider_token_tests`]. (NOTE: the streaming runner currently builds CPU-only ort sessions —
-/// int8 dynamic-quant isn't GPU-accelerated — so an `cuda` token reflects the resolved
-/// PREFERENCE; STT compute is on CPU regardless until/unless a GPU EP is wired for streaming.)
+/// Relabel a warm-child REALIZED-provider wire token to the config [`Provider`](ds_config::Provider)
+/// the status row shows, through the SHARED [`RealizedProvider`](ds_config::RealizedProvider) — the
+/// ONE realized-EP vocabulary BOTH engines PRODUCE (as a typed enum) and this row CONSUMES, so a
+/// token typo is a compile error and the two rows can't drift into different labels for the same
+/// runtime (drift guard: [`tests::tts_and_stt_report_the_same_realized_runtime`]).
+fn realized_ort_token(child_provider: &str) -> ds_config::Provider {
+    ds_config::RealizedProvider::parse(child_provider).to_provider()
+}
+
+/// The STT runtime TOKEN the UI shows — the REALIZED EP the warm child reports on its `STT_PROVIDER`
+/// line (what the Parakeet sessions ACTUALLY loaded on, CPU fallback included), mapped through the
+/// SAME [`realized_ort_token`] as TTS. No longer a preference gated on `cuda_present`/`shim_ok`: the
+/// child already reports the honest backend (it falls back to the ONNX CPU path when the ANE shim /
+/// GPU runtime is absent), so this just relabels it. `None` for non-built_in engines
+/// (claude_code/system/off have no local Parakeet ort runtime).
 fn stt_provider_token(
     resolved_stt: Option<ds_config::SttEngine>,
-    resolved_provider: ds_config::Provider,
-    shim_ok: bool,
-    cuda_present: bool,
+    child_provider: &str,
 ) -> Option<String> {
-    use ds_config::{Provider, SttEngine};
     match resolved_stt {
-        Some(SttEngine::BuiltIn) => Some(
-            match resolved_provider {
-                Provider::Ane if !shim_ok => Provider::OrtCpu.as_str(),
-                Provider::OrtCuda if !cuda_present => Provider::OrtCpu.as_str(),
-                other => other.as_str(),
-            }
-            .to_string(),
-        ),
+        Some(ds_config::SttEngine::BuiltIn) => {
+            Some(realized_ort_token(child_provider).as_str().to_string())
+        }
         _ => None,
     }
 }
 
-/// The TTS runtime TOKEN the UI shows — mapped from the live PROVIDER the warm Kokoro child
-/// reports (`"CoreML-ANE"`/`"CoreML"`/`"CUDA"`/`"CPU"`), i.e. what ACTUALLY loaded (the child
-/// builds its own ort session and records the realized EP, CPU fallback included), not a
-/// preference. `None` for the System (`say`) / Off engines (no Kokoro runtime).
+/// The TTS runtime TOKEN the UI shows — the REALIZED EP the warm Kokoro child reports on its
+/// `PROVIDER` line (`"CoreML-ANE"`/`"CoreML"`/`"CUDA"`/`"CPU"`), i.e. what ACTUALLY loaded (CPU
+/// fallback included), mapped through the SAME [`realized_ort_token`] as STT. `None` for the System
+/// (`say`) / Off engines (no Kokoro runtime).
 fn tts_provider_token(
     resolved_tts: Option<ds_config::TtsEngine>,
     child_provider: &str,
 ) -> Option<String> {
-    use ds_config::{Provider, TtsEngine};
     match resolved_tts {
-        Some(TtsEngine::Kokoro) => Some(
-            match child_provider {
-                "CoreML-ANE" => Provider::Ane.as_str(),
-                "CoreML" => Provider::OrtCoreMl.as_str(),
-                "CUDA" => Provider::OrtCuda.as_str(),
-                _ => Provider::OrtCpu.as_str(),
-            }
-            .to_string(),
-        ),
+        Some(ds_config::TtsEngine::Kokoro) => {
+            Some(realized_ort_token(child_provider).as_str().to_string())
+        }
         _ => None,
     }
 }
@@ -701,54 +684,45 @@ pub(crate) fn engine_state(
 
 #[cfg(test)]
 mod tests {
-    use super::{engine_state, stt_provider_token, tts_provider_token};
+    use super::{engine_state, realized_ort_token, stt_provider_token, tts_provider_token};
     use ds_config::{Provider, SttEngine, TtsEngine};
     use ds_status::EngineState;
 
     #[test]
-    fn stt_provider_is_actual_not_naive() {
-        // GUARD against the "UI claims CUDA but runs CPU" trap: cuda DEGRADES to cpu when
-        // the GPU runtime isn't fetched — NOT the naive resolved preference.
+    fn tts_and_stt_report_the_same_realized_runtime() {
+        // DRIFT GUARD: both status rows relabel the child's realized-provider string through the ONE
+        // shared `realized_ort_token`, so for the SAME reported runtime they MUST yield the SAME
+        // token. TTS and STT can never drift into different labels for the same EP — the whole point
+        // of routing both through one mapper (and one `ds_model::cuda_session_builder`).
+        let k = Some(TtsEngine::Kokoro);
         let b = Some(SttEngine::BuiltIn);
-        assert_eq!(
-            stt_provider_token(b, Provider::OrtCuda, false, false).as_deref(),
-            Some("cpu")
-        );
-        assert_eq!(
-            stt_provider_token(b, Provider::OrtCuda, false, true).as_deref(),
-            Some("cuda")
-        );
-        // ane degrades to cpu without the FluidAudio shim; cpu is always itself.
-        assert_eq!(
-            stt_provider_token(b, Provider::Ane, false, false).as_deref(),
-            Some("cpu")
-        );
-        assert_eq!(
-            stt_provider_token(b, Provider::Ane, true, false).as_deref(),
-            Some("ane")
-        );
-        assert_eq!(
-            stt_provider_token(b, Provider::OrtCpu, true, true).as_deref(),
-            Some("cpu")
-        );
-        // No local runtime for the delegate/OS engines or when TTS/STT is off.
-        assert_eq!(
-            stt_provider_token(Some(SttEngine::ClaudeCode), Provider::OrtCuda, true, true),
-            None
-        );
-        assert_eq!(
-            stt_provider_token(None, Provider::OrtCuda, true, true),
-            None
-        );
+        for realized in ["CUDA", "CPU", "CoreML-ANE", "CoreML", "System", "surprise"] {
+            assert_eq!(
+                tts_provider_token(k, realized),
+                stt_provider_token(b, realized),
+                "TTS and STT must map realized `{realized}` to the SAME token"
+            );
+        }
     }
 
     #[test]
-    fn tts_provider_reflects_the_childs_realized_runtime() {
-        // The token is what the warm child ACTUALLY loaded, not a preference.
+    fn provider_tokens_reflect_the_realized_runtime() {
+        // The token is the REALIZED EP the child reports, not a preference — CPU fallback included.
         let k = Some(TtsEngine::Kokoro);
+        let b = Some(SttEngine::BuiltIn);
         assert_eq!(tts_provider_token(k, "CUDA").as_deref(), Some("cuda"));
-        assert_eq!(tts_provider_token(k, "CPU").as_deref(), Some("cpu"));
-        assert_eq!(tts_provider_token(k, "CoreML-ANE").as_deref(), Some("ane"));
+        assert_eq!(stt_provider_token(b, "CUDA").as_deref(), Some("cuda"));
+        assert_eq!(stt_provider_token(b, "CPU").as_deref(), Some("cpu"));
+        assert_eq!(stt_provider_token(b, "CoreML-ANE").as_deref(), Some("ane"));
+        // Anything unrecognized (or "System") is CPU, never a wrong GPU claim.
+        assert_eq!(stt_provider_token(b, "System").as_deref(), Some("cpu"));
+        // The shared mapper's own table.
+        assert_eq!(realized_ort_token("CUDA"), Provider::OrtCuda);
+        assert_eq!(realized_ort_token("CoreML"), Provider::OrtCoreMl);
+        assert_eq!(realized_ort_token("nonsense"), Provider::OrtCpu);
+        // No local runtime token for the delegate/OS engines or when the engine is off.
+        assert_eq!(stt_provider_token(Some(SttEngine::ClaudeCode), "CUDA"), None);
+        assert_eq!(stt_provider_token(None, "CUDA"), None);
         assert_eq!(tts_provider_token(Some(TtsEngine::System), "CUDA"), None);
         assert_eq!(tts_provider_token(None, "CUDA"), None);
     }

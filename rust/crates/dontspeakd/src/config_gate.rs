@@ -89,25 +89,6 @@ pub(crate) fn parakeet_present_for(cfg: &VoiceConfig) -> bool {
     }
 }
 
-/// Is the Windows CUDA GPU runtime fetched? The "present" gate for the GPU execution
-/// provider, shared by Kokoro TTS and Parakeet STT (both run over it). Cfg-gated so
-/// callers (e.g. the honest `stt_provider` status row) compile on every platform; only
-/// Windows x86_64 has a downloadable CUDA runtime, so it's always false elsewhere —
-/// where `resolved_stt_provider` never returns CUDA anyway.
-#[cfg(all(
-    any(target_os = "windows", target_os = "linux"),
-    target_arch = "x86_64"
-))]
-pub(crate) fn cuda_runtime_present() -> bool {
-    ds_model::cuda_runtime_present()
-}
-#[cfg(not(all(
-    any(target_os = "windows", target_os = "linux"),
-    target_arch = "x86_64"
-)))]
-pub(crate) fn cuda_runtime_present() -> bool {
-    false
-}
 
 /// Is the System STT engine (macOS on-device `SFSpeechRecognizer`) usable right now?
 /// Probes the shim WITHOUT prompting — authorized + on-device-capable + recognizer live.

@@ -60,9 +60,9 @@ impl CoremlKokoro {
         Ok(me)
     }
 
-    /// Active provider label for the engine stats / `PROVIDER` line.
-    pub fn provider(&self) -> &'static str {
-        "CoreML-ANE"
+    /// The REALIZED provider for the engine stats / `PROVIDER` line — the shared type.
+    pub fn provider(&self) -> ds_config::RealizedProvider {
+        ds_config::RealizedProvider::CoreMlAne
     }
 
     /// Synthesize `text` → 24 kHz mono f32 PCM. `voice` is a Kokoro voice id. The ANE
