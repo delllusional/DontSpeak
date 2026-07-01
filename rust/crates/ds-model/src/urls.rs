@@ -93,7 +93,7 @@ pub const PARAKEET_TOKENS_FILE: &str = PARAKEET_TOKENS.file_name;
 // The shared `load-dynamic` inference dylib (Kokoro + Parakeet ONNX paths). The per-OS
 // SELECTION + extraction lives in `ort.rs`; this holds the pinned dist URL + digest. Pins
 // are 1.27.0 (a NEWER runtime serves the workspace's api-24 request; 1.24.2's loader
-// deadlocks on the SepFormer graph). No dist for Intel macOS / Linux.
+// deadlocks on the SepFormer graph). No dist for Intel macOS.
 
 /// The onnxruntime version the workspace `ort` pin (api-24) needs at runtime.
 pub const ONNXRUNTIME_VERSION: &str = "1.27.0";
@@ -105,9 +105,12 @@ pub const ONNXRUNTIME_VERSION: &str = "1.27.0";
 pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 78_593_089;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 8_831_605;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 7_797_972;
 #[cfg(not(any(
     all(target_os = "windows", target_arch = "aarch64"),
-    all(target_os = "linux", target_arch = "x86_64")
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64")
 )))]
 pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 31_604_221;
 
@@ -138,6 +141,13 @@ pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
     "547e40a48f1fe73e3f812d7c88a948612c23f896b91e4e2ee1e232d7b468246f";
+
+// Linux aarch64 — Microsoft's official linux-aarch64 build (same .tgz layout as linux-x64).
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-linux-aarch64-1.27.0.tgz";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub const ONNXRUNTIME_DIST_SHA256: &str =
+    "3e4d83ac06924a32a07b6d7f91ce6f852876153fc0bbdf931bf517a140bfbe48";
 
 /// The onnxruntime-gpu version shipped for the CUDA path — DELIBERATELY decoupled from the CPU
 /// [`ONNXRUNTIME_VERSION`] (1.27.0): onnxruntime-gpu ≥ 1.27 requires CUDA 13 (a newer driver than
@@ -282,6 +292,7 @@ pub enum Platform {
     WindowsX64,
     WindowsArm64,
     LinuxX64,
+    LinuxArm64,
     /// Apple Silicon — the only macOS target with the Core ML / ANE (FluidAudio) path and a
     /// bundled ONNX Runtime dist.
     MacArm64,
@@ -298,16 +309,18 @@ impl Platform {
         Platform::WindowsX64,
         Platform::WindowsArm64,
         Platform::LinuxX64,
+        Platform::LinuxArm64,
         Platform::MacArm64,
         Platform::MacX64,
     ];
 
-    /// Targets with a bundled ONNX Runtime dist — everywhere except Intel macOS (and Linux
-    /// arm, which the app doesn't ship). Mirrors `ort::onnxruntime_dist` returning `Some`.
+    /// Targets with a bundled ONNX Runtime dist — everywhere except Intel macOS.
+    /// Mirrors `ort::onnxruntime_dist` returning `Some`.
     pub const WITH_ONNX_RUNTIME: &'static [Platform] = &[
         Platform::WindowsX64,
         Platform::WindowsArm64,
         Platform::LinuxX64,
+        Platform::LinuxArm64,
         Platform::MacArm64,
     ];
 
@@ -334,6 +347,10 @@ pub const fn current_platform() -> Platform {
     {
         Platform::LinuxX64
     }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        Platform::LinuxArm64
+    }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         Platform::MacArm64
@@ -342,13 +359,14 @@ pub const fn current_platform() -> Platform {
     {
         Platform::MacX64
     }
-    // Any target the app doesn't ship (e.g. linux-arm64): treat as a generic portable target —
-    // only the all-platform model assets apply (the GPU/Apple-native lists exclude it, and the
+    // Any target the app doesn't ship: treat as a generic portable target — only the
+    // all-platform model assets apply (the GPU/Apple-native lists exclude it, and the
     // file-assembly cfg gates below never materialize CUDA/ONNX files there anyway).
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),
         all(target_os = "windows", target_arch = "aarch64"),
         all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
         all(target_os = "macos", target_arch = "aarch64"),
         all(target_os = "macos", target_arch = "x86_64"),
     )))]

@@ -231,7 +231,17 @@ jobs:
     # gtk4-layer-shell — which ubuntu-latest (24.04) is too old for. Ubuntu 26.04 ships
     # libadwaita 1.9 / GTK 4.22 and the layer-shell -dev package (matches windows-2025 /
     # macos-26). continue-on-error keeps a runner-availability hiccup from blocking the release.
-    runs-on: ubuntu-26.04
+    # Both arches build NATIVELY (no cross-compiling): x86_64 on ubuntu-26.04, aarch64 on
+    # ubuntu-26.04-arm; package.sh derives ARCH/DEB_ARCH from uname -m.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            arch: x86_64
+          - runner: ubuntu-26.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
@@ -250,7 +260,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: linux-packages
+          name: linux-packages-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
 
@@ -277,7 +287,7 @@ jobs:
             artifacts/windows-portable-x64/dontspeak-portable-x64.zip
             artifacts/windows-portable-arm64/dontspeak-portable-arm64.zip
             artifacts/macos-apps/*.app.zip
-            artifacts/linux-packages/*
+            artifacts/linux-packages-*/*
           )
           # checksums.txt — sha256 of every published asset, by basename, so the
           # dontspeak.org install scripts can verify each download. Built from the SAME

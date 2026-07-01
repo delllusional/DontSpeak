@@ -83,7 +83,15 @@ pub(crate) fn onnxruntime_dist() -> Option<OrtDist> {
             archive_sha256: crate::urls::ONNXRUNTIME_DIST_SHA256,
         });
     }
-    // Intel macOS / other Linux arches: no pinned dynamic dist → route B (build ort with
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        // Microsoft's official linux-aarch64 build — same .tgz layout as linux-x64.
+        return Some(OrtDist {
+            url: crate::urls::ONNXRUNTIME_DIST_URL,
+            archive_sha256: crate::urls::ONNXRUNTIME_DIST_SHA256,
+        });
+    }
+    // Intel macOS / other arches: no pinned dynamic dist → route B (build ort with
     // `download-binaries`, or set ORT_DYLIB_PATH manually).
     #[allow(unreachable_code)]
     None
