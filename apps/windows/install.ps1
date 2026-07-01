@@ -220,7 +220,7 @@ Write-Host "==> 3. wire client integrations (Claude Code hooks + MCP, Desktop MC
 # MCP registration together; Desktop/Codex self-skip if absent.
 # (undo: dontspeak.exe wire <client> --remove)
 $_dsBin = Join-Path $INSTALL_DIR 'dontspeak.exe'
-foreach ($client in 'claude_code', 'claude_desktop', 'codex') { & $_dsBin wire $client }
+& $_dsBin wire --all   # every known client (the list lives in the binary); each self-skips if absent
 
 # NOTE: there is NO Kokoro/speak.py step anymore. The Rust dontspeak.exe does
 # in-process Kokoro synthesis and downloads its model assets (onnx + voices + the

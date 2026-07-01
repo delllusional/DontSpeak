@@ -22,13 +22,15 @@ pub fn run(args: &[String]) -> i32 {
     let mut client: Option<WireTarget> = None;
     let mut remove = false;
     let mut print_only = false;
+    let mut all = false;
     for a in args {
         match a.as_str() {
+            "--all" => all = true,
             "--remove" => remove = true,
             "--print-only" | "--print" => print_only = true,
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: dontspeak wire <claude_code|claude_desktop|codex> [--remove] [--print-only]"
+                    "usage: dontspeak wire <claude_code|claude_desktop|codex> [--remove] [--print-only]\n       dontspeak wire --all [--remove] [--print-only]   (every known client; each self-skips if absent)"
                 );
                 return 0;
             }
@@ -46,10 +48,10 @@ pub fn run(args: &[String]) -> i32 {
             },
         }
     }
-    let Some(client) = client else {
-        eprintln!("wire: missing client (claude_code | claude_desktop | codex)");
+    if !all && client.is_none() {
+        eprintln!("wire: missing client (claude_code | claude_desktop | codex), or use --all");
         return 1;
-    };
+    }
     let Some(paths) = Paths::resolve() else {
         eprintln!("wire: $HOME not set; nothing to do");
         return 1;
@@ -60,7 +62,18 @@ pub fn run(args: &[String]) -> i32 {
         wire_hooks::seed_and_prune(&paths);
     }
 
-    wire_client(client, &paths, remove, print_only)
+    // `--all` wires (or unwires) EVERY known client from the canonical WireTarget::CLIENTS list —
+    // the single source the per-platform installers used to hand-copy. Each self-skips when its
+    // client is absent; return the WORST exit code so one client's hard error still surfaces.
+    if all {
+        return WireTarget::CLIENTS
+            .iter()
+            .map(|&c| wire_client(c, &paths, remove, print_only))
+            .max()
+            .unwrap_or(0);
+    }
+
+    wire_client(client.expect("checked above"), &paths, remove, print_only)
 }
 
 /// Wire (or unwire) ONE client's full set of surfaces, composed from the shared writers.

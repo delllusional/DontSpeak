@@ -79,9 +79,7 @@ install -d "$BIN" "$APPS" "$ICONS"
 install -m0755 "$HERE"/bin/* "$BIN/"
 sed "s|^Exec=ds-gtk|Exec=$BIN/ds-gtk|" "$HERE/share/applications/dontspeak.desktop" > "$APPS/dontspeak.desktop"
 install -m0644 "$HERE/share/icons/hicolor/scalable/apps/dontspeak.svg" "$ICONS/dontspeak.svg"
-for client in claude_code claude_desktop codex; do
-  "$BIN/dontspeak" wire "$client" 2>/dev/null || echo "(wire $client skipped)"
-done
+"$BIN/dontspeak" wire --all 2>/dev/null || echo "(wire skipped)"
 echo
 echo "Installed to $BIN. To grant /dev/uinput (synthetic keys), once:"
 echo "  sudo install -m0644 '$HERE/udev/99-ds-input.rules' /etc/udev/rules.d/99-ds-input.rules"

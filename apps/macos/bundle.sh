@@ -62,10 +62,8 @@ echo "   binaries installed; BUILD_ID=$BUILD_ID"
 # `wire <client>` self-skips if that client isn't installed.
 echo "==> 0b. wire client integrations (Claude Code hooks + MCP, Desktop MCP, Codex hooks)"
 _ds_bin="${DONTSPEAK_INSTALL_DIR:-$HOME/.local/bin}/dontspeak"
-for client in claude_code claude_desktop codex; do
-  "$_ds_bin" wire "$client" \
-    || echo "   !! wire $client failed; run '$_ds_bin wire $client' manually" >&2
-done
+"$_ds_bin" wire --all \
+  || echo "   !! wire --all failed; run '$_ds_bin wire --all' manually" >&2
 
 echo "==> 1. build (Rust staticlib + swift build)"
 "$DIR/build.sh" >/dev/null

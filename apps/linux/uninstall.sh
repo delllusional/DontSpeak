@@ -40,10 +40,8 @@ pkill -f "ds-helper" 2>/dev/null || true
 
 echo "==> 2. un-wire all client integrations (before deleting the binary)"
 if [ -x "$INSTALL_DIR/dontspeak" ]; then
-  for client in claude_code claude_desktop codex; do
-    "$INSTALL_DIR/dontspeak" wire "$client" --remove 2>/dev/null \
-      || echo "   (wire $client --remove failed or nothing to remove)"
-  done
+  "$INSTALL_DIR/dontspeak" wire --all --remove 2>/dev/null \
+    || echo "   (wire --all --remove failed or nothing to remove)"
 else
   echo "   (no $INSTALL_DIR/dontspeak — skipping hook removal)"
 fi

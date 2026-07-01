@@ -614,6 +614,12 @@ impl WireTarget {
         WireTarget::Codex,
     ];
 
+    /// The wire-able CLIENTS: [`ALL`](Self::ALL) minus [`NarrationSpec`](Self::NarrationSpec)
+    /// (a config file, not a client). Single source for `wire --all` and the per-platform
+    /// installers, which used to hand-copy this list in three different shells.
+    pub const CLIENTS: &'static [WireTarget] =
+        &[WireTarget::ClaudeCode, WireTarget::ClaudeDesktop, WireTarget::Codex];
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "narration_spec" => Some(WireTarget::NarrationSpec),
