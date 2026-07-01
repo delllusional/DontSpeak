@@ -1,0 +1,9 @@
+# actionlint configuration.
+#
+# ubuntu-26.04 is a REAL GitHub-hosted runner label (in preview — see
+# actions/runner-images README, "Available Images"), used by release.yml's linux job
+# for its GNOME stack (libadwaita >= 1.7). actionlint's built-in label list lags
+# preview images, so allow it here; drop this entry once actionlint knows the label.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
