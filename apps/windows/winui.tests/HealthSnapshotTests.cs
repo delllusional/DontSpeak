@@ -15,6 +15,10 @@ public class HealthSnapshotTests
 
     private static HealthSnapshot Parse(string json) => HealthSnapshot.FromJson(json, Word);
 
+    // CA1861: constant array arguments hoisted out of the repeatedly-called asserts.
+    private static readonly string[] DefaultIndicator = { "stt", "tts_animated" };
+    private static readonly string[] TtsOnly = { "tts" };
+
     // ── The engine-down / garbage paths must yield the safe default snapshot ──
 
     [Theory]
@@ -28,7 +32,7 @@ public class HealthSnapshotTests
         var s = Parse(json);
         Assert.False(s.Activity.EngineRunning);
         Assert.Equal(0UL, s.StatusSeq);
-        Assert.Equal(new[] { "stt", "tts_animated" }, s.Activity.TrayIndicator);
+        Assert.Equal(DefaultIndicator, s.Activity.TrayIndicator);
     }
 
     // ── Happy path: a well-formed payload maps every group ──
@@ -53,10 +57,10 @@ public class HealthSnapshotTests
     public void TrayIndicatorOverridesOnlyWhenPresent()
     {
         Assert.Equal(
-            new[] { "stt", "tts_animated" },
+            DefaultIndicator,
             Parse("""{"seq": 1}""").Activity.TrayIndicator);
         Assert.Equal(
-            new[] { "tts" },
+            TtsOnly,
             Parse("""{"tray_indicator": ["tts", null]}""").Activity.TrayIndicator);
         Assert.Empty(Parse("""{"tray_indicator": []}""").Activity.TrayIndicator);
     }
