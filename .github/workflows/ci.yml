@@ -131,6 +131,14 @@ jobs:
         working-directory: rust
         run: cargo test --workspace --locked
 
+      # Swift formatting gate (config: apps/macos/.swift-format). macOS leg only — that's
+      # where a Swift toolchain is guaranteed — mirroring the rustfmt job for the app sources.
+      - name: swift format lint (macOS app)
+        if: runner.os == 'macOS'
+        run: >
+          swift format lint --strict --recursive
+          apps/macos/Sources apps/macos/SmKokoro/Sources apps/macos/Tests
+
       # macOS SwiftUI app: run swift test only if the package declares test targets.
       - name: swift test (macOS app, if any)
         if: runner.os == 'macOS'

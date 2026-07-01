@@ -6,15 +6,15 @@
 //  tool shows what it does and the arguments it accepts (name, type, required,
 //  allowed values), read from the catalog's ORDERED `params` array (authored order).
 
-import SwiftUI
 import CDontSpeak
+import SwiftUI
 
 /// One argument of a tool, from the catalog's ordered `params` array.
 struct ToolParam: Identifiable, Sendable {
     let name: String
     let type: String
     let required: Bool
-    let detail: String       // "one of: a, b" / "0.5–2.0" / ""
+    let detail: String  // "one of: a, b" / "0.5–2.0" / ""
     let description: String
     var id: String { name }
 }

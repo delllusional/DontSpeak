@@ -145,9 +145,13 @@ private final class DragView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard let win = window else { return }
         let p = convert(event.locationInWindow, from: nil)
-        if p.x <= Overlay.edgeMargin { mode = .resizeLeft }
-        else if p.x >= bounds.width - Overlay.edgeMargin { mode = .resizeRight }
-        else { mode = .move }
+        if p.x <= Overlay.edgeMargin {
+            mode = .resizeLeft
+        } else if p.x >= bounds.width - Overlay.edgeMargin {
+            mode = .resizeRight
+        } else {
+            mode = .move
+        }
         initialMouse = NSEvent.mouseLocation
         initialOrigin = win.frame.origin
         initialWidth = win.frame.width
@@ -167,10 +171,11 @@ private final class DragView: NSView {
         let dx = now.x - initialMouse.x
         switch mode {
         case .move:
-            win.setFrameOrigin(NSPoint(
-                x: (initialOrigin.x + dx).rounded(),
-                y: (initialOrigin.y + now.y - initialMouse.y).rounded()
-            ))
+            win.setFrameOrigin(
+                NSPoint(
+                    x: (initialOrigin.x + dx).rounded(),
+                    y: (initialOrigin.y + now.y - initialMouse.y).rounded()
+                ))
         case .resizeRight:
             onResize?(OverlayWidth.clamp(initialWidth + dx), false)
         case .resizeLeft:
@@ -277,14 +282,19 @@ final class DictationPanelController {
         let h = max(Overlay.restHeight, hosting.fittingSize.height)
         let topY = old.maxY
         let minX = leftEdge ? (old.maxX - newWidth) : old.minX
-        panel.setFrame(NSRect(x: minX.rounded(), y: (topY - h).rounded(),
-                              width: newWidth, height: h),
-                       display: true)
+        panel.setFrame(
+            NSRect(
+                x: minX.rounded(), y: (topY - h).rounded(),
+                width: newWidth, height: h),
+            display: true)
     }
 
     /// Apply one dictation snapshot from `Core`. Shows the panel while recording or
     /// awaiting confirmation, hides it otherwise. Cheap to call on every push.
-    func apply(recording: Bool, awaiting: Bool, text: String, target: String?, local: Bool, hasTarget: Bool, promptGlow: Bool) {
+    func apply(
+        recording: Bool, awaiting: Bool, text: String, target: String?, local: Bool, hasTarget: Bool,
+        promptGlow: Bool
+    ) {
         model.recording = recording
         model.awaiting = awaiting
         model.text = text
@@ -332,8 +342,9 @@ final class DictationPanelController {
             screen = NSScreen.main ?? NSScreen.screens.first
             guard let vf = screen?.visibleFrame else { return }
             // Default: lower-center, top edge at the ~22%-up baseline + resting height.
-            topLeft = NSPoint(x: vf.midX - width / 2,
-                              y: vf.minY + vf.height * 0.22 + Overlay.restHeight)
+            topLeft = NSPoint(
+                x: vf.midX - width / 2,
+                y: vf.minY + vf.height * 0.22 + Overlay.restHeight)
         }
         guard let vf = screen?.visibleFrame else { return }
 
@@ -392,35 +403,35 @@ struct DictationOverlay: View {
         .padding(Overlay.pad)
         .frame(width: model.width, alignment: .leading)
         .glassBackground()
-            // No-target cue: the WHOLE card glows by washing the glass with the shared
-            // WARNING orange (`Color.smWarning` / `Brand.warning`) — the SAME color as the
-            // warming/reloading status dot, from the one cross-platform source of truth.
-            // Pulses with the breath. A SEPARATE layer from the white speak-now ring below,
-            // so they never collide.
-            .overlay {
-                RoundedRectangle(cornerRadius: Overlay.corner, style: .continuous)
-                    .fill(Color.smWarning)
-                    .opacity(noTarget ? (breathe ? 0.28 : 0.14) : 0)
-                    .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: breathe)
-                    .animation(.easeInOut(duration: 0.3), value: noTarget)
-                    .allowsHitTesting(false)
-            }
-            // Breathing WHITE "speak now" ring while waiting for the first word.
-            .overlay {
-                RoundedRectangle(cornerRadius: Overlay.corner, style: .continuous)
-                    .strokeBorder(.white.opacity(0.6), lineWidth: 1.5)
-                    .blur(radius: breathe ? 5 : 1.5)
-                    .shadow(color: .white.opacity(0.5), radius: breathe ? 16 : 5)
-                    .opacity(prompting ? (breathe ? 0.7 : 0.18) : 0)
-                    .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: breathe)
-                    .animation(.easeOut(duration: 0.3), value: prompting)
-                    .allowsHitTesting(false)
-            }
-            // NOTE: no OUTER shadow/halo here — the panel window is sized exactly to the
-            // card, so an outward glow would be clipped to the window's square bounds and
-            // read as a dark rectangle around the card. The in-bounds orange wash above is
-            // the whole-card glow; the pulse gives it life.
-            .onAppear { breathe = true }
+        // No-target cue: the WHOLE card glows by washing the glass with the shared
+        // WARNING orange (`Color.smWarning` / `Brand.warning`) — the SAME color as the
+        // warming/reloading status dot, from the one cross-platform source of truth.
+        // Pulses with the breath. A SEPARATE layer from the white speak-now ring below,
+        // so they never collide.
+        .overlay {
+            RoundedRectangle(cornerRadius: Overlay.corner, style: .continuous)
+                .fill(Color.smWarning)
+                .opacity(noTarget ? (breathe ? 0.28 : 0.14) : 0)
+                .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: breathe)
+                .animation(.easeInOut(duration: 0.3), value: noTarget)
+                .allowsHitTesting(false)
+        }
+        // Breathing WHITE "speak now" ring while waiting for the first word.
+        .overlay {
+            RoundedRectangle(cornerRadius: Overlay.corner, style: .continuous)
+                .strokeBorder(.white.opacity(0.6), lineWidth: 1.5)
+                .blur(radius: breathe ? 5 : 1.5)
+                .shadow(color: .white.opacity(0.5), radius: breathe ? 16 : 5)
+                .opacity(prompting ? (breathe ? 0.7 : 0.18) : 0)
+                .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: breathe)
+                .animation(.easeOut(duration: 0.3), value: prompting)
+                .allowsHitTesting(false)
+        }
+        // NOTE: no OUTER shadow/halo here — the panel window is sized exactly to the
+        // card, so an outward glow would be clipped to the window's square bounds and
+        // read as a dark rectangle around the card. The in-bounds orange wash above is
+        // the whole-card glow; the pulse gives it life.
+        .onAppear { breathe = true }
     }
 
     /// The transcript, or empty — the panel stays bare (just the glass) when nothing was
@@ -451,10 +462,17 @@ private struct FlowLayout: Layout {
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let maxW = proposal.width ?? .infinity
-        var x: CGFloat = 0, y: CGFloat = 0, lineH: CGFloat = 0, widest: CGFloat = 0
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var lineH: CGFloat = 0
+        var widest: CGFloat = 0
         for v in subviews {
             let s = v.sizeThatFits(.unspecified)
-            if x > 0 && x + s.width > maxW { x = 0; y += lineH + lineSpacing; lineH = 0 }
+            if x > 0 && x + s.width > maxW {
+                x = 0
+                y += lineH + lineSpacing
+                lineH = 0
+            }
             x += s.width + spacing
             lineH = max(lineH, s.height)
             widest = max(widest, x - spacing)
@@ -464,11 +482,15 @@ private struct FlowLayout: Layout {
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let maxW = bounds.width
-        var x: CGFloat = bounds.minX, y: CGFloat = bounds.minY, lineH: CGFloat = 0
+        var x: CGFloat = bounds.minX
+        var y: CGFloat = bounds.minY
+        var lineH: CGFloat = 0
         for v in subviews {
             let s = v.sizeThatFits(.unspecified)
             if x > bounds.minX && (x - bounds.minX) + s.width > maxW {
-                x = bounds.minX; y += lineH + lineSpacing; lineH = 0
+                x = bounds.minX
+                y += lineH + lineSpacing
+                lineH = 0
             }
             v.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(s))
             x += s.width + spacing
@@ -476,4 +498,3 @@ private struct FlowLayout: Layout {
         }
     }
 }
-

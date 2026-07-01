@@ -41,7 +41,8 @@ private enum SmkError: Error { case noResult, notInitialized, nilText, nilDir, b
 // callbacks — fired once, synchronously, on this same thread before the function returns. The
 // Rust side copies it out during the call, so there is no ownership transfer and nothing to
 // free. The callback runs only on the success (rc 0) path. These types mirror smkokoro.h.
-public typealias SmkPcmCb = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Float>?, Int, Int32) -> Void
+public typealias SmkPcmCb =
+    @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Float>?, Int, Int32) -> Void
 public typealias SmkStrCb = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
 
 // MARK: - shared state
@@ -54,11 +55,11 @@ private let state = ShimState()
 
 private func preset(_ i: Int32) -> TtsComputeUnitPreset {
     switch i {
-    case 1: return .allAne      // every stage on the Neural Engine
-    case 2: return .cpuAndGpu   // skip the ANE (GPU)
+    case 1: return .allAne  // every stage on the Neural Engine
+    case 2: return .cpuAndGpu  // skip the ANE (GPU)
     case 3: return .cpuOnly
     case 4: return .aneTailGpu
-    default: return .default     // ANE-resident RNN stages + GPU fp32 tail (recommended)
+    default: return .default  // ANE-resident RNN stages + GPU fp32 tail (recommended)
     }
 }
 
@@ -110,7 +111,10 @@ public func smk_synthesize_text(
     state.lock.lock()
     let mgr = state.manager
     state.lock.unlock()
-    guard let mgr else { logErr("smk_synthesize: not initialized"); return 2 }
+    guard let mgr else {
+        logErr("smk_synthesize: not initialized")
+        return 2
+    }
     guard let t = cString(text) else { return 3 }
     let v = cString(voice)
     switch runBlocking({ try await mgr.synthesizeDetailed(text: t, voice: v, speed: speed) }) {
@@ -130,7 +134,12 @@ public func smk_shutdown() {
     let mgr = state.manager
     state.manager = nil
     state.lock.unlock()
-    if let mgr { _ = runBlocking({ await mgr.cleanup(); return true }) }
+    if let mgr {
+        _ = runBlocking({
+            await mgr.cleanup()
+            return true
+        })
+    }
 }
 
 // MARK: - ASR (Parakeet TDT v2, English, Core ML / ANE) — the apple-native STT backend
@@ -212,7 +221,12 @@ public func smk_asr_shutdown() {
     let mgr = asr.manager
     asr.manager = nil
     asr.lock.unlock()
-    if let mgr { _ = runBlocking({ await mgr.cleanup(); return true }) }
+    if let mgr {
+        _ = runBlocking({
+            await mgr.cleanup()
+            return true
+        })
+    }
 }
 
 // MARK: - Streaming ASR (FluidAudio StreamingEouAsrManager, Core ML / ANE)
@@ -239,7 +253,7 @@ private let streamAsr = StreamAsrState()
 public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
     streamAsr.lock.lock()
     defer { streamAsr.lock.unlock() }
-    DownloadUtils.enforceOffline = true // DontSpeak pre-downloads the streaming model set
+    DownloadUtils.enforceOffline = true  // DontSpeak pre-downloads the streaming model set
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     switch runBlocking({ () -> StreamingEouAsrManager in
         if let mgr = streamAsr.manager {
@@ -247,7 +261,7 @@ public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
             return mgr
         }
         guard let dir else { throw SmkError.nilDir }
-        let mgr = StreamingEouAsrManager(chunkSize: .ms160) // lowest latency (~6 partials/sec)
+        let mgr = StreamingEouAsrManager(chunkSize: .ms160)  // lowest latency (~6 partials/sec)
         try await mgr.loadModels(from: dir)
         await mgr.reset()
         return mgr
@@ -286,10 +300,12 @@ public func smk_asr_stream_push(
     let rate = Double(sampleRate)
     switch runBlocking({ () -> String in
         guard rate > 0,
-              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                         sampleRate: rate, channels: 1, interleaved: false),
-              let buffer = AVAudioPCMBuffer(pcmFormat: format,
-                                            frameCapacity: AVAudioFrameCount(max(audio.count, 1)))
+            let format = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: rate, channels: 1, interleaved: false),
+            let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(max(audio.count, 1)))
         else { throw SmkError.badAudio }
         buffer.frameLength = AVAudioFrameCount(audio.count)
         if !audio.isEmpty, let dst = buffer.floatChannelData {
@@ -399,7 +415,9 @@ public func smk_sys_authorize() -> Int32 {
         return 0
     }) {
     case .success(let code): return code
-    case .failure(let e): logErr("smk_sys_authorize error: \(e)"); return 2
+    case .failure(let e):
+        logErr("smk_sys_authorize error: \(e)")
+        return 2
     }
 }
 
@@ -414,11 +432,18 @@ public func smk_sys_transcribe(
     _ cb: SmkStrCb?
 ) -> Int32 {
     guard #available(macOS 26, *) else { return 3 }
-    guard let samples, n > 0 else { "".withCString { cb?(ctx, $0) }; return 0 }
+    guard let samples, n > 0 else {
+        "".withCString { cb?(ctx, $0) }
+        return 0
+    }
     let pcm = Array(UnsafeBufferPointer(start: samples, count: n))
     switch runBlocking({ try await sysTranscribe(pcm, sampleRate: Double(sampleRate)) }) {
-    case .success(let text): text.withCString { cb?(ctx, $0) }; return 0
-    case .failure(let e): logErr("smk_sys_transcribe error: \(e)"); return 1
+    case .success(let text):
+        text.withCString { cb?(ctx, $0) }
+        return 0
+    case .failure(let e):
+        logErr("smk_sys_transcribe error: \(e)")
+        return 1
     }
 }
 
@@ -444,8 +469,9 @@ private func sysTranscribe(_ samples: [Float], sampleRate: Double) async throws 
     }
     var buffer = inBuf
     if let target = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]),
-       target != inFormat,
-       let converted = try sysConvert(inBuf, to: target) {
+        target != inFormat,
+        let converted = try sysConvert(inBuf, to: target)
+    {
         buffer = converted
     }
 
@@ -482,7 +508,10 @@ private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) thr
     let feed = ConvertFeed(input)
     var error: NSError?
     converter.convert(to: output, error: &error) { _, status in
-        if feed.done { status.pointee = .endOfStream; return nil }
+        if feed.done {
+            status.pointee = .endOfStream
+            return nil
+        }
         feed.done = true
         status.pointee = .haveData
         return feed.buffer

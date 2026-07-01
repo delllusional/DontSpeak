@@ -10,13 +10,13 @@
 //  running / failed / downloading + progress) in its model-status JSON; this just
 //  parses it straight into `EngineStatus` and publishes it for SwiftUI.
 
-import Foundation
-import CDontSpeak
-import DontSpeakLogic
-import Observation
+import AVFoundation  // AVCaptureDevice (Microphone)
 import AppKit
 import ApplicationServices  // AXIsProcessTrusted
-import AVFoundation         // AVCaptureDevice (Microphone)
+import CDontSpeak
+import DontSpeakLogic
+import Foundation
+import Observation
 
 /// Copy a returned `char*` into a Swift String and free it (paired alloc/free).
 private func takeCString(_ ptr: UnsafeMutablePointer<CChar>?) -> String? {
@@ -33,10 +33,10 @@ enum Grant: Sendable, Equatable {
 
 /// The OS permissions DontSpeak needs, each independently queryable.
 struct Perms: Sendable, Equatable {
-    var accessibility = Grant.unknown   // type dictation into apps (CGEventPost); also
-                                        // covers reading the Caps key, so no separate
-                                        // Input Monitoring grant is tracked.
-    var microphone = Grant.unknown      // record dictation (Parakeet STT)
+    var accessibility = Grant.unknown  // type dictation into apps (CGEventPost); also
+    // covers reading the Caps key, so no separate
+    // Input Monitoring grant is tracked.
+    var microphone = Grant.unknown  // record dictation (Parakeet STT)
 }
 
 /// Live activity + tray state: what the engine is doing right now and how the
@@ -242,7 +242,7 @@ final class Core {
     /// ourselves to avoid a hot spin until it comes back.
     private func startStatusProducer(_ cont: AsyncStream<HealthSnapshot>.Continuation) {
         let t = Thread {
-            var since: UInt64 = 0   // 0 ⇒ the first call returns the current state immediately
+            var since: UInt64 = 0  // 0 ⇒ the first call returns the current state immediately
             var delivered = false
             var lastRunning = true
             while !Thread.current.isCancelled {
@@ -381,7 +381,7 @@ final class Core {
     /// set `engineRunning`; the caller owns that from `ds_engine_running_global()`.
     private nonisolated static func decodeStatus(_ json: String?) -> (HealthSnapshot, UInt64?)? {
         guard let json,
-              let dto = try? JSONDecoder().decode(ModelStatusDTO.self, from: Data(json.utf8))
+            let dto = try? JSONDecoder().decode(ModelStatusDTO.self, from: Data(json.utf8))
         else { return nil }
         var s = HealthSnapshot()
         s.engineDots.kokoro = dto.kokoro.engineStatus

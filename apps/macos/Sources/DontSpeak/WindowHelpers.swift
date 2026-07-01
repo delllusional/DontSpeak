@@ -4,8 +4,8 @@
 //  close-only window chrome, a clear glass-backed window, a locked sidebar divider, and a
 //  menu-bar-friendly "open this window" action.
 
-import SwiftUI
 import AppKit
+import SwiftUI
 
 /// Reaches the hosting `NSWindow` from SwiftUI so callers can tweak native window
 /// chrome (e.g. disable the minimize/zoom buttons for a close-only window). The
@@ -51,20 +51,21 @@ extension View {
     /// ScrollView (expanding scrolls, nothing auto-resizes), so the zoom-disable holds with no
     /// observer fighting AppKit re-enabling it on resize (which flickered the green button).
     func closeOnlyWindow() -> some View {
-        background(WindowAccessor { window in
-            window.styleMask.remove(.miniaturizable)
-            window.collectionBehavior.insert(.fullScreenNone)
-            window.standardWindowButton(.zoomButton)?.isEnabled = false
-            window.standardWindowButton(.miniaturizeButton)?.isEnabled = false
-            // Don't restore the last frame. macOS state restoration re-applies the saved
-            // "NSWindow Frame main" on every launch, so the window reopened at whatever the user
-            // last dragged it to instead of its compact `defaultSize`. Turning off BOTH the Cocoa
-            // restorable state and the frame autosave (the macOS-14-compatible equivalent of
-            // `.restorationBehavior(.disabled)`, which is macOS 15+) lets the window open at its
-            // `idealHeight`/`minHeight` (the snug Status size) every time.
-            window.isRestorable = false
-            window.setFrameAutosaveName("")
-        })
+        background(
+            WindowAccessor { window in
+                window.styleMask.remove(.miniaturizable)
+                window.collectionBehavior.insert(.fullScreenNone)
+                window.standardWindowButton(.zoomButton)?.isEnabled = false
+                window.standardWindowButton(.miniaturizeButton)?.isEnabled = false
+                // Don't restore the last frame. macOS state restoration re-applies the saved
+                // "NSWindow Frame main" on every launch, so the window reopened at whatever the user
+                // last dragged it to instead of its compact `defaultSize`. Turning off BOTH the Cocoa
+                // restorable state and the frame autosave (the macOS-14-compatible equivalent of
+                // `.restorationBehavior(.disabled)`, which is macOS 15+) lets the window open at its
+                // `idealHeight`/`minHeight` (the snug Status size) every time.
+                window.isRestorable = false
+                window.setFrameAutosaveName("")
+            })
     }
 }
 
@@ -74,10 +75,11 @@ extension View {
     /// Liquid-Glass surface with no title strip. Same clear-window setup the dictation
     /// overlay uses (`DictationPanel`: `isOpaque = false` + `backgroundColor = .clear`).
     func glassWindow() -> some View {
-        background(WindowAccessor { window in
-            window.isOpaque = false
-            window.backgroundColor = .clear
-        })
+        background(
+            WindowAccessor { window in
+                window.isOpaque = false
+                window.backgroundColor = .clear
+            })
     }
 }
 
@@ -106,16 +108,17 @@ extension View {
     /// and if a future SwiftUI build reshapes the hierarchy this simply no-ops (draggable again),
     /// never crashes.
     func lockSidebarDivider(width: CGFloat = 150) -> some View {
-        background(WindowAccessor { window in
-            guard let content = window.contentView,
-                  let split = firstSplitView(in: content),
-                  let controller = split.delegate as? NSSplitViewController,
-                  let sidebar = controller.splitViewItems.first
-            else { return }
-            sidebar.canCollapse = false
-            sidebar.minimumThickness = width
-            sidebar.maximumThickness = width
-        })
+        background(
+            WindowAccessor { window in
+                guard let content = window.contentView,
+                    let split = firstSplitView(in: content),
+                    let controller = split.delegate as? NSSplitViewController,
+                    let sidebar = controller.splitViewItems.first
+                else { return }
+                sidebar.canCollapse = false
+                sidebar.minimumThickness = width
+                sidebar.maximumThickness = width
+            })
     }
 }
 
@@ -124,7 +127,7 @@ extension OpenWindowAction {
     /// aren't frontmost, so a window opened from the menu bar would otherwise appear
     /// behind whatever app currently is.
     func activating(_ id: String) {
-        NSApp.activate()   // `activate(ignoringOtherApps:)` is deprecated as of macOS 14
+        NSApp.activate()  // `activate(ignoringOtherApps:)` is deprecated as of macOS 14
         self(id: id)
     }
 }

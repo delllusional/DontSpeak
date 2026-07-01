@@ -10,10 +10,10 @@
 //  formatters don't run. The shared row chrome + stat-cell formatters are the file-private
 //  helpers at the bottom.
 
-import SwiftUI
 import AppKit
 import CDontSpeak
 import DontSpeakLogic
+import SwiftUI
 
 /// Lifecycle state of an engine/model, shown as one right-aligned dot. Color AND
 /// shape both carry the meaning (readable when color-blind):
@@ -160,9 +160,11 @@ struct StatusView: View {
                     // Speaker diarization (on-demand) — same lifecycle dot as STT/TTS;
                     // gray/idle when disabled, green when enabled+ready.
                     PlatterDivider()
-                    EngineStatRow(role: L.t("status.engine.role_diar"),
-                                  detail: L.t("status.engine.pyannote"),
-                                  status: core.engineDots.diarizer) { DiarStatsContent() }
+                    EngineStatRow(
+                        role: L.t("status.engine.role_diar"),
+                        detail: L.t("status.engine.pyannote"),
+                        status: core.engineDots.diarizer
+                    ) { DiarStatsContent() }
                 }
 
                 // Caps Lock platter — the dictation capture loop; expands to its tap/hold
@@ -188,11 +190,15 @@ struct StatusView: View {
         case "off":
             OffEngineRow(role: L.t("status.engine.role_tts"))
         case "system":
-            EngineStatRow(role: L.t("status.engine.role_tts"), detail: L.t("status.engine.system"),
-                          status: core.engineDots.ttsSystem) { TtsStatsContent() }
+            EngineStatRow(
+                role: L.t("status.engine.role_tts"), detail: L.t("status.engine.system"),
+                status: core.engineDots.ttsSystem
+            ) { TtsStatsContent() }
         default:
-            EngineStatRow(role: L.t("status.engine.role_tts"), detail: L.t("status.engine.kokoro"),
-                          status: core.engineDots.kokoro) { TtsStatsContent() }
+            EngineStatRow(
+                role: L.t("status.engine.role_tts"), detail: L.t("status.engine.kokoro"),
+                status: core.engineDots.kokoro
+            ) { TtsStatsContent() }
         }
     }
 
@@ -206,14 +212,20 @@ struct StatusView: View {
         case "off":
             OffEngineRow(role: L.t("status.engine.role_stt"))
         case "claude_code":
-            EngineStatRow(role: L.t("status.engine.role_stt"), detail: L.t("status.engine.claude_code"),
-                          status: core.engineDots.claudeCode) { SttStatsContent() }
+            EngineStatRow(
+                role: L.t("status.engine.role_stt"), detail: L.t("status.engine.claude_code"),
+                status: core.engineDots.claudeCode
+            ) { SttStatsContent() }
         case "system":
-            EngineStatRow(role: L.t("status.engine.role_stt"), detail: L.t("status.engine.system"),
-                          status: core.engineDots.system) { SttStatsContent() }
+            EngineStatRow(
+                role: L.t("status.engine.role_stt"), detail: L.t("status.engine.system"),
+                status: core.engineDots.system
+            ) { SttStatsContent() }
         default:
-            EngineStatRow(role: L.t("status.engine.role_stt"), detail: L.t("status.engine.parakeet"),
-                          status: core.engineDots.parakeet) { SttStatsContent() }
+            EngineStatRow(
+                role: L.t("status.engine.role_stt"), detail: L.t("status.engine.parakeet"),
+                status: core.engineDots.parakeet
+            ) { SttStatsContent() }
         }
     }
 }
@@ -375,14 +387,16 @@ private struct CapsLockRow: View {
                 // The OS permissions the Caps loop + dictation need — formerly their own
                 // section, now nested here (their grant state folds into the header dot above).
                 PlatterDivider()
-                PermRow(name: L.t("status.permission.accessibility"), grant: core.perms.accessibility,
-                        purpose: L.t("status.permission.accessibility_purpose"), pane: "Privacy_Accessibility")
+                PermRow(
+                    name: L.t("status.permission.accessibility"), grant: core.perms.accessibility,
+                    purpose: L.t("status.permission.accessibility_purpose"), pane: "Privacy_Accessibility")
                 // Mic row only for engines DontSpeak captures audio for — hidden for `off` (mic
                 // never opened) and `claude_code` (Claude Code owns its own mic).
                 if showsMicrophone {
                     PlatterDivider()
-                    PermRow(name: L.t("status.permission.microphone"), grant: core.perms.microphone,
-                            purpose: L.t("status.permission.microphone_purpose"), pane: "Privacy_Microphone")
+                    PermRow(
+                        name: L.t("status.permission.microphone"), grant: core.perms.microphone,
+                        purpose: L.t("status.permission.microphone_purpose"), pane: "Privacy_Microphone")
                 }
             }
         }
@@ -406,7 +420,9 @@ private struct PermRow: View {
             }
             Spacer()
             // Open the matching System Settings pane — icon button, BEFORE the dot.
-            Button { core.openPrivacyPane(pane) } label: {
+            Button {
+                core.openPrivacyPane(pane)
+            } label: {
                 Image(systemName: "arrow.up.forward.app")
             }
             .buttonStyle(.borderless)
@@ -471,8 +487,12 @@ private struct TtsStatsContent: View {
             if s.utterances == 0 {
                 glassHint("status.no_data")
             } else {
-                statRangeRow(L.t("status.stats.realtime"), s.rtfMin, s.rtfAvg, s.rtfMax, 2, "status.stats.unit.times")
-                statRangeRow(L.t("status.stats.first_audio"), s.firstMinMs / 1000, s.firstAvgMs / 1000, s.firstMaxMs / 1000, 1, "status.stats.unit.seconds")
+                statRangeRow(
+                    L.t("status.stats.realtime"), s.rtfMin, s.rtfAvg, s.rtfMax, 2, "status.stats.unit.times")
+                statRangeRow(
+                    L.t("status.stats.first_audio"), s.firstMinMs / 1000, s.firstAvgMs / 1000,
+                    s.firstMaxMs / 1000, 1,
+                    "status.stats.unit.seconds")
                 statCountRow(L.t("status.stats.spoken"), s.utterances, s.audioSecs)
                 if s.failures > 0 {
                     LabeledContent(L.t("status.stats.failures"), value: "\(s.failures)").foregroundStyle(.red)
@@ -507,7 +527,8 @@ private struct SttStatsContent: View {
         } else if s.transcriptions == 0 {
             glassHint("status.no_data")
         } else {
-            statRangeRow(L.t("status.stats.realtime"), s.rtfMin, s.rtfAvg, s.rtfMax, 2, "status.stats.unit.times")
+            statRangeRow(
+                L.t("status.stats.realtime"), s.rtfMin, s.rtfAvg, s.rtfMax, 2, "status.stats.unit.times")
             statCountRow(L.t("status.stats.transcribed"), s.transcriptions, s.audioSecs)
         }
     }
@@ -530,10 +551,12 @@ private struct DiarStatsContent: View {
             if !s.runtime.isEmpty {
                 LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(s.runtime))
             }
-            LabeledContent(L.t("status.diarization_enrolled"),
-                           value: s.speakers.joined(separator: ", "))
-            LabeledContent(L.t("status.diarization_sensitivity"),
-                           value: String(format: "%.2f", s.clusteringThreshold))
+            LabeledContent(
+                L.t("status.diarization_enrolled"),
+                value: s.speakers.joined(separator: ", "))
+            LabeledContent(
+                L.t("status.diarization_sensitivity"),
+                value: String(format: "%.2f", s.clusteringThreshold))
         }
     }
 }
@@ -577,7 +600,10 @@ private func grantDot(_ grant: Grant) -> some View {
         }
     }
     .frame(width: 10, height: 10)
-    .help(grant == .granted ? L.t("status.grant.granted") : (grant == .denied ? L.t("status.grant.denied") : L.t("status.grant.unknown")))
+    .help(
+        grant == .granted
+            ? L.t("status.grant.granted")
+            : (grant == .denied ? L.t("status.grant.denied") : L.t("status.grant.unknown")))
 }
 
 /// A lifetime-total row label: the metric name (TTS/STT) with a light "all-time" qualifier, so the
@@ -609,8 +635,10 @@ private func statCountRow(_ label: String, _ count: Int, _ secs: Double) -> some
 
 /// A stat RANGE row — "avg<unit>  ·  lo–hi" — via the SHARED `ds_stats_range` formatter.
 @MainActor @ViewBuilder
-private func statRangeRow(_ title: String, _ lo: Double, _ avg: Double, _ hi: Double,
-                          _ precision: UInt32, _ unitKey: String) -> some View {
+private func statRangeRow(
+    _ title: String, _ lo: Double, _ avg: Double, _ hi: Double,
+    _ precision: UInt32, _ unitKey: String
+) -> some View {
     LabeledContent {
         Text(smTake(ds_stats_range(lo, avg, hi, precision, unitKey))).monospacedDigit()
     } label: {
@@ -666,7 +694,8 @@ private struct BusyCursorOnHover: ViewModifier {
     private static var busy: NSCursor {
         let sel = NSSelectorFromString("busyButClickableCursor")
         if NSCursor.responds(to: sel),
-           let c = NSCursor.perform(sel)?.takeUnretainedValue() as? NSCursor {
+            let c = NSCursor.perform(sel)?.takeUnretainedValue() as? NSCursor
+        {
             return c
         }
         return .pointingHand

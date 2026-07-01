@@ -10,10 +10,10 @@
 //  colors are the shared `Brand.logSourcePalette` / `Brand.logLevelColor`. This view only
 //  wires the FFI read to that logic and renders it.
 
-import SwiftUI
 import AppKit
 import CDontSpeak
 import DontSpeakLogic
+import SwiftUI
 
 /// Read the combined log tail from the FFI and decode it into `[LogLine]`. `maxBytes` caps the
 /// tail PER source file (matching the Windows tab's 64 KB), so a long-running session shows a
@@ -106,7 +106,7 @@ struct LogView: View {
     private func sourceColor(_ source: String) -> Color {
         let palette = Brand.logSourcePalette
         guard !source.isEmpty, !palette.isEmpty,
-              let idx = LogCatalog.colorIndex(for: source, in: orderedSources)
+            let idx = LogCatalog.colorIndex(for: source, in: orderedSources)
         else { return .secondary }
         return Color(nsColor: palette[idx % palette.count])
     }
@@ -124,11 +124,11 @@ private struct SearchField: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
             TextField("", text: $text)
-                .textFieldStyle(.plain)        // no opaque bezel / focus box — just the glyph + text
+                .textFieldStyle(.plain)  // no opaque bezel / focus box — just the glyph + text
         }
-        .font(.body)                           // standard control text size
+        .font(.body)  // standard control text size
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)                 // ≈ the system's standard single-line control height
-        .glassBackground(cornerRadius: 8)      // the glass slab look of the left sidebar, not the card material
+        .padding(.vertical, 7)  // ≈ the system's standard single-line control height
+        .glassBackground(cornerRadius: 8)  // the glass slab look of the left sidebar, not the card material
     }
 }

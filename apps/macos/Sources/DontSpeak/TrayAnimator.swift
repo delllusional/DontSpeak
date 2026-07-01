@@ -75,7 +75,7 @@ final class TrayAnimator {
     /// Re-arm tracking of the tray-relevant reads; fire `sync` on any change.
     private func observe() {
         withObservationTracking {
-            _ = Self.key(core)   // reads activity.{sttActive,ttsActive,muted,trayIndicator,engineRunning}
+            _ = Self.key(core)  // reads activity.{sttActive,ttsActive,muted,trayIndicator,engineRunning}
         } onChange: {
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -153,12 +153,12 @@ final class TrayAnimator {
         // `breatheStart` with a +π/2 phase so it STARTS at the peak (full) and eases down — no
         // jump in from an arbitrary sine phase.
         if breathing {
-            let phase = (sin((now - breatheStart) / breatheDur * 2 * .pi + .pi / 2) + 1) / 2   // starts at 1
-            let pillAlpha = 0.725 + 0.275 * CGFloat(phase)           // 0.725…1.0 (half the dip from full)
+            let phase = (sin((now - breatheStart) / breatheDur * 2 * .pi + .pi / 2) + 1) / 2  // starts at 1
+            let pillAlpha = 0.725 + 0.275 * CGFloat(phase)  // 0.725…1.0 (half the dip from full)
             image = TrayState.current(core).breathingImage(muted: core.activity.muted, pillAlpha: pillAlpha)
         } else {
             image = toImage
-            updateTimer()   // nothing left to animate → stop + settle
+            updateTimer()  // nothing left to animate → stop + settle
         }
     }
 

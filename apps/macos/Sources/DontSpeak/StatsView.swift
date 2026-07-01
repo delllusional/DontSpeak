@@ -64,14 +64,20 @@ struct EngineStats: Sendable, Equatable {
         var s = EngineStats()
         guard let dto else { return s }
         if let t = dto.tts {
-            s.tts.rtfAvg = t.rtfAvg ?? 0; s.tts.rtfMin = t.rtfMin ?? 0; s.tts.rtfMax = t.rtfMax ?? 0
-            s.tts.firstAvgMs = t.firstAvgMs ?? 0; s.tts.firstMinMs = t.firstMinMs ?? 0; s.tts.firstMaxMs = t.firstMaxMs ?? 0
+            s.tts.rtfAvg = t.rtfAvg ?? 0
+            s.tts.rtfMin = t.rtfMin ?? 0
+            s.tts.rtfMax = t.rtfMax ?? 0
+            s.tts.firstAvgMs = t.firstAvgMs ?? 0
+            s.tts.firstMinMs = t.firstMinMs ?? 0
+            s.tts.firstMaxMs = t.firstMaxMs ?? 0
             s.tts.utterances = t.utterances ?? 0
             s.tts.audioSecs = t.audioSecs ?? 0
             s.tts.failures = t.failures ?? 0
         }
         if let t = dto.stt {
-            s.stt.rtfAvg = t.rtfAvg ?? 0; s.stt.rtfMin = t.rtfMin ?? 0; s.stt.rtfMax = t.rtfMax ?? 0
+            s.stt.rtfAvg = t.rtfAvg ?? 0
+            s.stt.rtfMin = t.rtfMin ?? 0
+            s.stt.rtfMax = t.rtfMax ?? 0
             s.stt.transcriptions = t.transcriptions ?? 0
             s.stt.audioSecs = t.audioSecs ?? 0
         }

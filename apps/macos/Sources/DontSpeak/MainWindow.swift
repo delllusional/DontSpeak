@@ -10,8 +10,8 @@
 //  same `windowGlass` overlay, same `TrayState` source, same system-derived height, now
 //  spanning the full width above both the sidebar and the detail.
 
-import SwiftUI
 import AppKit
+import SwiftUI
 
 /// The screens in the sidebar, in display order. Titles come from the shared i18n catalog
 /// (`common.nav_*`) so they match the Windows tabs; the SF Symbols are the macOS-native cue.

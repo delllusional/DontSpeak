@@ -3,8 +3,8 @@
 //  Tiny shared helpers for the `ds_*` C ABI so the "call → copy the owned C string → free it"
 //  dance lives in ONE place instead of being re-spelled at every catalog/colors read.
 
-import Foundation
 import CDontSpeak
+import Foundation
 
 /// Run a `ds_*` call that returns an OWNED `char*`, copy it into a Swift `String`, and free the
 /// C allocation (`ds_string_free`). `nil` when the call returns NULL. Every FFI string read

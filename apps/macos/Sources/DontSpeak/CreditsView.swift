@@ -6,8 +6,8 @@
 //  FILTERED to this platform (so an Apple-Silicon build shows the Core ML / ANE model sets
 //  and never the CUDA GPU runtime). It can't drift from what's actually fetched.
 
-import SwiftUI
 import CDontSpeak
+import SwiftUI
 
 /// One downloaded file of a library, from the catalog's `files` array.
 struct LibraryFile: Identifiable, Sendable {

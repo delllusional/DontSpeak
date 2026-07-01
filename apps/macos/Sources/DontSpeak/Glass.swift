@@ -131,7 +131,8 @@ extension View {
     /// over the window slab; it's the readable secondary surface the HUD pattern calls for.
     func platterBackground(cornerRadius: CGFloat = Glass.platterCorner) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        return self
+        return
+            self
             .background(.regularMaterial, in: shape)
             .clipShape(shape)
             .overlay(shape.strokeBorder(.separator.opacity(0.6), lineWidth: 0.5))

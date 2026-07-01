@@ -19,8 +19,9 @@ struct TrayMenu: View {
         Button {
             core.setMuted(!core.activity.muted)
         } label: {
-            Label(L.t("tray.mute"),
-                  systemImage: core.activity.muted ? "speaker.slash" : "speaker.wave.2")
+            Label(
+                L.t("tray.mute"),
+                systemImage: core.activity.muted ? "speaker.slash" : "speaker.wave.2")
         }
 
         // Settings: opens the single sidebar window (Status / Tools / Logs / Libraries), landing

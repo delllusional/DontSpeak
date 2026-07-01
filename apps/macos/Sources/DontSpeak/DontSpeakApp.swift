@@ -7,10 +7,10 @@
 //  ABI. It also shows status and helps grant OS permissions. All control lives in
 //  DontSpeak.
 
-import SwiftUI
 import AppKit
-import ServiceManagement
 import CDontSpeak
+import ServiceManagement
+import SwiftUI
 
 @main
 struct DontSpeakApp: App {
@@ -81,8 +81,8 @@ enum TrayState: Equatable {
         let cfg = core.activity.trayIndicator
         switch current(core) {
         case .recording: return cfg.contains("stt_animated")
-        case .speaking:  return cfg.contains("tts_animated")
-        case .idle:      return false
+        case .speaking: return cfg.contains("tts_animated")
+        case .idle: return false
         }
     }
 
@@ -95,8 +95,12 @@ enum TrayState: Equatable {
     /// talking. In half-duplex the two never overlap (the mic is gated closed during TTS).
     @MainActor static func current(_ core: Core) -> TrayState {
         let cfg = core.activity.trayIndicator
-        if core.activity.sttActive && (cfg.contains("stt") || cfg.contains("stt_animated")) { return .recording }
-        if core.activity.ttsActive && (cfg.contains("tts") || cfg.contains("tts_animated")) { return .speaking }
+        if core.activity.sttActive && (cfg.contains("stt") || cfg.contains("stt_animated")) {
+            return .recording
+        }
+        if core.activity.ttsActive && (cfg.contains("tts") || cfg.contains("tts_animated")) {
+            return .speaking
+        }
         return .idle
     }
 
@@ -105,18 +109,18 @@ enum TrayState: Equatable {
     /// window's bare pill (`TrayStatusIcon`) are both built from it, so they can't drift.
     @MainActor var tint: NSColor? {
         switch self {
-        case .idle:      return nil
+        case .idle: return nil
         case .recording: return Brand.micOrange
-        case .speaking:  return Brand.seedPurple
+        case .speaking: return Brand.seedPurple
         }
     }
 
     /// The glyph for this state — the shared cached images below.
     @MainActor var image: NSImage {
         switch self {
-        case .idle:      return Self.brandIcon
+        case .idle: return Self.brandIcon
         case .recording: return Self.recordingPill
-        case .speaking:  return Self.speakingPill
+        case .speaking: return Self.speakingPill
         }
     }
 
@@ -148,16 +152,20 @@ enum TrayState: Equatable {
             guard let ctx = NSGraphicsContext.current else { return true }
             if let tint {
                 slash.lineWidth = h * 0.20
-                tint.setStroke(); slash.stroke()
+                tint.setStroke()
+                slash.stroke()
                 slash.lineWidth = h * 0.09
-                NSColor.white.setStroke(); slash.stroke()
+                NSColor.white.setStroke()
+                slash.stroke()
             } else {
                 slash.lineWidth = h * 0.20
                 ctx.compositingOperation = .destinationOut
-                NSColor.black.setStroke(); slash.stroke()
+                NSColor.black.setStroke()
+                slash.stroke()
                 ctx.compositingOperation = .sourceOver
                 slash.lineWidth = h * 0.09
-                NSColor.black.setStroke(); slash.stroke()
+                NSColor.black.setStroke()
+                slash.stroke()
             }
             return true
         }
@@ -171,7 +179,7 @@ enum TrayState: Equatable {
     // `tint`, so the color lives in ONE place (see `tint`).
     @MainActor static let brandIcon = MenuBarIcon.icon(tint: TrayState.idle.tint)
     @MainActor static let recordingPill = MenuBarIcon.icon(tint: TrayState.recording.tint)
-    @MainActor static let speakingPill  = MenuBarIcon.icon(tint: TrayState.speaking.tint)
+    @MainActor static let speakingPill = MenuBarIcon.icon(tint: TrayState.speaking.tint)
 
     /// The active-state icon with ONLY the pill at `pillAlpha` — the white glyph stays fully
     /// opaque. Used by `TrayAnimator` so just the surrounding capsule breathes while the brand
@@ -210,8 +218,9 @@ enum TrayState: Equatable {
 /// falls back to the rasterized PNG, then an SF Symbol.
 private func brandGlyph(height: CGFloat) -> NSImage {
     if let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "svg")
-                ?? Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
-       let img = NSImage(contentsOf: url) {
+        ?? Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
+        let img = NSImage(contentsOf: url)
+    {
         img.size = NSSize(width: height, height: height)
         return img
     }
@@ -226,8 +235,8 @@ private func brandGlyph(height: CGFloat) -> NSImage {
 // follows the mic pill's measured 40:24 aspect, and the glyph fills ~88% of the bar.
 // EVERY state shares this one footprint, so switching never shifts/resizes the item —
 // only the colored pill appears/disappears behind a fixed glyph.
-private let kMicPillAspect: CGFloat = 40.0 / 24.0   // measured from the system mic pill
-private let kGlyphFill: CGFloat = 0.88              // glyph box ÷ bar height (≈ the mic's prominence)
+private let kMicPillAspect: CGFloat = 40.0 / 24.0  // measured from the system mic pill
+private let kGlyphFill: CGFloat = 0.88  // glyph box ÷ bar height (≈ the mic's prominence)
 
 /// Cached menu-bar icon geometry + glyphs, built ONCE (@MainActor; NSImage isn't Sendable
 /// and these are main-actor-only). The pill height tracks the bar so we fill it like the
@@ -286,7 +295,7 @@ private enum MenuBarIcon {
             }
             return true
         }
-        img.isTemplate = (tint == nil)   // idle tints to the bar; active keeps its color
+        img.isTemplate = (tint == nil)  // idle tints to the bar; active keeps its color
         return img
     }
 }
@@ -321,7 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the engine then downloads it on first launch exactly as before.
     private func useBundledOnnxRuntimeIfPresent() {
         guard let dylib = Bundle.main.privateFrameworksURL?.appendingPathComponent("libonnxruntime.dylib"),
-              FileManager.default.fileExists(atPath: dylib.path)
+            FileManager.default.fileExists(atPath: dylib.path)
         else { return }
         setenv("ORT_DYLIB_PATH", dylib.path, 1)
     }
@@ -332,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// builds, where it isn't bundled) the helper falls back to the ONNX path.
     private func useBundledKokoroCoreMLIfPresent() {
         guard let dylib = Bundle.main.privateFrameworksURL?.appendingPathComponent("libsmkokoro.dylib"),
-              FileManager.default.fileExists(atPath: dylib.path)
+            FileManager.default.fileExists(atPath: dylib.path)
         else { return }
         setenv("SMKOKORO_DYLIB_PATH", dylib.path, 1)
     }
@@ -343,7 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// open (transcribes unfiltered), so dictation still works without it.
     private func useBundledSeparatorIfPresent() {
         guard let model = Bundle.main.resourceURL?.appendingPathComponent("sepformer_int8.onnx"),
-              FileManager.default.fileExists(atPath: model.path)
+            FileManager.default.fileExists(atPath: model.path)
         else { return }
         setenv("DONTSPEAK_SEPARATOR_PATH", model.path, 1)
     }
