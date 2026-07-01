@@ -93,7 +93,8 @@ pub const PARAKEET_TOKENS_FILE: &str = PARAKEET_TOKENS.file_name;
 // The shared `load-dynamic` inference dylib (Kokoro + Parakeet ONNX paths). The per-OS
 // SELECTION + extraction lives in `ort.rs`; this holds the pinned dist URL + digest. Pins
 // are 1.27.0 (a NEWER runtime serves the workspace's api-24 request; 1.24.2's loader
-// deadlocks on the SepFormer graph). No dist for Intel macOS.
+// deadlocks on the SepFormer graph). No dist for Intel macOS — Microsoft ships arm64-only
+// macOS archives; there `ort.rs` falls back to a Homebrew-installed runtime (version-gated).
 
 /// The onnxruntime version the workspace `ort` pin (api-24) needs at runtime.
 pub const ONNXRUNTIME_VERSION: &str = "1.27.0";
@@ -296,8 +297,9 @@ pub enum Platform {
     /// Apple Silicon — the only macOS target with the Core ML / ANE (FluidAudio) path and a
     /// bundled ONNX Runtime dist.
     MacArm64,
-    /// Intel macOS — no Apple-native (FluidAudio) path and no ONNX Runtime dist (see
-    /// `ort::onnxruntime_dist`); only the portable model assets apply.
+    /// Intel macOS — no Apple-native (FluidAudio) path and no downloadable ONNX Runtime
+    /// dist (Microsoft ships arm64-only; `ort.rs` falls back to a Homebrew-installed
+    /// runtime there); only the portable model assets apply to the catalog.
     MacX64,
 }
 
