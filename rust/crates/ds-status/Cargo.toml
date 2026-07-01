@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "Typed model_status schema shared by the engine (producer) and the UI FFI (consumer): serde + uniffi::Record, THE one source of truth for the engine→app status contract (replaces the per-platform hand-written DTOs)."
 
 [dependencies]

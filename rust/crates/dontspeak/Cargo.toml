@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "DontSpeak single multi-call binary: the stdio MCP server (default) PLUS the two Claude Code hook verbs (`notify`/`provide`) and the per-client `wire <client>` installer subcommand — all thin clients of the resident engine over the ds-ipc Unix socket. Stdio only; no HTTP."
 
 # ONE binary, busybox-style — argv selects the role (see src/main.rs):

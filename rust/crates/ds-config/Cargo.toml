@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "Path resolution and voice/runtime config for dontspeak (~/.claude, pidfile)."
 
 [dependencies]

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "Engine selection factory for dontspeak: config enum -> Box<dyn Tts/Stt>, degrade-to-default-never-silent (ARCHITECTURE §A.3)."
 
 [dependencies]

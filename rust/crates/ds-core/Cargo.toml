@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "DontSpeak UI-agnostic core: a stable, read-only C-ABI FFI (engine liveness + model presence + status JSON) a native menu-bar/health UI binds. Control lives in DontSpeak."
 
 # A Rust `lib` PLUS a staticlib + cdylib carrying the `extern "C"` FFI symbols so

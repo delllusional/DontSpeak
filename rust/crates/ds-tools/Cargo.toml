@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "The single source of truth for DontSpeak's tool catalog (JSON-Schema definitions), shared by the MCP server (ds-mcp) and the app-facing FFI (ds-core) so the list never drifts."
 
 [dependencies]

@@ -23,8 +23,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
-repository = "https://github.com/dontspeak/dontspeak"
+repository = "https://github.com/delllusional/DontSpeak"
 authors = ["Alex Yanchenko <alex@yanchenko.com>"]
+# Internal path-dep crates, not (yet) meant for crates.io — makes an accidental
+# `cargo publish` a hard error instead of a half-published workspace.
+publish = false
 
 # Workspace-wide lint policy; crates opt in via `[lints] workspace = true`. The blanket
 # gate stays CI's `cargo clippy -- -D warnings` (ci.yml) — entries here are the specific

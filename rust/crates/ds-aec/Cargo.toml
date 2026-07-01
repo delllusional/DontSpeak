@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "Platform acoustic-echo-cancelled duplex audio (mic capture + speaker render through ONE OS unit) so STT never hears TTS. macOS = Voice-Processing I/O AudioUnit; other platforms = unsupported stub (half-duplex fallback)."
 
 [dependencies]

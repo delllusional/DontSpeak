@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "Pluggable TTS engines for dontspeak: trait Tts + KokoroTts (native ort/voice-g2p/rodio in-process synth, the default) + SystemTts (say/SAPI/spd-say)."
 
 [dependencies]

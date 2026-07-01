@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "Pidfile single-speaker + process-GROUP kill (barge-in) for dontspeak."
 
 [dependencies]

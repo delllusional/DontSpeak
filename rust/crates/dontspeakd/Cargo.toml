@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "dontspeak push-to-talk engine: caps poll + Ctrl+G emit + focus gate + barge-in."
 
 # Library only — the engine is ALWAYS hosted in-process by a platform host app via the

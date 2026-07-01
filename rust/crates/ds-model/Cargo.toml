@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 description = "Model asset locate/download for dontspeak (Parakeet v2 ONNX STT + native Kokoro onnx/voices + the onnxruntime dylib). Pinned SHA-256, atomic temp+rename, retry."
 
 [dependencies]

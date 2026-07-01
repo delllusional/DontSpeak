@@ -1,11 +1,13 @@
 [package]
 name = "ds-ipc"
+description = "Newline-delimited-JSON RPC over a Unix-domain socket between the engine and its clients"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # Tiny newline-delimited-JSON RPC over a Unix-domain socket. The engine hosts the
 # server; the resident host app (via ds-core) and the speak/narrate hooks are clients.
