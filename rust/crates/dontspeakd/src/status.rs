@@ -11,10 +11,10 @@ use crate::config_gate::{
     apple_native_shim_available, caps_loop_enabled, kokoro_present_for, parakeet_available,
 };
 use crate::downloads::DownloadProg;
-use ds_model::DownloadTarget;
 use crate::engine::{PasteState, dictation_preview};
 use crate::stats;
 use crate::tts::TtsManager;
+use ds_model::DownloadTarget;
 use ds_status::{
     CapsEvent as CapsEventDto, DiarStats, Dictation, EngineObj, EngineState, Loaded, ModelStatus,
     Running, Stats,
@@ -711,7 +711,10 @@ mod tests {
         assert_eq!(realized_ort_token("CoreML"), Provider::OrtCoreMl);
         assert_eq!(realized_ort_token("nonsense"), Provider::OrtCpu);
         // No local runtime token for the delegate/OS engines or when the engine is off.
-        assert_eq!(stt_provider_token(Some(SttEngine::ClaudeCode), "CUDA"), None);
+        assert_eq!(
+            stt_provider_token(Some(SttEngine::ClaudeCode), "CUDA"),
+            None
+        );
         assert_eq!(stt_provider_token(None, "CUDA"), None);
         assert_eq!(tts_provider_token(Some(TtsEngine::System), "CUDA"), None);
         assert_eq!(tts_provider_token(None, "CUDA"), None);

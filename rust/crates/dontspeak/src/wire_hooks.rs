@@ -93,10 +93,7 @@ fn prune_stale_bins() {
         }
         match std::fs::remove_file(&path) {
             Ok(()) => eprintln!("wire: pruned stale binary {}", path.display()),
-            Err(e) => eprintln!(
-                "wire: could not prune {} ({e}) — skipping",
-                path.display()
-            ),
+            Err(e) => eprintln!("wire: could not prune {} ({e}) — skipping", path.display()),
         }
     }
 }
@@ -134,9 +131,7 @@ pub(crate) fn claude_code_hooks(paths: &Paths, remove: bool, print_only: bool) -
         Ok(s) => match serde_json::from_str::<Value>(&s) {
             Ok(v) => v,
             Err(_) => {
-                eprintln!(
-                    "wire: existing settings.json is not valid JSON; leaving it unchanged"
-                );
+                eprintln!("wire: existing settings.json is not valid JSON; leaving it unchanged");
                 return 1;
             }
         },

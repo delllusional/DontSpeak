@@ -381,10 +381,9 @@ mod tests {
         assert_eq!(changes, vec!["stt_engine=[system]".to_string()]);
 
         // A bare SCALAR string is NO LONGER accepted (arrays-only) — it's a hard error.
-        let err = serde_json::from_value::<SetConfigArgs>(
-            serde_json::json!({ "stt_engine": "system" }),
-        )
-        .unwrap_err();
+        let err =
+            serde_json::from_value::<SetConfigArgs>(serde_json::json!({ "stt_engine": "system" }))
+                .unwrap_err();
         assert!(err.to_string().contains("must be one of"), "got: {err}");
 
         // The array form is the canonical ladder; `off` and dupes drop, order is kept.

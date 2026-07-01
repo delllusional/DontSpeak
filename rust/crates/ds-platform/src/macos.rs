@@ -22,7 +22,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
-
 use objc2_app_kit::NSWorkspace;
 
 use crate::{

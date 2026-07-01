@@ -1122,9 +1122,7 @@ mod tests {
         assert!(!d.voice_paused, "second tap resumes the voice");
     }
     use crate::config_gate::DEFAULT_LONG_PRESS_MS;
-    use ds_platform::{
-        CapsKeyMonitor, FrontmostWindow, KeyInjector, PreflightError,
-    };
+    use ds_platform::{CapsKeyMonitor, FrontmostWindow, KeyInjector, PreflightError};
     use std::cell::Cell;
 
     /// A controllable mock Platform for the §F long-press logic. All state is

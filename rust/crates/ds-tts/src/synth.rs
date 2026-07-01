@@ -99,7 +99,10 @@ impl KokoroSynth {
         // STT can't drift into different GPU behavior.
         // Windows (any arch — win-arm64 is a real release target) + Linux x86_64. On win-arm64
         // `cuda_session_builder`'s inner cfg is stripped, so it just returns a CPU builder — safe.
-        #[cfg(any(target_os = "windows", all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(any(
+            target_os = "windows",
+            all(target_os = "linux", target_arch = "x86_64")
+        ))]
         let (mut builder, provider) = {
             let want_gpu = ds_config::provider_pref_wants_gpu(pref);
             ds_model::cuda_session_builder(want_gpu)?

@@ -78,8 +78,7 @@ pub const SET_CONFIG_DROP_SPEECH: &str = "Drop a window's pending speech on subm
     Text needs the UserPromptSubmit hook.";
 pub const SET_CONFIG_PAUSE_BG: &str =
     "Pause speech while no terminal is frontmost; resume on focus. Default false.";
-pub const SET_CONFIG_EARCON_REPLY: &str =
-    "Reply-done chime: a system-sound name or absolute path; empty = off. Defaults to the OS chime.";
+pub const SET_CONFIG_EARCON_REPLY: &str = "Reply-done chime: a system-sound name or absolute path; empty = off. Defaults to the OS chime.";
 pub const SET_CONFIG_EARCON_INPUT: &str =
     "Needs-input cue: a system-sound name or absolute path; empty = off (default).";
 pub const SET_CONFIG_CAPS: &str = "Enable the Caps Lock handler — push-to-talk dictation plus \

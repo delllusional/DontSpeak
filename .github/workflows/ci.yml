@@ -37,6 +37,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Formatting gate: no toolchain deps, ~30s. Keeps rustfmt drift from regrowing once
+  # external PRs start arriving.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: cargo fmt --check
+        working-directory: rust
+        run: cargo fmt --all --check
+
   # Clippy gate: deny ALL warnings across the workspace + every target (incl. tests). Linux
   # only per-commit (matches the test default); covers the platform-agnostic majority plus the
   # Linux cfg paths. Needs the same ALSA/PulseAudio dev libs as the tests (clippy compiles the

@@ -53,8 +53,14 @@ fn child_env(
     [
         ("DONTSPEAK_PROVIDER", Some(provider.to_string())),
         ("DONTSPEAK_STT_PROVIDER", Some(stt_provider.to_string())),
-        ("DONTSPEAK_FULL_DUPLEX", full_duplex.then(|| "1".to_string())),
-        ("DONTSPEAK_STT_PRELOAD", stt_preload.then(|| "1".to_string())),
+        (
+            "DONTSPEAK_FULL_DUPLEX",
+            full_duplex.then(|| "1".to_string()),
+        ),
+        (
+            "DONTSPEAK_STT_PRELOAD",
+            stt_preload.then(|| "1".to_string()),
+        ),
     ]
 }
 

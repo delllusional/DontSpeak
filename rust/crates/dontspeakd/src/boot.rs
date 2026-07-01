@@ -463,4 +463,3 @@ fn install_bin(name: &str) -> std::path::PathBuf {
     }
     std::path::PathBuf::from(name)
 }
-

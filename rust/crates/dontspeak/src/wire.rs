@@ -36,9 +36,9 @@ pub fn run(args: &[String]) -> i32 {
             }
             other if other.starts_with('-') => eprintln!("wire: ignoring unknown flag {other:?}"),
             other => match WireTarget::parse(other) {
-                Some(t @ (WireTarget::ClaudeCode | WireTarget::ClaudeDesktop | WireTarget::Codex)) => {
-                    client = Some(t)
-                }
+                Some(
+                    t @ (WireTarget::ClaudeCode | WireTarget::ClaudeDesktop | WireTarget::Codex),
+                ) => client = Some(t),
                 _ => {
                     eprintln!(
                         "wire: unknown client {other:?}; expected claude_code, claude_desktop, or codex"

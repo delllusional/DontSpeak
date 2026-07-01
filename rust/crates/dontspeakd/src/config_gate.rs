@@ -89,7 +89,6 @@ pub(crate) fn parakeet_present_for(cfg: &VoiceConfig) -> bool {
     }
 }
 
-
 /// Is the System STT engine (macOS on-device `SFSpeechRecognizer`) usable right now?
 /// Probes the shim WITHOUT prompting — authorized + on-device-capable + recognizer live.
 /// False off macOS / without the shim. Drives both the build_stt gate and the

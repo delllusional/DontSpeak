@@ -33,11 +33,7 @@ fn fill(key: &str, pairs: &[(&str, &str)]) -> String {
 /// download wording ("Downloading <pct>%") can NEVER diverge between platforms. `progress` is a
 /// single OVERALL byte-weighted percent across the whole model set (see
 /// `ds_model::coreml_repo::ensure_coreml_repos`), NOT a per-file percent.
-pub fn engine_state_word(
-    state: &str,
-    progress: f64,
-    why: &str,
-) -> String {
+pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
     use ds_status::EngineState;
     match EngineState::parse(state) {
         Some(EngineState::Missing) => ds_i18n::t("status.engine.status.missing"),
@@ -279,8 +275,14 @@ mod tests {
             "one of: list, enroll, forget"
         );
         // A numeric range → "lo–hi", whole numbers without a trailing ".0".
-        assert_eq!(tool_param_detail(&json!({"minimum": 0.5, "maximum": 0.9})), "0.5–0.9");
-        assert_eq!(tool_param_detail(&json!({"minimum": 1.0, "maximum": 10.0})), "1–10");
+        assert_eq!(
+            tool_param_detail(&json!({"minimum": 0.5, "maximum": 0.9})),
+            "0.5–0.9"
+        );
+        assert_eq!(
+            tool_param_detail(&json!({"minimum": 1.0, "maximum": 10.0})),
+            "1–10"
+        );
         // Enum wins over a range if both are (somehow) present.
         assert_eq!(
             tool_param_detail(&json!({"enum": ["a"], "minimum": 1.0, "maximum": 2.0})),

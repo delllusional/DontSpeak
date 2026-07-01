@@ -102,13 +102,17 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             s.total = total;
         };
         let result: std::io::Result<()> = (|| match which {
-            DownloadTarget::KokoroModel => ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ()),
+            DownloadTarget::KokoroModel => {
+                ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ())
+            }
             // Voice-tensor pack only (~28 MB) — the ANE/Core ML path needs the voices npz
             // but not the 310 MB ONNX model. Requested by `EnsureKokoroVoices`.
             DownloadTarget::KokoroVoices => {
                 ds_model::run_setup_kokoro_voices_with_progress(&prog).map(|_| ())
             }
-            DownloadTarget::ParakeetModel => ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ()),
+            DownloadTarget::ParakeetModel => {
+                ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ())
+            }
             // Shared GPU runtime (~1.4 GB) for the ONNX CUDA EP — drives BOTH engines. Folded
             // in here (not a bespoke thread in `apply_tts_provider`) so the completion hook
             // below restarts the warm child onto the GPU UNIFORMLY, exactly like a model fetch.
@@ -327,14 +331,38 @@ mod tests {
         // to "must restart the child" iff the child hosts a model that target produced.
 
         // Kokoro targets (full ONNX model + the voices-only pack) restart iff Kokoro TTS runs.
-        assert!(target_hosts_engine(DownloadTarget::KokoroModel, true, false));
-        assert!(target_hosts_engine(DownloadTarget::KokoroVoices, true, false));
-        assert!(!target_hosts_engine(DownloadTarget::KokoroModel, false, true));
-        assert!(!target_hosts_engine(DownloadTarget::KokoroVoices, false, false));
+        assert!(target_hosts_engine(
+            DownloadTarget::KokoroModel,
+            true,
+            false
+        ));
+        assert!(target_hosts_engine(
+            DownloadTarget::KokoroVoices,
+            true,
+            false
+        ));
+        assert!(!target_hosts_engine(
+            DownloadTarget::KokoroModel,
+            false,
+            true
+        ));
+        assert!(!target_hosts_engine(
+            DownloadTarget::KokoroVoices,
+            false,
+            false
+        ));
 
         // The Parakeet ONNX target restarts iff the built-in (Parakeet) STT runs.
-        assert!(target_hosts_engine(DownloadTarget::ParakeetModel, false, true));
-        assert!(!target_hosts_engine(DownloadTarget::ParakeetModel, true, false));
+        assert!(target_hosts_engine(
+            DownloadTarget::ParakeetModel,
+            false,
+            true
+        ));
+        assert!(!target_hosts_engine(
+            DownloadTarget::ParakeetModel,
+            true,
+            false
+        ));
 
         // The combined model fetch AND the shared CUDA runtime restart iff EITHER engine runs —
         // both engines share the warm child and the compute provider.
@@ -431,7 +459,10 @@ mod tests {
         assert!(!should_prefetch_cuda(Provider::OrtCuda, true, true));
         // Every NON-CUDA rung ⇒ never fetch, even with a driver and no runtime.
         for p in [Provider::OrtCpu, Provider::OrtCoreMl, Provider::Ane] {
-            assert!(!should_prefetch_cuda(p, true, false), "{p:?} must not prefetch");
+            assert!(
+                !should_prefetch_cuda(p, true, false),
+                "{p:?} must not prefetch"
+            );
         }
     }
 }

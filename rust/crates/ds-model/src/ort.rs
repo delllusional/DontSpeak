@@ -291,9 +291,18 @@ fn preload_cuda_libs(dir: &std::path::Path) {
 /// x64 (no CUDA EP there); the caller's macOS Core ML path is separate.
 pub fn cuda_session_builder(
     want_gpu: bool,
-) -> Result<(ort::session::builder::SessionBuilder, ds_config::RealizedProvider), String> {
+) -> Result<
+    (
+        ort::session::builder::SessionBuilder,
+        ds_config::RealizedProvider,
+    ),
+    String,
+> {
     use ds_config::RealizedProvider;
-    #[cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))]
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
     if want_gpu && cuda_runtime_present() && cuda_driver_present() {
         use ort::execution_providers::CUDAExecutionProvider;
         // ort's builder methods return the builder INSIDE their error (for recovery), so chain
@@ -305,7 +314,9 @@ pub fn cuda_session_builder(
             // would silently commit on CPU while we returned `Cuda` — a mislabel. With it, a
             // registration failure propagates as `Err`, so the CPU fallback below fires AND the token
             // returned is honestly `Cpu`.
-            Ok(b.with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])?)
+            Ok(b.with_execution_providers([CUDAExecutionProvider::default()
+                .build()
+                .error_on_failure()])?)
         })() {
             Ok(b) => return Ok((b, RealizedProvider::Cuda)),
             Err(e) => {

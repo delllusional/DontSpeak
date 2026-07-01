@@ -62,15 +62,15 @@ pub mod urls;
 pub use download::{ensure, ensure_with_progress, set_prefetch_source, url_basename};
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
 pub use ort::{
-    ONNXRUNTIME_VERSION, cuda_session_builder, ensure_onnxruntime, ensure_onnxruntime_with_progress,
-    ensure_ort_dylib, ensure_ort_dylib_gpu, onnxruntime_dylib_file, onnxruntime_dylib_path,
-    onnxruntime_dylib_version_ok, set_ort_dylib_path,
+    ONNXRUNTIME_VERSION, cuda_session_builder, ensure_onnxruntime,
+    ensure_onnxruntime_with_progress, ensure_ort_dylib, ensure_ort_dylib_gpu,
+    onnxruntime_dylib_file, onnxruntime_dylib_path, onnxruntime_dylib_version_ok,
+    set_ort_dylib_path,
 };
 pub use setup::{
     run_setup_kokoro, run_setup_kokoro_voices_with_progress, run_setup_kokoro_with_progress,
     run_setup_parakeet, run_setup_parakeet_with_progress,
 };
-pub use target::DownloadTarget;
 pub use spec::{
     DownloadFile, KOKORO_ONNX_FILE, KOKORO_VOICES_FILE, ModelSpec, PARAKEET_DECODER_FILE,
     PARAKEET_ENCODER_FILE, PARAKEET_JOINER_FILE, PARAKEET_TOKENS_FILE, PrefetchItem, kokoro_files,
@@ -78,6 +78,7 @@ pub use spec::{
     parakeet_encoder_spec, parakeet_files, parakeet_joiner_spec, parakeet_present,
     parakeet_tokens_spec, prefetch_items,
 };
+pub use target::DownloadTarget;
 
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),
