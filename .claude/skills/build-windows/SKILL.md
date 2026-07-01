@@ -51,8 +51,3 @@ The shipping app is the WinUI app installed from the Inno `setup.exe`. The engin
 ## Uninstall / clean
 
 - **App**: run the Inno uninstaller — `C:\Program Files\DontSpeak\unins000.exe` (silent: append `/VERYSILENT`), elevated.
-- **CLI/daemon stack** (the alternative `~/.local/bin` deployment via `install.ps1`/`enable.ps1`): `apps\windows\disable.ps1` unregisters the logon task + stops the daemon.
-
-## Notes
-
-- The **CLI/daemon model** is separate: `apps\windows\install.ps1` builds the 3 console bins (`dontspeakd/dontspeak/ds-helper`) into `~/.local/bin`, `enable.ps1` registers the logon task. Use that only if testing the headless stack rather than the WinUI app.

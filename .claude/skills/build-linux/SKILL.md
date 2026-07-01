@@ -1,15 +1,13 @@
 ---
 name: build-linux
-description: Build / clean-reinstall / package DontSpeak on Linux (GTK4 desktop host or headless systemd daemon). Two use cases — (1) local clean build + reinstall for dev testing, (2) build distributable packages (.tar.gz always; .deb/.rpm/AppImage when their tool is installed). Use when asked to build, reinstall, package, or uninstall the Linux app. Runs on Linux (the WSL/VM host) — NOT on Windows/macOS.
+description: Build / clean-reinstall / package DontSpeak on Linux (GTK4 desktop host). Two use cases — (1) local clean build + reinstall for dev testing, (2) build distributable packages (.tar.gz always; .deb/.rpm/AppImage when their tool is installed). Use when asked to build, reinstall, package, or uninstall the Linux app. Runs on Linux (the WSL/VM host) — NOT on Windows/macOS.
 ---
 
 # DontSpeak — Linux (build / reinstall / package)
 
 > **Runs on:** Linux (the WSL Ubuntu build host or the VirtualBox VM). Not on the Windows dev box — these are bash + GTK4/libadwaita. **Working dir:** repo root. Symmetrical with `build-windows` / `build-macos`. Use the **Bash** tool on the Linux host.
 
-Two host shapes (run **one** — the engine pidfile is single-speaker):
-- **Desktop** (`ds-gtk`, GTK4 + libadwaita) — tray, health panel, dictation overlay; hosts the engine in-process. The normal path.
-- **Headless daemon** (`dontspeakd` via systemd user service) — the server path.
+The host is the **GTK4 + libadwaita desktop app** (`ds-gtk`) — tray, health panel, dictation overlay; it hosts the engine in-process. There is no separate daemon.
 
 Scripts: `scripts/install.sh` + `apps/linux/*.sh`, factored via `scripts/lib/common.sh`. **Don't duplicate build logic** — edit the scripts.
 
@@ -33,8 +31,6 @@ Two steps — engine bins first, then the GUI host:
    ```
    (If the udev/`input`-group step just ran, log out/in once so the group membership takes effect.)
 
-**Headless daemon instead of the GUI:** `apps/linux/enable-daemon.sh` builds/sets up the `ds-daemon` systemd user service (reload via `systemctl --user reload ds-daemon`).
-
 For a **clean** reinstall: stop the running host first, then run `apps/linux/uninstall.sh` (see below), then re-run the steps.
 
 ## Use case 2 — build a distributable package
@@ -57,10 +53,10 @@ Each native format is best-effort: a missing tool is skipped with an install hin
 ## Uninstall / clean
 
 ```bash
-apps/linux/uninstall.sh           # stop host/daemon, un-wire hooks, remove bins + launchers + data
+apps/linux/uninstall.sh           # stop host, un-wire hooks, remove bins + launchers + data
 apps/linux/uninstall.sh --udev    # ALSO remove the /dev/uinput udev rule (sudo)
 ```
-Mirrors the macOS `scripts/uninstall.sh`: stops the GUI host + systemd service, un-wires the Claude Code hooks, removes `~/.local/bin/{ds-gtk,dontspeak,ds-helper,dontspeakd}`, the `.desktop` launcher + autostart entry, and the app data/state/cache (`~/.config/dontspeak`, `~/.local/state/dontspeak`, `~/.cache/dontspeak`). The `input`-group membership is left intact.
+Mirrors the macOS `scripts/uninstall.sh`: stops the GUI host, un-wires the Claude Code hooks, removes `~/.local/bin/{ds-gtk,dontspeak,ds-helper}`, the `.desktop` launcher + autostart entry, and the app data/state/cache (`~/.config/dontspeak`, `~/.local/state/dontspeak`, `~/.cache/dontspeak`). The `input`-group membership is left intact.
 
 ## Notes
 

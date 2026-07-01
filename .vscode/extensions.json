@@ -2,7 +2,7 @@
   // DontSpeak is a multi-language repo. These are the extensions VS Code will
   // offer to install when the workspace is opened (Reload → "Install all").
   "recommendations": [
-    // Rust workspace (rust/) — the engine, daemon and FFI core. MSVC toolchain.
+    // Rust workspace (rust/) — the engine and FFI core. MSVC toolchain.
     "rust-lang.rust-analyzer",
     // Cargo.toml + our own config.toml syntax / schema / formatting.
     "tamasfe.even-better-toml",

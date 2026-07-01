@@ -18,7 +18,7 @@ final class StatusYieldTests: XCTestCase {
         )
     }
 
-    /// A real daemon-side status change advances the gate sequence → yield.
+    /// A real engine-side status change advances the gate sequence → yield.
     func testSeqAdvanceYields() {
         XCTAssertTrue(
             statusShouldYield(delivered: true, seq: 8, since: 7, running: true, lastRunning: true)

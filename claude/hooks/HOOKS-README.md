@@ -51,9 +51,9 @@ whole `last_assistant_message`, run through the same blockquote/short logic as s
 
 The narration / greet / mark-active hooks talk to the **warm engine** over the Unix
 socket (`dontspeak.sock` in our data dir), so speech is synthesized by the engine's
-resident Kokoro with no per-reply model reload. The engine runs in-process inside
-`DontSpeak.app` (or the headless `dontspeakd` on Linux/CLI); if it is down the hooks are
-best-effort no-ops (they never block Claude).
+resident Kokoro with no per-reply model reload. The engine runs in-process inside the
+platform's host app (macOS `DontSpeak.app`, Windows `ds-winui`, Linux `ds-gtk`); if it is
+down the hooks are best-effort no-ops (they never block Claude).
 
 ## Shell helpers
 
@@ -72,9 +72,9 @@ merge (preview with `--print-only`, undo with `--remove`). `wire claude_code` me
 hooks into `~/.claude/settings.json` AND registers the MCP server in `~/.claude.json`;
 `wire codex` wires Codex's hooks (when `~/.codex` exists); `wire claude_desktop` registers the
 MCP server with Claude Desktop (when installed).
-There is no launchd/systemd agent on macOS: the engine runs in-process inside
-`DontSpeak.app` (built by `apps/macos/bundle.sh`); on Linux the headless `dontspeakd` runs
-as a systemd user service (`apps/linux/enable-daemon.sh`).
+There is no launchd/systemd agent: the engine runs in-process inside the platform's host
+app (macOS `DontSpeak.app`, built by `apps/macos/bundle.sh`; Windows `ds-winui`; Linux
+`ds-gtk`).
 
 The `MessageDisplay` narrate entry is only meaningful when the `narrate` setting is
 non-empty (it defaults to `shorts` + `digests`); it's harmless (the bin self-gates) when

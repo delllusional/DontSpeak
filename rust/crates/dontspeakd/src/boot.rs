@@ -1,4 +1,4 @@
-//! Engine lifecycle / orchestration: the headless entry, `engine_run`, the
+//! Engine lifecycle / orchestration: the in-process entry, `engine_run`, the
 //! startup wiring, the signal handlers, and `install_bin`.
 
 use std::collections::VecDeque;
@@ -28,9 +28,9 @@ use crate::ttsq::TtsQueue;
 
 // ── Tunables (match the original Swift daemon) ──────────────────────────────
 pub(crate) const POLL_MS: u64 = 30; // caps-state poll interval
-/// §E.4 hot-reload debounce: collapse a flurry of triggers (e.g. the GUI's
-/// atomic settings.json write AND its explicit SIGHUP nudge that follows) into a
-/// single reload. Also hardens against editors that write-twice on save.
+/// §E.4 hot-reload debounce: collapse a flurry of triggers (e.g. the host's
+/// atomic settings.json write AND the explicit `engine_reload()` nudge that
+/// follows) into a single reload. Also hardens against editors that write-twice on save.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 /// How often to re-probe Accessibility trust so a live grant/revoke flips the
 /// caps loop without a reload (the dot follows ~this fast).
@@ -42,15 +42,15 @@ const AUTO_DL_RETRY_INTERVAL: Duration = Duration::from_secs(20);
 /// Coarse `stat()` BACKSTOP for an out-of-band settings.json edit. The primary trigger is
 /// the push-based [`config_watch`](crate::config_watch) filesystem watcher; this slow stat
 /// only covers the rare case the watcher can't start or a filesystem drops an event. Kept
-/// well under any human re-edit cadence. The SIGHUP / Reload-RPC path is independent (it
-/// sets `reload_requested` directly, read every tick).
+/// well under any human re-edit cadence. The explicit reload path (`engine_reload()` / the
+/// Reload RPC) is independent (it sets `reload_requested` directly, read every tick).
 const MTIME_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Run the engine to completion on the CURRENT thread. The host owns the two
 /// control flags: `running` (clear it → graceful stop) and `reload_requested`
-/// (set it → re-read settings.json). The headless binary drives these from POSIX
-/// signals ([`run_headless`]); an in-process host (the SwiftUI/Win/Linux app via
-/// the C ABI) drives them from `engine_stop()` / `engine_reload()`. The caps loop,
+/// (set it → re-read settings.json). The in-process host (the SwiftUI/Win/Linux app
+/// via the `ds-core` C ABI) drives them from `engine_stop()` / `engine_reload()` —
+/// this is the ONLY way the engine runs (there is no headless binary). The caps loop,
 /// RPC server, and TTS queue all run from here, so whichever process calls this is
 /// the one that needs the OS permissions (Accessibility / Input-Monitoring / Mic).
 pub fn engine_run(
@@ -60,9 +60,8 @@ pub fn engine_run(
     let debug = debug_enabled();
 
     // FATAL startup failures RETURN an error instead of process::exit(): this fn
-    // also runs on a background thread INSIDE the host app (the in-process FFI
-    // host), where an exit() would kill the whole app. The headless binary maps
-    // the Err back to a process exit (run_headless), so its behavior is unchanged.
+    // runs on a background thread INSIDE the host app (the in-process FFI host),
+    // where an exit() would kill the whole app. The host surfaces the Err instead.
     let paths = match Paths::resolve() {
         Some(p) => p,
         None => {
@@ -104,7 +103,7 @@ pub fn engine_run(
     let long_press_ms = cfg.long_press_ms;
 
     log(&format!(
-        "dontspeakd started (poll={POLL_MS}ms long_press={long_press_ms}ms \
+        "engine started (poll={POLL_MS}ms long_press={long_press_ms}ms \
          stt={} debug={debug})",
         cfg.resolved_stt().map(|e| e.as_str()).unwrap_or("off")
     ));
@@ -130,7 +129,7 @@ pub fn engine_run(
 
     // Single-instance guard: evict an OLDER engine BEFORE we bind the socket below.
     // launchd's KeepAlive only enforces one launchd-managed daemon — it does NOT
-    // cover the engine running in-process inside the GUI host, and Windows/headless
+    // cover the engine running in-process inside the GUI host, and Windows/Linux
     // have no OS singleton at all. Since `ds_ipc::bind` unlinks + rebinds the
     // socket, a second engine would otherwise STEAL the path from a still-running
     // first one, leaving two engines that both narrate (heard as the same reply
@@ -143,20 +142,18 @@ pub fn engine_run(
         ));
     }
 
-    // §E.4: write our own pid so the GUI can SIGHUP us for a no-restart reload +
-    // probe our liveness, and so the NEXT engine to start can evict US the same way
-    // (see evict_stale_engine above). Tolerate a write failure: the GUI then falls
-    // back to launchctl, so the engine keeps running either way.
+    // §E.4: write our own pid so the NEXT engine to start can evict US + probe our
+    // liveness (see evict_stale_engine above). Tolerate a write failure: eviction just
+    // no-ops, so the engine keeps running either way.
     if let Err(e) = std::fs::write(&paths.engine_pid, std::process::id().to_string()) {
         log(&format!(
-            "WARN: cannot write daemon pidfile {}: {e}",
+            "WARN: cannot write engine pidfile {}: {e}",
             paths.engine_pid.display()
         ));
     }
 
-    // `running` / `reload_requested` are owned by the caller (the headless bin
-    // wires them to SIGTERM/SIGINT + SIGHUP; the in-app FFI host flips them from
-    // engine_stop()/engine_reload()).
+    // `running` / `reload_requested` are owned by the caller: the in-app FFI host
+    // flips them from engine_stop()/engine_reload().
 
     // Live stats for the warm helper (Kokoro TTS + Parakeet STT), fed below.
     let tts_stats = Arc::new(stats::TtsStats::new());
@@ -405,7 +402,7 @@ pub fn engine_run(
     // ds-helper child explicitly, or engine_stop()/app-quit orphans it (it
     // would keep the mic/model alive after the engine "stopped"). set_enabled(false)
     // runs stop_child(): drop stdin → kill → wait → join the reader. Idempotent and
-    // already the toggle-off teardown, so headless exit is unaffected.
+    // already the toggle-off teardown, so engine-stop exit is unaffected.
     tts.set_enabled(false);
     // CORR-2: the lifetime totals are persisted with a debounce off the reader
     // thread, so a clean stop must flush the unwritten tail (a no-op when nothing
@@ -415,8 +412,7 @@ pub fn engine_run(
     // (spawn_ipc_server), the mic-barge watcher (spawn_mic_barge_watcher), and the
     // TtsQueue worker (TtsQueue::start). They hold only Arc clones of the shared
     // state and do no external IO after the socket is removed below; under the
-    // headless binary the process exits immediately, and under the hosted FFI the
-    // engine is a singleton so a fresh start rebinds cleanly. Joining them would
+    // hosted FFI the engine is a singleton so a fresh start rebinds cleanly. Joining them would
     // need stop signals threaded through each — deferred as too invasive for this
     // conservative fix.
 
@@ -434,25 +430,13 @@ pub fn engine_run(
 
 /// A FATAL engine-startup failure, RETURNED from [`engine_run`] instead of
 /// `process::exit()` so a startup failure on the in-process FFI host thread can't
-/// take down the whole app. [`run_headless`] maps each variant back to the exit
-/// code the standalone binary historically used, preserving headless behavior.
+/// take down the whole app. The host logs/surfaces it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
-    /// `$HOME` (and thus the runtime paths) could not be resolved. Was `exit(3)`.
+    /// `$HOME` (and thus the runtime paths) could not be resolved.
     HomeUnresolved,
-    /// Platform init (input/event backend) failed. Was `exit(2)`; carries detail.
+    /// Platform init (input/event backend) failed; carries detail.
     PlatformInit(String),
-}
-
-impl EngineError {
-    /// The process exit code the headless binary used for this failure, kept so
-    /// `run_headless` reproduces the old `process::exit` codes exactly.
-    pub fn exit_code(&self) -> i32 {
-        match self {
-            EngineError::HomeUnresolved => 3,
-            EngineError::PlatformInit(_) => 2,
-        }
-    }
 }
 
 impl std::fmt::Display for EngineError {
@@ -461,23 +445,6 @@ impl std::fmt::Display for EngineError {
             EngineError::HomeUnresolved => write!(f, "cannot resolve $HOME"),
             EngineError::PlatformInit(e) => write!(f, "platform init: {e}"),
         }
-    }
-}
-
-/// Headless entry: create the control flags, wire them to POSIX signals
-/// (SIGTERM/SIGINT → stop, SIGHUP → reload), run the engine, then exit. This is
-/// what the `dontspeakd` binary calls; the in-app host instead spawns a thread on
-/// [`engine_run`] and flips the flags itself.
-pub fn run_headless() {
-    let running = Arc::new(AtomicBool::new(true));
-    let reload_requested = Arc::new(AtomicBool::new(false));
-    install_signal_handlers(running.clone(), reload_requested.clone());
-    // A FATAL startup failure now RETURNS (so the in-process host survives); the
-    // standalone binary maps it back to the historical exit code so its behavior is
-    // unchanged (was exit(3) for $HOME, exit(2) for platform init, exit(0) clean).
-    match engine_run(running, reload_requested) {
-        Ok(()) => std::process::exit(0),
-        Err(e) => std::process::exit(e.exit_code()),
     }
 }
 
@@ -497,71 +464,3 @@ fn install_bin(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
-// Process-global signal flags. Each handler only ever does an atomic store,
-// which is async-signal-safe. The main loop owns Arc clones; the watcher thread
-// publishes these statics into those Arcs.
-//   RUN_FLAG    — SIGTERM/SIGINT: graceful stop.
-//   RELOAD_FLAG — SIGHUP: §E.4 explicit "reload now" nudge.
-#[cfg(unix)]
-static RUN_FLAG: AtomicBool = AtomicBool::new(true);
-#[cfg(unix)]
-static RELOAD_FLAG: AtomicBool = AtomicBool::new(false);
-
-#[cfg(unix)]
-fn install_signal_handlers(running: Arc<AtomicBool>, reload_requested: Arc<AtomicBool>) {
-    use nix::sys::signal::{SigHandler, Signal, signal};
-
-    // SIGTERM/SIGINT: flip RUN_FLAG. Does nothing but an atomic store (the
-    // process-global `static` is reachable from the bare extern "C" handler,
-    // which can carry no captured state) — async-signal-safe.
-    extern "C" fn handler(_sig: nix::libc::c_int) {
-        RUN_FLAG.store(false, Ordering::Relaxed);
-    }
-    // SIGHUP: flip RELOAD_FLAG. Same async-signal-safe single-store discipline.
-    extern "C" fn reload_handler(_sig: nix::libc::c_int) {
-        RELOAD_FLAG.store(true, Ordering::Relaxed);
-    }
-
-    // nix wraps `sigaction` with correct `SigHandler` typing — no function
-    // pointer is laundered through `usize`, so FFI type safety is preserved.
-    // A failure here is non-fatal: worst case the engine must be SIGKILLed (or
-    // the SIGHUP nudge is lost and the GUI's mtime-watch reload still applies).
-    unsafe {
-        let h = SigHandler::Handler(handler);
-        if let Err(e) = signal(Signal::SIGTERM, h) {
-            log(&format!("WARN: cannot install SIGTERM handler: {e}"));
-        }
-        if let Err(e) = signal(Signal::SIGINT, h) {
-            log(&format!("WARN: cannot install SIGINT handler: {e}"));
-        }
-        let rh = SigHandler::Handler(reload_handler);
-        if let Err(e) = signal(Signal::SIGHUP, rh) {
-            log(&format!("WARN: cannot install SIGHUP handler: {e}"));
-        }
-    }
-
-    // The loop reads `running` / `reload_requested`; this watcher propagates the
-    // static flips (set from the async-signal-safe handlers) back into the Arcs
-    // the loop owns. SIGHUP can fire repeatedly; we coalesce with swap.
-    std::thread::spawn(move || {
-        while RUN_FLAG.load(Ordering::Relaxed) {
-            if RELOAD_FLAG.swap(false, Ordering::Relaxed) {
-                reload_requested.store(true, Ordering::Relaxed);
-            }
-            // Just propagates rare async-signal-safe flag flips (SIGHUP/SIGTERM) into the
-            // Arcs — no need to share the 30 ms caps cadence; a stop/reload nudge tolerates
-            // this latency, and it keeps this watcher from waking ~33×/s for nothing.
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        running.store(false, Ordering::Relaxed);
-    });
-}
-
-#[cfg(not(unix))]
-fn install_signal_handlers(_running: Arc<AtomicBool>, _reload_requested: Arc<AtomicBool>) {
-    // Windows: rely on Ctrl-C default or service-stop; Phase-1 daemon runs as a
-    // LaunchAgent equivalent only on macOS. There is no SIGHUP on Windows, so the
-    // mtime-watch on settings.json is the ONLY reload mechanism off-unix.
-    // TODO(on-target): wire a Windows reload trigger (named event / service
-    // control) and a Linux systemctl reload to set `reload_requested`.
-}

@@ -17,10 +17,10 @@ app, granted once** (Accessibility subsumes Input Monitoring for the Caps-key re
 so no separate Input Monitoring grant is needed). There is no separate daemon and no
 launchd agent: the app is the login item, `engine_start()` on launch,
 `engine_stop()` on quit. The design is portable and **all three platforms ship
-implemented apps + platform backends, built and tested in CI**: a headless host
-binary (`dontspeakd`) runs the same `engine_run` for Linux/CLI, and the Windows
-(`apps/windows/winui/`) and Linux (`apps/linux/gtk/`) apps link the cdylib and call
-the same FFI. The `ds-platform` backends are complete real-API impls on each OS
+implemented apps + platform backends, built and tested in CI**: the macOS app links
+the C-ABI staticlib while the Windows (`apps/windows/winui/`, `ds-winui.exe`) and Linux
+(`apps/linux/gtk/`, `ds-gtk`) apps link the cdylib — each running the same `engine_run`
+in-process over the same FFI. There is no standalone/headless host binary. The `ds-platform` backends are complete real-API impls on each OS
 (`linux.rs` evdev/uinput/x11rb; `windows.rs` SendInput/GetKeyState/GetForegroundWindow;
 macOS IOKit/CGEvent), and the CI release matrix builds + tests on `ubuntu-latest`,
 `windows-2025`, and `macos-26`. macOS remains the most polished host; the Windows/Linux
@@ -49,7 +49,7 @@ applies changes **surgically** (no full reloads):
 
 Per-call params (voice / rate / narrate) change nothing warm — the next
 synth/transcribe reads them fresh. The engine hot-reloads our `config.toml` via
-an mtime-watch (the headless binary also honors SIGHUP). Quit the app to stop the
+an mtime-watch (the host app can also nudge an immediate reload). Quit the app to stop the
 engine; it restarts on next launch.
 
 ## Workspace layout
@@ -71,7 +71,7 @@ roles; in brief the crates are:
 - **`ds-tools`** — the single MCP tool catalog.
 - **`ds-i18n`** — shared UI-string catalog over the FFI.
 - **`ds-status`** — the `model_status` engine→UI contract.
-- **`dontspeakd`** — the engine (`engine_run`) + headless Linux/CLI host.
+- **`dontspeakd`** — the engine LIBRARY (`engine_run`), hosted in-process via `ds-core`.
 - **`ds-core`** — the stable C-ABI lib the apps link.
 - **`dontspeak`** — the one multi-call client (MCP server / hook entries / installers).
 

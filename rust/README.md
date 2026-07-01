@@ -9,16 +9,16 @@ assembles **`DontSpeak.app`**, which **hosts the engine in-process** by linking 
 Under the **single-process model** (see `../ARCHITECTURE.md`), the engine —
 `dontspeakd`'s `engine_run` (Caps loop, TTS queue, RPC server, hot-reload, behind the
 `caps_enabled` toggle + the `stt_engine` / `tts_engine` path selectors) — runs INSIDE the
-app via `ds_engine_start()`, so all OS permissions land on the one signed app. The
-`dontspeakd` binary is the **headless host** for Linux/CLI; future Win/Linux apps link the
-cdylib and call the same FFI. The hooks and the MCP server are the one merged `dontspeak`
+app via `ds_engine_start()`, so all OS permissions land on the one signed app. `dontspeakd`
+is a **library only** — there is no standalone binary; the Windows (`ds-winui`) and Linux
+(`ds-gtk`) apps link the cdylib and call the same FFI. The hooks and the MCP server are the one merged `dontspeak`
 binary (the MCP server when run with no args) — both **clients** that talk to the engine
 over a Unix-domain socket (`dontspeak.sock` in DontSpeak's data dir, NDJSON) and never load a
 model.
 
 ## Status
 
-| Target | dontspeakd platform impl | Built + tested in CI |
+| Target | `ds-platform` impl | Built + tested in CI |
 | --- | --- | --- |
 | macOS (Apple Silicon) | IOKit lock-state FFI, core-graphics CGEventPost, NSWorkspace | **YES — `macos-26`** |
 | Windows | `windows` crate: GetKeyState / SendInput / GetForegroundWindow | **YES — `windows-2025`** |
@@ -66,7 +66,8 @@ rust/
     ds-i18n/           # lib: the shared UI string catalog (locales/en.yml) over the FFI
     ds-status/         # lib: the model_status engine→UI contract (serde source of truth)
     ds-core/           # lib: cdylib/staticlib FFI for the SwiftUI app; engine-client calls
-    dontspeakd/               # bin+lib: the engine (caps loop, warm TTS+STT helper, IPC server)
+    dontspeakd/               # lib: the engine (caps loop, warm TTS+STT helper, IPC server),
+                             #      hosted in-process via ds-core — no standalone binary
     dontspeak/                # bin: the one multi-call client — no args = stdio MCP server;
                              #      `notify` = command hook sink; `provide` = query hook;
                              #      `wire <client>` per-client installer. Stdio only.

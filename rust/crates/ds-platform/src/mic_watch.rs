@@ -325,7 +325,7 @@ mod macos {
             }
             // INTENTIONAL LEAK of `self.ctx`: removal guarantees no NEW callbacks, but an
             // in-flight one on a CoreAudio thread may still be running, so freeing here could
-            // use-after-free. The Ctx is tiny and dropping a daemon-lifetime watcher is rare.
+            // use-after-free. The Ctx is tiny and dropping an engine-lifetime watcher is rare.
         }
     }
 }

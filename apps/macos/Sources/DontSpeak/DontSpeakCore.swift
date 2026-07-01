@@ -252,7 +252,7 @@ final class Core {
                 // changed; yielding that identical snapshot would re-run `apply` and churn every
                 // @Observable reader (menu-bar label, any open window, the TrayAnimator chain)
                 // ~1×/s forever while idle. So yield only when something actually changed:
-                //   • the gate sequence advanced (a real daemon-side status change), OR
+                //   • the gate sequence advanced (a real engine-side status change), OR
                 //   • `engineRunning` flipped — this is an EXTERNAL pidfile/launchd probe NOT
                 //     carried in the gate seq, so a stop/crash freezes the seq and must be
                 //     caught here (else the menu-bar dot stays stale "running"), OR

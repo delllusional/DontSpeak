@@ -89,7 +89,7 @@ status:
       failed: "Failed — %{why}"
     # Failure reasons interpolated into status.engine.status.failed as the %{why} above, shown in
     # the row's expanded section. `default` is the core formatter's fallback when the engine gives
-    # no reason; the rest are produced by the engine (dontspeakd). The raw OS/helper detail stays in
+    # no reason; the rest are produced by the engine. The raw OS/helper detail stays in
     # the logs, not the note.
     reason:
       default: "Failed to start"

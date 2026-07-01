@@ -12,10 +12,10 @@
 #   .rpm     — needs `cargo generate-rpm`(cargo install cargo-generate-rpm)
 #   AppImage — needs `linuxdeploy` + linuxdeploy-plugin-gtk on PATH  (EXPERIMENTAL)
 #
-# Payload (all formats): the GTK host ds-gtk + the engine/helper bins
-# (dontspeak, ds-helper, dontspeakd) + dontspeak.desktop + app-icon.svg + the
-# /dev/uinput udev rule. The .deb/.rpm layout is declared in apps/linux/gtk/Cargo.toml
-# ([package.metadata.deb] / [package.metadata.generate-rpm]).
+# Payload (all formats): the GTK host ds-gtk (hosts the engine in-process) + the
+# MCP/hook bin dontspeak + the warm-synth helper ds-helper + dontspeak.desktop +
+# app-icon.svg + the /dev/uinput udev rule. The .deb/.rpm layout is declared in
+# apps/linux/gtk/Cargo.toml ([package.metadata.deb] / [package.metadata.generate-rpm]).
 #
 #   apps/linux/package.sh                 # all formats, OUTDIR=./dist
 #   OUTDIR=~/Desktop apps/linux/package.sh
@@ -41,15 +41,16 @@ esac
 mkdir -p "$OUTDIR"
 echo "==> DontSpeak $VERSION ($ARCH) → $OUTDIR"
 
-# ── 1. build the engine bins (rust/ workspace) + the GTK host (standalone crate) ─────────
-echo "==> [1/5] cargo build --release (engine bins + ds-gtk)"
-( cd "$REPO/rust" && cargo build --release -p dontspeak -p dontspeakd && \
+# ── 1. build the CLI bins (rust/ workspace) + the GTK host (standalone crate) ─────────────
+# The GTK host links the engine in-process via ds-core; there is no standalone daemon bin.
+echo "==> [1/5] cargo build --release (dontspeak + ds-helper + ds-gtk)"
+( cd "$REPO/rust" && cargo build --release -p dontspeak && \
   cargo build --release -p ds-tts --bin ds-helper )
 ( cd "$GTK_DIR" && cargo build --release )
 
 RREL="$REPO/rust/target/release"
 GREL="$GTK_DIR/target/release"
-for b in "$GREL/ds-gtk" "$RREL/dontspeak" "$RREL/ds-helper" "$RREL/dontspeakd"; do
+for b in "$GREL/ds-gtk" "$RREL/dontspeak" "$RREL/ds-helper"; do
   [ -x "$b" ] || { echo "MISSING build output: $b" >&2; exit 1; }
 done
 
@@ -59,7 +60,7 @@ PKG="dontspeak-$VERSION-$ARCH"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 ROOT="$STAGE/$PKG"
 install -d "$ROOT/bin" "$ROOT/share/applications" "$ROOT/share/icons/hicolor/scalable/apps" "$ROOT/udev"
-install -m0755 "$GREL/ds-gtk" "$RREL/dontspeak" "$RREL/ds-helper" "$RREL/dontspeakd" "$ROOT/bin/"
+install -m0755 "$GREL/ds-gtk" "$RREL/dontspeak" "$RREL/ds-helper" "$ROOT/bin/"
 install -m0644 "$HERE/dontspeak.desktop" "$ROOT/share/applications/dontspeak.desktop"
 install -m0644 "$REPO/assets/app-icon.svg" "$ROOT/share/icons/hicolor/scalable/apps/dontspeak.svg"
 install -m0644 "$HERE/udev-rule.txt" "$ROOT/udev/99-ds-input.rules"
@@ -122,7 +123,7 @@ if [ "$SKIP_APPIMAGE" = "1" ]; then
 elif command -v linuxdeploy >/dev/null 2>&1 && command -v linuxdeploy-plugin-gtk >/dev/null 2>&1; then
   APPDIR="$STAGE/AppDir"
   install -d "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/scalable/apps"
-  install -m0755 "$GREL/ds-gtk" "$RREL/dontspeak" "$RREL/ds-helper" "$RREL/dontspeakd" "$APPDIR/usr/bin/"
+  install -m0755 "$GREL/ds-gtk" "$RREL/dontspeak" "$RREL/ds-helper" "$APPDIR/usr/bin/"
   install -m0644 "$HERE/dontspeak.desktop" "$APPDIR/usr/share/applications/dontspeak.desktop"
   install -m0644 "$REPO/assets/app-icon.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/dontspeak.svg"
   ( cd "$STAGE" && OUTPUT="$OUTDIR/DontSpeak-$VERSION-$ARCH.AppImage" \

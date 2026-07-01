@@ -39,11 +39,12 @@ fn sibling_bin(name: &str) -> Option<String> {
 
 /// PURE decision: is `name` a STALE DontSpeak binary — in our namespace (`dontspeak*` OR `ds-*`
 /// with this platform's exe suffix) but NOT in the canonical [`INSTALLED_BINS`] set? That covers
-/// the legacy `ds-mcp/-speak/-narrate` the consolidation replaced and any future renamed/dropped
-/// bin. The current bins (`dontspeak`, `dontspeakd`, `ds-helper`, `ds-winui`) are in the set so
-/// they're never flagged; foreign tools and non-exe siblings (e.g. `ds_core.dll` on Windows —
-/// wrong suffix) are kept. (Our exes use BOTH prefixes — the main app/daemon are `dontspeak*`,
-/// the helper/host are `ds-*` — so a single-prefix check would miss the `ds-*` legacy names.)
+/// the legacy `ds-mcp/-speak/-narrate` the consolidation replaced, the dropped `dontspeakd`
+/// engine binary, and any future renamed/dropped bin. The current bins (`dontspeak`,
+/// `ds-helper`, `ds-winui`, `ds-gtk`) are in the set so they're never flagged; foreign tools and
+/// non-exe siblings (e.g. `ds_core.dll` on Windows — wrong suffix) are kept. (Our exes use BOTH
+/// prefixes — the MCP/hook bin is `dontspeak`, the helper/host apps are `ds-*` — so a
+/// single-prefix check would miss the `ds-*` legacy names.)
 fn is_stale_ds_bin(name: &str) -> bool {
     match name.strip_suffix(std::env::consts::EXE_SUFFIX) {
         // EXE_SUFFIX is "" on unix, so strip_suffix yields Some(name) there.
@@ -273,14 +274,16 @@ mod tests {
         assert!(is_stale_ds_bin(&f("ds-mcp")));
         assert!(is_stale_ds_bin(&f("ds-speak")));
         assert!(is_stale_ds_bin(&f("ds-narrate")));
+        // The dropped `dontspeakd` binary → prune any leftover install.
+        assert!(is_stale_ds_bin(&f("dontspeakd")));
         // Any future renamed/dropped bin in our namespace → prune.
         assert!(is_stale_ds_bin(&f("ds-oldname")));
 
         // Current canonical binaries → keep (incl. the running dontspeak itself).
         assert!(!is_stale_ds_bin(&f("dontspeak")));
-        assert!(!is_stale_ds_bin(&f("dontspeakd")));
         assert!(!is_stale_ds_bin(&f("ds-helper")));
         assert!(!is_stale_ds_bin(&f("ds-winui")));
+        assert!(!is_stale_ds_bin(&f("ds-gtk")));
 
         // Foreign tools sharing the dir → keep.
         assert!(!is_stale_ds_bin(&f("ripgrep")));

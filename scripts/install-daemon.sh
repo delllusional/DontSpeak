@@ -13,13 +13,13 @@
 #
 # What it does (idempotent, macOS-first):
 #   1. compute a BUILD_ID (git short hash + -dirty) unless DONTSPEAK_BUILD_ID is set,
-#   2. cargo build --release the 3 bins WITH that id baked into dontspeakd,
+#   2. cargo build --release the 2 CLI bins (dontspeak MCP/hooks + ds-helper); the id is
+#      baked into the engine LIBRARY (dontspeakd's build.rs), which the app links via ds-core,
 #   3. install them to $INSTALL_DIR (default ~/.local/bin),
 #   4. codesign ALL installed bins with a STABLE identity AND the app's signing
 #      identifier (app.dontspeak.org) so the Accessibility/Input-Monitoring grants
 #      survive rebuilds and are shared with the app bundle (ad-hoc only as fallback),
-#   5. install the optional swift hook helpers (macOS only),
-#   6. defensively remove any stale standalone launchd daemon (the app hosts it now),
+#   5. install the optional swift hook helpers (macOS only).
 #   (logging is ~/Library/Logs/dontspeak.log with in-process rotation, no conf.)
 #
 # Inputs (env): DONTSPEAK_INSTALL_DIR, DONTSPEAK_BUILD_ID, DONTSPEAK_CODESIGN_ID.
@@ -42,15 +42,17 @@ echo "==> engine BUILD_ID = $DONTSPEAK_BUILD_ID" >&2
 
 mkdir -p "$INSTALL_DIR"
 
-# ── 2. build the 3 bins (dontspeakd carries the BUILD_ID via its build.rs) ──────────
-echo "==> build engine + hooks + kokoro/mcp (release)" >&2
+# ── 2. build the 2 CLI bins. The BUILD_ID rides the dontspeakd LIBRARY's build.rs (a dep
+#       of the `dontspeak` bin via ds-tools→…, and of the app via ds-core), so exporting it
+#       above is enough — there is no standalone daemon bin to build. ────────────────────
+echo "==> build hooks/mcp + ds-helper (release)" >&2
 ( cd "$RUST_DIR" && cargo build --release \
-    -p dontspeakd -p dontspeak -p ds-tts \
-    --bin dontspeakd --bin dontspeak --bin ds-helper ) >&2
+    -p dontspeak -p ds-tts \
+    --bin dontspeak --bin ds-helper ) >&2
 
 echo "==> install binaries → $INSTALL_DIR" >&2
 REL="$RUST_DIR/target/release"
-for b in dontspeakd dontspeak ds-helper; do
+for b in dontspeak ds-helper; do
   install -m 0755 "$REL/$b" "$INSTALL_DIR/$b"
 done
 
@@ -69,7 +71,7 @@ if [ "$UNAME" = "Darwin" ]; then
       && echo "   signed $1 (stable: ${STABLE_ID%% (*}…, app.dontspeak.org)" >&2 \
       || { echo "   !! stable-sign $1 failed; ad-hoc fallback" >&2; codesign --force --sign - "$INSTALL_DIR/$1" 2>/dev/null; }
   }
-  for b in dontspeakd dontspeak ds-helper; do
+  for b in dontspeak ds-helper; do
     if [ -n "$STABLE_ID" ]; then sign_stable "$b"
     else codesign --force --sign - "$INSTALL_DIR/$b" 2>/dev/null \
            && echo "   ad-hoc signed $b (no stable identity — grant RE-PROMPTS on rebuild; set DONTSPEAK_CODESIGN_ID)" >&2; fi
@@ -89,22 +91,10 @@ if [ "$UNAME" = "Darwin" ] && command -v swiftc >/dev/null 2>&1; then
   done
 fi
 cp -f "$REPO/claude/hooks/HOOKS-README.md" "$H/.claude/hooks/README.md" 2>/dev/null || true
-
-# ── 5. NO standalone launchd daemon on macOS ──────────────────────────────────────
-# DontSpeak.app HOSTS the engine in-process (ds_engine_start) and owns the RPC
-# socket. A standalone launchd `dontspeakd` would be a SECOND engine fighting the app
-# for the dontspeak.sock in our data dir — exactly the duplicate-engine bug. So we do NOT install
-# one; instead we DEFENSIVELY remove any stale agent left by an older install, and
-# the MCP server launches the app (app.dontspeak.org) when the engine is needed.
-if [ "$UNAME" = "Darwin" ]; then
-  echo "==> remove any stale standalone daemon (app hosts the engine)" >&2
-  mkdir -p "$H/Library/Logs"
-  stale="$H/Library/LaunchAgents/org.dontspeak.daemon.plist"
-  [ -f "$stale" ] && { launchctl unload "$stale" 2>/dev/null || true; rm -f "$stale"; \
-    echo "   removed stale org.dontspeak.daemon" >&2; }
-  # Logging writes ~/Library/Logs/dontspeak.log with lean in-process size rotation
-  # (rename-based, sudo-free) — there is no newsyslog conf to install.
-fi
+# The engine hosts in-process inside DontSpeak.app (ds_engine_start) and owns the RPC
+# socket; the MCP server launches the app (app.dontspeak.org) when the engine is needed.
+# Logging writes ~/Library/Logs/dontspeak.log with lean in-process size rotation
+# (rename-based, sudo-free) — there is no newsyslog conf to install.
 
 # LAST line: the resolved id, for callers (bundle.sh stamps Info.plist with it).
 echo "$DONTSPEAK_BUILD_ID"

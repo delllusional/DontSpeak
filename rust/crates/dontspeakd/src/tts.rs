@@ -36,6 +36,28 @@ fn helper_stderr() -> Stdio {
         .unwrap_or_else(Stdio::null)
 }
 
+/// The daemon→helper env contract, resolved from the warm child's spawn prefs. Every flag is
+/// returned as `Some(value)` to SET or `None` to CLEAR, so [`TtsManager::start`] applies the
+/// whole set with ONE uniform set-or-remove pass. Clearing is the point: the two conditional
+/// flags (`FULL_DUPLEX`, `STT_PRELOAD`) are `None` when off and get `env_remove`d, so an
+/// inherited ambient value (e.g. the daemon itself was launched with `DONTSPEAK_FULL_DUPLEX=1`)
+/// can NEVER leak into the child and override the config-resolved intent. The two provider
+/// tokens are always `Some` (always overwritten), so a new conditional flag can't reintroduce
+/// the leak — it just joins the table and inherits the clear-when-absent behaviour.
+fn child_env(
+    provider: &str,
+    stt_provider: &str,
+    full_duplex: bool,
+    stt_preload: bool,
+) -> [(&'static str, Option<String>); 4] {
+    [
+        ("DONTSPEAK_PROVIDER", Some(provider.to_string())),
+        ("DONTSPEAK_STT_PROVIDER", Some(stt_provider.to_string())),
+        ("DONTSPEAK_FULL_DUPLEX", full_duplex.then(|| "1".to_string())),
+        ("DONTSPEAK_STT_PRELOAD", stt_preload.then(|| "1".to_string())),
+    ]
+}
+
 /// Parse the optional `<file_done> <file_total> <file_index> <file_count>` payload of a
 /// `DOWNLOADING tts/stt …` line. `""` (the bare signal) → `None`; index/count default to 0 if a
 /// shorter (legacy `<done> <total>`) line arrives.
@@ -551,29 +573,30 @@ impl TtsManager {
         }
         let mut cmd = Command::new(&self.bin);
         cmd.arg("--serve")
-            .env(
-                "DONTSPEAK_PROVIDER",
-                self.provider_pref.lock().unwrap().clone(),
-            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Helper stderr → a log file (full-duplex status, capture levels,
             // barge-debug, errors) so the warm child is diagnosable; was discarded.
             .stderr(helper_stderr());
-        // Full-duplex AEC (macOS VPIO, Parakeet path only): the helper opens the
-        // echo-cancelled duplex unit when this env is set. Unset ⇒ half-duplex.
-        let full_duplex = *self.full_duplex_pref.lock().unwrap();
-        if full_duplex {
-            cmd.env("DONTSPEAK_FULL_DUPLEX", "1");
-        }
-        // Which local STT engine the child should serve ("cpu"|"ane").
+        // The daemon→helper env contract, resolved from the spawn prefs. Copy the values out
+        // from under their locks first (never hold a guard across the apply loop):
+        //   • DONTSPEAK_PROVIDER      — Kokoro TTS execution provider ("cpu"|"cuda"|…).
+        //   • DONTSPEAK_STT_PROVIDER  — local STT backend the child serves ("cpu"|"ane"|…).
+        //   • DONTSPEAK_FULL_DUPLEX   — AEC duplex mode (Parakeet+Kokoro only); off ⇒ half-duplex.
+        //   • DONTSPEAK_STT_PRELOAD   — preload STT in parallel with the TTS load; only when STT
+        //                               is the built-in engine (`stt_provider` alone can't tell —
+        //                               it resolves to "cpu" even for Off/ClaudeCode).
+        // Applied as ONE set-or-remove pass so every OFF flag is explicitly CLEARED — an
+        // inherited ambient value can't override the config-resolved intent. See [`child_env`].
+        let provider = self.provider_pref.lock().unwrap().clone();
         let stt_provider = self.stt_provider_pref.lock().unwrap().clone();
-        cmd.env("DONTSPEAK_STT_PROVIDER", &stt_provider);
-        // Whether the child should PRELOAD STT in parallel with the TTS load (gates its
-        // STT-preload thread). Only when STT is the built-in engine — `stt_provider` alone
-        // can't tell, since it resolves to "cpu" even for Off/ClaudeCode.
-        if *self.stt_wanted.lock().unwrap() {
-            cmd.env("DONTSPEAK_STT_PRELOAD", "1");
+        let full_duplex = *self.full_duplex_pref.lock().unwrap();
+        let stt_preload = *self.stt_wanted.lock().unwrap();
+        for (key, val) in child_env(&provider, &stt_provider, full_duplex, stt_preload) {
+            match val {
+                Some(v) => cmd.env(key, v),
+                None => cmd.env_remove(key),
+            };
         }
         // Windows: the engine runs inside a windowless GUI host (the WinUI app), so
         // spawning this CONSOLE-subsystem helper would pop a stray terminal window.
@@ -1440,5 +1463,29 @@ mod dl_lifecycle_tests {
         assert!(!dling.load(Ordering::Relaxed));
         assert_eq!(*dl.lock().unwrap(), (0, 0, 0, 0));
         assert!(loaded.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod child_env_tests {
+    use super::child_env;
+
+    #[test]
+    fn providers_always_set_conditionals_cleared_when_off() {
+        // Both providers are ALWAYS `Some` (always overwrite any ambient value); the two
+        // conditional flags are `Some("1")` when on and `None` when off — and `None` drives
+        // `env_remove` in `start`, so an inherited `DONTSPEAK_FULL_DUPLEX=1` / `_STT_PRELOAD=1`
+        // can't leak past the config-resolved intent.
+        let on = child_env("cuda", "ane", true, true);
+        assert_eq!(on[0], ("DONTSPEAK_PROVIDER", Some("cuda".into())));
+        assert_eq!(on[1], ("DONTSPEAK_STT_PROVIDER", Some("ane".into())));
+        assert_eq!(on[2], ("DONTSPEAK_FULL_DUPLEX", Some("1".into())));
+        assert_eq!(on[3], ("DONTSPEAK_STT_PRELOAD", Some("1".into())));
+
+        let off = child_env("cpu", "cpu", false, false);
+        assert_eq!(off[0], ("DONTSPEAK_PROVIDER", Some("cpu".into())));
+        assert_eq!(off[1], ("DONTSPEAK_STT_PROVIDER", Some("cpu".into())));
+        assert_eq!(off[2], ("DONTSPEAK_FULL_DUPLEX", None));
+        assert_eq!(off[3], ("DONTSPEAK_STT_PRELOAD", None));
     }
 }

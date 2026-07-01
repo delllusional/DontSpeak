@@ -1,4 +1,6 @@
-//! dontspeakd — dontspeak dictation engine for Claude Code voice (TAP-TOGGLE).
+//! dontspeakd — the dontspeak dictation-engine LIBRARY for Claude Code voice
+//! (TAP-TOGGLE), hosted in-process by each platform's host app via `ds-core`
+//! (there is no standalone/headless binary).
 //!
 //! Cross-platform Rust port of the original Swift caps-poll daemon (since removed).
 //! Reads the PHYSICAL Caps key
@@ -25,14 +27,13 @@
 //! `ClaudeNative` reproduces the Phase-1 emit bodies byte-for-byte.
 //!
 //! Phase 4 (§E.4 hot-reload): the engine writes its own pid to its
-//! `dontspeakd.pid` on startup (removed on clean exit), installs a SIGHUP
-//! handler alongside SIGTERM/SIGINT, and watches `config.toml` by mtime each
-//! tick. EITHER a SIGHUP (the GUI's explicit "reload now" nudge) OR an mtime
-//! change re-runs `VoiceConfig::load` and rebuilds the boxed `Stt` via the
-//! factory — no restart. `Engine::reload` ends any in-flight HOLD cleanly
-//! (engine `abort()`) before swapping engines, WITHOUT driving the Caps LED or
-//! emitting a spurious edge. A debounce window collapses the GUI's write+SIGHUP
-//! into one reload.
+//! `dontspeakd.pid` on startup (removed on clean exit) and watches `config.toml`
+//! by mtime each tick. EITHER an mtime change OR an explicit reload (the host
+//! app's `engine_reload()` over the C ABI, or the Reload RPC) re-runs
+//! `VoiceConfig::load` and rebuilds the boxed `Stt` via the factory — no restart.
+//! `Engine::reload` ends any in-flight HOLD cleanly (engine `abort()`) before
+//! swapping engines, WITHOUT driving the Caps LED or emitting a spurious edge. A
+//! debounce window collapses a write+reload into one.
 //!
 //! The platform surface (caps read / key inject / frontmost) is behind the
 //! ds-platform traits; only the macOS impl is compiled on the build host.
@@ -40,8 +41,7 @@
 //! ## Module layout
 //! The engine was split out of one god-file into focused modules; this `lib.rs` is
 //! the crate-doc + facade that re-exports the public API the host consumes:
-//! - `boot` — lifecycle/orchestration: [`engine_run`], [`run_headless`],
-//!   [`EngineError`], signal handlers, `install_bin`.
+//! - `boot` — lifecycle/orchestration: [`engine_run`], [`EngineError`], `install_bin`.
 //! - `engine` — the `Engine<P>` gesture state machine + the dictation-preview buffer.
 //! - `ipc` — the RPC server thread + its request-dispatch arms.
 //! - `status` — the `model_status` aggregator + the caps-event status channel.
@@ -72,9 +72,8 @@ mod ipc;
 mod logging;
 mod status;
 
-// The host (the `dontspeakd` binary's `main.rs` and the `ds-core` FFI crate)
-// consumes ONLY these three items.
-pub use boot::{EngineError, engine_run, run_headless};
+// The in-process host (the `ds-core` FFI crate) consumes ONLY these two items.
+pub use boot::{EngineError, engine_run};
 
 // Crate-root re-exports so the sibling modules that pre-date the split keep
 // resolving their historical paths without edits: `crate::log(...)` (the function,

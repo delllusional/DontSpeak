@@ -1,4 +1,4 @@
-//! `ds-ipc` — newline-delimited-JSON RPC between the `dontspeakd` engine (server)
+//! `ds-ipc` — newline-delimited-JSON RPC between the in-process engine (server)
 //! and its clients (the SwiftUI app via `ds-core`, the `dontspeak` MCP server, and
 //! the `dontspeak notify`/`provide` Claude Code hooks). See docs/DAEMON-REFACTOR.md.
 //!

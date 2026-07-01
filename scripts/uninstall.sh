@@ -37,7 +37,6 @@ osascript -e 'quit app "DontSpeak"' 2>/dev/null || true
 sleep 1
 pkill -f "DontSpeak.app/Contents/MacOS/DontSpeak" 2>/dev/null || true
 pkill -f "ds-helper" 2>/dev/null || true
-pkill -x dontspeakd 2>/dev/null || true
 
 echo "==> 2. un-wire the Claude Code hooks + Codex + Claude Code/Desktop MCP (before deleting the binary)"
 if [ -x "$INSTALL_DIR/dontspeak" ]; then
@@ -58,7 +57,7 @@ fi
 
 echo "==> 3. remove the app bundle + installed engine binaries"
 rm -rf "$APP"
-for b in dontspeak dontspeakd ds-helper; do rm -f "$INSTALL_DIR/$b"; done
+for b in dontspeak ds-helper; do rm -f "$INSTALL_DIR/$b"; done
 
 echo "==> 4. remove app data, downloaded models, caches, logs, state"
 # data_dir (config/state) + the legacy ProjectDirs layout; the ONNX model cache; the
@@ -80,12 +79,10 @@ rm -rf \
   "$H/Library/Logs/DontSpeak"
 # Logs land in ~/Library/Logs/DontSpeak/ (a dir) on current builds, plus a few loose
 # legacy files; crash + diagnostic reports accumulate under their own names.
-rm -f "$H"/Library/Logs/dontspeak*.log* "$H"/Library/Logs/dontspeak.daemon.*.log \
-      "$H"/Library/Logs/ds-helper.log
+rm -f "$H"/Library/Logs/dontspeak*.log* "$H"/Library/Logs/ds-helper.log
 rm -f "$H"/Library/Application\ Support/CrashReporter/ds-*.plist \
       "$H"/Library/Logs/DiagnosticReports/ds-*.ips \
       "$H"/Library/Logs/DiagnosticReports/Retired/ds-*.ips
-rm -f "$H/Library/LaunchAgents/org.dontspeak.daemon.plist"
 
 echo "==> 4b. remove the DontSpeak hook helpers (install-daemon.sh seeds these into the"
 echo "        SHARED ~/.claude/hooks — so delete only OUR files, never the whole dir)"

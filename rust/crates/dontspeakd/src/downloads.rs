@@ -221,7 +221,7 @@ pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig)
     // ladder resolves to ANE on ANY macOS (incl. Intel), so on its own it would skip the
     // ONNX fetch believing FluidAudio self-manages the cache. But ANE only actually serves
     // Kokoro when the shim dylib is present (`apple_native_shim_available`); without it — e.g.
-    // Intel macOS, or a headless engine with no SMKOKORO_DYLIB_PATH — the warm child falls
+    // Intel macOS, or an engine with no SMKOKORO_DYLIB_PATH — the warm child falls
     // back to the ONNX path and needs these files. Gate on the SAME runtime truth the status
     // / provider-token downgrade uses, so the model is fetched instead of silently skipped.
     let tts_is_kokoro = cfg.resolved_tts() == Some(ds_config::TtsEngine::Kokoro);

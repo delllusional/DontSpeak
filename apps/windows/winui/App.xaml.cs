@@ -93,7 +93,7 @@ public partial class App : Application
         _testOverlay = Has("--test-overlay") || testGlow; // visual QA: drive the panel directly
 
         // Be the resident engine host — but only if nothing already answers the
-        // socket (the MCP auto-spawns dontspeakd headless when no host is up). This
+        // socket (the MCP launches this host app when no engine is up). This
         // keeps us a polite client instead of double-binding the socket; we only
         // stop on exit what we ourselves started.
         _hostingEngine = !HealthSnapshot.Probe().Activity.EngineRunning;

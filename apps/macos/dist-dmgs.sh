@@ -14,7 +14,7 @@
 #
 # The DMG ships only what the app itself needs: the app binary (which hosts the engine
 # in-process via the linked staticlib) + ds-helper (the Kokoro synth child) + the
-# icon. The CLI/MCP bins (dontspeakd, dontspeak, …) are installed separately by the
+# icon. The CLI/MCP bins (dontspeak, ds-helper) are installed separately by the
 # CLI installer, not shipped here.
 #
 # Output: $OUTDIR/DontSpeak-<arch>.dmg   (default OUTDIR=~/Desktop)

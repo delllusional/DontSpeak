@@ -8,9 +8,9 @@ repository.workspace = true
 authors.workspace = true
 description = "dontspeak push-to-talk engine: caps poll + Ctrl+G emit + focus gate + barge-in."
 
-[[bin]]
-name = "dontspeakd"
-path = "src/main.rs"
+# Library only — the engine is ALWAYS hosted in-process by a platform host app via the
+# `ds-core` C ABI (macOS DontSpeak.app / Windows ds-winui / Linux ds-gtk). There is no
+# standalone headless binary any more; `ds-core::host` calls `engine_run` on a thread.
 
 [dependencies]
 ds-platform = { workspace = true }

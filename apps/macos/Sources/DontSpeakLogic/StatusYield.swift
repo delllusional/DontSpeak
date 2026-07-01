@@ -11,7 +11,7 @@
 /// TrayAnimator chain) ~1×/s forever while idle. So yield only when something actually
 /// changed:
 ///   - `!delivered` — the very first sample, always delivered;
-///   - `seq != since` — the daemon's status gate advanced (a real status change);
+///   - `seq != since` — the engine's status gate advanced (a real status change);
 ///   - `running != lastRunning` — `engineRunning` flipped. This is an EXTERNAL pidfile /
 ///     launchd probe NOT carried in the gate `seq`, so a stop/crash freezes `seq` and the
 ///     down transition would be missed if we gated on `seq` alone — leaving the menu-bar

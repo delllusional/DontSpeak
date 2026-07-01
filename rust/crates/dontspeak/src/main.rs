@@ -7,8 +7,8 @@
 //!
 //! As the MCP server it is a THIN BRIDGE: it speaks newline-delimited JSON-RPC 2.0 over
 //! stdio on one side (the MCP spec, revision 2025-11-25) and the existing `ds-ipc`
-//! Unix-socket protocol to the resident `dontspeakd` on the other — so MCP is just another
-//! client of the SAME engine the hooks and SwiftUI app use (one warm owner, in sync).
+//! Unix-socket protocol to the resident engine on the other — so MCP is just another
+//! client of the SAME engine the hooks and host app use (one warm owner, in sync).
 //!
 //! Tools (the authoritative catalog — names, schemas, descriptions — lives in
 //! `ds_tools::catalog()`; this is just an orientation): speak, stop_speech,

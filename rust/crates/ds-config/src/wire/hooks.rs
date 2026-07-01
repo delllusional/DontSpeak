@@ -20,7 +20,7 @@ use serde_json::{Map, Value, json};
 /// Any `dontspeak*` executable in the install dir that is NOT in this set is pruned as an
 /// orphan, so this is the single keep-list both the prune and the Inno `[InstallDelete]`
 /// honor.
-pub const INSTALLED_BINS: &[&str] = &["dontspeak", "dontspeakd", "ds-helper", "ds-winui"];
+pub const INSTALLED_BINS: &[&str] = &["dontspeak", "ds-helper", "ds-winui", "ds-gtk"];
 
 /// Inputs for [`merge_hooks`]: the resolved hook command path + voice prefs. All `&str`
 /// so the caller owns path formatting (incl. the platform `.exe` suffix).

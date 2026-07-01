@@ -2,21 +2,21 @@
 # install.sh — first-time / full CLI install of the DontSpeak RUST stack (macOS-first).
 #
 # The binary build+install is delegated to scripts/install-daemon.sh (the SINGLE
-# source of truth, ALSO called by apps/macos/bundle.sh). It builds + installs the engine
-# + helper binaries (dontspeakd, dontspeak, ds-helper) into $INSTALL_DIR
-# (default ~/.local/bin), stable-signs dontspeakd (so
-# the TCC grants survive rebuilds), and installs the thin hook wrappers.
-# Logging is ~/Library/Logs/dontspeak.log with in-process rotation (no conf needed).
+# source of truth, ALSO called by apps/macos/bundle.sh). It builds + installs the CLI
+# binaries (dontspeak MCP/hooks + ds-helper) into $INSTALL_DIR (default ~/.local/bin),
+# stable-signs them (so the TCC grants survive rebuilds), and installs the thin hook
+# wrappers. Logging is ~/Library/Logs/dontspeak.log with in-process rotation (no conf needed).
 #
 # This wrapper adds the things specific to a fresh CLI install: wiring each client's whole
 # integration via `dontspeak wire <client>` (Claude Code = hooks + MCP, Desktop = MCP, Codex =
 # hooks; additive, backed-up; preview with --print-only, undo with --remove) and the next-steps notes.
 #
-# ENGINE HOST: on macOS the engine runs IN-PROCESS inside DontSpeak.app (built via
-# apps/macos/bundle.sh) — it owns the RPC socket, hosts TTS/STT, and catches Caps-Lock,
-# so there is NO standalone daemon and a single TCC grant lands on the app. On Linux
-# the headless dontspeakd is the engine host (systemd: apps/linux/enable-daemon.sh). The
-# hooks work without either (warm socket if up, else a cold one-shot synth).
+# ENGINE HOST: the engine runs IN-PROCESS inside the platform's resident host app on EVERY
+# platform — macOS DontSpeak.app (apps/macos/bundle.sh), Linux the GTK host ds-gtk
+# (apps/linux/install-gui.sh), Windows the WinUI app. The host owns the RPC socket, hosts
+# TTS/STT, and catches Caps-Lock, so a single TCC/permission grant lands on the app and there
+# is NO standalone daemon. The hooks work without the app up (warm socket if it is, else a
+# cold one-shot synth).
 #
 # SAFETY: idempotent. Touches ~/.claude/hooks (backed up), $INSTALL_DIR, and wires each client's
 # integration via `dontspeak wire <client>` — additive, backed-up, malformed-safe merges that
@@ -61,7 +61,7 @@ echo "==> 7. wire OpenAI Codex narration hooks (only if ~/.codex exists)"
 cat <<EOF
 
 Done. Installed:
-  • $INSTALL_DIR/{dontspeakd,dontspeak,ds-helper}
+  • $INSTALL_DIR/{dontspeak,ds-helper}
   • Claude Code: ~/.claude/settings.json voice hooks + ~/.claude.json MCP server (wired via
     'dontspeak wire claude_code' — start a NEW Claude Code session to load the MCP server;
     undo any time with 'dontspeak wire claude_code --remove')
@@ -87,20 +87,17 @@ if [ "$UNAME" = "Darwin" ]; then
 EOF
 else
   cat <<EOF
-  • DESKTOP (recommended): build + install the GTK GUI host — tray, health panel,
-    dictation overlay; hosts the engine in-process like DontSpeak.app:
+  • Build + install the GTK GUI host — tray, health panel, dictation overlay; it
+    hosts the engine in-process like DontSpeak.app:
         ./apps/linux/install-gui.sh            (add --autostart, --aec as desired)
-    Then launch "DontSpeak" from your app menu.
-  • HEADLESS (server): run the engine as a systemd user service instead:
-        ./apps/linux/enable-daemon.sh
-    Pick ONE host (the engine pidfile is single-speaker). Either way, grant
-    input-device access per apps/linux/udev-rule.txt if recording does not start.
+    Then launch "DontSpeak" from your app menu. Grant input-device access per
+    apps/linux/udev-rule.txt if recording does not start.
 EOF
 fi
 
 cat <<EOF
 
 Hot-reload: the engine reloads config WITHOUT a restart — a settings.json write
-auto-applies via its mtime-watch, and the GUI also sends SIGHUP for an instant
-nudge. No relaunch needed after a voice/engine change.
+auto-applies via its mtime-watch, and the host app can nudge an instant reload
+(engine_reload). No relaunch needed after a voice/engine change.
 EOF

@@ -11,7 +11,7 @@ that "didn't work" was simply never deployed to the running helper).
 |---|---|---|---|
 | `dontspeak` | the CLI: MCP server **and** the Claude Code hook entries (`notify`/`provide`) | `install-daemon.sh` → `~/.local/bin/dontspeak` | **`~/.local/bin/dontspeak`** — the wired hook command points here, so this IS live after install-daemon |
 | `ds-helper` | the warm TTS/STT synthesis child | `install-daemon.sh` → `~/.local/bin/ds-helper` **AND** `bundle.sh` → `DontSpeak.app/Contents/MacOS/ds-helper` | **the BUNDLED copy** — the app spawns `Contents/MacOS/ds-helper`. The `~/.local/bin` copy is NOT used by the app. |
-| engine (`dontspeakd` logic) | the in-process engine (queue, IPC, playback) | `bundle.sh` → linked into the `DontSpeak.app` binary | **the app binary** — `~/.local/bin/dontspeakd` is the standalone CLI engine only, unused when the app runs |
+| engine (`dontspeakd` logic) | the in-process engine (queue, IPC, playback) | `bundle.sh` → linked into the `DontSpeak.app` binary | **the app binary** — the engine is linked in and runs in-process; there is no standalone `dontspeakd` binary |
 
 ### The rule
 

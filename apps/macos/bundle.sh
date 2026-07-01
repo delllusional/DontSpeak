@@ -90,15 +90,6 @@ assemble_app "$APP" "$EXE" "$HOME/.local/bin/ds-helper" \
   "$(cd "$DIR/../.." && pwd)/assets/menubar-icon.svg" "$BUILD_ID" "$SIGN"
 echo "   signed app ($([ "$SIGN" = "-" ] && echo ad-hoc || echo "${SIGN%% (*}…"))"
 
-# ==> 5. Cutover: the app hosts the engine in-process, so the standalone launchd
-# daemon must NOT run (it would fight for the same RPC socket). Remove it.
-echo "==> 5. remove standalone launchd daemon (app hosts the engine now)"
-PLISTDST="$HOME/Library/LaunchAgents/org.dontspeak.daemon.plist"
-launchctl unload "$PLISTDST" 2>/dev/null || true
-rm -f "$PLISTDST"
-pkill -f '/dontspeakd' 2>/dev/null || true
-echo "   launchd daemon removed — DontSpeak.app runs caps + RPC + TTS in-process"
-
 echo
 echo "Done → $APP"
 echo "Launch it: open \"$APP\"  (registers itself as the login item + starts the engine)"

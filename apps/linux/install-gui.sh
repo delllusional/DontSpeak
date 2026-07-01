@@ -4,8 +4,7 @@
 # The Linux analogue of building + installing DontSpeak.app on macOS: it installs the
 # `ds-gtk` host, which HOSTS the engine in-process (the same ds-core C ABI the
 # macOS/Windows apps use) and provides the tray, health panel, and dictation overlay. This
-# is the DESKTOP path; the headless systemd service (enable-daemon.sh) is the server path —
-# use ONE (the engine pidfile is single-speaker, so don't run both).
+# GTK host is the ONLY engine host on Linux — the engine has no standalone/headless mode.
 #
 # Run scripts/install.sh FIRST: it installs the engine/helper binaries (dontspeak,
 # ds-helper) + the Claude Code voice hooks this host relies on. This script then adds
@@ -97,5 +96,4 @@ Done. The DontSpeak GUI host is installed.
     quits the engine when you quit the app — the desktop analogue of DontSpeak.app.
   • Caps-Lock dictation needs the input-device access above (real keyboard required —
     not available under WSL/containers). Models download on demand on first use.
-  • Don't also run the headless service (enable-daemon.sh) — pick one host.
 EOF

@@ -1,7 +1,7 @@
 //! The canonical set of download / installer-prefetch targets.
 //!
 //! Historically each dispatcher — the installer prefetch list ([`crate::spec::prefetch_items`]),
-//! the ds-helper `run_prefetch`, and the daemon's background download manager — re-spelled the
+//! the ds-helper `run_prefetch`, and the engine's background download manager — re-spelled the
 //! same bare `&str` tokens ("onnx", "kokoro", "parakeet", …) in its own `match`, with no shared
 //! definition. A typo or a renamed token would silently fall through to a default arm. This enum
 //! is the ONE definition every dispatcher parses to and matches on, so the wire tokens live in a
@@ -35,7 +35,7 @@ pub enum DownloadTarget {
     /// The speaker-diarization Core ML models (the macOS ANE-shim path; fetched into the
     /// dir the shim loads from offline).
     Diarization,
-    /// "Everything": both ONNX models (Kokoro + Parakeet). The daemon's combined fetch and
+    /// "Everything": both ONNX models (Kokoro + Parakeet). The engine's combined fetch and
     /// the installer/helper default.
     All,
     /// Both ONNX models (Kokoro + Parakeet) — the installer's "models" component group.

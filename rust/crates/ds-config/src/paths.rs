@@ -31,8 +31,8 @@ pub struct Paths {
     pub claude_code_config: PathBuf,
     /// Side file holding the running `ds-narrate` pid (for `--stop`).
     pub narrate_pid: PathBuf,
-    /// Side file holding the running `dontspeakd` engine pid (for the GUI's
-    /// SIGHUP-to-reload nudge + liveness probe). DISTINCT from the SPEAKER
+    /// Side file holding the running engine pid (for the GUI's reload nudge +
+    /// liveness probe). DISTINCT from the SPEAKER
     /// `pidfile` (a TTS pgid) and the `narrate_pid` (the narrator pid).
     pub engine_pid: PathBuf,
     /// Unix-domain socket the engine listens on for RPC (`ds-ipc`). Clients (the

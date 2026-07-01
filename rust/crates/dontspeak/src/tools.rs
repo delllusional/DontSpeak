@@ -1,5 +1,5 @@
 //! The `tools/call` router and the individual `call_*` tool handlers (plus their
-//! strict arg structs). Most handlers bridge to the resident `dontspeakd` over
+//! strict arg structs). Most handlers bridge to the resident engine over
 //! `ds-ipc`; `list_voices`/`set_config`/`status`/`wire` read config or edit
 //! client files directly, never spawning the engine (set_config still best-effort-nudges
 //! a running one to Reload).

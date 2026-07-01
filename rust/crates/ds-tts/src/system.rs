@@ -28,7 +28,7 @@ impl SystemTts {
 
     /// Is a system TTS backend available on THIS build target? macOS always has `say`;
     /// Windows always has PowerShell `System.Speech.Synthesis`. Linux stays unavailable
-    /// (its spd-say/espeak path isn't wired into the daemon yet).
+    /// (its spd-say/espeak path isn't wired into the engine yet).
     pub fn available() -> bool {
         cfg!(any(target_os = "macos", target_os = "windows"))
     }

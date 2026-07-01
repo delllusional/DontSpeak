@@ -1,19 +1,8 @@
 {
   "version": "0.2.0",
   "configurations": [
-    // ── Rust: the MCP daemon ─────────────────────────────────────────────────
-    // cppvsdbg is the Windows-MSVC native debugger (reads the rustc PDBs).
-    {
-      "name": "Debug dontspeakd (daemon)",
-      "type": "cppvsdbg",
-      "request": "launch",
-      "preLaunchTask": "rust: build (debug)",
-      "program": "${workspaceFolder}/rust/target/debug/dontspeakd.exe",
-      "args": [],
-      "cwd": "${workspaceFolder}/rust",
-      "console": "integratedTerminal"
-    },
     // ── Rust: the CLI ────────────────────────────────────────────────────────
+    // cppvsdbg is the Windows-MSVC native debugger (reads the rustc PDBs).
     {
       "name": "Debug dontspeak (cli)",
       "type": "cppvsdbg",

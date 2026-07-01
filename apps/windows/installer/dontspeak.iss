@@ -128,12 +128,10 @@ Name: "integrations\claudedesktop"; Description: "Claude Desktop — register th
 ; The CURRENT names mirror ds_config::INSTALLED_BINS (rust/crates/ds-config/src/lib.rs) —
 ; the one source of truth the cross-platform `wire` prune uses directly; it runs as
 ; the NON-elevated user and can't clear {app} under Program Files, so this elevated,
-; pre-copy delete is duplicated here declaratively. Keep in sync. (dontspeakd is a no-op on
-; Windows — not shipped here.)
+; pre-copy delete is duplicated here declaratively. Keep in sync.
 [InstallDelete]
 ; current binaries (mirror INSTALLED_BINS)
 Type: files; Name: "{app}\dontspeak.exe"
-Type: files; Name: "{app}\dontspeakd.exe"
 Type: files; Name: "{app}\ds-helper.exe"
 Type: files; Name: "{app}\ds-winui.exe"
 ; legacy binaries replaced by the single-binary consolidation
@@ -554,7 +552,7 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var rc: Integer;
 begin
   Exec('taskkill.exe',
-    '/F /IM ds-winui.exe /IM ds-helper.exe /IM dontspeakd.exe /IM dontspeak.exe /IM ds-tray.exe',
+    '/F /IM ds-winui.exe /IM ds-helper.exe /IM dontspeak.exe /IM ds-tray.exe',
     '', SW_HIDE, ewWaitUntilTerminated, rc);
   Result := '';
 end;
@@ -582,7 +580,7 @@ var rc: Integer;
 begin
   if CurUninstallStep <> usUninstall then exit;
   Exec('taskkill.exe',
-    '/F /IM ds-winui.exe /IM ds-helper.exe /IM dontspeakd.exe /IM dontspeak.exe /IM ds-tray.exe',
+    '/F /IM ds-winui.exe /IM ds-helper.exe /IM dontspeak.exe /IM ds-tray.exe',
     '', SW_HIDE, ewWaitUntilTerminated, rc);
   { Offer to remove the downloaded voice models + cached runtime — the re-downloadable blobs in
     the LOCAL DontSpeak app-data folder (models, the CUDA runtime, logs), potentially several GB.

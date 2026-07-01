@@ -1,17 +1,18 @@
 # install.ps1 — build + install the DontSpeak RUST stack on Windows (parity with scripts/install.sh).
 #
-# Phase 4 cutover: builds the Rust workspace and installs the daemon + helper binaries
-#   dontspeakd.exe, dontspeak.exe, ds-helper.exe
+# Builds the Rust workspace and installs the CLI binaries
+#   dontspeak.exe, ds-helper.exe
 # into one install dir (default %USERPROFILE%\.local\bin, override with
 # $env:DONTSPEAK_INSTALL_DIR), merges the keybindings snippet, wires the voice hooks via
 # `dontspeak.exe wire` (the single cross-platform definition — no placeholder
-# substitution here any more), and PRINTS the next steps.
+# substitution here any more), builds the WinUI host app (which hosts the engine
+# in-process via ds_core.dll), and PRINTS the next steps.
 # There is no more speak.py / uv / Kokoro model download — the Rust dontspeak.exe
 # does in-process Kokoro synth and fetches its model assets to the per-OS data dir on
-# first synth. This does NOT enable the daemon — that is enable.ps1.
+# first synth.
 #
 # What it does:
-#   1. Build the Rust workspace (cargo --release for the 3 console bins) and
+#   1. Build the Rust workspace (cargo --release: the 2 console bins + ds_core.dll) and
 #      install the .exe's -> $INSTALL_DIR
 #   2. Copy hooks -> %USERPROFILE%\.claude\hooks\ with the binary path substituted
 #   3. Install keybindings.json (space:null, ctrl+g:voice:pushToTalk)
@@ -109,23 +110,21 @@ New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
 Write-Host "    install dir: $INSTALL_DIR"
 
 # ── 0b. build the Rust workspace + install the .exe binaries ────────────────────────
-# Mirrors scripts/install.sh: plain --release for the daemon + the merged dontspeak bin + the
-# kokoro helper bin (the kokoro helper is a [[bin]] in ds-tts, so `-p ds-tts` MUST be in
-# scope to select --bin ds-helper). The merged dontspeak bin is the MCP server,
-# the hook executor, and the wire tool, dispatched by subcommand.
-# Windows ships the daemon + the dontspeak bin + the kokoro helper; there is no GUI (the
-# old Slint ds-gui was removed — macOS uses the SwiftUI app, which Windows has no
-# analog for yet).
+# Mirrors scripts/install.sh: plain --release for the merged dontspeak bin + the kokoro
+# helper bin (the kokoro helper is a [[bin]] in ds-tts, so `-p ds-tts` MUST be in scope to
+# select --bin ds-helper). The merged dontspeak bin is the MCP server, the hook executor,
+# and the wire tool, dispatched by subcommand. The engine has no standalone binary — it is
+# hosted in-process by the WinUI app via ds_core.dll (built below).
 Write-Host ""
 Write-Host "==> 0c. build the Rust workspace"
 Push-Location $RUST_DIR
 try {
-    # -p ds-core builds the cdylib (ds_core.dll) the WinUI app P/Invokes
-    # AND hosts the engine in-process (the WinUI app is now the resident host — the
-    # old ds-tray crate was merged into it; see windows/winui/TrayIcon.cs).
+    # -p ds-core builds the cdylib (ds_core.dll) the WinUI app P/Invokes to host the engine
+    # in-process (the WinUI app is the resident host — the old ds-tray crate was merged into
+    # it; see windows/winui/TrayIcon.cs).
     cargo build --release `
-        -p dontspeakd -p dontspeak -p ds-core -p ds-tts `
-        --bin dontspeakd --bin dontspeak --bin ds-helper
+        -p dontspeak -p ds-core -p ds-tts `
+        --bin dontspeak --bin ds-helper
     if ($LASTEXITCODE -ne 0) { throw "cargo build (console bins) failed" }
 } finally {
     Pop-Location
@@ -136,11 +135,11 @@ try {
 # Copy-Item below would fail outright; (2) more importantly, leaving the old engine
 # alive lets it race the new one for the RPC socket, which is heard as the same
 # reply spoken TWICE after the upgrade. The engine also self-evicts on boot (see
-# dontspeakd boot.rs evict_stale_engine), but stopping here makes the handoff clean
+# the engine's boot.rs evict_stale_engine), but stopping here makes the handoff clean
 # and unblocks the copy. The MCP server / hook CLI (`dontspeak.exe`) is a stateless
 # client that holds no socket, so it is intentionally left alone.
 Write-Host "==> 0c. stop any DontSpeak engine from a previous install"
-foreach ($p in 'ds-winui','dontspeakd','ds-helper') {
+foreach ($p in 'ds-winui','ds-helper') {
     Get-Process -Name $p -ErrorAction SilentlyContinue | ForEach-Object {
         Write-Host "    stopping $($_.ProcessName) (pid $($_.Id))"
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -150,7 +149,6 @@ foreach ($p in 'ds-winui','dontspeakd','ds-helper') {
 Write-Host "==> 0d. install the binaries -> $INSTALL_DIR"
 $REL    = Join-Path $RUST_DIR 'target\release'
 $bins = @(
-    @{ src = (Join-Path $REL    'dontspeakd.exe');        dst = (Join-Path $INSTALL_DIR 'dontspeakd.exe') },
     @{ src = (Join-Path $REL    'dontspeak.exe');         dst = (Join-Path $INSTALL_DIR 'dontspeak.exe') },
     @{ src = (Join-Path $REL    'ds-helper.exe');  dst = (Join-Path $INSTALL_DIR 'ds-helper.exe') }
 )
@@ -171,9 +169,9 @@ foreach ($b in $bins) {
 # The macOS SwiftUI-app analogue, and the Windows resident host: it shows the tray icon,
 # hosts the engine in-process (ds_core.dll), and has the Status/Tools window.
 # Framework-dependent unpackaged: needs the Windows App Runtime (preinstalled on most
-# Win11). Published into $INSTALL_DIR\winui. Skipped if no dotnet — in that case there is
-# no tray UI, but the engine still runs headless: DontSpeak auto-spawns dontspeakd
-# on demand (or enable.ps1 installs a logon task for it).
+# Win11). Published into $INSTALL_DIR\winui. The WinUI app is the ONLY engine host on
+# Windows (it hosts the engine in-process via ds_core.dll) — so if dotnet is missing it is
+# skipped and there is NO engine host: install the .NET SDK and re-run to get it.
 Write-Host ""
 Write-Host "==> 0f. WinUI app (resident host + Fluent UI)"
 $WINUI_PROJ = Join-Path $REPO_WIN 'winui\DontSpeak.WinUI.csproj'
@@ -181,9 +179,9 @@ if ((Get-Command dotnet -ErrorAction SilentlyContinue) -and (Test-Path $WINUI_PR
     $WINUI_OUT = Join-Path $INSTALL_DIR 'winui'
     dotnet publish $WINUI_PROJ -c Release -o $WINUI_OUT --nologo
     if ($LASTEXITCODE -eq 0) { Write-Host "    published WinUI app -> $WINUI_OUT" }
-    else { Write-Host "    !! dotnet publish failed; no tray UI (engine still runs headless via dontspeakd)." }
+    else { Write-Host "    !! dotnet publish failed; no engine host until it builds." }
 } else {
-    Write-Host "    skipped (no .NET SDK on PATH) — no tray UI; the engine runs headless via dontspeakd."
+    Write-Host "    skipped (no .NET SDK on PATH) — no engine host; install the .NET SDK and re-run."
 }
 
 # The speak/narrate hooks are EXEC-FORM (the settings snippet calls the .exe directly —
@@ -230,25 +228,23 @@ foreach ($client in 'claude_code', 'claude_desktop', 'codex') { & $_dsBin wire $
 
 Write-Host ""
 Write-Host @"
-Done (binaries built + installed; config merged; daemon NOT yet enabled).
+Done (binaries built + installed; config merged).
 
 Installed:
-  • $INSTALL_DIR\{dontspeakd,dontspeak,ds-helper}.exe
+  • $INSTALL_DIR\{dontspeak,ds-helper}.exe
   • $INSTALL_DIR\winui\ds-winui.exe (the resident host + Fluent UI), if the .NET SDK was found.
   • MCP server 'dontspeak' registered with Claude Code (user scope), if the claude CLI was found.
 
 Next:
   • Restart Claude Code so it loads the 'dontspeak' MCP server + the merged hooks.
   • Ensure Claude Code voice is on (/voice on).
-  • For the desktop app (the Windows analogue of the macOS menu-bar app), run
-    "$INSTALL_DIR\winui\ds-winui.exe": it shows a status-dot tray icon (idle /
-    orange recording / purple speaking), hosts the engine IN-PROCESS, and has a
-    Status/Tools window. Closing the window hides it to the tray; quit from the tray's
-    Exit. Enable "Start at login" from the tray menu — and do NOT also run enable.ps1's
-    daemon task, or two engines will fight over the socket. (No .NET? Skip the app —
-    the engine still runs headless: the MCP spawns dontspeakd on demand.)
-  • Run the daemon as a logon task:  pwsh -NoProfile -File "$REPO_WIN\enable.ps1"
-  • Revert:  pwsh -NoProfile -File "$REPO_WIN\disable.ps1"
+  • Launch the resident host (the Windows analogue of the macOS menu-bar app), which
+    hosts the engine IN-PROCESS — it is REQUIRED for the warm engine + Caps-Lock:
+    "$INSTALL_DIR\winui\ds-winui.exe". It shows a status-dot tray icon (idle /
+    orange recording / purple speaking) and a Status/Tools window. Closing the window
+    hides it to the tray; quit from the tray's Exit. Enable "Start at login" from the
+    tray menu. (No .NET SDK? Re-run this script after installing it — without the WinUI
+    host there is no engine.)
   • First synth downloads the Kokoro model assets to the per-OS data dir (one-time).
   • The .exe's are UNSIGNED — first run may hit SmartScreen ('More info -> Run anyway'),
     or Authenticode-sign them with your cert.

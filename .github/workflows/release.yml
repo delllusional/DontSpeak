@@ -138,8 +138,8 @@ jobs:
         with:
           name: windows-binaries-arm64
           # The binaries the Windows installer actually ships + runs: the in-process engine
-          # DLL, the MCP/hook bin, and the warm-synth helper. (dontspeakd — the standalone
-          # headless host — isn't shipped on Windows; the engine runs in-process via the DLL.)
+          # DLL, the MCP/hook bin, and the warm-synth helper. (dontspeakd is a library, not a
+          # shipped binary — there is no standalone host; the engine runs in-process via the DLL.)
           path: |
             rust/target/aarch64-pc-windows-msvc/release/ds_core.dll
             rust/target/aarch64-pc-windows-msvc/release/dontspeak.exe

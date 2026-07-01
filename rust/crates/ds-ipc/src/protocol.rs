@@ -80,7 +80,7 @@ pub enum Request {
     /// A window/terminal closed for good (Claude Code `SessionEnd`). Like a per-window
     /// [`StopSpeech`](Request::StopSpeech) (drop this session's queued + in-flight speech),
     /// but ALSO reclaims the session's transient voice state — its preferred-pool
-    /// assignment — so that map doesn't grow one entry per session for the daemon's
+    /// assignment — so that map doesn't grow one entry per session for the engine's
     /// lifetime. `None` (no session id) is the global hard barge, same as
     /// `StopSpeech { None }`, and forgets nothing session-scoped.
     SessionEnd {
@@ -134,7 +134,8 @@ pub enum Request {
     /// Apply `settings.json` NOW — the explicit "reload" nudge. The MCP/GUI writes
     /// settings.json (still the source of truth), then sends this so the engine
     /// reloads immediately and surgically via `Engine::reload` instead of waiting
-    /// for the mtime poll. Same effect as SIGHUP; debounced with it. → [`Response::Done`].
+    /// for the mtime poll. Same effect as an mtime-triggered reload; debounced with it.
+    /// → [`Response::Done`].
     Reload,
     /// Play an audible EARCON now (fire-and-forget). `event` is `"reply_done"` (the Stop
     /// hook — Claude finished its turn) or `"needs_input"` (the Notification hook — a

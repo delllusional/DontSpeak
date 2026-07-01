@@ -1,7 +1,7 @@
 # Linux port
 
 **Status (2026-06): shipped.** GTK4/libadwaita GUI host (`apps/linux/gtk/`, crate
-`ds-linux-gtk`) + headless `dontspeakd` daemon, Linux backends for `ds-platform`
+`ds-linux-gtk`) hosting the engine in-process, Linux backends for `ds-platform`
 (evdev/uinput/x11rb) and `ds-aec` (PipeWire `module-echo-cancel`), `.deb`/`.rpm` packaging
 (`apps/linux/package.sh`) — built and tested in CI on `ubuntu-26.04`.
 
@@ -24,8 +24,8 @@ single source of truth, and each platform adds only a `ds-platform` input/window
 
 The dev box is WSL2 Ubuntu 26.04 under WSLg (Wayland `wayland-0` + Xwayland `:0`,
 PulseAudio). What runs here: the full build/compile, the GTK4 GUI host (WSLg Wayland),
-audio (cpal/rodio + PipeWire), uinput injection (`/dev/uinput` present), the daemon, MCP,
-TTS/STT. What does **not** run here: Caps-Lock LED read — WSL2 exposes **no `/dev/input`
+audio (cpal/rodio + PipeWire), uinput injection (`/dev/uinput` present), the in-process
+engine, MCP, TTS/STT. What does **not** run here: Caps-Lock LED read — WSL2 exposes **no `/dev/input`
 evdev keyboard node**, so the dictation *trigger* must be verified on bare-metal Linux. The
 code is written for evdev and compile-verified in WSL; trigger runtime test is deferred to
 real hardware.
