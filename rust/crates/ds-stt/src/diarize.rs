@@ -1,7 +1,7 @@
 //! Speaker diarization — "who spoke when", optionally labelled by enrolled NAME.
 //!
 //! Mirrors the [`crate::Stt`] split: ONE platform-agnostic [`Diarizer`](crate::diarize::Diarizer)
-//! trait with a Core ML / ANE backend now ([`CoremlDiarizer`](crate::diarize::CoremlDiarizer),
+//! trait with a Core ML / ANE backend now (`CoremlDiarizer`,
 //! macOS only) and room for a cross-platform ONNX backend later (Pyannote + WeSpeaker over
 //! `ort`). Diarization runs on the FULL utterance buffer at end-of-capture, one-shot (not
 //! streamed).
