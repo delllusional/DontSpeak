@@ -7,10 +7,6 @@ claude/hooks/mic-active
 scripts/dontspeakd
 scripts/daemon.log
 
-
-# Rust lockfiles — these are libraries/apps where we don't pin; ignore everywhere
-Cargo.lock
-
 .DS_Store
 
 # sync logs

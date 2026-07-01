@@ -45,9 +45,9 @@ function Invoke-CargoRelease {
     Push-Location "$Repo\rust"
     try {
         if ($RustTarget) { rustup target add $RustTarget; if ($LASTEXITCODE) { throw "rustup target add $RustTarget failed" } }
-        cargo build --release @CargoTargetArg -p ds-core; if ($LASTEXITCODE) { throw 'cargo ds-core failed' }
-        cargo build --release @CargoTargetArg -p ds-tts --bin ds-helper; if ($LASTEXITCODE) { throw 'cargo helper failed' }
-        cargo build --release @CargoTargetArg -p dontspeak; if ($LASTEXITCODE) { throw 'cargo dontspeak failed' }
+        cargo build --release --locked @CargoTargetArg -p ds-core; if ($LASTEXITCODE) { throw 'cargo ds-core failed' }
+        cargo build --release --locked @CargoTargetArg -p ds-tts --bin ds-helper; if ($LASTEXITCODE) { throw 'cargo helper failed' }
+        cargo build --release --locked @CargoTargetArg -p dontspeak; if ($LASTEXITCODE) { throw 'cargo dontspeak failed' }
     }
     finally { Pop-Location }
 }

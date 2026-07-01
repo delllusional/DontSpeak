@@ -67,17 +67,17 @@ build_arch() {   # $1 display arch, $2 rust triple, $3 swift arch
   echo; echo "################## $ARCH ($TRIPLE) ##################"
 
   echo "==> [1/6] cargo staticlib ($TRIPLE)"
-  ( cd "$RUST" && "$CARGO" build --profile release-ffi --target "$TRIPLE" -p ds-core )
+  ( cd "$RUST" && "$CARGO" build --profile release-ffi --locked --target "$TRIPLE" -p ds-core )
   local SLIB="$RUST/target/$TRIPLE/release-ffi/libds_core.a"
   [ -f "$SLIB" ] || { echo "no staticlib $SLIB" >&2; exit 1; }
 
   echo "==> [2/6] cargo ds-helper + dontspeak ($TRIPLE)"
-  ( cd "$RUST" && "$CARGO" build --release --target "$TRIPLE" -p ds-tts --bin ds-helper )
+  ( cd "$RUST" && "$CARGO" build --release --locked --target "$TRIPLE" -p ds-tts --bin ds-helper )
   local HELPER="$RUST/target/$TRIPLE/release/ds-helper"
   [ -f "$HELPER" ] || { echo "no helper $HELPER" >&2; exit 1; }
   # The multi-call CLI (MCP server + hooks + `wire`) — shipped inside the .app so an
   # unzipped bundle can self-wire (assemble_app reads DONTSPEAK_CLI_BIN).
-  ( cd "$RUST" && "$CARGO" build --release --target "$TRIPLE" -p dontspeak --bin dontspeak )
+  ( cd "$RUST" && "$CARGO" build --release --locked --target "$TRIPLE" -p dontspeak --bin dontspeak )
   local CLI="$RUST/target/$TRIPLE/release/dontspeak"
   [ -f "$CLI" ] || { echo "no dontspeak CLI $CLI" >&2; exit 1; }
   export DONTSPEAK_CLI_BIN="$CLI"

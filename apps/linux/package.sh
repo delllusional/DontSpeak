@@ -44,9 +44,9 @@ echo "==> DontSpeak $VERSION ($ARCH) → $OUTDIR"
 # ── 1. build the CLI bins (rust/ workspace) + the GTK host (standalone crate) ─────────────
 # The GTK host links the engine in-process via ds-core; there is no standalone daemon bin.
 echo "==> [1/5] cargo build --release (dontspeak + ds-helper + ds-gtk)"
-( cd "$REPO/rust" && cargo build --release -p dontspeak && \
-  cargo build --release -p ds-tts --bin ds-helper )
-( cd "$GTK_DIR" && cargo build --release )
+( cd "$REPO/rust" && cargo build --release --locked -p dontspeak && \
+  cargo build --release --locked -p ds-tts --bin ds-helper )
+( cd "$GTK_DIR" && cargo build --release --locked )
 
 RREL="$REPO/rust/target/release"
 GREL="$GTK_DIR/target/release"
