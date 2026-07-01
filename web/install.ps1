@@ -75,7 +75,17 @@ try {
   Expand-Archive -Path $zip -DestinationPath $dest -Force
 
   $cli = Join-Path $dest 'dontspeak.exe'
-  if (Test-Path $cli) { Say "wiring clients (MCP + hooks)"; & $cli wire --all 2>$null }
+  if (Test-Path $cli) {
+    Say "wiring clients (MCP + hooks)"
+    # Windows PowerShell 5.1 (the stock `irm | iex` host) raises NativeCommandError when a
+    # native command writes to a redirected stderr under ErrorActionPreference=Stop — a mere
+    # wire warning would abort the install after extraction. Contain it and warn instead
+    # (parity with install.sh's `|| warn`).
+    try {
+      & $cli wire --all 2>$null
+      if ($LASTEXITCODE -ne 0) { Warn "wire --all reported an issue (exit $LASTEXITCODE)" }
+    } catch { Warn "wire --all reported an issue: $($_.Exception.Message)" }
+  }
   else { Warn "dontspeak.exe not found under $dest — the zip layout may have changed" }
 
   # Start-menu shortcut so DontSpeak is launchable like any app.
