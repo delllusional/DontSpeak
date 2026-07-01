@@ -13,3 +13,6 @@ ds-config = { workspace = true }
 ds-tts = { workspace = true }
 ds-stt = { workspace = true }
 ds-platform = { workspace = true }
+
+[lints]
+workspace = true

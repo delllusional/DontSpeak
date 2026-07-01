@@ -41,3 +41,6 @@ libloading = "0.9"
 [dev-dependencies]
 # WAV reader for the `diarize_wav` example (manual on-device diarizer check).
 hound = "3.5"
+
+[lints]
+workspace = true

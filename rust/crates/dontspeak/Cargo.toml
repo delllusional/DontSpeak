@@ -40,3 +40,6 @@ serde_json = { workspace = true }
 [dev-dependencies]
 # Temp config files for the wire_mcp (MCP registration) tests.
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

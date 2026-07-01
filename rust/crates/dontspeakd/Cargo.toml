@@ -40,3 +40,6 @@ notify = { workspace = true }
 # unix signal handling (SIGTERM/SIGINT) via type-safe sigaction wrapper.
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
+
+[lints]
+workspace = true

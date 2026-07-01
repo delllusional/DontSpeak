@@ -26,6 +26,15 @@ license = "MIT"
 repository = "https://github.com/dontspeak/dontspeak"
 authors = ["Alex Yanchenko <alex@yanchenko.com>"]
 
+# Workspace-wide lint policy; crates opt in via `[lints] workspace = true`. The blanket
+# gate stays CI's `cargo clippy -- -D warnings` (ci.yml) — entries here are the specific
+# lints we promote beyond clippy's defaults, and they apply to LOCAL builds too, so dev
+# and CI can't drift.
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
 # Shared dependency versions pinned once; crates opt in via `workspace = true`.
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }

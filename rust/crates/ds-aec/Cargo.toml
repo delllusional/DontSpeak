@@ -61,3 +61,6 @@ libpulse-simple-binding = "2.25"
 # playback. Self-contained; no engine wiring.
 name = "ds-aec-probe"
 path = "src/bin/probe.rs"
+
+[lints]
+workspace = true

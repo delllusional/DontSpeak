@@ -55,3 +55,6 @@ libc = "0.2"
 [dev-dependencies]
 # Localhost TcpListener fixture for the no-network ensure() happy-path test.
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

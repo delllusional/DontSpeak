@@ -25,3 +25,6 @@ ds-proc = { workspace = true }
 # proven ds_proc::write_speaker pattern so a crash never leaves a half-written
 # settings.json (the file Claude Code itself also reads).
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -20,3 +20,6 @@ serde_json = { workspace = true }
 # .sock security model, no loopback-TCP + auth-token handshake needed.
 [target.'cfg(windows)'.dependencies]
 uds_windows = "1.2"
+
+[lints]
+workspace = true

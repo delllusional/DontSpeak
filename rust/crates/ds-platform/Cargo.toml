@@ -76,3 +76,6 @@ x11rb = "0.13"
 # Ctrl+Shift+V paste into the focused terminal, mirroring the macOS Cmd+V / Windows
 # Ctrl+V path (per-char uinput Unicode is layout-dependent and crawls in a console).
 arboard = { workspace = true }
+
+[lints]
+workspace = true
