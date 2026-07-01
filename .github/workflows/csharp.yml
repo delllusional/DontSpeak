@@ -1,0 +1,41 @@
+name: C#
+
+# Per-commit compile check for the WinUI app. Without this, the release pipeline is the
+# only thing that builds apps/windows — a C# breakage (or analyzer regression) could sit
+# unnoticed on main until the next tag. Path-filtered so the Windows runner only spins up
+# when the C# tree (or this workflow) changes; Rust/Swift-only commits stay cheap.
+#
+# Compile-only, no Rust build: the csproj's ds_core.dll / ds-helper.exe items are
+# Exists()-guarded, so the app compiles without the engine artifacts. This is also where
+# the .NET analyzers (AnalysisLevel in the csproj) first run in CI — once this job shows
+# the build is warning-clean, flip TreatWarningsAsErrors in the csproj.
+
+on:
+  push:
+    paths:
+      - 'apps/windows/**'
+      - '.github/workflows/csharp.yml'
+  pull_request:
+    paths:
+      - 'apps/windows/**'
+      - '.github/workflows/csharp.yml'
+  workflow_dispatch: {}
+
+# Same policy as ci.yml: never cancel — every per-commit check should finish green.
+concurrency:
+  group: csharp-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compile:
+    name: dotnet build (winui)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'   # the WinUI app targets net10 (WinApp SDK 2.2 + H.NotifyIcon)
+      # Plain framework-dependent build (the release's dotnet publish --self-contained is
+      # exercised by build-portable.ps1); x64 matches the csproj's default RuntimeIdentifier.
+      - name: dotnet build (x64, Release)
+        run: dotnet build apps/windows/winui/DontSpeak.WinUI.csproj -c Release -p:Platform=x64
