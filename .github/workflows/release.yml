@@ -83,7 +83,7 @@ jobs:
       # Self-contained portable zip (bundles .NET + Windows App SDK + engine DLL/helper +
       # dontspeak.exe). -SkipModels keeps it lean — the app downloads the voice models on
       # first launch, the same as macOS/Linux. The one-command installer (web/install.ps1)
-      # unzips it and runs `dontspeak wire --all`. No Inno installer, no SignPath.
+      # unzips it and runs `dontspeak wire --all`. Unsigned (runs from an extracted folder).
       - name: Build portable zip (${{ matrix.arch }})
         shell: pwsh
         run: ./apps/windows/installer/build-portable.ps1 -Arch ${{ matrix.arch }} -SkipModels

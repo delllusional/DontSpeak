@@ -39,7 +39,8 @@ fi
 # Resolve a release asset's download URL by a basename regex, off the latest release.
 # Uses the GitHub API so a versioned name (the Linux tarball) resolves without knowing
 # the version. DONTSPEAK_DOWNLOAD_BASE, if set, short-circuits to <base>/<name> — best-effort
-# for the fixed-name assets (dmg/exe/checksums); it can't reconstruct the versioned tarball.
+# for the fixed-name assets (app.zip / portable zip / checksums); it can't reconstruct the
+# versioned tarball.
 asset_url() {  # $1 = extended-regex matching the asset filename
   pat="$1"
   if [ -n "${DONTSPEAK_DOWNLOAD_BASE:-}" ]; then

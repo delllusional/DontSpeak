@@ -19,10 +19,10 @@ use serde_json::Value;
 ///
 /// On UNIX, prefer `~/.local/bin/<name>` (the install layout): this lets a dev build run from
 /// `target/` wire the hooks at the DEPLOYED binary, not the build dir. On WINDOWS we do NOT
-/// consult `~/.local/bin` — Inno is authoritative and lays the binary in `{app}` beside THIS
-/// exe, so a stale dev-deploy copy in `~/.local/bin` must not SHADOW the freshly-installed one.
-/// Returns the sibling path even if not present yet (the installer lays the binaries down
-/// together, so the path is correct regardless).
+/// consult `~/.local/bin` — the portable zip extracts the binary beside THIS exe, so a stale
+/// dev-deploy copy in `~/.local/bin` must not SHADOW the installed one. Returns the sibling
+/// path even if not present yet (the package lays the binaries down together, so the path is
+/// correct regardless).
 fn sibling_bin(name: &str) -> Option<String> {
     let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     #[cfg(unix)]
@@ -60,8 +60,7 @@ fn is_stale_ds_bin(name: &str) -> bool {
 /// renamed/dropped executable can't shadow or be re-wired. Best-effort and SAFE: only regular
 /// files (subdirs like a `winui/` dev-deploy skipped), only names matching
 /// [`is_stale_ds_bin`], and on unix only files with the execute bit (never a stray data
-/// file). No-op when the dir isn't writable — the Windows `{app}` case, where the elevated Inno
-/// `[InstallDelete]` owns cleanup; a permission error there is logged, not fatal.
+/// file). No-op when the dir isn't writable; a permission error there is logged, not fatal.
 fn prune_stale_bins() {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -106,8 +105,8 @@ fn prune_stale_bins() {
 /// seed our `config.toml` with defaults if absent (a self-documenting file; the engine still
 /// fails-open to defaults without it) AND prune orphan/legacy DontSpeak binaries from the install
 /// dir so a renamed/dropped exe can't shadow or be re-wired (covers the legacy ds-mcp/-speak/
-/// -narrate). Idempotent — safe to run per client the installer wires. Pruning no-ops when the dir
-/// isn't writable (Windows `{app}`, where Inno `[InstallDelete]` owns it).
+/// -narrate). Idempotent — safe to run per client wired. Pruning no-ops when the install dir
+/// isn't writable (a permission error is logged, not fatal).
 pub(crate) fn seed_and_prune(paths: &Paths) {
     if !paths.config_toml.exists() {
         if let Err(e) = ds_config::write_settings(paths, &ds_config::VoiceConfig::default()) {

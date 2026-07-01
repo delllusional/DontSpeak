@@ -40,7 +40,7 @@ The shipping app is the WinUI app (`ds-winui`); the engine + Caps hook run **in-
 ## Use case 2 — build the distributable package
 
 - **Portable zip** (the release artifact, self-contained): `build-portable.ps1 -Arch x64` / `-Arch arm64` → `Output\dontspeak-portable-<arch>.zip`. Bundles .NET + the Windows App SDK; the app downloads models on first launch (add nothing) or bundle them by dropping `-SkipModels`.
-- **Signing**: none — the app runs from an extracted folder; first launch may hit SmartScreen. (There is no interactive installer to sign; the Inno + SignPath path was removed.)
+- **Signing**: none — the app runs from an extracted folder, so there is nothing to code-sign; first launch may hit SmartScreen until download reputation accrues.
 - The full multi-arch release is tag-triggered CI (`release.yml`) — this skill is the fast local path.
 
 ## Uninstall / clean

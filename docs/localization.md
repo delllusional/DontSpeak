@@ -69,8 +69,8 @@ Conversely, strings that are **semantically the same and shown in the same role*
 - **Product name** → `common.app_name` ("DontSpeak"). It is also the "DontSpeak" status
   row title on both platforms (no separate `status.engine_title`). *(The Rust
   `ds-config::brand::DISPLAY_NAME` const is the parallel single source for the
-  NON-catalog native surfaces — installer DisplayName, the SessionStart banner — which
-  can't call the FFI.)*
+  NON-catalog native surfaces — the OS shortcut / bundle name, the SessionStart banner —
+  which can't call the FFI.)*
 - **Screen labels** → `common.nav_status` / `common.nav_tools` ("Status" / "Tools"). Shared
   by the Windows NavigationView tabs **and** the macOS tray menu items (same word, same
   destination). Only the platform-idiomatic *actions* (`tray.quit` vs `tray.exit`) split.

@@ -59,9 +59,9 @@ fn main() {
     }
 
     if first == "--print-manifest" {
-        // Installer hook: write a component's STILL-NEEDED download list to a file
-        // (GUI subsystem ⇒ no stdout for Inno to read). Lines: `url|basename|sha`.
-        // URLs come from ds-model, so the installer never hardcodes them.
+        // Tooling hook: write a component's STILL-NEEDED download list to a file
+        // (GUI subsystem ⇒ no stdout for a GUI caller to read). Lines: `url|basename|sha`.
+        // URLs come from ds-model, so the caller never hardcodes them.
         let what = args.next().unwrap_or_else(|| "all".to_string());
         let out = args.next().unwrap_or_default();
         let body = ds_model::prefetch_items(&what)

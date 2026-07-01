@@ -9,7 +9,7 @@ description: Build / clean-reinstall / package DontSpeak on macOS. Two use cases
 
 Scripts live under `apps/macos/` and `scripts/`, already factored via `apps/macos/bundle-lib.sh` + `scripts/lib/common.sh` (the source of truth). This skill runs them — **don't duplicate build logic**.
 
-**Prereqs:** Xcode + command-line tools · Rust with `aarch64-apple-darwin` (and `x86_64-apple-darwin` for the Intel slice). Signing/notarization needs an Apple Developer ID cert + an app-specific password (see `docs/signing.md`); without them, builds fall back to ad-hoc/unsigned. (The old DMG image tooling — `imagemagick`/`librsvg` — is no longer needed.)
+**Prereqs:** Xcode + command-line tools · Rust with `aarch64-apple-darwin` (and `x86_64-apple-darwin` for the Intel slice). Signing/notarization needs an Apple Developer ID cert + an app-specific password (see `docs/signing.md`); without them, builds fall back to ad-hoc/unsigned.
 
 The macOS app **hosts the engine in-process** (`ds-core` C ABI) — there is no standalone daemon. TCC grants (Accessibility / Mic / Input Monitoring) attach to `DontSpeak.app`.
 
@@ -33,7 +33,7 @@ open "$HOME/Applications/DontSpeak.app"
 ```bash
 apps/macos/dist-apps.sh
 ```
-- Output: **`~/Desktop/DontSpeak-<arch>.app.zip`** (override `OUTDIR`). One signed (+ notarized, stapled) `DontSpeak.app` zipped per arch — no more `.dmg`. The one-command installer (`web/install.sh`) unzips it into `/Applications`.
+- Output: **`~/Desktop/DontSpeak-<arch>.app.zip`** (override `OUTDIR`). One signed (+ notarized, stapled) `DontSpeak.app` zipped per arch. The one-command installer (`web/install.sh`) unzips it into `/Applications`.
 - `DONTSPEAK_ARCHES` — default `arm64`; set `"arm64 x86_64"` for both slices (the Intel slice ships without the Apple-Silicon-only Core ML shim).
 - `DONTSPEAK_DIST` — default **`1`** = hardened-runtime Developer-ID sign + notarize + staple the `.app` (needs the Apple creds), then zip. Set `DONTSPEAK_DIST=0` for a local ad-hoc unsigned zip (first launch hits Gatekeeper).
 - Notarize a pre-built app separately: `DONTSPEAK_NOTARY_PROFILE=<profile> apps/macos/notarize.sh <path>/DontSpeak.app`.

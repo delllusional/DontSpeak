@@ -10,16 +10,12 @@
 use serde_json::{Map, Value, json};
 
 /// The base names (no extension) of every executable DontSpeak installs into a binary
-/// directory it controls TODAY — the CURRENT set, used by the installers' stale-binary
-/// cleanup as the "keep" list. `dontspeak wire`'s housekeeping prunes any `dontspeak*` executable in
-/// the install dir that is NOT in this set (see its `prune_stale_bins`); the Windows Inno
-/// `[InstallDelete]` mirrors it (it must enumerate names declaratively, pre-copy, in the
-/// ELEVATED context — it can't call into this user-context binary to clear `{app}` under
-/// Program Files). Keep the two in sync.
-///
-/// Any `dontspeak*` executable in the install dir that is NOT in this set is pruned as an
-/// orphan, so this is the single keep-list both the prune and the Inno `[InstallDelete]`
-/// honor.
+/// directory it controls TODAY — the CURRENT set, used as the "keep" list by `dontspeak wire`'s
+/// stale-binary cleanup: it prunes any `dontspeak*`/`ds-*` executable in the install dir that
+/// is NOT in this set (see `prune_stale_bins`), covering binaries a rename/drop left behind.
+/// The install dir is user-writable on every platform (the macOS `.app` bundle, the Windows
+/// `%LOCALAPPDATA%\Programs\DontSpeak` extract, Linux `~/.local/bin`), so the prune runs
+/// entirely in the user context.
 pub const INSTALLED_BINS: &[&str] = &["dontspeak", "ds-helper", "ds-winui", "ds-gtk"];
 
 /// Inputs for [`merge_hooks`]: the resolved hook command path + voice prefs. All `&str`

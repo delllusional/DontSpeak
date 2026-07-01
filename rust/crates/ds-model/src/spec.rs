@@ -271,11 +271,10 @@ pub fn prefetch_items(what: &str) -> Vec<PrefetchItem> {
                 .map(|(u, s)| item(u, s))
                 .collect()
         }
-        // Windows installer prerequisite runtimes (the .iss reads these URLs from here so it
-        // hardcodes none). The installer does its OWN presence gating (a .NET filesystem probe
-        // / Get-AppxPackage for the Windows App Runtime) and runs the downloaded installers
-        // itself, so these are returned UNCONDITIONALLY and carry no sha (aka.ms permalinks
-        // are not sha-pinnable — see urls.rs).
+        // Windows prerequisite runtimes (.NET Desktop + Windows App Runtime). The shipping
+        // portable zip bundles both self-contained, so these are only for a framework-dependent
+        // build or a runtime repair; `ds-helper --print-manifest` exposes them. Returned
+        // UNCONDITIONALLY and carry no sha (aka.ms permalinks are not sha-pinnable — see urls.rs).
         #[cfg(target_os = "windows")]
         DownloadTarget::Dotnet => vec![item(crate::urls::DOTNET_DESKTOP_RUNTIME_URL, "")],
         #[cfg(target_os = "windows")]

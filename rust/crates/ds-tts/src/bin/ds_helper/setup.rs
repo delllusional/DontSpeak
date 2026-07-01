@@ -37,8 +37,8 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         Err(e) => {
             let msg = format!("ds-helper: prefetch '{what}' failed: {e}");
             eprintln!("{msg}");
-            // stderr is discarded under the GUI subsystem (Inno can't read it), so leave a
-            // diagnosable trace the installer/user can find.
+            // stderr is discarded under the GUI subsystem (a GUI-subsystem caller can't read
+            // it), so leave a diagnosable trace on disk the caller/user can find.
             let _ = std::fs::write(std::env::temp_dir().join("ds-prefetch-error.log"), &msg);
             1
         }

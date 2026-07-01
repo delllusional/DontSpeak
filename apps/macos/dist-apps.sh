@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # dist-apps.sh — build the DontSpeak.app bundle(s) and zip each for distribution.
 #
-# The portable-archive replacement for the old dist-dmgs.sh / make-dmg.sh flow: no styled
-# .dmg installer, just a signed + notarized + stapled DontSpeak.app packaged as
-# DontSpeak-<arch>.app.zip. The one-command installer (web/install.sh) unzips it straight
-# into /Applications. Everything else is identical to the old DMG build.
+# Produces a signed + notarized + stapled DontSpeak.app packaged as DontSpeak-<arch>.app.zip.
+# The one-command installer (web/install.sh) unzips it straight into /Applications.
 #
 # Builds the arch slices named in $DONTSPEAK_ARCHES (default "arm64"; "x86_64" for the
 # Intel slice, or "arm64 x86_64" for both). The apple-native Kokoro/Parakeet/diarization

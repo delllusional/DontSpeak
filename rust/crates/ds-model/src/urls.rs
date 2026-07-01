@@ -227,7 +227,7 @@ pub const CUDA_WHEELS: &[(&str, &str)] = &[
     ),
 ];
 
-// ── Windows installer prerequisite runtimes ──────────────────────────────────
+// ── Windows prerequisite runtimes ────────────────────────────────────────────
 // The two Microsoft FRAMEWORK runtimes the unpackaged WinUI app needs at launch: the
 // .NET Desktop Runtime (the app is framework-dependent `net10.0-windows`) and the Windows
 // App Runtime (WinUI/WinAppSDK), from Microsoft's stable aka.ms permalinks. The shipping

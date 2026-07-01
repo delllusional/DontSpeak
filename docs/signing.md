@@ -16,13 +16,12 @@ but unsigned/ad-hoc — first launch then hits **SmartScreen** (Windows) / **Gat
 
 ## Windows — unsigned portable zip
 
-Windows ships as a **self-contained portable zip** (`dontspeak-portable-<arch>.zip`), not an
-installer, so there is **no Windows code signing** configured. The app runs from an extracted
-folder under `%LOCALAPPDATA%\Programs\DontSpeak`; first launch may show a SmartScreen
-"unknown publisher" prompt that fades as download reputation accrues. (The previous Inno
-installer + SignPath Foundation path was removed when the interactive installer was dropped;
-if per-file Authenticode signing is wanted later, sign the binaries inside the zip before
-`Compress-Archive` in `apps/windows/installer/build-portable.ps1`.)
+Windows ships as a **self-contained portable zip** (`dontspeak-portable-<arch>.zip`) that runs
+from an extracted folder under `%LOCALAPPDATA%\Programs\DontSpeak`, so there is **no Windows
+code signing** configured — nothing is code-signed and first launch may show a SmartScreen
+"unknown publisher" prompt that fades as download reputation accrues. If per-file Authenticode
+signing is wanted later, sign the binaries inside the zip before `Compress-Archive` in
+`apps/windows/installer/build-portable.ps1`.
 
 ---
 
