@@ -26,6 +26,11 @@ RUST_DIR="$(cd "$HERE/../../rust" && pwd)"
 . "$HERE/../../scripts/lib/common.sh"
 
 echo "==> [1/2] Building Rust FFI staticlib (release-ffi profile)…"
+# Pin the staticlib's deployment target to the app's floor (Package.swift .macOS(.v14),
+# same pin as dist-apps.sh) — without it cargo targets the HOST macOS version and the
+# link warns "built for newer macOS than being linked (14.0)", with undefined behavior
+# possible if such a binary ever runs on the floor OS.
+export MACOSX_DEPLOYMENT_TARGET=14.0
 ( cd "$RUST_DIR" && cargo build --profile release-ffi -p ds-core )
 
 STATICLIB="$RUST_DIR/target/release-ffi/libds_core.a"

@@ -107,6 +107,10 @@ jobs:
       # macOS SwiftUI app: run swift test only if the package declares test targets.
       - name: swift test (macOS app, if any)
         if: runner.os == 'macOS'
+        env:
+          # Pin the staticlib to the app's macOS floor (Package.swift .macOS(.v14)) so the
+          # swift-test link doesn't warn "built for newer macOS" — same pin as build.sh.
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
         run: |
           if grep -q 'testTarget' apps/macos/Package.swift 2>/dev/null; then
             # Package.swift force_loads ../../rust/target/release-ffi/libds_core.a (the
