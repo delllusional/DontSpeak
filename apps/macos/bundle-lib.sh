@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bundle-lib.sh — shared DontSpeak.app assembly, sourced by BOTH:
 #   • bundle.sh    (build + INSTALL on this machine), and
-#   • dist-dmgs.sh (cross-arch distributable DMGs).
+#   • dist-apps.sh (cross-arch distributable DontSpeak.app zips).
 # Keeping the .app layout, icon compile, and signing in ONE place stops the two
 # callers from drifting (resource list, Info.plist stamp, codesign identity).
 # Source this file; do not execute it.
@@ -85,7 +85,7 @@ assemble_app() {
   # helper must live next to it in Contents/MacOS.
   cp "$helper" "$app/Contents/MacOS/ds-helper"
   # Ship the multi-call CLI (MCP server + hooks + `wire`) INSIDE the bundle when built
-  # (DONTSPEAK_CLI_BIN, set by dist-dmgs.sh). A drag-installed .app has no ~/.local/bin
+  # (DONTSPEAK_CLI_BIN, set by dist-apps.sh). An unzipped .app has no ~/.local/bin
   # copy, so this is what the one-command installer runs `wire --all` with, and what the
   # MCP registration points at. Signed below (dev: --deep; dist: sign_app_dist). Absent →
   # unchanged (the dev bundle.sh installs dontspeak to ~/.local/bin separately).

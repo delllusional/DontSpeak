@@ -14,47 +14,25 @@ but unsigned/ad-hoc — first launch then hits **SmartScreen** (Windows) / **Gat
 
 ---
 
-## Windows — SignPath Foundation (free for open source)
+## Windows — unsigned portable zip
 
-DontSpeak is OSI-licensed (MIT), so it qualifies for **SignPath Foundation**: free managed
-code signing, key on SignPath's HSM, cert issued by a trusted CA, verified against this
-repo (not a personal identity).
-
-### Apply
-1. Go to <https://signpath.org/> → "Apply for the SignPath Foundation" (OSS program).
-2. Application details to provide:
-   - **Project name:** DontSpeak
-   - **Repository:** https://github.com/dontspeak/dontspeak
-   - **License:** MIT (OSI-approved) — `LICENSE` in the repo root.
-   - **Description:** Local, on-device voice (STT/TTS) for Claude Code — a Rust engine +
-     Windows installer (`apps/windows/installer`) and a macOS app.
-   - **Artifact to sign:** `dontspeak-setup.exe` (Inno Setup installer) produced by the
-     `Release` workflow's `windows` job.
-   - **Build system:** GitHub Actions (public), `release.yml`.
-   - Eligibility they check: OSI license ✓, actively maintained ✓, released artifact ✓.
-3. Once approved, SignPath gives you an **organization id**, a **project slug**, a
-   **signing-policy slug** (e.g. `release-signing`), and an **API token**.
-
-### Add these repo secrets
-| Secret | Value |
-| --- | --- |
-| `SIGNPATH_API_TOKEN` | The SignPath CI user API token. |
-| `SIGNPATH_ORGANIZATION_ID` | SignPath organization id (GUID). |
-| `SIGNPATH_PROJECT_SLUG` | The project slug (e.g. `dontspeak`). |
-| `SIGNPATH_POLICY_SLUG` | The signing-policy slug (e.g. `release-signing`). |
-
-The `windows` job uploads the unsigned installer, submits it to SignPath
-(`signpath/github-action-submit-signing-request`), and publishes the **signed** result.
-Without `SIGNPATH_API_TOKEN`, it publishes the unsigned installer.
+Windows ships as a **self-contained portable zip** (`dontspeak-portable-<arch>.zip`), not an
+installer, so there is **no Windows code signing** configured. The app runs from an extracted
+folder under `%LOCALAPPDATA%\Programs\DontSpeak`; first launch may show a SmartScreen
+"unknown publisher" prompt that fades as download reputation accrues. (The previous Inno
+installer + SignPath Foundation path was removed when the interactive installer was dropped;
+if per-file Authenticode signing is wanted later, sign the binaries inside the zip before
+`Compress-Archive` in `apps/windows/installer/build-portable.ps1`.)
 
 ---
 
 ## macOS — Apple Developer ID + notarization
 
-The `macos` job runs the full distribution path (`apps/macos/dist-dmgs.sh` with
+The `macos` job runs the full distribution path (`apps/macos/dist-apps.sh` with
 `DONTSPEAK_DIST=1`): bundles `libonnxruntime.dylib`, signs inside-out with the **hardened
-runtime** + entitlements, signs the DMG, then **notarizes + staples** it — a clean
-Gatekeeper launch. This activates when an Apple Developer ID cert is configured.
+runtime** + entitlements, then **notarizes + staples the `.app`** and zips it
+(`DontSpeak-<arch>.app.zip`) — a clean Gatekeeper launch. This activates when an Apple
+Developer ID cert is configured.
 
 ### Prerequisites
 - An **Apple Developer Program** membership ($99/yr).
@@ -107,9 +85,9 @@ To override (e.g. a differently-named cert): `DONTSPEAK_CODESIGN_ID="…" ./apps
 
 ## Quick reference: what each state produces
 
-| Secrets present | Windows | macOS |
+| Apple secrets present | Windows | macOS |
 | --- | --- | --- |
-| none | unsigned `dontspeak-setup.exe` | ad-hoc DMGs |
-| Windows only | SignPath-signed installer | ad-hoc DMGs |
-| macOS only | unsigned installer | signed + notarized DMGs |
-| both | signed installer | signed + notarized DMGs |
+| no | unsigned `dontspeak-portable-<arch>.zip` | ad-hoc app zips |
+| yes | unsigned `dontspeak-portable-<arch>.zip` | signed + notarized app zips |
+
+(Windows is always the unsigned portable zip — there is no Windows signing path.)

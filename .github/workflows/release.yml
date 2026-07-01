@@ -1,7 +1,9 @@
 name: Release
 
-# Build the Windows installers (.exe — x64 + ARM64) and the macOS app (.dmg — Apple
-# silicon AND Intel/x86_64) on a version tag, then publish them to a GitHub Release.
+# Build the Windows portable zips (self-contained — x64 + ARM64) and the macOS app zips
+# (signed + notarized DontSpeak.app — Apple silicon AND Intel/x86_64) on a version tag,
+# then publish them to a GitHub Release alongside the Linux packages + a checksums.txt.
+# The one-command installers at dontspeak.org download + verify these assets.
 # Trigger by pushing a tag:  git tag v0.1.0 && git push origin v0.1.0
 #
 # Runner labels are pinned to the current images (mid-2026): windows-2025 (Windows
@@ -9,10 +11,10 @@ name: Release
 # release is created with the `gh` CLI (GitHub-maintained) rather than a third-party
 # action.
 #
-# Signing is GATED on secrets (see docs/signing.md): Windows is signed via SignPath
-# (free for OSS) when SIGNPATH_* secrets exist; macOS runs the full Developer ID
-# sign + notarize path when APPLE_* secrets exist. With NO secrets, both still build
-# and publish ad-hoc/unsigned (first launch hits SmartScreen / Gatekeeper).
+# macOS signing is GATED on secrets (see docs/signing.md): the full Developer ID sign +
+# notarize path runs when APPLE_* secrets exist, else the app is ad-hoc-signed (first
+# launch hits Gatekeeper). The Windows portable zip is self-contained and unsigned (the
+# app runs from an extracted folder; SmartScreen may warn on first run).
 
 on:
   push:
@@ -26,7 +28,7 @@ jobs:
   # ── Guard: the pushed tag must equal the single-source version ───────────────
   # The one place of truth is rust/Cargo.toml ([workspace.package] version), read via
   # scripts/version.sh. Fail fast (before the long platform builds) if a tag like
-  # v0.1.0 doesn't match it, so the .dmg / installer / About string / tag never drift.
+  # v0.1.0 doesn't match it, so the app zip / portable zip / About string / tag never drift.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -47,7 +49,7 @@ jobs:
     with:
       full-matrix: true
 
-  # ── Windows installers (setup.exe — x64 + ARM64) ────────────────────────────
+  # ── Windows portable zips (self-contained — x64 + ARM64) ────────────────────
   windows:
     needs: [check, tests]
     runs-on: windows-2025
@@ -58,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # build.ps1 expects per-user toolchains on PATH (~/.dotnet, ~/.cargo). cargo is
+      # build-portable.ps1 expects per-user toolchains on PATH (~/.dotnet, ~/.cargo). cargo is
       # already there via the preinstalled rustup; install .NET 10 INTO ~/.dotnet so the
       # script's DOTNET_ROOT/PATH assumptions hold with no edits.
       - name: Point .NET install at ~/.dotnet
@@ -70,7 +72,7 @@ jobs:
 
       # rustls' crypto = ring, which assembles via NASM (x64) / clang (arm64). LLVM ships
       # on the windows image (add to PATH); install NASM. The ARM64 MSVC tools are already
-      # in the image; build.ps1 adds the Rust arm64 target itself.
+      # in the image; build-portable.ps1 adds the Rust arm64 target itself.
       - name: ring asm toolchain (NASM + LLVM on PATH)
         shell: pwsh
         run: |
@@ -78,56 +80,19 @@ jobs:
           echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
           echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
 
-      - name: Install Inno Setup
+      # Self-contained portable zip (bundles .NET + Windows App SDK + engine DLL/helper +
+      # dontspeak.exe). -SkipModels keeps it lean — the app downloads the voice models on
+      # first launch, the same as macOS/Linux. The one-command installer (web/install.ps1)
+      # unzips it and runs `dontspeak wire --all`. No Inno installer, no SignPath.
+      - name: Build portable zip (${{ matrix.arch }})
         shell: pwsh
-        run: choco install innosetup -y --no-progress
+        run: ./apps/windows/installer/build-portable.ps1 -Arch ${{ matrix.arch }} -SkipModels
 
-      - name: Build installer (${{ matrix.arch }})
-        shell: pwsh
-        run: ./apps/windows/installer/build.ps1 -Arch ${{ matrix.arch }}
-
-      # Upload the unsigned installer — it's both the SignPath input (referenced by
-      # artifact id) and the fallback if signing is not configured.
-      - name: Upload unsigned installer
-        id: unsigned
+      - name: Upload portable zip (release artifact)
         uses: actions/upload-artifact@v7
         with:
-          name: windows-installer-unsigned-${{ matrix.arch }}
-          path: apps/windows/installer/Output/dontspeak-setup-${{ matrix.arch }}.exe
-          if-no-files-found: error
-
-      # Gate: only sign when the SignPath secrets exist (SignPath Foundation is free for
-      # OSS — see docs/signing.md). Secrets can't be used in `if:` directly, so map the
-      # token to an output first.
-      - name: Detect SignPath config
-        id: sp
-        shell: bash
-        env:
-          TOK: ${{ secrets.SIGNPATH_API_TOKEN }}
-        run: |
-          if [ -n "$TOK" ]; then echo "on=true" >> "$GITHUB_OUTPUT"; else echo "on=false" >> "$GITHUB_OUTPUT"; fi
-
-      # SignPath pulls the uploaded artifact by id, signs it on its managed HSM, and
-      # writes the signed installer to ./signed. No-op until the secrets are set.
-      - name: Sign installer (SignPath)
-        if: steps.sp.outputs.on == 'true'
-        uses: signpath/github-action-submit-signing-request@v1
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ secrets.SIGNPATH_POLICY_SLUG }}
-          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: signed
-
-      # The canonical artifact the release publishes: the SIGNED installer when SignPath
-      # ran, else the unsigned one (so the release still ships either way). One per arch.
-      - name: Upload installer (release artifact)
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-installer-${{ matrix.arch }}
-          path: ${{ steps.sp.outputs.on == 'true' && format('signed/dontspeak-setup-{0}.exe', matrix.arch) || format('apps/windows/installer/Output/dontspeak-setup-{0}.exe', matrix.arch) }}
+          name: windows-portable-${{ matrix.arch }}
+          path: apps/windows/installer/Output/dontspeak-portable-${{ matrix.arch }}.zip
           if-no-files-found: error
 
       # The raw cross-built ARM64 binaries — consumed by windows-arm-smoke to RUN them on
@@ -137,7 +102,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: windows-binaries-arm64
-          # The binaries the Windows installer actually ships + runs: the in-process engine
+          # The binaries the Windows portable zip actually ships + runs: the in-process engine
           # DLL, the MCP/hook bin, and the warm-synth helper. (dontspeakd is a library, not a
           # shipped binary — there is no standalone host; the engine runs in-process via the DLL.)
           path: |
@@ -195,18 +160,15 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: '14.0'
       OUTDIR: ${{ github.workspace }}/dist
-      DONTSPEAK_ARCHES: 'arm64 x86_64'   # dist-dmgs.sh builds one DMG per arch
+      DONTSPEAK_ARCHES: 'arm64 x86_64'   # dist-apps.sh builds one .app.zip per arch
     steps:
       - uses: actions/checkout@v7
 
       - name: Add Rust apple targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      - name: Install DMG tooling
-        run: brew install imagemagick librsvg
-
       # Gate: run the full distribution path (hardened runtime + Developer ID sign +
-      # notarize, the dist-dmgs.sh DONTSPEAK_DIST=1 branch) only when an Apple Developer
+      # notarize, the dist-apps.sh DONTSPEAK_DIST=1 branch) only when an Apple Developer
       # ID cert is configured; otherwise build ad-hoc (DIST=0). See docs/signing.md.
       - name: Detect Apple signing config
         id: sign
@@ -235,22 +197,22 @@ jobs:
           rm -f "$RUNNER_TEMP/cert.p12"
 
       # DONTSPEAK_DIST=1 → bundle libonnxruntime.dylib, hardened-runtime sign inside-out
-      # with entitlements, sign the DMG, and notarize+staple (via the APPLE_ID trio).
+      # with entitlements, then notarize+staple the .app (via the APPLE_ID trio) and zip it.
       # When unset/0 it ad-hoc-signs and skips notarization — both bundle the app, helper,
-      # shim and separator model; only signing/notarization differs.
-      - name: Build app DMGs (signed + notarized when configured)
+      # CLI, shim and separator model; only signing/notarization differs.
+      - name: Build app zips (signed + notarized when configured)
         env:
           DONTSPEAK_DIST: ${{ steps.sign.outputs.on == 'true' && '1' || '0' }}
           DONTSPEAK_CODESIGN_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
           DONTSPEAK_APPLE_ID: ${{ secrets.APPLE_ID }}
           DONTSPEAK_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           DONTSPEAK_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: ./apps/macos/dist-dmgs.sh
+        run: ./apps/macos/dist-apps.sh
 
       - uses: actions/upload-artifact@v7
         with:
-          name: macos-dmgs
-          path: dist/*.dmg
+          name: macos-apps
+          path: dist/*.app.zip
           if-no-files-found: error
 
   # ── Linux packages (.tar.gz + .deb + .rpm) ──────────────────────────────────
@@ -308,9 +270,9 @@ jobs:
           # Windows + macOS are required; Linux packages are best-effort (the linux job
           # is continue-on-error) — nullglob drops them silently if the job produced none.
           FILES=(
-            artifacts/windows-installer-x64/dontspeak-setup-x64.exe
-            artifacts/windows-installer-arm64/dontspeak-setup-arm64.exe
-            artifacts/macos-dmgs/*.dmg
+            artifacts/windows-portable-x64/dontspeak-portable-x64.zip
+            artifacts/windows-portable-arm64/dontspeak-portable-arm64.zip
+            artifacts/macos-apps/*.app.zip
             artifacts/linux-packages/*
           )
           # checksums.txt — sha256 of every published asset, by basename, so the

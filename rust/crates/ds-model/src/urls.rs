@@ -230,14 +230,13 @@ pub const CUDA_WHEELS: &[(&str, &str)] = &[
 // ── Windows installer prerequisite runtimes ──────────────────────────────────
 // The two Microsoft FRAMEWORK runtimes the unpackaged WinUI app needs at launch: the
 // .NET Desktop Runtime (the app is framework-dependent `net10.0-windows`) and the Windows
-// App Runtime (WinUI/WinAppSDK). The Windows installer downloads these from Microsoft's
-// stable aka.ms permalinks and installs them SILENTLY — no winget (winget isn't on PATH in
-// the elevated installer context, so the old `winget install` path silently no-op'd and
-// left a non-launching app behind). They live HERE so urls.rs stays the ONE registry of
-// everything the app fetches; `apps/windows/installer/dontspeak.iss` reads them at the
-// download-page step via `ds-helper --print-manifest dotnet|winapp` (so the installer
-// hardcodes no URLs). These are permalinks to the LATEST servicing build, so unlike the
-// model blobs they are NOT sha-pinned (the bytes roll forward).
+// App Runtime (WinUI/WinAppSDK), from Microsoft's stable aka.ms permalinks. The shipping
+// Windows package is now the SELF-CONTAINED portable zip, which bundles both runtimes, so
+// they are not downloaded at install time. They stay HERE so urls.rs remains the ONE registry
+// of everything the app can fetch, and `ds-helper --print-manifest dotnet|winapp` still
+// exposes them (e.g. for a framework-dependent build or a runtime repair). These are
+// permalinks to the LATEST servicing build, so unlike the model blobs they are NOT sha-pinned
+// (the bytes roll forward).
 //
 // WINDOWS_APP_RUNTIME_VERSION must match the `Microsoft.WindowsAppSDK` <PackageReference>
 // in apps/windows/winui/DontSpeak.WinUI.csproj (what the app links against). The aka.ms URL

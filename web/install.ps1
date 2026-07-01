@@ -3,13 +3,14 @@
 
       irm https://dontspeak.org/install.ps1 | iex
 
-  Downloads the prebuilt setup for this arch from the latest GitHub Release, verifies
-  its SHA-256, runs the installer silently (which wires the MCP server + voice hooks),
-  re-asserts `dontspeak wire --all` for good measure, and launches the app so the voice
-  models download themselves on first boot. No compiler required.
+  Downloads the self-contained portable zip for this arch from the latest GitHub Release,
+  verifies its SHA-256, extracts it to %LOCALAPPDATA%\Programs\DontSpeak (no elevation, no
+  runtime install — .NET + the Windows App SDK are bundled), wires the MCP server + voice
+  hooks into every client (`dontspeak wire --all`), adds a Start-menu shortcut, and launches
+  the app so the voice models download themselves on first boot. No compiler required.
 
   Programmers who want a from-source build should clone the repo and use the
-  build-windows path instead (this script never builds).
+  apps/windows/installer/build-portable.ps1 path instead (this script never builds).
 
   Env overrides:
     DONTSPEAK_REPO            owner/repo (default delllusional/DontSpeak)
@@ -26,7 +27,7 @@ function Warn ($m) { Write-Warning $m }
 
 # arch: ARM64 → arm64, everything else (AMD64) → x64
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
-$setupName = "dontspeak-setup-$arch.exe"
+$zipName = "dontspeak-portable-$arch.zip"
 
 # Resolve an asset URL by literal filename off the latest release (or the override base).
 function Resolve-Asset ($name) {
@@ -36,53 +37,64 @@ function Resolve-Asset ($name) {
   if ($a) { return $a.browser_download_url } else { return $null }
 }
 
-$setupUrl = Resolve-Asset $setupName
-if (-not $setupUrl) { throw "no Windows asset ($setupName) on the latest release of $repo" }
-Say "Windows $arch -> $setupUrl"
+$zipUrl = Resolve-Asset $zipName
+if (-not $zipUrl) { throw "no Windows asset ($zipName) on the latest release of $repo" }
+Say "Windows $arch -> $zipUrl"
 
-if ($dry) { Write-Host "(dry run) would silently install $setupName then wire --all"; return }
+if ($dry) { Write-Host "(dry run) would unzip to %LOCALAPPDATA%\Programs\DontSpeak then wire --all"; return }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("dontspeak-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 try {
-  $setup = Join-Path $tmp $setupName
+  $zip = Join-Path $tmp $zipName
   Say "downloading"
-  Invoke-WebRequest -Headers @{ 'User-Agent' = 'dontspeak-install' } -Uri $setupUrl -OutFile $setup
+  Invoke-WebRequest -Headers @{ 'User-Agent' = 'dontspeak-install' } -Uri $zipUrl -OutFile $zip
 
   # SHA-256 verify against checksums.txt (skips cleanly if the release lacks it).
   $sumsUrl = Resolve-Asset 'checksums.txt'
   if ($sumsUrl) {
     try {
       $sums = (Invoke-WebRequest -Headers @{ 'User-Agent' = 'dontspeak-install' } -Uri $sumsUrl).Content
-      $want = ($sums -split "`n" | Where-Object { $_ -match ("\*?" + [regex]::Escape($setupName) + '\s*$') } |
+      $want = ($sums -split "`n" | Where-Object { $_ -match ("\*?" + [regex]::Escape($zipName) + '\s*$') } |
                Select-Object -First 1) -replace '\s.*$', ''
       if ($want) {
-        $got = (Get-FileHash -Algorithm SHA256 $setup).Hash.ToLower()
-        if ($got -ne $want.ToLower()) { throw "checksum mismatch for $setupName (want $want, got $got)" }
-        Say "verified $setupName (sha256 ok)"
-      } else { Warn "$setupName not listed in checksums.txt — skipping integrity check" }
+        $got = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+        if ($got -ne $want.ToLower()) { throw "checksum mismatch for $zipName (want $want, got $got)" }
+        Say "verified $zipName (sha256 ok)"
+      } else { Warn "$zipName not listed in checksums.txt — skipping integrity check" }
     } catch { if ($_.Exception.Message -match 'checksum mismatch') { throw } else { Warn "checksum step skipped: $($_.Exception.Message)" } }
   } else { Warn "no checksums.txt on the release — skipping integrity check" }
 
-  Say "installing (silent; elevation prompt is expected)"
-  # /VERYSILENT runs the installer's own `wire claude_code` step and installs the app to
-  # %ProgramFiles%\DontSpeak. The default component set includes the Claude Code integration.
-  $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Verb RunAs -Wait -PassThru
-  if ($p.ExitCode -ne 0) { Warn "installer exited with code $($p.ExitCode)" }
+  # Extract to a per-user location (no elevation). Replace any prior copy.
+  $dest = Join-Path $env:LOCALAPPDATA 'Programs\DontSpeak'
+  Say "installing to $dest"
+  # Stop a running instance so its files aren't locked, then replace the folder.
+  Get-Process ds-winui,dontspeak,ds-helper -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+  New-Item -ItemType Directory -Path $dest -Force | Out-Null
+  Expand-Archive -Path $zip -DestinationPath $dest -Force
 
-  # Re-assert wiring for every client (idempotent) and launch the app so models download.
-  $app = Join-Path $env:ProgramFiles 'DontSpeak'
-  $cli = Join-Path $app 'dontspeak.exe'
+  $cli = Join-Path $dest 'dontspeak.exe'
   if (Test-Path $cli) { Say "wiring clients (MCP + hooks)"; & $cli wire --all 2>$null }
-  else { Warn "dontspeak.exe not found under $app — open DontSpeak and use Setup Integration to wire" }
+  else { Warn "dontspeak.exe not found under $dest — the zip layout may have changed" }
 
-  $ui = Join-Path $app 'ds-winui.exe'
-  if (Test-Path $ui) { Say "launching DontSpeak (first boot downloads the voice models)"; Start-Process $ui }
+  # Start-menu shortcut so DontSpeak is launchable like any app.
+  $ui = Join-Path $dest 'ds-winui.exe'
+  if (Test-Path $ui) {
+    $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'DontSpeak.lnk'
+    $w = New-Object -ComObject WScript.Shell
+    $s = $w.CreateShortcut($lnk); $s.TargetPath = $ui
+    $ico = Join-Path $dest 'AppIcon.ico'; if (Test-Path $ico) { $s.IconLocation = $ico }
+    $s.Save()
+    Say "launching DontSpeak (first boot downloads the voice models)"
+    Start-Process $ui
+  }
 
   Write-Host ""
   Write-Host "Done. Start a NEW Claude Code session to load the DontSpeak MCP server."
   Write-Host "Models download automatically in the background; watch progress in the app."
   Write-Host "Undo any time:  & '$cli' wire --all --remove"
+  Write-Host "Uninstall: close DontSpeak, run the unwire above, then delete $dest"
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

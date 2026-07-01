@@ -2,7 +2,7 @@
 # notarize.sh — notarize + staple a signed DontSpeak artifact (.dmg or .app).
 #
 # Prereq: the artifact is ALREADY Developer-ID signed with hardened runtime + secure
-# timestamp (dist-dmgs.sh / bundle-lib.sh do this when DONTSPEAK_DIST=1).
+# timestamp (dist-apps.sh / bundle-lib.sh do this when DONTSPEAK_DIST=1).
 #
 # Credentials (pick one):
 #   • DONTSPEAK_NOTARY_PROFILE — a stored notarytool keychain profile (recommended).

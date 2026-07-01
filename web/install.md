@@ -30,13 +30,15 @@ That is the whole install. It is idempotent — safe to re-run.
 
 ## What it does
 
-1. Resolves the right asset on the latest GitHub Release of `delllusional/DontSpeak`:
-   - macOS → `DontSpeak-<arm64|x86_64>.dmg`
-   - Windows → `dontspeak-setup-<x64|arm64>.exe`
+1. Resolves the right asset on the latest GitHub Release of `delllusional/DontSpeak`
+   (all portable archives — no interactive installer):
+   - macOS → `DontSpeak-<arm64|x86_64>.app.zip`
+   - Windows → `dontspeak-portable-<x64|arm64>.zip` (self-contained: bundles .NET + the
+     Windows App SDK, so no runtime install and no elevation)
    - Linux → `dontspeak-<version>-<x86_64|aarch64>.tar.gz`
 2. Verifies its SHA-256 against the release's `checksums.txt`.
-3. Installs the app (macOS: copy to `/Applications`; Windows: silent Inno install to
-   `%ProgramFiles%\DontSpeak`; Linux: extract + run the bundled `install.sh`).
+3. Installs the app (macOS: unzip `DontSpeak.app` into `/Applications`; Windows: extract to
+   `%LOCALAPPDATA%\Programs\DontSpeak`; Linux: extract + run the bundled `install.sh`).
 4. Runs `dontspeak wire --all` — registers the MCP server (`~/.claude.json`,
    `claude_desktop_config.json`) and merges the voice hooks (`~/.claude/settings.json`,
    `~/.codex/config.toml`). Additive, backed-up, idempotent.
@@ -54,9 +56,10 @@ That is the whole install. It is idempotent — safe to re-run.
 ## Uninstall / unwire
 
 - Remove just the client integration: `dontspeak wire --all --remove`
-- Remove the app: macOS — delete `/Applications/DontSpeak.app`; Windows — Add/Remove
-  Programs → DontSpeak; Linux — `~/.local/bin/dontspeak wire --all --remove` then delete
-  the installed binaries under `~/.local/bin`.
+- Remove the app: macOS — delete `/Applications/DontSpeak.app`; Windows — close DontSpeak,
+  run the unwire above, then delete `%LOCALAPPDATA%\Programs\DontSpeak` and the Start-menu
+  shortcut; Linux — `~/.local/bin/dontspeak wire --all --remove` then delete the installed
+  binaries under `~/.local/bin`.
 
 ## Build from source (developers only)
 

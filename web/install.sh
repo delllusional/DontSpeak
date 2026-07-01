@@ -78,22 +78,20 @@ ARCH=$(uname -m)
 case "$OS" in
   Darwin)
     case "$ARCH" in arm64|x86_64) : ;; *) die "unsupported macOS arch: $ARCH" ;; esac
-    DMG_NAME="DontSpeak-$ARCH.dmg"
-    url=$(asset_url "DontSpeak-$ARCH\\.dmg") || true
-    [ -n "$url" ] || die "no macOS asset ($DMG_NAME) on the latest release of $REPO"
+    ZIP_NAME="DontSpeak-$ARCH.app.zip"
+    url=$(asset_url "DontSpeak-$ARCH\\.app\\.zip") || true
+    [ -n "$url" ] || die "no macOS asset ($ZIP_NAME) on the latest release of $REPO"
     sums=$(asset_url "checksums\\.txt")
     say "macOS $ARCH → $url"
-    [ "$DRY" = "1" ] && { echo "(dry run) would install DontSpeak.app to /Applications and wire --all"; exit 0; }
+    [ "$DRY" = "1" ] && { echo "(dry run) would unzip DontSpeak.app into /Applications and wire --all"; exit 0; }
 
-    dmg="$TMP/$DMG_NAME"; http_dl "$url" "$dmg"; verify_sha "$dmg" "$sums"
-    mnt="$TMP/mnt"; mkdir -p "$mnt"
-    hdiutil attach "$dmg" -mountpoint "$mnt" -nobrowse -noverify -noautoopen >/dev/null
-    trap 'hdiutil detach "$mnt" >/dev/null 2>&1 || true; rm -rf "$TMP"' EXIT
+    zip="$TMP/$ZIP_NAME"; http_dl "$url" "$zip"; verify_sha "$zip" "$sums"
     say "installing DontSpeak.app → /Applications"
+    out="$TMP/app"; mkdir -p "$out"
+    ditto -x -k "$zip" "$out"          # the zip holds DontSpeak.app/ at its root
+    [ -d "$out/DontSpeak.app" ] || die "unexpected archive layout (no DontSpeak.app)"
     rm -rf "/Applications/DontSpeak.app"
-    cp -R "$mnt/DontSpeak.app" /Applications/
-    hdiutil detach "$mnt" >/dev/null 2>&1 || true
-    trap 'rm -rf "$TMP"' EXIT
+    cp -R "$out/DontSpeak.app" /Applications/
 
     cli="/Applications/DontSpeak.app/Contents/MacOS/dontspeak"
     if [ -x "$cli" ]; then say "wiring clients (MCP + hooks)"; "$cli" wire --all || warn "wire --all reported an issue"

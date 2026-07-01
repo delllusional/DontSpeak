@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # package.sh — build DontSpeak Linux distributables (the Linux analogue of the Windows
-# installer/portable-zip and the macOS .dmg). Closes the "no Linux package" gap.
+# portable-zip and the macOS .app.zip). Closes the "no Linux package" gap.
 #
 # Always produces a self-contained PORTABLE TARBALL (works on any distro, no packaging
 # toolchain). Additionally produces a .deb, .rpm, and AppImage when the respective tool

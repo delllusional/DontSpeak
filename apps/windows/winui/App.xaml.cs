@@ -34,10 +34,10 @@ public partial class App : Application
     private static Mutex? _instanceMutex;
     private static EventWaitHandle? _activate;
     private const string ActivateEvent = "DontSpeak.WinUI.Activate";
-    // The app's explicit AppUserModelID. The installer stamps this SAME id on the Start-menu
-    // shortcut (dontspeak.iss [Icons] AppUserModelID) whose name is "DontSpeak", so Windows
-    // resolves this id to that name — making the taskbar + Task Manager "Apps" group read
-    // "DontSpeak" instead of the "ds-winui" exe-name fallback. Keep the two in sync.
+    // The app's explicit AppUserModelID. The one-command installer creates a Start-menu
+    // shortcut named "DontSpeak" (web/install.ps1); keeping this id stable lets Windows group
+    // the taskbar + Task Manager "Apps" entry under that name instead of the "ds-winui"
+    // exe-name fallback.
     private const string AppUserModelId = "DontSpeak";
 
     public App()

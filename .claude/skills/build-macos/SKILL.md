@@ -1,6 +1,6 @@
 ---
 name: build-macos
-description: Build / clean-reinstall / package DontSpeak on macOS. Two use cases — (1) local clean build + reinstall of DontSpeak.app for dev testing, (2) build a distributable .dmg (signed + notarized when Apple creds are set). Use when asked to build, reinstall, package, or cut the macOS app. Runs on a Mac (locally or over the Mac SSH host) — NOT on Windows/Linux.
+description: Build / clean-reinstall / package DontSpeak on macOS. Two use cases — (1) local clean build + reinstall of DontSpeak.app for dev testing, (2) build a distributable DontSpeak.app zip (signed + notarized when Apple creds are set). Use when asked to build, reinstall, package, or cut the macOS app. Runs on a Mac (locally or over the Mac SSH host) — NOT on Windows/Linux.
 ---
 
 # DontSpeak — macOS (build / reinstall / package)
@@ -9,7 +9,7 @@ description: Build / clean-reinstall / package DontSpeak on macOS. Two use cases
 
 Scripts live under `apps/macos/` and `scripts/`, already factored via `apps/macos/bundle-lib.sh` + `scripts/lib/common.sh` (the source of truth). This skill runs them — **don't duplicate build logic**.
 
-**Prereqs:** Xcode + command-line tools · Rust with `aarch64-apple-darwin` (and `x86_64-apple-darwin` for the Intel slice) · `brew install imagemagick librsvg` (DMG background art). Signing/notarization needs an Apple Developer ID cert + an app-specific password (see `docs/signing.md`); without them, builds fall back to ad-hoc/unsigned.
+**Prereqs:** Xcode + command-line tools · Rust with `aarch64-apple-darwin` (and `x86_64-apple-darwin` for the Intel slice). Signing/notarization needs an Apple Developer ID cert + an app-specific password (see `docs/signing.md`); without them, builds fall back to ad-hoc/unsigned. (The old DMG image tooling — `imagemagick`/`librsvg` — is no longer needed.)
 
 The macOS app **hosts the engine in-process** (`ds-core` C ABI) — there is no standalone daemon. TCC grants (Accessibility / Mic / Input Monitoring) attach to `DontSpeak.app`.
 
@@ -31,13 +31,13 @@ open "$HOME/Applications/DontSpeak.app"
 ## Use case 2 — build a distributable package
 
 ```bash
-apps/macos/dist-dmgs.sh
+apps/macos/dist-apps.sh
 ```
-- Output: **`~/Desktop/DontSpeak-<arch>.dmg`** (override `OUTDIR`). One styled drag-to-`/Applications` DMG per arch.
+- Output: **`~/Desktop/DontSpeak-<arch>.app.zip`** (override `OUTDIR`). One signed (+ notarized, stapled) `DontSpeak.app` zipped per arch — no more `.dmg`. The one-command installer (`web/install.sh`) unzips it into `/Applications`.
 - `DONTSPEAK_ARCHES` — default `arm64`; set `"arm64 x86_64"` for both slices (the Intel slice ships without the Apple-Silicon-only Core ML shim).
-- `DONTSPEAK_DIST` — default **`1`** = hardened-runtime Developer-ID sign + notarize + staple (needs the Apple creds). Set `DONTSPEAK_DIST=0` for a local ad-hoc unsigned DMG (first launch hits Gatekeeper).
-- Notarize separately (if built unsigned-then-signed): `DONTSPEAK_NOTARY_PROFILE=<profile> apps/macos/notarize.sh ~/Desktop/DontSpeak-arm64.dmg`.
-- Sub-scripts: `make-dmg.sh` (styled image) and `notarize.sh` (staple) — `dist-dmgs.sh` orchestrates them.
+- `DONTSPEAK_DIST` — default **`1`** = hardened-runtime Developer-ID sign + notarize + staple the `.app` (needs the Apple creds), then zip. Set `DONTSPEAK_DIST=0` for a local ad-hoc unsigned zip (first launch hits Gatekeeper).
+- Notarize a pre-built app separately: `DONTSPEAK_NOTARY_PROFILE=<profile> apps/macos/notarize.sh <path>/DontSpeak.app`.
+- Sub-script: `notarize.sh` (submit + staple the `.app`) — `dist-apps.sh` orchestrates it, then `ditto`-zips the stapled bundle.
 
 ## Uninstall / clean
 

@@ -20,7 +20,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="${DONTSPEAK_APP_DIR:-$HOME/Applications/DontSpeak.app}"
 # Shared .app assembly (compile_icon / assemble_app / resolve_sign_identity), also
-# used by dist-dmgs.sh so the bundle layout + signing live in one place.
+# used by dist-apps.sh so the bundle layout + signing live in one place.
 source "$DIR/bundle-lib.sh"
 
 # ==> Preflight: REQUIRE the full Xcode toolchain BEFORE the (slow) Rust + swift

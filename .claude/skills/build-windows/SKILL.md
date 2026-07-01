@@ -1,53 +1,54 @@
 ---
 name: build-windows
-description: Build / clean-reinstall / package DontSpeak on Windows. Two use cases — (1) local clean build + reinstall for dev testing, (2) build a distributable package (installer .exe or portable .zip). Use when asked to build, reinstall, package, or cut the Windows app. Runs natively here (x64); arm64 cross-compiles.
+description: Build / clean-reinstall / package DontSpeak on Windows. Two use cases — (1) local clean build + reinstall for dev testing, (2) build the distributable portable .zip. Use when asked to build, reinstall, package, or cut the Windows app. Runs natively here (x64); arm64 cross-compiles.
 ---
 
 # DontSpeak — Windows (build / reinstall / package)
 
 > **Runs on:** this Windows box. **Working dir:** repo root (`C:\Users\usr\Develop\git\dontspeak`). Use the **PowerShell** tool. Symmetrical with `build-macos` / `build-linux`.
 
-The scripts under `apps/windows/installer/` are the source of truth (`build.ps1`, `build-portable.ps1`, shared `build-common.ps1`). This skill runs them and handles the install/uninstall dance — **don't duplicate build logic here**; edit the scripts.
+DontSpeak ships on Windows as a **self-contained portable zip** — no installer. The scripts under `apps/windows/installer/` are the source of truth (`build-portable.ps1`, shared `build-common.ps1`). This skill runs them and handles the install/uninstall dance — **don't duplicate build logic here**; edit the scripts.
 
-**Prereqs (one-time):** Rust (MSVC, via rustup) · .NET 10 SDK in `~/.dotnet` · NASM + LLVM on PATH (ring's crypto) · Inno Setup 6 (`winget install -e --id JRSoftware.InnoSetup`). A missing-tool error → install that one tool and re-run.
+**Prereqs (one-time):** Rust (MSVC, via rustup) · .NET 10 SDK in `~/.dotnet` · NASM + LLVM on PATH (ring's crypto). A missing-tool error → install that one tool and re-run.
 
 ## Use case 1 — local clean build + reinstall (dev)
 
-The shipping app is the WinUI app installed from the Inno `setup.exe`. The engine + Caps hook run **in-process** inside `ds-winui` via `ds_core.dll` (no separate daemon on Windows).
+The shipping app is the WinUI app (`ds-winui`); the engine + Caps hook run **in-process** via `ds_core.dll` (no separate daemon on Windows). Install = extract the portable zip to a per-user folder (the same thing `web/install.ps1` does for end users).
 
-1. **Build** the installer:
+1. **Build** the portable zip (fast dev loop: add `-SkipModels`):
    ```powershell
-   pwsh -NoProfile -File apps\windows\installer\build.ps1 -Arch x64
+   pwsh -NoProfile -File apps\windows\installer\build-portable.ps1 -Arch x64 -SkipModels
    ```
-   (`-Arch arm64` cross-compiles.) Slow (~min) — run in the background + read the tee'd log. On success: `DONE → ...\dontspeak-setup-x64.exe`.
-2. **Copy to Desktop** (handy for the user):
+   (`-Arch arm64` cross-compiles.) Slow (~min) — run in the background + read the tee'd log. On success: `DONE → ...\dontspeak-portable-x64.zip`.
+2. **Stop running processes** so files aren't locked:
    ```powershell
-   Copy-Item apps\windows\installer\Output\dontspeak-setup-x64.exe ([Environment]::GetFolderPath('Desktop')) -Force
+   Get-Process ds-winui,dontspeak,ds-helper -ErrorAction SilentlyContinue | Stop-Process -Force
    ```
-3. **Stop running processes** so the upgrade can replace files in use:
+3. **Extract** over the per-user install dir (replace in place):
    ```powershell
-   Get-Process | Where-Object { $_.ProcessName -match 'dontspeak' } | Stop-Process -Force
+   $dest = "$env:LOCALAPPDATA\Programs\DontSpeak"
+   if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+   Expand-Archive apps\windows\installer\Output\dontspeak-portable-x64.zip $dest -Force
    ```
-4. *(clean install only)* **uninstall the old build first** — see Uninstall below. For a plain in-place upgrade, skip this.
-5. **Install elevated + silent** (tell the user to approve the **UAC** prompt):
+4. **Wire + launch**:
    ```powershell
-   Start-Process ([Environment]::GetFolderPath('Desktop') + '\dontspeak-setup-x64.exe') `
-     -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Verb RunAs -Wait -PassThru
+   & "$dest\dontspeak.exe" wire --all
+   Start-Process "$dest\ds-winui.exe"
    ```
-   Exit code `0` = success. Same `AppId` ⇒ in-place upgrade (the workspace version need not change).
-6. **Relaunch** (silent install does NOT auto-launch):
-   ```powershell
-   Start-Process 'C:\Program Files\DontSpeak\ds-winui.exe'
-   ```
-7. **Verify**: binaries under `C:\Program Files\DontSpeak\` stamped with the just-built time; `ds-winui` + `ds-helper` running.
+5. **Verify**: binaries under `$dest` stamped with the just-built time; `ds-winui` + `ds-helper` running.
 
-## Use case 2 — build a distributable package
+## Use case 2 — build the distributable package
 
-- **Installer** (the release artifact): `build.ps1 -Arch x64` / `-Arch arm64` → `Output\dontspeak-setup-<arch>.exe` (~15 MB, framework-dependent).
-- **Portable zip** (self-contained, no install, bundles models): `build-portable.ps1 -Arch x64 [-SkipModels]` → `Output\dontspeak-portable-<arch>.zip`.
-- **Signing** is gated on SignPath secrets (CI `release.yml` only); local builds are unsigned → first launch may hit SmartScreen.
-- The full multi-arch signed release is tag-triggered CI (`release.yml`) — this skill is the fast local path.
+- **Portable zip** (the release artifact, self-contained): `build-portable.ps1 -Arch x64` / `-Arch arm64` → `Output\dontspeak-portable-<arch>.zip`. Bundles .NET + the Windows App SDK; the app downloads models on first launch (add nothing) or bundle them by dropping `-SkipModels`.
+- **Signing**: none — the app runs from an extracted folder; first launch may hit SmartScreen. (There is no interactive installer to sign; the Inno + SignPath path was removed.)
+- The full multi-arch release is tag-triggered CI (`release.yml`) — this skill is the fast local path.
 
 ## Uninstall / clean
 
-- **App**: run the Inno uninstaller — `C:\Program Files\DontSpeak\unins000.exe` (silent: append `/VERYSILENT`), elevated.
+- Close DontSpeak, un-wire, then delete the folder + shortcut:
+  ```powershell
+  Get-Process ds-winui,dontspeak,ds-helper -ErrorAction SilentlyContinue | Stop-Process -Force
+  & "$env:LOCALAPPDATA\Programs\DontSpeak\dontspeak.exe" wire --all --remove
+  Remove-Item "$env:LOCALAPPDATA\Programs\DontSpeak" -Recurse -Force
+  Remove-Item ([Environment]::GetFolderPath('Programs') + '\DontSpeak.lnk') -ErrorAction SilentlyContinue
+  ```
