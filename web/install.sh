@@ -124,7 +124,10 @@ EOF
     inner=$(find "$TMP" -maxdepth 2 -name install.sh -path '*dontspeak-*' | head -n1)
     [ -n "$inner" ] || die "tarball has no install.sh"
     say "running the bundled installer (copies to ~/.local/bin, wires --all)"
-    sh "$inner"
+    # The bundled installer is bash (pipefail, BASH_SOURCE) — running it with `sh`
+    # breaks on distros where sh is dash (Debian/Ubuntu).
+    command -v bash >/dev/null 2>&1 || die "the bundled installer needs bash on PATH"
+    bash "$inner"
     # Launch the GTK host if a display is available, so the engine boots + models download.
     if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v "$HOME/.local/bin/ds-gtk" >/dev/null 2>&1; then
       say "launching DontSpeak"
