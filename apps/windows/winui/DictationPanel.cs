@@ -825,8 +825,12 @@ internal sealed class DictationPanel : IDisposable
                 // The window is a fixed-height container; only the DRAWN card is interactive. The
                 // empty glow padding above the card and the transparent slack below it (where the
                 // transcript hasn't grown to yet) return HTTRANSPARENT so clicks fall through.
-                int sx = (short)(lparam.ToInt32() & 0xFFFF);
-                int sy = (short)((lparam.ToInt32() >> 16) & 0xFFFF);
+                // ToInt32() would throw OverflowException when bit 31 is set (negative screen
+                // coords on a monitor left of/above the primary, zero-extended into the 64-bit
+                // LPARAM) — and an exception escaping this WndProc kills the process.
+                int lp = unchecked((int)lparam.ToInt64());
+                int sx = (short)(lp & 0xFFFF);
+                int sy = (short)((lp >> 16) & 0xFFFF);
                 if (GetWindowRect(hwnd, out RECT wr))
                 {
                     int relx = sx - wr.left, rely = sy - wr.top, width = wr.right - wr.left;
@@ -856,7 +860,7 @@ internal sealed class DictationPanel : IDisposable
                 int clamped = Math.Clamp((r.right - r.left) - GlowMargin * 2, MinCardWidth, MaxCardWidth);
                 _userWidth = clamped;
                 int winW = clamped + GlowMargin * 2;
-                if (wparam.ToInt32() is WMSZ_LEFT or WMSZ_TOPLEFT or WMSZ_BOTTOMLEFT)
+                if (unchecked((int)wparam.ToInt64()) is WMSZ_LEFT or WMSZ_TOPLEFT or WMSZ_BOTTOMLEFT)
                     r.left = r.right - winW;
                 else
                     r.right = r.left + winW;
