@@ -86,7 +86,20 @@ fn main() {
         std::process::exit(wire::run(&argv[2..]));
     }
 
-    // No subcommand: run the stdio MCP server loop.
+    // An explicit but UNRECOGNIZED first argument must NOT fall through to the stdio MCP
+    // server: that silently blocks on stdin forever (a typo, or an OLD binary handed a
+    // subcommand it predates — e.g. `dontspeak wire` on a build without `wire` — would just
+    // hang instead of failing). The MCP server is the NO-argument mode ONLY (how MCP clients
+    // spawn us: `command: dontspeak`, no args). So error out on any leftover argument.
+    if let Some(sub) = argv.get(1) {
+        eprintln!(
+            "dontspeak: unknown subcommand {sub:?}; expected `notify`, `provide`, or `wire` \
+             (run with no arguments for the stdio MCP server)"
+        );
+        std::process::exit(2);
+    }
+
+    // No arguments: run the stdio MCP server loop.
     mcp::serve();
 }
 
