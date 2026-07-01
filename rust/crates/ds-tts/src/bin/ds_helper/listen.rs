@@ -5,7 +5,7 @@
 //! For the cross-platform ONNX "parakeet" engine, both callers route to [`try_streaming`] — a
 //! cache-aware [`ds_stt::streaming::StreamingModel`] that encodes each frame once (no whole-tail
 //! re-encode); it REPLACED the old whole-buffer engine. The macOS apple-native / system engines
-//! keep the offline `transcribe_loop`. See `docs/STREAMING-STT-PLAN.md`.
+//! keep the offline `transcribe_loop`.
 
 use std::sync::{Mutex, OnceLock};
 

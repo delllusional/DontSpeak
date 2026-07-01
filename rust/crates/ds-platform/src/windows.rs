@@ -1,5 +1,5 @@
-//! Windows platform impl — written behind cfg(target_os="windows").
-//! UNCOMPILED on the macOS build host; types/APIs not yet exercised.
+//! Windows platform impl — behind cfg(target_os="windows"). Built + tested on
+//! Windows in CI (the release full matrix).
 //!
 //! * Caps LED: `set_caps_lock` drives the physical Caps light out-of-band via
 //!   `IOCTL_KEYBOARD_SET_INDICATORS` — a pure output, never a toggle read.
@@ -229,7 +229,7 @@ impl WindowsPlatform {
 
 impl KeyInjector for WindowsPlatform {
     // Native SendInput, ours — no library. The caller (ds-stt) gates these on
-    // `terminal_frontmost()`. UNCOMPILED on the macOS host; verify on a Windows host.
+    // `terminal_frontmost()`.
 
     /// Tap the dictation chord once: press modifiers, press+release the base key, release
     /// modifiers (reverse). One discrete keypress = one toggle of Claude Code's voice TAP.

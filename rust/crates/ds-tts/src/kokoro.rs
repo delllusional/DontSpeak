@@ -2,7 +2,7 @@
 //! (ort + voice-g2p + rodio); NO Python, NO uv, NO speak.py.
 //!
 //! The actual synth + audio playback runs in the thin `ds-helper` HELPER
-//! BIN (see `src/bin/ds_helper.rs`), which this module spawns in the
+//! BIN (see `src/bin/ds_helper/`), which this module spawns in the
 //! child's OWN process group (`setsid`). That preserves the SACRED
 //! single-speaker pidfile contract unchanged: [`spawn`] still returns
 //! `(Child, pgid)` and records the pgid in the shared pidfile, so the engine's

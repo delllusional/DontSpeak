@@ -20,8 +20,6 @@
 //! the only residue window is a HARD kill (SIGKILL) with no relaunch — caps stays remapped
 //! until the next clean run, a logout, or a reboot. Documented; acceptable (same model as
 //! Karabiner-style tools).
-//!
-//! UNCOMPILED on the non-macOS build host; verify on a Mac.
 
 use std::process::Command;
 

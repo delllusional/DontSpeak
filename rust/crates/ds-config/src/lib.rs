@@ -3,12 +3,12 @@
 //! The existing system uses these fixed locations (DO NOT relocate — the
 //! pidfile is the single-speaker contract shared between the engine's barge-in
 //! and the hook executor):
-//!   ~/.claude/speak-hook.pid   process-GROUP id of the current speaker
-//!   ~/.claude/hooks/           hook helpers (mic-active, ...)
+//!   speak-hook.pid (in the per-OS state dir)  process-GROUP id of the current speaker
+//!   ~/.claude/hooks/                          hook helpers (mic-active, ...)
 //!
-//! The unified activity log lives at `~/Library/Logs/dontspeak.log` with lean,
-//! sudo-free in-process size rotation (rename-based) — see `Paths::log_file` and
-//! `log()`. No `newsyslog`.
+//! The unified activity log lives in the per-OS logs dir (macOS:
+//! `~/Library/Logs/DontSpeak/dontspeak.log`) with lean, sudo-free in-process
+//! size rotation (rename-based) — see `Paths::log_file` and `log()`. No `newsyslog`.
 //!
 //! Synthesis is NATIVE in-process Kokoro (ds-tts: ort + voice-g2p + rodio).
 //! Model assets (kokoro onnx + voices + the onnxruntime dylib) live in the

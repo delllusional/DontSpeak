@@ -1,8 +1,8 @@
 //  WindowHelpers.swift
 //
-//  Shared helpers for the app's auxiliary windows (Status, Tools, About): close-only
-//  window chrome and a menu-bar-friendly "open this window" action. Kept here so the
-//  three windows share one implementation instead of repeating it.
+//  Shared helpers for the app's single sidebar window (Status / Tools / Logs / Libraries):
+//  close-only window chrome, a clear glass-backed window, a locked sidebar divider, and a
+//  menu-bar-friendly "open this window" action.
 
 import SwiftUI
 import AppKit

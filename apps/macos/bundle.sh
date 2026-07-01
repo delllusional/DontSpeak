@@ -46,8 +46,8 @@ require_xcode() {
 require_xcode
 
 # ==> 0. Build + install the engine BINARIES + hooks FIRST. install-daemon.sh
-# computes the BUILD_ID (git), builds+installs+stable-signs the 5 bins (incl. the
-# ds-helper that step 3c bundles), installs the hooks, and echoes the id as its
+# computes the BUILD_ID (git), builds+installs+stable-signs the CLI bins (incl. the
+# ds-helper that step 3 bundles), installs the hooks, and echoes the id as its
 # LAST stdout line (all progress → stderr). We bake that SAME id into the app's
 # Info.plist (step 3). There is no standalone daemon — the app hosts the engine.
 echo "==> 0. build + install engine binaries + hooks"

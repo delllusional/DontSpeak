@@ -35,10 +35,9 @@ struct LogView: View {
         // The Logs pane of the merged sidebar window — a filter bar over a scrollable colored
         // log on one platter. The glass slab + traffic-light strip live on `MainWindow`.
         VStack(spacing: 10) {
-            // A native macOS search field — the correct control for a live filter. `.roundedBorder`
-            // drew an opaque white box that clashed with the glass; the system search field is the
-            // standard translucent rounded control (magnifier glyph, standard size) and carries NO
-            // placeholder — it's an empty input field.
+            // The live filter field — a glass-styled search field (magnifier glyph, no
+            // placeholder); see `SearchField`. A native NSSearchField / `.roundedBorder` drew an
+            // opaque white box that clashed with the glass.
             SearchField(text: $filter)
 
             ScrollView {

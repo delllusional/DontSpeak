@@ -266,7 +266,6 @@ impl TtsQueue {
         q
     }
 
-    /// Enqueue the final reply (survives a record-barge in resume mode).
     /// Enqueue one unit of speech onto the FIFO. Empty text is ignored. There is no cap
     /// and no kind: callers (explicit `speak`, the greeting, and mid-turn narration) all
     /// land here and are played in order. `voice`/`rate` are optional per-call overrides

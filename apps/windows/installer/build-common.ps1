@@ -1,5 +1,5 @@
 <#
-build-common.ps1 — shared prologue for the Windows builders (build.ps1 + build-portable.ps1).
+build-common.ps1 — shared prologue for the Windows portable builder (build-portable.ps1).
 
 Dot-source it from a builder:
     . "$PSScriptRoot\build-common.ps1"

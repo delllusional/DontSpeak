@@ -66,10 +66,9 @@ pub fn t_args_json(key: &str, args_json: &str) -> String {
     let s = t(key);
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(args_json)
     {
-        // Reuse rust-i18n's own `%{name}` interpolator instead of re-implementing it:
-        // it walks the template once, substitutes each `%{key}` from the matching
-        // pattern, and leaves unknown placeholders intact (same behavior as before).
-        // Numbers/bools stringify via their JSON form; strings pass through unquoted.
+        // Reuse rust-i18n's own `%{name}` interpolator: it walks the template once,
+        // substitutes each `%{key}`, and leaves unknown placeholders intact. Numbers/bools
+        // stringify via their JSON form; strings pass through unquoted.
         let mut patterns: Vec<&str> = Vec::with_capacity(map.len());
         let mut values: Vec<String> = Vec::with_capacity(map.len());
         for (k, v) in &map {

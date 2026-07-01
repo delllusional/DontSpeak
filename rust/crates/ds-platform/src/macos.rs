@@ -359,8 +359,7 @@ impl Platform for MacPlatform {
 // ── Microphone-in-use probe (TTS feedback gate) ──────────────────────────────
 //
 // macOS impl of the lib.rs probe: CoreAudio
-// `kAudioDevicePropertyDeviceIsRunningSomewhere` on the default input device
-// (mirrors the old `mic-active.swift` helper).
+// `kAudioDevicePropertyDeviceIsRunningSomewhere` on the default input device.
 
 /// Returns true if the system's default microphone is currently capturing.
 pub(crate) fn mic_active() -> bool {

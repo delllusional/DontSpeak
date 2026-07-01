@@ -12,11 +12,9 @@
 //! modules. The OS-independent [`KeyChord`]/[`KeyBase`] keybinding parser lives in
 //! the `chord` module.
 //!
-//! Compile status:
-//! - macOS: implemented & compile-verified on the Apple-Silicon build host
-//!   (core-graphics CGEventPost, IOKit Caps-LED write, NSWorkspace).
-//! - Windows: written behind cfg(target_os="windows"); UNCOMPILED here.
-//! - Linux: written behind cfg(target_os="linux"); UNCOMPILED here.
+//! All three ports are implemented, each behind its `cfg(target_os=…)`, and are
+//! built + tested per-OS in CI (the release full matrix: Linux, Windows, macOS;
+//! per-commit CI covers Linux only).
 
 use std::error::Error;
 use std::fmt;
@@ -241,9 +239,8 @@ pub const TERM_BUNDLES: &[&str] = &[
 //
 // Claude Code exposes no recording-state hook/signal, so we read it from the OS.
 // macOS: CoreAudio `kAudioDevicePropertyDeviceIsRunningSomewhere` on the default
-// input device (mirrors the old `mic-active.swift` helper). Other platforms have
-// no probe yet → `false` (no gate), which degrades to today's always-play. The
-// Windows WASAPI probe is implemented during the Windows port.
+// input device. Windows: a WASAPI capture-session probe. Linux has no probe yet →
+// `false` (no gate), which degrades to always-play.
 
 /// Returns true if the system's default microphone is currently capturing.
 ///

@@ -102,7 +102,7 @@ pub enum Request {
     Diarize { seconds: u64 },
     /// Enroll a voiceprint: record the mic for `seconds`, extract a WeSpeaker embedding,
     /// and persist it under `name` so future [`Diarize`](Request::Diarize) labels that
-    /// person by name. Replies [`Response::Enrolled`]. (the `enroll` MCP tool).
+    /// person by name. Replies [`Response::Enrolled`]. (the `manage_speakers` enroll action).
     Enroll { name: String, seconds: u64 },
     /// Remove an enrolled voiceprint by name → [`Response::Done`] (no-op if absent).
     ForgetSpeaker { name: String },

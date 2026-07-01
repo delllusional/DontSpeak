@@ -3,8 +3,8 @@
 //! Windows (selected per-OS by the `notify` crate) — that flips `reload_requested` the
 //! instant the config changes. The boot loop keeps a COARSE `stat()` backstop (see
 //! `MTIME_CHECK_INTERVAL`) for the rare case the watcher can't start or a filesystem
-//! drops an event, per the platform guidance that FSEvents/native watches and a stat
-//! fallback are best used to COMPLEMENT each other rather than as strict replacements.
+//! drops an event — a native watch and a stat fallback COMPLEMENT each other rather
+//! than one replacing the other.
 
 use std::path::Path;
 use std::sync::Arc;

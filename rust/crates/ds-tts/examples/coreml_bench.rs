@@ -1,6 +1,6 @@
 //! CPU vs CoreML synth benchmark. Run both:
 //!   cargo run -q --release -p ds-tts --example coreml_bench
-//!   DONTSPEAK_COREML=1 cargo run -q --release -p ds-tts --example coreml_bench
+//!   DONTSPEAK_PROVIDER=coreml cargo run -q --release -p ds-tts --example coreml_bench
 use ds_tts::{batch::stream_batches, g2p, synth::KokoroSynth};
 use std::time::Instant;
 

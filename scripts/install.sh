@@ -40,7 +40,7 @@ need cargo
 BUILD_ID="$(DONTSPEAK_INSTALL_DIR="$INSTALL_DIR" bash "$REPO/scripts/install-daemon.sh")"
 echo "==> binaries + hooks installed (BUILD_ID=$BUILD_ID)"
 
-# ==> 5. Wire the Claude Code voice hooks into ~/.claude/settings.json. The
+# ==> 5. Wire the Claude Code voice hooks into ~/.claude/settings.json.
 # The dontspeak binary owns the ONE cross-platform per-client integration definition + a SAFE
 # merge (additive, idempotent, timestamped backup first, malformed file left untouched), so every
 # platform installs the identical set. `wire <client>` does that client's WHOLE integration in one

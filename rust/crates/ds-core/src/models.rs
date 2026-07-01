@@ -37,7 +37,7 @@ pub fn kokoro_present() -> bool {
     ds_model::kokoro_present()
 }
 
-/// Is the full Parakeet-ONNX asset set (encoder + decoder + preprocessor + vocab
+/// Is the full Parakeet-ONNX asset set (encoder + decoder + joiner + tokens
 /// + dylib) present + valid?
 pub fn parakeet_onnx_present() -> bool {
     ds_model::parakeet_present()

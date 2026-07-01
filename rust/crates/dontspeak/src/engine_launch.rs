@@ -98,8 +98,9 @@ fn host_app_bin() -> Option<PathBuf> {
         candidates.push(dir.join("winui").join(APP)); // a winui\ subdir beside us
     }
     if let Some(paths) = ds_config::Paths::resolve() {
-        // The `~/.local/bin` install layout: install.ps1 publishes the WinUI app to a
-        // `winui/` subdir; install-gui.sh installs `ds-gtk` directly into `~/.local/bin`.
+        // The `~/.local/bin` install layout: on Linux install-gui.sh installs `ds-gtk`
+        // directly here. (Windows: the `winui/` subdir is a legacy dev-deploy fallback —
+        // the portable zip now lays every bin together beside this exe, caught above.)
         #[cfg(target_os = "windows")]
         candidates.push(paths.home.join(".local/bin/winui").join(APP));
         #[cfg(not(target_os = "windows"))]

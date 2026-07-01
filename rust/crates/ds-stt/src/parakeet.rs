@@ -144,7 +144,7 @@ impl Capture {
 
 /// The cross-platform ONNX on-device STT engine — now backed by the cache-aware streaming
 /// FastConformer ([`crate::streaming::StreamingModel`]), which REPLACED the old whole-buffer
-/// `transcribe-rs` Parakeet TDT engine (see `docs/STREAMING-STT-PLAN.md`). The name is kept
+/// `transcribe-rs` Parakeet TDT engine. The name is kept
 /// because the `built_in` STT engine, its config provider tokens, and the model-asset wiring
 /// all still call it "parakeet". Exposes the same lazy-load + whole-buffer API; the helper's
 /// live dictation drives the streaming model INCREMENTALLY (per-chunk partials) instead — both

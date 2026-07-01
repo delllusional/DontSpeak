@@ -157,7 +157,7 @@ pub struct VoiceConfig {
     #[serde(default = "default_provider", deserialize_with = "de_provider")]
     pub provider: Vec<Provider>,
 
-    // ── Engine-owns-everything subsystem toggles (see docs/DAEMON-REFACTOR.md) ─
+    // ── Engine-owns-everything subsystem toggles ──────────────────────────────
     // TTS and STT on/off are folded into their engine enums (`tts_engine`/`stt_engine` =
     // `off`) — there is no separate `tts_enabled`/`stt_enabled` flag; the engine choice IS
     // the selection. `caps_enabled` is its OWN axis: it gates the physical Caps key handler,
@@ -331,8 +331,8 @@ fn default_capture_gain() -> CaptureGain {
 /// mic without per-machine tuning (it gives the half-duplex path the level-consistency
 /// VPIO's AGC provides in full-duplex). `Manual(g)` applies a fixed multiplier instead.
 ///
-/// Serializes as the string `"auto"` or a JSON number, and deserializes from either, so
-/// settings.json accepts `"capture_gain": "auto"` or `"capture_gain": 2.5`.
+/// Serializes as the string `"auto"` or a number, and deserializes from either, so
+/// `capture_gain` accepts `"auto"` or a value like `2.5`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CaptureGain {
     #[default]
@@ -531,11 +531,10 @@ impl VoiceConfig {
         self.speaker_threshold = self.speaker_threshold.clamp(0.0, 1.0);
     }
 
-    /// True when the active TTS model is the apple-native (FluidAudio Core ML / ANE) Kokoro
-    /// — the Kokoro engine running on the apple-native provider. It runs on the Neural
-    /// Engine and self-manages its model cache (materializing voices on demand from the
-    /// shared `voices-v1.0.bin`), so the status code gates its Kokoro row on shim capability
-    /// rather than the ONNX files. Voices are SHARED — there is no separate voice set.
+    /// True when the active TTS is the apple-native (FluidAudio Core ML / ANE) Kokoro. It
+    /// runs on the Neural Engine and self-manages its model cache (materializing voices on
+    /// demand from the shared `voices-v1.0.bin`), so the status code gates its Kokoro row on
+    /// shim capability rather than the ONNX files. Voices are SHARED — no separate voice set.
     pub fn uses_apple_native_model(&self) -> bool {
         self.resolved_tts() == Some(TtsEngine::Kokoro)
             && cfg!(target_os = "macos")

@@ -3,8 +3,7 @@
 //! The offline [`crate::parakeet`] path re-encodes the whole buffer on every preview tick
 //! (`transcribe-rs` `ParakeetModel`, `supports_streaming: false`). This module instead feeds
 //! audio to a *cache-aware* NeMo FastConformer encoder in fixed chunks, threading the encoder
-//! cache so each frame is encoded EXACTLY ONCE — the fix planned in `docs/STREAMING-STT-PLAN.md`
-//! and prototyped/validated in `scripts/streaming-stt/`.
+//! cache so each frame is encoded EXACTLY ONCE — prototyped/validated in `scripts/streaming-stt/`.
 //!
 //! Model: `sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-*` (encoder + decoder(LSTM) +
 //! joiner ONNX + `tokens.txt`). Tensor contract, metadata keys and the greedy-decode logic are

@@ -1,11 +1,11 @@
 //! Shared loader for the FluidAudio C-ABI shim dylib (`libsmkokoro.dylib`).
 //!
 //! The apple-native STT backends dlopen this dylib: the Parakeet transcriber
-//! ([`crate::coreml`]) and the System speech recognizer ([`crate::sysspeech`]). It
+//! ([`crate::coreml`]) and the System speech recognizer ([`crate::sysspeech`]); the
+//! apple-native Kokoro TTS backend (`ds-tts`) loads it through this same helper. It
 //! centralizes the `SMKOKORO_DYLIB_PATH` resolution + `dlopen` + the error string so
 //! the callers can't drift. Each keeps its OWN `Library` handle (dlopen refcounts the
-//! same image). (The shim still ships TTS symbols, but apple-native Kokoro TTS was
-//! removed, so nothing here loads them anymore.)
+//! same image).
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};

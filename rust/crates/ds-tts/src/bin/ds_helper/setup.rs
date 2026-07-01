@@ -1,5 +1,5 @@
 //! Installer/setup hooks: the headless model/runtime prefetch driven by ds-model
-//! (the single source of the pinned URLs/SHAs). The `--setup`/`--prefetch`/
+//! (the single source of the pinned URLs/SHAs). The `--prefetch`/
 //! `--install-prefetched`/`--print-manifest` arg dispatch lives in [`crate::main`].
 
 /// Headless prefetch for the installer: fetch model assets and/or the Windows CUDA

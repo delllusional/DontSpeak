@@ -2,10 +2,10 @@
 //! live, so callers never hardcode either. [`DISPLAY_NAME`] is the spaced, title-case
 //! name shown to people ("DontSpeak" — distinct from the lowercase `dontspeak` binary /
 //! MCP server id). [`VERSION`] is the workspace version (`version.workspace = true`), so
-//! it tracks the engine and installer with no second source to bump.
+//! it tracks the workspace with no second source to bump.
 
-/// The human-facing product name, with the space — what the installer's DisplayName and the
-/// tray show. NOT the binary/server id (`dontspeak`).
+/// The human-facing product name, with the space — what the app window and tray show.
+/// NOT the binary/server id (`dontspeak`).
 pub const DISPLAY_NAME: &str = "DontSpeak";
 
 /// The crate (= workspace) version, e.g. `"0.2.0"`. Single source: `Cargo.toml`'s

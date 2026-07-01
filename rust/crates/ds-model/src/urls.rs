@@ -43,9 +43,9 @@ pub const KOKORO_VOICES: Download = Download {
 
 // ── Parakeet STT: cache-aware STREAMING FastConformer transducer (80ms, int8) ──
 // NeMo `stt_en_fastconformer_hybrid_large_streaming_80ms`, transducer branch, exported by
-// csukuangfj (sherpa-onnx). This REPLACED the old whole-buffer transcribe-rs Parakeet TDT model
-// (see `docs/STREAMING-STT-PLAN.md`); the `built_in` STT engine + config tokens keep the
-// "parakeet" name. The `ds-stt::streaming` runner loads all four flat in one dir (~137 MB total).
+// csukuangfj (sherpa-onnx). This REPLACED the old whole-buffer transcribe-rs Parakeet TDT model;
+// the `built_in` STT engine + config tokens keep the "parakeet" name. The `ds-stt::streaming`
+// runner loads all four flat in one dir (~137 MB total).
 // 80ms is the lowest-latency sherpa variant (~12 encoder steps/sec) — picked so the ONNX path
 // (Windows/Linux, and the macOS `cpu` fallback) updates the live overlay far more often than
 // the old 480ms variant; cadence is read from the encoder metadata, so just swapping the files

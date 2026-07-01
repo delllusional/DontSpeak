@@ -57,7 +57,7 @@ for b in dontspeak ds-helper; do
 done
 
 # ── 3. codesign: STABLE identity + the app's identifier for EVERY bin ───────────────
-# Sign all three installed bins with the SAME stable cert AND the SAME signing
+# Sign both installed bins with the SAME stable cert AND the SAME signing
 # identifier the app bundle uses (app.dontspeak.org — see apps/macos/bundle-lib.sh).
 # One cert + one identifier across the app, its bundled helper, and these CLI bins means
 # TCC (Accessibility / Input Monitoring) keys every component to ONE app identity, so the

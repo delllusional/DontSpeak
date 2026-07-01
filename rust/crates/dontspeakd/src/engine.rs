@@ -534,7 +534,7 @@ impl<P: Platform + 'static> Engine<P> {
     /// spurious tap.
     pub(crate) fn reload(&mut self, cfg: &VoiceConfig) {
         // Diff against the last-applied config and touch ONLY what changed — the
-        // "no extra reloads" contract (docs/DAEMON-REFACTOR.md). Per-call params
+        // "no extra reloads" contract. Per-call params
         // (voice/rate/narrate/region/vocab) need no action: the next call reads
         // them fresh from `self.cfg`, which we update unconditionally below.
         let change = cfg.changes_since(&self.cfg);

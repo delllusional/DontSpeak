@@ -11,8 +11,8 @@ use crate::spec::{
     parakeet_encoder_spec, parakeet_files, parakeet_joiner_spec, parakeet_tokens_spec,
 };
 
-/// Eager pre-download of the FULL Parakeet asset set: encoder, decoder, preprocessor,
-/// vocab, AND the shared onnxruntime dylib (route A). Returns the model dir on success.
+/// Eager pre-download of the FULL Parakeet asset set: encoder, decoder, joiner,
+/// tokens, AND the shared onnxruntime dylib (route A). Returns the model dir on success.
 pub fn run_setup_parakeet() -> std::io::Result<PathBuf> {
     ensure(&parakeet_encoder_spec())?;
     ensure(&parakeet_decoder_spec())?;
@@ -25,7 +25,7 @@ pub fn run_setup_parakeet() -> std::io::Result<PathBuf> {
 }
 
 /// Like [`run_setup_parakeet`] but reports AGGREGATE byte-level progress across
-/// the whole asset set (encoder + decoder + preprocessor + vocab + onnxruntime
+/// the whole asset set (encoder + decoder + joiner + tokens + onnxruntime
 /// dylib) as a single `(downloaded, total)` stream, so the GUI shows one combined bar.
 pub fn run_setup_parakeet_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
     let files = parakeet_files();

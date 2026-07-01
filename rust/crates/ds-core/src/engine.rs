@@ -1,7 +1,8 @@
 //! Engine running-probe.
 //!
-//! The engine (`dontspeakd`) runs IN-PROCESS inside DontSpeak.app — started on a
-//! background thread by the FFI `ds_engine_start` (see `ffi.rs`) — and writes
+//! The engine (`dontspeakd`) runs IN-PROCESS inside the resident host app (macOS
+//! DontSpeak.app / Windows ds-winui / Linux ds-gtk) — started on a background
+//! thread by the FFI `ds_engine_start` (see `ffi.rs`) — and writes
 //! its own pidfile (`~/.claude/dontspeakd.pid`, via `ds_config::Paths::engine_pid`).
 //! Liveness is that pidfile heartbeat; config reload is the in-process atomic flag
 //! the FFI sets (`ds_engine_reload`), not a signal or launchctl — so there is

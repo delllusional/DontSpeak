@@ -8,8 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 # Tiny newline-delimited-JSON RPC over a Unix-domain socket. The engine hosts the
-# server; the SwiftUI app (via ds-core) and the speak/narrate hooks are
-# clients. See docs/DAEMON-REFACTOR.md.
+# server; the resident host app (via ds-core) and the speak/narrate hooks are clients.
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

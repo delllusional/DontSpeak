@@ -19,8 +19,6 @@
 //! find each one's Caps-Lock LED element, and `IOHIDDeviceSetValue` an integer
 //! on/off. Output `SetValue` is synchronous, so no run-loop scheduling is needed.
 //! Symbols come from IOKit / CoreFoundation (linked in build.rs).
-//!
-//! UNCOMPILED on the non-macOS build host; verify on a Mac.
 
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_uint};

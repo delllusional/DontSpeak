@@ -1,4 +1,4 @@
-//! ds-aec — acoustic-echo-cancelled duplex audio (see docs/docs/AEC.md).
+//! ds-aec — acoustic-echo-cancelled duplex audio (see docs/AEC.md).
 //!
 //! One platform unit owns BOTH the speaker render and the mic capture, so the OS
 //! can subtract the played-back TTS (the far-end reference) from the captured mic

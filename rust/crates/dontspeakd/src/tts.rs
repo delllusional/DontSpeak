@@ -5,7 +5,7 @@
 //! spawns the child; disabling KILLS it (freeing the model with no ONNX-teardown
 //! crash, since a killed process runs no destructors). Speak/preview/stop are
 //! mediated over the child's stdio with the protocol documented in
-//! `ds_helper.rs`.
+//! `ds_helper/main.rs`.
 //!
 //! Concurrency (full-duplex coexist): ONE persistent reader thread owns the
 //! child's stdout and DEMUXES its lines into two slots — a [`SpeakSlot`] (DONE/

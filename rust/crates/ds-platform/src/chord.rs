@@ -21,9 +21,8 @@ pub enum KeyBase {
 }
 
 /// A keystroke to synthesize: a base key plus modifier flags, parsed from a Claude Code
-/// keybinding string (e.g. `"ctrl+g"`, `"space"`, `"meta+k"`). Platform-agnostic — each
-/// [`crate::KeyInjector`] maps the base to its OS keycode. The `claude_code` STT engine reads
-/// Claude Code's `voice:pushToTalk` binding into one of these and taps it.
+/// keybinding string (e.g. `"ctrl+g"`, `"space"`, `"meta+k"`). The `claude_code` STT engine
+/// reads Claude Code's `voice:pushToTalk` binding into one of these and taps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyChord {
     pub ctrl: bool,

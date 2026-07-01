@@ -116,7 +116,7 @@ pub extern "C" fn ds_parakeet_onnx_present_global() -> u8 {
     guard_val(0, || models::parakeet_onnx_present() as u8)
 }
 
-/// Is the engine running? HANDLE-FREE (pidfile + launchctl probe), safe off the
+/// Is the engine running? HANDLE-FREE (pidfile probe), safe off the
 /// main thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_running_global() -> u8 {

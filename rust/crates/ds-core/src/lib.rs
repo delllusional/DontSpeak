@@ -8,8 +8,9 @@
 //! remaining control surface (voice/engine/language/rate/toggles/downloads)
 //! lives in DontSpeak, so the rich config/voice-picker core that used to
 //! live here is gone.
-//!   - macOS: the SwiftUI app (`../macos/`) links the staticlib.
-//!   - Win/Linux later: a native UI binds the same header (cdylib).
+//!   - macOS: the SwiftUI app (`apps/macos/`) links the staticlib.
+//!   - Linux: the GTK app (`ds-gtk`) links the staticlib; Windows: the WinUI app
+//!     (`ds-winui`) binds the same header via the `ds_core.dll` cdylib.
 
 pub mod engine;
 pub mod ffi;

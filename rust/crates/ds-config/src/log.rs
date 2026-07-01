@@ -1,6 +1,6 @@
 //! Unified activity log — one readable file with lean in-process rotation.
 //!
-//! One file (`paths.log_file` = ~/Library/Logs/dontspeak.log), one leveled format,
+//! One file (`paths.log_file`, e.g. macOS `~/Library/Logs/DontSpeak/dontspeak.log`), one leveled format,
 //! shared by every process (engine + hooks + mcp). Each call opens the file
 //! `O_APPEND` and writes the whole line in a SINGLE `write_all`; POSIX guarantees
 //! an append write lands atomically at EOF, so concurrent writers never interleave.
