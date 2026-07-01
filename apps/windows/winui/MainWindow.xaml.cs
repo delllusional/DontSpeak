@@ -137,7 +137,9 @@ public sealed partial class MainWindow : Window
     {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         long style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
-        SetWindowLongPtr(hwnd, GWL_STYLE, unchecked((IntPtr)(style & ~(WS_MINIMIZEBOX | WS_MAXIMIZEBOX))));
+        // checked: CA2020 — bit-clearing can't overflow, so this never throws; the keyword
+        // just makes the (IntPtr)Int64 conversion's intent explicit for the analyzer.
+        SetWindowLongPtr(hwnd, GWL_STYLE, checked((IntPtr)(style & ~(WS_MINIMIZEBOX | WS_MAXIMIZEBOX))));
         SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     }
