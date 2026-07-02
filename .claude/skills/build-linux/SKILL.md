@@ -1,6 +1,6 @@
 ---
 name: build-linux
-description: Build / clean-reinstall / package DontSpeak on Linux (GTK4 desktop host). Two use cases — (1) local clean build + reinstall for dev testing, (2) build the distributable tarball (.tar.gz always; AppImage when its tool is installed — .deb/.rpm were dropped 2026-07-02). Use when asked to build, reinstall, package, or uninstall the Linux app. Runs on Linux (the WSL/VM host) — NOT on Windows/macOS.
+description: Build / clean-reinstall / package DontSpeak on Linux (GTK4 desktop host). Two use cases — (1) local clean build + reinstall for dev testing, (2) build the distributable tarball (.tar.gz always; AppImage when its tool is installed). Use when asked to build, reinstall, package, or uninstall the Linux app. Runs on Linux (the WSL/VM host) — NOT on Windows/macOS.
 ---
 
 # DontSpeak — Linux (build / reinstall / package)
@@ -44,8 +44,7 @@ Builds the engine bins + the GTK host, then emits to `dist/`:
 - **`dontspeak-<ver>-<arch>.tar.gz`** — **always**. Self-contained portable bundle (binaries + `.desktop` + icon + udev rule + an `install.sh`); the universal baseline, like the Windows portable zip. Extract and run `./install.sh`.
 - **AppImage** — **experimental**; only when `linuxdeploy` + `linuxdeploy-plugin-gtk` are on PATH (GTK bundling is finicky — verify on the target). Skip with `--skip-appimage`.
 
-AppImage is best-effort: a missing tool is skipped with an install hint, so the tarball always succeeds. The tarball path is CI-exercised on every release (see NOTE); the **AppImage** path + `uninstall.sh` remain unexercised — **verify those on Linux**. (`.deb`/`.rpm` were dropped 2026-07-02: nothing consumed them and without a hosted apt/dnf repo they can't update — revisit with a real repo or Flatpak.)
-
+AppImage is best-effort: a missing tool is skipped with an install hint, so the tarball always succeeds. The tarball path is CI-exercised on every release (see NOTE); the **AppImage** path + `uninstall.sh` remain unexercised — **verify those on Linux**.
 > NOTE: `release.yml` builds + uploads the Linux tarball via a per-arch `linux` matrix (ubuntu-26.04 + ubuntu-26.04-arm) that runs `apps/linux/package.sh --skip-appimage` with the real GTK/libadwaita/layer-shell deps and uploads `linux-packages-<arch>` artifacts (`if-no-files-found: error`).
 
 ## Uninstall / clean

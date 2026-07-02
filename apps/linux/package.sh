@@ -3,9 +3,7 @@
 # portable-zip and the macOS .app.zip). Closes the "no Linux package" gap.
 #
 # Always produces a self-contained PORTABLE TARBALL (works on any distro, no packaging
-# toolchain) — the one Linux release asset, mirroring the single Windows zip. Native
-# .deb/.rpm were dropped (nothing consumed them and, without a hosted apt/dnf repo,
-# they can't update); revisit with a real repo or an AppImage/Flatpak.
+# toolchain) — the one Linux release asset, mirroring the single Windows zip.
 #
 #   .tar.gz  — always (bin/ + .desktop + udev rule + an install.sh; extract & run install.sh)
 #   AppImage — needs `linuxdeploy` + linuxdeploy-plugin-gtk on PATH  (EXPERIMENTAL)
