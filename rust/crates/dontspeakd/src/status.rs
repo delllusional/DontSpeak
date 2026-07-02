@@ -172,15 +172,19 @@ pub(crate) fn model_status_json(
     //   * onnx (cpu/coreml/cuda) → gated on the downloaded ONNX model + voices + dylib.
     // Without this branch the row read "missing" on the apple-native path (no ONNX
     // files) even though TTS works.
-    let tts_uses_apple_native = cfg.uses_apple_native_model();
+    // `uses_apple_native_model()` / `resolved_stt_provider()` resolve to `Ane` as a STATIC
+    // preference on ANY macOS, but the ANE (FluidAudio Core ML) backend only actually serves when
+    // its shim dylib is present; without it the warm child DOWNGRADES to the ONNX-CPU path (e.g.
+    // Intel macOS — see the realized `tts_provider`/`stt_provider` below, and the identical
+    // `ane_active` guard in `downloads::auto_download_missing`). So gate the ROW's apple-native-ness
+    // on the SAME runtime truth (shim present), else the ONNX-CPU path's row reads "missing" (no
+    // Core ML files) even though the model loaded and is actively running on CPU.
+    let shim = apple_native_shim_available();
+    let tts_uses_apple_native = cfg.uses_apple_native_model() && shim;
     let kokoro_onnx_files = exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
         && exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
         && exists(ds_model::onnxruntime_dylib_path());
-    let kokoro_present = kokoro_present_for(
-        tts_uses_apple_native,
-        apple_native_shim_available(),
-        kokoro_onnx_files,
-    );
+    let kokoro_present = kokoro_present_for(tts_uses_apple_native, shim, kokoro_onnx_files);
     // The STT engine is `parakeet`; the ACTIVE runtime is the resolved provider.
     //   * onnx         → gated on the downloaded ONNX model files (+ shared dylib);
     //                    the only runtime with deletable, downloadable files.
@@ -191,10 +195,10 @@ pub(crate) fn model_status_json(
         && exists(ds_model::model_path(ds_model::PARAKEET_JOINER_FILE))
         && exists(ds_model::model_path(ds_model::PARAKEET_TOKENS_FILE))
         && exists(ds_model::onnxruntime_dylib_path());
-    let stt_uses_onnx = matches!(
-        cfg.resolved_stt_provider(),
-        ds_config::Provider::OrtCpu | ds_config::Provider::OrtCuda
-    );
+    // Same shim-aware downgrade as Kokoro above: the STT provider resolves to `Ane` as a static
+    // preference, but with no Core ML shim the warm child runs Parakeet on the ONNX-CPU path — so
+    // the row must gate on the downloaded ONNX files, not the (absent) apple-native cache.
+    let stt_uses_onnx = !(cfg.resolved_stt_provider() == ds_config::Provider::Ane && shim);
     let parakeet_present = if stt_uses_onnx {
         parakeet_onnx_files
     } else {
