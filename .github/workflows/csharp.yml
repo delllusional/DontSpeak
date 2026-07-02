@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   compile:
-    name: dotnet build (winui)
+    name: dotnet build + test (winui)
     runs-on: windows-2025
     # A hung testhost (e.g. a runtime bootstrap waiting on UI) must fail, not spin for
     # GitHub's 6-hour default.

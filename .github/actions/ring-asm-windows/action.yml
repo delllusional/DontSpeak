@@ -1,0 +1,14 @@
+name: ring asm toolchain (Windows)
+description: >
+  rustls' crypto = ring, which assembles via NASM on x64 Windows (clang on arm64).
+  Install NASM and put it + LLVM (preinstalled on the image) on PATH so ring's build
+  script finds them.
+runs:
+  using: composite
+  steps:
+    - name: NASM + LLVM on PATH
+      shell: pwsh
+      run: |
+        choco install nasm -y --no-progress
+        echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+        echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH

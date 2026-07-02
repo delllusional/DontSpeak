@@ -1,9 +1,8 @@
 name: CI
 
 # Run the project's ACTUAL test suite. The bulk lives in the Rust workspace
-# (cargo test --workspace); the macOS SwiftPM package adds DontSpeakLogicTests (run on
-# the macOS leg). The WinUI app has no test projects today, so that step auto-skips
-# rather than fail (no placeholder/dummy tests) and picks tests up if/when added.
+# (cargo test --workspace); the macOS SwiftPM package adds DontSpeakLogicTests and the
+# WinUI app adds winui.tests (xunit) — each on its own OS leg.
 #
 # Cost/coverage split:
 #   • Per commit / PR  → Linux only (fast; covers the platform-agnostic majority).
@@ -58,8 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Linux audio deps (ALSA + PulseAudio)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpulse-dev pkg-config
+      - uses: ./.github/actions/linux-build-deps
       - name: cargo clippy -D warnings
         working-directory: rust
         # --keep-going: lint every crate even after one fails, so a multi-crate workspace
@@ -74,8 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Linux audio deps (ALSA + PulseAudio)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpulse-dev pkg-config
+      - uses: ./.github/actions/linux-build-deps
       - name: cargo doc -D warnings
         working-directory: rust
         env:
@@ -85,6 +82,7 @@ jobs:
   # Pick the OS matrix: Linux-only by default, all three when full-matrix is requested
   # (the release gate). push/PR events have no `inputs`, so they fall to Linux-only.
   setup:
+    name: test matrix
     runs-on: ubuntu-latest
     outputs:
       os: ${{ steps.pick.outputs.os }}
@@ -108,21 +106,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # cpal links ALSA and ds-aec links PulseAudio (libpulse) — neither dev lib is
-      # on the ubuntu runner by default. Install both + pkg-config. macOS/Windows use native audio.
-      - name: Linux audio deps (ALSA + PulseAudio)
+      - uses: ./.github/actions/linux-build-deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpulse-dev pkg-config
 
-      # rustls' crypto = ring, which assembles via NASM on x64 Windows. Install NASM and put
-      # it + LLVM (preinstalled on the image) on PATH so ring's build script finds them.
-      - name: ring asm toolchain on PATH (Windows)
+      - uses: ./.github/actions/ring-asm-windows
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install nasm -y --no-progress
-          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
-          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
 
       # cfg-gated platform code (macOS Core ML / ANE, Windows CUDA EP) compiles on its
       # own OS via the matrix, so on the full-matrix release run every test executes

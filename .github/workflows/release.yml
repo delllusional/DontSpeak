@@ -30,6 +30,7 @@ jobs:
   # scripts/version.sh. Fail fast (before the long platform builds) if a tag like
   # v0.1.0 doesn't match it, so the app zip / portable zip / About string / tag never drift.
   check:
+    name: tag = version guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -70,15 +71,9 @@ jobs:
         with:
           dotnet-version: '10.0.x'   # the WinUI app targets net10 (WinApp SDK 2.2 + H.NotifyIcon)
 
-      # rustls' crypto = ring, which assembles via NASM (x64) / clang (arm64). LLVM ships
-      # on the windows image (add to PATH); install NASM. The ARM64 MSVC tools are already
-      # in the image; build-portable.ps1 adds the Rust arm64 target itself.
-      - name: ring asm toolchain (NASM + LLVM on PATH)
-        shell: pwsh
-        run: |
-          choco install nasm -y --no-progress
-          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
-          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+      # The ARM64 MSVC tools are already in the image; build-portable.ps1 adds the Rust
+      # arm64 target itself.
+      - uses: ./.github/actions/ring-asm-windows
 
       # Self-contained portable zip (bundles .NET + Windows App SDK + engine DLL/helper +
       # dontspeak.exe). -SkipModels keeps it lean — the app downloads the voice models on
@@ -247,10 +242,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Build deps (GTK4 + libadwaita + layer-shell + ALSA + PulseAudio)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libasound2-dev libpulse-dev \
-            libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev
+        uses: ./.github/actions/linux-build-deps
+        with:
+          extra: build-essential libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev
 
       - name: Packaging tools (cargo-deb + cargo-generate-rpm)
         run: cargo install cargo-deb cargo-generate-rpm
@@ -266,6 +260,7 @@ jobs:
 
   # ── Publish the GitHub Release with all artifacts ───────────────────────────
   release:
+    name: publish release
     needs: [windows, macos, windows-arm-smoke, linux]
     runs-on: ubuntu-latest
     # Only publish a release for an actual tag push (workflow_dispatch just builds).
