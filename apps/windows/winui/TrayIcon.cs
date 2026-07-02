@@ -27,17 +27,17 @@ namespace DontSpeak;
 /// </summary>
 internal sealed class TrayIcon : IDisposable
 {
-    internal enum IconState { Idle = 0, Recording = 1, Speaking = 2 }
+    internal enum IconState { Idle = 0, Recording = 1, Speaking = 2, Downloading = 3 }
 
     // Menu commands — settings opens the app window; the rest mirror the macOS menu-bar app.
     public event Action? OpenStatus;
     public event Action? Exit;
 
     private readonly H.NotifyIcon.TaskbarIcon _icon;
-    private readonly IntPtr[] _hicons = new IntPtr[3];        // owned HICONs (destroyed on Dispose)
-    private readonly Icon[] _stateIcons = new Icon[3];        // System.Drawing.Icon wrappers over them
-    private readonly IntPtr[] _mutedHicons = new IntPtr[3];   // the same three with a muted slash
-    private readonly Icon[] _mutedStateIcons = new Icon[3];
+    private readonly IntPtr[] _hicons = new IntPtr[4];        // owned HICONs (destroyed on Dispose)
+    private readonly Icon[] _stateIcons = new Icon[4];        // System.Drawing.Icon wrappers over them
+    private readonly IntPtr[] _mutedHicons = new IntPtr[4];   // the same four with a muted slash
+    private readonly Icon[] _mutedStateIcons = new Icon[4];
     private ToggleMenuFlyoutItem? _autostartItem;
     private ToggleMenuFlyoutItem? _muteItem;
     private int _lastState = -1;
@@ -218,14 +218,15 @@ internal sealed class TrayIcon : IDisposable
     }
 
     // ── brand-glyph icons (unchanged rendering; see BrandGlyph) ───────────────────────
-    /// <summary>(Re)build all three state icons at the tray-icon size: idle = theme
-    /// foreground, recording = mic-orange (STT), speaking = seed-purple (TTS).</summary>
+    /// <summary>(Re)build all state icons at the tray-icon size: idle = theme foreground,
+    /// recording = mic-orange (STT), speaking = seed-purple (TTS), downloading = warning-orange
+    /// (a model fetch in flight — shares the orange warning tint so it never reads as idle/gray).</summary>
     private void BuildIcons()
     {
         int px = TrayIconPx();
         DestroyIcons();
-        var inks = new[] { BrandGlyph.IdleForeground(), Brand.MicOrangeGdi, Brand.SeedPurpleGdi };
-        for (int i = 0; i < 3; i++)
+        var inks = new[] { BrandGlyph.IdleForeground(), Brand.MicOrangeGdi, Brand.SeedPurpleGdi, Brand.MicOrangeGdi };
+        for (int i = 0; i < inks.Length; i++)
         {
             _hicons[i] = MakeGlyphIcon(px, inks[i], muted: false);
             _stateIcons[i] = Icon.FromHandle(_hicons[i]);

@@ -23,6 +23,7 @@ pub enum Cmd {
 pub struct SpeakTray {
     pub speaking: bool,
     pub recording: bool,
+    pub downloading: bool,
     pub muted: bool,
     seed_purple: Rgb,
     mic_orange: Rgb,
@@ -35,6 +36,7 @@ impl SpeakTray {
         SpeakTray {
             speaking: false,
             recording: false,
+            downloading: false,
             muted: false,
             seed_purple,
             mic_orange,
@@ -43,12 +45,17 @@ impl SpeakTray {
     }
 
     /// Per-state glyph tint, mirroring macOS/Windows: recording → mic_orange, speaking →
-    /// seed_purple, otherwise the idle foreground. (Muted is an overlaid slash, not a color.)
+    /// seed_purple, a model fetch in flight → mic_orange (the shared warning tint, so a download
+    /// never reads as a silent idle glyph), otherwise the idle foreground. Live record/speak rank
+    /// above downloading so an active interaction still wins the single tray glyph. (Muted is an
+    /// overlaid slash, not a color.)
     fn ink(&self) -> Rgb {
         if self.recording {
             self.mic_orange
         } else if self.speaking {
             self.seed_purple
+        } else if self.downloading {
+            self.mic_orange
         } else {
             icon::idle_fg()
         }

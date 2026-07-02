@@ -336,26 +336,26 @@ public sealed partial class MainWindow : Window
         // ── 2. Engine rows — TTS / STT name the CONCRETE engine for the active token
         // (mirrors the macOS ttsEngineRow/sttEngineRow). ──
         if (s.EngineSelection.TtsEngine == "off")
-        { TtsDetail.Text = ""; ApplyOff(TtsDot); }   // no label — the gray dot says "off"
+        { TtsDetail.Text = ""; ApplyOff(TtsDot, TtsRing); }   // no label — the gray dot says "off"
         else if (s.EngineSelection.TtsEngine == "system")
-        { TtsDetail.Text = Loc.T("status.engine.system"); ApplyEngine(s.EngineDots.TtsSystem, TtsDot); }
+        { TtsDetail.Text = Loc.T("status.engine.system"); ApplyEngine(s.EngineDots.TtsSystem, TtsDot, TtsRing); }
         else
-        { TtsDetail.Text = Loc.T("status.engine.kokoro"); ApplyEngine(s.EngineDots.Kokoro, TtsDot); }
+        { TtsDetail.Text = Loc.T("status.engine.kokoro"); ApplyEngine(s.EngineDots.Kokoro, TtsDot, TtsRing); }
 
         switch (s.EngineSelection.SttEngine)
         {
             case "off":
                 SttDetail.Text = "";   // no label — the gray dot says "off"
-                ApplyOff(SttDot); break;
+                ApplyOff(SttDot, SttRing); break;
             case "claude_code":
                 SttDetail.Text = Loc.T("status.engine.claude_code");
-                ApplyEngine(s.EngineDots.ClaudeCode, SttDot); break;
+                ApplyEngine(s.EngineDots.ClaudeCode, SttDot, SttRing); break;
             case "system":
                 SttDetail.Text = Loc.T("status.engine.system");
-                ApplyEngine(s.EngineDots.System, SttDot); break;
+                ApplyEngine(s.EngineDots.System, SttDot, SttRing); break;
             default:
                 SttDetail.Text = Loc.T("status.engine.parakeet");
-                ApplyEngine(s.EngineDots.Parakeet, SttDot); break;
+                ApplyEngine(s.EngineDots.Parakeet, SttDot, SttRing); break;
         }
 
         // TTS expansion. A not-ready engine (downloading/starting/failed) shows its state word
@@ -453,6 +453,7 @@ public sealed partial class MainWindow : Window
         {
             TrayIcon.IconState.Recording => Brand.MicOrange,
             TrayIcon.IconState.Speaking => Brand.SeedPurple,
+            TrayIcon.IconState.Downloading => Brand.Warning,   // model fetch → orange wash (not gray)
             _ => (Windows.UI.Color?)null,
         };
         // Idle: no stripe at all (clear the fill, leaving the bare tab row).
@@ -473,12 +474,26 @@ public sealed partial class MainWindow : Window
     /// engine surfaces its state word as a note in the expanded section instead. Models fetch
     /// automatically on first activation, so there's no Download/Retry button — the dot conveys
     /// missing → downloading → running by color, matching macOS.</summary>
-    private static void ApplyEngine(EngineInfo e, Microsoft.UI.Xaml.Shapes.Ellipse dot)
+    private static void ApplyEngine(EngineInfo e, Microsoft.UI.Xaml.Shapes.Ellipse dot,
+                                    Microsoft.UI.Xaml.Controls.ProgressRing ring)
     {
+        // Downloading swaps the flat dot for an ORANGE determinate progress ring driven by the
+        // byte-weighted 0…1 percent — the macOS StatusView "orange progress ring" treatment, so a
+        // fetch reads as live progress, not a static blob (and never a silent gray). A tiny floor
+        // keeps a sliver of arc visible at 0%.
+        if (e.State == EngineState.Downloading)
+        {
+            ring.Value = Math.Clamp(e.Progress, 0.02, 1.0);
+            ring.Visibility = Visibility.Visible;
+            dot.Visibility = Visibility.Collapsed;
+            return;
+        }
+        ring.Visibility = Visibility.Collapsed;
+        dot.Visibility = Visibility.Visible;
         dot.Fill = e.State switch
         {
             EngineState.Running => Green,
-            EngineState.Warming or EngineState.Downloading => Orange,
+            EngineState.Warming => Orange,   // downloaded, loading — orange filled (macOS parity)
             EngineState.Failed => Red,
             _ => Gray,
         };
@@ -486,8 +501,11 @@ public sealed partial class MainWindow : Window
 
     /// <summary>An engine switched off (tts_engine/stt_engine = off): just a gray idle dot, no
     /// label (mirrors the macOS offEngineRow). No tooltip — like every dot now.</summary>
-    private static void ApplyOff(Microsoft.UI.Xaml.Shapes.Ellipse dot)
+    private static void ApplyOff(Microsoft.UI.Xaml.Shapes.Ellipse dot,
+                                 Microsoft.UI.Xaml.Controls.ProgressRing ring)
     {
+        ring.Visibility = Visibility.Collapsed;
+        dot.Visibility = Visibility.Visible;
         dot.Fill = Gray;
     }
 

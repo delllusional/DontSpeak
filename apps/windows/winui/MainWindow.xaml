@@ -109,7 +109,13 @@
                                     <TextBlock x:Name="TtsDetail" Text="{loc:Loc Key=status.engine.kokoro}" Opacity="0.6" VerticalAlignment="Center" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                                    <Ellipse x:Name="TtsDot" Width="11" Height="11" VerticalAlignment="Center" />
+                                    <!-- Dot for every settled state; an orange determinate progress ring swaps in while the
+                                         model is downloading (macOS StatusView parity), so a fetch reads as progress not gray. -->
+                                    <Grid Width="16" Height="16" VerticalAlignment="Center">
+                                        <Ellipse x:Name="TtsDot" Width="11" Height="11" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        <ProgressRing x:Name="TtsRing" Width="16" Height="16" IsIndeterminate="False"
+                                                      Maximum="1" Visibility="Collapsed" Foreground="#FF9F0A" />
+                                    </Grid>
                                 </StackPanel>
                             </Grid>
                             <StackPanel x:Name="TtsStats" Spacing="6" Margin="12,0,0,6" Visibility="Collapsed">
@@ -152,7 +158,13 @@
                                     <TextBlock x:Name="SttDetail" Text="{loc:Loc Key=status.engine.parakeet}" Opacity="0.6" VerticalAlignment="Center" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                                    <Ellipse x:Name="SttDot" Width="11" Height="11" VerticalAlignment="Center" />
+                                    <!-- Dot for every settled state; an orange determinate progress ring swaps in while the
+                                         model is downloading (macOS StatusView parity), so a fetch reads as progress not gray. -->
+                                    <Grid Width="16" Height="16" VerticalAlignment="Center">
+                                        <Ellipse x:Name="SttDot" Width="11" Height="11" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        <ProgressRing x:Name="SttRing" Width="16" Height="16" IsIndeterminate="False"
+                                                      Maximum="1" Visibility="Collapsed" Foreground="#FF9F0A" />
+                                    </Grid>
                                 </StackPanel>
                             </Grid>
                             <StackPanel x:Name="SttStats" Spacing="6" Margin="12,0,0,6" Visibility="Collapsed">

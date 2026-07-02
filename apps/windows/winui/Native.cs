@@ -226,6 +226,9 @@ internal sealed class HealthSnapshot
     public EngineDots EngineDots = new();
     public EngineSelection EngineSelection = new();
     public Dictation Dictation = new();
+    // The shared GPU runtime (~1.4 GB) is fetching — tied to no engine row, so the tray/stripe
+    // read it directly to show orange activity through the longest first-boot download.
+    public bool CudaDownloading;
 
     /// <summary>The engine object ACTUALLY doing TTS for the active tts_engine (Kokoro,
     /// or the OS voice when "system") — so dots/tooltips name what's really speaking.</summary>
@@ -250,6 +253,15 @@ internal sealed class HealthSnapshot
             Array.IndexOf(Activity.TrayIndicator, state + "_animated") >= 0;
         if (Activity.Recording && Colors("stt")) return TrayIcon.IconState.Recording;
         if (Activity.Speaking && Colors("tts")) return TrayIcon.IconState.Speaking;
+        // A local fetch in flight — a model (Kokoro TTS / Parakeet STT) OR the shared ~1.4 GB GPU
+        // runtime (tied to no engine row) → surface it so the tray icon and the window stripe show
+        // orange activity instead of a silent idle glyph. Not gated by `tray_indicator` (unlike
+        // stt/tts): a first-boot download is always worth showing. Ranks below live record/speak so
+        // an active interaction still wins the single indicator.
+        if (EngineDots.Kokoro.State == EngineState.Downloading ||
+            EngineDots.Parakeet.State == EngineState.Downloading ||
+            CudaDownloading)
+            return TrayIcon.IconState.Downloading;
         return TrayIcon.IconState.Idle;
     }
     // Per-engine stats for the expandable Kokoro/Parakeet rows, grouped into cohesive
@@ -306,6 +318,7 @@ internal sealed class HealthSnapshot
             // (absent ⇒ DTO field is null ⇒ keep the default), mirroring the old guard.
             if (dto.TrayIndicator is { } ti)
                 s.Activity.TrayIndicator = ti.Where(t => t is not null).Cast<string>().ToArray();
+            s.CudaDownloading = dto.CudaDownloading;
             if (dto.Dictation is { } d)
             {
                 s.Dictation.DictText = d.Text ?? "";
@@ -396,6 +409,7 @@ internal sealed record ModelStatusDto
     [JsonPropertyName("system")] public EngineObjDto? System { get; init; }
     [JsonPropertyName("claude_code")] public EngineObjDto? ClaudeCode { get; init; }
     [JsonPropertyName("tts_system")] public EngineObjDto? TtsSystem { get; init; }
+    [JsonPropertyName("cuda_downloading")] public bool CudaDownloading { get; init; }
 
     [JsonPropertyName("stt_engine")] public string? SttEngine { get; init; }
     [JsonPropertyName("stt_provider")] public string? SttProvider { get; init; }

@@ -149,6 +149,13 @@ pub struct ModelStatus {
     pub running: Running,
     pub dictation: Dictation,
     pub tray_indicator: Vec<String>,
+    /// The shared GPU runtime (~1.4 GB, Windows/Linux x86_64) is fetching. Unlike a MODEL
+    /// download it's tied to no engine row, so without this flag a first-boot GPU box shows a
+    /// silent idle tray/indicator through the LONGEST download. The tray/state-stripe OR this
+    /// with the per-engine `downloading` states so any active fetch reads as activity, not gray.
+    /// `#[serde(default)]` keeps older/foreign payloads (e.g. the macOS DTO) decoding cleanly.
+    #[serde(default)]
+    pub cuda_downloading: bool,
     pub stats: Stats,
     pub caps_events: Vec<CapsEvent>,
     pub build_id: String,
@@ -204,6 +211,7 @@ mod tests {
                 prompt_glow: false,
             },
             tray_indicator: vec!["stt".to_string(), "tts".to_string()],
+            cuda_downloading: false,
             stats: Stats {
                 tts: TtsSnapshot::default(),
                 stt: SttSnapshot::default(),

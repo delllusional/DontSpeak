@@ -549,6 +549,10 @@ pub(crate) fn model_status_json(
             .iter()
             .map(|k| k.as_str().to_string())
             .collect(),
+        // The shared GPU runtime fetch (tied to no engine row) — so the tray/state-stripe can
+        // show orange activity through it, not a silent idle glyph. `== Some(Cuda)` only (NOT the
+        // `downloading` helper's `|| All`): an `All` model fetch already lights the engine rows.
+        cuda_downloading: dl_target == Some(DownloadTarget::Cuda),
         // Live engine stats for the app's stats view: TTS + STT realtime factors /
         // counts, lifetime totals, and which models are resident in the warm helper.
         stats: Stats {

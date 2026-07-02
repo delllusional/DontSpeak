@@ -80,12 +80,26 @@ fn on_activate(app: &adw::Application) {
                     Some(s) => (s.running.tts_active, s.running.stt_active, s.running.muted),
                     None => (false, false, false),
                 };
+                // A local fetch in flight — a model (Kokoro/Parakeet) OR the shared ~1.4 GB GPU
+                // runtime (tied to no engine row) → tint the tray glyph orange too, so a first-boot
+                // download is visible in the tray, not just the window dot (parity with the fixed
+                // Windows tray + the macOS host).
+                let downloading = match &snap.status {
+                    Some(s) => {
+                        use ds_status::EngineState;
+                        s.cuda_downloading
+                            || EngineState::parse(&s.kokoro.state) == Some(EngineState::Downloading)
+                            || EngineState::parse(&s.parakeet.state) == Some(EngineState::Downloading)
+                    }
+                    None => false,
+                };
                 muted.set(is_muted);
                 if let Some(h) = &th {
                     h.update(move |t| {
                         t.muted = is_muted;
                         t.speaking = speaking;
                         t.recording = recording;
+                        t.downloading = downloading;
                     });
                 }
             }
