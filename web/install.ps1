@@ -131,11 +131,67 @@ try {
     Start-Process $ui
   }
 
+  # ── Windows uninstall entry (Settings > Apps / Control Panel > Programs) ──────────────
+  # The portable zip has no installer framework, so nothing would otherwise register DontSpeak
+  # in the standard uninstall UI (the retired Inno build did, via unins000.exe). Register a
+  # PER-USER key (HKCU — the install is per-user, no admin) and ship a small uninstall.ps1 next
+  # to the app. Its UninstallString runs the SAME teardown the retired installer did: unwire
+  # every client (dontspeak wire --all --remove), then remove the app, shortcut, autostart entry,
+  # downloaded models/config, and the uninstall key itself.
+  $ver = if ($zipName -match 'dontspeak-(.+?)-windows') { $Matches[1] } else { '' }
+  $unps = Join-Path $dest 'uninstall.ps1'
+  # Single-quoted here-string: the $PSScriptRoot / $env: refs below are LITERAL — they resolve
+  # when the uninstaller RUNS, not now. The dir is deleted last, from a detached cmd, because
+  # this script lives inside it (a running script can't delete its own folder).
+  @'
+# DontSpeak uninstaller — invoked by Windows (Settings > Apps) via the registered
+# UninstallString, or run directly. Removes everything the one-command installer created.
+$ErrorActionPreference = 'SilentlyContinue'
+$dest = $PSScriptRoot
+# 1. Stop the resident app + engine + warm helper so no files are locked.
+Get-Process ds-winui,dontspeak,ds-helper -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 500
+# 2. Unwire every client (MCP server + voice hooks) via the app's own remover — waited.
+$cli = Join-Path $dest 'dontspeak.exe'
+if (Test-Path $cli) { Start-Process -FilePath $cli -ArgumentList 'wire','--all','--remove' -Wait -WindowStyle Hidden }
+# 3. Start-menu shortcut + start-at-login entry.
+Remove-Item (Join-Path ([Environment]::GetFolderPath('Programs')) 'DontSpeak.lnk') -Force
+Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name DontSpeak
+# 4. Downloaded models + logs + config (everything DontSpeak wrote outside the install dir).
+Remove-Item "$env:LOCALAPPDATA\DontSpeak" -Recurse -Force
+Remove-Item "$env:APPDATA\DontSpeak" -Recurse -Force
+# 5. The uninstall registry entry itself (so it drops out of Settings > Apps).
+Remove-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DontSpeak' -Recurse -Force
+# 6. Delete the install dir LAST — from a detached cmd after a short delay, so this running
+#    script's own folder is free to remove once powershell exits.
+Start-Process cmd.exe -ArgumentList '/c',"timeout /t 2 >nul & rmdir /s /q `"$dest`"" -WindowStyle Hidden
+'@ | Set-Content -Path $unps -Encoding UTF8
+
+  $unkey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DontSpeak'
+  New-Item -Path $unkey -Force | Out-Null
+  $uninstallCmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $unps + '"'
+  $unprops = [ordered]@{
+    DisplayName          = 'DontSpeak'
+    DisplayVersion       = $ver
+    Publisher            = 'DontSpeak'
+    DisplayIcon          = (Join-Path $dest 'AppIcon.ico')
+    InstallLocation      = $dest
+    UninstallString      = $uninstallCmd
+    QuietUninstallString = $uninstallCmd
+    NoModify             = 1
+    NoRepair             = 1
+  }
+  foreach ($k in $unprops.Keys) {
+    $type = if ($unprops[$k] -is [int]) { 'DWord' } else { 'String' }
+    New-ItemProperty -Path $unkey -Name $k -Value $unprops[$k] -PropertyType $type -Force | Out-Null
+  }
+  Say "registered uninstall entry (Settings > Apps > DontSpeak)"
+
   Write-Host ""
   Write-Host "Done. Start a NEW Claude Code session to load the DontSpeak MCP server."
   Write-Host "Models download automatically in the background; watch progress in the app."
   Write-Host "Undo any time:  & '$cli' wire --all --remove"
-  Write-Host "Uninstall: close DontSpeak, run the unwire above, then delete $dest"
+  Write-Host "Uninstall: Settings > Apps > DontSpeak > Uninstall (or run '$unps')"
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

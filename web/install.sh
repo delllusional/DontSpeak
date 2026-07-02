@@ -74,6 +74,58 @@ verify_sha() {  # $1 = file, $2 = checksums url  (skips cleanly if unavailable)
   say "verified $base (sha256 ok)"
 }
 
+# Drop a STANDALONE uninstaller next to the CLI. macOS/Linux have no OS-level "installed apps"
+# registry for drag/tarball installs (unlike the Windows Settings>Apps entry install.ps1
+# registers), so a one-command script placed on PATH is the idiomatic equivalent. It reuses the
+# app's own `dontspeak wire --all --remove`, then removes the app, launchers, autostart, and all
+# data — mirroring scripts/uninstall.sh (macOS) / apps/linux/uninstall.sh (Linux). Self-deletes.
+UNINSTALLER="$HOME/.local/bin/dontspeak-uninstall"
+place_uninstaller() {
+  mkdir -p "$(dirname "$UNINSTALLER")"
+  cat > "$UNINSTALLER" <<'UNINSTALL'
+#!/usr/bin/env bash
+# DontSpeak uninstaller — unwires every client, removes the app + launchers + autostart + all
+# data. Placed by the one-command installer. Idempotent; missing pieces are skipped. Self-deletes.
+set -uo pipefail
+H="$HOME"
+case "$(uname -s)" in
+  Darwin)
+    APP="/Applications/DontSpeak.app"; CLI="$APP/Contents/MacOS/dontspeak"
+    osascript -e 'quit app "DontSpeak"' 2>/dev/null || true; sleep 1
+    pkill -f "DontSpeak.app/Contents/MacOS/DontSpeak" 2>/dev/null || true
+    pkill -f ds-helper 2>/dev/null || true
+    [ -x "$CLI" ] && "$CLI" wire --all --remove 2>/dev/null || true
+    rm -rf "$APP" \
+      "$H/Library/Application Support/DontSpeak" \
+      "$H/Library/Application Support/org.dontspeak.DontSpeak" \
+      "$H/Library/Application Support/FluidAudio" "$H/.cache/fluidaudio" \
+      "$H/Library/Caches/DontSpeak" "$H/Library/Caches/app.dontspeak.org" \
+      "$H/Library/Caches/org.dontspeak.DontSpeak" \
+      "$H/Library/HTTPStorages/app.dontspeak.org" \
+      "$H/Library/Preferences/app.dontspeak.org.plist" "$H/Library/Logs/DontSpeak"
+    rm -f "$H"/Library/Logs/dontspeak*.log* "$H"/Library/Logs/ds-helper.log
+    osascript -e 'tell application "System Events" to delete login item "DontSpeak"' 2>/dev/null || true
+    ;;
+  Linux)
+    BIN="${DONTSPEAK_INSTALL_DIR:-$H/.local/bin}"
+    APPS="${XDG_DATA_HOME:-$H/.local/share}/applications"
+    pkill -x ds-gtk 2>/dev/null || true; pkill -f ds-helper 2>/dev/null || true
+    [ -x "$BIN/dontspeak" ] && "$BIN/dontspeak" wire --all --remove 2>/dev/null || true
+    for b in ds-gtk dontspeak ds-helper; do rm -f "$BIN/$b"; done
+    rm -f "$APPS/dontspeak.desktop" "${XDG_CONFIG_HOME:-$H/.config}/autostart/dontspeak.desktop"
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS" 2>/dev/null || true
+    rm -rf "${XDG_CONFIG_HOME:-$H/.config}/dontspeak" \
+           "${XDG_STATE_HOME:-$H/.local/state}/dontspeak" \
+           "${XDG_CACHE_HOME:-$H/.cache}/dontspeak"
+    ;;
+esac
+echo "DontSpeak removed."
+rm -f "$0"
+UNINSTALL
+  chmod +x "$UNINSTALLER"
+  say "uninstaller placed: $UNINSTALLER (run it any time to fully remove DontSpeak)"
+}
+
 TMP=$(mktemp -d)
 # Signals too: a Ctrl-C mid-download must not leave the mktemp dir behind (POSIX sh
 # doesn't run the EXIT trap on an unhandled signal).
@@ -114,16 +166,18 @@ case "$OS" in
     cli="/Applications/DontSpeak.app/Contents/MacOS/dontspeak"
     if [ -x "$cli" ]; then say "wiring clients (MCP + hooks)"; "$cli" wire --all || warn "wire --all reported an issue"
     else warn "no bundled dontspeak CLI in the app — start it and use the Setup Integration action to wire"; fi
+    place_uninstaller
     say "launching DontSpeak (first boot downloads the voice models)"
     open -a /Applications/DontSpeak.app || warn "could not auto-launch — open DontSpeak from Applications"
-    cat <<'EOF'
+    cat <<EOF
 
 Done. Next:
   • On first launch, grant DontSpeak Accessibility + Microphone
     (System Settings › Privacy & Security) — one grant set, all on DontSpeak.app.
   • Start a NEW Claude Code session to load the DontSpeak MCP server.
   • Models download automatically in the background; watch progress in the app.
-  • Undo any time:  /Applications/DontSpeak.app/Contents/MacOS/dontspeak wire --all --remove
+  • Uninstall any time:  $UNINSTALLER
+    (or just unwire:  /Applications/DontSpeak.app/Contents/MacOS/dontspeak wire --all --remove)
 EOF
     ;;
 
@@ -165,12 +219,14 @@ EOF
     else
       say "no display detected — launch DontSpeak (ds-gtk) from your desktop to start model download"
     fi
-    cat <<'EOF'
+    place_uninstaller
+    cat <<EOF
 
 Done. Next:
   • Start a NEW Claude Code session to load the DontSpeak MCP server.
   • Grant /dev/uinput access with the sudo step printed above (synthetic keys / Caps-Lock).
-  • Undo any time:  ~/.local/bin/dontspeak wire --all --remove
+  • Uninstall any time:  $UNINSTALLER
+    (or just unwire:  ~/.local/bin/dontspeak wire --all --remove)
 EOF
     ;;
 
