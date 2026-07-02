@@ -64,6 +64,11 @@ try {
   if ($sumsUrl) {
     try {
       $sums = (Invoke-WebRequest -Headers @{ 'User-Agent' = 'dontspeak-install' } -Uri $sumsUrl).Content
+      # GitHub serves checksums.txt as application/octet-stream, so PowerShell 7 hands back a
+      # byte[] (5.1 gives a string). Splitting a byte[] on "`n" stringifies it to "104 101 …"
+      # with no newlines, so the zip is never "found" and the integrity check silently skips.
+      # Decode to text first when the body came back as bytes.
+      if ($sums -is [byte[]]) { $sums = [System.Text.Encoding]::UTF8.GetString($sums) }
       $want = ($sums -split "`n" | Where-Object { $_ -match ("\*?" + [regex]::Escape($zipName) + '\s*$') } |
                Select-Object -First 1) -replace '\s.*$', ''
       if ($want) {
@@ -91,8 +96,13 @@ try {
     # wire warning would abort the install after extraction. Contain it and warn instead
     # (parity with install.sh's `|| warn`).
     try {
-      & $cli wire --all 2>$null
-      if ($LASTEXITCODE -ne 0) { Warn "wire --all reported an issue (exit $LASTEXITCODE)" }
+      # dontspeak.exe is a GUI-subsystem binary: the call operator (`&`) launches it DETACHED
+      # and does not wait, so `$LASTEXITCODE` is never set (a hard error under StrictMode 2.0)
+      # AND the script races ahead before the wiring lands — leaving Claude Code unwired.
+      # Start-Process -Wait blocks on the process handle regardless of subsystem, and -PassThru
+      # surfaces the real exit code.
+      $wp = Start-Process -FilePath $cli -ArgumentList 'wire','--all' -Wait -PassThru -WindowStyle Hidden
+      if ($wp.ExitCode -ne 0) { Warn "wire --all reported an issue (exit $($wp.ExitCode))" }
     } catch { Warn "wire --all reported an issue: $($_.Exception.Message)" }
   }
   else { Warn "dontspeak.exe not found under $dest — the zip layout may have changed" }
@@ -105,6 +115,18 @@ try {
     $s = $w.CreateShortcut($lnk); $s.TargetPath = $ui
     $ico = Join-Path $dest 'AppIcon.ico'; if (Test-Path $ico) { $s.IconLocation = $ico }
     $s.Save()
+
+    # Start-at-login: bring DontSpeak up minimized to the tray on sign-in (the resident-host
+    # model — same as the retired Inno installer's Finished-page checkbox). The value NAME and
+    # the `--hidden` argument match the app's own tray toggle (winui TrayIcon.cs: RunValue
+    # "DontSpeak"), so the tray's "Start at login" checkmark stays in sync and toggling it there
+    # cleanly removes this. Opt out of the install-time enable with DONTSPEAK_NO_AUTOSTART=1.
+    if ($env:DONTSPEAK_NO_AUTOSTART -ne '1') {
+      $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+      New-ItemProperty -Path $runKey -Name 'DontSpeak' -Value ('"' + $ui + '" --hidden') -PropertyType String -Force | Out-Null
+      Say "enabled start-at-login (toggle in the tray menu; DONTSPEAK_NO_AUTOSTART=1 to skip)"
+    }
+
     Say "launching DontSpeak (first boot downloads the voice models)"
     Start-Process $ui
   }

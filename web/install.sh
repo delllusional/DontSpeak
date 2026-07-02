@@ -145,6 +145,19 @@ EOF
     # breaks on distros where sh is dash (Debian/Ubuntu).
     command -v bash >/dev/null 2>&1 || die "the bundled installer needs bash on PATH"
     bash "$inner"
+    # Start-at-login: DontSpeak is a resident tray/engine host, so enable autostart by default
+    # (parity with the Windows installer's Run key and the retired Inno "start at login" default).
+    # The bundled installer wrote the launcher into the XDG applications dir; XDG autostart is
+    # just a copy of that .desktop under ~/.config/autostart. Opt out with DONTSPEAK_NO_AUTOSTART=1.
+    if [ "${DONTSPEAK_NO_AUTOSTART:-0}" != "1" ]; then
+      desktop_src="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dontspeak.desktop"
+      autostart_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+      if [ -f "$desktop_src" ]; then
+        mkdir -p "$autostart_dir"
+        cp "$desktop_src" "$autostart_dir/dontspeak.desktop"
+        say "enabled start-at-login ($autostart_dir/dontspeak.desktop; DONTSPEAK_NO_AUTOSTART=1 to skip)"
+      fi
+    fi
     # Launch the GTK host if a display is available, so the engine boots + models download.
     if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v "$HOME/.local/bin/ds-gtk" >/dev/null 2>&1; then
       say "launching DontSpeak"
