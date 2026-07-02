@@ -87,7 +87,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: windows-portable-${{ matrix.arch }}
-          path: apps/windows/installer/Output/dontspeak-portable-${{ matrix.arch }}.zip
+          # dontspeak-<version>-windows-<x86_64|aarch64>.zip — the only zip Output holds.
+          path: apps/windows/installer/Output/*.zip
           if-no-files-found: error
 
       # The raw cross-built ARM64 binaries — consumed by windows-arm-smoke to RUN them on
@@ -279,8 +280,7 @@ jobs:
           # Windows + macOS are required; Linux packages are best-effort (the linux job
           # is continue-on-error) — nullglob drops them silently if the job produced none.
           FILES=(
-            artifacts/windows-portable-x64/dontspeak-portable-x64.zip
-            artifacts/windows-portable-arm64/dontspeak-portable-arm64.zip
+            artifacts/windows-portable-*/*.zip
             artifacts/macos-apps/*.app.zip
             artifacts/linux-packages-*/*
           )

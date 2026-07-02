@@ -61,7 +61,7 @@ done
 
 # ── 2. portable tarball (always) ─────────────────────────────────────────────────────────
 echo "==> [2/5] portable tarball"
-PKG="dontspeak-$VERSION-$ARCH"
+PKG="dontspeak-$VERSION-linux-$ARCH"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT INT TERM HUP
 ROOT="$STAGE/$PKG"
 install -d "$ROOT/bin" "$ROOT/share/applications" "$ROOT/share/icons/hicolor/scalable/apps" "$ROOT/udev"

@@ -21,7 +21,7 @@ NASM + LLVM on PATH (ring's crypto assembles with them).
 
 ```powershell
 pwsh apps/windows/installer/build-portable.ps1 -Arch x64 -SkipModels
-# → apps/windows/installer/Output/dontspeak-portable-x64.zip
+# → apps/windows/installer/Output/dontspeak-<version>-windows-x86_64.zip
 ```
 
 - `-Arch arm64` cross-compiles (needs the arm64 MSVC tools + clang).
@@ -36,4 +36,4 @@ Windows-ML DLLs) → optional model prefetch into `models\` → `Compress-Archiv
 are build artifacts (git-ignored).
 
 The full multi-arch release is built by tag-triggered CI (`.github/workflows/release.yml`),
-which publishes `dontspeak-portable-<arch>.zip` alongside a `checksums.txt`.
+which publishes `dontspeak-<version>-windows-<x86_64|aarch64>.zip` alongside a `checksums.txt`.

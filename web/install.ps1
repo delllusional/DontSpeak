@@ -27,20 +27,26 @@ $dry  = $env:DONTSPEAK_DRY_RUN -eq '1'
 function Say  ($m) { Write-Host "==> $m" }
 function Warn ($m) { Write-Warning $m }
 
-# arch: ARM64 → arm64, everything else (AMD64) → x64
-$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
-$zipName = "dontspeak-portable-$arch.zip"
+# Release-asset arch token is uname-style everywhere: ARM64 → aarch64, AMD64 → x86_64.
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
+$zipPattern = "^dontspeak-.+-windows-$arch\.zip$"   # dontspeak-<ver>-windows-<arch>.zip
 
-# Resolve an asset URL by literal filename off the latest release (or the override base).
-function Resolve-Asset ($name) {
-  if ($env:DONTSPEAK_DOWNLOAD_BASE) { return ($env:DONTSPEAK_DOWNLOAD_BASE.TrimEnd('/') + "/$name") }
+# Resolve an asset URL off the latest release: by regex pattern (the versioned zip) or
+# literal name (checksums.txt — the only fixed-name asset, and the only thing the
+# DONTSPEAK_DOWNLOAD_BASE override can still serve).
+function Resolve-Asset ($nameOrPattern, [switch]$Pattern) {
+  if ($env:DONTSPEAK_DOWNLOAD_BASE) {
+    if ($Pattern) { throw "DONTSPEAK_DOWNLOAD_BASE can't resolve the versioned asset '$nameOrPattern' — unset it" }
+    return ($env:DONTSPEAK_DOWNLOAD_BASE.TrimEnd('/') + "/$nameOrPattern")
+  }
   $rel = Invoke-RestMethod -Headers @{ 'User-Agent' = 'dontspeak-install' } -Uri $api
-  $a = $rel.assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
+  $a = $rel.assets | Where-Object { if ($Pattern) { $_.name -match $nameOrPattern } else { $_.name -eq $nameOrPattern } } |
+       Select-Object -First 1
   if ($a) { return $a.browser_download_url } else { return $null }
 }
 
-$zipUrl = Resolve-Asset $zipName
-if (-not $zipUrl) { throw "no Windows asset ($zipName) on the latest release of $repo" }
+$zipUrl = Resolve-Asset $zipPattern -Pattern
+if (-not $zipUrl) { throw "no Windows asset (dontspeak-<ver>-windows-$arch.zip) on the latest release of $repo" }
 Say "Windows $arch -> $zipUrl"
 
 if ($dry) { Write-Host "(dry run) would unzip to %LOCALAPPDATA%\Programs\DontSpeak then wire --all"; return }
@@ -48,6 +54,7 @@ if ($dry) { Write-Host "(dry run) would unzip to %LOCALAPPDATA%\Programs\DontSpe
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("dontspeak-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 try {
+  $zipName = [System.IO.Path]::GetFileName(([uri]$zipUrl).AbsolutePath)
   $zip = Join-Path $tmp $zipName
   Say "downloading"
   Invoke-WebRequest -Headers @{ 'User-Agent' = 'dontspeak-install' } -Uri $zipUrl -OutFile $zip

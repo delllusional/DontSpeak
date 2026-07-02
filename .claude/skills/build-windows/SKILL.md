@@ -19,7 +19,7 @@ The shipping app is the WinUI app (`ds-winui`); the engine + Caps hook run **in-
    ```powershell
    pwsh -NoProfile -File apps\windows\installer\build-portable.ps1 -Arch x64 -SkipModels
    ```
-   (`-Arch arm64` cross-compiles.) Slow (~min) — run in the background + read the tee'd log. On success: `DONE → ...\dontspeak-portable-x64.zip`.
+   (`-Arch arm64` cross-compiles.) Slow (~min) — run in the background + read the tee'd log. On success: `DONE → ...\dontspeak-<version>-windows-x86_64.zip`.
 2. **Stop running processes** so files aren't locked:
    ```powershell
    Get-Process ds-winui,dontspeak,ds-helper -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -28,7 +28,7 @@ The shipping app is the WinUI app (`ds-winui`); the engine + Caps hook run **in-
    ```powershell
    $dest = "$env:LOCALAPPDATA\Programs\DontSpeak"
    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
-   Expand-Archive apps\windows\installer\Output\dontspeak-portable-x64.zip $dest -Force
+   Expand-Archive (Get-Item apps\windows\installer\Output\dontspeak-*-windows-x86_64.zip) $dest -Force
    ```
 4. **Wire + launch**:
    ```powershell
@@ -39,7 +39,7 @@ The shipping app is the WinUI app (`ds-winui`); the engine + Caps hook run **in-
 
 ## Use case 2 — build the distributable package
 
-- **Portable zip** (the release artifact, self-contained): `build-portable.ps1 -Arch x64` / `-Arch arm64` → `Output\dontspeak-portable-<arch>.zip`. Bundles .NET + the Windows App SDK; the app downloads models on first launch (add nothing) or bundle them by dropping `-SkipModels`.
+- **Portable zip** (the release artifact, self-contained): `build-portable.ps1 -Arch x64` / `-Arch arm64` → `Output\dontspeak-<version>-windows-<x86_64|aarch64>.zip`. Bundles .NET + the Windows App SDK; the app downloads models on first launch (add nothing) or bundle them by dropping `-SkipModels`.
 - **Signing**: none — the app runs from an extracted folder, so there is nothing to code-sign; first launch may hit SmartScreen until download reputation accrues.
 - The full multi-arch release is tag-triggered CI (`release.yml`) — this skill is the fast local path.
 

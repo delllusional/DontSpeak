@@ -8,6 +8,19 @@ toolchain-PATH setup, the per-arch target derivation, and the engine cargo build
 ONE place (mirrors apps/macos/bundle-lib.sh + scripts/lib/common.sh).
 #>
 
+# The single-source workspace version (rust/Cargo.toml [workspace.package]) — the same
+# value scripts/version.sh reads; release asset names embed it.
+function Get-DsVersion {
+    param([Parameter(Mandatory)][string]$Repo)
+    $inBlock = $false
+    foreach ($line in Get-Content "$Repo\rust\Cargo.toml") {
+        if ($line -match '^\s*\[workspace\.package\]') { $inBlock = $true; continue }
+        if ($inBlock -and $line -match '^\s*\[') { break }
+        if ($inBlock -and $line -match '^\s*version\s*=\s*"([^"]+)"') { return $Matches[1] }
+    }
+    '0.0.0'
+}
+
 # Make the per-user Rust + .NET toolchains visible. PREPEND to the INHERITED PATH (don't
 # replace it) so NASM + LLVM added to THIS shell survive — ring's crypto assembles with
 # them (CI adds them via GITHUB_PATH; a local build may have them only on the session PATH).

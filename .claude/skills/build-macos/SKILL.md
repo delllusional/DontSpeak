@@ -33,7 +33,7 @@ open "$HOME/Applications/DontSpeak.app"
 ```bash
 apps/macos/dist-apps.sh
 ```
-- Output: **`~/Desktop/DontSpeak-<arch>.app.zip`** (override `OUTDIR`). One signed (+ notarized, stapled) `DontSpeak.app` zipped per arch. The one-command installer (`web/install.sh`) unzips it into `/Applications`.
+- Output: **`~/Desktop/dontspeak-<version>-macos-<aarch64|x86_64>.app.zip`** (override `OUTDIR`). One signed (+ notarized, stapled) `DontSpeak.app` zipped per arch. The one-command installer (`web/install.sh`) unzips it into `/Applications`.
 - `DONTSPEAK_ARCHES` — default `arm64`; set `"arm64 x86_64"` for both slices (the Intel slice ships without the Apple-Silicon-only Core ML shim).
 - `DONTSPEAK_DIST` — default **`1`** = hardened-runtime Developer-ID sign + notarize + staple the `.app` (needs the Apple creds), then zip. Set `DONTSPEAK_DIST=0` for a local ad-hoc unsigned zip (first launch hits Gatekeeper).
 - Notarize a pre-built app separately: `DONTSPEAK_NOTARY_PROFILE=<profile> apps/macos/notarize.sh <path>/DontSpeak.app`.

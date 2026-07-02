@@ -32,8 +32,8 @@ That is the whole install. It is idempotent — safe to re-run.
 
 1. Resolves the right asset on the latest GitHub Release of `delllusional/DontSpeak`
    (all portable archives — no interactive installer):
-   - macOS → `DontSpeak-<arm64|x86_64>.app.zip`
-   - Windows → `dontspeak-portable-<x64|arm64>.zip` (self-contained: bundles .NET + the
+   - macOS → `dontspeak-<version>-macos-<aarch64|x86_64>.app.zip`
+   - Windows → `dontspeak-<version>-windows-<x86_64|aarch64>.zip` (self-contained: bundles .NET + the
      Windows App SDK, so no runtime install and no elevation)
    - Linux → `dontspeak-<version>-<x86_64|aarch64>.tar.gz`
 2. Verifies its SHA-256 against the release's `checksums.txt`.

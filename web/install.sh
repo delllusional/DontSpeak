@@ -37,17 +37,16 @@ else
 fi
 
 # Resolve a release asset's download URL by a basename regex, off the latest release.
-# Uses the GitHub API so a versioned name (the Linux tarball) resolves without knowing
-# the version. DONTSPEAK_DOWNLOAD_BASE, if set, short-circuits to <base>/<name> — best-effort
-# for the fixed-name assets (app.zip / portable zip / checksums); it can't reconstruct the
-# versioned tarball.
+# Uses the GitHub API so the versioned asset names resolve without knowing the version.
+# DONTSPEAK_DOWNLOAD_BASE, if set, short-circuits to <base>/<name> — now only useful for
+# the fixed-name checksums.txt (every binary asset embeds the version).
 asset_url() {  # $1 = extended-regex matching the asset filename
   pat="$1"
   if [ -n "${DONTSPEAK_DOWNLOAD_BASE:-}" ]; then
     case "$pat" in *\[*)
       # A character class means a VERSIONED name (the Linux tarball) — un-escaping it
       # would build a garbage URL. Fail loudly instead of 404ing on nonsense.
-      die "DONTSPEAK_DOWNLOAD_BASE can't resolve the versioned asset '$pat' — unset it on Linux" ;;
+      die "DONTSPEAK_DOWNLOAD_BASE can't resolve the versioned asset '$pat' — unset it" ;;
     esac
     lit=$(printf '%s' "$pat" | sed 's/\\//g')   # unescape the ERE to a literal name
     printf '%s/%s\n' "${DONTSPEAK_DOWNLOAD_BASE%/}" "$lit"; return 0
@@ -86,14 +85,16 @@ ARCH=$(uname -m)
 case "$OS" in
   Darwin)
     case "$ARCH" in arm64|x86_64) : ;; *) die "unsupported macOS arch: $ARCH" ;; esac
-    ZIP_NAME="DontSpeak-$ARCH.app.zip"
-    url=$(asset_url "DontSpeak-$ARCH\\.app\\.zip") || true
+    # Release-asset arch token is uname-style everywhere: macOS arm64 → aarch64.
+    case "$ARCH" in arm64) AARCH=aarch64 ;; *) AARCH="$ARCH" ;; esac
+    ZIP_NAME="dontspeak-<ver>-macos-$AARCH.app.zip"
+    url=$(asset_url "dontspeak-[0-9][^/]*-macos-$AARCH\\.app\\.zip") || true
     [ -n "$url" ] || die "no macOS asset ($ZIP_NAME) on the latest release of $REPO"
     sums=$(asset_url "checksums\\.txt")
     say "macOS $ARCH → $url"
     [ "$DRY" = "1" ] && { echo "(dry run) would unzip DontSpeak.app into /Applications and wire --all"; exit 0; }
 
-    zip="$TMP/$ZIP_NAME"; http_dl "$url" "$zip"; verify_sha "$zip" "$sums"
+    zip="$TMP/$(basename "$url")"; http_dl "$url" "$zip"; verify_sha "$zip" "$sums"
     say "installing DontSpeak.app → /Applications"
     out="$TMP/app"; mkdir -p "$out"
     ditto -x -k "$zip" "$out"          # the zip holds DontSpeak.app/ at its root
@@ -128,8 +129,8 @@ EOF
 
   Linux)
     case "$ARCH" in x86_64|aarch64) : ;; *) die "unsupported Linux arch: $ARCH" ;; esac
-    url=$(asset_url "dontspeak-[0-9][^/]*-$ARCH\\.tar\\.gz") || true
-    [ -n "$url" ] || die "no Linux tarball (dontspeak-<ver>-$ARCH.tar.gz) on the latest release of $REPO"
+    url=$(asset_url "dontspeak-[0-9][^/]*-linux-$ARCH\\.tar\\.gz") || true
+    [ -n "$url" ] || die "no Linux tarball (dontspeak-<ver>-linux-$ARCH.tar.gz) on the latest release of $REPO"
     sums=$(asset_url "checksums\\.txt")
     say "Linux $ARCH → $url"
     [ "$DRY" = "1" ] && { echo "(dry run) would extract the tarball and run its install.sh (wires --all)"; exit 0; }

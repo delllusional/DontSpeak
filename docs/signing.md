@@ -16,7 +16,7 @@ but unsigned/ad-hoc — first launch then hits **SmartScreen** (Windows) / **Gat
 
 ## Windows — unsigned portable zip
 
-Windows ships as a **self-contained portable zip** (`dontspeak-portable-<arch>.zip`) that runs
+Windows ships as a **self-contained portable zip** (`dontspeak-<version>-windows-<arch>.zip`) that runs
 from an extracted folder under `%LOCALAPPDATA%\Programs\DontSpeak`, so there is **no Windows
 code signing** configured — nothing is code-signed and first launch may show a SmartScreen
 "unknown publisher" prompt that fades as download reputation accrues. If per-file Authenticode
@@ -30,7 +30,7 @@ signing is wanted later, sign the binaries inside the zip before `Compress-Archi
 The `macos` job runs the full distribution path (`apps/macos/dist-apps.sh` with
 `DONTSPEAK_DIST=1`): bundles `libonnxruntime.dylib`, signs inside-out with the **hardened
 runtime** + entitlements, then **notarizes + staples the `.app`** and zips it
-(`DontSpeak-<arch>.app.zip`) — a clean Gatekeeper launch. This activates when an Apple
+(`dontspeak-<version>-macos-<arch>.app.zip`) — a clean Gatekeeper launch. This activates when an Apple
 Developer ID cert is configured.
 
 ### Prerequisites
@@ -86,7 +86,7 @@ To override (e.g. a differently-named cert): `DONTSPEAK_CODESIGN_ID="…" ./apps
 
 | Apple secrets present | Windows | macOS |
 | --- | --- | --- |
-| no | unsigned `dontspeak-portable-<arch>.zip` | ad-hoc app zips |
-| yes | unsigned `dontspeak-portable-<arch>.zip` | signed + notarized app zips |
+| no | unsigned windows zip | ad-hoc app zips |
+| yes | unsigned windows zip | signed + notarized app zips |
 
 (Windows is always the unsigned portable zip — there is no Windows signing path.)

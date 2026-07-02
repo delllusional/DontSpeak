@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # dist-apps.sh — build the DontSpeak.app bundle(s) and zip each for distribution.
 #
-# Produces a signed + notarized + stapled DontSpeak.app packaged as DontSpeak-<arch>.app.zip.
+# Produces a signed + notarized + stapled DontSpeak.app packaged as
+# dontspeak-<version>-macos-<aarch64|x86_64>.app.zip.
 # The one-command installer (web/install.sh) unzips it straight into /Applications.
 #
 # Builds the arch slices named in $DONTSPEAK_ARCHES (default "arm64"; "x86_64" for the
@@ -14,7 +15,7 @@
 # multi-call `dontspeak` CLI (MCP server + hooks + `wire`, so an unzipped .app can
 # self-wire) + the icon. NO models — they download on first launch.
 #
-# Output: $OUTDIR/DontSpeak-<arch>.app.zip   (default OUTDIR=~/Desktop)
+# Output: $OUTDIR/dontspeak-<version>-macos-<arch>.app.zip   (default OUTDIR=~/Desktop)
 # Requires: a cargo that can target each arch (rustup for a CROSS slice; any cargo for a
 #           NATIVE slice). Override with $DONTSPEAK_CARGO.
 set -euo pipefail
@@ -37,6 +38,14 @@ if [ -z "$CARGO" ]; then
 fi
 OUTDIR="${OUTDIR:-$HOME/Desktop}"
 MENUBAR_SVG="$REPO/assets/menubar-icon.svg"
+VERSION="$(bash "$REPO/scripts/version.sh" 2>/dev/null | tr -d '\r\n')"
+[ -n "$VERSION" ] || VERSION=0.0.0
+# Asset-name arch token: uname-style (aarch64/x86_64), uniform across every platform's
+# release asset — the Swift/Apple toolchain keeps using the apple-style $ARCH (arm64).
+zip_name() { # $1 = apple arch (arm64|x86_64)
+  case "$1" in arm64) echo "dontspeak-$VERSION-macos-aarch64.app.zip" ;;
+               *)     echo "dontspeak-$VERSION-macos-$1.app.zip" ;; esac
+}
 HOST_SLIB="$RUST/target/release-ffi/libds_core.a"
 
 source "$HERE/bundle-lib.sh"   # compile_icon / assemble_app / resolve_sign_identity
@@ -117,13 +126,13 @@ build_arch() {   # $1 display arch, $2 rust triple, $3 swift arch
   # Notarize + staple the .app itself (notarize.sh zips it for submission, staples the app),
   # so the ticket travels inside the distribution zip. Skipped without credentials.
   if [ -n "${DONTSPEAK_NOTARY_PROFILE:-}" ] || [ -n "${DONTSPEAK_APPLE_ID:-}" ]; then
-    echo "==> [6/6] notarize + staple, then zip → $OUTDIR/DontSpeak-$ARCH.app.zip"
+    echo "==> [6/6] notarize + staple, then zip → $OUTDIR/$(zip_name "$ARCH")"
     "$HERE/notarize.sh" "$APP"
   else
-    echo "==> [6/6] NOT notarized (no credentials) — zipping the signed app → $OUTDIR/DontSpeak-$ARCH.app.zip"
+    echo "==> [6/6] NOT notarized (no credentials) — zipping the signed app → $OUTDIR/$(zip_name "$ARCH")"
     echo "    (set DONTSPEAK_NOTARY_PROFILE or the APPLE_* trio to notarize; else first launch hits Gatekeeper)"
   fi
-  local ZIP="$OUTDIR/DontSpeak-$ARCH.app.zip"
+  local ZIP="$OUTDIR/$(zip_name "$ARCH")"
   rm -f "$ZIP"
   # ditto --keepParent so the archive contains DontSpeak.app/ at its root (a plain unzip
   # yields /Applications/DontSpeak.app). This is also the notary-friendly zip format.
@@ -141,5 +150,5 @@ for A in $ARCHES; do
 done
 
 echo; echo "==> Done. App zips on $OUTDIR:"
-for ARCH in $ARCHES; do ls -lh "$OUTDIR/DontSpeak-$ARCH.app.zip"; done
+for ARCH in $ARCHES; do ls -lh "$OUTDIR/$(zip_name "$ARCH")"; done
 echo "BUILD_ID=$BUILD_ID  signed-with=$([ "$SIGN" = "-" ] && echo ad-hoc || echo "${SIGN%% (*}…")"
