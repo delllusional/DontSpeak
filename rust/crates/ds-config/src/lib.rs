@@ -46,13 +46,16 @@ pub use claude_code::{ClaudeCodeVoice, read_claude_code_voice};
 pub use earcon::{EarconEvent, SystemSound, resolve_cue, system_sounds};
 pub use enums::{
     DiarizerProvider, DropSpeechKind, ListenMode, NarrateKind, Provider, RealizedProvider,
-    SttEngine, TrayKind, TtsEngine, WireTarget, provider_pref_wants_gpu,
+    SttEngine, TrayKind, TtsEngine, WireTarget, intel_mac_builtin_ort_available,
+    provider_pref_wants_gpu,
 };
 pub use log::{
     LogLevel, aux_log_path, combined_log_json, log, log_tail, open_aux_log, rotate_if_large,
 };
 pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
-pub use paths::{Paths, coreml_dir, coreml_model_present, data_dir, model_dir};
+pub use paths::{
+    Paths, brew_onnxruntime_dylib, coreml_dir, coreml_model_present, data_dir, model_dir,
+};
 pub use pidfile::{engine_pid_alive, evict_stale_engine, pid_alive, read_engine_pid};
 pub use set_config::SetConfigArgs;
 pub use speakers::{Speaker, SpeakerStore};

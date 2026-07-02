@@ -975,24 +975,38 @@ pub(crate) mod tests {
         };
         assert!(off.resolved_tts().is_none() && !off.tts_on());
         assert!(off.resolved_stt().is_none());
-        // On the x86_64-macOS build the on-device rungs are unusable, so the default ladders
-        // fall through: TTS → system (`say`), STT → claude_code (LAST, always usable).
+        // On x86_64 macOS the on-device rungs are usable ONLY when an onnxruntime dylib is present
+        // (Homebrew keg / ORT_DYLIB_PATH — a runtime capability, see `intel_mac_builtin_ort_available`).
+        // Present ⇒ the built-in rungs win first; absent ⇒ the default ladders fall through:
+        // TTS → system (`say`), STT → claude_code (LAST, always usable).
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         {
-            assert_eq!(
-                VoiceConfig::default().resolved_tts(),
-                Some(TtsEngine::System)
-            );
-            assert_eq!(
-                VoiceConfig::default().resolved_stt(),
-                Some(SttEngine::ClaudeCode)
-            );
-            // A ladder with no usable rung resolves to None (= off), not a forced fallback.
             let only_builtin = VoiceConfig {
                 tts_engine: vec![TtsEngine::Kokoro],
                 ..VoiceConfig::default()
             };
-            assert!(only_builtin.resolved_tts().is_none());
+            if crate::enums::intel_mac_builtin_ort_available() {
+                assert_eq!(
+                    VoiceConfig::default().resolved_tts(),
+                    Some(TtsEngine::Kokoro)
+                );
+                assert_eq!(
+                    VoiceConfig::default().resolved_stt(),
+                    Some(SttEngine::BuiltIn)
+                );
+                assert_eq!(only_builtin.resolved_tts(), Some(TtsEngine::Kokoro));
+            } else {
+                assert_eq!(
+                    VoiceConfig::default().resolved_tts(),
+                    Some(TtsEngine::System)
+                );
+                assert_eq!(
+                    VoiceConfig::default().resolved_stt(),
+                    Some(SttEngine::ClaudeCode)
+                );
+                // A ladder with no usable rung resolves to None (= off), not a forced fallback.
+                assert!(only_builtin.resolved_tts().is_none());
+            }
         }
     }
 

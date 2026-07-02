@@ -93,6 +93,14 @@ impl SttEngine {
     /// `claude_code` always works (it delegates to Claude Code, no native deps). `off` never
     /// appears in a resolved ladder.
     pub(crate) fn stt_usable(self) -> bool {
+        // Intel macOS: built-in (Parakeet) ONNX STT is a RUNTIME capability (an onnxruntime dylib —
+        // Homebrew keg / ORT_DYLIB_PATH), invisible to the static `(os, arch)` matrix. Absent ⇒ this
+        // rung is skipped and the ladder falls through to `claude_code`.
+        if matches!(self, SttEngine::BuiltIn)
+            && cfg!(all(target_os = "macos", target_arch = "x86_64"))
+        {
+            return intel_mac_builtin_ort_available();
+        }
         self.stt_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
@@ -157,6 +165,14 @@ impl TtsEngine {
     /// available on macOS + Windows (no system synth wired on Linux). `off` never appears in a
     /// resolved ladder.
     pub(crate) fn tts_usable(self) -> bool {
+        // Intel macOS: built-in (Kokoro) ONNX TTS is a RUNTIME capability (an onnxruntime dylib —
+        // Homebrew keg / ORT_DYLIB_PATH), invisible to the static `(os, arch)` matrix. Absent ⇒ this
+        // rung is skipped and the ladder falls through to `system` (`say`).
+        if matches!(self, TtsEngine::Kokoro)
+            && cfg!(all(target_os = "macos", target_arch = "x86_64"))
+        {
+            return intel_mac_builtin_ort_available();
+        }
         self.tts_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
@@ -890,6 +906,21 @@ where
 fn built_in_usable_on(os: &str, arch: &str) -> bool {
     !(os == "macos" && arch == "x86_64")
 }
+
+/// The ONE runtime fact the static `(os, arch)` matrix above can't see: whether the built-in ONNX
+/// engines (Kokoro TTS / Parakeet STT) can actually run on **Intel macOS**. Every other platform
+/// either ships a pinned onnxruntime dist or has none at all; Intel is unique in needing an
+/// out-of-band runtime — a Homebrew keg ([`crate::brew_onnxruntime_dylib`]) or an explicit
+/// `ORT_DYLIB_PATH`. Only the runtime `tts_usable`/`stt_usable` consult this (NOT the pure `_on`
+/// matrix), so with the runtime present Intel resolves to `built_in` like every other platform,
+/// and without it the ladders fall through to `system` (`say`) / `claude_code` rather than
+/// resolving to an engine that can't load.
+pub fn intel_mac_builtin_ort_available() -> bool {
+    std::env::var_os("ORT_DYLIB_PATH")
+        .map(|p| std::path::Path::new(&p).is_file())
+        .unwrap_or(false)
+        || crate::brew_onnxruntime_dylib().is_some()
+}
 fn system_stt_buildable_on(os: &str, arch: &str) -> bool {
     os == "macos" && arch == "aarch64"
 }
@@ -1109,13 +1140,26 @@ mod tests {
     #[test]
     fn engine_usability_matches_host_target() {
         // The host build's `*_usable()` must agree with the pure `_on(OS, ARCH)` it delegates
-        // to (the cross-platform table below pins every OTHER target on this one host).
+        // to (the cross-platform table below pins every OTHER target on this one host) — EXCEPT the
+        // built-in engines on Intel macOS, whose runtime usability tracks the onnxruntime dylib
+        // probe (Homebrew keg / ORT_DYLIB_PATH), a runtime fact the static matrix can't see.
         let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        let intel_mac = os == "macos" && arch == "x86_64";
         for e in [TtsEngine::Off, TtsEngine::Kokoro, TtsEngine::System] {
-            assert_eq!(e.tts_usable(), e.tts_usable_on(os, arch), "{e:?}");
+            let want = if intel_mac && matches!(e, TtsEngine::Kokoro) {
+                intel_mac_builtin_ort_available()
+            } else {
+                e.tts_usable_on(os, arch)
+            };
+            assert_eq!(e.tts_usable(), want, "{e:?}");
         }
         for e in SttEngine::ALL.iter().copied() {
-            assert_eq!(e.stt_usable(), e.stt_usable_on(os, arch), "{e:?}");
+            let want = if intel_mac && matches!(e, SttEngine::BuiltIn) {
+                intel_mac_builtin_ort_available()
+            } else {
+                e.stt_usable_on(os, arch)
+            };
+            assert_eq!(e.stt_usable(), want, "{e:?}");
         }
     }
 

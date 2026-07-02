@@ -113,62 +113,15 @@ pub fn onnxruntime_dylib_path() -> Option<PathBuf> {
     let downloaded = model_path(onnxruntime_dylib_file());
     // Intel macOS is the one shipped platform with NO pinned dist to download (Microsoft
     // publishes arm64-only macOS archives since 1.2x) — fall back to a Homebrew-installed
-    // runtime when nothing is downloaded. Platforms WITH a pinned dist never consult brew:
-    // the SHA-pinned official bytes stay the source of truth there.
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    // runtime when nothing is downloaded. Resolved in ds-config so the loader and the
+    // engine-usability gate share ONE source; returns `None` on platforms with a pinned dist,
+    // where the SHA-pinned official bytes stay the source of truth.
     if !downloaded.as_deref().is_some_and(|p| p.is_file())
-        && let Some(brew) = brew_onnxruntime_dylib()
+        && let Some(brew) = ds_config::brew_onnxruntime_dylib()
     {
         return Some(brew);
     }
     downloaded
-}
-
-/// Homebrew fallback for INTEL macOS. homebrew-core bottles onnxruntime for Intel (a
-/// community build — consulted only because there is nothing official to pin on this
-/// target). The `opt` symlink is version-stable: /usr/local (Intel default prefix) and
-/// /opt/homebrew (covers a brew migrated onto an arm-prefix layout). We pick the
-/// VERSIONED file (`libonnxruntime.<ver>.dylib`) and require the same 1.27 floor as the
-/// pins — older loaders deadlock on the SepFormer graph; `ort`'s api-24 handshake (and
-/// the major-only [`onnxruntime_dylib_version_ok`] id scan) guard the ceiling.
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-fn brew_onnxruntime_dylib() -> Option<PathBuf> {
-    for lib_dir in [
-        "/usr/local/opt/onnxruntime/lib",
-        "/opt/homebrew/opt/onnxruntime/lib",
-    ] {
-        let Ok(entries) = std::fs::read_dir(lib_dir) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let name = e.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if let Some(v) = name
-                .strip_prefix("libonnxruntime.")
-                .and_then(|r| r.strip_suffix(".dylib"))
-                && parse_dylib_version(v).is_some_and(|ver| ver >= (1, 27, 0))
-                && e.path().is_file()
-            {
-                return Some(e.path());
-            }
-        }
-    }
-    None
-}
-
-/// Parse a dotted dylib version ("1.27.0", "1.27") into a comparable triple; missing
-/// parts read as 0, anything non-numeric (including the bare "1" major-only symlink,
-/// which carries no minor to gate on) is `None`.
-#[cfg(any(all(target_os = "macos", target_arch = "x86_64"), test))]
-fn parse_dylib_version(v: &str) -> Option<(u32, u32, u32)> {
-    let mut parts = v.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next().unwrap_or("0").parse().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some((major, minor, patch))
 }
 
 /// The onnxruntime version the workspace `ort` pin (api-24) requires at runtime —
@@ -710,18 +663,5 @@ mod tests {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(name, "libonnxruntime.so");
         assert!(!name.is_empty());
-    }
-
-    /// The brew-probe version gate: full versions parse and compare against the 1.27
-    /// floor; the bare major-only symlink ("1") and junk are rejected (no minor to gate on).
-    #[test]
-    fn brew_dylib_version_gate() {
-        assert_eq!(parse_dylib_version("1.27.0"), Some((1, 27, 0)));
-        assert_eq!(parse_dylib_version("1.27"), Some((1, 27, 0)));
-        assert!(parse_dylib_version("1.28.1").is_some_and(|v| v >= (1, 27, 0)));
-        assert!(parse_dylib_version("1.24.2").is_some_and(|v| v < (1, 27, 0)));
-        assert_eq!(parse_dylib_version("1"), None); // major-only symlink
-        assert_eq!(parse_dylib_version("1.27.0.extra"), None);
-        assert_eq!(parse_dylib_version("current"), None);
     }
 }

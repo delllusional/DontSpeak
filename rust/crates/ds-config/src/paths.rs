@@ -246,6 +246,61 @@ pub fn model_dir() -> Option<PathBuf> {
     Some(BaseDirs::new()?.cache_dir().join(APP_DIR).join("models"))
 }
 
+/// The Homebrew-installed onnxruntime dylib on **Intel macOS**, or `None` elsewhere / when no
+/// suitable keg is installed. Intel is the one shipped platform with NO pinned dist to download
+/// (Microsoft publishes arm64-only macOS archives since 1.2x), so the built-in ONNX engines fall
+/// back to a Homebrew build. Lives in ds-config (the lowest crate) so the runtime loader
+/// (`ds_model::onnxruntime_dylib_path`) AND the engine-usability gate
+/// (`enums::intel_mac_builtin_ort_available`) resolve it from ONE place. Picks the VERSIONED file
+/// (`libonnxruntime.<ver>.dylib`) at/above the 1.27 pin floor — older loaders deadlock on the
+/// SepFormer graph; `ort`'s api-24 handshake + the major-only id scan guard the ceiling. The `opt`
+/// symlink is version-stable across `/usr/local` (Intel prefix) and `/opt/homebrew`.
+pub fn brew_onnxruntime_dylib() -> Option<PathBuf> {
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        for lib_dir in [
+            "/usr/local/opt/onnxruntime/lib",
+            "/opt/homebrew/opt/onnxruntime/lib",
+        ] {
+            let Ok(entries) = std::fs::read_dir(lib_dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let name = e.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if let Some(v) = name
+                    .strip_prefix("libonnxruntime.")
+                    .and_then(|r| r.strip_suffix(".dylib"))
+                    && parse_dylib_version(v).is_some_and(|ver| ver >= (1, 27, 0))
+                    && e.path().is_file()
+                {
+                    return Some(e.path());
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    {
+        None
+    }
+}
+
+/// Parse a dotted dylib version ("1.27.0", "1.27") into a comparable triple; a missing patch reads
+/// as 0, anything non-numeric (including the bare "1" major-only symlink, which carries no minor to
+/// gate on) is `None`.
+#[cfg(any(all(target_os = "macos", target_arch = "x86_64"), test))]
+fn parse_dylib_version(v: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = v.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
 /// The FluidAudio Core ML / ANE model cache (Kokoro TTS, Parakeet STT, diarization), a
 /// `coreml/` subdir under [`model_dir`]. We pass this EXPLICITLY to the shim's
 /// `smk_*_init` so FluidAudio downloads here instead of its own scattered defaults
@@ -357,5 +412,18 @@ mod tests {
     #[test]
     fn model_dir_resolves() {
         assert!(model_dir().is_some());
+    }
+
+    /// The brew-probe version gate: full versions parse and compare against the 1.27 floor; the
+    /// bare major-only symlink ("1") and junk are rejected (no minor to gate on).
+    #[test]
+    fn brew_dylib_version_gate() {
+        assert_eq!(parse_dylib_version("1.27.0"), Some((1, 27, 0)));
+        assert_eq!(parse_dylib_version("1.27"), Some((1, 27, 0)));
+        assert!(parse_dylib_version("1.28.1").is_some_and(|v| v >= (1, 27, 0)));
+        assert!(parse_dylib_version("1.24.2").is_some_and(|v| v < (1, 27, 0)));
+        assert_eq!(parse_dylib_version("1"), None); // major-only symlink
+        assert_eq!(parse_dylib_version("1.27.0.extra"), None);
+        assert_eq!(parse_dylib_version("current"), None);
     }
 }
