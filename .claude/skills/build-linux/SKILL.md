@@ -1,6 +1,6 @@
 ---
 name: build-linux
-description: Build / clean-reinstall / package DontSpeak on Linux (GTK4 desktop host). Two use cases — (1) local clean build + reinstall for dev testing, (2) build distributable packages (.tar.gz always; .deb/.rpm/AppImage when their tool is installed). Use when asked to build, reinstall, package, or uninstall the Linux app. Runs on Linux (the WSL/VM host) — NOT on Windows/macOS.
+description: Build / clean-reinstall / package DontSpeak on Linux (GTK4 desktop host). Two use cases — (1) local clean build + reinstall for dev testing, (2) build the distributable tarball (.tar.gz always; AppImage when its tool is installed — .deb/.rpm were dropped 2026-07-02). Use when asked to build, reinstall, package, or uninstall the Linux app. Runs on Linux (the WSL/VM host) — NOT on Windows/macOS.
 ---
 
 # DontSpeak — Linux (build / reinstall / package)
@@ -37,18 +37,16 @@ For a **clean** reinstall: stop the running host first, then run `apps/linux/uni
 
 ```bash
 apps/linux/package.sh                 # all formats → ./dist  (OUTDIR=~/Desktop to change)
-apps/linux/package.sh --skip-appimage # tarball + deb + rpm only
+apps/linux/package.sh --skip-appimage # tarball only
 ```
 Builds the engine bins + the GTK host, then emits to `dist/`:
 
 - **`dontspeak-<ver>-<arch>.tar.gz`** — **always**. Self-contained portable bundle (binaries + `.desktop` + icon + udev rule + an `install.sh`); the universal baseline, like the Windows portable zip. Extract and run `./install.sh`.
-- **`.deb`** — when `cargo deb` is installed (`cargo install cargo-deb`). Layout from `[package.metadata.deb]` in `apps/linux/gtk/Cargo.toml`; GTK deps auto-detected via `$auto`.
-- **`.rpm`** — when `cargo generate-rpm` is installed (`cargo install cargo-generate-rpm`). Layout from `[package.metadata.generate-rpm]`.
 - **AppImage** — **experimental**; only when `linuxdeploy` + `linuxdeploy-plugin-gtk` are on PATH (GTK bundling is finicky — verify on the target). Skip with `--skip-appimage`.
 
-Each native format is best-effort: a missing tool is skipped with an install hint, so the tarball always succeeds. The tarball/`.deb`/`.rpm` path is now CI-exercised on every release (see NOTE); the **AppImage** path + `uninstall.sh` remain unexercised — **verify those on Linux**.
+AppImage is best-effort: a missing tool is skipped with an install hint, so the tarball always succeeds. The tarball path is CI-exercised on every release (see NOTE); the **AppImage** path + `uninstall.sh` remain unexercised — **verify those on Linux**. (`.deb`/`.rpm` were dropped 2026-07-02: nothing consumed them and without a hosted apt/dnf repo they can't update — revisit with a real repo or Flatpak.)
 
-> NOTE: `release.yml` now builds + uploads the Linux packages (`.tar.gz`/`.deb`/`.rpm`) via a `linux` job on `ubuntu-26.04` that runs `apps/linux/package.sh --skip-appimage` (installing `cargo-deb` + `cargo-generate-rpm` and the real GTK/libadwaita/layer-shell deps) and uploads them as the `linux-packages` artifact (`if-no-files-found: error`).
+> NOTE: `release.yml` builds + uploads the Linux tarball via a per-arch `linux` matrix (ubuntu-26.04 + ubuntu-26.04-arm) that runs `apps/linux/package.sh --skip-appimage` with the real GTK/libadwaita/layer-shell deps and uploads `linux-packages-<arch>` artifacts (`if-no-files-found: error`).
 
 ## Uninstall / clean
 
@@ -60,4 +58,4 @@ Mirrors the macOS `scripts/uninstall.sh`: stops the GUI host, un-wires the Claud
 
 ## Notes
 
-- The package + uninstall scripts were added 2026-06-28 to close the Windows/macOS symmetry. The `package.sh --skip-appimage` path (tarball + `.deb` + `.rpm`) is now run in CI on `ubuntu-26.04` every release, so it's exercised. The **AppImage** path and `uninstall.sh` are still **unexercised on Linux** — first run of those on a Linux host should be treated as verification.
+- The package + uninstall scripts were added 2026-06-28 to close the Windows/macOS symmetry. The `package.sh --skip-appimage` path (tarball) is run in CI on both ubuntu-26.04 arches every release, so it's exercised. The **AppImage** path and `uninstall.sh` are still **unexercised on Linux** — first run of those on a Linux host should be treated as verification.

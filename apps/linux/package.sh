@@ -3,23 +3,20 @@
 # portable-zip and the macOS .app.zip). Closes the "no Linux package" gap.
 #
 # Always produces a self-contained PORTABLE TARBALL (works on any distro, no packaging
-# toolchain). Additionally produces a .deb, .rpm, and AppImage when the respective tool
-# is installed — each is best-effort and skipped (with a hint) if its tool is missing, so
-# the tarball is the guaranteed baseline.
+# toolchain) — the one Linux release asset, mirroring the single Windows zip. Native
+# .deb/.rpm were dropped (nothing consumed them and, without a hosted apt/dnf repo,
+# they can't update); revisit with a real repo or an AppImage/Flatpak.
 #
 #   .tar.gz  — always (bin/ + .desktop + udev rule + an install.sh; extract & run install.sh)
-#   .deb     — needs `cargo deb`        (cargo install cargo-deb)
-#   .rpm     — needs `cargo generate-rpm`(cargo install cargo-generate-rpm)
 #   AppImage — needs `linuxdeploy` + linuxdeploy-plugin-gtk on PATH  (EXPERIMENTAL)
 #
-# Payload (all formats): the GTK host ds-gtk (hosts the engine in-process) + the
-# MCP/hook bin dontspeak + the warm-synth helper ds-helper + dontspeak.desktop +
-# app-icon.svg + the /dev/uinput udev rule. The .deb/.rpm layout is declared in
-# apps/linux/gtk/Cargo.toml ([package.metadata.deb] / [package.metadata.generate-rpm]).
+# Payload: the GTK host ds-gtk (hosts the engine in-process) + the MCP/hook bin
+# dontspeak + the warm-synth helper ds-helper + dontspeak.desktop + app-icon.svg +
+# the /dev/uinput udev rule.
 #
-#   apps/linux/package.sh                 # all formats, OUTDIR=./dist
+#   apps/linux/package.sh                 # tarball (+ AppImage when tooling exists)
 #   OUTDIR=~/Desktop apps/linux/package.sh
-#   apps/linux/package.sh --skip-appimage # tarball + deb + rpm only
+#   apps/linux/package.sh --skip-appimage # tarball only
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,17 +35,13 @@ esac; done
 # otherwise put a carriage return into every artifact filename).
 VERSION="$(bash "$REPO/scripts/version.sh" 2>/dev/null | tr -d '\r\n')"
 [ -n "$VERSION" ] || VERSION=0.0.0
-case "$(uname -m)" in
-  x86_64)  ARCH=x86_64;  DEB_ARCH=amd64 ;;
-  aarch64) ARCH=aarch64; DEB_ARCH=arm64 ;;
-  *) ARCH="$(uname -m)"; DEB_ARCH="$ARCH" ;;
-esac
+ARCH="$(uname -m)"
 mkdir -p "$OUTDIR"
 echo "==> DontSpeak $VERSION ($ARCH) → $OUTDIR"
 
 # ── 1. build the CLI bins (rust/ workspace) + the GTK host (standalone crate) ─────────────
 # The GTK host links the engine in-process via ds-core; there is no standalone daemon bin.
-echo "==> [1/5] cargo build --release (dontspeak + ds-helper + ds-gtk)"
+echo "==> [1/3] cargo build --release (dontspeak + ds-helper + ds-gtk)"
 ( cd "$REPO/rust" && cargo build --release --locked -p dontspeak && \
   cargo build --release --locked -p ds-tts --bin ds-helper )
 ( cd "$GTK_DIR" && cargo build --release --locked )
@@ -60,7 +53,7 @@ for b in "$GREL/ds-gtk" "$RREL/dontspeak" "$RREL/ds-helper"; do
 done
 
 # ── 2. portable tarball (always) ─────────────────────────────────────────────────────────
-echo "==> [2/5] portable tarball"
+echo "==> [2/3] portable tarball"
 PKG="dontspeak-$VERSION-linux-$ARCH"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT INT TERM HUP
 ROOT="$STAGE/$PKG"
@@ -98,29 +91,8 @@ TARBALL="$OUTDIR/$PKG.tar.gz"
 tar -C "$STAGE" -czf "$TARBALL" "$PKG"
 echo "    → $TARBALL"
 
-# ── 3. .deb (best-effort) ────────────────────────────────────────────────────────────────
-echo "==> [3/5] .deb"
-if cargo deb --version >/dev/null 2>&1; then
-  # --no-build: reuse the release bins we just built (cargo-deb would only rebuild the gtk crate).
-  ( cd "$GTK_DIR" && cargo deb --no-build --output "$OUTDIR/dontspeak_${VERSION}_${DEB_ARCH}.deb" ) \
-    && echo "    → $OUTDIR/dontspeak_${VERSION}_${DEB_ARCH}.deb" \
-    || echo "    !! cargo deb failed (see above)"
-else
-  echo "    (skip — install with: cargo install cargo-deb)"
-fi
-
-# ── 4. .rpm (best-effort) ────────────────────────────────────────────────────────────────
-echo "==> [4/5] .rpm"
-if cargo generate-rpm --version >/dev/null 2>&1; then
-  ( cd "$GTK_DIR" && cargo generate-rpm ) \
-    && { mv -f "$GTK_DIR"/target/generate-rpm/*.rpm "$OUTDIR/" 2>/dev/null || true; echo "    → $OUTDIR/*.rpm"; } \
-    || echo "    !! cargo generate-rpm failed (see above)"
-else
-  echo "    (skip — install with: cargo install cargo-generate-rpm)"
-fi
-
-# ── 5. AppImage (best-effort, EXPERIMENTAL — needs GTK bundling) ──────────────────────────
-echo "==> [5/5] AppImage"
+# ── 3. AppImage (best-effort, EXPERIMENTAL — needs GTK bundling) ──────────────────────────
+echo "==> [3/3] AppImage"
 if [ "$SKIP_APPIMAGE" = "1" ]; then
   echo "    (skipped — --skip-appimage)"
 elif command -v linuxdeploy >/dev/null 2>&1 && command -v linuxdeploy-plugin-gtk >/dev/null 2>&1; then

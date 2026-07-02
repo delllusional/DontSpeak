@@ -2,7 +2,7 @@ name: Release
 
 # Build the Windows portable zips (self-contained — x64 + ARM64) and the macOS app zips
 # (signed + notarized DontSpeak.app — Apple silicon AND Intel/x86_64) on a version tag,
-# then publish them to a GitHub Release alongside the Linux packages + a checksums.txt.
+# then publish them to a GitHub Release alongside the Linux tarballs + a checksums.txt.
 # The one-command installers at dontspeak.org download + verify these assets.
 # Trigger by pushing a tag:  git tag v0.1.0 && git push origin v0.1.0
 #
@@ -215,12 +215,12 @@ jobs:
           path: dist/*.app.zip
           if-no-files-found: error
 
-  # ── Linux packages (.tar.gz + .deb + .rpm) ──────────────────────────────────
+  # ── Linux tarball ────────────────────────────────────────────────────────────
   # The standalone GTK host (apps/linux/gtk) + the engine bins, packaged by
   # apps/linux/package.sh. AppImage is skipped (its GTK bundling is finicky in CI).
   # continue-on-error: the GTK host needs a recent libadwaita (>= 1.7) — on an older
   # runner image this build can fail; that must NOT block the Windows/macOS release,
-  # so Linux packages are best-effort and attached only when the job produces them.
+  # so the Linux tarball is best-effort and attached only when the job produces it.
   linux:
     needs: [check, tests]
     # The GTK host needs a RECENT GNOME stack — libadwaita >= 1.7 (v1_7) + GTK 4.12 +
@@ -247,10 +247,7 @@ jobs:
         with:
           extra: build-essential libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev
 
-      - name: Packaging tools (cargo-deb + cargo-generate-rpm)
-        run: cargo install cargo-deb cargo-generate-rpm
-
-      - name: Build Linux packages (.tar.gz + .deb + .rpm)
+      - name: Build the Linux tarball
         run: ./apps/linux/package.sh --skip-appimage
 
       - uses: actions/upload-artifact@v7

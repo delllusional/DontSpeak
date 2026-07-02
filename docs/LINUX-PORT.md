@@ -2,7 +2,7 @@
 
 **Status (2026-06): shipped.** GTK4/libadwaita GUI host (`apps/linux/gtk/`, crate
 `ds-linux-gtk`) hosting the engine in-process, Linux backends for `ds-platform`
-(evdev/uinput/x11rb) and `ds-aec` (PipeWire `module-echo-cancel`), `.deb`/`.rpm` packaging
+(evdev/uinput/x11rb) and `ds-aec` (PipeWire `module-echo-cancel`), tarball packaging
 (`apps/linux/package.sh`) — built and tested in CI on `ubuntu-26.04`.
 
 Design rule (same as macOS/Windows): the `ds-core` Rust engine behind the C ABI is the
