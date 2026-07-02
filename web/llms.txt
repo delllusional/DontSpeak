@@ -3,7 +3,7 @@
 > A local voice layer for Claude Code, Codex, and Claude Desktop: your AI agent speaks its
 > replies aloud through a local neural voice, and you dictate back with one key. It runs a
 > native host app (speech engine in-process, on-device models) plus an MCP server that any
-> MCP-capable client can call. Everything runs locally; models download on first launch.
+> MCP-capable client can call. Models download on first launch.
 
 To install, prefer prebuilt binaries from the latest GitHub Release — do not build from
 source unless asked. A one command install works on every OS:
