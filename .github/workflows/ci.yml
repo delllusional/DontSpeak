@@ -1,0 +1,188 @@
+name: CI
+
+# Run the project's ACTUAL test suite. The bulk lives in the Rust workspace
+# (cargo test --workspace); the macOS SwiftPM package adds DontSpeakLogicTests and the
+# WinUI app adds winui.tests (xunit) — each on its own OS leg.
+#
+# Cost/coverage split:
+#   • Per commit / PR  → Linux only, essentials only (clippy + tests + cargo-deny — fast;
+#     covers the platform-agnostic majority). cargo-deny is dependency-graph analysis
+#     (advisories/bans/licenses/sources against rust/Cargo.lock), not compiled code, so
+#     it's cheap and Linux-only-covers-everything the same way clippy below is.
+#   • Release pipeline → the FULL ubuntu + windows-2025 + macos-26 matrix PLUS the
+#     hygiene gate (rustfmt + rustdoc), so the macOS Core ML/ANE and Windows CUDA-path
+#     tests (cfg-gated to their own OS) run — and format/doc drift is cleaned up —
+#     before anything is built or published. release.yml calls this with
+#     full-matrix: true.
+# This is `workflow_call`-able so the release reuses the EXACT same test definition.
+
+on:
+  # Per-commit + PR test runs (Linux-only — the fast, platform-agnostic majority).
+  push:
+  pull_request:
+  # Manual runs (workflow_dispatch) and the release gate (workflow_call from release.yml)
+  # also run tests; the release passes full-matrix: true for all three OSes.
+  workflow_dispatch: {}
+  workflow_call:
+    inputs:
+      full-matrix:
+        description: Run on all three OSes (Linux + Windows + macOS) instead of just Linux.
+        type: boolean
+        default: false
+
+# Never cancel a run: every per-commit check should FINISH (green), so a commit on the
+# branch page never shows a cancelled (red) mark. Grouped per ref, so the release's
+# full-matrix gate (a tag ref) is independent of the per-commit branch check — they run in
+# parallel and both go green. Deliberate trade-off: when a commit and its tag are pushed
+# together, the quick Linux per-commit check runs alongside the release's full gate.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Hygiene gate — RELEASE-ONLY (runs when full-matrix is requested, i.e. from
+  # release.yml): rustfmt across both workspaces + rustdoc -D warnings. Deliberately
+  # SKIPPED per-commit — the fast loop enforces only the essentials (clippy + tests);
+  # the release enforces every optional checker too, so drift gets cleaned up at least
+  # once per release instead of nagging every commit. Fix drift locally BEFORE tagging
+  # (see .claude/skills/make-release): `cargo fmt` in rust/ and apps/linux/gtk/, then
+  # `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`.
+  hygiene:
+    name: hygiene (rustfmt + rustdoc)
+    if: inputs.full-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/linux-build-deps
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rust -> target
+            apps/linux/gtk -> target
+      - name: cargo fmt --check (rust workspace)
+        working-directory: rust
+        run: cargo fmt --all --check
+      - name: cargo fmt --check (GTK host crate)
+        working-directory: apps/linux/gtk
+        run: cargo fmt --all --check
+      - name: cargo doc -D warnings
+        working-directory: rust
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
+  # Clippy gate: deny ALL warnings across the workspace + every target (incl. tests). Linux
+  # only per-commit (matches the test default); covers the platform-agnostic majority plus the
+  # Linux cfg paths. Needs the same ALSA/PulseAudio dev libs as the tests (clippy compiles the
+  # cpal / ds-aec crates). Platform-specific (macOS/Windows cfg) lints are caught when the
+  # release runs the full matrix's tests; clippy here only type-checks the host's active cfg.
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/linux-build-deps
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: cargo clippy -D warnings
+        working-directory: rust
+        # --keep-going: lint every crate even after one fails, so a multi-crate workspace
+        # surfaces ALL lints in one run instead of stopping at the first.
+        run: cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings
+
+  # cargo-deny gate: advisories (RustSec) + bans (duplicate/banned crates) + licenses
+  # (rust/deny.toml's [licenses.allow] + arpabet's BSD-4-Clause exception) + sources
+  # (only crates.io, no stray git/registry deps). Linux-only, no OS matrix — unlike
+  # clippy/test, this is dependency-GRAPH analysis, not compiled code: deny.toml's
+  # [graph] targets = [] (unset) means cargo-deny already evaluates every platform's
+  # conditional dependencies (Windows/macOS/Linux cfg-gated deps alike) regardless of
+  # which OS runs the check, so running this on all three release-matrix OSes would be
+  # pure duplication of the same Cargo.lock analysis.
+  # Since release.yml's `tests` job does `uses: ./.github/workflows/ci.yml`, this job
+  # automatically becomes part of the release gate too — intended, not a bug.
+  cargo-deny:
+    name: cargo-deny (advisories + bans + licenses + sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rust/Cargo.toml
+
+  # Pick the OS matrix: Linux-only by default, all three when full-matrix is requested
+  # (the release gate). push/PR events have no `inputs`, so they fall to Linux-only.
+  setup:
+    name: test matrix
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.pick.outputs.os }}
+    steps:
+      - id: pick
+        run: |
+          if [ "${{ inputs.full-matrix }}" = "true" ]; then
+            echo 'os=["ubuntu-latest","windows-2025","macos-26"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: setup
+    name: tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.setup.outputs.os) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/linux-build-deps
+        if: runner.os == 'Linux'
+
+      - uses: ./.github/actions/ring-asm-windows
+        if: runner.os == 'Windows'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      # cfg-gated platform code (macOS Core ML / ANE, Windows CUDA EP) compiles on its
+      # own OS via the matrix, so on the full-matrix release run every test executes
+      # somewhere. --locked: build exactly the committed Cargo.lock, fail on drift.
+      - name: cargo test (workspace)
+        working-directory: rust
+        run: cargo test --workspace --locked
+
+      # Swift formatting gate — DELIBERATELY DISABLED, same policy as the Rust lint
+      # gates above: CI runs unit tests only. (Config: apps/macos/.swift-format.)
+      # - name: swift format lint (macOS app)
+      #   if: runner.os == 'macOS'
+      #   run: >
+      #     swift format lint --strict --recursive
+      #     apps/macos/Sources apps/macos/SmKokoro/Sources apps/macos/Tests
+
+      # macOS SwiftUI app: run swift test only if the package declares test targets.
+      - name: swift test (macOS app, if any)
+        if: runner.os == 'macOS'
+        env:
+          # Pin the staticlib to the app's macOS floor (Package.swift .macOS(.v14)) so the
+          # swift-test link doesn't warn "built for newer macOS" — same pin as build.sh.
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+        run: |
+          if grep -q 'testTarget' apps/macos/Package.swift 2>/dev/null; then
+            # Package.swift force_loads ../../rust/target/release-ffi/libds_core.a (the
+            # FFI staticlib, release-ffi profile — see apps/macos/build.sh). swift test links
+            # it, so build it FIRST or the link fails with "library ... not found".
+            ( cd rust && cargo build --profile release-ffi --locked -p ds-core )
+            cd apps/macos && swift test
+          else
+            echo "no Swift test targets in apps/macos/Package.swift — skipping"
+          fi
+
+      # WinUI app: the xunit pure-seam tests (apps/windows/winui.tests). Shared composite
+      # (also used by csharp.yml) — see .github/actions/dotnet-test-winui for the TODO
+      # on the hosted-runner testhost crash this works around.
+      - name: dotnet test (WinUI app)
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/dotnet-test-winui

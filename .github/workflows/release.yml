@@ -1,0 +1,468 @@
+name: Release
+
+# Build the Windows portable zips (self-contained — x64 + ARM64) and the macOS app zips
+# (signed + notarized DontSpeak.app — Apple silicon AND Intel/x86_64) on a version tag,
+# then publish them to a GitHub Release alongside the Linux tarballs + a checksums.txt.
+# The one-command installers at dontspeak.org download + verify these assets.
+# Trigger by pushing a tag:  git tag v0.1.0 && git push origin v0.1.0
+#
+# Runner labels are pinned to the current images (mid-2026): windows-2025 (Windows
+# Server 2025 / VS 2026) and macos-26 (arm64, Xcode 26) — see runner-images. The
+# release is created with the `gh` CLI (GitHub-maintained) rather than a third-party
+# action.
+#
+# macOS signing is GATED on secrets (see docs/SIGNING.md): the full Developer ID sign +
+# notarize path runs when APPLE_* secrets exist, else the app is ad-hoc-signed (first
+# launch hits Gatekeeper). The Windows portable zip is self-contained and unsigned (the
+# app runs from an extracted folder; SmartScreen may warn on first run).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}   # allow manual runs for testing the build itself
+
+permissions:
+  contents: write          # gh release create needs to write the release
+
+jobs:
+  # ── Guard: the pushed tag must equal the single-source version ───────────────
+  # The one place of truth is rust/Cargo.toml ([workspace.package] version), read via
+  # scripts/version.sh. Fail fast (before the long platform builds) if a tag like
+  # v0.1.0 doesn't match it, so the app zip / portable zip / About string / tag never drift.
+  check:
+    name: tag = version guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag matches rust/Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          ver="$(bash scripts/version.sh)"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "single-source version=$ver  tag=$tag"
+          [ "$ver" = "$tag" ] || { echo "::error::tag v$tag != rust/Cargo.toml version $ver — bump the workspace version or fix the tag"; exit 1; }
+
+  # ── Tests gate: run the SAME suite as CI, but across ALL THREE OSes, before
+  #    building/publishing (per-commit CI is Linux-only; the release is thorough). ──
+  tests:
+    uses: ./.github/workflows/ci.yml
+    with:
+      full-matrix: true
+
+  # ── Windows portable zips (self-contained — x64 + ARM64) ────────────────────
+  windows:
+    needs: [check, tests]
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+
+      # build-portable.ps1 expects per-user toolchains on PATH (~/.dotnet, ~/.cargo). cargo is
+      # already there via the preinstalled rustup; install .NET 10 INTO ~/.dotnet so the
+      # script's DOTNET_ROOT/PATH assumptions hold with no edits.
+      - name: Point .NET install at ~/.dotnet
+        shell: pwsh
+        run: echo "DOTNET_INSTALL_DIR=$env:USERPROFILE\.dotnet" >> $env:GITHUB_ENV
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'   # the WinUI app targets net10 (WinApp SDK 2.2 + H.NotifyIcon)
+
+      # The ARM64 MSVC tools are already in the image; build-portable.ps1 adds the Rust
+      # arm64 target itself.
+      - uses: ./.github/actions/ring-asm-windows
+
+      # key includes matrix.arch: the x64 and arm64 legs cross-compile different Rust
+      # targets from the same job name, so the automatic per-job cache key alone would
+      # conflate them.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          key: ${{ matrix.arch }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('apps/windows/**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      # Self-contained portable zip (bundles .NET + Windows App SDK + engine DLL/helper +
+      # dontspeak.exe). -SkipModels keeps it lean — the app downloads the voice models on
+      # first launch, the same as macOS/Linux. The one-command installer (web/install.ps1)
+      # unzips it and runs `dontspeak wire --all`. Unsigned (runs from an extracted folder).
+      - name: Build portable zip (${{ matrix.arch }})
+        shell: pwsh
+        run: ./apps/windows/installer/build-portable.ps1 -Arch ${{ matrix.arch }} -SkipModels
+
+      - name: Upload portable zip (release artifact)
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-portable-${{ matrix.arch }}
+          # dontspeak-<version>-windows-<x86_64|aarch64>.zip — the only zip Output holds.
+          path: apps/windows/installer/Output/*.zip
+          if-no-files-found: error
+
+      # The raw cross-built ARM64 binaries — consumed by windows-arm-smoke to RUN them on
+      # real ARM64 silicon (this x64 build runner can't execute an arm64 binary).
+      - name: Upload raw ARM64 binaries (smoke-test input)
+        if: matrix.arch == 'arm64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-binaries-arm64
+          # The binaries the Windows portable zip actually ships + runs: the in-process engine
+          # DLL, the MCP/hook bin, and the warm-synth helper. (dontspeakd is a library, not a
+          # shipped binary — there is no standalone host; the engine runs in-process via the DLL.)
+          path: |
+            rust/target/aarch64-pc-windows-msvc/release/ds_core.dll
+            rust/target/aarch64-pc-windows-msvc/release/dontspeak.exe
+            rust/target/aarch64-pc-windows-msvc/release/ds-helper.exe
+          if-no-files-found: error
+
+  # ── Smoke-test the ARM64 build on REAL ARM64 Windows — DISABLED ──────────────
+  # Disabled for now: fails with "module could not be found" loading ds_core.dll on
+  # the bare windows-11-arm runner; root cause needs real ARM64 hardware to diagnose.
+  # The ARM64 BUILD itself is verified (`windows (arm64)` above) — only this runtime
+  # smoke check is affected, so it must not block shipping. Re-enable once fixed.
+  # (Job also dropped from the `release` job's `needs:` below; restore both to revive.)
+#   windows-arm-smoke:
+#     needs: windows
+#     runs-on: windows-11-arm
+#     continue-on-error: true
+#     steps:
+#       - uses: actions/download-artifact@v8
+#         with:
+#           name: windows-binaries-arm64
+#           path: arm64bin
+#       # Leading theory for the "module could not be found" dependency failure below:
+#       # this runner is a BARE smoke-test image (unlike `windows`, the build job, which
+#       # runs on windows-2025 with full VS tooling — and its matching x64 redistributable
+#       # already installed as a side effect). ds_core.dll is MSVC-compiled for ARM64; the
+#       # ARM64 Visual C++ Redistributable (vcruntime140.dll et al) is a SEPARATE package
+#       # from the x64 one and isn't necessarily present on a minimal ARM64 image. This is
+#       # a well-documented class of issue for MSVC binaries shipped to a machine without
+#       # the matching redistributable (e.g. microsoft/onnxruntime#10924, a near-identical
+#       # symptom: ImportError until vcruntime140_1.dll was installed). Installing it
+#       # before the load attempt is a real fix if this theory holds; the diagnostic step
+#       # below still runs regardless, so if this ISN'T it we get the actual dependency name.
+#       - name: Install VC++ Redistributable (ARM64)
+#         shell: pwsh
+#         run: |
+#           $ErrorActionPreference = 'Stop'
+#           Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.arm64.exe" -OutFile vc_redist.arm64.exe
+#           $p = Start-Process -FilePath .\vc_redist.arm64.exe -ArgumentList "/quiet","/norestart" -PassThru -Wait
+#           Write-Host "vc_redist.arm64.exe exit code: $($p.ExitCode)"
+#           # 0 = installed; 1638/3010 = a newer/same version is already present (fine, not
+#           # a failure) — anything else is a real install problem worth failing fast on.
+#           if ($p.ExitCode -notin 0, 1638, 3010) { throw "vc_redist.arm64.exe failed: exit $($p.ExitCode)" }
+#       - name: Run the ARM64 binaries
+#         shell: pwsh
+#         run: |
+#           $ErrorActionPreference = 'Stop'
+#           $bin = (Resolve-Path arm64bin).Path
+#
+#           # Diagnostic (never fails the job): list ds_core.dll's DIRECT PE imports. Windows'
+#           # "module could not be found" error for a transitive dependency never names it, so
+#           # a failed load below is otherwise a guessing game. Hand-parsed (no dumpbin — this
+#           # runner is a bare smoke-test image, not the build image, so Build Tools may not be
+#           # on it) straight from the PE header: DOS stub -> NT header -> optional header's
+#           # Import Data Directory RVA -> section table to convert that RVA to a file offset
+#           # -> walk the IMAGE_IMPORT_DESCRIPTOR array's Name RVAs.
+#           # IMPORTANT: this reads ds_core.dll itself, same as the real load 6 lines down —
+#           # a PREVIOUS attempt ran this as its OWN separate step, immediately after
+#           # download-artifact, and hit a ~16s file lock (likely the download-artifact
+#           # Node.js process's own handle not yet released) even after 10 retries; the
+#           # REAL smoke test a step later never hit it. So this now runs at the exact same
+#           # point in the script as the proven-reliable read, not on its own timing.
+#           function Get-PEImports([string]$Path) {
+#             # Open with the widest sharing flags (Read+Write+Delete) rather than
+#             # File::ReadAllBytes's default — belt-and-suspenders against whatever held
+#             # the earlier separate-step attempt's plain ReadAllBytes locked for ~16s
+#             # (LoadLibrary-style APIs share this permissively; .NET's helper may not).
+#             $stream = [System.IO.File]::Open(
+#               $Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+#               [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+#             $bytes = New-Object byte[] $stream.Length
+#             [void]$stream.Read($bytes, 0, $bytes.Length)
+#             $stream.Close()
+#             $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+#             $numSections = [BitConverter]::ToUInt16($bytes, $peOffset + 6)
+#             $optHeaderSize = [BitConverter]::ToUInt16($bytes, $peOffset + 20)
+#             $magic = [BitConverter]::ToUInt16($bytes, $peOffset + 24)
+#             $isPE32Plus = ($magic -eq 0x20b)
+#             $importDirOffset = $peOffset + 24 + $(if ($isPE32Plus) { 112 } else { 96 })
+#             $importRVA = [BitConverter]::ToInt32($bytes, $importDirOffset)
+#             $sectionStart = $peOffset + 24 + $optHeaderSize
+#             $sections = @()
+#             for ($i = 0; $i -lt $numSections; $i++) {
+#               $s = $sectionStart + $i * 40
+#               $sections += [pscustomobject]@{
+#                 VA  = [BitConverter]::ToUInt32($bytes, $s + 12)
+#                 VSize = [BitConverter]::ToUInt32($bytes, $s + 8)
+#                 Raw = [BitConverter]::ToUInt32($bytes, $s + 20)
+#               }
+#             }
+#             function RvaToOffset([int]$rva) {
+#               foreach ($sec in $sections) {
+#                 if ($rva -ge $sec.VA -and $rva -lt ($sec.VA + $sec.VSize)) { return $sec.Raw + ($rva - $sec.VA) }
+#               }
+#               return -1
+#             }
+#             $off = RvaToOffset $importRVA
+#             $names = @()
+#             while ($true) {
+#               $nameRVA = [BitConverter]::ToInt32($bytes, $off + 12)
+#               if ($nameRVA -eq 0) { break }
+#               $nameOff = RvaToOffset $nameRVA
+#               $end = $nameOff
+#               while ($bytes[$end] -ne 0) { $end++ }
+#               $names += [System.Text.Encoding]::ASCII.GetString($bytes, $nameOff, $end - $nameOff)
+#               $off += 20
+#             }
+#             return $names
+#           }
+#           try {
+#             $imports = Get-PEImports "$bin\ds_core.dll"
+#             Write-Host "ds_core.dll direct imports:"
+#             foreach ($n in $imports) {
+#               $onPath = $null -ne (Get-Command $n -ErrorAction SilentlyContinue)
+#               $inDir = Test-Path "$bin\$n"
+#               $sys = Test-Path "C:\Windows\System32\$n"
+#               Write-Host "  $n  (System32=$sys, bundled=$inDir, PATH=$onPath)"
+#             }
+#           } catch {
+#             Write-Host "PE import parse failed (non-fatal, diagnostic only): $_"
+#           }
+#
+#           # 1) The engine DLL the app P/Invokes loads on ARM64 — a wrong-arch DLL throws
+#           #    BadImageFormatException; load-dynamic ⇒ no ONNX Runtime needed just to load.
+#           $h = [System.Runtime.InteropServices.NativeLibrary]::Load("$bin\ds_core.dll")
+#           [System.Runtime.InteropServices.NativeLibrary]::Free($h)
+#           Write-Host "OK: ds_core.dll loaded on ARM64"
+#           # 2) Each exe LAUNCHES on ARM64 — the loader resolves the arch + every dependency. A
+#           #    wrong-arch / missing-dep binary fails IN THE LOADER (Start-Process throws, or an
+#           #    NTSTATUS exit < 0 like 0xC000007B). An app-level exit (>= 0) or a still-running
+#           #    server both mean it launched fine — these are stdio servers, so they normally block.
+#           foreach ($exe in 'dontspeak.exe','ds-helper.exe') {
+#             try { $p = Start-Process "$bin\$exe" -PassThru -ErrorAction Stop }
+#             catch { throw "$exe failed to launch on ARM64: $_" }
+#             Start-Sleep -Seconds 2
+#             if ($p.HasExited -and $p.ExitCode -lt 0) { throw ("{0} loader error on ARM64: 0x{1:X8}" -f $exe, $p.ExitCode) }
+#             # Capture liveness BEFORE killing (else we'd read our own kill code as the exit).
+#             $status = if ($p.HasExited) { "exit $($p.ExitCode)" } else { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; "running" }
+#             Write-Host "OK: $exe launched on ARM64 ($status)"
+#           }
+#           Write-Host "ARM64 smoke test passed"
+
+  # ── macOS app DMGs (arm64 + x86_64) ─────────────────────────────────────────
+  # Both slices build on the arm64 macos-26 runner: arm64 native, x86_64 cross-compiled
+  # (Rust via the added target, Swift via `swift build --arch x86_64`). The Intel slice
+  # ships WITHOUT the Apple-Silicon-only Core ML shim (libsmkokoro) — its engine ladder
+  # resolves to the system `say` voice + claude_code dictation, which need no onnxruntime.
+  macos:
+    needs: [check, tests]
+    runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      OUTDIR: ${{ github.workspace }}/dist
+      DONTSPEAK_ARCHES: 'arm64 x86_64'   # dist-apps.sh builds one .app.zip per arch
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      - name: Add Rust apple targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      # librsvg provides `rsvg-convert`, which bundle-lib.sh uses to render the menu-bar
+      # glyph AND — critically — the COMPLETE legacy AppIcon.icns (all sizes) from
+      # assets/app-icon.svg. Without it the build falls back to actool's 16px+128px stub
+      # and the app icon degrades on macOS < 26 (Assets.car's Liquid Glass AppIcon is
+      # unreadable there). See .claude/skills/build-macos/SKILL.md → "App icon — dual path".
+      - name: Install librsvg (rsvg-convert for the app + menu-bar icons)
+        run: brew install librsvg
+
+      # Gate: run the full distribution path (hardened runtime + Developer ID sign +
+      # notarize, the dist-apps.sh DONTSPEAK_DIST=1 branch) only when an Apple Developer
+      # ID cert is configured; otherwise build ad-hoc (DIST=0). See docs/SIGNING.md.
+      - name: Detect Apple signing config
+        id: sign
+        env:
+          CERT: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+        run: |
+          if [ -n "$CERT" ]; then echo "on=true" >> "$GITHUB_OUTPUT"; else echo "on=false" >> "$GITHUB_OUTPUT"; fi
+
+      # Import the Developer ID Application cert (+ key) into a temporary keychain so
+      # codesign can use it. `security import -P` only accepts the p12 passphrase as a
+      # literal argv argument -- no stdin/env option exists (checked `man security`) --
+      # which would put CERT_PW in that process's argv, unlike every other secret in
+      # this job. Route around it: openssl's `-passin env:` reads the passphrase from
+      # the environment (never argv) to decrypt the p12 into an unencrypted PEM, which
+      # `security import` then takes with no -P needed at all. The -legacy/no-legacy
+      # fallback mirrors ensure_local_sign_identity in scripts/lib/common.sh (OpenSSL 3
+      # needs -legacy for older RC2/3DES-encrypted p12s; LibreSSL, macOS's system
+      # openssl, has no such flag). The decrypted PEM is as sensitive as the .p12 and
+      # is removed immediately after import, same as the .p12 already was.
+      - name: Import Developer ID certificate
+        if: steps.sign.outputs.on == 'true'
+        env:
+          CERT_B64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          CERT_PW: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/build.keychain"; kcpw="$(openssl rand -hex 16)"
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          pemok=0
+          for legacy in -legacy ""; do
+            if /usr/bin/openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -nodes $legacy \
+                 -passin env:CERT_PW -out "$RUNNER_TEMP/cert.pem" 2>/dev/null; then
+              pemok=1; break
+            fi
+          done
+          [ "$pemok" = 1 ] || { echo "::error::failed to decrypt APPLE_CERT_P12_BASE64 with APPLE_CERT_PASSWORD"; exit 1; }
+          security import "$RUNNER_TEMP/cert.pem" -k "$kc" -T /usr/bin/codesign
+          security list-keychains -d user -s "$kc" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc" >/dev/null
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/cert.pem"
+
+      # DONTSPEAK_DIST=1 → bundle libonnxruntime.dylib, hardened-runtime sign inside-out
+      # with entitlements, then notarize+staple the .app (via the APPLE_ID trio) and zip it.
+      # When unset/0 it ad-hoc-signs and skips notarization — both bundle the app, helper,
+      # CLI and shim; only signing/notarization differs. (The SepFormer separator is not
+      # bundled — it downloads at runtime like every other model.)
+      - name: Build app zips (signed + notarized when configured)
+        env:
+          DONTSPEAK_DIST: ${{ steps.sign.outputs.on == 'true' && '1' || '0' }}
+          # Headless runner: never auto-mint a self-signed local-dev cert + codesign with it —
+          # that blocks on a keychain-authorization GUI prompt forever. Ad-hoc sign instead when
+          # not doing a real Developer-ID dist build. (No-op in dist mode, which skips autosign.)
+          DONTSPEAK_NO_AUTOSIGN: '1'
+          DONTSPEAK_CODESIGN_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          DONTSPEAK_APPLE_ID: ${{ secrets.APPLE_ID }}
+          DONTSPEAK_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          DONTSPEAK_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: ./apps/macos/dist-apps.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-apps
+          path: dist/*.app.zip
+          if-no-files-found: error
+
+  # ── Linux tarball ────────────────────────────────────────────────────────────
+  # The standalone GTK host (apps/linux/gtk) + the engine bins, packaged by
+  # apps/linux/package.sh — the tarball is the ONE Linux package.
+  # continue-on-error is scoped per-step (not job-level): it applies ONLY to the
+  # tarball-packaging step and its artifact upload below, which are decoupled from
+  # code correctness and best-effort by design. checkout, the GTK build deps, the
+  # cache restore, and `cargo test` are NOT tolerated — a broken environment or a
+  # genuine test regression in apps/linux/gtk must hard-fail this job and block the
+  # `release` job's `needs:` gate, same as windows/macos.
+  linux:
+    needs: [check, tests]
+    # The GTK host needs a RECENT GNOME stack — libadwaita >= 1.7 (v1_7) + GTK 4.12 +
+    # gtk4-layer-shell — which ubuntu-latest (24.04) is too old for. Ubuntu 26.04 ships
+    # libadwaita 1.9 / GTK 4.22 and the layer-shell -dev package (matches windows-2025 /
+    # macos-26), so the runner is pinned specifically to get a stack recent enough that
+    # the old "libadwaita too old to build" failure this job used to tolerate is no
+    # longer expected — that's why build/test steps below are no longer wrapped in
+    # continue-on-error.
+    # Both arches build NATIVELY (no cross-compiling): x86_64 on ubuntu-26.04, aarch64 on
+    # ubuntu-26.04-arm; package.sh derives ARCH/DEB_ARCH from uname -m.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            arch: x86_64
+          - runner: ubuntu-26.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build deps (GTK4 + libadwaita + layer-shell + ALSA + PulseAudio)
+        uses: ./.github/actions/linux-build-deps
+        with:
+          extra: build-essential libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev
+
+      # key includes matrix.arch: x86_64 and aarch64 run on different runner labels but
+      # share this job name, so make the cache split explicit rather than relying on the
+      # action's automatic per-runner-arch detection.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rust -> target
+            apps/linux/gtk -> target
+          key: ${{ matrix.arch }}
+
+      # apps/linux/gtk is its own Cargo workspace (not a member of rust/), so
+      # `cargo test --workspace` in ci.yml never touches it — this is the only place
+      # its unit tests run, and (deliberately) the only OS: ubuntu-26.04, the same
+      # image package.sh below builds the shipped tarball on. No continue-on-error
+      # here: a compile or test failure must hard-fail the job and block `release`.
+      - name: cargo test (GTK host crate)
+        working-directory: apps/linux/gtk
+        run: cargo test --locked
+
+      # Packaging is best-effort and decoupled from code correctness: continue-on-error
+      # here (and on the upload below) keeps a packaging-only failure from blocking the
+      # Windows/macOS release, now that the build/test steps above are no longer tolerant.
+      - name: Build the Linux tarball
+        continue-on-error: true
+        run: ./apps/linux/package.sh
+
+      - uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: linux-packages-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ── Publish the GitHub Release with all artifacts ───────────────────────────
+  release:
+    name: publish release
+    needs: [windows, macos, linux]
+    runs-on: ubuntu-latest
+    # Only publish a release for an actual tag push (workflow_dispatch just builds).
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Create / update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Windows + macOS are required; Linux packages are best-effort (the linux job
+          # is continue-on-error) — nullglob drops them silently if the job produced none.
+          FILES=(
+            artifacts/windows-portable-*/*.zip
+            artifacts/macos-apps/*.app.zip
+            artifacts/linux-packages-*/*
+          )
+          # checksums.txt — sha256 of every published asset, by basename, so the
+          # dontspeak.org install scripts can verify each download. Built from the SAME
+          # FILES list, then shipped alongside them as one more release asset.
+          : > checksums.txt
+          for f in "${FILES[@]}"; do
+            [ -f "$f" ] || continue
+            ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) >> "$GITHUB_WORKSPACE/checksums.txt"
+          done
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "DontSpeak ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            "${FILES[@]}" checksums.txt

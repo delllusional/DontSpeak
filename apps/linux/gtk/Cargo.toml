@@ -1,0 +1,48 @@
+# DontSpeak Linux GUI host — GTK4 + libadwaita, the native modern GNOME analogue of the
+# macOS SwiftUI app and the Windows WinUI app. It HOSTS the engine in-process via the same
+# ds-core C ABI the other two hosts use (callable directly here since it's Rust),
+# and renders the engine's pushed status as a tray icon, a health panel, and a focus-safe
+# dictation overlay.
+#
+# Standalone (NOT a member of the rust/ workspace): it has Linux-only GTK system deps, so
+# keeping it out of the workspace leaves the macOS/Windows `cargo build` untouched — exactly
+# why apps/macos and apps/windows are separate builds too.
+[package]
+name = "ds-linux-gtk"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+description = "DontSpeak Linux GUI host (GTK4 + libadwaita): tray, health panel, dictation overlay; hosts the engine in-process via ds-core."
+
+[[bin]]
+name = "ds-gtk"
+path = "src/main.rs"
+
+[dependencies]
+# The modern GNOME stack (matches GTK 4.22 / libadwaita 1.9 on Ubuntu 26.04+). The
+# gtk-rs ecosystem releases in lockstep — gtk4 0.11 / libadwaita 0.9 / gtk4-layer-shell
+# 0.8 all bind the same gtk4-sys generation (only one crate may `links = "gtk-4"`).
+# v4_12 unlocks CssProvider::load_from_string et al. (GTK 4.22 on the target satisfies it).
+gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
+# v1_7 unlocks AdwInlineViewSwitcher (the segmented view switcher) on top of AdwToolbarView
+# et al. (libadwaita 1.9 on the target satisfies it).
+adw = { package = "libadwaita", version = "0.9", features = ["v1_7"] }
+# Push status from the engine thread into the GTK main loop.
+async-channel = "2"
+# StatusNotifierItem tray (freedesktop spec; GTK4 dropped legacy StatusIcon). Pure-Rust DBus.
+# `blocking` gives a self-contained DBus thread (no async runtime to integrate with GTK).
+ksni = { version = "0.3", features = ["blocking"] }
+# wlr-layer-shell surface for the focus-safe dictation overlay (Wayland; X11 fallback inside).
+gtk4-layer-shell = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pure-Rust SVG rasterizer for the tray status glyph — renders the shared assets/tray-icon.svg
+# to an ARGB pixmap (re-exports usvg + tiny_skia). No system libs, so no new provisioning deps.
+resvg = "0.47"
+sys-locale = "0.3"
+# The engine + the stable C ABI (engine lifecycle, status JSON, tools, i18n, formatters).
+ds-core = { path = "../../../rust/crates/ds-core" }
+# The typed model_status schema — deserialize the engine's JSON into the real structs
+# (a Rust host needs no hand-mirrored DTO the way the Swift/C# hosts do).
+ds-status = { path = "../../../rust/crates/ds-status" }

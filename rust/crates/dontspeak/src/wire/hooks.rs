@@ -1,0 +1,458 @@
+//! Hook-wiring building blocks for the [`wire`](crate::wire) orchestrator — the two hook
+//! MECHANISMS of the client registry (`ds_config::WireMechanism`): Claude-contract hooks in a
+//! JSON settings file ([`claude_json_hooks`] — Claude Code's `~/.claude/settings.json`) and the
+//! same contract in a format-preserved TOML config ([`claude_toml_hooks`] — Codex's
+//! `~/.codex/config.toml`), plus the client-agnostic install housekeeping ([`seed_and_prune`]:
+//! seed our `config.toml`, prune stale binaries). Both writers take the TARGET FILE as a
+//! parameter — the registry resolves which client's file — so a new client reusing either
+//! contract (e.g. Qwen Code) is a registry entry, not a new writer. The hook SETS + merges are
+//! the ONE definition in `ds-config` (shared by every platform installer); binary-path
+//! resolution, the JSON read, and the backup+atomic-write tail are the shared
+//! `io` core (see `super::io`).
+//!
+//! Safe by construction: additive + idempotent merge (never duplicates ours, never clobbers the
+//! user's own hooks/keys), a timestamped backup before writing, and a malformed existing file is
+//! treated as empty rather than destroyed. `print_only` emits the merged document without touching
+//! disk.
+
+use super::io::{self, WriteBody};
+use ds_config::{HookSpec, INSTALLED_BINS, Paths};
+
+/// Binary names this app has shipped and later dropped or renamed. The single-binary
+/// consolidation replaced `ds-mcp`/`ds-speak`/`ds-narrate`; the standalone `dontspeakd` engine
+/// binary was folded into `dontspeak` itself. A FINITE, EXPLICIT list — see [`is_stale_ds_bin`]
+/// for why this is a list of known names rather than a `dontspeak*`/`ds-*` prefix match: a
+/// shared install dir (e.g. `~/.local/bin`) is NOT exclusively ours, so "starts with the
+/// prefix" is not an ownership signal. When a future bin is renamed/dropped, add its name here.
+const KNOWN_LEGACY_BINS: &[&str] = &["ds-mcp", "ds-speak", "ds-narrate", "dontspeakd"];
+
+/// PURE decision: is `name` a KNOWN-STALE DontSpeak binary — an exact match (modulo this
+/// platform's exe suffix) against [`KNOWN_LEGACY_BINS`], and (defensively) not one of the
+/// current [`INSTALLED_BINS`]? Deliberately NOT a `dontspeak*`/`ds-*` prefix check: that used to
+/// flag ANY same-prefixed name not in the current-bins set as stale, which silently deleted
+/// this app's OWN `dontspeak-uninstall` script (placed executable in the same install dir by
+/// the installer, but not one of the four current bins) on every single wire, and would just as
+/// happily have deleted an unrelated user tool like `~/.local/bin/ds-sync` — sharing a name
+/// prefix is not an ownership check. Foreign tools, non-exe siblings (e.g. `ds_core.dll` on
+/// Windows — wrong suffix), and anything not on the explicit legacy list are kept.
+fn is_stale_ds_bin(name: &str) -> bool {
+    match name.strip_suffix(std::env::consts::EXE_SUFFIX) {
+        // EXE_SUFFIX is "" on unix, so strip_suffix yields Some(name) there.
+        Some(stem) => KNOWN_LEGACY_BINS.contains(&stem) && !INSTALLED_BINS.contains(&stem),
+        None => false,
+    }
+}
+
+/// Remove orphan DontSpeak binaries from the install dir (this binary's own directory) so a
+/// renamed/dropped executable can't shadow or be re-wired. Best-effort and SAFE: only regular
+/// files (subdirs like a `winui/` dev-deploy skipped), only names matching
+/// [`is_stale_ds_bin`], and on unix only files with the execute bit (never a stray data
+/// file). No-op when the dir isn't writable; a permission error there is logged, not fatal.
+fn prune_stale_bins() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(dir) = exe.parent() else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue; // skip dirs (e.g. ~/.local/bin/winui/) and anything non-regular
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !is_stale_ds_bin(name) {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let executable = entry
+                .metadata()
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false);
+            if !executable {
+                continue; // never delete a non-executable namesake (e.g. a lib/data file)
+            }
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => eprintln!("wire: pruned stale binary {}", path.display()),
+            Err(e) => eprintln!("wire: could not prune {} ({e}) — skipping", path.display()),
+        }
+    }
+}
+
+/// Client-agnostic install housekeeping, run once on any real (non-remove, non-preview) wire:
+/// seed our `config.toml` with defaults if absent (a self-documenting file; the engine still
+/// fails-open to defaults without it) AND prune orphan/legacy DontSpeak binaries from the install
+/// dir so a renamed/dropped exe can't shadow or be re-wired (covers the legacy ds-mcp/-speak/
+/// -narrate). Idempotent — safe to run per client wired. Pruning no-ops when the install dir
+/// isn't writable (a permission error is logged, not fatal).
+pub(crate) fn seed_and_prune(paths: &Paths) {
+    if !paths.config_toml.exists() {
+        if let Err(e) = ds_config::write_settings(paths, &ds_config::VoiceConfig::default()) {
+            eprintln!("wire: could not seed {}: {e}", paths.config_toml.display());
+        } else {
+            eprintln!("wire: seeded {}", paths.config_toml.display());
+        }
+    }
+    // NOTE: we deliberately do NOT seed `narration-spec.md`. The spec lives in the binary
+    // (`DEFAULT_NARRATION_SPEC`), which the `provide` hook injects directly; a file on disk is
+    // an OPTIONAL override only.
+    prune_stale_bins();
+}
+
+/// Wire (or strip / print) the DontSpeak voice hooks into `cfg`, a JSON settings file using
+/// Claude Code's hook contract (`WireMechanism::ClaudeJsonHooks` — today Claude Code's
+/// `~/.claude/settings.json`; the registry names the file per client). Returns 0 on success,
+/// 1 on a hard error.
+pub(crate) fn claude_json_hooks(cfg: &std::path::Path, remove: bool, print_only: bool) -> i32 {
+    let Ok(existing) = io::read_json_or_bail("wire", cfg) else {
+        return 1;
+    };
+
+    let merged = if remove {
+        Ok(ds_config::strip_hooks(existing))
+    } else {
+        let Some(bin) = io::resolve_dontspeak_bin() else {
+            eprintln!("wire: could not resolve the dontspeak binary path");
+            return 1;
+        };
+        let notif_channel = if cfg!(target_os = "macos") {
+            Some("iterm2_with_bell")
+        } else {
+            None
+        };
+        let spec = HookSpec {
+            bin: &bin,
+            notif_channel,
+        };
+        ds_config::merge_hooks(existing, &spec)
+    };
+
+    // A malformed existing file (e.g. a non-array `hooks.<Event>` slot) is the user's own
+    // file — leave it, don't fail the run, matching `claude_toml_hooks`'s convention below.
+    let merged = match merged {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("wire: {} left unchanged ({e})", cfg.display());
+            return 0;
+        }
+    };
+
+    if print_only {
+        match serde_json::to_string_pretty(&merged) {
+            Ok(s) => {
+                println!("// {}\n{s}", cfg.display());
+                0
+            }
+            Err(e) => {
+                eprintln!("wire: serialize failed: {e}");
+                1
+            }
+        }
+    } else {
+        io::backup_then_write(
+            "wire",
+            cfg,
+            "json",
+            &WriteBody::Json(&merged),
+            hook_action(remove),
+        )
+    }
+}
+
+/// The report verb for a hook write — shared by both hook mechanisms.
+fn hook_action(remove: bool) -> &'static str {
+    if remove {
+        "removed DontSpeak hooks from"
+    } else {
+        "wired DontSpeak hooks ->"
+    }
+}
+
+/// Wire (or strip / print) DontSpeak's narration hooks into `cfg`, a TOML config using Claude
+/// Code's hook contract (`WireMechanism::ClaudeTomlHooks` — today Codex's `~/.codex/config.toml`;
+/// the registry names the file per client) — `UserPromptSubmit`→`provide` (inject the narration
+/// spec) and `Stop`→`notify` (speak the reply). Format-preserving (toml_edit). Returns 0 on
+/// success, 1 on a hard error; a malformed config is reported and left UNCHANGED (it's the
+/// user's file), which is non-fatal.
+pub(crate) fn claude_toml_hooks(cfg: &std::path::Path, remove: bool, print_only: bool) -> i32 {
+    let existing = std::fs::read_to_string(cfg).unwrap_or_default();
+    let result = if remove {
+        ds_config::strip_codex_hooks(&existing)
+    } else {
+        let Some(bin) = io::resolve_dontspeak_bin() else {
+            eprintln!("wire: could not resolve the dontspeak binary path");
+            return 1;
+        };
+        ds_config::merge_codex_hooks(&existing, &bin)
+    };
+    match result {
+        Ok(merged) if print_only => {
+            println!("\n# {}\n{merged}", cfg.display());
+            0
+        }
+        Ok(merged) if merged != existing => io::backup_then_write(
+            "wire",
+            cfg,
+            "toml",
+            &WriteBody::Str(&merged),
+            hook_action(remove),
+        ),
+        Ok(_) => 0, // no change (already wired / nothing to strip)
+        // A malformed config is the user's own file — leave it, don't fail the run.
+        Err(e) => {
+            eprintln!("wire: {} left unchanged ({e})", cfg.display());
+            0
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prunes_only_known_legacy_binaries_keeps_current_foreign_and_own_non_bins() {
+        let ext = std::env::consts::EXE_SUFFIX; // ".exe" on Windows, "" on unix
+        let f = |b: &str| format!("{b}{ext}");
+
+        // Known legacy names the single-binary consolidation replaced → prune.
+        assert!(is_stale_ds_bin(&f("ds-mcp")));
+        assert!(is_stale_ds_bin(&f("ds-speak")));
+        assert!(is_stale_ds_bin(&f("ds-narrate")));
+        // The dropped `dontspeakd` binary → prune any leftover install.
+        assert!(is_stale_ds_bin(&f("dontspeakd")));
+
+        // Current canonical binaries → keep (incl. the running dontspeak itself).
+        assert!(!is_stale_ds_bin(&f("dontspeak")));
+        assert!(!is_stale_ds_bin(&f("ds-helper")));
+        assert!(!is_stale_ds_bin(&f("ds-winui")));
+        assert!(!is_stale_ds_bin(&f("ds-gtk")));
+
+        // Regression test: this app's OWN `dontspeak-uninstall` script (placed executable in
+        // the install dir by the installer) is NOT a known legacy binary name → keep. A
+        // `dontspeak*`/`ds-*` prefix check used to flag it as stale and delete it on every wire.
+        assert!(!is_stale_ds_bin(&f("dontspeak-uninstall")));
+        // An unrelated user tool that merely shares the prefix is never mistaken for ours.
+        assert!(!is_stale_ds_bin(&f("ds-sync")));
+        // Any OTHER same-prefixed name not on the explicit legacy list → keep (no more
+        // catch-all prefix match; a future rename/drop must be added to `KNOWN_LEGACY_BINS`).
+        assert!(!is_stale_ds_bin(&f("ds-oldname")));
+
+        // Foreign tools sharing the dir → keep.
+        assert!(!is_stale_ds_bin(&f("ripgrep")));
+        assert!(!is_stale_ds_bin(&f("node")));
+
+        // On Windows a non-.exe namesake (the cdylib) has the wrong suffix → keep.
+        #[cfg(windows)]
+        assert!(!is_stale_ds_bin("ds_core.dll"));
+    }
+
+    /// Parse a written `settings.json` (or `""` for a not-yet-created file) into a `Value`.
+    fn read_json(cfg: &std::path::Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(cfg).unwrap()).unwrap()
+    }
+
+    // NOTE on every non-`--remove` test below (the ones that call `claude_json_hooks`/
+    // `claude_toml_hooks` with `remove: false`): that path unconditionally calls
+    // `io::resolve_dontspeak_bin()` before touching the tempdir-scoped `cfg` at all. On unix
+    // this calls the REAL `ds_config::Paths::resolve()` (real `$HOME` via `BaseDirs::new()`)
+    // and does a real, READ-ONLY `.exists()` check against `$HOME/.local/bin/dontspeak` on the
+    // machine actually running the test — mirroring the disclosure already given for
+    // `wire::mod`'s `list_flag_exits_zero` test. This is benign: the check never writes
+    // anything, and none of these tests assert on the literal resolved path — only that a
+    // `dontspeak`-named binary ends up as the hook command's basename, or that a byte count/
+    // idempotence property holds — so whatever `$HOME` happens to contain on this machine can't
+    // change the assertions below.
+
+    #[test]
+    fn claude_json_hooks_wires_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("settings.json");
+
+        assert_eq!(claude_json_hooks(&cfg, false, false), 0);
+        let v = read_json(&cfg);
+        assert_eq!(v["hooks"]["MessageDisplay"].as_array().unwrap().len(), 1);
+
+        // Re-run: REPLACE-OURS merge must not duplicate the group.
+        assert_eq!(claude_json_hooks(&cfg, false, false), 0);
+        let v2 = read_json(&cfg);
+        assert_eq!(v2["hooks"]["MessageDisplay"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn claude_json_hooks_remove_strips_previously_wired_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("settings.json");
+
+        assert_eq!(claude_json_hooks(&cfg, false, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, false), 0);
+
+        let v = read_json(&cfg);
+        // `strip_hooks` drops an event array once it's emptied of our groups, and drops the
+        // whole `hooks` object once every event is gone — undoing the get-or-create scaffold.
+        assert!(v.get("hooks").is_none());
+    }
+
+    #[test]
+    fn claude_json_hooks_malformed_json_errors_and_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("settings.json");
+        let raw = b"{ not json";
+        std::fs::write(&cfg, raw).unwrap();
+
+        // Fails in `io::read_json_or_bail` itself — never reaches `resolve_dontspeak_bin`.
+        assert_eq!(claude_json_hooks(&cfg, false, false), 1);
+        assert_eq!(std::fs::read(&cfg).unwrap(), raw);
+    }
+
+    #[test]
+    fn claude_json_hooks_unmergeable_event_shape_is_left_unchanged_non_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("settings.json");
+        // `hooks.MessageDisplay` as an object (not an array) is a hand-edited/foreign shape
+        // `merge_hooks` refuses to clobber → `HooksMergeError::UnmergeableShape`, the first
+        // canonical event merge tried, so this never reaches the write call.
+        let raw = r#"{"hooks":{"MessageDisplay":{"not":"an array"}}}"#;
+        std::fs::write(&cfg, raw).unwrap();
+
+        assert_eq!(claude_json_hooks(&cfg, false, false), 0); // non-fatal
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw); // byte-identical
+    }
+
+    #[test]
+    fn claude_json_hooks_print_only_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("settings.json");
+
+        assert_eq!(claude_json_hooks(&cfg, false, true), 0);
+        assert!(!cfg.exists());
+    }
+
+    /// `backup_then_write`'s `Err(e) => 1` arm: force `create_dir_all` on the config's parent
+    /// dir to fail by pre-creating a plain FILE at the path that would otherwise be that parent
+    /// directory — `create_dir_all` errors because `blocked` already exists and isn't a dir.
+    #[test]
+    fn claude_json_hooks_write_failure_returns_1() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("blocked"), b"not a directory").unwrap();
+        let cfg = dir.path().join("blocked").join("settings.json");
+
+        assert_eq!(claude_json_hooks(&cfg, false, false), 1);
+    }
+
+    #[test]
+    fn claude_toml_hooks_wires_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+
+        assert_eq!(claude_toml_hooks(&cfg, false, false), 0);
+        let first = std::fs::read_to_string(&cfg).unwrap();
+
+        // Re-run: an unchanged command is a true byte-for-byte no-op (see `codex_group_matches`).
+        assert_eq!(claude_toml_hooks(&cfg, false, false), 0);
+        let second = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn claude_toml_hooks_remove_strips_previously_wired_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+
+        assert_eq!(claude_toml_hooks(&cfg, false, false), 0);
+        assert_eq!(claude_toml_hooks(&cfg, true, false), 0);
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(!text.contains("dontspeak"));
+    }
+
+    #[test]
+    fn claude_toml_hooks_remove_on_missing_file_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+
+        // `existing` is `unwrap_or_default()` on the missing-file read → "", and
+        // `strip_codex_hooks("")` short-circuits `Ok("")` before ever calling
+        // `resolve_dontspeak_bin` (that call is skipped entirely on the `remove` path anyway).
+        assert_eq!(claude_toml_hooks(&cfg, true, false), 0);
+        assert!(!cfg.exists());
+    }
+
+    #[test]
+    fn claude_toml_hooks_malformed_toml_is_left_unchanged_non_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let raw = "hooks = [not valid toml";
+        std::fs::write(&cfg, raw).unwrap();
+
+        // `CodexMergeError::Parse` → the final `Err(e)` arm: reported, non-fatal, unchanged.
+        assert_eq!(claude_toml_hooks(&cfg, false, false), 0);
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
+    }
+
+    #[test]
+    fn claude_toml_hooks_print_only_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+
+        assert_eq!(claude_toml_hooks(&cfg, false, true), 0);
+        assert!(!cfg.exists());
+    }
+
+    /// Same write-failure technique as `claude_json_hooks_write_failure_returns_1`, for the
+    /// TOML writer's `backup_then_write` call.
+    #[test]
+    fn claude_toml_hooks_write_failure_returns_1() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("blocked"), b"not a directory").unwrap();
+        let cfg = dir.path().join("blocked").join("config.toml");
+
+        assert_eq!(claude_toml_hooks(&cfg, false, false), 1);
+    }
+
+    #[test]
+    fn seed_and_prune_seeds_config_toml_once_then_leaves_it_alone() {
+        // `seed_and_prune` also unconditionally runs `prune_stale_bins`, which walks
+        // `current_exe()`'s own directory (this test binary's build-output dir) and removes
+        // any entry named exactly one of `KNOWN_LEGACY_BINS`. Safe today because no workspace
+        // `[[bin]]` target is named `ds-mcp`/`ds-speak`/`ds-narrate`/`dontspeakd` (the last is
+        // lib-only) — a future rename that violates that would need this comment (and test)
+        // revisited.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+
+        seed_and_prune(&paths);
+        assert!(paths.config_toml.exists());
+
+        // Append a marker to the seeded file, then prove a second call does NOT overwrite it
+        // — the `!exists()` gate only seeds once.
+        let mut contents = std::fs::read_to_string(&paths.config_toml).unwrap();
+        contents.push_str("\n# marker\n");
+        std::fs::write(&paths.config_toml, &contents).unwrap();
+
+        seed_and_prune(&paths);
+        let after = std::fs::read_to_string(&paths.config_toml).unwrap();
+        assert_eq!(after, contents);
+    }
+
+    /// `write_settings`'s `Err` branch inside `seed_and_prune`: pre-create a plain FILE at the
+    /// path that would be `paths.config_toml`'s parent directory, so the underlying
+    /// `create_dir_all` fails. `seed_and_prune` returns `()`, not a `Result` — reading the
+    /// function, its `Err(e)` arm only `eprintln!`s and continues (does not propagate, does not
+    /// panic), so the only observable effect is that `config_toml` is never created.
+    #[test]
+    fn seed_and_prune_write_failure_is_logged_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::write(dir.path().join(".dontspeak"), b"blocking file").unwrap();
+
+        seed_and_prune(&paths); // must not panic
+        assert!(!paths.config_toml.exists());
+    }
+}

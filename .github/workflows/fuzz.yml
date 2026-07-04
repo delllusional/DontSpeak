@@ -1,0 +1,32 @@
+name: Fuzz (scheduled)
+
+# Fuzzes ds-ipc's wire-protocol parsers against arbitrary/adversarial byte input — the
+# untrusted-input boundary where any local process talking to the engine's socket can
+# send bytes. Requires nightly (libFuzzer/cargo-fuzz's hard requirement) — confined
+# entirely to this scheduled, non-blocking job; never touches the stable per-commit
+# build (the fuzz/ crate is its own independent Cargo workspace, invisible to
+# `cargo build/clippy/test --workspace`). Linux-only: libFuzzer doesn't support Windows.
+on:
+  schedule:
+    - cron: '43 5 * * 1'   # weekly, Monday
+  workflow_dispatch: {}
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse_request, parse_response]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=180
+        working-directory: rust/crates/ds-ipc/fuzz
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: rust/crates/ds-ipc/fuzz/artifacts/${{ matrix.target }}/

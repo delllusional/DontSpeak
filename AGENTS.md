@@ -1,0 +1,91 @@
+# DontSpeak
+
+A local voice layer for Claude Code, Codex, and Claude Desktop: the agent speaks its
+replies aloud, the user dictates back with one key (Caps Lock). One native app per OS
+(macOS SwiftUI, Windows WinUI, Linux GTK4) hosts the same Rust engine **in-process**
+over a C ABI (`ds-core`) — there is no separate daemon. The Claude Code hooks and the
+MCP server are thin clients that talk to the engine over a Unix-domain socket.
+
+Full design: [ARCHITECTURE.md](ARCHITECTURE.md). Crate-by-crate roles: [rust/README.md](rust/README.md).
+Build prerequisites per OS: [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Workspace layout
+
+- `rust/crates/` — 16 single-purpose crates (Rust workspace, `rust-version = 1.96`).
+  Notable ones: `ds-core` (the stable C ABI the apps link), `dontspeakd` (the engine
+  library), `dontspeak` (the one CLI: MCP server + hook entries + installers),
+  `ds-tools` (the single MCP tool catalog), `ds-config` (paths + `config.toml` +
+  `~/.claude/settings.json` merge).
+- `apps/macos/` (SwiftUI, most polished host), `apps/windows/winui/` (.NET 10),
+  `apps/linux/gtk/` (GTK4 + libadwaita) — each a thin menu-bar/health/permissions UI
+  that hosts the engine and is the login item. Voice/engine control is via MCP, not
+  the app UI.
+- `web/` — the dontspeak.org site (deployed locally via the `deploy-site` skill, not
+  CI — see git log for `site deploys run locally`).
+
+## Commands
+
+All Rust commands run from `rust/` (the workspace root — not the repo root).
+
+```sh
+cd rust
+cargo build --workspace --locked                 # build everything
+cargo test --workspace --locked                  # run the real test suite (this is what CI runs)
+cargo test -p ds-config --locked                 # test one crate
+cargo test -p ds-config wire::registry --locked  # run tests matching a name/path in one crate
+cargo clippy --workspace --all-targets --locked -- -D warnings   # the per-commit lint gate
+cargo fmt --all --check                          # release-only gate — not enforced per commit
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked  # release-only gate
+```
+
+The GTK host is a separate workspace and needs its own fmt check:
+`cd apps/linux/gtk && cargo fmt --all --check`.
+
+The macOS SwiftPM tests need the FFI staticlib built first (`apps/macos/build.sh` does
+this): `cd rust && cargo build --profile release-ffi --locked -p ds-core && cd ../apps/macos && swift test`.
+The WinUI app's xunit tests: `dotnet test apps/windows/winui.tests` (has no runnable
+`dotnet build`/`test` shortcut outside CI otherwise — see `.github/actions/dotnet-test-winui`).
+
+Use the `build-linux` / `build-macos` / `build-windows` skills rather than raw
+build/package commands per OS — see [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md) for why
+the three runtime pieces (CLI, engine, host app) need different rebuild routes.
+
+## Invariants worth knowing before you touch things
+
+- **Config lives in `config.toml`** under the OS data dir, never in
+  `~/.claude/settings.json` — that file stays purely Claude Code's own (hooks + its
+  own `voice` block).
+- **No codegen for the FFI boundary.** uniffi was evaluated and deliberately rejected
+  for the ~29-function `ds-core` surface — see
+  [ARCHITECTURE.md § FFI boundary](ARCHITECTURE.md#ffi-boundary).
+  If you touch `model_status`, edit the Rust source of truth in `ds-status` then
+  hand-update the two mirrors (`apps/windows/winui/Native.cs`,
+  `apps/macos/Sources/DontSpeak/DontSpeakCore.swift`) and run its round-trip test.
+  Don't reintroduce a generated-bindings toolchain here.
+- **Three runtime pieces deploy by three different routes** — see
+  [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md). Rebuilding the wrong piece (e.g. just
+  the CLI when you changed the engine or helper) leaves the running app on stale code
+  that *looks* installed. Always check that doc before concluding a fix works.
+- **No statically linked/bundled GPL or LGPL code.** `espeak-ng` (GPLv3) is invoked
+  only as an optional external process, never linked. The Linux build *dynamically*
+  links a small, disclosed set of LGPL system libraries (GTK4, libadwaita, ALSA,
+  PulseAudio) — allowed under LGPL's dynamic-linking exception — see
+  [NOTICE.md](NOTICE.md)'s "Linux build: LGPL system libraries" section before
+  changing how any of those are linked, and before adding any new native dependency.
+- **No hardcoded UI strings.** Every new user-facing string goes in the shared
+  `ds-i18n` catalog (`rust/crates/ds-i18n/locales/en.yml`), rendered through the FFI
+  — never literal text in Swift/C#/XAML — see [docs/LOCALIZATION.md](docs/LOCALIZATION.md).
+
+## Gates — per-commit vs release (deliberate split, not an oversight)
+
+Per-commit CI (`.github/workflows/ci.yml`, Linux-only) runs **only** `cargo clippy
+--workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`,
+and `cargo deny check` (`rust/deny.toml` — advisories + bans + licenses + sources) —
+fast, on purpose. `cargo fmt --check` and `RUSTDOCFLAGS="-D warnings" cargo doc` are
+**release-only** gates (the `hygiene` job, full-matrix), so formatting/doc drift
+accumulates between releases by design rather than nagging every commit — fix it once
+before tagging (`.claude/skills/make-release` does this). A separate scheduled workflow
+(`.github/workflows/dependency-audit.yml`) re-runs `cargo deny check advisories` daily,
+since a newly-disclosed RustSec advisory against an unchanged `Cargo.lock` has no commit
+to attach the per-commit check to. Use `.claude/skills/prepush` to run the exact
+per-commit gates locally before pushing.

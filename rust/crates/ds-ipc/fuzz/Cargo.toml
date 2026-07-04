@@ -1,0 +1,30 @@
+# cargo-fuzz's own, independent Cargo workspace (the empty `[workspace]` table below
+# makes this its own resolver root, invisible to the parent `rust/` workspace's
+# `cargo build/clippy/test --workspace` — no entry needed in rust/Cargo.toml's
+# `members`). Fuzzes ds-ipc's hand-tagged serde wire types against arbitrary byte
+# input; see fuzz/README.md for how to run it and .github/workflows/fuzz.yml for the
+# scheduled CI job. Never shipped, never linked into any release artifact.
+[workspace]
+
+[package]
+name = "ds-ipc-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+ds-ipc = { path = ".." }
+
+[[bin]]
+name = "parse_request"
+path = "fuzz_targets/parse_request.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "parse_response"
+path = "fuzz_targets/parse_response.rs"
+test = false
+doc = false

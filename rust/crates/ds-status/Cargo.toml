@@ -1,0 +1,23 @@
+[package]
+name = "ds-status"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Single Rust source of truth for the model_status schema, mirrored by hand in each platform's UI."
+
+[dependencies]
+# serde for the wire: the engine serializes this to the model_status JSON; each platform's
+# hand-written DTOs (winui Native.cs, macOS) mirror THIS shape and parse it. ONE Rust
+# definition, hand-mirrored on the edges and guarded by the round-trip contract test below.
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+proptest = { workspace = true }
+
+[lints]
+workspace = true

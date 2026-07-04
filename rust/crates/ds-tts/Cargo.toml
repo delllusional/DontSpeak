@@ -1,0 +1,48 @@
+[package]
+name = "ds-tts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Pluggable TTS engines for DontSpeak: Kokoro (native in-process synth, default) and System (OS voice)."
+
+[dependencies]
+ds-config = { workspace = true }
+ds-proc = { workspace = true }
+# The shared ORT session builder + the apple-native FluidAudio shim loader (used by
+# synth_coreml). The warm-media helper that unions synth + dictation + AEC is its OWN
+# crate now (ds-helper), so this TTS library no longer depends on ds-stt / ds-aec.
+ds-model = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# ── Phase-2b native Kokoro synth ─────────────────────────────────────────────
+# The pure modules (vocab/voices/trim/group) need NONE of these; the synth path does.
+# Pinned once in the workspace.
+# ONNX inference (load-dynamic: no onnxruntime baked, resolved at runtime).
+ort = { workspace = true }
+# Pure-Rust English G2P (per-word wrapper avoids the espeak-ng fallback).
+voice-g2p = { workspace = true }
+# Pure-Rust NEURAL OOV predictor (g2p.py port) — pronounces dictionary-miss words
+# (proper nouns etc.) without espeak. Outputs ARPABET; bridged to Kokoro IPA in g2p.rs.
+# Bundles its own model in-memory; deps are ndarray only (no ML runtime). BSD-4.
+grapheme_to_phoneme = { workspace = true }
+# 24 kHz mono f32 PCM playback. `symphonia-aiff` (added to the default decoders) lets the
+# earcon `cue` op decode macOS system sounds (.aiff); wav (Windows) + vorbis/oga (Linux) are
+# already in rodio's defaults.
+rodio = { workspace = true, features = ["symphonia-aiff"] }
+
+# setsid for the speaker's own process group (single-speaker pidfile contract).
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# dlopen libsmkokoro.dylib (the FluidAudio Core ML / ANE Kokoro shim) for the
+# apple-native TTS backend. Loaded at runtime, like ort's load-dynamic onnxruntime.
+libloading = "0.9"
+
+[lints]
+workspace = true

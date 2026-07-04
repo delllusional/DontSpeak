@@ -1,0 +1,12 @@
+# Analyzer tuning for the WinUI app (inherits the root .editorconfig formatting rules).
+
+[*.cs]
+# CA1051 (no visible instance fields): the Native.cs wire DTOs / HealthSnapshot groups are
+# deliberate plain-field data bags mirroring the macOS structs — properties would add noise,
+# not safety, on types that never leave the app.
+dotnet_diagnostic.CA1051.severity = none
+
+# CA2101 (specify marshaling for P/Invoke strings): false positive — every string parameter
+# in Loc.cs/Native.cs is explicitly [MarshalAs(UnmanagedType.LPUTF8Str)], which the analyzer
+# does not recognize as explicit marshaling (dotnet/roslyn-analyzers, LPUTF8Str limitation).
+dotnet_diagnostic.CA2101.severity = none

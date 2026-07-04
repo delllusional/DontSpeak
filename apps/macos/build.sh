@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+#
+# build.sh — build the Rust FFI staticlib, then the SwiftUI macOS app.
+#
+# Steps:
+#   1. cargo build the ds-core staticlib in the `release-ffi` profile
+#      (inherits release, but does NOT strip and disables LTO so the
+#      `#[no_mangle] extern "C"` symbols survive in libds_core.a — a
+#      stripped/fat-LTO'd archive loses them and `-lds_core` fails to link).
+#      This also regenerates the committed C header IF `cbindgen` is available
+#      (the `--features cbindgen` regen is opt-in; the header is committed so the
+#      default path needs no cbindgen).
+#   2. swift build the app, linking that staticlib + the system frameworks the
+#      staticlib transitively needs.
+#
+# Per the project constraints this BUILDS ONLY — it never runs the app/engine and
+# never bundles/codesigns a runnable .app. It echoes the product paths.
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUST_DIR="$(cd "$HERE/../../rust" && pwd)"
+
+# Shared helpers (swift_build_resilient — self-heals a stale .build module cache; also
+# normalizes PATH for cargo/swift). ../../scripts/lib from apps/macos.
+. "$HERE/../../scripts/lib/common.sh"
+
+echo "==> [1/2] Building Rust FFI staticlib (release-ffi profile)…"
+# Pin the staticlib's deployment target to the app's floor (Package.swift .macOS(.v14),
+# same pin as dist-apps.sh) — without it cargo targets the HOST macOS version and the
+# link warns "built for newer macOS than being linked (14.0)", with undefined behavior
+# possible if such a binary ever runs on the floor OS.
+export MACOSX_DEPLOYMENT_TARGET=14.0
+( cd "$RUST_DIR" && cargo build --profile release-ffi -p ds-core )
+
+STATICLIB="$RUST_DIR/target/release-ffi/libds_core.a"
+if [[ ! -f "$STATICLIB" ]]; then
+    echo "ERROR: expected staticlib not found: $STATICLIB" >&2
+    exit 1
+fi
+echo "    staticlib: $STATICLIB"
+
+echo "==> [2/2] Building the SwiftUI app (swift build -c release)…"
+# SwiftPM doesn't track the external C staticlib as a dependency, so a Rust-only
+# change leaves the previously-linked executable in place (no Swift sources changed
+# ⇒ no relink) and the app silently keeps the OLD engine. Drop the linked binary so
+# swift build always relinks against the freshly-built libds_core.a.
+rm -f "$HERE/.build/release/DontSpeak"
+swift_build_resilient "$HERE" -c release
+
+APP_BIN="$HERE/.build/release/DontSpeak"
+# Removing just the binary is NOT always enough: a warm tree can "relink" from cached
+# inputs and drop the -force_load of libds_core.a (dist-apps.sh observed a 2.5s relink
+# reproduce the stale link — the engineless-app failure). Verify the engine symbol; on a
+# stale link, nuke the whole product dir and relink from scratch ONCE — so a healthy
+# build never pays the full-relink cost.
+if ! require_engine_symbol "$APP_BIN"; then
+    echo "    stale link (no ds_engine_start) — clearing the product dir and relinking from scratch" >&2
+    BIN_DIR="$(cd "$HERE" && swift build -c release --show-bin-path)"
+    rm -rf "$BIN_DIR"
+    swift_build_resilient "$HERE" -c release
+    require_engine_symbol "$APP_BIN" || {
+        echo "FATAL: $APP_BIN is missing ds_engine_start even after a from-scratch relink" >&2
+        exit 1
+    }
+fi
+echo
+echo "==> Build complete."
+echo "    Rust staticlib : $STATICLIB"
+echo "    App executable : $APP_BIN"
+echo "    (Bundling into a runnable .app — Info.plist at macos/Bundle/Info.plist —"
+echo "     is intentionally NOT done here; the constraint is build-only.)"

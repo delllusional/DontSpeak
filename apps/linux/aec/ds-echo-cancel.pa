@@ -1,0 +1,18 @@
+# PulseAudio variant (for hosts running PulseAudio rather than PipeWire): load
+# module-echo-cancel exposing a WebRTC-cancelled source named `ds_ec_source`,
+# the source DontSpeak's full-duplex AEC backend opens by name.
+#
+# Install (per-user):  mkdir -p ~/.config/pulse
+#                      { echo '.include /etc/pulse/default.pa'; cat ds-echo-cancel.pa; } \
+#                        > ~/.config/pulse/default.pa
+#                      pulseaudio -k    # restart the daemon
+# Or load live (this session only):
+#   pactl load-module module-echo-cancel aec_method=webrtc source_name=ds_ec_source sink_name=ds_ec_sink
+# Verify:  pactl list sources short | grep ds_ec_source
+#
+# Then enable full-duplex in DontSpeak via the MCP: set_config full_duplex=true.
+
+load-module module-echo-cancel aec_method=webrtc source_name=ds_ec_source sink_name=ds_ec_sink use_master_format=1
+# Leave the system default devices alone — DontSpeak opens the cancelled source by name,
+# so there's no need to make it the global default (uncomment if you want every app to use it):
+# set-default-source ds_ec_source

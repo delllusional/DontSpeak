@@ -1,0 +1,44 @@
+# Compiled Swift helpers — arch-specific; rebuilt by scripts/install.sh
+claude/hooks/capslock
+claude/hooks/mic-active
+
+# dontspeakd daemon — compiled binary (arch-specific, AX-grantee; rebuilt by scripts/build.sh)
+scripts/dontspeakd
+scripts/dontspeakd.test
+
+.DS_Store
+__pycache__/
+*.log
+
+# Swift build artifacts
+.build/
+apps/macos/dist/
+.tse-staging/
+
+# Xcode / SwiftPM local state
+.swiftpm/
+*.xcuserstate
+xcuserdata/
+
+# Model artifacts are never committed — they live in the download registry (ds-model urls.rs)
+apps/macos/models/
+
+# Cloudflare Wrangler local state (site deploy) — cache + account creds, never committed.
+.wrangler/
+
+# Rust workspaces — Cargo.lock IS committed (binaries, not libraries); CI/build scripts
+# build --locked against it, so keep it out of this ignore list.
+target/
+
+# macOS SmKokoro Swift package smoke-test artifacts
+apps/macos/SmKokoro/ctest*
+apps/macos/SmKokoro/*.wav
+
+# Windows installer build artifacts
+apps/windows/installer/payload/
+apps/windows/installer/Output/
+apps/windows/installer/portable/
+
+# Windows .NET build artifacts (winui + winui.tests)
+apps/windows/**/bin/
+apps/windows/**/obj/

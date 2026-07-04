@@ -1,0 +1,265 @@
+//! The CLIENT REGISTRY — the ONE declarative catalog of every AI client DontSpeak wires
+//! into. Each [`ClientSpec`] separates the three questions the wiring used to answer
+//! implicitly, per client, in scattered `match` arms:
+//!
+//!   * WHO — the client ([`WireTarget`] token, display name, [`ClientKind`]: terminal CLI
+//!     vs desktop app);
+//!   * WHERE — the platform surface it's installed on: the presence probe
+//!     ([`ClientSpec::present`]/[`ClientSpec::detect_dir`]) and each config file the wire
+//!     edits ([`Surface::config_file`]), both resolved per-OS by [`Paths`];
+//!   * HOW — the [`WireMechanism`] each surface is written with (Claude-contract JSON
+//!     hooks, Claude-contract TOML hooks, or a JSON `mcpServers` entry), plus the
+//!     OFFICIAL documentation ([`DocRef`]) the contract was derived from.
+//!
+//! The `dontspeak wire` orchestrator iterates a spec's surfaces and dispatches on the
+//! mechanism — so adding a client (e.g. Qwen Code, whose hooks reuse Claude Code's wire
+//! protocol, or Gemini CLI) is ONE new `WireTarget` variant + `Paths` fields + a registry
+//! entry, not a new code path. The pure merge/strip shapers stay in the sibling modules;
+//! this file holds no IO.
+
+use std::path::Path;
+
+use crate::enums::WireTarget;
+use crate::paths::Paths;
+
+/// What KIND of application a client is — i.e. where the integration runs and, by
+/// convention, where its config lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientKind {
+    /// A terminal CLI agent. Config lives under a dot-dir in `$HOME` on every OS
+    /// (`~/.claude`, `~/.codex`, …), so the paths are platform-uniform.
+    TerminalCli,
+    /// A desktop GUI app. Config lives under the per-OS application-support dir
+    /// (macOS `~/Library/Application Support`, Windows `%APPDATA%`, Linux `~/.config`),
+    /// so the path is platform-resolved by [`Paths`].
+    DesktopApp,
+}
+
+/// HOW one integration surface is written into a client's config file. Every mechanism is
+/// additive + idempotent + user-preserving; the writers live in the `dontspeak` crate, the
+/// pure shapers in this crate's sibling `wire::*` modules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireMechanism {
+    /// DontSpeak's voice hooks merged into a JSON settings file using Claude Code's hook
+    /// contract (`hooks.<Event>` groups; JSON on stdin; `Stop` carries
+    /// `last_assistant_message`). Shaper: `merge_hooks`/`strip_hooks`.
+    ClaudeJsonHooks,
+    /// The SAME Claude-contract hooks, but in a TOML config edited format-preservingly
+    /// (`toml_edit`) — `[[hooks.<Event>]]` tables. Shaper:
+    /// `merge_codex_hooks`/`strip_codex_hooks`.
+    ClaudeTomlHooks,
+    /// The stdio `mcpServers.DontSpeak` entry merged into a JSON config. Shaper:
+    /// `merge_mcp_server`/`strip_mcp_server`.
+    JsonMcp,
+}
+
+/// ONE config file the wire edits for a client, and how.
+pub struct Surface {
+    pub mechanism: WireMechanism,
+    /// The config file this surface edits, resolved per-OS by [`Paths`].
+    pub config_file: fn(&Paths) -> &Path,
+    /// For [`WireMechanism::JsonMcp`]: how the user loads the newly registered server
+    /// (printed after a successful wire). Hook surfaces take effect on the next turn, so
+    /// they carry no hint.
+    pub load_hint: Option<&'static str>,
+}
+
+/// A pointer to the OFFICIAL documentation a wiring is derived from — so every registry
+/// entry names its sources and a contract change is checkable against the upstream doc
+/// rather than against folklore.
+pub struct DocRef {
+    /// What the document specifies: `"hooks"` or `"mcp"`.
+    pub topic: &'static str,
+    pub url: &'static str,
+}
+
+/// One wireable client: WHO it is, WHERE it lives, HOW it's wired, and the docs saying so.
+pub struct ClientSpec {
+    /// The canonical [`WireTarget`] token (`claude_code` / `claude_desktop` / `codex`).
+    pub target: WireTarget,
+    /// Human-facing name for messages ("Claude Code", "OpenAI Codex", …).
+    pub display_name: &'static str,
+    pub kind: ClientKind,
+    /// Is the client installed? A REAL wire (not `--remove`, not `--print-only`) of a
+    /// [`gate_on_presence`](Self::gate_on_presence) client is skipped when this is false,
+    /// so we never scatter a stray config on a machine without the client.
+    pub present: fn(&Paths) -> bool,
+    /// The directory whose existence [`present`](Self::present) probes — named in the
+    /// "not detected (…)" skip message.
+    pub detect_dir: fn(&Paths) -> &Path,
+    /// `false` only for Claude Code: the installers wire it unconditionally (our hooks
+    /// write CREATES `~/.claude`, which then satisfies the MCP surface's gate) — it is
+    /// DontSpeak's primary client. Everything else gates.
+    pub gate_on_presence: bool,
+    pub surfaces: &'static [Surface],
+    /// The official docs this entry's mechanisms and paths were derived from.
+    pub docs: &'static [DocRef],
+    /// The VERSION PIN: the client version current when this wiring was last verified —
+    /// i.e. the [`docs`](Self::docs) were (re-)read and the merge shape confirmed against
+    /// them. NOT a compatibility floor (the contracts are stable across versions until
+    /// proven otherwise); it says "implemented per the docs as of this client version".
+    /// Update it whenever a wiring is re-checked or changed.
+    pub verified_client_version: &'static str,
+    /// ISO date of that verification (`YYYY-MM-DD`).
+    pub verified_on: &'static str,
+}
+
+/// The registry. Order matches [`WireTarget::CLIENTS`] (pinned by test): this is the SAME
+/// canonical client list, with the wiring facts attached.
+pub const CLIENT_REGISTRY: &[ClientSpec] = &[
+    ClientSpec {
+        target: WireTarget::ClaudeCode,
+        display_name: "Claude Code",
+        kind: ClientKind::TerminalCli,
+        present: |p| p.claude_dir.exists(),
+        detect_dir: |p| &p.claude_dir,
+        gate_on_presence: false,
+        surfaces: &[
+            Surface {
+                mechanism: WireMechanism::ClaudeJsonHooks,
+                config_file: |p| &p.settings_json, // ~/.claude/settings.json
+                load_hint: None,
+            },
+            Surface {
+                mechanism: WireMechanism::JsonMcp,
+                config_file: |p| &p.claude_code_config, // ~/.claude.json (user scope)
+                load_hint: Some("start a new Claude Code session to load the server"),
+            },
+        ],
+        docs: &[
+            DocRef {
+                topic: "hooks",
+                url: "https://code.claude.com/docs/en/hooks",
+            },
+            DocRef {
+                topic: "mcp",
+                url: "https://code.claude.com/docs/en/mcp",
+            },
+        ],
+        verified_client_version: "2.1.198",
+        verified_on: "2026-07-02",
+    },
+    ClientSpec {
+        target: WireTarget::ClaudeDesktop,
+        display_name: "Claude Desktop",
+        kind: ClientKind::DesktopApp,
+        present: |p| p.is_claude_desktop_present(),
+        detect_dir: |p| &p.claude_desktop_dir,
+        gate_on_presence: true,
+        // Desktop has no hook system — MCP is its whole integration.
+        surfaces: &[Surface {
+            mechanism: WireMechanism::JsonMcp,
+            config_file: |p| &p.claude_desktop_config, // per-OS app-support/Claude/…
+            load_hint: Some("quit and reopen Claude Desktop to load the server"),
+        }],
+        docs: &[DocRef {
+            topic: "mcp",
+            url: "https://modelcontextprotocol.io/quickstart/user",
+        }],
+        verified_client_version: "1.15962.1",
+        verified_on: "2026-07-02",
+    },
+    ClientSpec {
+        target: WireTarget::Codex,
+        display_name: "OpenAI Codex",
+        kind: ClientKind::TerminalCli,
+        present: |p| p.codex_dir.exists(),
+        detect_dir: |p| &p.codex_dir,
+        gate_on_presence: true,
+        // Codex adopted Claude Code's hook contract (same events, same stdin JSON,
+        // `Stop.last_assistant_message`), so the SAME dontspeak binary serves it; only
+        // the file format (TOML) differs. Codex has no MCP surface we register.
+        surfaces: &[Surface {
+            mechanism: WireMechanism::ClaudeTomlHooks,
+            config_file: |p| &p.codex_config, // ~/.codex/config.toml
+            load_hint: None,
+        }],
+        docs: &[
+            DocRef {
+                topic: "hooks",
+                url: "https://developers.openai.com/codex/hooks",
+            },
+            DocRef {
+                topic: "config",
+                url: "https://github.com/openai/codex/blob/main/docs/config.md",
+            },
+        ],
+        verified_client_version: "0.142.5",
+        verified_on: "2026-07-02",
+    },
+];
+
+/// Look up the registry entry for a client token. `None` for
+/// [`WireTarget::NarrationSpec`] — a config file, not a client.
+pub fn client_spec(target: WireTarget) -> Option<&'static ClientSpec> {
+    CLIENT_REGISTRY.iter().find(|s| s.target == target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The registry IS `WireTarget::CLIENTS` with wiring facts attached — same set, same
+    /// order. A client added to one place but not the other fails here, not in the field.
+    #[test]
+    fn registry_matches_the_canonical_client_list() {
+        let registry: Vec<WireTarget> = CLIENT_REGISTRY.iter().map(|s| s.target).collect();
+        assert_eq!(registry, WireTarget::CLIENTS);
+    }
+
+    /// Every entry is fully specified: at least one surface, and at least one official
+    /// doc reference per DISTINCT mechanism it uses — the registry's contract is that a
+    /// wiring names its sources.
+    #[test]
+    fn every_client_has_surfaces_and_documentation() {
+        for spec in CLIENT_REGISTRY {
+            assert!(
+                !spec.surfaces.is_empty(),
+                "{}: a client with no surfaces wires nothing",
+                spec.display_name
+            );
+            assert!(
+                !spec.docs.is_empty(),
+                "{}: every wiring must reference the official doc it was derived from",
+                spec.display_name
+            );
+            for d in spec.docs {
+                assert!(
+                    d.url.starts_with("https://"),
+                    "{}: doc ref {:?} is not a URL",
+                    spec.display_name,
+                    d.url
+                );
+            }
+            assert!(
+                !spec.verified_client_version.is_empty()
+                    && spec
+                        .verified_client_version
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_digit()),
+                "{}: the version pin must name the client version the wiring was verified against",
+                spec.display_name
+            );
+            assert!(
+                spec.verified_on.len() == 10 && spec.verified_on.chars().nth(4) == Some('-'),
+                "{}: verified_on must be an ISO date (YYYY-MM-DD), got {:?}",
+                spec.display_name,
+                spec.verified_on
+            );
+        }
+    }
+
+    /// `client_spec` resolves every client and rejects the non-client.
+    #[test]
+    fn lookup_covers_clients_and_rejects_narration_spec() {
+        for &t in WireTarget::CLIENTS {
+            assert!(
+                client_spec(t).is_some(),
+                "{} missing from registry",
+                t.as_str()
+            );
+        }
+        assert!(client_spec(WireTarget::NarrationSpec).is_none());
+    }
+}

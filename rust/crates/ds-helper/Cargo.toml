@@ -1,0 +1,52 @@
+[package]
+name = "ds-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "DontSpeak's warm helper process: unions TTS synth, local STT, and duplex AEC into one process sharing the audio device."
+
+# ONE binary, mode-selected by argv (see src/main.rs):
+#   ds-helper <text> <voice> <rate>   one-shot synth+play, then exit (engine-down fallback)
+#   ds-helper --serve                 warm server: load model once, read speak/stop/listen ops on stdin
+#   ds-helper --prefetch|--print-manifest|--install-prefetched   installer model-asset hooks (via ds-model)
+#   ds-helper --coexist-probe         VPIO + cpal capture dev diagnostic
+[[bin]]
+name = "ds-helper"
+path = "src/main.rs"
+
+[dependencies]
+# The native Kokoro TTS pipeline (g2p / batch / synth / play) + the apple-native Core ML backend.
+ds-tts = { workspace = true }
+# Local dictation: the streaming Parakeet transducer + diarization (the `listen` op).
+ds-stt = { workspace = true }
+# Full-duplex AEC duplex unit for the render+capture path when DONTSPEAK_FULL_DUPLEX is set.
+ds-aec = { workspace = true }
+# Model-asset locate/download for the installer prefetch hooks + the shared ORT/shim runtime.
+ds-model = { workspace = true }
+# Default voice + the DiarizerProvider config enum the serve loop reads.
+ds-config = { workspace = true }
+# The `--serve` stdin request objects + the diarize/embed JSON replies.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The persistent playback sink/mixer the warm server drives directly (symphonia-aiff so the
+# earcon `cue` op can decode macOS system sounds, matching ds-tts's rodio features).
+rodio = { workspace = true, features = ["symphonia-aiff"] }
+
+# Brand the ds-helper.exe Windows version resource so Task Manager lists the helper child as
+# "DontSpeak" (not "ds-helper"). Build-only; the build script no-ops off Windows. See build.rs.
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }
+
+# Best-effort scheduling priority boost for latency-critical threads (see src/priority.rs).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

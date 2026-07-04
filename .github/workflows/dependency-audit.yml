@@ -1,0 +1,26 @@
+name: Dependency audit (scheduled)
+
+# Catches newly-disclosed RustSec advisories against dependencies that HAVEN'T changed —
+# the per-commit cargo-deny job in ci.yml only re-evaluates when a commit touches the
+# dependency graph; a new CVE against an already-resolved Cargo.lock has no commit to
+# attach to, so it needs a timer. Advisories-only (bans/licenses/sources only change with
+# a Cargo.lock edit, already covered per-commit — re-running them here is pure duplication).
+#
+# Caveat: GitHub auto-disables scheduled workflows after 60 days with no repo commits
+# (public-repo cost control) — not a concern at this repo's commit cadence, but if this
+# job silently stops running, that's why; re-enable from the Actions tab.
+on:
+  schedule:
+    - cron: '17 6 * * *'   # daily, off the top of the hour
+  workflow_dispatch: {}
+
+jobs:
+  cargo-deny-advisories:
+    name: cargo-deny check advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rust/Cargo.toml
+          command-arguments: advisories
