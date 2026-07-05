@@ -26,6 +26,15 @@ product_version() {
   printf '%s' "${v:-0.0.0}"
 }
 
+# product_build_version — CFBundleVersion (the bundle "build number" key, distinct from
+# CFBundleShortVersionString/the marketing version above). Apple expects this to be plain
+# period-separated integers, so this strips any semver prerelease suffix (e.g.
+# "0.1.1-dev" → "0.1.1") from the SAME single source rather than being a second,
+# independently-set literal that could drift from it.
+product_build_version() {
+  product_version | cut -d- -f1
+}
+
 # app_display_name — the user-visible app name. SINGLE source of truth: the i18n
 # catalog's `common.app_name`, the same string the app itself renders. The build stamps
 # it into CFBundleName/CFBundleDisplayName so the bundle (Finder, the
@@ -167,6 +176,10 @@ assemble_app() {
   # Stamp the marketing version from the Rust workspace so the OS bundle version
   # (Finder "Get Info") matches the About screen's `ds_version()`. Single source.
   plutil -replace CFBundleShortVersionString -string "$(product_version)" "$app/Contents/Info.plist"
+  # Stamp CFBundleVersion (the build-number key) from the SAME source — otherwise it
+  # ships as the checked-in Info.plist template's literal "1" forever, unrelated to the
+  # actual product version, on every build.
+  plutil -replace CFBundleVersion -string "$(product_build_version)" "$app/Contents/Info.plist"
   # Stamp the display name from the i18n catalog so the bundle's name agrees with the
   # in-app name everywhere — one source (app.display_name), no drift.
   local app_name; app_name="$(app_display_name)"

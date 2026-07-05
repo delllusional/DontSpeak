@@ -9,7 +9,11 @@
 # why apps/macos and apps/windows are separate builds too.
 [package]
 name = "ds-linux-gtk"
-version = "0.1.0"
+# Kept in lockstep with rust/Cargo.toml's [workspace.package] version by hand — this is a
+# STANDALONE workspace (see the note above), so Cargo's `version.workspace = true`
+# inheritance can't reach across to the other workspace. release.yml's `check` job
+# asserts the two agree so drift here fails fast instead of silently shipping stale.
+version = "0.1.1-dev"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"

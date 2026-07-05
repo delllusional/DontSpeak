@@ -42,6 +42,16 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           echo "single-source version=$ver  tag=$tag"
           [ "$ver" = "$tag" ] || { echo "::error::tag v$tag != rust/Cargo.toml version $ver — bump the workspace version or fix the tag"; exit 1; }
+      - name: apps/linux/gtk/Cargo.toml agrees with rust/Cargo.toml
+        # A STANDALONE workspace (see its Cargo.toml header) can't use `version.workspace =
+        # true` to inherit from rust/'s [workspace.package] — its own version literal is
+        # kept in lockstep by hand, so catch drift here rather than shipping it silently.
+        run: |
+          set -euo pipefail
+          ver="$(bash scripts/version.sh)"
+          gtk_ver="$(grep -m1 '^version = "' apps/linux/gtk/Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          echo "rust/Cargo.toml version=$ver  apps/linux/gtk/Cargo.toml version=$gtk_ver"
+          [ "$ver" = "$gtk_ver" ] || { echo "::error::apps/linux/gtk/Cargo.toml version ($gtk_ver) != rust/Cargo.toml version ($ver) — bump it to match"; exit 1; }
 
   # ── Tests gate: run the SAME suite as CI, but across ALL THREE OSes, before
   #    building/publishing (per-commit CI is Linux-only; the release is thorough). ──

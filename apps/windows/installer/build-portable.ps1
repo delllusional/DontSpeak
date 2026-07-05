@@ -34,6 +34,13 @@ $ver    = Get-DsVersion -Repo $repo
 # Uniform release-asset arch token (uname-style), shared with the macOS/Linux packagers.
 $archToken = if ($Arch -eq 'arm64') { 'aarch64' } else { 'x86_64' }
 $zipName = "dontspeak-$ver-windows-$archToken.zip"
+# AssemblyVersion/FileVersion must be purely numeric X.Y.Z.W (no semver prerelease
+# suffix like "-dev") — the shipped .exe's file-properties version would otherwise
+# silently stay the .NET SDK's default 1.0.0.0 forever, regardless of $ver, since
+# nothing else stamps it. Strip any "-suffix" and pad to 4 components; `-p:Version`
+# itself (NuGet-style, shown nowhere on the .exe's Details tab) keeps the full string.
+$fileVer = ($ver -split '-')[0]
+if (($fileVer -split '\.').Count -eq 3) { $fileVer = "$fileVer.0" }
 
 Write-Host "==> 1/4  cargo build --release ($($Arch): core + helper + dontspeak)" -ForegroundColor Cyan
 Invoke-CargoRelease -Repo $repo -CargoTargetArg $b.CargoTargetArg -RustTarget $b.RustTarget
@@ -47,7 +54,9 @@ if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 # on failure — a bare "publish failed" is undebuggable from a CI transcript.
 $publishOut = dotnet publish "$repo\apps\windows\winui\DontSpeak.WinUI.csproj" -c Release `
     -p:Platform=$dotnetPlatform -r "win-$Arch" --self-contained true `
-    -p:WindowsAppSDKSelfContained=true -o "$stage" 2>&1
+    -p:WindowsAppSDKSelfContained=true `
+    -p:Version=$ver -p:AssemblyVersion=$fileVer -p:FileVersion=$fileVer `
+    -o "$stage" 2>&1
 if ($LASTEXITCODE) { $publishOut | Write-Host; throw "dotnet publish failed" }
 Copy-Item "$rel\dontspeak.exe" "$stage\" -Force
 Copy-Item "$repo\apps\windows\winui\AppIcon.ico" "$stage\" -Force
