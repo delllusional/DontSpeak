@@ -108,6 +108,19 @@ release): run the `deploy-site` skill **in the `dontspeak.org` repo checkout** �
 there, not here. The one-command installers resolve the latest GitHub release via the API at
 run time, so a brief site lag degrades gracefully — but don't skip the deploy.
 
+## 8 — Bump to the next dev version
+
+Immediately after the release publishes (step 5), bump `rust/Cargo.toml`'s
+`[workspace.package] version` to the next version with a `-dev` suffix — e.g. `0.1.0` →
+`0.1.1-dev` for a patch-level next release, or `0.2.0-dev` if you already know the next
+release is minor-sized. Regenerate the lock file (`cargo build --offline` anywhere in the
+workspace touches it) and commit both. This is a small, code-free commit whose only job is
+to make `main` visibly "ahead of the last release" — the exact-string tag/version guard
+(step 3.1) never sees this suffix since nothing ever tags a `-dev` version. When it's time
+to cut the NEXT release, first replace `-dev` with the real next version (bumping further
+to `minor`/`major` instead of `patch` if what accumulated warrants it), commit, then tag as
+usual (step 2).
+
 ## Caveats
 
 - A pushed tag on a commit whose tests later fail leaves a **tag without a release** — clean it
@@ -115,3 +128,9 @@ run time, so a brief site lag degrades gracefully — but don't skip the deploy.
 - `workflow_dispatch` runs the build for testing without a tag — it does not publish.
 - Don't `git tag -f` over a pushed tag without deleting the remote one first; GitHub keeps the
   old object and Actions may not re-trigger.
+- **Don't skip step 8.** Without the `-dev` bump, `rust/Cargo.toml` keeps reading the
+  JUST-RELEASED version even as new commits land on `main` — indistinguishable from the
+  released state by version number alone. A commit that lands after `vX.Y.Z` is tagged is
+  NOT part of that release just because the version string hasn't changed yet; re-cutting
+  (step 6) must move the tag back to the actual release commit, not forward onto whatever
+  unreleased work has since landed on `main`.
