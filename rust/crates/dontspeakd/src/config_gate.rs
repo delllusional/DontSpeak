@@ -120,6 +120,22 @@ pub(crate) fn system_stt_available() -> bool {
     ds_stt::system_available()
 }
 
+/// Does the config's resolved STT engine (System) still need an authorization ATTEMPT —
+/// i.e. it isn't already fully `Ready`? Gates the boot/reload-time authorize nudge
+/// (`boot::authorize_system_stt_if_needed`) so it fires once per real transition into an
+/// unauthorized/preparing System rather than on every single boot/reload while System
+/// stays selected and already usable — an already-`Ready` recognizer would otherwise pay
+/// for a spurious thread + (on macOS <26) a real on-device smoke-transcribe every time.
+/// `Preparing`/`Unavailable` both count as "needs it": the former is the not-yet-decided
+/// or still-downloading case authorize should advance, the latter is a previously denied/
+/// unsupported case worth one more attempt per boot/reload in case it was granted
+/// out-of-band (System Settings) since the recognizer's live TCC state can change without
+/// our config changing. PURE (probes without prompting) + unit-tested.
+pub(crate) fn system_stt_needs_authorization(cfg: &VoiceConfig) -> bool {
+    cfg.resolved_stt() == Some(ds_config::SttEngine::System)
+        && ds_stt::system_state() != ds_stt::SystemState::Ready
+}
+
 /// The local-STT backend token the warm helper should run, derived from the engine +
 /// provider: `"system"` (SFSpeechRecognizer) when the System engine is selected, else
 /// the resolved Parakeet runtime (`onnx`/`apple-native`). Carried to the helper via

@@ -86,9 +86,11 @@ pub fn available() -> bool {
 }
 
 /// Request Speech Recognition authorization (prompts on first use), BLOCKING, then
-/// re-check. `Ok(())` when usable afterwards; `Err(reason)` otherwise. The engine
-/// calls this when the user opts into `stt_engine=system` so the prompt is attributed
-/// to DontSpeak.app and enabling never silently degrades.
+/// re-check. `Ok(())` when usable afterwards; `Err(reason)` otherwise. Called both when
+/// the user explicitly opts into `stt_engine=system` (so the prompt is attributed to
+/// DontSpeak.app and enabling never silently degrades) and automatically at boot/reload
+/// when the config resolves to System via the default ladder — see
+/// `dontspeakd::boot::authorize_system_stt_if_needed`.
 pub fn authorize() -> Result<(), String> {
     let lib = ds_model::shim::open()?;
     // SAFETY: app-signed dylib whose C ABI matches smkokoro.h.

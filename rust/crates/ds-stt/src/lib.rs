@@ -81,9 +81,12 @@ pub fn system_available() -> bool {
 }
 
 /// Request Speech Recognition authorization (prompts on first use), BLOCKING, then
-/// re-check. `Ok(())` when usable afterwards, else `Err(reason)`. The engine calls this
-/// on opt-in so enabling `stt_engine=system` verifies availability and never silently
-/// falls back. Always `Err` off macOS.
+/// re-check. `Ok(())` when usable afterwards, else `Err(reason)`. Called both when a
+/// user explicitly opts into `stt_engine=system` (so enabling it verifies availability
+/// and never silently falls back) AND automatically at boot/reload when the config
+/// resolves to System via the default ladder without ever going through that explicit
+/// opt-in — see `dontspeakd::boot::authorize_system_stt_if_needed`. Always `Err` off
+/// macOS.
 #[cfg(target_os = "macos")]
 pub fn system_authorize() -> Result<(), String> {
     sysspeech::authorize()

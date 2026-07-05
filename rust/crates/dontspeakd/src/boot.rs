@@ -13,7 +13,7 @@ use crate::barge::spawn_mic_barge_watcher;
 use crate::config_gate::{
     build_stt, config_mtime, debug_enabled, full_duplex_wanted, helper_needed, helper_stt_provider,
     helper_uses_stt, local_stt_available, normalize_long_press, reconcile_helper_models,
-    reload_watermark, should_reload_on_mtime,
+    reload_watermark, should_reload_on_mtime, system_stt_needs_authorization,
 };
 use crate::downloads::{
     DownloadFlags, DownloadState, apply_provider_and_autofetch, auto_download_missing, wire,
@@ -112,6 +112,18 @@ pub fn engine_run(
     // missing / bad settings.json still yields a working engine.
     let cfg = VoiceConfig::load(&paths);
     let long_press_ms = cfg.long_press_ms;
+
+    // One-time PROMPT for macOS Speech-Recognition authorization when the config
+    // resolves to System STT — mirrors `plat.request_permissions()` above (the same
+    // "ask once at boot" shape for Accessibility). Without this, a machine that never
+    // went through the explicit `set_config(stt_engine=system)` opt-in gate (e.g. the
+    // default `stt_engine_ladder` picking System, unset by the user) never calls
+    // `system_authorize()` at all: the recognizer sits in `Preparing` (orange) forever
+    // and every Caps-Lock tap gets refused, with no path to actually become usable.
+    // Re-run on every reload too (see the `Run` arm below) — the ladder can newly
+    // resolve to System after boot as well (a hand-edited config.toml, or a higher rung
+    // losing availability), and that path never went through `set_config` either.
+    authorize_system_stt_if_needed(&cfg, &reload_requested, &running);
 
     log(&format!(
         "engine started (poll={POLL_MS}ms long_press={long_press_ms}ms \
@@ -469,6 +481,11 @@ pub fn engine_run(
                 if stt_engine_changed {
                     stt_stats.reset();
                 }
+                // Same one-time authorize nudge as boot — a reload (not just startup) can be
+                // the FIRST time the config resolves to System (a hand-edited config.toml, or
+                // the ladder falling through when a higher rung stops being available), and
+                // that path never goes through `set_config`'s explicit opt-in gate either.
+                authorize_system_stt_if_needed(&new_cfg, &reload_requested, &running);
                 // Newly-activated engine (e.g. user just enabled TTS) → apply the provider and
                 // auto-fetch its model(s), CUDA runtime included when the provider calls for it.
                 apply_provider_and_autofetch(&tts, &downloads, &new_cfg);
@@ -501,12 +518,14 @@ pub fn engine_run(
     // is pending) — otherwise the last few utterances of the session are lost.
     lifetime.flush();
     // Still-DETACHED on this return (not joined): the IPC server thread
-    // (spawn_ipc_server), the mic-barge watcher (spawn_mic_barge_watcher), and the
-    // TtsQueue worker (TtsQueue::start). They hold only Arc clones of the shared
-    // state and do no external IO after the socket is removed below; under the
-    // hosted FFI the engine is a singleton so a fresh start rebinds cleanly. Joining them would
-    // need stop signals threaded through each — deferred as too invasive for this
-    // conservative fix.
+    // (spawn_ipc_server), the mic-barge watcher (spawn_mic_barge_watcher), the
+    // TtsQueue worker (TtsQueue::start), and — while a permission dialog is still
+    // unanswered — `authorize_system_stt_if_needed`'s thread (it checks `running` before
+    // touching `reload_requested`, so it's harmless past this point, just outstanding).
+    // They hold only Arc clones of the shared state and do no external IO after the
+    // socket is removed below; under the hosted FFI the engine is a singleton so a fresh
+    // start rebinds cleanly. Joining them would need stop signals threaded through each —
+    // deferred as too invasive for this conservative fix.
 
     // §E.4: remove the engine pidfile ONLY if it still records OUR pid — same
     // don't-clobber-a-newer-instance discipline as ds-narrate::clear_self_pid
@@ -573,6 +592,45 @@ pub fn engine_run(
         }
     }
     Ok(())
+}
+
+/// Spawn the one-time macOS Speech-Recognition authorization attempt for System STT, IF
+/// this resolution actually needs it ([`config_gate::system_stt_needs_authorization`]) —
+/// so an already-`Ready` (or off-macOS, where it's never selected) config never pays for
+/// a spurious thread +, on macOS <26, a real on-device smoke-transcribe. `system_authorize`
+/// BLOCKS on the OS permission flow, so it runs off this thread; on completion it nudges
+/// `reload_requested` (the SAME flag the download self-heal in `downloads.rs` uses) so
+/// `Engine::reload`'s `local_avail_flipped` check picks up a freshly granted (or freshly
+/// denied) recognizer without a restart. Skips the nudge if `running` has already gone
+/// false — the engine may have been asked to stop while this thread was blocked on the
+/// permission dialog, exactly the race `downloads.rs`'s own `shutdown` observer guards
+/// against for its detached completion hooks. Called from BOTH boot (`engine_run`, once)
+/// and every config reload (the ladder can newly resolve to System after boot too, via a
+/// hand-edited config.toml or a higher rung losing availability) — `system_authorize`
+/// otherwise runs ONLY through `set_config`'s explicit `AuthorizeSystemStt` opt-in gate
+/// (`dontspeak::tools::call_set_config`), which a config that resolves to System via the
+/// ladder alone never goes through.
+fn authorize_system_stt_if_needed(
+    cfg: &VoiceConfig,
+    reload_requested: &Arc<AtomicBool>,
+    running: &Arc<AtomicBool>,
+) {
+    if !system_stt_needs_authorization(cfg) {
+        return;
+    }
+    let reload_requested = reload_requested.clone();
+    let running = running.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = ds_stt::system_authorize() {
+            log(&format!(
+                "WARN: system STT authorization failed: {e} — dictation stays on the \
+                 Claude Code fallback until granted"
+            ));
+        }
+        if running.load(Ordering::Relaxed) {
+            reload_requested.store(true, Ordering::Relaxed);
+        }
+    });
 }
 
 /// Cap on relaunches over the caps-HID-stuck condition within [`CAPS_RELAUNCH_WINDOW`] —
