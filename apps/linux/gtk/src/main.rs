@@ -26,6 +26,7 @@ fn main() -> glib::ExitCode {
     app.connect_startup(|_| {
         ffi::set_locale(&sys_locale::get_locale().unwrap_or_else(|| "en".to_string()));
         overlay::load_css();
+        ui::load_update_badge_css();
         // Host the engine in-process (idempotent; returns true if running now).
         ffi::engine_start();
     });
@@ -51,6 +52,28 @@ fn on_activate(app: &adw::Application) {
         w.set_visible(false);
         glib::Propagation::Stop
     });
+
+    // One-shot startup update check: `ds_update_check_json` is a blocking network call (the
+    // ONE network-touching ds-core FFI entry point), so it runs on its own throwaway thread,
+    // never the GTK main thread — mirrors the `status::spawn_push` background-thread pattern,
+    // but fires exactly once per launch rather than looping. The result crosses back to the
+    // main thread over a one-shot channel; `ui::apply_update_check` treats any failure/`{}`
+    // payload as "no update" and leaves the pill hidden.
+    {
+        let w = widgets.clone();
+        let (tx, rx) = async_channel::bounded::<String>(1);
+        std::thread::Builder::new()
+            .name("ds-update-check".into())
+            .spawn(move || {
+                let _ = tx.send_blocking(ffi::update_check_json());
+            })
+            .ok();
+        glib::spawn_future_local(async move {
+            if let Ok(json) = rx.recv().await {
+                ui::apply_update_check(&w, &json);
+            }
+        });
+    }
 
     // Tray on its own DBus thread; its menu hands commands back over a channel. Fail-soft:
     // no session bus / no SNI host → no tray, the rest of the app still runs.

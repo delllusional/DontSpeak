@@ -150,6 +150,19 @@ char *ds_log_colors_json(void);
 // `ds_string_free`. HANDLE-FREE — no engine needed.
 char *ds_version(void);
 
+// Startup update check: is a newer DontSpeak release out? Hits the real GitHub API (a
+// blocking HTTP GET — this is the one FFI call that touches the network, NOT handle-free the
+// way the disk/IPC-only probes above are; call it off the UI thread, e.g. once at startup on
+// a background thread) and compares the latest release tag against [`crate::VERSION`] via
+// [`ds_model::update_check::check_for_update`]. Returns a JSON object:
+// `{"update_available":bool,"current_version":str,"latest_version":str,"html_url":str}` — the
+// per-host UI reads `update_available` to decide whether to show the pill next to the version
+// number, and `html_url` as its click-through target. On ANY failure (offline, rate-limited,
+// malformed response) returns `"{}"` — a host must treat a missing `update_available` key the
+// same as `false`, never as "unknown, so show the pill anyway". Owned `char*`, free with
+// `ds_string_free`.
+char *ds_update_check_json(void);
+
 // Set the active UI locale (BCP-47 or a bare language tag, e.g. "de"). NULL is a no-op.
 // Unknown locales fall back to English at lookup. HANDLE-FREE — no engine needed.
 void ds_set_locale(const char *locale);

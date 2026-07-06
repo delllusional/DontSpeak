@@ -20,6 +20,10 @@ common:
   app_name: DontSpeak    # the product name — the canonical brand string. Reused for the tray
                          # hover label and the Status "DontSpeak" row title.
   dash: "—"
+  # Forward glyph for the "current → new" version pill (paired with status.update_available):
+  # "this version leads to that one", not an up/down direction — a symbol, not language text,
+  # but still routed through the catalog rather than hardcoded per host, like the "—" glyph above.
+  update_arrow: "→"
   # The screen labels — "Status", "Tools", "Libraries". ONE key each, shared by the Windows
   # NavigationView tabs AND the macOS tray menu items (same word, same destination); only
   # the platform-idiomatic tray ACTIONS below (Quit vs Exit) stay on separate keys.
@@ -107,6 +111,10 @@ status:
   # TTS/STT expansion empty-state: the engine is ready but hasn't produced any stats yet.
   # (A not-ready engine instead shows its `status.engine.status.*` word here — see that group.)
   no_data: "No data yet."
+  # The pill shown next to the version number when a newer release is available (from
+  # ds_update_check_json). Neutral wording — brand-purple accent conveys "notice me", not a
+  # warning/error connotation, so the label itself stays a plain statement of fact.
+  update_available: "Update available"
   # Engine-specific rows that are NOT empty-states — they carry their own affordance/info and
   # so stay distinct: System TTS links out to the OS voices, Claude Code names its delegation.
   tts_system_settings: "Manage voices"

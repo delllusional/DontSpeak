@@ -84,4 +84,10 @@ extension Color {
     /// SwiftUI alias for the shared [`Brand.warning`] orange — used by the warming status
     /// dot and the dictation panel's no-focus glow so they share ONE source of truth.
     static let smWarning = Color(nsColor: Brand.warning)
+
+    /// SwiftUI alias for the shared [`Brand.seedPurple`] brand accent — used by the startup
+    /// "update available" pill (StatusView's DontSpeakRow). An available update is a neutral
+    /// "notice me" cue, not a warning/error condition, so it deliberately uses the brand accent
+    /// rather than `smWarning` — the same purple as the menu-bar "speaking" pill.
+    static let smSeedPurple = Color(nsColor: Brand.seedPurple)
 }

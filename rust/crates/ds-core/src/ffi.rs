@@ -297,6 +297,35 @@ pub extern "C" fn ds_version() -> *mut c_char {
     guard_str("", || to_cstring(crate::VERSION))
 }
 
+/// Startup update check: is a newer DontSpeak release out? Hits the real GitHub API (a
+/// blocking HTTP GET — this is the one FFI call that touches the network, NOT handle-free the
+/// way the disk/IPC-only probes above are; call it off the UI thread, e.g. once at startup on
+/// a background thread) and compares the latest release tag against [`crate::VERSION`] via
+/// [`ds_model::update_check::check_for_update_at`]. Returns a JSON object:
+/// `{"update_available":bool,"current_version":str,"latest_version":str,"html_url":str}` — the
+/// per-host UI reads `update_available` to decide whether to show the pill next to the version
+/// number, `latest_version` as the version it displays, and `html_url` as the pill's own
+/// click-through target. On ANY failure (offline, rate-limited, malformed response) returns
+/// `"{}"` — a host must treat a missing `update_available` key the same as `false`, never as
+/// "unknown, so show the pill anyway". Owned `char*`, free with `ds_string_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_update_check_json() -> *mut c_char {
+    ds_update_check_json_at("https://api.github.com")
+}
+
+/// Split out from [`ds_update_check_json`] ONLY so its test can point `api_base` at a mock
+/// server instead of the real GitHub API — exercises the real marshaling (`guard_str`/
+/// `to_cstring`) and the real [`crate::VERSION`], not a duplicate of `ds-model`'s own unit
+/// tests for [`ds_model::update_check::check_for_update_at`] itself.
+fn ds_update_check_json_at(api_base: &str) -> *mut c_char {
+    guard_str("{}", || {
+        let json = ds_model::update_check::check_for_update_at(api_base, crate::VERSION)
+            .map(|info| info.to_json())
+            .unwrap_or_else(|_| "{}".to_string());
+        to_cstring(json)
+    })
+}
+
 // ── Localization (shared ds-i18n catalog) ────────────────────────────────────────
 // Every platform UI renders ONE catalog through these: macOS (Swift) and Windows
 // (WinUI) call them instead of hardcoding/duplicating literals. English is the
@@ -461,6 +490,56 @@ pub extern "C" fn ds_string_free(s: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The new FFI-boundary function itself, not a duplicate of `ds-model`'s own httpmock unit
+    /// tests for `check_for_update_at`: goes through the real `ds_update_check_json_at` seam
+    /// (same `guard_str`/`to_cstring` marshaling `ds_update_check_json` uses), pointed at a
+    /// mock server so it never touches the real GitHub API on `cargo test`.
+    #[test]
+    fn ds_update_check_json_at_reads_a_mocked_release_through_the_real_ffi_path() {
+        let server = httpmock::MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/repos/delllusional/DontSpeak/releases/latest");
+            then.status(200).json_body(serde_json::json!({
+                "tag_name": "v9.9.9",
+                "html_url": "https://github.com/delllusional/DontSpeak/releases/tag/v9.9.9",
+            }));
+        });
+
+        let ptr = ds_update_check_json_at(&server.base_url());
+        let json = unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        ds_string_free(ptr);
+        mock.assert();
+
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["update_available"], true);
+        assert_eq!(v["latest_version"], "9.9.9");
+    }
+
+    /// A failing endpoint must degrade to `"{}"`, never propagate an error to the caller.
+    #[test]
+    fn ds_update_check_json_at_degrades_to_empty_object_on_a_failing_endpoint() {
+        let server = httpmock::MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/repos/delllusional/DontSpeak/releases/latest");
+            then.status(404);
+        });
+
+        let ptr = ds_update_check_json_at(&server.base_url());
+        let json = unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        ds_string_free(ptr);
+        mock.assert();
+
+        assert_eq!(json, "{}");
+    }
 
     /// End-to-end: the UI tool catalog the hosts read (`ds_tools_json`) enriches EVERY param
     /// with a `detail` string, and constraint params carry the shared localized qualifier — so

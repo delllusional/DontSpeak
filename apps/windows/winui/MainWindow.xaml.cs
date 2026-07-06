@@ -606,6 +606,25 @@ public sealed partial class MainWindow : Window
             await Windows.System.Launcher.LaunchUriAsync(uri);
     }
 
+    /// <summary>Turn the plain version into a "current → new" pill when a newer release is out —
+    /// the result of the ONE-SHOT startup check (App.OnLaunched's background thread, off the UI
+    /// thread since the check blocks on a real GitHub API call). <paramref name="latestVersion"/>
+    /// is null whenever <paramref name="available"/> is false, per Native.ParseLatestVersion's
+    /// contract — in that case VersionPill is left with no background and the arrow/new-version
+    /// text stay collapsed, so it reads exactly as the plain version did before this feature.
+    /// Deliberately does NOT touch VersionLink's click handler — the version keeps opening the
+    /// homepage either way. Brand-purple (Brand.SeedPurple) background only — the text keeps its
+    /// existing color (Opacity 0.55 / TextFillColorPrimaryBrush, same as VersionText always had):
+    /// a pending update isn't an error/warning condition, just something that should stand out.</summary>
+    internal void ApplyUpdateCheck(bool available, string? latestVersion)
+    {
+        if (!available || latestVersion is null) return;
+        UpdateBadgeText.Text = latestVersion;
+        UpdateArrowText.Visibility = UpdateBadgeText.Visibility = Visibility.Visible;
+        var purple = Brand.SeedPurple;
+        VersionPill.Background = new SolidColorBrush(Color.FromArgb(40, purple.R, purple.G, purple.B));
+    }
+
     // HyperlinkButton.Click doesn't mark the underlying Tapped routed event Handled, so without
     // this it bubbles up to DontSpeakHeader's own Tapped and expands the row on every version
     // click. Stop it here instead of relying on the button to consume it implicitly.

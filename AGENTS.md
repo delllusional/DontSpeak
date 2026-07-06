@@ -75,6 +75,15 @@ the three runtime pieces (CLI, engine, host app) need different rebuild routes.
 - **No hardcoded UI strings.** Every new user-facing string goes in the shared
   `ds-i18n` catalog (`rust/crates/ds-i18n/locales/en.yml`), rendered through the FFI
   — never literal text in Swift/C#/XAML — see [docs/LOCALIZATION.md](docs/LOCALIZATION.md).
+- **Tests never touch a real network endpoint.** Any code that makes an outbound HTTP
+  call (model downloads in `ds-model`, the GitHub releases update-check) must be
+  structured so its tests point at a local mock instead of the real service —
+  `httpmock` is already a dev-dependency of `ds-model` for exactly this; parameterize
+  the function under test by base URL (see `ds-model`'s `download.rs`/`update_check.rs`
+  for the pattern: a `pub(crate)`/`pub` `..._at(base_url, ...)` inner function the
+  public entry point calls with the real URL, and tests call directly with a
+  `MockServer`'s URL). A test that hits the live internet is a CI-flake and
+  rate-limit risk, not just a style nit — code review should treat it as a bug.
 
 ## Gates — per-commit vs release (deliberate split, not an oversight)
 

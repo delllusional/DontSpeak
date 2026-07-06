@@ -28,6 +28,8 @@ rustls-native-certs = "0.8"
 rustls-pki-types = "1"
 sha2 = { workspace = true }
 tempfile = { workspace = true }
+# Compare the running version against the latest GitHub release tag (update_check).
+semver = { workspace = true }
 # ONE GPU-aware ORT SessionBuilder (`cuda_session_builder`) shared by Kokoro TTS + Parakeet STT,
 # so the CUDA-EP registration + CPU-fallback logic lives here, not copy-pasted per engine.
 ort = { workspace = true }

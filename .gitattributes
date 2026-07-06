@@ -13,3 +13,8 @@ rust/crates/sm-normalize/tests/fixtures/*.out text eol=lf
 apps/linux/aec/*.conf    text eol=lf
 apps/linux/aec/*.pa      text eol=lf
 apps/linux/udev-rule.txt text eol=lf
+
+# Workflow scripts (.claude/workflows) are read verbatim by the Workflow tool's
+# permission dialog, which rejects embedded \r as a hidden control character. Pin
+# them to LF so a Windows checkout with autocrlf=true doesn't break `Workflow({name: ...})`.
+.claude/workflows/*.js   text eol=lf

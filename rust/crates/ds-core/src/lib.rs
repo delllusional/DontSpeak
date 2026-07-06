@@ -7,7 +7,9 @@
 //! all over a tiny stable C ABI ([`ffi`], the committed `dontspeak.h`). The
 //! remaining control surface (voice/engine/language/rate/toggles/downloads)
 //! lives in DontSpeak, so the rich config/voice-picker core that used to
-//! live here is gone.
+//! live here is gone. It also exposes a startup update check
+//! (`ds_update_check_json`, backed by [`ds_model::update_check`]) — the one FFI
+//! call here that hits the network, everything else is disk/IPC-only.
 //!   - macOS: the SwiftUI app (`apps/macos/`) links the staticlib.
 //!   - Linux: the GTK app (`ds-gtk`) links the staticlib; Windows: the WinUI app
 //!     (`ds-winui`) binds the same header via the `ds_core.dll` cdylib.

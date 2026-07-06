@@ -45,6 +45,11 @@ pub struct Widgets {
     /// Lifetime totals revealed under the headline (TTS / STT all-time durations).
     spoken: gtk::Label,
     heard: gtk::Label,
+    /// The headline row's version subtitle — the SAME `GtkLabel` `make_version_link` wires its
+    /// homepage click to. [`apply_update_check`] rewrites its text to "current → new" and tints
+    /// its background once the one-shot startup check confirms a newer release, so old+new sit
+    /// on one shared pill rather than a separate adjacent badge.
+    version_subtitle: gtk::Label,
 }
 
 /// Build the health window (hidden until presented). Returns the window + the value handles.
@@ -90,7 +95,10 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         .subtitle(version.as_str())
         .build();
     let engine = expander_indicator(&status_row);
-    make_version_link(&status_row, &crate::ffi::homepage_url());
+    // The version subtitle keeps opening the homepage (unchanged, same GtkLabel/click handler
+    // as before this feature) — apply_update_check later rewrites ITS text + background in
+    // place for "current → new", rather than adding a separate suffix widget.
+    let version_subtitle = make_version_link(&status_row, &crate::ffi::homepage_url());
 
     // Lifetime totals — "TTS all-time" / "STT all-time" (role + lifetime keys), revealed on expand.
     let tts_life = format!(
@@ -273,6 +281,7 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         caps_dot,
         spoken,
         heard,
+        version_subtitle,
     }
 }
 
@@ -521,12 +530,17 @@ fn find_by_css_class(w: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
 /// cursor plus a `GtkGestureClick` claimed on *press* — the row's own tap-to-expand gesture fires
 /// on press too, so claiming any later (e.g. on release) would be too late to stop it. Mirrors the
 /// Windows `CursorHyperlinkButton` / macOS `linkCursor` pairing, minus any style change.
-fn make_version_link(row: &adw::ExpanderRow, url: &str) {
-    let Some(subtitle) = find_by_css_class(row.upcast_ref::<gtk::Widget>(), "subtitle") else {
-        return;
-    };
+///
+/// Returns the subtitle `GtkLabel` itself (falling back to a standalone, unparented one on the
+/// — practically never hit — case the row has no "subtitle"-classed child) so
+/// [`apply_update_check`] can later rewrite its text/background in place for "current → new",
+/// rather than adding a second, separate widget next to it.
+fn make_version_link(row: &adw::ExpanderRow, url: &str) -> gtk::Label {
+    let subtitle = find_by_css_class(row.upcast_ref::<gtk::Widget>(), "subtitle")
+        .and_then(|w| w.downcast::<gtk::Label>().ok())
+        .unwrap_or_else(|| gtk::Label::new(None));
     if url.is_empty() {
-        return;
+        return subtitle;
     }
     subtitle.set_cursor_from_name(Some("pointer"));
     let click = gtk::GestureClick::new();
@@ -539,6 +553,66 @@ fn make_version_link(row: &adw::ExpanderRow, url: &str) {
             gtk::gio::AppInfo::launch_default_for_uri(&url, None::<&gtk::gio::AppLaunchContext>);
     });
     subtitle.add_controller(click);
+    subtitle
+}
+
+/// Load the `.ds-update-badge` pill styling — background + rounding ONLY, tinted with the
+/// shared brand-purple RGB, parsed by the SAME [`crate::icon::brand_colors`] the tray icon
+/// already uses (never a second hardcoded `#5B4397`), built as a runtime CSS string (per-pixel
+/// color, not a static stylesheet) since the RGB is only known at runtime via
+/// `ds_brand_colors_json`. Deliberately does NOT set `color`/`font-*`: applied to the version
+/// subtitle label itself (see [`apply_update_check`]), it must keep that label's existing text
+/// styling — only the background changes, so "current → new" reads exactly like the plain
+/// version did, just on a pale purple pill. Called once at startup (`main.rs`), independent of
+/// the (separately dispatched, network-touching) update check itself — the color source is
+/// local, no network round trip needed to load it.
+pub fn load_update_badge_css() {
+    let (crate::icon::Rgb(r, g, b), _mic_orange) =
+        crate::icon::brand_colors(&crate::ffi::brand_colors_json());
+    let css = format!(
+        ".ds-update-badge {{
+            background-color: rgba({r}, {g}, {b}, 0.18);
+            border-radius: 999px;
+            padding: 2px 10px;
+        }}"
+    );
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(&css);
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+/// Apply the one-shot startup update-check result (`main.rs`'s background dispatch of
+/// `ds_update_check_json`). A `{}` payload, a missing/false `update_available` key, or a missing
+/// `latest_version` — ANY failure: offline, rate-limited, malformed — is treated as "no update,
+/// stay as the plain version", per the FFI contract; this never shows a pill on doubt. Rewrites
+/// the EXISTING version subtitle label in place to "current → new" and tints its background —
+/// no new widget, no new click target (no GitHub Releases link yet — that's a follow-up, not
+/// part of this change); the subtitle's own homepage click (`make_version_link`) is unchanged.
+pub fn apply_update_check(w: &Widgets, json: &str) {
+    let v: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+    let available = v
+        .get("update_available")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    let Some(latest) = available
+        .then(|| v.get("latest_version"))
+        .flatten()
+        .and_then(|s| s.as_str())
+    else {
+        return;
+    };
+    let current = w.version_subtitle.text();
+    w.version_subtitle
+        .set_text(&format!("{current} {} {latest}", t("common.update_arrow")));
+    w.version_subtitle.add_css_class("ds-update-badge");
+    w.version_subtitle
+        .set_tooltip_text(Some(&t("status.update_available")));
 }
 
 /// An `AdwActionRow` with `title` and any widget (a value label or a status dot) as suffix.

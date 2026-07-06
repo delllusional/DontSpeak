@@ -174,6 +174,16 @@ final class Core {
         return String(cString: ptr)
     }()
 
+    /// Whether a newer DontSpeak release is out — set ONCE per launch by `checkForUpdateOnce()`.
+    /// Drives the small pill next to the version number in `DontSpeakRow`. Starts `false`
+    /// (fail-quiet): until the one-shot check resolves, or if it fails/times out, no pill shows.
+    var updateAvailable = false
+
+    /// The newer release's version number (e.g. "0.2.0"), shown INSIDE the pill next to an
+    /// arrow — set alongside `updateAvailable` by the same one-shot check. `nil` until/unless
+    /// a newer release is confirmed.
+    var latestVersion: String?
+
     /// Animates the menu-bar icon (crossfade on state change + breathing while active) off
     /// this Core's activity. `@ObservationIgnored`: the reference never changes; the label
     /// tracks the animator's own `image`. Set at the end of `init` (needs a ready `self`).
@@ -235,6 +245,33 @@ final class Core {
 
         // Now that `self` is ready, spin the menu-bar icon animator off this Core's activity.
         trayAnimator = TrayAnimator(core: self)
+
+        // One-shot per launch: is a newer release out? Off the main thread — `ds_update_check_json`
+        // is a blocking network GET, unlike every other probe here.
+        checkForUpdateOnce()
+    }
+
+    /// One-shot startup check for a newer DontSpeak release (`ds_update_check_json`, the one
+    /// FFI call here that touches the network — a blocking GET — so it runs on a detached task,
+    /// never the main actor). On ANY failure the FFI already returns `"{}"`; a missing
+    /// `update_available` key decodes to `false` here too, so offline/rate-limited/malformed
+    /// just means no pill — never a crash or a stuck "checking" state.
+    private func checkForUpdateOnce() {
+        Task { [weak self] in
+            let result = await Task.detached { () -> (Bool, String?) in
+                guard let ptr = ds_update_check_json() else { return (false, nil) }
+                defer { ds_string_free(ptr) }
+                let json = String(cString: ptr)
+                guard let data = json.data(using: .utf8),
+                    let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                else { return (false, nil) }
+                let available = (obj["update_available"] as? Bool) ?? false
+                return (available, available ? obj["latest_version"] as? String : nil)
+            }.value
+            guard let self else { return }
+            self.updateAvailable = result.0
+            self.latestVersion = result.1
+        }
     }
 
     deinit {

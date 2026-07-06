@@ -316,10 +316,20 @@ private struct DontSpeakRow: View {
                     Text(L.t("common.app_name")).glassRowTitle()
                     // The version links to the homepage: its own tap gesture takes clicks
                     // within its bounds, so a tap elsewhere on the row still expands usage.
-                    Text(core.version).glassRowDetail()
-                        .contentShape(Rectangle())
-                        .linkCursor()
-                        .onTapGesture { core.openHomepage() }
+                    // When a newer release is out, "current → new" sits together inside ONE
+                    // purple-tinted pill (see UpdateBadge) — same tap target, same destination
+                    // (the homepage, unchanged), just a shared background to draw the eye.
+                    if core.updateAvailable, let latest = core.latestVersion {
+                        UpdateBadge(current: core.version, latest: latest)
+                            .contentShape(Rectangle())
+                            .linkCursor()
+                            .onTapGesture { core.openHomepage() }
+                    } else {
+                        Text(core.version).glassRowDetail()
+                            .contentShape(Rectangle())
+                            .linkCursor()
+                            .onTapGesture { core.openHomepage() }
+                    }
                 }
                 Spacer()
                 ExpandDot(expanded: expanded) { StatusDot(core.activity.engineRunning ? .running : .idle) }
@@ -333,6 +343,30 @@ private struct DontSpeakRow: View {
                 statusDetailBlock { LifetimeContent() }
             }
         }
+    }
+}
+
+/// The "current → new" pill shown in place of the plain version text once
+/// `ds_update_check_json` (checked once at launch, see `Core.checkForUpdateOnce`) reports a
+/// newer release. Text keeps the SAME styling as the plain version text (`glassRowDetail()`) —
+/// only the background changes, to a brand seed-purple tint (`Color.smSeedPurple`), NOT
+/// `Color.smWarning`: an available update is a neutral "notice me" cue, not a warning/error
+/// condition — the same brand accent as the menu-bar "speaking" pill.
+private struct UpdateBadge: View {
+    let current: String
+    let latest: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(current)
+            Text(L.t("common.update_arrow"))
+            Text(latest)
+        }
+        .glassRowDetail()
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(Color.smSeedPurple.opacity(0.18)))
+        .accessibilityLabel(L.t("status.update_available"))
     }
 }
 

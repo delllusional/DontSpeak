@@ -55,5 +55,10 @@ cbindgen = { version = "0.29", optional = true }
 default = []
 cbindgen = ["dep:cbindgen"]
 
+[dev-dependencies]
+# Mocks the GitHub releases endpoint for ds_update_check_json's FFI-layer test — same
+# dev-dependency ds-model already uses for its own update_check tests, never the real API.
+httpmock = "0.8.3"
+
 [lints]
 workspace = true

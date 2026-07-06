@@ -111,6 +111,14 @@ pub fn homepage_url() -> String {
 pub fn brand_colors_json() -> String {
     take(sys::ds_brand_colors_json())
 }
+/// Startup update check: the SAME `ds_update_check_json` the macOS/Windows hosts call — a
+/// blocking HTTP GET against the real GitHub API, NOT handle-free like the calls above. Call
+/// only from a dedicated background thread (see `main.rs`'s one-shot startup dispatch), never
+/// the GTK main thread. Returns the raw JSON (`"{}"` on any failure — offline, rate-limited,
+/// malformed); the caller must treat a missing `update_available` key as `false`.
+pub fn update_check_json() -> String {
+    take(sys::ds_update_check_json())
+}
 pub fn set_locale(locale: &str) {
     if let Ok(c) = CString::new(locale) {
         sys::ds_set_locale(c.as_ptr());

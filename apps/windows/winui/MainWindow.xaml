@@ -69,8 +69,29 @@
                                     <loc:CursorHyperlinkButton x:Name="VersionLink" Padding="0" MinWidth="0" MinHeight="0"
                                                      VerticalAlignment="Center" Background="Transparent"
                                                      Click="VersionLink_Click" Tapped="VersionLink_Tapped">
-                                        <TextBlock x:Name="VersionText" Opacity="0.55" FontFamily="{StaticResource MonoFont}"
-                                                   Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                        <!-- "current → new" lives INSIDE the same click target as the plain version —
+                                             same destination (the homepage, unchanged), just a shared pill background
+                                             when a newer release is out (VersionPill.Background, set in code from
+                                             Brand.SeedPurple — the SAME brand-purple accent as the tray "speaking"
+                                             glyph, not the warning/orange token: an update isn't a warning condition,
+                                             just something that should stand out). Text stays the SAME styling as the
+                                             plain version (Opacity 0.55, TextFillColorPrimaryBrush) — only the
+                                             background differs; filled in by MainWindow.ApplyUpdateCheck, hidden by
+                                             default (and again on any failure/offline result). -->
+                                        <Border x:Name="VersionPill" CornerRadius="8" Padding="4,1">
+                                            <StackPanel Orientation="Horizontal" Spacing="3" VerticalAlignment="Center">
+                                                <TextBlock x:Name="VersionText" Opacity="0.55" FontFamily="{StaticResource MonoFont}"
+                                                           Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                                <TextBlock x:Name="UpdateArrowText" Text="{loc:Loc Key=common.update_arrow}"
+                                                           Opacity="0.55" FontFamily="{StaticResource MonoFont}"
+                                                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                                           Visibility="Collapsed" />
+                                                <TextBlock x:Name="UpdateBadgeText" Opacity="0.55" FontFamily="{StaticResource MonoFont}"
+                                                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                                           Visibility="Collapsed"
+                                                           AutomationProperties.Name="{loc:Loc Key=status.update_available}" />
+                                            </StackPanel>
+                                        </Border>
                                     </loc:CursorHyperlinkButton>
                                 </StackPanel>
                                 <Ellipse x:Name="EngineDot" Grid.Column="1" Width="11" Height="11"

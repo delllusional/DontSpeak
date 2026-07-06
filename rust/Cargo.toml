@@ -80,6 +80,10 @@ proptest = "1"
 # aarch64-pc-windows-msvc, whereas ring is pure-Rust and builds on every target.
 attohttpc = { version = "0.31", default-features = false, features = ["tls-rustls-webpki-roots-ring"] }
 sha2 = "0.11"
+# Parse GitHub release tags + the running version for the startup update check
+# (ds-model::update_check), so "is a newer release out" is a real semver compare, not a
+# string compare (which would misorder e.g. "0.9.0" vs "0.10.0").
+semver = "1"
 # STT capture/resample (ds-stt, Parakeet): mic capture (cpal) → mono → 16 kHz
 # (rubato) → transcribe-rs over the shared `ort` runtime.
 cpal = "0.18"

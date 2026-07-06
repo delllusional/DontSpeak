@@ -196,6 +196,25 @@ public partial class App : Application
         // directly).
         if (!_testOverlay) StartDictationPush();
 
+        // Startup, ONE-SHOT update check (ds_update_check_json BLOCKS on a real GitHub API GET,
+        // so it must never run on the UI thread) — fire-and-forget: the pill only ever appears
+        // when a newer release is confirmed, it doesn't gate anything else on launch. Runs once
+        // per process, unconditionally (independent of --test-overlay, which only concerns the
+        // dictation panel).
+        new Thread(() =>
+        {
+            bool available; string? latest;
+            try
+            {
+                var json = Native.UpdateCheckJson();
+                available = Native.ParseUpdateAvailable(json);
+                latest = Native.ParseLatestVersion(json);
+            }
+            catch { available = false; latest = null; } // engine/dll hiccup → no pill, never crash the thread
+            q.TryEnqueue(() => _window?.ApplyUpdateCheck(available, latest));
+        })
+        { IsBackground = true, Name = "update-check" }.Start();
+
         // --test-overlay: cycle the dictation panel without a live Parakeet dictation. The push
         // thread is skipped (above), so nothing fights the scripted panel updates.
         if (testGlow)

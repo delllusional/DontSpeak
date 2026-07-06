@@ -30,6 +30,7 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_homepage_url();
     [DllImport(Dll)] private static extern IntPtr ds_brand_colors_json();
     [DllImport(Dll)] private static extern IntPtr ds_log_colors_json();
+    [DllImport(Dll)] private static extern IntPtr ds_update_check_json();
     // Shared status-panel formatters (one implementation, every platform UI).
     [DllImport(Dll)] private static extern IntPtr ds_engine_state_word([MarshalAs(UnmanagedType.LPUTF8Str)] string state, double progress, [MarshalAs(UnmanagedType.LPUTF8Str)] string why);
     [DllImport(Dll)] private static extern IntPtr ds_duration_live(double secs);
@@ -91,6 +92,46 @@ internal static class Native
     /// source every platform's Logs tab tints from. "{}" on the engine side; <see cref="Brand"/>
     /// falls back to the built-in palette.</summary>
     public static string LogColorsJson() => TakeString(ds_log_colors_json());
+
+    /// <summary>Startup update check: BLOCKS on a real GitHub API GET (ds_update_check_json) —
+    /// call OFF the UI thread (see App.OnLaunched's dedicated "update-check" thread). Raw JSON;
+    /// parse with <see cref="ParseUpdateAvailable"/> / <see cref="ParseLatestVersion"/>.</summary>
+    public static string UpdateCheckJson() => TakeString(ds_update_check_json());
+
+    /// <summary>The pure parse half of the startup update check, split out so the "missing/
+    /// malformed ⇒ false" contract can be unit-tested without ds_core.dll (mirrors how
+    /// <see cref="HealthSnapshot.FromJson(string, Func{string, double, string, string})"/> is
+    /// tested) — internal (not private) so DontSpeak.WinUI.Tests can call it directly.</summary>
+    internal static bool ParseUpdateAvailable(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return false;
+        try
+        {
+            var dto = JsonSerializer.Deserialize<UpdateCheckDto>(json, UpdateCheckJsonOptions);
+            return dto?.UpdateAvailable ?? false;
+        }
+        catch { return false; } // malformed JSON → never show the pill on ambiguity
+    }
+
+    /// <summary>The version number the pill shows (e.g. "0.2.0") — <c>null</c> whenever
+    /// <see cref="ParseUpdateAvailable"/> would return <c>false</c>, so a caller never needs to
+    /// check both: a non-null result already implies an update is available.</summary>
+    internal static string? ParseLatestVersion(string json)
+    {
+        if (!ParseUpdateAvailable(json)) return null;
+        try
+        {
+            var dto = JsonSerializer.Deserialize<UpdateCheckDto>(json, UpdateCheckJsonOptions);
+            return string.IsNullOrEmpty(dto?.LatestVersion) ? null : dto.LatestVersion;
+        }
+        catch { return null; }
+    }
+
+    private static readonly JsonSerializerOptions UpdateCheckJsonOptions = new() { PropertyNameCaseInsensitive = true };
+
+    private sealed record UpdateCheckDto(
+        [property: JsonPropertyName("update_available")] bool UpdateAvailable,
+        [property: JsonPropertyName("latest_version")] string? LatestVersion);
 
     /// <summary>The engine's model-status JSON ("{}" when the engine is down).</summary>
     public static string ModelStatusJson() => TakeString(ds_model_status_json());

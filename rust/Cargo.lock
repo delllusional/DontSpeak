@@ -928,6 +928,7 @@ dependencies = [
  "ds-status",
  "ds-tools",
  "ds-tts",
+ "httpmock",
  "serde_json",
 ]
 
@@ -991,6 +992,7 @@ dependencies = [
  "ort",
  "rustls-native-certs",
  "rustls-pki-types",
+ "semver",
  "serde_json",
  "sha2 0.11.0",
  "tar",

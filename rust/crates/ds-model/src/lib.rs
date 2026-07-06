@@ -38,6 +38,8 @@
 //! - `archive` — extract the onnxruntime lib / CUDA DLLs from the archives.
 //! - [`ort`] — onnxruntime dylib resolve + version gate + fetch + the CUDA runtime.
 //! - [`setup`] — eager pre-download orchestrators with aggregate progress.
+//! - [`update_check`] — startup check for a newer GitHub release (unrelated to model assets,
+//!   but lives here since it reuses the same HTTP GET plumbing as the rest of the crate).
 
 use std::path::PathBuf;
 
@@ -60,6 +62,8 @@ pub mod spec;
 /// The canonical [`DownloadTarget`] enum — the single definition of every download/prefetch
 /// target token, parsed-to and matched-on by all three dispatchers (see the module docs).
 pub mod target;
+/// Startup update check (latest GitHub release vs. the running version) — see the module docs.
+pub mod update_check;
 /// THE single registry of every download URL + SHA-256 + size (see the module docs).
 pub mod urls;
 
@@ -85,6 +89,7 @@ pub use spec::{
     prefetch_items, sepformer_spec,
 };
 pub use target::DownloadTarget;
+pub use update_check::{UpdateInfo, check_for_update};
 
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),
