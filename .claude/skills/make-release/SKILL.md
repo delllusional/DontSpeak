@@ -129,14 +129,18 @@ run time, so a brief site lag degrades gracefully — but don't skip the deploy.
 
 ## 9 — Bump to the next dev version
 
-Immediately after the release publishes (step 5), bump `rust/Cargo.toml`'s
-`[workspace.package] version` to the next version with a `-dev` suffix — e.g. `0.1.0` →
-`0.1.1-dev` for a patch-level next release, or `0.2.0-dev` if you already know the next
-release is minor-sized. Regenerate the lock file (`cargo build --offline` anywhere in the
-workspace touches it) and commit both. This is a small, code-free commit whose only job is
-to make `main` visibly "ahead of the last release" — the exact-string tag/version guard
-(step 3.1) never sees this suffix since nothing ever tags a `-dev` version. When it's time
-to cut the NEXT release, first replace `-dev` with the real next version (bumping further
+Immediately after the release publishes (step 5), bump **both** `rust/Cargo.toml`'s
+`[workspace.package] version` **and** `apps/linux/gtk/Cargo.toml`'s `version` (it can't
+inherit — see its own header comment) to the next version with a `-dev` suffix — e.g.
+`0.1.0` → `0.1.1-dev` for a patch-level next release, or `0.2.0-dev` if you already know
+the next release is minor-sized. Missing the second file doesn't fail fast: the tag/version
+guard (step 3.1) only compares them at the NEXT tag push, so a skipped bump here silently
+sits stale for a whole release cycle. Regenerate both lock files (`cargo build --offline`
+in each workspace touches it) and commit all four. This is a small, code-free commit whose
+only job is to make `main` visibly "ahead of the last release" — the exact-string
+tag/version guard (step 3.1) never sees this suffix since nothing ever tags a `-dev`
+version. When it's time to cut the NEXT release, first replace `-dev` with the real next
+version in both files (bumping further
 to `minor`/`major` instead of `patch` if what accumulated warrants it), commit, then tag as
 usual (step 2).
 
