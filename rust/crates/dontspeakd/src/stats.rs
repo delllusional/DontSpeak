@@ -221,6 +221,13 @@ impl SttStats {
             failures: s.failures,
         }
     }
+
+    /// JSON form of [`snapshot`](Self::snapshot) for the unit tests, mirroring
+    /// [`TtsStats::snapshot_json`].
+    #[cfg(test)]
+    pub fn snapshot_json(&self) -> serde_json::Value {
+        serde_json::to_value(self.snapshot()).unwrap()
+    }
 }
 
 /// How often, at most, the lifetime totals are flushed to disk. CORR-2: the
@@ -414,6 +421,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_an_stt_stats_line() {
+        let st = SttStats::new();
+        // Returns the recorded audio seconds (500 ms → 0.5 s), None for garbage.
+        assert_eq!(
+            st.record_stt_line("transcribe_ms=120.0 audio_ms=500.0"),
+            Some(0.5)
+        );
+        assert_eq!(st.record_stt_line("garbage"), None); // no audio → not recorded
+        // audio_ms=0.0 present but non-positive → still not recorded.
+        assert_eq!(st.record_stt_line("transcribe_ms=50.0 audio_ms=0.0"), None);
+        assert_eq!(st.snapshot_json()["transcriptions"], 1);
+    }
+
+    #[test]
     fn lifetime_accumulates_and_survives_reload() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ds-stats-test.json");
@@ -476,6 +497,75 @@ mod tests {
         assert_eq!(
             LifetimeSeconds::load(path.clone()).snapshot_json()["tts_secs"],
             7
+        );
+    }
+
+    #[test]
+    fn tts_stats_line_feeds_lifetime_total() {
+        // Mirrors the real wiring in tts.rs (`if let Some(secs) = stats.record_stats_line(rest)
+        // { lifetime.add_tts(secs); }`) — proves the parser's output actually lands in the
+        // persisted lifetime total, not just in each half's own isolated unit test.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ds-stats-e2e-tts.json");
+        let stats = TtsStats::new();
+        let lifetime = LifetimeSeconds::load(path.clone());
+
+        // Realistic STATS line: 2500 ms of audio → 2.5 s → rounds to 3 whole seconds.
+        if let Some(secs) = stats.record_stats_line("synth_ms=900.0 audio_ms=2500.0 first_ms=150.0")
+        {
+            lifetime.add_tts(secs);
+        }
+        assert_eq!(lifetime.snapshot_json()["tts_secs"], 3);
+
+        // A garbage line must not add anything (None short-circuits the add, as in production).
+        if let Some(secs) = stats.record_stats_line("garbage") {
+            lifetime.add_tts(secs);
+        }
+        assert_eq!(
+            lifetime.snapshot_json()["tts_secs"],
+            3,
+            "garbage line must not bump the total"
+        );
+
+        lifetime.flush();
+        let reloaded = LifetimeSeconds::load(path);
+        assert_eq!(
+            reloaded.snapshot_json()["tts_secs"],
+            3,
+            "persists across reload"
+        );
+    }
+
+    #[test]
+    fn stt_stats_line_feeds_lifetime_total() {
+        // Mirrors the real wiring in tts.rs (`if let Some(secs) = stt_stats.record_stt_line(rest)
+        // { lifetime.add_stt(secs); }`).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ds-stats-e2e-stt.json");
+        let stt = SttStats::new();
+        let lifetime = LifetimeSeconds::load(path.clone());
+
+        // Realistic STTSTATS line: 1800 ms of audio → 1.8 s → rounds to 2 whole seconds.
+        if let Some(secs) = stt.record_stt_line("transcribe_ms=300.0 audio_ms=1800.0") {
+            lifetime.add_stt(secs);
+        }
+        assert_eq!(lifetime.snapshot_json()["stt_secs"], 2);
+
+        if let Some(secs) = stt.record_stt_line("garbage") {
+            lifetime.add_stt(secs);
+        }
+        assert_eq!(
+            lifetime.snapshot_json()["stt_secs"],
+            2,
+            "garbage line must not bump the total"
+        );
+
+        lifetime.flush();
+        let reloaded = LifetimeSeconds::load(path);
+        assert_eq!(
+            reloaded.snapshot_json()["stt_secs"],
+            2,
+            "persists across reload"
         );
     }
 }
