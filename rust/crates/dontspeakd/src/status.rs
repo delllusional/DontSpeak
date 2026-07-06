@@ -327,15 +327,15 @@ pub(crate) fn model_status_json(
     // downloaded"), but that's the `missing` state (offer Download), not a failure — so
     // ignore the load error unless the model is present (else the row reads red "failed"
     // instead of the download affordance). A genuine download failure always surfaces.
-    let kokoro_error = dl_err_for(DownloadTarget::KokoroModel)
-        .or_else(|| dl_err_for(DownloadTarget::KokoroCoreml))
-        .or_else(|| {
-            if kokoro_present {
-                tts.last_error()
-            } else {
-                None
-            }
-        });
+    let kokoro_error = combined_error(
+        kokoro_present,
+        dl_err_for(DownloadTarget::KokoroModel)
+            .or_else(|| dl_err_for(DownloadTarget::KokoroCoreml)),
+        // A mid-session `load tts`/preload failure (e.g. a transient AV-scan file-not-found on
+        // an already-downloaded model) ahead of the warm-CHILD start failure — both are
+        // per-Kokoro, so either surfaces.
+        tts.tts_load_error().or_else(|| tts.last_error()),
+    );
 
     // System TTS (macOS `say`) — the speech-OUT analogue of the System STT row. No model
     // to download/remove; present + running when it's the selected engine and TTS is on,
@@ -432,11 +432,18 @@ pub(crate) fn model_status_json(
             RowState {
                 present: parakeet_present,
                 downloading: parakeet_downloading,
-                error: if stt_uses_onnx {
-                    dl_err_for(DownloadTarget::ParakeetModel)
-                } else {
-                    dl_err_for(DownloadTarget::ParakeetCoreml)
-                },
+                error: combined_error(
+                    parakeet_present,
+                    if stt_uses_onnx {
+                        dl_err_for(DownloadTarget::ParakeetModel)
+                    } else {
+                        dl_err_for(DownloadTarget::ParakeetCoreml)
+                    },
+                    // A mid-session `load stt`/preload failure (e.g. a transient AV-scan
+                    // file-not-found on an already-downloaded model) — only surfaced as
+                    // "Failed" (not "Missing") while the model is actually present.
+                    tts.stt_load_error(),
+                ),
                 running: stt_loaded && parakeet_enabled,
                 enabled: parakeet_enabled,
             },
@@ -734,6 +741,25 @@ fn row_downloading(
     own_downloading || (!uses_apple_native && cuda_downloading && !engine_loaded)
 }
 
+/// Combine a model row's DOWNLOAD-manager error with its (mid-session re/load) failure,
+/// gated on PRESENCE for the load half only — a genuinely absent/never-installed model must
+/// read "missing" (offer Download), never a stale "failed", even if a load-error slot happens
+/// to still hold a message from a previous install (`TtsManager`'s per-model `stt_load_error`/
+/// `tts_load_error` are cleared on the model's own residency transitions, but this keeps the
+/// row itself defensive against any ordering this misses). A download error, by contrast,
+/// surfaces UNCONDITIONALLY — mirrors the pre-existing `kokoro_error` ordering, where a failed
+/// fetch is shown even though the model isn't present (that IS the interesting state: "tried to
+/// get it, couldn't"). Pure, mirroring `row_downloading`/`row_download_frac` — extracted so this
+/// precedence is unit-tested directly rather than needing a full `EngineShared`/`TtsManager`
+/// harness (see `local_stt_matches_running_flags`'s doc for why that's disproportionate here).
+fn combined_error(
+    present: bool,
+    dl_err: Option<String>,
+    load_err: Option<String>,
+) -> Option<String> {
+    dl_err.or(if present { load_err } else { None })
+}
+
 /// The fraction a MODEL row's download ring shows, picked from the row's OWN targets in
 /// priority order: the ONNX model fetch's live progress, then its just-finished progress
 /// (so a completed fetch's ring reads 100% rather than snapping back to 0 the instant it's
@@ -832,8 +858,8 @@ pub(crate) fn engine_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        StatusGate, dictation_local_stt, engine_state, realized_ort_token, row_download_frac,
-        row_downloading, stt_provider_token, tts_provider_token,
+        StatusGate, combined_error, dictation_local_stt, engine_state, realized_ort_token,
+        row_download_frac, row_downloading, stt_provider_token, tts_provider_token,
     };
     use ds_config::{Provider, SttEngine, TtsEngine};
     use ds_status::EngineState;
@@ -1087,6 +1113,48 @@ mod tests {
             engine_state(true, true, false, false, true),
             EngineState::Downloading
         );
+    }
+
+    /// `combined_error`'s presence-gating: a model row's DOWNLOAD-manager error always
+    /// surfaces, but a LOAD-error only counts while the model is actually present — a
+    /// since-removed/never-installed model must read "missing", never a stale "failed".
+    #[test]
+    fn combined_error_gates_the_load_error_on_presence_but_not_the_download_error() {
+        // present + load_err (no dl_err) → Some(load_err).
+        assert_eq!(
+            combined_error(true, None, Some("load boom".to_string())),
+            Some("load boom".to_string())
+        );
+        // present + dl_err + no load_err → Some(dl_err).
+        assert_eq!(
+            combined_error(true, Some("dl boom".to_string()), None),
+            Some("dl boom".to_string())
+        );
+        // present + BOTH → the download error wins (mirrors the pre-existing kokoro_error
+        // ordering: dl_err_for(...) is checked before the load-error fallback).
+        assert_eq!(
+            combined_error(
+                true,
+                Some("dl boom".to_string()),
+                Some("load boom".to_string())
+            ),
+            Some("dl boom".to_string())
+        );
+        // !present + load_err (no dl_err) → None: don't show a stale failure for a
+        // since-removed/never-installed model.
+        assert_eq!(
+            combined_error(false, None, Some("load boom".to_string())),
+            None
+        );
+        // !present + dl_err → Some(dl_err): a download failure surfaces even though the
+        // model never landed (that IS the interesting state).
+        assert_eq!(
+            combined_error(false, Some("dl boom".to_string()), None),
+            Some("dl boom".to_string())
+        );
+        // neither → None.
+        assert_eq!(combined_error(true, None, None), None);
+        assert_eq!(combined_error(false, None, None), None);
     }
 
     /// Pins `dictation_local_stt`'s own OR definition — NOT an end-to-end check of

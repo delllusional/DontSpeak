@@ -86,7 +86,7 @@ fn meta_usize(s: &Session, key: &str, default: usize) -> usize {
 /// shared type Kokoro reports, so STT and TTS report through ONE path and can't drift. (int8 ops
 /// ORT can't place on CUDA fall back to CPU per-op; the graph parts it can offload run on GPU.)
 fn build(path: &Path, want_gpu: bool) -> Result<(Session, ds_config::RealizedProvider), String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let bytes = ds_model::read_model_file(path)?;
     let (mut builder, realized) = ds_model::cuda_session_builder(want_gpu)?;
     let session = builder
         .commit_from_memory(&bytes)
@@ -151,10 +151,7 @@ impl StreamingModel {
             .collect();
 
         let tokens_path = dir.join(ds_model::PARAKEET_TOKENS_FILE);
-        let tokens = parse_tokens(
-            &std::fs::read_to_string(&tokens_path)
-                .map_err(|e| format!("read {}: {e}", tokens_path.display()))?,
-        );
+        let tokens = parse_tokens(&ds_model::read_model_file_to_string(&tokens_path)?);
         if tokens.len() <= vocab {
             return Err(format!(
                 "tokens.txt has {} entries, need > vocab_size {vocab}",

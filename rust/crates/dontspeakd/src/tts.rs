@@ -86,15 +86,52 @@ struct SpawnPrefs {
     stt_preload: bool,
 }
 
-/// Mark an engine's model RESIDENT + WARM (the dot greens): set loaded and PUSH (bump the
-/// gate). Shared by the TTS `READY` and STT `STTLOADED` terminals so "green = warm" — and the
-/// push that surfaces it — live in ONE place. (Model DOWNLOADS never pass through the helper:
-/// every fetch runs in the engine's download manager, which owns its own progress/status —
-/// the helper only loads, so there is no per-child downloading state to clear here.)
+/// Mark an engine's model RESIDENT + WARM (the dot greens): set loaded and, on a REAL
+/// transition (was NOT already loaded), PUSH (bump the gate) — mirrors `set_error`/
+/// `clear_error`'s change-gating below. Without this gate, a repeat `STTLOADED`/`TTSLOADED`
+/// for an ALREADY-loaded model (e.g. the periodic self-heal reconcile in `boot.rs` re-preloading
+/// a model that never actually unloaded) would bump `StatusGate` every tick forever —
+/// reintroducing the poll-churn `StatusGate` (a push transport, not a poll) exists to
+/// eliminate. Shared by the TTS `READY` and STT `STTLOADED` terminals so "green = warm" — and
+/// the push that surfaces it — live in ONE place. (Model DOWNLOADS never pass through the
+/// helper: every fetch runs in the engine's download manager, which owns its own
+/// progress/status — the helper only loads, so there is no per-child downloading state to
+/// clear here.)
 fn mark_loaded(loaded: &AtomicBool, gate: Option<&StatusGate>) {
-    loaded.store(true, Ordering::Relaxed);
-    if let Some(g) = gate {
+    let was_loaded = loaded.swap(true, Ordering::Relaxed);
+    if !was_loaded && let Some(g) = gate {
         g.bump();
+    }
+}
+
+/// Change-gated setter for a per-model load-error slot (`stt_load_error`/`tts_load_error`):
+/// only stores + bumps the gate when the message is a REAL change (a fresh error, or a
+/// different message) — the exact `set_error`/`clear_error` pattern below, as a free function
+/// because both `start_locked`'s pre-READY wait loop (has `&self`) and the persistent
+/// `reader_loop` (no `&self` — it runs off cloned `Arc`s on its own thread) need it. This
+/// matters because the transient-NotFound AV-scan-retry scenario this whole error channel
+/// exists for can repeat the IDENTICAL failure message several times in a row; each repeat
+/// must not spam `StatusGate`.
+fn set_load_error(slot: &Mutex<Option<String>>, msg: impl Into<String>, gate: Option<&StatusGate>) {
+    let msg = msg.into();
+    let mut guard = slot.lock().unwrap();
+    if guard.as_deref() != Some(msg.as_str()) {
+        *guard = Some(msg);
+        drop(guard);
+        if let Some(g) = gate {
+            g.bump();
+        }
+    }
+}
+
+/// Change-gated clear for a per-model load-error slot — the mirror of [`set_load_error`].
+fn clear_load_error(slot: &Mutex<Option<String>>, gate: Option<&StatusGate>) {
+    let mut guard = slot.lock().unwrap();
+    if guard.take().is_some() {
+        drop(guard);
+        if let Some(g) = gate {
+            g.bump();
+        }
     }
 }
 
@@ -187,6 +224,11 @@ struct ReaderStats {
 struct ReaderModelState {
     tts_loaded: Arc<AtomicBool>,
     stt_loaded: Arc<AtomicBool>,
+    /// Last STT (mid-session re/load) failure message, set on the helper's `STTLOADERR`,
+    /// cleared on the next `STTLOADED` — see `set_load_error`/`clear_load_error`.
+    stt_load_error: Arc<Mutex<Option<String>>>,
+    /// Last TTS (mid-session re/load) failure message — the `tts_load_error` counterpart.
+    tts_load_error: Arc<Mutex<Option<String>>>,
     stt_realized: Arc<Mutex<String>>,
     gate: Option<Arc<StatusGate>>,
     expected_eof: Arc<AtomicBool>,
@@ -280,6 +322,16 @@ pub struct TtsManager {
     /// confirmation (emitted after preload + the graph WARMUP) — the dot only greens when
     /// the model is truly resident AND warm, not optimistically on the load request.
     stt_loaded: Arc<AtomicBool>,
+    /// Last STT (re)load failure surfaced by the helper's `STTLOADERR` (a mid-session
+    /// `load stt`/preload that failed — e.g. a transient AV-scan file-not-found on an
+    /// already-downloaded model). Distinct from `last_error` (warm-CHILD start failures):
+    /// this is per-MODEL, so `model_status`'s `parakeet` row can show it without also
+    /// tripping `kokoro`'s. `Arc<Mutex<..>>` (like `tts_loaded`/`stt_loaded`) so the
+    /// persistent reader thread can set it directly. Cleared on the next `STTLOADED`.
+    stt_load_error: Arc<Mutex<Option<String>>>,
+    /// Last TTS (re)load failure surfaced by the helper's `TTSLOADERR` — the `tts_load_error`
+    /// counterpart of `stt_load_error`.
+    tts_load_error: Arc<Mutex<Option<String>>>,
     /// Global MUTE: when true the warm child plays silence (queue still drains; only the audio
     /// is zeroed). Toggled by a Caps-tap (dictation off) and the tray checkbox. Read by the
     /// status snapshot; pushed to the child via the `mute` op.
@@ -348,6 +400,8 @@ impl TtsManager {
             stt_provider_active: Mutex::new(String::new()),
             tts_loaded: Arc::new(AtomicBool::new(false)),
             stt_loaded: Arc::new(AtomicBool::new(false)),
+            stt_load_error: Arc::new(Mutex::new(None)),
+            tts_load_error: Arc::new(Mutex::new(None)),
             muted: AtomicBool::new(false),
             gate: OnceLock::new(),
             expected_eof: Arc::new(AtomicBool::new(false)),
@@ -376,6 +430,41 @@ impl TtsManager {
     /// Is the Parakeet (STT) model currently resident in the warm helper?
     pub fn is_stt_loaded(&self) -> bool {
         self.stt_loaded.load(Ordering::Relaxed)
+    }
+
+    /// The last STT (re)load failure (the helper's `STTLOADERR`), if any — surfaced in
+    /// `model_status`'s `parakeet` row alongside `last_error`/the download error.
+    pub fn stt_load_error(&self) -> Option<String> {
+        self.stt_load_error.lock().unwrap().clone()
+    }
+    /// The last TTS (re)load failure (the helper's `TTSLOADERR`) — the `tts_load_error`
+    /// counterpart of [`stt_load_error`](Self::stt_load_error).
+    pub fn tts_load_error(&self) -> Option<String> {
+        self.tts_load_error.lock().unwrap().clone()
+    }
+    /// Change-gated setter for [`stt_load_error`](Self::stt_load_error) — see [`set_load_error`].
+    fn set_stt_load_error(&self, msg: impl Into<String>) {
+        set_load_error(
+            &self.stt_load_error,
+            msg,
+            self.gate.get().map(|g| g.as_ref()),
+        );
+    }
+    /// Change-gated clear for [`stt_load_error`](Self::stt_load_error) — see [`clear_load_error`].
+    fn clear_stt_load_error(&self) {
+        clear_load_error(&self.stt_load_error, self.gate.get().map(|g| g.as_ref()));
+    }
+    /// Change-gated setter for [`tts_load_error`](Self::tts_load_error) — see [`set_load_error`].
+    fn set_tts_load_error(&self, msg: impl Into<String>) {
+        set_load_error(
+            &self.tts_load_error,
+            msg,
+            self.gate.get().map(|g| g.as_ref()),
+        );
+    }
+    /// Change-gated clear for [`tts_load_error`](Self::tts_load_error) — see [`clear_load_error`].
+    fn clear_tts_load_error(&self) {
+        clear_load_error(&self.tts_load_error, self.gate.get().map(|g| g.as_ref()));
     }
     /// The warm child's active ONNX execution provider ("CPU" until a child reports
     /// otherwise via its PROVIDER line).
@@ -759,12 +848,25 @@ impl TtsManager {
                     let gate = self.gate.get().map(|g| g.as_ref());
                     if l == "STTLOADED" {
                         mark_loaded(&self.stt_loaded, gate);
+                        self.clear_stt_load_error();
                         continue;
                     }
                     // Symmetric with STTLOADED: a mid-session `load tts` confirms residency here
                     // (though it normally lands post-READY, in the persistent reader below).
                     if l == "TTSLOADED" {
                         mark_loaded(&self.tts_loaded, gate);
+                        self.clear_tts_load_error();
+                        continue;
+                    }
+                    // STT preloads in PARALLEL, so a failed preload can also report here
+                    // (before READY) rather than only in the post-READY persistent reader —
+                    // see `set_stt_load_error`'s doc.
+                    if let Some(msg) = l.strip_prefix("STTLOADERR ") {
+                        self.set_stt_load_error(msg.trim());
+                        continue;
+                    }
+                    if let Some(msg) = l.strip_prefix("TTSLOADERR ") {
+                        self.set_tts_load_error(msg.trim());
                         continue;
                     }
                     if let Some(p) = l.strip_prefix("STT_PROVIDER ") {
@@ -797,6 +899,11 @@ impl TtsManager {
         }
 
         self.clear_error();
+        // A fresh child is about to be installed: any stale per-model load error from a
+        // PRIOR child is no longer relevant — clear both (gated, so this is a no-op unless
+        // one was actually set).
+        self.clear_stt_load_error();
+        self.clear_tts_load_error();
         {
             // Bump the generation WHILE still holding the `child` lock: anyone who next
             // observes this child via `is_running()`/`child.lock()` is then guaranteed
@@ -823,6 +930,8 @@ impl TtsManager {
             let lifetime = self.lifetime.clone();
             let tts_loaded = self.tts_loaded.clone();
             let stt_loaded = self.stt_loaded.clone();
+            let stt_load_error = self.stt_load_error.clone();
+            let tts_load_error = self.tts_load_error.clone();
             let expected_eof = self.expected_eof.clone();
             // So the reader's unexpected-EOF handler can try_wait() the real exit
             // status/signal (peek only — the actual reap stays with mark_dead/
@@ -853,6 +962,8 @@ impl TtsManager {
                     ReaderModelState {
                         tts_loaded,
                         stt_loaded,
+                        stt_load_error,
+                        tts_load_error,
                         stt_realized,
                         gate,
                         expected_eof,
@@ -906,6 +1017,11 @@ impl TtsManager {
         if tts_was_loaded || stt_was_loaded {
             self.bump_gate();
         }
+        // The process (both `stop_child` and `mark_dead_locked` route through here) is
+        // gone — any per-model load error belongs to that dead child, not whatever
+        // (re)starts next. Gated, so a no-op unless one was actually set.
+        self.clear_stt_load_error();
+        self.clear_tts_load_error();
     }
 
     /// Kill + reap the warm child, freeing the model. Safe to call when stopped.
@@ -1034,6 +1150,8 @@ impl TtsManager {
         let ReaderModelState {
             tts_loaded,
             stt_loaded,
+            stt_load_error,
+            tts_load_error,
             stt_realized,
             gate,
             expected_eof,
@@ -1078,6 +1196,13 @@ impl TtsManager {
                     if !expected_eof.load(Ordering::Relaxed) {
                         tts_loaded.store(false, Ordering::Relaxed);
                         stt_loaded.store(false, Ordering::Relaxed);
+                        // Clear both load-errors too (mirrors every other teardown path —
+                        // `start_locked`'s fresh-install, `clear_loaded_flags`, `unload_engine`):
+                        // a crashed child's stale "failed to load" message must not keep
+                        // showing after the process is gone, or it lingers until the next
+                        // successful `start_locked`.
+                        clear_load_error(&tts_load_error, gate.as_deref());
+                        clear_load_error(&stt_load_error, gate.as_deref());
                         if let Some(g) = gate.as_deref() {
                             g.bump();
                         }
@@ -1152,8 +1277,19 @@ impl TtsManager {
                         // resident after a `load tts`, so the dot greens only now — not on the
                         // optimistic request. (The COMMON path for a mid-session TTS (re)select.)
                         mark_loaded(&tts_loaded, gate.as_deref());
+                        clear_load_error(&tts_load_error, gate.as_deref());
                     } else if l == "STTLOADED" {
                         mark_loaded(&stt_loaded, gate.as_deref());
+                        clear_load_error(&stt_load_error, gate.as_deref());
+                    } else if let Some(msg) = l.strip_prefix("STTLOADERR ") {
+                        // A mid-session `load stt`/preload failure (e.g. a transient AV-scan
+                        // file-not-found on an already-downloaded model) — surfaced per-model so
+                        // `model_status`'s `parakeet` row can show it without touching `kokoro`.
+                        // Change-gated: the exact same failure can repeat identically several
+                        // times in a row and must not spam `StatusGate` each time.
+                        set_load_error(&stt_load_error, msg.trim(), gate.as_deref());
+                    } else if let Some(msg) = l.strip_prefix("TTSLOADERR ") {
+                        set_load_error(&tts_load_error, msg.trim(), gate.as_deref());
                     } else if let Some(p) = l.strip_prefix("STT_PROVIDER ") {
                         // The REALIZED STT EP (mirrors the pre-READY parse in start()). Post-READY is
                         // the COMMON path — the parallel preload usually reports after READY — so
@@ -1199,14 +1335,26 @@ impl TtsManager {
             // Bump the gate on the flag flip (mirrors `mark_loaded`'s push on the "true"
             // direction) — otherwise an ordinary TTS/STT engine switch leaves a blocked
             // `WaitModelStatus` showing a stale "Running" dot for up to the poll window.
+            // Gated on a REAL true→false transition (mirrors `mark_loaded`/`clear_loaded_flags`
+            // above): `reconcile_helper_models` now calls this UNCONDITIONALLY every ~20s tick
+            // for any engine that isn't currently wanted, so an unconditional bump here would
+            // wake every connected client every tick forever even when nothing changed —
+            // reintroducing the poll-churn regression this whole gating scheme exists to fix.
             match engine {
                 "tts" => {
-                    self.tts_loaded.store(false, Ordering::Relaxed);
-                    self.bump_gate();
+                    let was_loaded = self.tts_loaded.swap(false, Ordering::Relaxed);
+                    // A deliberately unloaded model has no "failed to load" state anymore.
+                    self.clear_tts_load_error();
+                    if was_loaded {
+                        self.bump_gate();
+                    }
                 }
                 "stt" => {
-                    self.stt_loaded.store(false, Ordering::Relaxed);
-                    self.bump_gate();
+                    let was_loaded = self.stt_loaded.swap(false, Ordering::Relaxed);
+                    self.clear_stt_load_error();
+                    if was_loaded {
+                        self.bump_gate();
+                    }
                 }
                 _ => {}
             }
@@ -1715,6 +1863,8 @@ mod reader_eof_tests {
             ReaderModelState {
                 tts_loaded: tts_loaded.clone(),
                 stt_loaded: stt_loaded.clone(),
+                stt_load_error: Arc::new(Mutex::new(None)),
+                tts_load_error: Arc::new(Mutex::new(None)),
                 stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                 gate: None,
                 expected_eof: Arc::new(AtomicBool::new(expected_eof)),
@@ -1777,6 +1927,8 @@ mod reader_eof_tests {
             ReaderModelState {
                 tts_loaded: Arc::new(AtomicBool::new(true)),
                 stt_loaded: Arc::new(AtomicBool::new(true)),
+                stt_load_error: Arc::new(Mutex::new(None)),
+                tts_load_error: Arc::new(Mutex::new(None)),
                 stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                 gate: None,
                 expected_eof: Arc::new(AtomicBool::new(false)), // unexpected — the crash-detection path
@@ -1843,6 +1995,8 @@ mod reader_eof_tests {
             ReaderModelState {
                 tts_loaded: tts_loaded.clone(),
                 stt_loaded: stt_loaded.clone(),
+                stt_load_error: Arc::new(Mutex::new(None)),
+                tts_load_error: Arc::new(Mutex::new(None)),
                 stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                 gate: None,
                 expected_eof: Arc::new(AtomicBool::new(true)),
@@ -1873,6 +2027,87 @@ mod reader_eof_tests {
         let (tts, stt) = run_reader_init(false, false, b"STTLOADED\n");
         assert!(stt, "STTLOADED must mark the STT model resident");
         assert!(!tts, "STTLOADED must not touch the TTS flag");
+    }
+
+    /// Like `run_reader_init`, but additionally returns the drained `stt_load_error`/
+    /// `tts_load_error` slots — for the `STTLOADERR`/`TTSLOADERR` coverage below.
+    fn run_reader_init_errs(stdout: &[u8]) -> (bool, bool, Option<String>, Option<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let tts_loaded = Arc::new(AtomicBool::new(false));
+        let stt_loaded = Arc::new(AtomicBool::new(false));
+        let stt_load_error = Arc::new(Mutex::new(None));
+        let tts_load_error = Arc::new(Mutex::new(None));
+        TtsManager::reader_loop(
+            stdout,
+            ReaderSlots {
+                speak: Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new())),
+                listen: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
+                diarize: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
+                enroll: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
+            },
+            ReaderStats {
+                tts: Arc::new(crate::stats::TtsStats::new()),
+                stt: Arc::new(crate::stats::SttStats::new()),
+                lifetime: Arc::new(crate::stats::LifetimeSeconds::load(
+                    dir.path().join("ds-stats-reader-loaderr-test.json"),
+                )),
+            },
+            ReaderModelState {
+                tts_loaded: tts_loaded.clone(),
+                stt_loaded: stt_loaded.clone(),
+                stt_load_error: stt_load_error.clone(),
+                tts_load_error: tts_load_error.clone(),
+                stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                gate: None,
+                expected_eof: Arc::new(AtomicBool::new(true)),
+                child: Arc::new(Mutex::new(None)),
+            },
+        );
+        (
+            tts_loaded.load(Ordering::Relaxed),
+            stt_loaded.load(Ordering::Relaxed),
+            stt_load_error.lock().unwrap().clone(),
+            tts_load_error.lock().unwrap().clone(),
+        )
+    }
+
+    #[test]
+    fn sttloaderr_sets_the_error_without_touching_stt_loaded() {
+        let (_, stt_loaded, stt_err, tts_err) = run_reader_init_errs(b"STTLOADERR boom\n");
+        assert_eq!(stt_err.as_deref(), Some("boom"));
+        assert_eq!(tts_err, None, "STTLOADERR must not touch tts_load_error");
+        assert!(
+            !stt_loaded,
+            "a load FAILURE must not mark the model resident"
+        );
+    }
+
+    #[test]
+    fn ttsloaderr_sets_the_error_without_touching_tts_loaded() {
+        let (tts_loaded, _, stt_err, tts_err) = run_reader_init_errs(b"TTSLOADERR boom\n");
+        assert_eq!(tts_err.as_deref(), Some("boom"));
+        assert_eq!(stt_err, None, "TTSLOADERR must not touch stt_load_error");
+        assert!(
+            !tts_loaded,
+            "a load FAILURE must not mark the model resident"
+        );
+    }
+
+    #[test]
+    fn sttloaded_after_sttloaderr_clears_the_error() {
+        // The AV-scan-retry scenario this whole channel exists for: a transient failure
+        // followed by a successful (re)load must clear the stale error, not leave it stuck
+        // showing "failed" forever alongside a now-healthy green dot.
+        let (_, stt_loaded, stt_err, _) =
+            run_reader_init_errs(b"STTLOADERR transient boom\nSTTLOADED\n");
+        assert!(
+            stt_loaded,
+            "STTLOADED after the retry must mark it resident"
+        );
+        assert_eq!(
+            stt_err, None,
+            "a subsequent STTLOADED must clear the earlier STTLOADERR"
+        );
     }
 
     /// A `Read` that yields `data` once, then BLOCKS (never reports EOF) until `close` is
@@ -1940,6 +2175,8 @@ mod reader_eof_tests {
                 ReaderModelState {
                     tts_loaded: reader_tts,
                     stt_loaded: reader_stt,
+                    stt_load_error: Arc::new(Mutex::new(None)),
+                    tts_load_error: Arc::new(Mutex::new(None)),
                     stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                     gate: None,
                     expected_eof: Arc::new(AtomicBool::new(true)),
@@ -2013,6 +2250,8 @@ mod reader_eof_tests {
             ReaderModelState {
                 tts_loaded: Arc::new(AtomicBool::new(true)),
                 stt_loaded: Arc::new(AtomicBool::new(true)),
+                stt_load_error: Arc::new(Mutex::new(None)),
+                tts_load_error: Arc::new(Mutex::new(None)),
                 stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                 gate: None,
                 expected_eof: Arc::new(AtomicBool::new(true)),
@@ -2134,6 +2373,107 @@ mod status_gate_tests {
             gate.seq(),
             seq_after_set,
             "resolving a real error bumps the gate"
+        );
+    }
+
+    #[test]
+    fn mark_loaded_bumps_gate_only_on_a_real_transition() {
+        // Section E's periodic self-heal reconcile can re-report an ALREADY-loaded model's
+        // STTLOADED/TTSLOADED repeatedly (e.g. every 20s tick); each repeat must be a no-op
+        // for the gate — otherwise StatusGate spam reintroduces the poll-churn it exists to
+        // eliminate (mirrors set_error/clear_error's own change-gating above).
+        let loaded = AtomicBool::new(false);
+        let gate = StatusGate::new();
+
+        mark_loaded(&loaded, Some(&gate));
+        let seq1 = gate.seq();
+        assert_ne!(seq1, 0, "the FIRST transition to loaded bumps the gate");
+        assert!(loaded.load(Ordering::Relaxed));
+
+        mark_loaded(&loaded, Some(&gate));
+        assert_eq!(
+            gate.seq(),
+            seq1,
+            "an already-loaded model reported loaded again must NOT bump"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unload_engine_bumps_gate_only_on_a_real_transition() {
+        // Section E's unconditional 20s-tick `reconcile_helper_models` call means
+        // `unload_engine` can now be invoked for an engine that is ALREADY unloaded —
+        // every repeat must be a no-op for the gate, or the periodic tick wakes every
+        // connected client forever with no real state change (mirrors
+        // `mark_loaded_bumps_gate_only_on_a_real_transition` above). `unload_engine` only
+        // does anything once `write_request` succeeds, so this needs a real child with a
+        // live piped stdin (a canned `stdin: None` would make the whole call a no-op and
+        // prove nothing).
+        let (tts, gate) = mk();
+        let mut child = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn `cat`");
+        *tts.stdin.lock().unwrap() = child.stdin.take();
+
+        // Simulate a genuinely loaded TTS engine, then unload it: a REAL true→false
+        // transition, so the first call must bump.
+        tts.tts_loaded.store(true, Ordering::Relaxed);
+        tts.unload_engine("tts");
+        let seq1 = gate.seq();
+        assert_ne!(seq1, 0, "a real loaded→unloaded transition bumps the gate");
+        assert!(!tts.tts_loaded.load(Ordering::Relaxed));
+
+        // Repeat on an already-unloaded engine: no real transition, must NOT bump again.
+        tts.unload_engine("tts");
+        assert_eq!(
+            gate.seq(),
+            seq1,
+            "unloading an already-unloaded engine must NOT bump again"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn set_load_error_bumps_gate_only_on_a_real_change() {
+        // Same change-gating as set_error, exercised directly on the free helper shared by
+        // the pre-READY wait loop and the persistent reader_loop.
+        let slot: Mutex<Option<String>> = Mutex::new(None);
+        let gate = StatusGate::new();
+
+        set_load_error(&slot, "read encoder.int8.onnx: os error 2", Some(&gate));
+        let seq1 = gate.seq();
+        assert_ne!(seq1, 0, "a fresh load error bumps the gate");
+
+        set_load_error(&slot, "read encoder.int8.onnx: os error 2", Some(&gate));
+        assert_eq!(
+            gate.seq(),
+            seq1,
+            "an IDENTICAL repeat (e.g. the same transient AV-scan failure recurring) must not bump"
+        );
+
+        set_load_error(&slot, "a different failure", Some(&gate));
+        assert_ne!(gate.seq(), seq1, "a DIFFERENT message bumps again");
+    }
+
+    #[test]
+    fn clear_load_error_bumps_gate_only_when_an_error_was_actually_set() {
+        let slot: Mutex<Option<String>> = Mutex::new(None);
+        let gate = StatusGate::new();
+
+        clear_load_error(&slot, Some(&gate));
+        assert_eq!(gate.seq(), 0, "clearing a not-set load error must not bump");
+
+        set_load_error(&slot, "boom", Some(&gate));
+        let seq_after_set = gate.seq();
+        clear_load_error(&slot, Some(&gate));
+        assert_ne!(
+            gate.seq(),
+            seq_after_set,
+            "resolving a real load error bumps the gate"
         );
     }
 

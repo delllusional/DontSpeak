@@ -247,6 +247,7 @@ pub(crate) fn serve() -> ! {
             println!("WARMING stt");
             let _ = std::io::stdout().flush();
             let mut t = transcriber.lock().unwrap();
+            eprintln!("dontspeak/helper: load stt attempting (provider={stt_provider})");
             match t.preload() {
                 Ok(()) => {
                     // Also warm the SEPARATE streaming-backend cache a real listen actually
@@ -269,6 +270,8 @@ pub(crate) fn serve() -> ! {
                     // happening to fully RESTART this helper (mirrors Job::LoadTts below, which
                     // rechecks `synth.is_none()` fresh each time instead of a one-shot latch).
                     stt_claimed.store(false, Ordering::Relaxed);
+                    println!("STTLOADERR {e}");
+                    let _ = std::io::stdout().flush();
                     eprintln!("dontspeak/helper: preload stt failed: {e}");
                 }
             }
@@ -903,6 +906,11 @@ pub(crate) fn serve() -> ! {
                 // one stayed loaded, roughly doubling STT memory after the first listen.
                 let freed_offline = transcriber.lock().unwrap().unload();
                 let freed_streaming = crate::listen::unload_streaming();
+                // Release the claim so a LATER `load stt` (a real off→on toggle) can
+                // actually claim + attempt a fresh load — otherwise `stt_claimed` stays
+                // stuck `true` from the original successful load and every subsequent
+                // `Job::LoadStt` sees `swap(true) == true` and silently skips forever.
+                stt_claimed.store(false, Ordering::Relaxed);
                 eprintln!(
                     "dontspeak/helper: unloaded stt (parakeet), freed={} (offline={freed_offline}, streaming={freed_streaming})",
                     freed_offline || freed_streaming
@@ -922,7 +930,12 @@ pub(crate) fn serve() -> ! {
                             synth = Some(s);
                             resident = true;
                         }
-                        Err(e) => eprintln!("dontspeak/helper: preload tts failed: {e}"),
+                        Err(e) => {
+                            use std::io::Write as _;
+                            println!("TTSLOADERR {e}");
+                            let _ = std::io::stdout().flush();
+                            eprintln!("dontspeak/helper: preload tts failed: {e}");
+                        }
                     }
                 }
                 if resident {
@@ -938,9 +951,13 @@ pub(crate) fn serve() -> ! {
                 // load is already claimed (by that preload, or a prior `load stt`), skip — else
                 // claim it and load HERE (STT became wanted after startup, or preload was off).
                 if stt_claimed.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "dontspeak/helper: load stt skipped — a load is already claimed/in flight"
+                    );
                     continue;
                 }
                 let mut t = transcriber.lock().unwrap();
+                eprintln!("dontspeak/helper: load stt attempting (provider={stt_provider})");
                 match t.preload() {
                     Ok(()) => {
                         // Same streaming-cache warm as the startup preload (see there) — an
@@ -956,6 +973,8 @@ pub(crate) fn serve() -> ! {
                         // reconciling again once the file it's still fetching actually lands)
                         // can retry instead of silently no-op'ing on the stuck claim forever.
                         stt_claimed.store(false, Ordering::Relaxed);
+                        println!("STTLOADERR {e}");
+                        let _ = std::io::stdout().flush();
                         eprintln!("dontspeak/helper: preload stt failed: {e}");
                     }
                 }
@@ -966,9 +985,18 @@ pub(crate) fn serve() -> ! {
         // Lazily (re)load the Kokoro synth if a prior `unload tts` freed it.
         if synth.is_none() {
             match load_backend() {
-                Ok(s) => synth = Some(s),
+                Ok(s) => {
+                    synth = Some(s);
+                    // Confirm residency to the engine (mirrors Job::LoadTts's success arm)
+                    // so `dontspeakd`'s reader_loop clears any stale `tts_load_error` and
+                    // marks the engine loaded again — without this the lazy reload silently
+                    // resurrected the model but never told the engine it happened.
+                    println!("TTSLOADED");
+                    let _ = std::io::stdout().flush();
+                }
                 Err(e) => {
                     eprintln!("dontspeak/helper: synth reload failed: {e}");
+                    println!("TTSLOADERR {e}");
                     println!("DONE");
                     let _ = std::io::stdout().flush();
                     continue;

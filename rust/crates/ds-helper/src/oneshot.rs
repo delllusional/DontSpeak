@@ -28,8 +28,8 @@ fn load_synth() -> Result<KokoroSynth, String> {
         &std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into()),
     );
     ds_model::ensure_ort_dylib_gpu(want_gpu)?;
-    let model_bytes = std::fs::read(&model_path).map_err(|e| format!("read model: {e}"))?;
-    let voices_bytes = std::fs::read(&voices_path).map_err(|e| format!("read voices: {e}"))?;
+    let model_bytes = ds_model::read_model_file(&model_path)?;
+    let voices_bytes = ds_model::read_model_file(&voices_path)?;
     KokoroSynth::load(&model_bytes, &voices_bytes)
 }
 

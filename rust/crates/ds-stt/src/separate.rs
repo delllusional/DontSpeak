@@ -66,8 +66,8 @@ impl Separator {
         // Read the model bytes and `commit_from_memory` (NOT `commit_from_file`): the latter
         // deadlocks under ort 2.0-rc + load-dynamic on macOS, mirroring the Kokoro synth
         // session which loads from memory for the same reason.
-        let model_bytes = std::fs::read(model_path)
-            .map_err(|e| format!("read separator {}: {e}", model_path.display()))?;
+        let model_bytes =
+            ds_model::read_model_file(model_path).map_err(|e| format!("read separator: {e}"))?;
         let session = builder
             .commit_from_memory(&model_bytes)
             .map_err(|e| format!("ort load separator {}: {e}", model_path.display()))?;

@@ -419,8 +419,18 @@ pub fn engine_run(
         // Full-auto download retry safety net: if an enabled engine's model is still
         // missing (a launch-time download failed / had no network), re-kick it without any
         // user action. Cheap + idempotent, but throttled so it's not a per-tick stat storm.
+        //
+        // Piggybacks the SAME throttle: a periodic `load stt`/`load tts` self-heal backstop.
+        // `reconcile_helper_models` fires-and-forgets a `load`/`unload` per wanted engine —
+        // idempotent (a resident model just re-confirms `STTLOADED`/`TTSLOADED`, gated by
+        // `mark_loaded`'s change-gating so this can't spam StatusGate) — so re-sending it
+        // every interval recovers within one window if a `load stt`/`load tts` request was
+        // ever silently dropped (e.g. the transient-NotFound race this whole change targets,
+        // if it somehow still wedges a load) without needing to fully pin down the exact
+        // interleaving that can cause it.
         if last_auto_dl.elapsed() >= AUTO_DL_RETRY_INTERVAL {
             auto_download_missing(&downloads, &daemon.cfg);
+            reconcile_helper_models(&tts, &daemon.cfg);
             last_auto_dl = Instant::now();
         }
 

@@ -37,6 +37,9 @@
 //!   and the installer prefetch fast-path.
 //! - `archive` — extract the onnxruntime lib / CUDA DLLs from the archives.
 //! - [`ort`] — onnxruntime dylib resolve + version gate + fetch + the CUDA runtime.
+//! - `read_retry` — [`read_model_file`], a bounded retry-on-transient-`NotFound` file
+//!   read shared by every model loader (a momentary AV/EDR scan/indexer touch on an
+//!   already-downloaded file must not surface as a load failure).
 //! - [`setup`] — eager pre-download orchestrators with aggregate progress.
 //! - [`update_check`] — startup check for a newer GitHub release (unrelated to model assets,
 //!   but lives here since it reuses the same HTTP GET plumbing as the rest of the crate).
@@ -52,6 +55,7 @@ pub mod hash;
 /// collected from the [`urls`] registry for the UI's Libraries tab (see the module docs).
 pub mod libraries;
 pub mod ort;
+mod read_retry;
 pub mod setup;
 /// Shared loader for the FluidAudio Core ML / ANE shim dylib (`libsmkokoro`), used by the
 /// apple-native STT backends (`ds-stt`) AND the apple-native Kokoro TTS backend (`ds-tts`) —
@@ -76,6 +80,7 @@ pub use ort::{
     is_onnxruntime_dylib_version_ok, onnxruntime_dylib_file, onnxruntime_dylib_path,
     set_ort_dylib_path,
 };
+pub use read_retry::{read_model_file, read_model_file_to_string};
 pub use setup::{
     run_setup_kokoro, run_setup_kokoro_voices_with_progress, run_setup_kokoro_with_progress,
     run_setup_parakeet, run_setup_parakeet_with_progress, run_setup_sepformer_with_progress,
