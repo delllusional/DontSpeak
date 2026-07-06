@@ -11,6 +11,15 @@ session afterward so it picks up the MCP server. macOS: grant Accessibility + Mi
 on first launch. Linux: run the one-time `sudo` udev step the installer prints (for
 Caps-Lock capture).
 
+To update, tell your agent to run the exact same install command again. There is no
+separate update mechanism — every install is a clean reinstall: it stops any running
+DontSpeak process, replaces the previous install with the latest GitHub release,
+re-wires the MCP server + hooks, and relaunches. It's safe to re-run anytime, whether
+or not a newer release is out. (When a newer release is out, the app's version
+number itself turns into a purple "current → new" pill — that's informational and
+click-through to dontspeak.org only, not an auto-updater; use the install command
+above to actually update.)
+
 Every install carries its own full uninstaller — macOS/Linux:
 `~/.local/bin/dontspeak-uninstall`; Windows: Settings > Apps > DontSpeak (or
 `%LOCALAPPDATA%\Programs\DontSpeak\uninstall.ps1`).

@@ -19,6 +19,8 @@ Or just tell your agent: **"Install DontSpeak.org app."** — it reads [dontspea
 
 **After installing:** macOS grants Accessibility + Microphone on first launch; Linux prints a one-time `sudo` udev step for Caps-Lock capture.
 
+**Update:** re-run the install command above — it's a clean reinstall (stops the running app, replaces it with the latest release, re-wires, relaunches), safe to run anytime. When a newer release is out, the app's own version number turns into an in-app pill; that just flags it, it doesn't update anything itself.
+
 **Build from source (developers):** `git clone https://github.com/delllusional/DontSpeak && cd DontSpeak && ./scripts/install.sh` (needs a Rust toolchain).
 
 **Uninstall** (app + integrations + all data/models): macOS/Linux — `~/.local/bin/dontspeak-uninstall` (or `scripts/uninstall.sh` from a checkout); Windows — Settings › Apps › DontSpeak. To unwire the clients but keep the app: `dontspeak wire --all --remove`.
