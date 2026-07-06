@@ -25,10 +25,18 @@ use std::thread::JoinHandle;
 use crate::log;
 use crate::status::StatusGate;
 
-/// Where the warm child's stderr is sent (the app has no console, so its diagnostics —
-/// STTSTATS/rtf, RMS, gain, model EP — must go to a file). Routed through the shared
-/// `open_aux_log` so it sits BESIDE the engine's unified log in the one per-OS logs dir AND is
-/// size-rotated like it (never a second location, never unbounded). Null only if it can't open.
+/// Where the warm child's stderr is sent (the app has no console, so anything that lands here
+/// must go to a file). Routed through the shared `open_aux_log` so it sits BESIDE the engine's
+/// unified log in the one per-OS logs dir AND is size-rotated like it (never a second location,
+/// never unbounded). Null only if it can't open.
+///
+/// Routine `ds-helper` diagnostics (load attempts, unload confirmations, capture stats,
+/// full-duplex active, wav dump ok, separator loaded, stream picked, and failure/fallback
+/// conditions) now go through the unified activity log (source `helper`) via `ds-helper`'s own
+/// `logging::log`, NOT this raw stderr redirect. This redirect is retained purely as a
+/// last-resort safety net for anything that bypasses explicit logging entirely — a native-
+/// library abort, an unhandled panic, or a startup failure before `ds_config::log_cached` can
+/// even initialize.
 fn helper_stderr() -> Stdio {
     ds_config::Paths::resolve()
         .and_then(|p| ds_config::open_aux_log(&p, "ds-helper.log"))

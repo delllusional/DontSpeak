@@ -52,11 +52,19 @@ fn record_16k(seconds: u64, cancel: &std::sync::atomic::AtomicBool) -> Result<Ve
     }
     accum.extend_from_slice(&capture.drain_new()); // tail
     let pcm = ds_stt::resample_to_16k(&accum, rate);
-    eprintln!(
-        "capture: rate={rate} accum={} pcm16k={} secs={seconds}",
-        accum.len(),
-        pcm.len()
-    );
+    // Per-capture diagnostic (fires once per diarize/enroll job) — routine, so it's gated
+    // behind DONTSPEAK_DEBUG like the engine's own DEBUG lines, not shown by default.
+    if crate::debug_enabled() {
+        ds_config::log_cached(
+            ds_config::LogLevel::Debug,
+            "helper",
+            &format!(
+                "capture: rate={rate} accum={} pcm16k={} secs={seconds}",
+                accum.len(),
+                pcm.len()
+            ),
+        );
+    }
     Ok(pcm)
 }
 
@@ -247,7 +255,11 @@ pub(crate) fn serve() -> ! {
             println!("WARMING stt");
             let _ = std::io::stdout().flush();
             let mut t = transcriber.lock().unwrap();
-            eprintln!("dontspeak/helper: load stt attempting (provider={stt_provider})");
+            ds_config::log_cached(
+                ds_config::LogLevel::Info,
+                "helper",
+                &format!("load stt attempting (provider={stt_provider})"),
+            );
             match t.preload() {
                 Ok(()) => {
                     // Also warm the SEPARATE streaming-backend cache a real listen actually
@@ -272,7 +284,11 @@ pub(crate) fn serve() -> ! {
                     stt_claimed.store(false, Ordering::Relaxed);
                     println!("STTLOADERR {e}");
                     let _ = std::io::stdout().flush();
-                    eprintln!("dontspeak/helper: preload stt failed: {e}");
+                    ds_config::log_cached(
+                        ds_config::LogLevel::Warn,
+                        "helper",
+                        &format!("preload stt failed: {e}"),
+                    );
                 }
             }
         });
@@ -358,14 +374,19 @@ pub(crate) fn serve() -> ! {
     let duplex: Option<DuplexAudio> = if std::env::var_os("DONTSPEAK_FULL_DUPLEX").is_some() {
         match DuplexAudio::open() {
             Ok(d) => {
-                eprintln!(
-                    "dontspeak/helper: full-duplex AEC active ({} Hz capture)",
-                    d.capture_rate()
+                ds_config::log_cached(
+                    ds_config::LogLevel::Info,
+                    "helper",
+                    &format!("full-duplex AEC active ({} Hz capture)", d.capture_rate()),
                 );
                 Some(d)
             }
             Err(e) => {
-                eprintln!("dontspeak/helper: full-duplex unavailable ({e}); half-duplex");
+                ds_config::log_cached(
+                    ds_config::LogLevel::Warn,
+                    "helper",
+                    &format!("full-duplex unavailable ({e}); half-duplex"),
+                );
                 None
             }
         }
@@ -896,7 +917,11 @@ pub(crate) fn serve() -> ! {
             Job::UnloadTts => {
                 // Drop the cached Kokoro model; the next speak lazily reloads it.
                 let freed = synth.take().is_some();
-                eprintln!("dontspeak/helper: unloaded tts (kokoro), freed={freed}");
+                ds_config::log_cached(
+                    ds_config::LogLevel::Info,
+                    "helper",
+                    &format!("unloaded tts (kokoro), freed={freed}"),
+                );
                 continue;
             }
             Job::UnloadStt => {
@@ -911,9 +936,13 @@ pub(crate) fn serve() -> ! {
                 // stuck `true` from the original successful load and every subsequent
                 // `Job::LoadStt` sees `swap(true) == true` and silently skips forever.
                 stt_claimed.store(false, Ordering::Relaxed);
-                eprintln!(
-                    "dontspeak/helper: unloaded stt (parakeet), freed={} (offline={freed_offline}, streaming={freed_streaming})",
-                    freed_offline || freed_streaming
+                ds_config::log_cached(
+                    ds_config::LogLevel::Info,
+                    "helper",
+                    &format!(
+                        "unloaded stt (parakeet), freed={} (offline={freed_offline}, streaming={freed_streaming})",
+                        freed_offline || freed_streaming
+                    ),
                 );
                 continue;
             }
@@ -934,7 +963,11 @@ pub(crate) fn serve() -> ! {
                             use std::io::Write as _;
                             println!("TTSLOADERR {e}");
                             let _ = std::io::stdout().flush();
-                            eprintln!("dontspeak/helper: preload tts failed: {e}");
+                            ds_config::log_cached(
+                                ds_config::LogLevel::Warn,
+                                "helper",
+                                &format!("preload tts failed: {e}"),
+                            );
                         }
                     }
                 }
@@ -951,13 +984,19 @@ pub(crate) fn serve() -> ! {
                 // load is already claimed (by that preload, or a prior `load stt`), skip — else
                 // claim it and load HERE (STT became wanted after startup, or preload was off).
                 if stt_claimed.swap(true, Ordering::Relaxed) {
-                    eprintln!(
-                        "dontspeak/helper: load stt skipped — a load is already claimed/in flight"
+                    ds_config::log_cached(
+                        ds_config::LogLevel::Info,
+                        "helper",
+                        "load stt skipped — a load is already claimed/in flight",
                     );
                     continue;
                 }
                 let mut t = transcriber.lock().unwrap();
-                eprintln!("dontspeak/helper: load stt attempting (provider={stt_provider})");
+                ds_config::log_cached(
+                    ds_config::LogLevel::Info,
+                    "helper",
+                    &format!("load stt attempting (provider={stt_provider})"),
+                );
                 match t.preload() {
                     Ok(()) => {
                         // Same streaming-cache warm as the startup preload (see there) — an
@@ -975,7 +1014,11 @@ pub(crate) fn serve() -> ! {
                         stt_claimed.store(false, Ordering::Relaxed);
                         println!("STTLOADERR {e}");
                         let _ = std::io::stdout().flush();
-                        eprintln!("dontspeak/helper: preload stt failed: {e}");
+                        ds_config::log_cached(
+                            ds_config::LogLevel::Warn,
+                            "helper",
+                            &format!("preload stt failed: {e}"),
+                        );
                     }
                 }
                 continue;
@@ -995,7 +1038,11 @@ pub(crate) fn serve() -> ! {
                     let _ = std::io::stdout().flush();
                 }
                 Err(e) => {
-                    eprintln!("dontspeak/helper: synth reload failed: {e}");
+                    ds_config::log_cached(
+                        ds_config::LogLevel::Warn,
+                        "helper",
+                        &format!("synth reload failed: {e}"),
+                    );
                     println!("TTSLOADERR {e}");
                     println!("DONE");
                     let _ = std::io::stdout().flush();
@@ -1131,7 +1178,11 @@ pub(crate) fn serve() -> ! {
                             append(pcm);
                         }
                         Ok(_) => {}
-                        Err(e) => eprintln!("dontspeak/helper: coreml synth failed: {e}"),
+                        Err(e) => ds_config::log_cached(
+                            ds_config::LogLevel::Warn,
+                            "helper",
+                            &format!("coreml synth failed: {e}"),
+                        ),
                     }
                 }
             }

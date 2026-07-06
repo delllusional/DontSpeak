@@ -119,10 +119,11 @@ fn main() {
         // hang instead of failing). The MCP server is the NO-argument mode ONLY (how MCP clients
         // spawn us: `command: dontspeak`, no args). So error out on any leftover argument.
         Subcommand::Unknown(sub) => {
-            eprintln!(
+            let msg = format!(
                 "dontspeak: unknown subcommand {sub:?}; expected `notify`, `provide`, or `wire` \
                  (run with no arguments for the stdio MCP server)"
             );
+            ds_config::log_cached_echoed(ds_config::LogLevel::Error, "hook", &msg);
             std::process::exit(2);
         }
         // No arguments: run the stdio MCP server loop.

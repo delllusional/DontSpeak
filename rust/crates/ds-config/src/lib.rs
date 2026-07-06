@@ -50,8 +50,8 @@ pub use enums::{
     provider_pref_wants_gpu,
 };
 pub use log::{
-    LogLevel, aux_log_path, clear_logs, combined_log_json, log, log_tail, open_aux_log,
-    rotate_if_large,
+    LogLevel, aux_log_path, clear_logs, combined_log_json, log, log_cached, log_cached_echoed,
+    log_tail, open_aux_log, rotate_if_large,
 };
 pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
 pub use paths::{

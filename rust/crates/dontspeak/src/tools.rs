@@ -320,6 +320,7 @@ fn call_wire(paths: &Paths, args: &Value) -> Result<String, String> {
     let (label, code) = (spec.display_name, wire::run(&flags(target.as_str())));
 
     if code != 0 {
+        log_wire_failure(paths, label, code);
         return Err(format!(
             "wiring {label} failed (exit {code}); see the engine log"
         ));
@@ -333,6 +334,20 @@ fn call_wire(paths: &Paths, args: &Value) -> Result<String, String> {
     Ok(format!(
         "{verb} the DontSpeak integration for {label}{note}."
     ))
+}
+
+/// Persist the `wiring {label} failed` diagnostic to the unified log — closes the gap where
+/// `call_wire`'s error message promised "see the engine log" but nothing actually wrote there.
+/// Takes `paths` directly (not `ds_config::log_cached`) since `call_wire` already has a real
+/// `&Paths` in scope, keeping this trivially unit-testable against an isolated tempdir `Paths`
+/// without touching the real `$HOME` log.
+fn log_wire_failure(paths: &Paths, label: &str, code: i32) {
+    ds_config::log(
+        paths,
+        ds_config::LogLevel::Error,
+        "mcp",
+        &format!("setup_integration: wiring {label} failed (exit {code})"),
+    );
 }
 
 fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
@@ -1150,6 +1165,20 @@ mod wire_tests {
             "got: {msg}"
         );
         assert!(!paths.narration_spec.exists());
+    }
+
+    #[test]
+    fn log_wire_failure_writes_an_error_line_to_the_unified_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        log_wire_failure(&paths, "Claude Code", 1);
+
+        let contents = std::fs::read_to_string(&paths.log_file).unwrap();
+        assert!(contents.contains("ERROR mcp"), "got: {contents}");
+        assert!(
+            contents.contains("wiring Claude Code failed (exit 1)"),
+            "got: {contents}"
+        );
     }
 }
 

@@ -14,7 +14,15 @@
 //!
 //! Wire format: `[<epoch_seconds>] <LEVEL> <source> <message>\n`
 //!   e.g. `[1781700000] INFO engine started build=ab12cd`
-//! `source` is one token: engine, tts, stt, caps, hook, mcp.
+//! `source` is one token: engine, tts, stt, caps, hook, mcp, helper.
+//!
+//! `log()`'s single `write_all` is atomic on more than just POSIX: Rust's
+//! `OpenOptions::append(true)` maps to a `FILE_APPEND_DATA`-only handle on Windows, which gives
+//! the same single-write-lands-atomically-at-EOF guarantee there too. That matters because this
+//! file is now a genuinely multi-process append target — the long-lived engine, short-lived
+//! `dontspeak` CLI invocations (hooks/MCP), and the long-lived `ds-helper` child can all be
+//! appending concurrently — so concurrent cross-process appends are safe on all three OSes, not
+//! just POSIX ones.
 
 use std::path::{Path, PathBuf};
 
@@ -104,7 +112,7 @@ pub fn open_aux_log(paths: &Paths, file_name: &str) -> Option<std::fs::File> {
 }
 
 /// Append one line to the unified activity log. `source` is the subsystem token
-/// (engine, tts, stt, caps, hook, mcp). Fail-quiet: any IO error is a no-op —
+/// (engine, tts, stt, caps, hook, mcp, helper). Fail-quiet: any IO error is a no-op —
 /// logging must never take down a hook or the engine.
 pub fn log(paths: &Paths, level: LogLevel, source: &str, msg: &str) {
     use std::io::Write;
@@ -120,6 +128,37 @@ pub fn log(paths: &Paths, level: LogLevel, source: &str, msg: &str) {
         .open(&paths.log_file)
     {
         let _ = f.write_all(line.as_bytes());
+    }
+}
+
+static CACHED_PATHS: std::sync::OnceLock<Option<Paths>> = std::sync::OnceLock::new();
+
+/// Convenience wrapper over `log()` for callers with no `Paths` of their own in scope
+/// (the dontspeak CLI's hook/MCP paths, ds-helper's diagnostics) — resolves+caches `Paths`
+/// once per process so callers don't each reimplement the same OnceLock cache. Fail-quiet:
+/// a no-op if `$HOME` can't resolve.
+///
+/// Callers that already have a `Paths` in scope (e.g. anything reached from a test harness
+/// rooted at a tempdir via `Paths::rooted_at`) must call `log()` directly instead — this
+/// function always resolves the REAL per-OS paths via `Paths::resolve()` and ignores any
+/// caller-local `Paths`, so using it from a path that's supposed to stay test-isolated would
+/// silently leak writes into the real `$HOME`-based log directory.
+pub fn log_cached(level: LogLevel, source: &str, msg: &str) {
+    match CACHED_PATHS.get_or_init(Paths::resolve) {
+        Some(paths) => log(paths, level, source, msg),
+        None => eprintln!("[{source}] {msg}"),
+    }
+}
+
+/// Like `log_cached`, but also echoes the message to stderr — for callers where a human might
+/// be watching a terminal in real time (a hand-run MCP server, the interactive `dontspeak wire`
+/// subcommand) in addition to the persisted unified log. Checks `CACHED_PATHS` itself (rather
+/// than calling `log_cached` and letting its own failure-path `eprintln!` run too) so a
+/// `Paths::resolve()` failure prints exactly once, not twice.
+pub fn log_cached_echoed(level: LogLevel, source: &str, msg: &str) {
+    eprintln!("{msg}");
+    if let Some(paths) = CACHED_PATHS.get_or_init(Paths::resolve) {
+        log(paths, level, source, msg);
     }
 }
 

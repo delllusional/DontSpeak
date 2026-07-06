@@ -108,9 +108,10 @@ fn tools() -> Value {
     ds_tools::catalog()
 }
 
-/// Log to STDERR only — stdout is reserved for JSON-RPC messages.
+/// Log to STDERR (stdout is reserved for JSON-RPC messages) AND persist to the unified
+/// activity log (source `mcp`) — see `ds_config::log_cached_echoed`.
 pub(crate) fn log(msg: &str) {
-    eprintln!("dontspeak: {msg}");
+    ds_config::log_cached_echoed(ds_config::LogLevel::Info, "mcp", msg);
 }
 
 #[cfg(test)]

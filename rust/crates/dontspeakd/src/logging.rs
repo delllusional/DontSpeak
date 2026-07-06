@@ -5,16 +5,12 @@
 //! that pre-date the split — reach the function as `crate::log(...)` without a
 //! module/function name collision.
 
-use ds_config::Paths;
-
-/// Cached `Paths` for the unified logger (resolved once; cheap, fail-quiet).
-static LOG_PATHS: std::sync::OnceLock<Option<Paths>> = std::sync::OnceLock::new();
-
-/// Engine logging → the unified activity log (`ds_config::log`, source = `engine`).
+/// Engine logging → the unified activity log (`ds_config::log_cached`, source = `engine`).
 /// Call sites keep their `"WARN:"` / `"FATAL:"` / `"ERROR:"` message prefixes; we
 /// map those to a structured [`ds_config::LogLevel`] and strip the prefix so the
-/// stored line carries the level separately. Falls back to stderr (→ launchd) only
-/// if `$HOME` can't be resolved.
+/// stored line carries the level separately. The `Paths`-caching + actual `log()` call is
+/// shared plumbing in `ds_config::log_cached` (fail-quiet: a no-op if `$HOME` can't resolve) —
+/// this module only owns the engine-specific prefix parsing/level-mapping/DEBUG-gating.
 pub(crate) fn log(s: &str) {
     let (level, msg) = split_level(s);
     // DEBUG lines are verbose per-event telemetry — drop them unless debug is on (same
@@ -23,10 +19,7 @@ pub(crate) fn log(s: &str) {
     if level == ds_config::LogLevel::Debug && !crate::config_gate::debug_enabled() {
         return;
     }
-    match LOG_PATHS.get_or_init(Paths::resolve) {
-        Some(p) => ds_config::log(p, level, "engine", msg),
-        None => eprintln!("{s}"),
-    }
+    ds_config::log_cached(level, "engine", msg);
 }
 
 /// Log a `DEBUG`-level line — written only when `DONTSPEAK_DEBUG` is on (see [`log`]). For

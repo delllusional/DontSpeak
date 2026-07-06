@@ -39,6 +39,15 @@ unsafe extern "C" {
     pub(crate) fn _exit(code: i32) -> !;
 }
 
+/// Whether verbose per-utterance/per-session diagnostics should be logged — mirrors the
+/// engine's own `DONTSPEAK_DEBUG` gate (`dontspeakd`'s `config_gate::debug_enabled`) so
+/// ds-helper's routine per-listen `LogLevel::Debug` lines stay off by default too, one env
+/// var away when diagnosing. `ds_config::log`/`log_cached` write DEBUG lines unconditionally
+/// (the gating is each caller's job), so call sites that log at `Debug` must check this first.
+pub(crate) fn debug_enabled() -> bool {
+    std::env::var("DONTSPEAK_DEBUG").as_deref() == Ok("1")
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let first = args.next().unwrap_or_default();
