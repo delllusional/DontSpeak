@@ -13,6 +13,7 @@ use gtk::glib;
 
 mod ffi;
 mod icon;
+mod log_push;
 mod overlay;
 mod status;
 mod tray;

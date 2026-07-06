@@ -68,8 +68,24 @@ pub fn libraries_json() -> String {
 /// payload the Windows host parses for per-source coloring); the GTK Logs `TextView` shows
 /// plain text, so we flatten it to `"[source] text"` lines here.
 pub fn log_tail(max_bytes: u32) -> String {
-    let json = take(sys::ds_logs_json(max_bytes));
-    match serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+    flatten_log_json(&take(sys::ds_logs_json(max_bytes)))
+}
+
+/// Like [`log_tail`] but BLOCKS until the logs directory changes (any `*.log` file
+/// created/modified/removed) or `timeout_ms` elapses, then returns the CURRENT flattened tail
+/// — the same `"[source] text"` shape `log_tail` returns. CLIENT-SIDE (an fs watch in this
+/// process), not an engine round-trip. Call ONLY on a dedicated background thread (it blocks),
+/// in a loop: call → render → call again — see `log_push::spawn_push`.
+pub fn log_wait(max_bytes: u32, timeout_ms: u32) -> String {
+    flatten_log_json(&take(sys::ds_logs_wait(max_bytes, timeout_ms)))
+}
+
+/// Flatten the combined-log JSON array of `{source, level, text}` into `"[source] text"` lines
+/// (or bare `text` when `source` is empty) — shared by [`log_tail`] and [`log_wait`] so the
+/// one-shot and push paths can't drift. Falls back to the raw payload if it isn't the expected
+/// JSON array.
+fn flatten_log_json(json: &str) -> String {
+    match serde_json::from_str::<Vec<serde_json::Value>>(json) {
         Ok(entries) => entries
             .iter()
             .map(|e| {
@@ -83,8 +99,7 @@ pub fn log_tail(max_bytes: u32) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        // Fall back to the raw payload if it isn't the expected JSON array.
-        Err(_) => json,
+        Err(_) => json.to_string(),
     }
 }
 /// Erase the ENTIRE on-disk activity log — the unified log, its rotated backups, and every

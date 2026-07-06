@@ -122,6 +122,18 @@ char *ds_libraries_json(void);
 // "[]" when there's no log yet. Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
 char *ds_logs_json(uint32_t max_bytes);
 
+// Like [`ds_logs_json`] but BLOCKS until the logs directory changes (any `*.log` file
+// created/modified/removed — the unified log or a sibling aux log; rotated `*.log.N` files
+// don't count) or `timeout_ms` elapses, then returns the CURRENT combined log JSON — the SAME
+// shape `ds_logs_json` returns, no diff/since token (unlike `ds_model_status_wait`, there's no
+// cross-call sequence to echo back — the caller just re-renders the full tail each time). This
+// is CLIENT-SIDE (an fs watch in the calling process), NOT an engine-IPC round-trip like the
+// status wait — logs are read straight off disk here, same as `ds_logs_json`. Call ONLY on a
+// DEDICATED background thread (it blocks up to `timeout_ms`), in a loop: call → render → call
+// again. `max_bytes` caps the tail PER file, same as `ds_logs_json`. Owned `char*`, free with
+// `ds_string_free`; `"[]"` if `Paths` can't resolve. HANDLE-FREE.
+char *ds_logs_wait(uint32_t max_bytes, uint32_t timeout_ms);
+
 // Erase the ENTIRE on-disk activity log — the unified log, its rotated backups, and every
 // sibling auxiliary log — for the Logs tab's Clear button. Irreversible; the caller must confirm
 // with the user before calling. A no-op (not an error) if there's nothing on disk yet.
@@ -154,13 +166,13 @@ char *ds_version(void);
 // blocking HTTP GET — this is the one FFI call that touches the network, NOT handle-free the
 // way the disk/IPC-only probes above are; call it off the UI thread, e.g. once at startup on
 // a background thread) and compares the latest release tag against [`crate::VERSION`] via
-// [`ds_model::update_check::check_for_update`]. Returns a JSON object:
+// [`ds_model::update_check::check_for_update_at`]. Returns a JSON object:
 // `{"update_available":bool,"current_version":str,"latest_version":str,"html_url":str}` — the
 // per-host UI reads `update_available` to decide whether to show the pill next to the version
-// number, and `html_url` as its click-through target. On ANY failure (offline, rate-limited,
-// malformed response) returns `"{}"` — a host must treat a missing `update_available` key the
-// same as `false`, never as "unknown, so show the pill anyway". Owned `char*`, free with
-// `ds_string_free`.
+// number, `latest_version` as the version it displays, and `html_url` as the pill's own
+// click-through target. On ANY failure (offline, rate-limited, malformed response) returns
+// `"{}"` — a host must treat a missing `update_available` key the same as `false`, never as
+// "unknown, so show the pill anyway". Owned `char*`, free with `ds_string_free`.
 char *ds_update_check_json(void);
 
 // Set the active UI locale (BCP-47 or a bare language tag, e.g. "de"). NULL is a no-op.

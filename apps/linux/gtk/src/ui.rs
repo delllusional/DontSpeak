@@ -215,12 +215,31 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         Some("credits"),
         &t("common.nav_credits"),
     );
-    // (Re)load + scroll-to-newest whenever the Log page is selected (no poll), like Windows.
+    // Live-update the Log page while it's the visible tab: an fs-watch push (`log_push`), not
+    // a poll timer — started when the tab is shown, stopped when it's left, since pushing logs
+    // into a closed tab is pure waste. `log_push_stop` holds the current push's stop-handle (if
+    // any is running); `Rc<RefCell<...>>` because GTK/glib closures are single-threaded/`Rc`-based
+    // even though the spawned push thread itself is a real OS thread.
+    let log_push_stop: std::rc::Rc<std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
     {
         let lv = log_view.clone();
+        let log_push_stop = log_push_stop.clone();
         stack.connect_visible_child_name_notify(move |s| {
             if s.visible_child_name().as_deref() == Some("log") {
                 load_logs(&lv);
+                if log_push_stop.borrow().is_none() {
+                    let (tx, rx) = async_channel::unbounded::<String>();
+                    *log_push_stop.borrow_mut() = Some(crate::log_push::spawn_push(tx));
+                    let lv = lv.clone();
+                    gtk::glib::spawn_future_local(async move {
+                        while let Ok(text) = rx.recv().await {
+                            set_log_text(&lv, text);
+                        }
+                    });
+                }
+            } else if let Some(stop) = log_push_stop.borrow_mut().take() {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         });
     }
@@ -840,7 +859,12 @@ fn build_log_page() -> (gtk::ScrolledWindow, gtk::TextView) {
 
 /// Fill the Logs view from the shared `log_tail` and scroll to the newest line.
 fn load_logs(view: &gtk::TextView) {
-    let tail = crate::ffi::log_tail(64 * 1024);
+    set_log_text(view, crate::ffi::log_tail(64 * 1024));
+}
+
+/// Render `tail` into the Logs view and scroll to the newest line — shared by the initial
+/// `load_logs` and every live push update, so the two can't render differently.
+fn set_log_text(view: &gtk::TextView, tail: String) {
     let text = if tail.trim().is_empty() {
         t("logs.empty")
     } else {

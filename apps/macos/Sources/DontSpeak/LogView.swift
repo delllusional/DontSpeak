@@ -3,9 +3,11 @@
 //  The Log tab: a read-only tail of the COMBINED activity log (the unified log + every
 //  sibling auxiliary log), read via the FFI (ds_logs_json → the shared ds-config combined-log
 //  reader) — the SAME file the engine writes, so it can't drift from what actually happened.
-//  Reloaded each time the tab is shown (no poll timer). A top filter bar narrows lines live;
-//  below it the color-coded (per-source + ERROR/WARN), selectable, wrapped log scrolls. The
-//  trash button next to the filter erases the on-disk log (ds_logs_clear) after a confirm.
+//  LIVE while the tab is open — driven by `LogFeed`, a dedicated background thread blocking in
+//  `ds_logs_wait` (an fs watch, not a poll timer), started on appear and stopped on disappear.
+//  A top filter bar narrows lines live; below it the color-coded (per-source + ERROR/WARN),
+//  selectable, wrapped log scrolls. The trash button next to the filter erases the on-disk log
+//  (ds_logs_clear) after a confirm.
 //
 //  The ordering + filter rules are the pure `LogCatalog` (in DontSpeakLogic, unit-tested); the
 //  colors are the shared `Brand.logSourcePalette` / `Brand.logLevelColor`. This view only
@@ -16,23 +18,13 @@ import CDontSpeak
 import DontSpeakLogic
 import SwiftUI
 
-/// Read the combined log tail from the FFI and decode it into `[LogLine]`. `maxBytes` caps the
-/// tail PER source file (matching the Windows tab's 64 KB), so a long-running session shows a
-/// bounded, recent window rather than the whole history.
-private func loadLogLines(maxBytes: UInt32 = 64 * 1024) -> [LogLine] {
-    ffiDecode([LogLine].self) { ds_logs_json(maxBytes) } ?? []
-}
-
 struct LogView: View {
-    @State private var lines: [LogLine] = []
-    /// Distinct sources in first-appearance order (empties dropped) — each source's palette
-    /// color is its index here, so the coloring is stable + identical to every other platform.
-    @State private var orderedSources: [String] = []
+    @State private var feed = LogFeed()
     @State private var filter: String = ""
     @State private var showClearConfirm = false
 
     private var shown: [(index: Int, line: LogLine)] {
-        LogCatalog.filterIndexed(lines, query: filter)
+        LogCatalog.filterIndexed(feed.lines, query: filter)
     }
 
     var body: some View {
@@ -52,7 +44,7 @@ struct LogView: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
-                .disabled(lines.isEmpty)
+                .disabled(feed.lines.isEmpty)
                 .help(L.t("logs.clear"))
             }
             .confirmationDialog(
@@ -62,7 +54,7 @@ struct LogView: View {
             ) {
                 Button(L.t("logs.clear_confirm_action"), role: .destructive) {
                     ds_logs_clear()
-                    reload()
+                    feed.reloadNow()
                 }
                 Button(L.t("common.cancel"), role: .cancel) {}
             }
@@ -79,14 +71,8 @@ struct LogView: View {
         }
         .windowContentInset()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear(perform: reload)
-    }
-
-    /// (Re)read the log and recompute the stable source order. Called on appear; the Logs tab
-    /// reloads on show rather than polling, so reopening it picks up new lines.
-    private func reload() {
-        lines = loadLogLines()
-        orderedSources = LogCatalog.distinctSources(lines).filter { !$0.isEmpty }
+        .onAppear { feed.start() }
+        .onDisappear { feed.stop() }
     }
 
     @ViewBuilder
@@ -96,7 +82,7 @@ struct LogView: View {
         let result = shown
         if result.isEmpty {
             // Distinguish "nothing logged yet" from "filter matched nothing", like Windows.
-            Text(L.t(lines.isEmpty ? "logs.empty" : "logs.no_match"))
+            Text(L.t(feed.lines.isEmpty ? "logs.empty" : "logs.no_match"))
                 .glassCaption()
         } else {
             VStack(alignment: .leading, spacing: 2) {
@@ -135,7 +121,7 @@ struct LogView: View {
     private func sourceColor(_ source: String) -> Color {
         let palette = Brand.logSourcePalette
         guard !source.isEmpty, !palette.isEmpty,
-            let idx = LogCatalog.colorIndex(for: source, in: orderedSources)
+            let idx = LogCatalog.colorIndex(for: source, in: feed.orderedSources)
         else { return .secondary }
         return Color(nsColor: palette[idx % palette.count])
     }

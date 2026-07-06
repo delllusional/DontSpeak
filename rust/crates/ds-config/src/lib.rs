@@ -30,6 +30,7 @@ mod brand;
 mod claude_code;
 mod earcon;
 mod log;
+mod log_watch;
 mod narration;
 mod paths;
 mod pidfile;
@@ -53,6 +54,7 @@ pub use log::{
     LogLevel, aux_log_path, clear_logs, combined_log_json, log, log_cached, log_cached_echoed,
     log_tail, open_aux_log, rotate_if_large,
 };
+pub use log_watch::wait_logs_changed;
 pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
 pub use paths::{
     Paths, brew_onnxruntime_dylib, coreml_dir, coreml_model_present, data_dir, model_dir,

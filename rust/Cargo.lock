@@ -908,6 +908,7 @@ version = "0.2.2-dev"
 dependencies = [
  "directories",
  "ds-proc",
+ "notify",
  "serde",
  "serde_json",
  "tempfile",

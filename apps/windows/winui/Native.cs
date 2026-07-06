@@ -25,6 +25,7 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_tools_json();
     [DllImport(Dll)] private static extern IntPtr ds_libraries_json();
     [DllImport(Dll)] private static extern IntPtr ds_logs_json(uint maxBytes);
+    [DllImport(Dll)] private static extern IntPtr ds_logs_wait(uint maxBytes, uint timeoutMs);
     [DllImport(Dll)] private static extern void ds_logs_clear();
     [DllImport(Dll)] private static extern IntPtr ds_version();
     [DllImport(Dll)] private static extern IntPtr ds_homepage_url();
@@ -160,6 +161,14 @@ internal static class Native
     /// chronological order. Reads the SAME files the engine writes (shared-read). "[]" if no log
     /// yet. The UI derives its source filter from the distinct source values.</summary>
     public static string LogsJson(uint maxBytes) => TakeString(ds_logs_json(maxBytes));
+
+    /// <summary>Like <see cref="LogsJson"/> but BLOCKS until the logs directory changes (any
+    /// *.log file created/modified/removed — the unified log or a sibling aux log; rotated
+    /// *.log.N files don't count) or <paramref name="timeoutMs"/> elapses, then returns the
+    /// CURRENT combined log JSON — the same shape as <see cref="LogsJson"/>, no diff/since
+    /// token. CLIENT-SIDE (an fs watch in this process), not an engine round-trip. Call ONLY on
+    /// a DEDICATED background thread (it blocks), in a loop: call → render → call again.</summary>
+    public static string LogsWait(uint maxBytes, uint timeoutMs) => TakeString(ds_logs_wait(maxBytes, timeoutMs));
 
     /// <summary>Erase the ENTIRE on-disk activity log — the unified log, its rotated backups, and
     /// every sibling aux log — for the Logs tab's Clear button. Irreversible; the caller must
