@@ -475,6 +475,30 @@ pub(crate) fn run_listen(
 /// Process-wide cache of the loaded streaming backend, keyed by the provider it was built for
 /// (`cpu`/`cuda` → ONNX, `ane` → Core ML). One mic / one listen at a time, so a single
 /// cached instance is fine; the heavy model stays resident and each listen just `reset`s it.
+///
+/// Concurrency invariant, precisely: "no `listen` op reaches the helper before any in-flight
+/// preload of this cache has finished" holds ONLY for the primary Caps-tap dictation path —
+/// `dontspeakd` sends `"listen"` there only after `config_gate::stt_can_start` (via
+/// `TtsQueue::stt_loaded()`/`engine.rs`'s `stt_ready_to_dictate`) observes `is_stt_loaded() ==
+/// true`, which is only set after `serve.rs` prints `STTLOADED`, which is only printed after
+/// [`preload_streaming`] has already completed in that same success arm.
+///
+/// It does NOT hold for Settings' "Test Recognition" path: `dontspeakd/src/stt_test.rs`'s
+/// `TestSession::run` (reached ungated from `dontspeakd/src/ipc.rs`'s `TestRecognitionStart`
+/// handler) calls `tts.listen(...)` gated only on `config_gate::parakeet_present_for`
+/// (file/shim presence) — NOT `is_stt_loaded()`. A user who enables Parakeet STT and
+/// immediately opens Settings → Test Recognition can send a `listen` op while a preload is
+/// still in flight, reaching [`try_streaming`] concurrently with [`preload_streaming`] against
+/// this cell. The `Mutex` rules out a data race, but there IS a real logical race: the preload
+/// builds a backend into the cell while `try_streaming` independently takes/overwrites it.
+///
+/// This is a PRE-EXISTING condition, not introduced or worsened by the `ModelSlot`/
+/// `SttResidencySlot` refactor (neither `stt_test.rs`, `ipc.rs`, nor `parakeet_present_for` was
+/// touched by it, and `TtsManager::listen()`'s only change was its internal-representation swap
+/// from a raw `AtomicBool` store to `ModelSlot::mark_loaded_optimistic()` — no timing/gating
+/// change to when the wire `listen` write happens). Not fixed here — that's a separate
+/// product/UX decision (should Test Recognition block/refuse while warming?). TODO: consider
+/// gating `TestSession::run` the same way `stt_can_start` gates dictation.
 type CachedBackend = (String, Box<dyn StreamingStt>);
 fn backend_cell() -> &'static Mutex<Option<CachedBackend>> {
     static CELL: OnceLock<Mutex<Option<CachedBackend>>> = OnceLock::new();

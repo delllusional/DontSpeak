@@ -423,11 +423,14 @@ pub fn engine_run(
         // Piggybacks the SAME throttle: a periodic `load stt`/`load tts` self-heal backstop.
         // `reconcile_helper_models` fires-and-forgets a `load`/`unload` per wanted engine —
         // idempotent (a resident model just re-confirms `STTLOADED`/`TTSLOADED`, gated by
-        // `mark_loaded`'s change-gating so this can't spam StatusGate) — so re-sending it
-        // every interval recovers within one window if a `load stt`/`load tts` request was
-        // ever silently dropped (e.g. the transient-NotFound race this whole change targets,
-        // if it somehow still wedges a load) without needing to fully pin down the exact
-        // interleaving that can cause it.
+        // `ModelSlot::transition`'s change-gating so this can't spam StatusGate) — so
+        // re-sending it every interval recovers within one window from a dropped/
+        // never-delivered fire-and-forget stdio write: the `load`/`unload` request arriving
+        // while the helper is mid-restart, or a pipe write whose effect the sender can't
+        // confirm — there's no ack/request-id in the `dontspeakd`<->`ds-helper` wire protocol.
+        // NOT compensating for an internal `TtsManager`/`ModelSlot`/`SttResidencySlot` race —
+        // those are structurally closed (see `model_slot.rs`/`stt_residency.rs`), not this
+        // tick's job.
         if last_auto_dl.elapsed() >= AUTO_DL_RETRY_INTERVAL {
             auto_download_missing(&downloads, &daemon.cfg);
             reconcile_helper_models(&tts, &daemon.cfg);

@@ -34,6 +34,7 @@ mod oneshot;
 mod priority;
 mod serve;
 mod setup;
+mod stt_residency;
 
 unsafe extern "C" {
     pub(crate) fn _exit(code: i32) -> !;

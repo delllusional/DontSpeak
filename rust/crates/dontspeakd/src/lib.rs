@@ -57,6 +57,7 @@ mod helper_stt;
 #[allow(dead_code)]
 mod listen;
 mod listener;
+mod model_slot;
 mod stats;
 mod stt_test;
 mod tts;

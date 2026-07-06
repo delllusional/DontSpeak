@@ -177,8 +177,8 @@ pub(crate) fn full_duplex_wanted(cfg: &VoiceConfig) -> bool {
 
 /// Reconcile the warm helper's resident models with the config: eagerly LOAD the
 /// model for each selected engine and UNLOAD the deselected one. This keeps a single
-/// residency truth (the helper's `Option`s, mirrored in `tts_*_loaded`) that BOTH
-/// the status-dot and the stats screen read — so "loaded" means the same thing
+/// residency truth (the helper's `Option`s, mirrored in each `TtsManager` `ModelSlot`)
+/// that BOTH the status-dot and the stats screen read — so "loaded" means the same thing
 /// everywhere, a selected engine is resident before first use (Parakeet is
 /// otherwise lazy), and a deselected model's RAM is reclaimed while the helper stays
 /// warm for the other. No-op when the helper isn't running; when neither engine

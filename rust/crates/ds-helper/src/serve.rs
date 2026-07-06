@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::_exit;
 use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
 use crate::oneshot::{Backend, load_backend};
+use crate::stt_residency::SttResidencySlot;
 
 /// One stdin request in `--serve` mode (one JSON object per line).
 #[derive(Debug, Deserialize)]
@@ -238,12 +239,15 @@ pub(crate) fn serve() -> ! {
     // memory after the first listen). `STTLOADED`'s truthiness still reflects `transcriber`
     // specifically (not whichever cache a given listen would actually hit); unifying that
     // status signal is a separate, larger change left alone here.
-    // Set the MOMENT the STT load is CLAIMED — by the parallel preload below OR a later
-    // `load stt` request — so the two can't BOTH load the model concurrently.
-    let stt_claimed = Arc::new(AtomicBool::new(false));
+    // Claimed the MOMENT the STT load starts — by the parallel preload below OR a later
+    // `load stt` request — so the two can't BOTH load the model concurrently. See
+    // `SttResidencySlot`: `Idle -> Loading -> Loaded`, with `Loading`/`Loaded` only ever
+    // exiting via `resolve_ok`/`mark_unloaded`, so the claim can't get stuck.
+    let stt_claimed = Arc::new(SttResidencySlot::new());
     if std::env::var_os("DONTSPEAK_STT_PRELOAD").is_some() {
-        // Claim BEFORE spawning so a `load stt` that races in skips its own load.
-        stt_claimed.store(true, Ordering::Relaxed);
+        // Claim BEFORE spawning so a `load stt` that races in skips its own load. Nothing
+        // else has claimed yet at this point in startup, so this always succeeds.
+        stt_claimed.try_claim();
         let transcriber = transcriber.clone();
         let stt_provider = stt_provider.clone();
         let stt_claimed = stt_claimed.clone();
@@ -272,16 +276,17 @@ pub(crate) fn serve() -> ! {
                     println!("STTLOADED");
                     println!("STT_PROVIDER {}", t.provider().as_str());
                     let _ = std::io::stdout().flush();
+                    stt_claimed.resolve_ok();
                 }
                 Err(e) => {
                     // Release the claim on failure (e.g. the model isn't downloaded yet on a
                     // fresh install) so a LATER `load stt` — sent whenever the engine reconciles
-                    // the helper's models again — can actually retry. Without this, `swap(true)`
-                    // above stayed true forever: the very first failed attempt permanently wedged
+                    // the helper's models again — can actually retry. Without this, the claim
+                    // stayed true forever: the very first failed attempt permanently wedged
                     // STT off for this process's whole lifetime, recoverable only by the daemon
                     // happening to fully RESTART this helper (mirrors Job::LoadTts below, which
                     // rechecks `synth.is_none()` fresh each time instead of a one-shot latch).
-                    stt_claimed.store(false, Ordering::Relaxed);
+                    stt_claimed.mark_unloaded();
                     println!("STTLOADERR {e}");
                     let _ = std::io::stdout().flush();
                     ds_config::log_cached(
@@ -929,13 +934,18 @@ pub(crate) fn serve() -> ! {
                 // streaming-capable providers (cpu/cuda/ane), the SEPARATE resident model a
                 // real listen actually runs on (listen.rs's `backend_cell`) — otherwise that
                 // one stayed loaded, roughly doubling STT memory after the first listen.
-                let freed_offline = transcriber.lock().unwrap().unload();
-                let freed_streaming = crate::listen::unload_streaming();
+                let mut t = transcriber.lock().unwrap();
+                let freed_offline = t.unload();
                 // Release the claim so a LATER `load stt` (a real off→on toggle) can
-                // actually claim + attempt a fresh load — otherwise `stt_claimed` stays
-                // stuck `true` from the original successful load and every subsequent
-                // `Job::LoadStt` sees `swap(true) == true` and silently skips forever.
-                stt_claimed.store(false, Ordering::Relaxed);
+                // actually claim + attempt a fresh load — `mark_unloaded` is valid from
+                // ANY state, so this can't leave the claim stuck from the original
+                // successful load the way the old raw flag could. Kept inside the same
+                // `transcriber` guard as the unload itself, matching the other three
+                // `SttResidencySlot` call sites (the startup preload thread, `Job::LoadStt`'s
+                // success/failure arms) so all four are structurally consistent.
+                stt_claimed.mark_unloaded();
+                drop(t);
+                let freed_streaming = crate::listen::unload_streaming();
                 ds_config::log_cached(
                     ds_config::LogLevel::Info,
                     "helper",
@@ -983,7 +993,7 @@ pub(crate) fn serve() -> ! {
                 // this engine-sent `load stt` is usually redundant. SINGLE-FLIGHT it: if the
                 // load is already claimed (by that preload, or a prior `load stt`), skip — else
                 // claim it and load HERE (STT became wanted after startup, or preload was off).
-                if stt_claimed.swap(true, Ordering::Relaxed) {
+                if !stt_claimed.try_claim() {
                     ds_config::log_cached(
                         ds_config::LogLevel::Info,
                         "helper",
@@ -1006,12 +1016,13 @@ pub(crate) fn serve() -> ! {
                         println!("STTLOADED");
                         println!("STT_PROVIDER {}", t.provider().as_str());
                         let _ = std::io::stdout().flush();
+                        stt_claimed.resolve_ok();
                     }
                     Err(e) => {
                         // Release the claim on failure so the NEXT `load stt` (e.g. the engine
                         // reconciling again once the file it's still fetching actually lands)
                         // can retry instead of silently no-op'ing on the stuck claim forever.
-                        stt_claimed.store(false, Ordering::Relaxed);
+                        stt_claimed.mark_unloaded();
                         println!("STTLOADERR {e}");
                         let _ = std::io::stdout().flush();
                         ds_config::log_cached(
