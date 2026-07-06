@@ -4,13 +4,13 @@
 //! drafts/prereleases — no client-side filtering needed), parses the release's `tag_name` as
 //! semver (a leading `v` is stripped, matching this repo's tag convention — see `make-release`),
 //! and compares it against the RUNNING version via a real semver ordering (not a string
-//! compare, which would misorder e.g. "0.9.0" vs "0.10.0"). [`check_for_update_at`] takes the
+//! compare, which would misorder e.g. "0.9.0" vs "0.10.0"). [`crate::update_check::check_for_update_at`] takes the
 //! API base as a parameter so tests can point it at a local httpmock server instead of the
 //! real `api.github.com`; [`check_for_update`] is the thin wrapper the ds-core FFI boundary
 //! calls, pointed at the real GitHub API.
 //!
 //! No async runtime (matches the rest of ds-model): one blocking `attohttpc` GET using the
-//! crate's shared timeout/TLS-root builder ([`crate::download::http_get_builder`]). Network —
+//! crate's shared timeout/TLS-root builder (`crate::download::http_get_builder`). Network —
 //! callers (the ds-core FFI, then each host's UI) must run this off the main/UI thread, the
 //! same way `ds_model_status_wait` is documented to be.
 

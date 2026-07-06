@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "dontspeak"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "ds-config",
  "ds-ipc",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "dontspeakd"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "ds-config",
  "ds-engines",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "ds-aec"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "coreaudio-rs",
  "libpulse-binding",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "ds-config"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "directories",
  "ds-proc",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "ds-core"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "cbindgen",
  "dontspeakd",
@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "ds-engines"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "ds-config",
  "ds-platform",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "ds-helper"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "ds-aec",
  "ds-config",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "ds-i18n"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "rust-i18n",
  "serde_json",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "ds-ipc"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "ds-model"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "attohttpc",
  "ds-config",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "ds-platform"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "core-graphics",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "ds-proc"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "nix 0.31.3",
  "tempfile",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "ds-status"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "serde",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "ds-stt"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "cpal 0.18.1",
  "ds-config",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tools"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "ds-config",
  "serde_json",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tts"
-version = "0.1.1-dev"
+version = "0.2.0"
 dependencies = [
  "ds-config",
  "ds-model",
