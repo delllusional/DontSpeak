@@ -15,7 +15,9 @@ curl -fsSL https://dontspeak.org/install.sh | sh
 irm https://dontspeak.org/install.ps1 | iex
 ```
 
-Or just tell your agent: **"install DontSpeak from dontspeak.org"** — Claude Code fetches [the recipe](https://dontspeak.org/install.md) and does it. Start a new session afterwards so the MCP server loads.
+Or just tell your agent: **"Install DontSpeak.org app."** — it reads [dontspeak.org/llms.txt](https://dontspeak.org/llms.txt) and does it. Start a new session afterwards so the MCP server loads.
+
+**After installing:** macOS grants Accessibility + Microphone on first launch; Linux prints a one-time `sudo` udev step for Caps-Lock capture.
 
 **Build from source (developers):** `git clone https://github.com/delllusional/DontSpeak && cd DontSpeak && ./scripts/install.sh` (needs a Rust toolchain).
 

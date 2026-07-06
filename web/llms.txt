@@ -1,12 +1,15 @@
 # DontSpeak
 
-> A local voice layer for Claude Code, Codex, and Claude Desktop: your AI agent speaks its
+> A local voice layer for Claude Code, Claude Desktop, and Codex: your AI agent speaks its
 > replies aloud through a local neural voice, and you dictate back with one key. It runs a
 > native host app (speech engine in-process, on-device models) plus an MCP server that any
 > MCP-capable client can call. Models download on first launch.
 
 To install, tell your agent: `Install DontSpeak.org app.` It detects the OS and runs the
-matching installer — prebuilt binaries only, no source build.
+matching installer — prebuilt binaries only, no source build. Start a new Claude Code
+session afterward so it picks up the MCP server. macOS: grant Accessibility + Microphone
+on first launch. Linux: run the one-time `sudo` udev step the installer prints (for
+Caps-Lock capture).
 
 Every install carries its own full uninstaller — macOS/Linux:
 `~/.local/bin/dontspeak-uninstall`; Windows: Settings > Apps > DontSpeak (or
