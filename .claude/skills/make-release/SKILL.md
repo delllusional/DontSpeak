@@ -67,7 +67,10 @@ git push origin main "v$ver"
      the `APPLE_*` secrets exist, else ad-hoc (first launch hits Gatekeeper).
    - `linux` — per-arch tarballs (ubuntu-26.04 + -arm). **`continue-on-error`**: a Linux hiccup
      doesn't block the release, but ships it without Linux assets — check they're there.
-4. **`publish release`** — `gh release create` with all artifacts + `checksums.txt`.
+4. **`publish release`** — `gh release create` with all artifacts + `checksums.txt` +
+   `--generate-notes`. That flag only lists merged PULL REQUESTS — this repo pushes straight
+   to `main` with no PRs, so it has nothing to draw from and renders as a bare compare link
+   with no real content. Write the actual notes yourself (step 6).
 
 ## 4 — Monitor (mandatory)
 
@@ -90,7 +93,23 @@ Expect **7 assets**: `checksums.txt` + linux `{x86_64,aarch64}.tar.gz` + macos
 `{aarch64,x86_64}.app.zip` + windows `{x86_64,aarch64}.zip`. Missing Linux assets means the
 best-effort Linux job failed — decide whether to re-cut or ship without.
 
-## 6 — Re-cut a failed (or same-version test) release
+## 6 — Write real release notes
+
+No script for this — write it directly (this whole release process already runs through an
+agent capable of writing it, so a keyword-matching heuristic script was tried and removed as
+strictly worse than just doing it):
+1. Find the previous release tag: `gh release list --limit 2` (the one before the one you
+   just cut). List what changed: `git log <prev-tag>..v$ver --oneline`.
+2. Group into sections that fit what ACTUALLY changed — don't force categories that end up
+   empty. Typical shape: `## Bug fixes`, `## Features`, `## Shared changes` (rust/ engine,
+   cross-platform), plus one section per platform that got platform-specific work this
+   release (`## macOS`, `## Windows`, `## Linux`). One concise, plain-English line per
+   change (not the raw commit subject — write what it means for the user), linking to its
+   commit: `- <description> ([`<short-sha>`](https://github.com/delllusional/DontSpeak/commit/<sha>))`.
+3. Submit it: `gh release edit "v$ver" --repo delllusional/DontSpeak --notes-file <file>`
+   (or `--notes "..."` inline for something short).
+
+## 7 — Re-cut a failed (or same-version test) release
 
 Only while pre-1.0, or explicitly told backward-compat doesn't matter — normally bump the
 version instead. Fix the cause, commit, then move the tag:
@@ -101,14 +120,14 @@ git tag "v$ver" && git push origin main "v$ver"                 # re-triggers th
 ```
 Then monitor again (step 4).
 
-## 7 — After the release: deploy the site
+## 8 — After the release: deploy the site
 
 Republishing dontspeak.org is a mandatory final step (the served install scripts must match the
 release): run the `deploy-site` skill **in the `dontspeak.org` repo checkout** — the skill lives
 there, not here. The one-command installers resolve the latest GitHub release via the API at
 run time, so a brief site lag degrades gracefully — but don't skip the deploy.
 
-## 8 — Bump to the next dev version
+## 9 — Bump to the next dev version
 
 Immediately after the release publishes (step 5), bump `rust/Cargo.toml`'s
 `[workspace.package] version` to the next version with a `-dev` suffix — e.g. `0.1.0` →
@@ -124,13 +143,13 @@ usual (step 2).
 ## Caveats
 
 - A pushed tag on a commit whose tests later fail leaves a **tag without a release** — clean it
-  up (step 6) or the next attempt's tag push is rejected as already existing.
+  up (step 7) or the next attempt's tag push is rejected as already existing.
 - `workflow_dispatch` runs the build for testing without a tag — it does not publish.
 - Don't `git tag -f` over a pushed tag without deleting the remote one first; GitHub keeps the
   old object and Actions may not re-trigger.
-- **Don't skip step 8.** Without the `-dev` bump, `rust/Cargo.toml` keeps reading the
+- **Don't skip step 9.** Without the `-dev` bump, `rust/Cargo.toml` keeps reading the
   JUST-RELEASED version even as new commits land on `main` — indistinguishable from the
   released state by version number alone. A commit that lands after `vX.Y.Z` is tagged is
   NOT part of that release just because the version string hasn't changed yet; re-cutting
-  (step 6) must move the tag back to the actual release commit, not forward onto whatever
+  (step 7) must move the tag back to the actual release commit, not forward onto whatever
   unreleased work has since landed on `main`.
