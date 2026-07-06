@@ -147,9 +147,7 @@ usual (step 2).
 - `workflow_dispatch` runs the build for testing without a tag — it does not publish.
 - Don't `git tag -f` over a pushed tag without deleting the remote one first; GitHub keeps the
   old object and Actions may not re-trigger.
-- **Don't skip step 9.** Without the `-dev` bump, `rust/Cargo.toml` keeps reading the
-  JUST-RELEASED version even as new commits land on `main` — indistinguishable from the
-  released state by version number alone. A commit that lands after `vX.Y.Z` is tagged is
-  NOT part of that release just because the version string hasn't changed yet; re-cutting
-  (step 7) must move the tag back to the actual release commit, not forward onto whatever
-  unreleased work has since landed on `main`.
+- **Don't skip step 9** (why: see there). One consequence worth calling out separately:
+  re-cutting (step 7) must move the tag back to the ACTUAL release commit, never forward
+  onto whatever unreleased work has since landed on `main` — a commit isn't part of a
+  release just because `Cargo.toml`'s version string hasn't changed yet.
