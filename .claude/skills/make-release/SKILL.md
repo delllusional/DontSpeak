@@ -20,18 +20,21 @@ description: Cut a DontSpeak release — tag the single-source version, push the
 - **Version**: the single source is `rust/Cargo.toml` → `[workspace.package] version` (read by
   `scripts/version.sh`). The tag must be `v` + exactly that version — the `check` job fails the
   run fast otherwise. Bump it (+ commit) for a new release.
-- **Green main, pushed**: run the `prepush` skill first (clippy + tests + cargo-deny — the
-  same suite the release re-runs); the tagged commit must be on `origin/main`.
-- **Hygiene clean — run `cargo fmt` locally before tagging.** The release (unlike per-commit CI
-  and `prepush`, neither of which runs rustfmt/rustdoc) also gates on rustfmt + rustdoc
-  (`ci.yml`'s `hygiene` job, full-matrix only) — **the single most common re-cut cause**. Format
-  both workspaces, verify clean, and rebuild docs before tagging:
+- **Green main, pushed**: run the `prepush` skill first (clippy + tests — the same suite
+  the release re-runs); the tagged commit must be on `origin/main`.
+- **Hygiene clean — run `cargo fmt` + `cargo deny check` locally before tagging.** The
+  release (unlike per-commit CI and `prepush`) also gates on rustfmt + rustdoc AND
+  cargo-deny (`ci.yml`'s `hygiene` and `cargo-deny` jobs, full-matrix only) — **the
+  single most common re-cut cause**. Format both workspaces, verify clean, rebuild docs,
+  and clear cargo-deny before tagging:
   ```bash
   (cd rust && cargo fmt) && (cd apps/linux/gtk && cargo fmt)     # apply
   (cd rust && cargo fmt --check) && (cd apps/linux/gtk && cargo fmt --check)   # must be clean
   (cd rust && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked)   # must pass
+  (cd rust && cargo deny check)   # must pass — advisories/bans/licenses/sources
   ```
-  Commit whatever `cargo fmt` changed — a release is where the codebase gets cleaned up.
+  Commit whatever `cargo fmt` (or a `cargo update` for a flagged advisory) changed — a
+  release is where the codebase gets cleaned up.
 - **macOS Swift tests (run on a Mac).** The release matrix runs `swift test` on the macos-26
   leg, but neither `prepush` nor the gate above covers it — a Swift-logic regression would
   otherwise surface only ~30 min into the release. Run it here first (builds the FFI staticlib

@@ -5,15 +5,19 @@ name: CI
 # WinUI app adds winui.tests (xunit) — each on its own OS leg.
 #
 # Cost/coverage split:
-#   • Per commit / PR  → Linux only, essentials only (clippy + tests + cargo-deny — fast;
-#     covers the platform-agnostic majority). cargo-deny is dependency-graph analysis
-#     (advisories/bans/licenses/sources against rust/Cargo.lock), not compiled code, so
-#     it's cheap and Linux-only-covers-everything the same way clippy below is.
+#   • Per commit / PR  → Linux only, essentials only (clippy + tests — fast; covers the
+#     platform-agnostic majority).
 #   • Release pipeline → the FULL ubuntu + windows-2025 + macos-26 matrix PLUS the
-#     hygiene gate (rustfmt + rustdoc), so the macOS Core ML/ANE and Windows CUDA-path
-#     tests (cfg-gated to their own OS) run — and format/doc drift is cleaned up —
-#     before anything is built or published. release.yml calls this with
-#     full-matrix: true.
+#     hygiene gate (rustfmt + rustdoc) AND cargo-deny (advisories/bans/licenses/sources),
+#     so the macOS Core ML/ANE and Windows CUDA-path tests (cfg-gated to their own OS)
+#     run — and format/doc drift + dependency-graph issues are cleaned up — before
+#     anything is built or published. release.yml calls this with full-matrix: true.
+#     cargo-deny is release-only, same reasoning as hygiene: it's a considered gate
+#     (license/advisory exceptions need a deliberate deny.toml change, not a reflexive
+#     fix), so it's cheaper to clear once per release than to nag every commit. The
+#     scheduled dependency-audit.yml still re-runs advisories daily in between, since a
+#     newly-disclosed RustSec advisory against an unchanged Cargo.lock has no commit to
+#     attach a per-commit check to.
 # This is `workflow_call`-able so the release reuses the EXACT same test definition.
 
 on:
@@ -91,18 +95,22 @@ jobs:
         # surfaces ALL lints in one run instead of stopping at the first.
         run: cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings
 
-  # cargo-deny gate: advisories (RustSec) + bans (duplicate/banned crates) + licenses
-  # (rust/deny.toml's [licenses.allow] + arpabet's BSD-4-Clause exception) + sources
-  # (only crates.io, no stray git/registry deps). Linux-only, no OS matrix — unlike
-  # clippy/test, this is dependency-GRAPH analysis, not compiled code: deny.toml's
-  # [graph] targets = [] (unset) means cargo-deny already evaluates every platform's
-  # conditional dependencies (Windows/macOS/Linux cfg-gated deps alike) regardless of
-  # which OS runs the check, so running this on all three release-matrix OSes would be
-  # pure duplication of the same Cargo.lock analysis.
-  # Since release.yml's `tests` job does `uses: ./.github/workflows/ci.yml`, this job
-  # automatically becomes part of the release gate too — intended, not a bug.
+  # cargo-deny gate — RELEASE-ONLY (same `if` as hygiene above): advisories (RustSec) +
+  # bans (duplicate/banned crates) + licenses (rust/deny.toml's [licenses.allow] +
+  # arpabet's BSD-4-Clause exception) + sources (only crates.io, no stray git/registry
+  # deps). Deliberately skipped per-commit — a new advisory or license entering the
+  # graph needs a considered deny.toml change (dated reason, scoped exception), not a
+  # reflexive fix on every push; the release enforces it once, same rationale as
+  # rustfmt/rustdoc. dependency-audit.yml's daily schedule still catches newly-disclosed
+  # advisories against an unchanged Cargo.lock in between releases.
+  # Linux-only, no OS matrix — unlike clippy/test, this is dependency-GRAPH analysis,
+  # not compiled code: deny.toml's [graph] targets = [] (unset) means cargo-deny already
+  # evaluates every platform's conditional dependencies (Windows/macOS/Linux cfg-gated
+  # deps alike) regardless of which OS runs the check, so running this on all three
+  # release-matrix OSes would be pure duplication of the same Cargo.lock analysis.
   cargo-deny:
     name: cargo-deny (advisories + bans + licenses + sources)
+    if: inputs.full-matrix
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

@@ -88,13 +88,16 @@ the three runtime pieces (CLI, engine, host app) need different rebuild routes.
 ## Gates — per-commit vs release (deliberate split, not an oversight)
 
 Per-commit CI (`.github/workflows/ci.yml`, Linux-only) runs **only** `cargo clippy
---workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`,
-and `cargo deny check` (`rust/deny.toml` — advisories + bans + licenses + sources) —
-fast, on purpose. `cargo fmt --check` and `RUSTDOCFLAGS="-D warnings" cargo doc` are
-**release-only** gates (the `hygiene` job, full-matrix), so formatting/doc drift
-accumulates between releases by design rather than nagging every commit — fix it once
-before tagging (`.claude/skills/make-release` does this). A separate scheduled workflow
-(`.github/workflows/dependency-audit.yml`) re-runs `cargo deny check advisories` daily,
-since a newly-disclosed RustSec advisory against an unchanged `Cargo.lock` has no commit
-to attach the per-commit check to. Use `.claude/skills/prepush` to run the exact
-per-commit gates locally before pushing.
+--workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked`
+— fast, on purpose. `cargo fmt --check`, `RUSTDOCFLAGS="-D warnings" cargo doc`, and
+`cargo deny check` (`rust/deny.toml` — advisories + bans + licenses + sources) are all
+**release-only** gates (the `hygiene` and `cargo-deny` jobs, gated on full-matrix), so
+formatting/doc drift and dependency-graph issues (a new advisory, a new license
+entering the graph) accumulate between releases by design rather than nagging every
+commit — fix them once before tagging (`.claude/skills/make-release` does this). A
+separate scheduled workflow (`.github/workflows/dependency-audit.yml`) re-runs `cargo
+deny check advisories` daily, since a newly-disclosed RustSec advisory against an
+unchanged `Cargo.lock` has no commit — and, now, no imminent release — to attach the
+check to. Use `.claude/skills/prepush` to run the exact per-commit gates locally before
+pushing (cargo-deny is no longer one of them — see the skill for the release-only
+caveat).

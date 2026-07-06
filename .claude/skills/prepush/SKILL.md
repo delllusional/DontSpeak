@@ -1,6 +1,6 @@
 ---
 name: prepush
-description: Run the exact CI gates locally, then push to origin only if they pass — so the per-commit CI on GitHub never goes red. Mirrors .github/workflows/ci.yml (clippy + test + cargo-deny). Use when asked to push, prepush, "run CI locally", or verify a change before pushing to main.
+description: Run the exact CI gates locally, then push to origin only if they pass — so the per-commit CI on GitHub never goes red. Mirrors .github/workflows/ci.yml (clippy + test). Use when asked to push, prepush, "run CI locally", or verify a change before pushing to main.
 ---
 
 # DontSpeak — prepush (local CI gate, then push)
@@ -8,15 +8,12 @@ description: Run the exact CI gates locally, then push to origin only if they pa
 **Source of truth:** `.github/workflows/ci.yml` — if a gate changes there, update this
 skill. Runs on any dev machine; all cargo commands run in `rust/`.
 
-Per-commit CI runs three Linux jobs. Run the same three locally, in order, and push only
-once all three are green. (rustfmt + rustdoc are release-only — `ci.yml`'s full-matrix
-`hygiene` job, cleaned up by `make-release` before tagging. swift-format is not
-enforced anywhere.)
+Per-commit CI runs two Linux jobs. Run the same two locally, in order, and push only
+once both are green. (rustfmt + rustdoc + cargo-deny are release-only — `ci.yml`'s
+full-matrix `hygiene` and `cargo-deny` jobs, cleaned up / cleared by `make-release`
+before tagging. swift-format is not enforced anywhere.)
 
-**Local prerequisite:** `cargo-deny` isn't part of the default toolchain — install it
-once with `cargo install cargo-deny --locked` before running gate 3.
-
-## The three gates
+## The two gates
 
 1. **Clippy (deny warnings)**
    ```bash
@@ -29,17 +26,22 @@ once with `cargo install cargo-deny --locked` before running gate 3.
    ```bash
    cargo test --workspace --locked
    ```
-3. **cargo-deny (advisories + bans + licenses + sources)**
-   ```bash
-   cargo deny check
-   ```
-   Checks `deny.toml`'s advisory-ignore list, license allowlist/exceptions, banned/
-   duplicate crates, and allowed registries/git sources against the resolved
-   `Cargo.lock`. A new advisory or a new license entering the graph needs a considered
-   `deny.toml` change (dated reason, scoped exception), not a reflexive `#[allow]`-style
-   widening — see `rust/deny.toml`'s existing entries for the expected rigor.
 
-If all three pass, push. If any fails, fix it and re-run.
+If both pass, push. If either fails, fix it and re-run.
+
+## cargo-deny (release-only, not a per-commit gate)
+
+`cargo deny check` (advisories + bans + licenses + sources against `deny.toml` /
+`Cargo.lock`) only runs in the release pipeline now — see `.claude/skills/make-release`.
+It's still worth running here if you touched `Cargo.toml`/`Cargo.lock` or `deny.toml`,
+so a new advisory or license doesn't surface for the first time at tag time:
+```bash
+cargo deny check
+```
+Install once with `cargo install cargo-deny --locked` (not part of the default
+toolchain). A new advisory or a new license entering the graph needs a considered
+`deny.toml` change (dated reason, scoped exception), not a reflexive `#[allow]`-style
+widening — see `rust/deny.toml`'s existing entries for the expected rigor.
 
 ## Push
 
