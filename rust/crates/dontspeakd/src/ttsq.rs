@@ -202,6 +202,29 @@ fn select_pos(q: &VecDeque<Item>, active: &Option<String>) -> Option<usize> {
     }
 }
 
+/// Why the queue is currently paused — lets a barge-watcher auto-resume tell its OWN
+/// speculative pause apart from a real Caps-gesture pause it must never touch. The two
+/// causes are guarded ASYMMETRICALLY on purpose: a `Dictation` pause/resume always
+/// applies unconditionally (engine.rs's own gesture always wins), while a
+/// `BargeSpeculative` pause/resume is a no-op whenever a `Dictation` pause is (or
+/// would be) in effect — see `pause_with_cause` and `resume_if_barge_speculative`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PauseCause {
+    /// A genuine user gesture: `engine.rs`'s `toggle_dictation` PauseVoice arm or
+    /// `start_recording`. Never auto-cleared by anything except the matching
+    /// `resume()` call from that SAME gesture's stop/ResumeVoice arm.
+    Dictation,
+    /// `barge.rs`'s own "foreign mic looks live" watcher. The ONLY cause
+    /// `resume_if_barge_speculative` will ever auto-clear.
+    BargeSpeculative,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PausedState {
+    paused: bool,
+    cause: Option<PauseCause>,
+}
+
 pub struct TtsQueue {
     items: Mutex<VecDeque<Item>>,
     cv: Condvar,
@@ -209,8 +232,15 @@ pub struct TtsQueue {
     /// the generation moves past the one it dequeued under.
     generation: AtomicU64,
     /// True while paused for a record-barge (resume mode): the worker stops
-    /// dequeuing until `resume()`.
-    paused: AtomicBool,
+    /// dequeuing until `resume()`. Tagged with WHY it's paused (`PauseCause`) so a
+    /// barge-watcher auto-resume (`resume_if_barge_speculative`) can tell its own
+    /// speculative pause apart from a real Caps/PTT `Dictation` pause it must never
+    /// touch — and so the PAUSE side of that same guard (`pause_with_cause`) can
+    /// refuse to relabel an already-`Dictation`-tagged pause as `BargeSpeculative`
+    /// during the `start_recording` race window (`pause_for_record()` fires before
+    /// `set_stt_active(true)`). Both sides guarded under ONE lock so the check-and-set
+    /// is atomic.
+    paused: Mutex<PausedState>,
     /// Per-interruption requeue intent, keyed by the generation value in effect the
     /// MOMENT each cancellation fired (the `fetch_add`'s PRE-bump value — exactly the
     /// `gen0` whatever item was in flight at that instant is running under). `true` = a
@@ -292,7 +322,7 @@ impl TtsQueue {
             items: Mutex::new(VecDeque::new()),
             cv: Condvar::new(),
             generation: AtomicU64::new(0),
-            paused: AtomicBool::new(false),
+            paused: Mutex::new(PausedState::default()),
             cancel_kind: Mutex::new(HashMap::new()),
             tts_active: AtomicBool::new(false),
             terminal_front: AtomicBool::new(true),
@@ -374,7 +404,7 @@ impl TtsQueue {
     /// tapers instead of clicking.
     pub fn clear(&self) {
         self.items.lock().unwrap().clear();
-        self.paused.store(false, Ordering::SeqCst);
+        *self.paused.lock().unwrap() = PausedState::default();
         self.hard_cancel_in_flight();
         self.cv.notify_one();
     }
@@ -503,12 +533,29 @@ impl TtsQueue {
         recent
     }
 
-    /// Record barge (mic active): pause the worker and cancel the current item,
-    /// keeping the ENTIRE queue (narration and reply). The worker re-enqueues the
-    /// interrupted item on its generation bump, so `resume()` continues the whole
-    /// queue from where the mic interrupted it.
-    pub fn pause_for_record(&self) {
-        self.paused.store(true, Ordering::SeqCst);
+    /// Shared body of `pause_for_record` / `pause_for_suspected_barge`: mark the queue
+    /// paused under `cause`, abandon the in-flight item into resume mode (generation
+    /// bump + resume intent), and fade the audio out. GUARD: a `BargeSpeculative`
+    /// request is a no-op — paused state and cause both left exactly as they were — if
+    /// the queue is ALREADY paused for `Dictation`. That closes the round-4 race:
+    /// `start_recording` calls `pause_for_record()` (tags `Dictation`) roughly 40 lines
+    /// before it calls `set_stt_active(true)`; in that window a genuinely-foreign mic
+    /// edge can fire the barge watcher, and it must not relabel (or touch at all) a
+    /// pause that's already correctly held for the real reason — the queue is already
+    /// paused, so the watcher's own pause action would be redundant even if it weren't
+    /// actively harmful (a later `resume_if_barge_speculative()` would otherwise
+    /// wrongly clear it). A `Dictation` request (`cause == Dictation`) is NEVER
+    /// guarded — engine.rs's own gesture always wins and applies unconditionally, same
+    /// as before this change.
+    fn pause_with_cause(&self, cause: PauseCause) {
+        {
+            let mut st = self.paused.lock().unwrap();
+            if cause == PauseCause::BargeSpeculative && st.cause == Some(PauseCause::Dictation) {
+                return;
+            }
+            st.paused = true;
+            st.cause = Some(cause);
+        }
         // Nothing is audibly playing while paused for the record-barge; the kept
         // reply resumes on `resume()` (which re-enters the worker and re-sets it).
         self.set_tts_active(false);
@@ -521,6 +568,24 @@ impl TtsQueue {
         // voice tapers as recording starts. ~60 ms keeps mic bleed minimal in half-duplex
         // (full-duplex stands this watcher down entirely, so it never reaches here).
         self.tts.stop_fade();
+    }
+
+    /// Record barge (a genuine Caps/PTT gesture — `engine.rs`'s `toggle_dictation`
+    /// PauseVoice arm and `start_recording`, UNCHANGED call sites/behavior): pause and
+    /// tag `Dictation`. Always applies, never guarded. Keeps the ENTIRE queue
+    /// (narration and reply); the worker re-enqueues the interrupted item on its
+    /// generation bump, so `resume()` continues the whole queue from where the mic
+    /// interrupted it.
+    pub fn pause_for_record(&self) {
+        self.pause_with_cause(PauseCause::Dictation);
+    }
+
+    /// Speculative record barge (`barge.rs`'s own foreign-mic watcher, NEW entry point
+    /// replacing its direct `pause_for_record()` call): pause and tag `BargeSpeculative`
+    /// — UNLESS the queue is already paused for a real `Dictation` gesture, in which case
+    /// this is a no-op (see `pause_with_cause`'s guard doc for why).
+    pub fn pause_for_suspected_barge(&self) {
+        self.pause_with_cause(PauseCause::BargeSpeculative);
     }
 
     /// Whether the warm child is running in full-duplex AEC mode (delegates to the
@@ -575,10 +640,30 @@ impl TtsQueue {
         self.pause_in_background.store(pause, Ordering::SeqCst);
     }
 
-    /// Mic freed: lift the pause so the worker resumes the kept/interrupted reply.
-    /// No-op when not paused.
+    /// Mic freed via a genuine Caps/PTT gesture (`engine.rs`'s `toggle_dictation`
+    /// ResumeVoice arm and `stop_recording`, UNCHANGED call sites): unconditionally lift
+    /// the pause regardless of cause — this IS the matching counterpart of whichever
+    /// gesture paused it. No-op when not paused.
     pub fn resume(&self) {
-        if self.paused.swap(false, Ordering::SeqCst) {
+        let mut st = self.paused.lock().unwrap();
+        if st.paused {
+            *st = PausedState::default();
+            drop(st);
+            self.cv.notify_one();
+        }
+    }
+
+    /// `barge.rs`'s own resume (NEW entry point replacing its direct `resume()` call):
+    /// clears the pause ONLY when it's tagged `BargeSpeculative` — a `Dictation`-tagged
+    /// pause (or no pause) is left completely untouched, no matter when this is called.
+    /// This is the round-3 half of the fix (approved); `pause_for_suspected_barge`'s
+    /// guard above is the round-4 half that makes it actually safe, by ensuring the tag
+    /// can never have been wrongly stomped in the first place.
+    pub fn resume_if_barge_speculative(&self) {
+        let mut st = self.paused.lock().unwrap();
+        if st.cause == Some(PauseCause::BargeSpeculative) {
+            *st = PausedState::default();
+            drop(st);
             self.cv.notify_one();
         }
     }
@@ -591,7 +676,7 @@ impl TtsQueue {
         (
             self.tts_active.load(Ordering::SeqCst),
             queued,
-            self.paused.load(Ordering::SeqCst),
+            self.paused.lock().unwrap().paused,
             self.tts.is_muted(),
         )
     }
@@ -612,6 +697,12 @@ impl TtsQueue {
         if self.tts_active.swap(on, Ordering::SeqCst) != on {
             self.gate.bump();
         }
+    }
+
+    /// Cheap read of the live pause flag (cause-agnostic) — used by the worker's
+    /// dequeue loop and by `requeue_if_resuming`'s defensive fallback.
+    fn is_paused(&self) -> bool {
+        self.paused.lock().unwrap().paused
     }
 
     /// Record the requeue intent for the generation transition a cancellation JUST made:
@@ -762,7 +853,7 @@ impl TtsQueue {
             let item = {
                 let mut q = self.items.lock().unwrap();
                 loop {
-                    if !self.paused.load(Ordering::SeqCst) {
+                    if !self.is_paused() {
                         let active = self.active.lock().unwrap().effective();
                         if let Some(pos) = select_pos(&q, &active) {
                             break q.remove(pos).expect("select_pos returns a valid index");
@@ -887,7 +978,7 @@ impl TtsQueue {
             .lock()
             .unwrap()
             .remove(&gen0)
-            .unwrap_or_else(|| self.paused.load(Ordering::SeqCst));
+            .unwrap_or_else(|| self.is_paused());
         if !should_requeue(requeue, &item.text) {
             return;
         }
@@ -1253,7 +1344,7 @@ mod tests {
             items: Mutex::new(VecDeque::new()),
             cv: Condvar::new(),
             generation: AtomicU64::new(0),
-            paused: AtomicBool::new(false),
+            paused: Mutex::new(PausedState::default()),
             cancel_kind: Mutex::new(HashMap::new()),
             tts_active: AtomicBool::new(false),
             terminal_front: AtomicBool::new(true),
@@ -1322,7 +1413,7 @@ mod tests {
         // Defensive fallback: if this generation's intent was never recorded (or was already
         // consumed), `requeue_if_resuming` reads the CURRENT `paused` flag instead.
         let q = mk_queue();
-        q.paused.store(true, Ordering::SeqCst);
+        q.paused.lock().unwrap().paused = true;
         q.requeue_if_resuming(item("resumed via live flag"), 123);
         assert_eq!(
             q.items.lock().unwrap().len(),
@@ -1331,7 +1422,7 @@ mod tests {
         );
 
         let q2 = mk_queue();
-        q2.paused.store(false, Ordering::SeqCst);
+        q2.paused.lock().unwrap().paused = false;
         q2.requeue_if_resuming(item("dropped via live flag"), 456);
         assert!(
             q2.items.lock().unwrap().is_empty(),
@@ -1345,7 +1436,7 @@ mod tests {
         // generation must not see it again (it must fall back to the live `paused` flag).
         let q = mk_queue();
         q.record_cancel_kind(1, true);
-        q.paused.store(false, Ordering::SeqCst); // live flag says "drop" this time
+        q.paused.lock().unwrap().paused = false; // live flag says "drop" this time
         q.requeue_if_resuming(item("first"), 1); // consumes the recorded `true`
         assert_eq!(
             q.items.lock().unwrap().len(),
@@ -1405,7 +1496,7 @@ mod tests {
             .lock()
             .unwrap()
             .extend([narr(Some("a")), narr(Some("b"))]);
-        q.paused.store(true, Ordering::SeqCst);
+        q.paused.lock().unwrap().paused = true;
         let gen_before = q.generation.load(Ordering::SeqCst);
 
         // Also proves this doesn't panic calling `tts.stop_fade()` against the stub manager.
@@ -1415,7 +1506,11 @@ mod tests {
             q.items.lock().unwrap().is_empty(),
             "clear drops every queued item"
         );
-        assert!(!q.paused.load(Ordering::SeqCst), "clear resets the pause");
+        {
+            let st = q.paused.lock().unwrap();
+            assert!(!st.paused, "clear resets the pause");
+            assert!(st.cause.is_none(), "clear resets the cause too");
+        }
         assert!(
             q.generation.load(Ordering::SeqCst) > gen_before,
             "clear bumps the generation"
@@ -1614,7 +1709,11 @@ mod tests {
 
         q.pause_for_record();
 
-        assert!(q.paused.load(Ordering::SeqCst));
+        {
+            let st = q.paused.lock().unwrap();
+            assert!(st.paused);
+            assert_eq!(st.cause, Some(PauseCause::Dictation));
+        }
         assert!(!q.tts_active.load(Ordering::SeqCst));
         assert!(q.generation.load(Ordering::SeqCst) > gen_before);
         assert_eq!(
@@ -1627,14 +1726,101 @@ mod tests {
     #[test]
     fn resume_is_a_noop_when_not_paused_and_clears_pause_when_it_was() {
         let q = mk_queue();
-        assert!(!q.paused.load(Ordering::SeqCst));
+        assert!(!q.paused.lock().unwrap().paused);
         q.resume(); // no-op
-        assert!(!q.paused.load(Ordering::SeqCst));
+        assert!(!q.paused.lock().unwrap().paused);
 
         q.pause_for_record();
-        assert!(q.paused.load(Ordering::SeqCst));
+        assert!(q.paused.lock().unwrap().paused);
         q.resume();
-        assert!(!q.paused.load(Ordering::SeqCst), "resume clears the pause");
+        {
+            let st = q.paused.lock().unwrap();
+            assert!(!st.paused, "resume clears the pause");
+            assert!(st.cause.is_none(), "resume clears the cause too");
+        }
+    }
+
+    #[test]
+    fn pause_for_suspected_barge_tags_barge_speculative_when_idle() {
+        // Baseline positive case: with nothing paused, the barge watcher's own pause
+        // applies normally and tags BargeSpeculative (mirrors the existing
+        // pause_for_record_... test, but for the new entry point).
+        let q = mk_queue();
+        q.tts_active.store(true, Ordering::SeqCst);
+        let gen_before = q.generation.load(Ordering::SeqCst);
+        q.pause_for_suspected_barge();
+        let st = q.paused.lock().unwrap();
+        assert!(st.paused);
+        assert_eq!(st.cause, Some(PauseCause::BargeSpeculative));
+        drop(st);
+        assert!(q.generation.load(Ordering::SeqCst) > gen_before);
+    }
+
+    #[test]
+    fn pause_for_suspected_barge_never_overwrites_an_existing_dictation_cause() {
+        // THE ROUND-4 REGRESSION GUARD: a real Caps/PTT pause is already in effect
+        // (pause_for_record, tagged Dictation) when the barge watcher's speculative
+        // pause fires — e.g. the start_recording race window where pause_for_record()
+        // (line ~1279) runs before set_stt_active(true) (line ~1318) and a foreign mic
+        // edge lands in between. pause_for_suspected_barge() must be a no-op: cause
+        // must STILL read Dictation afterward, never relabeled BargeSpeculative.
+        let q = mk_queue();
+        q.pause_for_record();
+        let gen_after_dictation_pause = q.generation.load(Ordering::SeqCst);
+
+        q.pause_for_suspected_barge();
+
+        let st = q.paused.lock().unwrap();
+        assert!(st.paused, "still paused");
+        assert_eq!(
+            st.cause,
+            Some(PauseCause::Dictation),
+            "a real Dictation pause must never be relabeled BargeSpeculative"
+        );
+        drop(st);
+        assert_eq!(
+            q.generation.load(Ordering::SeqCst),
+            gen_after_dictation_pause,
+            "the redundant speculative pause must not bump the generation again"
+        );
+
+        // And the mirror-image resume-side guard (round 3) still holds on top of this:
+        // the barge watcher's own resume must NOT clear a Dictation-tagged pause.
+        q.resume_if_barge_speculative();
+        assert!(
+            q.paused.lock().unwrap().paused,
+            "resume_if_barge_speculative must leave a Dictation pause untouched"
+        );
+    }
+
+    #[test]
+    fn resume_if_barge_speculative_never_clears_a_real_dictation_pause() {
+        // Round 3's planned regression test (not yet in the tree — add it here): a
+        // Dictation-tagged pause is untouched by the barge watcher's auto-resume no
+        // matter when it's called, since nothing else re-tags it BargeSpeculative
+        // (this test doesn't rely on the round-4 pause-side guard — it pauses via
+        // pause_for_record directly, so it also acts as a standalone check that the
+        // resume-side guard alone is correct).
+        let q = mk_queue();
+        q.pause_for_record();
+        q.resume_if_barge_speculative();
+        let st = q.paused.lock().unwrap();
+        assert!(
+            st.paused,
+            "a Dictation pause is never auto-cleared by the barge watcher"
+        );
+        assert_eq!(st.cause, Some(PauseCause::Dictation));
+    }
+
+    #[test]
+    fn resume_if_barge_speculative_clears_a_barge_speculative_pause() {
+        // Positive case: the barge watcher's own pause IS cleared by its own resume.
+        let q = mk_queue();
+        q.pause_for_suspected_barge();
+        q.resume_if_barge_speculative();
+        let st = q.paused.lock().unwrap();
+        assert!(!st.paused);
+        assert_eq!(st.cause, None);
     }
 
     #[test]

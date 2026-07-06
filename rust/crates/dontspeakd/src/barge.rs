@@ -246,8 +246,8 @@ pub(crate) fn spawn_mic_barge_watcher(
                 BARGE_MAX_TICKS,
             );
             match action {
-                BargeAction::Pause => ttsq.pause_for_record(),
-                BargeAction::Resume => ttsq.resume(),
+                BargeAction::Pause => ttsq.pause_for_suspected_barge(),
+                BargeAction::Resume => ttsq.resume_if_barge_speculative(),
                 BargeAction::None => {}
             }
             st = next;
