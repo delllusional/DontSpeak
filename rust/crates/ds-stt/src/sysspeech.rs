@@ -206,8 +206,10 @@ impl SystemStreamer {
         // Mirrors `SystemTranscriber::transcribe_pcm_16k`'s borrowed-callback pattern for the
         // batch symbol: the shim copies the transcript out during the call, so there's no
         // out-param and no `smk_free_str`.
-        ds_model::shim::collect_str(|ctx, cb| unsafe { f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) })
-            .map_err(|rc| format!("smk_sys_stream_push failed (rc={rc})"))
+        ds_model::shim::collect_str(|ctx, cb| unsafe {
+            f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+        })
+        .map_err(|rc| format!("smk_sys_stream_push failed (rc={rc})"))
     }
 }
 
