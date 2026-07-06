@@ -95,9 +95,10 @@ best-effort Linux job failed — decide whether to re-cut or ship without.
 
 ## 6 — Write real release notes
 
-No script for this — write it directly (this whole release process already runs through an
-agent capable of writing it, so a keyword-matching heuristic script was tried and removed as
-strictly worse than just doing it):
+The summary prose has no script — write it directly (this whole release process already
+runs through an agent capable of writing it, so a keyword-matching heuristic script was
+tried and removed as strictly worse than just doing it). The change-stats table (below) is
+scripted, since it's arithmetic, not judgment:
 1. Find the previous release tag: `gh release list --limit 2` (the one before the one you
    just cut). List what changed: `git log <prev-tag>..v$ver --oneline`.
 2. Group into sections that fit what ACTUALLY changed — don't force categories that end up
@@ -106,10 +107,22 @@ strictly worse than just doing it):
    release (`## macOS`, `## Windows`, `## Linux`). One concise, plain-English line per
    change (not the raw commit subject — write what it means for the user), linking to its
    commit: `- <description> ([`<short-sha>`](https://github.com/delllusional/DontSpeak/commit/<sha>))`.
-3. End with a full-diff link against the previous tag (GitHub's own compare view — every
-   commit, not just the ones summarized above):
-   `**Full diff**: https://github.com/delllusional/DontSpeak/compare/<prev-tag>...v$ver`.
-4. Submit it: `gh release edit "v$ver" --repo delllusional/DontSpeak --notes-file <file>`
+3. Append the change-stats table under its own `## LOC` heading — same level as the summary
+   sections above, not a `---` divider — so it reads as one more section, not an appendix.
+   The diff link (step 4) goes first, bare (no `**Diff**:` label), then the table under it:
+   `scripts/release-stats.py <prev-tag> v$ver` prints the ready-to-paste markdown table
+   splitting code vs. test line changes across the `rust` (shared) / `apps/macos` /
+   `apps/windows` / `apps/linux` buckets.
+   ```
+   ## LOC
+
+   https://github.com/delllusional/DontSpeak/compare/<prev-tag>...v$ver
+
+   <script output>
+   ```
+4. The diff link (GitHub's own compare view — every commit, not just the ones summarized
+   above) is the bare URL at the top of the `## LOC` section, per step 3.
+5. Submit it: `gh release edit "v$ver" --repo delllusional/DontSpeak --notes-file <file>`
    (or `--notes "..."` inline for something short).
 
 ## 7 — Re-cut a failed (or same-version test) release
