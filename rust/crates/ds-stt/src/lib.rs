@@ -47,7 +47,7 @@ pub use streaming::{OnnxStreamer, StreamSession, StreamingStt};
 pub use system::SystemStt;
 
 #[cfg(target_os = "macos")]
-pub use sysspeech::SystemState;
+pub use sysspeech::{SystemState, SystemStreamer};
 /// Usability of the System STT engine (Apple's on-device recognizer, en-US), mirroring the
 /// Parakeet present/warming/ready split for the status dot. Off macOS it's just a stub.
 #[cfg(not(target_os = "macos"))]

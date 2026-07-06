@@ -2,10 +2,12 @@
 //! callers ([`run_listen`] half-duplex, [`run_concurrent_listen`] full-duplex),
 //! plus the make-up gain ([`auto_gain`]) and silence trim ([`trim_silence_16k`]).
 //!
-//! For the cross-platform ONNX "parakeet" engine, both callers route to [`try_streaming`] — a
-//! cache-aware [`ds_stt::streaming::StreamingModel`] that encodes each frame once (no whole-tail
-//! re-encode); it REPLACED the old whole-buffer engine. The macOS apple-native / system engines
-//! keep the offline `transcribe_loop`.
+//! For the cross-platform ONNX "parakeet" engine (`cpu`/`cuda`), the macOS Core ML/ANE engine,
+//! and the macOS System engine, all three callers route to [`try_streaming`] — a cache-aware
+//! backend (see [`ds_stt::streaming::StreamingStt`]) that encodes/decodes each frame once (no
+//! whole-tail re-encode); it REPLACED the old whole-buffer engine for all three. `transcribe_loop`
+//! is now only the FALLBACK path used when a streaming backend fails to build (missing model,
+//! absent shim, etc.), not the steady-state path for any of them.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -512,6 +514,16 @@ fn build_backend(provider: &str) -> Option<Box<dyn StreamingStt>> {
             Ok(s) => Some(Box::new(s)),
             Err(e) => {
                 eprintln!("streaming: Core ML streamer unavailable, using offline: {e}");
+                None
+            }
+        };
+    }
+    #[cfg(target_os = "macos")]
+    if provider.eq_ignore_ascii_case("system") {
+        return match ds_stt::sysspeech::SystemStreamer::new() {
+            Ok(s) => Some(Box::new(s)),
+            Err(e) => {
+                eprintln!("streaming: System streamer unavailable, using offline: {e}");
                 None
             }
         };

@@ -6,11 +6,10 @@
 //! [`crate::local::LocalTranscriber`].
 
 use std::ffi::{c_char, c_void};
-use std::time::Instant;
 
 use libloading::{Library, Symbol};
 
-use crate::streaming::StreamingStt;
+use crate::streaming::{StreamingStt, timed};
 use ds_model::shim::StrCb;
 
 // Text-returning calls still BLOCK and return their status; the transcript comes back through a
@@ -162,21 +161,6 @@ impl CoremlStreamer {
     }
 }
 
-/// Run `call`, returning its result alongside the wall-clock time it took (ms).
-/// `collect_str`'s callback fires synchronously while the shim call blocks (see
-/// `ds_model::shim::collect_str`'s doc comment), so timing directly around `call` is
-/// a faithful analogue of `OnnxStreamer::run_encoder_step`'s `Instant::now()`/
-/// `.elapsed()` span around the real `ort` inference call — not just FFI dispatch
-/// overhead. Pure (no FFI/self dependency), so it's unit-testable without a real
-/// Core ML shim; callers add the elapsed time to their own accumulator only when
-/// `call` succeeds (mirroring `run_encoder_step`, where an early `?` bail-out skips
-/// the accumulate line too).
-fn timed<T>(call: impl FnOnce() -> Result<T, String>) -> (Result<T, String>, f64) {
-    let t0 = Instant::now();
-    let out = call();
-    (out, t0.elapsed().as_secs_f64() * 1000.0)
-}
-
 impl StreamingStt for CoremlStreamer {
     fn reset(&mut self) -> Result<(), String> {
         let rc = unsafe {
@@ -217,31 +201,5 @@ impl StreamingStt for CoremlStreamer {
 
     fn transcribe_ms(&self) -> f64 {
         self.transcribe_ms
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // `CoremlStreamer` needs a real dlopen'd `libsmkokoro.dylib` to construct (see module
-    // doc); `timed` is the one piece of new logic independent of that FFI boundary, so
-    // it gets direct coverage here instead.
-
-    #[test]
-    fn timed_reports_elapsed_ms_and_preserves_ok() {
-        let (result, ms) = timed(|| -> Result<i32, String> {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            Ok(42)
-        });
-        assert_eq!(result, Ok(42));
-        assert!(ms >= 5.0, "expected >= 5ms elapsed, got {ms}");
-    }
-
-    #[test]
-    fn timed_still_reports_elapsed_on_err() {
-        let (result, ms) = timed(|| -> Result<i32, String> { Err("boom".to_string()) });
-        assert_eq!(result, Err("boom".to_string()));
-        assert!(ms >= 0.0);
     }
 }

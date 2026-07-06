@@ -467,6 +467,19 @@ pub trait StreamingStt: Send {
     }
 }
 
+/// Run `call`, returning its result alongside the wall-clock time it took (ms). Shared by every
+/// FFI-backed [`StreamingStt`] impl that times its push/finalize calls for the STTSTATS
+/// `transcribe_ms` field (originally `CoremlStreamer`'s private helper — relocated here so
+/// `crate::sysspeech::SystemStreamer` reuses the SAME implementation instead of a third copy).
+/// Pure (no FFI/self dependency), so it's unit-testable without a real backend; callers add the
+/// elapsed time to their own accumulator only when `call` succeeds (mirroring
+/// `OnnxStreamer::run_encoder_step`, where an early `?` bail-out skips the accumulate line too).
+pub fn timed<T>(call: impl FnOnce() -> Result<T, String>) -> (Result<T, String>, f64) {
+    let t0 = Instant::now();
+    let out = call();
+    (out, t0.elapsed().as_secs_f64() * 1000.0)
+}
+
 /// The ONNX cache-aware streaming backend bound into one owner (model + per-utterance state) so it
 /// fits the [`StreamingStt`] trait object the helper drives.
 pub struct OnnxStreamer {
@@ -543,13 +556,24 @@ impl StreamSession {
     }
 
     /// Flush the withheld tail + the backend, returning the final transcript.
+    ///
+    /// The tail-flush `accept_16k` is BEST-EFFORT: on the Core ML/system backends,
+    /// `backend.finalize()` is what tears down the Swift-side session
+    /// (`smk_asr_stream_finish`/`smk_sys_stream_finish`) — skipping it after a failed tail
+    /// flush used to leak that session, since nothing else ever finishes it and the next
+    /// utterance's `reset()` would then clobber the reference with no cleanup. So a tail-flush
+    /// error is logged, not propagated, and `finalize()` always runs. `OnnxStreamer::finalize`
+    /// has no such side effect (purely local model state), so calling it unconditionally here
+    /// doesn't change its behavior either.
     pub fn finalize(&mut self) -> Result<String, String> {
         let full = crate::resample(&self.dev_buf, self.in_rate, 16_000);
         if full.len() > self.fed_16k {
             let new = &full[self.fed_16k..];
             self.audio_ms += new.len() as f64 / 16.0;
             self.fed_16k = full.len();
-            self.backend.accept_16k(new)?;
+            if let Err(e) = self.backend.accept_16k(new) {
+                eprintln!("StreamSession::finalize: tail flush failed, finalizing anyway: {e}");
+            }
         }
         self.backend.finalize()
     }
@@ -615,5 +639,24 @@ mod tests {
             text.contains("after early nightfall the yellow lamps"),
             "unexpected transcript: {text:?}"
         );
+    }
+
+    // `timed` relocated from `coreml.rs` (see its doc comment) — coverage moves with it.
+
+    #[test]
+    fn timed_reports_elapsed_ms_and_preserves_ok() {
+        let (result, ms) = timed(|| -> Result<i32, String> {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            Ok(42)
+        });
+        assert_eq!(result, Ok(42));
+        assert!(ms >= 5.0, "expected >= 5ms elapsed, got {ms}");
+    }
+
+    #[test]
+    fn timed_still_reports_elapsed_on_err() {
+        let (result, ms) = timed(|| -> Result<i32, String> { Err("boom".to_string()) });
+        assert_eq!(result, Err("boom".to_string()));
+        assert!(ms >= 0.0);
     }
 }
