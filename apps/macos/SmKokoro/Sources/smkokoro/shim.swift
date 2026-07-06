@@ -986,12 +986,14 @@ private func sysStreamStartModern() -> Int32 {
         // Force `.volatileResults` on top of whatever the `.transcription` preset's own
         // reportingOptions already are: this streaming path NEEDS non-final results, and the
         // preset's live default couldn't be confirmed on this (Sequoia-only) box — union
-        // guarantees it regardless of what the preset already includes.
+        // guarantees it regardless of what the preset already includes. `.fastResults`
+        // biases the transcriber toward responsiveness (faster, slightly less accurate
+        // interim guesses) to match the ~6/sec cadence of the ANE/Parakeet streaming path.
         let base = SpeechTranscriber.Preset.transcription
         let transcriber = SpeechTranscriber(
             locale: SYS_LOCALE,
             transcriptionOptions: base.transcriptionOptions,
-            reportingOptions: base.reportingOptions.union([.volatileResults]),
+            reportingOptions: base.reportingOptions.union([.volatileResults, .fastResults]),
             attributeOptions: base.attributeOptions
         )
         try await sysEnsureModel(transcriber)
