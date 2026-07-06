@@ -613,6 +613,11 @@ pub fn apply_update_check(w: &Widgets, json: &str) {
     w.version_subtitle.add_css_class("ds-update-badge");
     w.version_subtitle
         .set_tooltip_text(Some(&t("status.update_available")));
+    // AdwActionRow's subtitle label is hexpand/halign-fill by default so it lines up with the
+    // title above it; left alone, the badge background paints across the whole row instead of
+    // hugging just the "current → new" text. Shrink-wrap it to its natural width for the badge.
+    w.version_subtitle.set_hexpand(false);
+    w.version_subtitle.set_halign(gtk::Align::Start);
 }
 
 /// An `AdwActionRow` with `title` and any widget (a value label or a status dot) as suffix.
