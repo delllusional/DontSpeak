@@ -15,16 +15,14 @@ launch. Reuse them; don't reimplement the steps by hand.
 
 ## One command
 
-Detect the OS and run the matching line:
+Tell your agent:
 
-- **macOS / Linux:**
-  ```sh
-  curl -fsSL https://dontspeak.org/install.sh | sh
-  ```
-- **Windows (PowerShell):**
-  ```powershell
-  irm https://dontspeak.org/install.ps1 | iex
-  ```
+```
+Install DontSpeak.org app.
+```
+
+It detects the OS itself and runs the matching installer — `install.sh` (macOS/Linux)
+or `install.ps1` (Windows).
 
 That is the whole install. It is idempotent — safe to re-run.
 
