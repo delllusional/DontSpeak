@@ -106,7 +106,10 @@ strictly worse than just doing it):
    release (`## macOS`, `## Windows`, `## Linux`). One concise, plain-English line per
    change (not the raw commit subject — write what it means for the user), linking to its
    commit: `- <description> ([`<short-sha>`](https://github.com/delllusional/DontSpeak/commit/<sha>))`.
-3. Submit it: `gh release edit "v$ver" --repo delllusional/DontSpeak --notes-file <file>`
+3. End with a full-diff link against the previous tag (GitHub's own compare view — every
+   commit, not just the ones summarized above):
+   `**Full diff**: https://github.com/delllusional/DontSpeak/compare/<prev-tag>...v$ver`.
+4. Submit it: `gh release edit "v$ver" --repo delllusional/DontSpeak --notes-file <file>`
    (or `--notes "..."` inline for something short).
 
 ## 7 — Re-cut a failed (or same-version test) release
