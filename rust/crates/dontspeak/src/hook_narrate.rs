@@ -96,10 +96,12 @@ struct StopHook {
 ///     `Stop` fires ⇒ the reply was ALREADY narrated; `Stop` must not re-speak it.
 ///   • OpenAI Codex wires NO `MessageDisplay` hook (see `wire/codex.rs` `CODEX_HOOKS`), so the
 ///     file is NEVER written ⇒ `streamed = false`, and `Stop` is Codex's only narration path.
-/// [`mark_streaming_session`] also SEEDS this file at `SessionStart` (which Codex doesn't wire),
+/// [`mark_streaming_session`] also SEEDS this file at `SessionStart` (which Codex doesn't wire;
+/// Qwen Code wires SessionStart with `--greet-only`, which skips the seed for the same reason),
 /// so the witness is present from session open — closing the timing edge of a `Stop` racing the
-/// first batch's write, while its absence for Codex keeps that case correct too.
-fn streamed_via_message_display(paths: &Paths, session: &str) -> bool {
+/// first batch's write, while its absence for Codex/Qwen keeps that case correct too.
+/// `pub(crate)` so `hook_core`'s greet-only tests can probe the witness directly.
+pub(crate) fn streamed_via_message_display(paths: &Paths, session: &str) -> bool {
     display_state_path(paths, session).exists()
 }
 
@@ -152,8 +154,9 @@ pub fn speak_reply(paths: &Paths, payload: &str) {
 /// Otherwise the whole reply is fed through a fresh `Accum` as ONE final batch, yielding the
 /// exact runs the streaming path would emit (every top-level blockquote in order; or, under
 /// `short`, a brief blockquote-less reply whole) — so a Codex reply is voiced just like a
-/// Claude Code one.
-fn stop_utterances(
+/// Claude Code one. `pub(crate)` so `hook_core`'s greet-only tests can feed the witness
+/// value they observed straight into the Stop decision.
+pub(crate) fn stop_utterances(
     last_assistant_message: Option<&str>,
     messages_on: bool,
     short_on: bool,

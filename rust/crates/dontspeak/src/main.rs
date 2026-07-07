@@ -100,7 +100,12 @@ fn main() {
     match resolve_subcommand(&argv) {
         Subcommand::Notify => {
             let payload = read_stdin();
-            hook_core::notify(&hook_core::event_name(&payload), &payload);
+            // `--greet-only` (wired on SessionStart for NON-streaming clients like Qwen Code):
+            // greet, but skip the streaming-witness seed — on a client with no MessageDisplay
+            // stream the seed would mark every session "already narrated" and silence each
+            // Stop reply. Rides at argv[2+]; `resolve_subcommand` matches argv[1] only.
+            let greet_only = argv.iter().any(|a| a == "--greet-only");
+            hook_core::notify(&hook_core::event_name(&payload), &payload, greet_only);
             std::process::exit(0);
         }
         Subcommand::Provide => {
@@ -153,6 +158,14 @@ mod tests {
     #[test]
     fn notify_token_resolves_to_notify() {
         let argv = argv(&["dontspeak", "notify"]);
+        assert_eq!(resolve_subcommand(&argv), Subcommand::Notify);
+    }
+
+    #[test]
+    fn notify_with_greet_only_flag_still_resolves_to_notify() {
+        // The `--greet-only` flag (non-streaming SessionStart wiring) rides at argv[2];
+        // `resolve_subcommand` matches argv[1] only, so it must not disturb the dispatch.
+        let argv = argv(&["dontspeak", "notify", "--greet-only"]);
         assert_eq!(resolve_subcommand(&argv), Subcommand::Notify);
     }
 

@@ -60,39 +60,52 @@ pub fn session_id_from_payload(payload: &str) -> Option<String> {
 
 /// COMMAND: run the side effect for `event` from its `payload`; no reply. Unknown events are
 /// ignored (forward-compatible — a newly-wired event we don't handle yet is a no-op).
-pub fn notify(event: &str, payload: &str) {
+/// `greet_only` is the `dontspeak notify --greet-only` flag, wired on SessionStart for
+/// NON-streaming clients (Qwen Code): greet, but skip the streaming-witness seed — see
+/// [`notify_at`]. Resolves the real `Paths` and delegates to the injectable core.
+pub fn notify(event: &str, payload: &str, greet_only: bool) {
     let Some(paths) = ds_config::Paths::resolve() else {
         return;
     };
+    notify_at(&paths, event, payload, greet_only);
+}
+
+/// Injectable core of [`notify`] — takes `paths` so tests drive it against a
+/// tempdir-rooted `Paths` (never the real `$HOME`; the engine pings are best-effort
+/// no-ops against the tempdir's nonexistent socket).
+pub(crate) fn notify_at(paths: &ds_config::Paths, event: &str, payload: &str, greet_only: bool) {
     match event {
         "SessionStart" => {
-            hook_speak::engine_ping(&paths, hook_speak::Ping::Greet, payload);
+            hook_speak::engine_ping(paths, hook_speak::Ping::Greet, payload);
             // Seed this session's streaming witness so the Stop handler reliably knows Claude
             // Code narrates via MessageDisplay (closing the only timing gap in the double-
-            // narration guard). Codex wires no SessionStart, so it never seeds — and its Stop
-            // still voices the reply.
-            hook_narrate::mark_streaming_session(&paths, payload);
+            // narration guard). ONLY for streaming clients: `--greet-only` (Qwen Code, which
+            // wires SessionStart but has NO MessageDisplay stream) skips the seed — seeding
+            // would mark every session "already narrated" and silence each Stop reply. Codex
+            // wires no SessionStart at all, so it never seeds either way.
+            if !greet_only {
+                hook_narrate::mark_streaming_session(paths, payload);
+            }
             // Greeting is voice-only (the engine greet above); no visible banner — see module docs.
         }
-        "UserPromptSubmit" => {
-            hook_speak::engine_ping(&paths, hook_speak::Ping::MarkActive, payload)
-        }
-        "SessionEnd" => hook_narrate::barge_session(&paths, payload),
-        "MessageDisplay" => hook_narrate::message_display(&paths, payload),
-        // Two clients send Stop, handled by ONE arm:
-        //  • Codex (no MessageDisplay stream) → speak_reply voices `last_assistant_message`.
+        "UserPromptSubmit" => hook_speak::engine_ping(paths, hook_speak::Ping::MarkActive, payload),
+        "SessionEnd" => hook_narrate::barge_session(paths, payload),
+        "MessageDisplay" => hook_narrate::message_display(paths, payload),
+        // Multiple clients send Stop, handled by ONE arm:
+        //  • Codex / Qwen Code (no MessageDisplay stream) → speak_reply voices
+        //    `last_assistant_message`.
         //  • Claude Code streams via MessageDisplay but ALSO delivers `last_assistant_message`
         //    on Stop, so speak_reply self-gates on this session's MessageDisplay state file
         //    (present ⇒ already narrated ⇒ silent); CC wires Stop for the turn-done ding.
         // The reply-done earcon then rings for both (engine self-gates on `earcon_enabled` +
         // mute), so a finished turn is signalled whether or not the reply was just voiced.
         "Stop" => {
-            hook_narrate::speak_reply(&paths, payload);
-            hook_speak::engine_earcon(&paths, "reply_done");
+            hook_narrate::speak_reply(paths, payload);
+            hook_speak::engine_earcon(paths, "reply_done");
         }
         // A permission prompt / idle notification → the needs-input earcon (the handler filters
         // to just the "waiting on you" notification types).
-        "Notification" => hook_speak::notification_earcon(&paths, payload),
+        "Notification" => hook_speak::notification_earcon(paths, payload),
         _ => {}
     }
 }
@@ -116,5 +129,52 @@ mod tests {
         // The greeting is voice-only — SessionStart no longer returns a visible banner from the
         // sync `provide` path (CC 2.1+ drops a SessionStart hook's stdout; see module docs).
         assert!(provide("SessionStart", "{}").is_none());
+    }
+
+    /// A reply shaped like a spoken digest — what Stop would voice (or wrongly suppress).
+    const DIGEST_REPLY: &str = "> First point.\n\nDetail.";
+
+    #[test]
+    fn greet_only_session_start_skips_witness_so_stop_still_voices() {
+        // The non-streaming-client fix: `notify --greet-only` on SessionStart (Qwen Code)
+        // greets but must NOT seed the streaming witness — Stop is that client's ONLY
+        // narration path, and a seeded witness silences every reply. Driven against a
+        // tempdir-rooted `Paths`: the SessionStart engine ping is a best-effort no-op on the
+        // tempdir's nonexistent socket (see hook_speak's engine_ping_with_no_socket test).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
+        let session = "qwen-session-aaaa";
+        let payload = format!(r#"{{"hook_event_name":"SessionStart","session_id":"{session}"}}"#);
+
+        notify_at(&paths, "SessionStart", &payload, /*greet_only*/ true);
+        let streamed = hook_narrate::streamed_via_message_display(&paths, session);
+        assert!(
+            !streamed,
+            "greet-only SessionStart must not seed the streaming witness"
+        );
+        assert_eq!(
+            hook_narrate::stop_utterances(Some(DIGEST_REPLY), true, false, false, streamed),
+            vec!["First point.".to_string()],
+            "unseeded session ⇒ Stop voices the whole reply"
+        );
+    }
+
+    #[test]
+    fn plain_session_start_seeds_witness_so_stop_stays_silent() {
+        // Counterpart: the streaming wiring (plain `notify`, Claude Code) DOES seed the
+        // witness, so Stop never double-speaks what MessageDisplay already narrated.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
+        let session = "cc-session-bbbb";
+        let payload = format!(r#"{{"hook_event_name":"SessionStart","session_id":"{session}"}}"#);
+
+        notify_at(&paths, "SessionStart", &payload, /*greet_only*/ false);
+        let streamed = hook_narrate::streamed_via_message_display(&paths, session);
+        assert!(streamed, "streaming SessionStart seeds the witness");
+        assert!(
+            hook_narrate::stop_utterances(Some(DIGEST_REPLY), true, false, false, streamed)
+                .is_empty(),
+            "seeded session ⇒ Stop stays silent"
+        );
     }
 }
