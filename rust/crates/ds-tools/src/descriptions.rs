@@ -116,6 +116,6 @@ pub const SET_CONFIG_TRAY: &str = "Tray icon: which states color it and whether 
 // ── setup_integration ─────────────────────────────────────────────────────────────────────────────
 pub const SETUP_INTEGRATION: &str = "Write a config file, or register/remove a client integration — the same \
     setup the installer does. Targets: \"narration_spec\", \"claude_code\", \"claude_desktop\", \
-    \"codex\". Additive and backed up; enabled=false removes only our entry.";
+    \"codex\", \"qwen_code\". Additive and backed up; enabled=false removes only our entry.";
 pub const WIRE_TARGET: &str = "What to wire: the narration spec, or a client integration.";
 pub const WIRE_ENABLED: &str = "true = register; false = remove.";

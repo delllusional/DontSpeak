@@ -145,7 +145,7 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
         .iter()
         .map(|s| match s.mechanism {
             WireMechanism::ClaudeJsonHooks => {
-                hooks::claude_json_hooks((s.config_file)(paths), remove, print_only)
+                hooks::claude_json_hooks((s.config_file)(paths), s.hook_streaming, remove, print_only)
             }
             WireMechanism::ClaudeTomlHooks => {
                 hooks::claude_toml_hooks((s.config_file)(paths), remove, print_only)

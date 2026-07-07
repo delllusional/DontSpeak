@@ -111,9 +111,16 @@ pub(crate) fn seed_and_prune(paths: &Paths) {
 
 /// Wire (or strip / print) the DontSpeak voice hooks into `cfg`, a JSON settings file using
 /// Claude Code's hook contract (`WireMechanism::ClaudeJsonHooks` — today Claude Code's
-/// `~/.claude/settings.json`; the registry names the file per client). Returns 0 on success,
+/// `~/.claude/settings.json`; the registry names the file per client). `streaming` selects
+/// the hook SET: `true` (Claude Code) wires `MessageDisplay` for per-batch narration; `false`
+/// (Qwen Code) omits it, so the reply is voiced whole from `Stop`. Returns 0 on success,
 /// 1 on a hard error.
-pub(crate) fn claude_json_hooks(cfg: &std::path::Path, remove: bool, print_only: bool) -> i32 {
+pub(crate) fn claude_json_hooks(
+    cfg: &std::path::Path,
+    streaming: bool,
+    remove: bool,
+    print_only: bool,
+) -> i32 {
     let Ok(existing) = io::read_json_or_bail("wire", cfg) else {
         return 1;
     };
@@ -133,6 +140,7 @@ pub(crate) fn claude_json_hooks(cfg: &std::path::Path, remove: bool, print_only:
         let spec = HookSpec {
             bin: &bin,
             notif_channel,
+            streaming,
         };
         ds_config::merge_hooks(existing, &spec)
     };
@@ -279,12 +287,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
 
-        assert_eq!(claude_json_hooks(&cfg, false, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, false, false), 0);
         let v = read_json(&cfg);
         assert_eq!(v["hooks"]["MessageDisplay"].as_array().unwrap().len(), 1);
 
         // Re-run: REPLACE-OURS merge must not duplicate the group.
-        assert_eq!(claude_json_hooks(&cfg, false, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, false, false), 0);
         let v2 = read_json(&cfg);
         assert_eq!(v2["hooks"]["MessageDisplay"].as_array().unwrap().len(), 1);
     }
@@ -294,8 +302,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
 
-        assert_eq!(claude_json_hooks(&cfg, false, false), 0);
-        assert_eq!(claude_json_hooks(&cfg, true, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, false, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, true, false), 0);
 
         let v = read_json(&cfg);
         // `strip_hooks` drops an event array once it's emptied of our groups, and drops the
@@ -311,7 +319,7 @@ mod tests {
         std::fs::write(&cfg, raw).unwrap();
 
         // Fails in `io::read_json_or_bail` itself — never reaches `resolve_dontspeak_bin`.
-        assert_eq!(claude_json_hooks(&cfg, false, false), 1);
+        assert_eq!(claude_json_hooks(&cfg, true, false, false), 1);
         assert_eq!(std::fs::read(&cfg).unwrap(), raw);
     }
 
@@ -325,7 +333,7 @@ mod tests {
         let raw = r#"{"hooks":{"MessageDisplay":{"not":"an array"}}}"#;
         std::fs::write(&cfg, raw).unwrap();
 
-        assert_eq!(claude_json_hooks(&cfg, false, false), 0); // non-fatal
+        assert_eq!(claude_json_hooks(&cfg, true, false, false), 0); // non-fatal
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw); // byte-identical
     }
 
@@ -334,7 +342,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
 
-        assert_eq!(claude_json_hooks(&cfg, false, true), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, false, true), 0);
         assert!(!cfg.exists());
     }
 
@@ -347,7 +355,35 @@ mod tests {
         std::fs::write(dir.path().join("blocked"), b"not a directory").unwrap();
         let cfg = dir.path().join("blocked").join("settings.json");
 
-        assert_eq!(claude_json_hooks(&cfg, false, false), 1);
+        assert_eq!(claude_json_hooks(&cfg, true, false, false), 1);
+    }
+
+    /// Non-streaming wire (Qwen Code): `MessageDisplay` is omitted, but the same idempotent +
+    /// additive + clean-strip guarantees hold. The `streaming: false` path must wire the
+    /// events that DO fire and never install a dead `MessageDisplay` hook.
+    #[test]
+    fn claude_json_hooks_non_streaming_omits_messagedisplay() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("settings.json");
+
+        assert_eq!(claude_json_hooks(&cfg, false, false, false), 0);
+        let v = read_json(&cfg);
+        assert!(
+            v["hooks"].get("MessageDisplay").is_none(),
+            "non-streaming wire must NOT install MessageDisplay"
+        );
+        // Stop / UserPromptSubmit / SessionStart / Notification ARE wired.
+        for evt in ["Stop", "UserPromptSubmit", "SessionStart", "Notification"] {
+            assert!(
+                v["hooks"].get(evt).is_some(),
+                "{evt} wired for non-streaming client"
+            );
+        }
+        // Idempotent.
+        assert_eq!(claude_json_hooks(&cfg, false, false, false), 0);
+        // Strips cleanly (remove removes every DontSpeak group regardless of streaming).
+        assert_eq!(claude_json_hooks(&cfg, false, true, false), 0);
+        assert!(read_json(&cfg).get("hooks").is_none());
     }
 
     #[test]

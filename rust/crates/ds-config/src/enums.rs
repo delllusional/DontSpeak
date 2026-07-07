@@ -615,6 +615,8 @@ pub enum WireTarget {
     ClaudeDesktop,
     /// OpenAI Codex's narration hooks in `~/.codex/config.toml`.
     Codex,
+    /// Qwen Code's voice hooks + MCP server in `~/.qwen/settings.json`.
+    QwenCode,
 }
 
 impl WireTarget {
@@ -625,6 +627,7 @@ impl WireTarget {
         WireTarget::ClaudeCode,
         WireTarget::ClaudeDesktop,
         WireTarget::Codex,
+        WireTarget::QwenCode,
     ];
 
     /// The wire-able CLIENTS: [`ALL`](Self::ALL) minus [`NarrationSpec`](Self::NarrationSpec)
@@ -634,6 +637,7 @@ impl WireTarget {
         WireTarget::ClaudeCode,
         WireTarget::ClaudeDesktop,
         WireTarget::Codex,
+        WireTarget::QwenCode,
     ];
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -642,6 +646,7 @@ impl WireTarget {
             "claude_code" => Some(WireTarget::ClaudeCode),
             "claude_desktop" => Some(WireTarget::ClaudeDesktop),
             "codex" => Some(WireTarget::Codex),
+            "qwen_code" => Some(WireTarget::QwenCode),
             _ => None,
         }
     }
@@ -653,6 +658,7 @@ impl WireTarget {
             WireTarget::ClaudeCode => "claude_code",
             WireTarget::ClaudeDesktop => "claude_desktop",
             WireTarget::Codex => "codex",
+            WireTarget::QwenCode => "qwen_code",
         }
     }
 }

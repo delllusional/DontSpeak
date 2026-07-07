@@ -62,6 +62,12 @@ pub struct Surface {
     /// (printed after a successful wire). Hook surfaces take effect on the next turn, so
     /// they carry no hint.
     pub load_hint: Option<&'static str>,
+    /// For [`WireMechanism::ClaudeJsonHooks`]: whether the client streams assistant messages
+    /// via `MessageDisplay` (Claude Code → `true`). Non-streaming clients (Qwen Code → `false`)
+    /// omit the `MessageDisplay` hook — the reply is voiced whole from `Stop`. Ignored by
+    /// [`WireMechanism::JsonMcp`] and [`WireMechanism::ClaudeTomlHooks`] (Codex's streaming-ness
+    /// is baked into its own TOML shaper's fixed hook set).
+    pub hook_streaming: bool,
 }
 
 /// A pointer to the OFFICIAL documentation a wiring is derived from — so every registry
@@ -119,11 +125,13 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 mechanism: WireMechanism::ClaudeJsonHooks,
                 config_file: |p| &p.settings_json, // ~/.claude/settings.json
                 load_hint: None,
+                hook_streaming: true,
             },
             Surface {
                 mechanism: WireMechanism::JsonMcp,
                 config_file: |p| &p.claude_code_config, // ~/.claude.json (user scope)
                 load_hint: Some("start a new Claude Code session to load the server"),
+                hook_streaming: false,
             },
         ],
         docs: &[
@@ -151,6 +159,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             mechanism: WireMechanism::JsonMcp,
             config_file: |p| &p.claude_desktop_config, // per-OS app-support/Claude/…
             load_hint: Some("quit and reopen Claude Desktop to load the server"),
+            hook_streaming: false,
         }],
         docs: &[DocRef {
             topic: "mcp",
@@ -173,6 +182,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             mechanism: WireMechanism::ClaudeTomlHooks,
             config_file: |p| &p.codex_config, // ~/.codex/config.toml
             load_hint: None,
+            hook_streaming: false,
         }],
         docs: &[
             DocRef {
@@ -186,6 +196,46 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         ],
         verified_client_version: "0.142.5",
         verified_on: "2026-07-02",
+    },
+    ClientSpec {
+        target: WireTarget::QwenCode,
+        display_name: "Qwen Code",
+        kind: ClientKind::TerminalCli,
+        present: |p| p.qwen_dir.exists(),
+        detect_dir: |p| &p.qwen_dir,
+        gate_on_presence: true,
+        // Qwen Code reuses Claude Code's hook contract (same events, same stdin JSON,
+        // `Stop.last_assistant_message`, `UserPromptSubmit` honors `additionalContext`), so the
+        // SAME dontspeak binary serves it via the JSON writer. It has NO `MessageDisplay`
+        // stream, so `hook_streaming: false` and the reply is voiced whole from `Stop`
+        // (the non-streaming path the binary already serves Codex through). Hooks + MCP both
+        // live in the ONE `~/.qwen/settings.json`, so the two surfaces share a config_file.
+        surfaces: &[
+            Surface {
+                mechanism: WireMechanism::ClaudeJsonHooks,
+                config_file: |p| &p.qwen_settings, // ~/.qwen/settings.json
+                load_hint: None,
+                hook_streaming: false,
+            },
+            Surface {
+                mechanism: WireMechanism::JsonMcp,
+                config_file: |p| &p.qwen_settings, // same file
+                load_hint: Some("start a new Qwen Code session to load the server"),
+                hook_streaming: false,
+            },
+        ],
+        docs: &[
+            DocRef {
+                topic: "hooks",
+                url: "https://github.com/QwenLM/qwen-code/blob/main/bundled/qc-helper/docs/features/hooks.md",
+            },
+            DocRef {
+                topic: "mcp",
+                url: "https://github.com/QwenLM/qwen-code/blob/main/bundled/qc-helper/docs/features/mcp.md",
+            },
+        ],
+        verified_client_version: "0.19.6",
+        verified_on: "2026-07-07",
     },
 ];
 

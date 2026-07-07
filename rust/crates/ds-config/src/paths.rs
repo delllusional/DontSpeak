@@ -85,6 +85,13 @@ pub struct Paths {
     /// Codex's `~/.codex/config.toml` — where `wire codex` adds (or removes) the
     /// `UserPromptSubmit`→`provide` (narration spec) and `Stop`→`notify` (speak reply) hooks.
     pub codex_config: PathBuf,
+    /// Qwen Code CLI's config dir (`~/.qwen`). Its existence is how `wire qwen_code`
+    /// presence-gates the wiring (a clean skip when Qwen Code isn't installed).
+    pub qwen_dir: PathBuf,
+    /// Qwen Code's `~/.qwen/settings.json` — where `wire qwen_code` adds (or removes) BOTH
+    /// the voice hooks (non-streaming: no `MessageDisplay`) and the `mcpServers.DontSpeak`
+    /// stdio entry, since Qwen Code keeps hooks + MCP in one file.
+    pub qwen_settings: PathBuf,
 }
 
 impl Paths {
@@ -95,6 +102,7 @@ impl Paths {
         let claude_dir = home.join(".claude");
         let hooks_dir = claude_dir.join("hooks");
         let codex_dir = home.join(".codex");
+        let qwen_dir = home.join(".qwen");
         // Two roots, each idiomatic per OS (see [`data_dir`] / [`model_dir`] / `state_root`):
         //   config (roaming, user SETTINGS): config.toml, speakers.json, narration-spec.md
         //   state  (local, machine RUNTIME): stats.toml, pidfiles, the IPC socket, logs
@@ -129,6 +137,8 @@ impl Paths {
             claude_desktop_config,
             codex_config: codex_dir.join("config.toml"),
             codex_dir,
+            qwen_settings: qwen_dir.join("settings.json"),
+            qwen_dir,
             home,
             claude_dir,
             hooks_dir,
@@ -147,6 +157,7 @@ impl Paths {
         let claude_dir = home.join(".claude");
         let hooks_dir = claude_dir.join("hooks");
         let codex_dir = home.join(".codex");
+        let qwen_dir = home.join(".qwen");
         let ds_dir = home.join(".dontspeak");
         let claude_desktop_dir = home.join("Claude");
         let claude_desktop_config = claude_desktop_dir.join("claude_desktop_config.json");
@@ -170,6 +181,8 @@ impl Paths {
             claude_desktop_config,
             codex_config: codex_dir.join("config.toml"),
             codex_dir,
+            qwen_settings: qwen_dir.join("settings.json"),
+            qwen_dir,
             home,
             claude_dir,
             hooks_dir,

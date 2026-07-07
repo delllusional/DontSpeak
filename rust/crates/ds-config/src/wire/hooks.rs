@@ -27,6 +27,11 @@ pub struct HookSpec<'a> {
     pub bin: &'a str,
     /// Optional `preferredNotifChannel` (e.g. macOS iTerm's `"iterm2_with_bell"`).
     pub notif_channel: Option<&'a str>,
+    /// Whether the client streams assistant messages via a `MessageDisplay` hook event
+    /// (Claude Code). `true` wires `MessageDisplay` for per-batch narration; `false`
+    /// (Qwen Code, Codex) omits it — the full reply is voiced from `Stop`'s
+    /// `last_assistant_message` via the non-streaming `speak_reply` path.
+    pub streaming: bool,
 }
 
 /// The basename (no extension) of the command we install — the single `dontspeak` binary.
@@ -70,31 +75,37 @@ fn canonical_hook_groups(spec: &HookSpec) -> Vec<(&'static str, Value)> {
         h
     };
     // One group per event (ours, so merge stays idempotent + strip stays clean). `notify` on
-    // every fire-and-forget event: MessageDisplay is the SINGLE narration pipeline (Claude Code
-    // ≥ 2.1.x streams it per batch); SessionStart greets; SessionEnd barges this window's
-    // playback; UserPromptSubmit marks THIS terminal active so narration follows it. The
-    // UserPromptSubmit group ALSO carries the synchronous `provide` (the narration spec as
-    // `additionalContext`) — two interaction kinds on one event, in one group.
-    vec![
-        ("MessageDisplay", json!({ "hooks": [ notify(10) ] })),
-        // SessionStart is async-notify ONLY: the engine voice greet + streaming-witness seed,
-        // off the critical path. The greeting is voice-only — there is no visible banner, so no
-        // synchronous `provide` twin (CC 2.1+ drops a SessionStart hook's stdout anyway).
-        ("SessionStart", json!({ "hooks": [ notify(0) ] })),
-        ("SessionEnd", json!({ "hooks": [ notify(0) ] })),
-        // Stop fires once when Claude finishes a turn → the reply "ding" earcon. Notification
-        // fires on a permission prompt / idle → the needs-input earcon. Both are async notify
-        // sinks (never block Claude); the binary routes them in `hook_core` and self-gates on
-        // `earcon_enabled` / notification_type.
-        ("Stop", json!({ "hooks": [ notify(0) ] })),
-        ("Notification", json!({ "hooks": [ notify(0) ] })),
-        (
-            "UserPromptSubmit",
-            json!({ "hooks": [
-                notify(5),
-                { "type": "command", "command": spec.bin, "args": ["provide"], "timeout": 5 } ] }),
-        ),
-    ]
+    // every fire-and-forget event; `MessageDisplay` is the streaming narration pipeline
+    // (Claude Code ≥ 2.1.x streams it per batch) — omitted for non-streaming clients
+    // (Qwen Code, Codex) where the reply is voiced whole from `Stop`. SessionStart greets +
+    // seeds the streaming witness; SessionEnd barges this window's playback;
+    // UserPromptSubmit marks THIS terminal active so narration follows it AND carries the
+    // synchronous `provide` (the narration spec as `additionalContext`). Stop fires once
+    // when the turn ends → the reply "ding" earcon (and, for non-streaming clients, the
+    // `speak_reply` fallback voices the whole reply). Notification fires on a permission
+    // prompt / idle → the needs-input earcon.
+    let mut groups: Vec<(&'static str, Value)> = Vec::new();
+    if spec.streaming {
+        groups.push(("MessageDisplay", json!({ "hooks": [ notify(10) ] })));
+    }
+    // SessionStart is async-notify ONLY: the engine voice greet + streaming-witness seed,
+    // off the critical path. The greeting is voice-only — there is no visible banner, so no
+    // synchronous `provide` twin (CC 2.1+ drops a SessionStart hook's stdout anyway).
+    groups.push(("SessionStart", json!({ "hooks": [ notify(0) ] })));
+    groups.push(("SessionEnd", json!({ "hooks": [ notify(0) ] })));
+    // Stop fires once when the turn finishes → the reply "ding" earcon. Notification
+    // fires on a permission prompt / idle → the needs-input earcon. Both are async notify
+    // sinks (never block the client); the binary routes them in `hook_core` and self-gates on
+    // `earcon_enabled` / notification_type.
+    groups.push(("Stop", json!({ "hooks": [ notify(0) ] })));
+    groups.push(("Notification", json!({ "hooks": [ notify(0) ] })));
+    groups.push((
+        "UserPromptSubmit",
+        json!({ "hooks": [
+            notify(5),
+            { "type": "command", "command": spec.bin, "args": ["provide"], "timeout": 5 } ] }),
+    ));
+    groups
 }
 
 /// Why a [`merge_hooks`] call could not apply. Mirrors Codex TOML's `CodexMergeError`: an
@@ -227,6 +238,7 @@ mod tests {
         HookSpec {
             bin: "/bin/dontspeak",
             notif_channel: None,
+            streaming: true,
         }
     }
 
@@ -410,6 +422,42 @@ mod tests {
     }
 
     #[test]
+    fn non_streaming_client_omits_messagedisplay_keeps_stop_provide() {
+        // Qwen Code (and Codex) have no MessageDisplay stream — the reply is voiced whole
+        // from Stop's last_assistant_message. A non-streaming wire must omit MessageDisplay
+        // (a dead hook for an event the client never fires) while keeping the events that
+        // DO fire: SessionStart, SessionEnd, Stop, Notification, UserPromptSubmit.
+        let spec_ns = HookSpec {
+            bin: "/bin/dontspeak",
+            notif_channel: None,
+            streaming: false,
+        };
+        let out = merge_hooks(json!({}), &spec_ns).expect("merge ok");
+        assert!(
+            out["hooks"].get("MessageDisplay").is_none(),
+            "MessageDisplay must NOT be wired for a non-streaming client"
+        );
+        // The events that DO fire are all present.
+        for evt in ["SessionStart", "SessionEnd", "Stop", "Notification", "UserPromptSubmit"] {
+            assert!(
+                out["hooks"].get(evt).is_some(),
+                "{evt} wired for non-streaming client"
+            );
+        }
+        // Stop is where the reply gets voiced for a non-streaming client.
+        assert_eq!(
+            out["hooks"]["Stop"][0]["hooks"][0]["args"],
+            json!(["notify"]),
+            "Stop notify sink present"
+        );
+        // UserPromptSubmit still carries the synchronous `provide` query.
+        let ups = out["hooks"]["UserPromptSubmit"][0]["hooks"]
+            .as_array()
+            .unwrap();
+        assert!(ups.iter().any(|h| h["args"] == json!(["provide"])));
+    }
+
+    #[test]
     fn merge_hooks_wires_stop_and_notification_earcon_events() {
         // The earcon events: Stop (reply ding) + Notification (needs-input cue) are wired as
         // async notify-only sinks, recognized as ours (idempotent), and stripped on uninstall.
@@ -452,6 +500,7 @@ mod tests {
         let spec_a = HookSpec {
             bin: "/bin/dontspeak",
             notif_channel: Some("iterm2_with_bell"),
+            streaming: true,
         };
         let once = merge_hooks(json!({}), &spec_a).expect("merge ok");
         assert_eq!(once["preferredNotifChannel"], json!("iterm2_with_bell"));
@@ -459,6 +508,7 @@ mod tests {
         let spec_b = HookSpec {
             bin: "/bin/dontspeak",
             notif_channel: Some("other_channel"),
+            streaming: true,
         };
         let twice = merge_hooks(once, &spec_b).expect("merge ok");
         assert_eq!(
@@ -477,6 +527,7 @@ mod tests {
         let spec_with_channel = HookSpec {
             bin: "/bin/dontspeak",
             notif_channel: Some("iterm2_with_bell"),
+            streaming: true,
         };
         let wired = merge_hooks(json!({ "model": "opus" }), &spec_with_channel).expect("merge ok");
         assert!(wired.get("preferredNotifChannel").is_some());
