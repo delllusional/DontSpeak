@@ -11,7 +11,7 @@ Build prerequisites per OS: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Workspace layout
 
-- `rust/crates/` — 17 single-purpose crates (Rust workspace, `rust-version = 1.96`).
+- `rust/crates/` — 18 single-purpose crates (Rust workspace, `rust-version = 1.96`).
   Notable ones: `ds-core` (the stable C ABI the apps link), `dontspeakd` (the engine
   library), `dontspeak` (the one CLI: MCP server + hook entries + installers),
   `ds-tools` (the single MCP tool catalog), `ds-config` (paths + `config.toml` +
@@ -22,6 +22,44 @@ Build prerequisites per OS: [CONTRIBUTING.md](CONTRIBUTING.md).
   the app UI.
 - `web/` — the dontspeak.org site (deployed locally via the `deploy-site` skill, not
   CI — see git log for `site deploys run locally`).
+
+## Concurrent sessions: work in a worktree
+
+More than one Claude Code session (yours, a background workflow's implement stage,
+someone else's terminal) can be active in this same clone at once. To keep one
+session's edits from clobbering another's uncommitted changes in the shared working
+tree, **every session must call `EnterWorktree` before its first file edit** in this
+repo — no matter how small the change is. Read-only sessions (answering a question,
+looking something up) don't need one.
+
+- Before starting, check `.claude/worktrees/` and `git worktree list` — an existing
+  worktree already named after your task means another session already started it;
+  don't open a second one for the same work.
+- Name the worktree after the task/issue (short kebab-case, e.g. the GitHub issue
+  slug), so it's identifiable in `git worktree list`.
+- Commit your change on the worktree's branch before finishing — don't leave
+  uncommitted edits as the only copy of the work.
+- When the change is done (and, for risky changes, audited clear): merge the
+  branch into `main`, push to `origin` (the public repo; never `wip`), then
+  `ExitWorktree` with `action: remove` so `.claude/worktrees/` doesn't accumulate
+  stale directories.
+
+The `plan-review-implement` workflow (see CLAUDE.md) already does this for its
+Implement/Land stages — you don't need to wrap it yourself when using that pipeline.
+
+## Out-of-scope findings: file a GitHub issue
+
+Working a task often turns up a second real problem — a bug, a missing test, a
+stale doc, a gap in one of the invariants below. If it's small and obviously
+correct, fix it inline and say so in your report. If it isn't part of what you were
+actually asked to do, don't silently drop it and don't silently expand scope to fix
+it anyway: file it as a GitHub issue instead —
+`gh issue create --repo delllusional/DontSpeak --title "..." --body "..."`, with a
+label if one fits (`bug`, `enhancement`, `documentation`, `question` are in use —
+`gh label list --repo delllusional/DontSpeak` for the full set). Check
+`gh issue list --repo delllusional/DontSpeak` first so you don't file a duplicate of
+something already open. Mention the issue number in your final report so it isn't
+lost.
 
 ## Commands
 

@@ -1,7 +1,7 @@
-//! The per-message narration accumulation core — "given a streamed `MessageDisplay` batch,
-//! which top-level blockquote runs become speakable now". PURE of IO (no socket, no disk) so
-//! it is exhaustively unit-testable; [`crate::hook_narrate::message_display`] wraps it with the
-//! per-session state file + lock and the engine forward.
+//! The per-message narration accumulation core — "given a streamed text batch, which
+//! top-level blockquote runs become speakable now". PURE of IO (no socket, no disk) so
+//! it is exhaustively unit-testable; [`crate::narrate_batch`] wraps it with the
+//! per-session state file + lock; the adapters forward the utterances to the engine.
 //!
 //! Claude Code streams an assistant message as many `MessageDisplay` batches (a `delta` chunk
 //! keyed by content-block `index`, plus a sticky `final` flag), and — because "all matching
@@ -9,15 +9,17 @@
 //! [`Accum`] makes reconstruction INDEPENDENT of arrival order (parts keyed by index) and emits
 //! each completed blockquote run EXACTLY ONCE, in document order (a high-water mark, not a
 //! one-shot latch), so a later run — e.g. a closing question — is still voiced and a re-fed or
-//! duplicate batch emits nothing.
+//! duplicate batch emits nothing. The cumulative (`displayed_text`) mode serves clients
+//! that send whole-text snapshots instead of deltas (Qwen Code's sketched hook; Codex's
+//! authoritative `item/completed` final text).
 
 use std::collections::BTreeMap;
 
 /// Per-message accumulation: feed batches, get back the blockquote runs that became newly
-/// speakable. `hook_narrate` persists one of these per session (serialized to a file under a
-/// lock, so the overlapping per-batch hook processes take turns).
+/// speakable. [`crate::narrate_batch`] persists one of these per session (serialized to a
+/// file under a lock, so overlapping per-batch hook processes take turns).
 #[derive(Default, Clone, Debug, PartialEq)]
-pub(crate) struct Accum {
+pub struct Accum {
     /// Each batch's chunk keyed by content-block `index` → cumulative text reconstructs in
     /// index order regardless of the order calls arrive.
     pub parts: BTreeMap<u64, String>,
@@ -105,7 +107,7 @@ impl Accum {
 /// (No length/code/URL/slash guards: they silently swallowed readable replies — e.g. a
 /// slashed word like "pause/resume" muted a whole answer. We read everything for now and can
 /// special-case genuinely-unspeakable content later.)
-pub(crate) fn short_reply_utterance(text: &str) -> Option<String> {
+pub fn short_reply_utterance(text: &str) -> Option<String> {
     let t = text.trim();
     if t.is_empty() {
         return None;

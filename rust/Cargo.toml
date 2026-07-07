@@ -20,6 +20,7 @@ members = [
     "crates/ds-tools",
     "crates/ds-i18n",
     "crates/ds-status",
+    "crates/ds-narrate",
     "crates/ds-core",
     "crates/dontspeakd",
     "crates/dontspeak",
@@ -78,6 +79,13 @@ proptest = "1"
 # Local HTTP mock server (dev-only): every outbound-HTTP test points here, never a
 # real endpoint (see AGENTS.md's no-real-network invariant).
 httpmock = "0.8.3"
+# Sync WebSocket framing for the Codex app-server subscriber (dontspeakd::codex_stream).
+# The client is generic over `Read + Write`, so it runs over a `UnixStream` (the codex
+# control socket carries WebSocket frames over UDS) or a `TcpStream` (the `ws://` config
+# override). No TLS features — the endpoints are local. Deliberately NOT the official
+# `codex-app-server-protocol` crate (stale on crates.io, drags the full surface) nor the
+# tokio SDK (the workspace's no-tokio stance): we hand-write ~8 tolerant serde DTOs.
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
 # ── Phase-2 engine deps (pinned once) ────────────────────────────────────────
 # Model download (ds-model): tiny blocking HTTP, checksum, atomic rename. We use
@@ -175,6 +183,7 @@ ds-engines = { path = "crates/ds-engines" }
 ds-tools = { path = "crates/ds-tools" }
 ds-i18n = { path = "crates/ds-i18n" }
 ds-status = { path = "crates/ds-status" }
+ds-narrate = { path = "crates/ds-narrate" }
 dontspeakd = { path = "crates/dontspeakd" }
 
 [profile.release]

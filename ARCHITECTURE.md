@@ -67,6 +67,14 @@ Barge-in (starting to record while speech is playing) pauses the queue and resum
 cancel. Short audible earcons — a reply-done cue and a needs-input cue, each
 independently configurable — play outside the queue, mixed over any in-flight speech.
 
+Streaming (mid-turn) narration is ONE shared core (`ds-narrate`: per-message
+accumulation → blockquote digests → the per-session on-disk state file that doubles as
+the `Stop`-silencing witness) behind three thin adapters: the Claude Code and Qwen Code
+hook adapters in the `dontspeak` CLI, and — for OpenAI Codex, which has no per-batch
+hook stream — a long-lived app-server subscriber inside the engine
+(`dontspeakd::codex_stream`) that attaches to the user's shared codex daemon and feeds
+the same core in-process. See [docs/STREAMING-NARRATION.md](docs/STREAMING-NARRATION.md).
+
 ## Local STT (Parakeet)
 
 Built-in dictation runs through the same warm helper as TTS: on Caps-ON the helper

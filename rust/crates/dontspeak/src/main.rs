@@ -42,7 +42,6 @@ mod hook_narrate;
 mod hook_prompt;
 mod hook_speak;
 mod mcp;
-mod narrate;
 mod tools;
 mod voices;
 mod wire;

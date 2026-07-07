@@ -178,9 +178,19 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         // Codex adopted Claude Code's hook contract (same events, same stdin JSON,
         // `Stop.last_assistant_message`), so the SAME dontspeak binary serves it; only
         // the file format (TOML) differs. Its hook set is three events — `SessionStart`
-        // (greet-only), `UserPromptSubmit`, `Stop`; `SessionStart` landed in Codex CLI
-        // 0.142.x, it didn't exist when Codex was first wired. Codex has no MCP surface
-        // we register.
+        // (greet-only), `UserPromptSubmit` (ONE group, two inner hooks: `notify` for
+        // mark-active routing + the engine's codex_stream session re-discovery, and the
+        // synchronous `provide` for the narration spec), `Stop`; `SessionStart` landed in
+        // Codex CLI 0.142.x, it didn't exist when Codex was first wired. Codex has no MCP
+        // surface we register. Codex's hook event list has NO `SessionEnd` and no
+        // `Notification` (confirmed against the hooks doc, 2026-07-07) — per-session
+        // cleanup for Codex is owned by the engine's codex_stream supervisor, not a hook.
+        // MID-TURN narration doesn't ride hooks at all: the engine subscribes to the
+        // shared app-server (`codex app-server daemon start` + `codex --remote`) — see
+        // the "app-server" DocRef and docs/STREAMING-NARRATION.md. OPEN FINDING for the
+        // live-capture pass (§9 there): whether hooks still fire for `--remote`-hosted
+        // sessions is undocumented — if they do NOT, streaming narration still works and
+        // Stop simply never fires, but greet/`provide` would be lost for those sessions.
         surfaces: &[Surface {
             mechanism: WireMechanism::ClaudeTomlHooks,
             config_file: |p| &p.codex_config, // ~/.codex/config.toml
@@ -197,9 +207,13 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 topic: "config",
                 url: "https://github.com/openai/codex/blob/main/docs/config.md",
             },
+            DocRef {
+                topic: "app-server",
+                url: "https://developers.openai.com/codex/app-server",
+            },
         ],
         verified_client_version: "0.142.5",
-        verified_on: "2026-07-07",
+        verified_on: "2026-07-08",
     },
     ClientSpec {
         target: WireTarget::QwenCode,
@@ -214,10 +228,20 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         // passes ONLY the `command` string to a shell (no `args` field exists in its
         // `CommandHookConfig`, `timeout` is milliseconds), so the surface is
         // `HookCommandStyle::InlineShell` — verbs inlined into the command string, timeouts
-        // scaled. It has NO `MessageDisplay` stream, so `hook_streaming: false` and the reply
-        // is voiced whole from `Stop` (the non-streaming path the binary already serves Codex
-        // through). Hooks + MCP both live in the ONE `~/.qwen/settings.json`, so the two
-        // surfaces share a config_file.
+        // scaled. It has NO `MessageDisplay` stream TODAY, so `hook_streaming: false` and the
+        // reply is voiced whole from `Stop` (the non-streaming path the binary already serves
+        // plain-TUI Codex through). Hooks + MCP both live in the ONE `~/.qwen/settings.json`,
+        // so the two surfaces share a config_file.
+        //
+        // FUTURE FLIP (QwenLM/qwen-code#6488): when Qwen ships its MessageDisplay hook
+        // (snake_case cumulative payload — `displayed_text` + `is_final`, already accepted
+        // by the handler's serde aliases), the WHOLE change is `hook_streaming: true` here
+        // + a version-pin bump via the `verify-wiring` skill — no core or handler edits.
+        // The wiring side of that combination (InlineShell + streaming: MessageDisplay
+        // group with the inlined notify command, ms-scaled timeout, plain-notify
+        // SessionStart witness seed) is pinned NOW by
+        // `inline_streaming_wires_messagedisplay_with_ms_timeout_and_plain_sessionstart`
+        // in wire/hooks.rs.
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::ClaudeJsonHooks,

@@ -46,6 +46,9 @@ rust/
     ds-tools/     # the MCP tool catalog — single source for MCP and the app's Tools view
     ds-i18n/      # the shared UI string catalog (locales/en.yml), rendered over the FFI
     ds-status/    # the model_status engine→UI contract (serde source of truth)
+    ds-narrate/   # the shared streaming-narration core (accumulation, digests, the
+                  #   per-session streaming witness) behind the CC/Qwen hook adapters
+                  #   and the engine's Codex app-server subscriber
     ds-core/      # cdylib/staticlib FFI each app links; engine-client calls
     dontspeakd/   # the engine itself (Caps loop, warm TTS+STT helper, IPC server) —
                   #   a library, hosted in-process via ds-core

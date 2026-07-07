@@ -48,6 +48,8 @@
 //! - `downloads` — background model-download state + the auto-fetch orchestration.
 //! - `config_gate` — the pure config predicates + reload-decision fns.
 //! - `barge` — the mic-barge watcher thread.
+//! - `codex_stream` — the Codex app-server subscriber: mid-turn narration for sessions
+//!   hosted on the shared codex daemon (docs/STREAMING-NARRATION.md).
 //! - `log` — engine logging → the unified activity log.
 
 // Always-listening: `listen` is the pure, unit-tested core (endpointer, stopword,
@@ -66,6 +68,7 @@ mod ttsq;
 
 mod barge;
 mod boot;
+mod codex_stream;
 mod config_gate;
 mod config_watch;
 mod downloads;

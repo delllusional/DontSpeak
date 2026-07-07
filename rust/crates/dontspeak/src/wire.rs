@@ -141,7 +141,8 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
         }
     }
 
-    spec.surfaces
+    let code = spec
+        .surfaces
         .iter()
         .map(|s| match s.mechanism {
             WireMechanism::ClaudeJsonHooks => hooks::claude_json_hooks(
@@ -160,7 +161,17 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
             }
         })
         .max()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    // Codex-only user hint: hooks alone give Stop-narration; MID-TURN narration needs the
+    // session hosted on the shared app-server so the engine can subscribe (see
+    // docs/STREAMING-NARRATION.md). CLI literal by precedent (this file's other eprintln!s);
+    // the ds-i18n catalog covers Swift/C#/XAML, none of which are involved here.
+    if client == WireTarget::Codex && !remove && !print_only && code == 0 {
+        eprintln!(
+            "wire: for mid-turn narration, run Codex on the shared app-server: `codex app-server daemon start` once, then `codex --remote unix://` — otherwise replies are voiced at end of turn as before"
+        );
+    }
+    code
 }
 
 /// `wire --list` — print the client registry: who, where (per-OS resolved paths + live presence),

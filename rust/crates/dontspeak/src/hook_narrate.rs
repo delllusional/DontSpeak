@@ -1,17 +1,27 @@
-//! The `notify`-side narration handlers — speak meaningful assistant prose as Claude
-//! *works*. Dispatched from [`crate::hook_core::notify`].
+//! The `notify`-side narration handlers — the CLAUDE CODE / QWEN CODE ADAPTER over the
+//! shared streaming-narration core (`ds-narrate`). Dispatched from
+//! [`crate::hook_core::notify`]. This file only: parses the hook payload, builds a
+//! client-neutral `ds_narrate::StreamBatch`, runs the shared file-backed step
+//! ([`ds_narrate::narrate_batch`]), and forwards each utterance to the engine.
 //!
-//! [`message_display`] (`MessageDisplay`): runs once per streaming batch. Accumulates the
-//! `delta` chunk per `message_id`, and — when `narrate` contains "digests" — speaks EVERY
-//! top-level blockquote Claude writes (the dedicated spoken lines, read VERBATIM, each once,
-//! in document order). When `narrate` contains "shorts", a SHORT plain message with NO
-//! blockquote (no code fence / path / URL) is instead voiced whole, lightly cleaned. Fast +
+//! [`message_display`] (`MessageDisplay`): runs once per streaming batch. Claude Code
+//! sends an incremental `delta` chunk keyed by content-block `index` (+ a sticky `final`
+//! flag); Qwen Code's sketched hook (QwenLM/qwen-code#6488) sends CUMULATIVE
+//! `displayed_text` snapshots + `is_final` — BOTH parse through the same
+//! [`MessageDisplayHook`] (serde aliases) and the same core. When `narrate` contains
+//! "digests", every top-level blockquote is spoken (verbatim, each once, in document
+//! order); "shorts" voices a short blockquote-less final reply whole. Fast +
 //! fire-and-forget so it never delays the display.
 //!
-//! [`speak_reply`] (`Stop`): the non-streaming analogue for OpenAI Codex and Qwen Code — voices
-//! the whole final reply, guarded so it never double-speaks what `MessageDisplay` already
-//! streamed. [`mark_streaming_session`] (`SessionStart`) seeds that guard's witness for
-//! streaming clients only (Claude Code); non-streaming clients pass `--greet-only` to skip it.
+//! [`speak_reply`] (`Stop`): the non-streaming analogue — voices the whole final reply,
+//! guarded by the streaming WITNESS so it never double-speaks what a streaming pass
+//! (MessageDisplay here, or the engine's Codex app-server subscriber —
+//! `dontspeakd::codex_stream`) already narrated. [`mark_streaming_session`]
+//! (`SessionStart`) seeds that witness for streaming hook clients (Claude Code);
+//! non-streaming clients pass `--greet-only` to skip it. A Codex session gets its
+//! witness seeded BY THE ENGINE on a successful app-server `thread/resume` instead — a
+//! plain-TUI Codex session (not on the shared app-server) never seeds, so its `Stop`
+//! still speaks exactly as before.
 //!
 //! [`barge_session`] (`SessionEnd`): barge THIS session's engine playback (a scoped
 //! `StopSpeech{session}`) so closing a window silences its OWN reply, not another's. No
@@ -19,11 +29,8 @@
 //!
 //! Settings (ds-config VoiceConfig): `narrate` is a SET of "digests"/"shorts".
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
-
 use ds_config::{NarrateKind, Paths, VoiceConfig};
+use ds_narrate::{BatchPayload, StreamBatch};
 use serde::Deserialize;
 
 /// SessionEnd notify: barge ONLY this session's engine playback (so closing one window
@@ -41,25 +48,24 @@ pub fn barge_session(paths: &Paths, payload: &str) {
     // mid-session barge uses `StopSpeech`), so the engine reclaims this session's voice
     // maps, and here we reclaim its per-session display-state file and its lock/tmp
     // siblings. Without this they accumulate one `narrate-display-<session>.json` per
-    // distinct session in the data dir forever.
+    // distinct session in the data dir forever. (Codex wires NO SessionEnd hook — its
+    // cleanup is owned by the engine's codex_stream supervisor.)
     if let Some(s) = &session {
-        let path = display_state_path(paths, s);
-        let _ = std::fs::remove_file(path.with_extension("lock"));
-        let _ = std::fs::remove_file(path.with_extension("tmp"));
-        let _ = std::fs::remove_file(&path);
+        ds_narrate::clear_session_state(paths, s);
     }
 }
 
-/// SessionStart notify (the streaming-witness seed): pre-create THIS session's MessageDisplay
-/// state file so [`speak_reply`]'s `streamed` guard is reliably true before the first `Stop`,
-/// closing the only timing gap in the double-narration fix. The discriminator is the event
-/// wiring + the `--greet-only` flag (see [`crate::hook_core::notify`]):
+/// SessionStart notify (the streaming-witness seed): pre-create THIS session's streaming
+/// state file so [`speak_reply`]'s `streamed` guard is reliably true before the first
+/// `Stop`, closing the only timing gap in the double-narration fix. The discriminator is
+/// the event wiring + the `--greet-only` flag (see [`crate::hook_core::notify`]):
 ///   • Claude Code (streaming) wires `SessionStart` with plain `notify` → seeds the witness.
 ///   • Qwen Code (non-streaming) wires `SessionStart` with `--greet-only` → greet runs but the
 ///     seed is SKIPPED — otherwise the witness would suppress Qwen Code's only narration path.
-///   • OpenAI Codex (non-streaming) likewise wires `SessionStart` with `--greet-only` (see
-///     `wire/codex.rs`): greet runs, seed skipped — it still has no `MessageDisplay`, so a
-///     seed would suppress its only narration path too; it never reaches this function.
+///   • OpenAI Codex likewise wires `SessionStart` with `--greet-only` (see `wire/codex.rs`):
+///     greet runs, seed skipped — its witness is instead seeded by the ENGINE on a successful
+///     app-server `thread/resume` (`dontspeakd::codex_stream`), so only sessions that are
+///     actually streamed mid-turn silence their `Stop`; a plain-TUI session keeps `Stop`.
 /// Idempotent + non-destructive: never clobbers real in-progress state (a re-fired
 /// SessionStart is a no-op), and the seeded default reads exactly like "no file yet" (fresh
 /// `Accum`), so streaming is unaffected.
@@ -67,17 +73,7 @@ pub fn mark_streaming_session(paths: &Paths, payload: &str) {
     let Some(session) = crate::hook_core::session_id_from_payload(payload) else {
         return; // no session id ⇒ can't scope a witness (the per-batch write still covers it)
     };
-    let path = display_state_path(paths, &session);
-    if path.exists() {
-        return; // don't overwrite real state from a prior turn / resumed session
-    }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    atomic_write(
-        &path,
-        &serde_json::to_string(&DisplayState::default()).unwrap_or_default(),
-    );
+    ds_narrate::seed_witness(paths, &session);
 }
 
 // ── Stop hook (speak the FINAL reply — non-streaming clients) ───────────────────
@@ -94,33 +90,38 @@ struct StopHook {
     session_id: Option<String>,
 }
 
-/// Witness that a `MessageDisplay` streaming pass ran for this session: its per-session state
-/// file (which [`message_display`] writes on EVERY batch) exists. The deterministic
-/// client-discriminator the `Stop` path needs (see [`speak_reply`]):
+/// Witness that a streaming pass ran for this session: its per-session state file exists
+/// (delegates to [`ds_narrate::witness_exists`]). The deterministic client-discriminator
+/// the `Stop` path needs (see [`speak_reply`]):
 ///   • Claude Code (streaming) wires `MessageDisplay` and streams every turn, so the file is
 ///     present when `Stop` fires ⇒ the reply was ALREADY narrated; `Stop` must not re-speak it.
 ///   • Qwen Code (non-streaming) wires `SessionStart` with `--greet-only` (no witness seed)
 ///     and NO `MessageDisplay` hook, so the file is NEVER written ⇒ `streamed = false`, and
 ///     `Stop` is Qwen Code's only narration path.
-///   • OpenAI Codex wires NO `MessageDisplay` hook (see `wire/codex.rs` `CODEX_HOOKS`), so the
-///     file is NEVER written ⇒ `streamed = false`, and `Stop` is Codex's only narration path.
-/// [`mark_streaming_session`] also SEEDS this file at `SessionStart` for STREAMING clients
-/// (Claude Code), so the witness is present from session open — closing the timing edge of a
-/// `Stop` racing the first batch's write. Both non-streaming clients (Qwen Code, OpenAI Codex)
-/// pass `--greet-only` on `SessionStart`, so neither seeds and both keep `streamed = false`.
+///   • OpenAI Codex wires NO `MessageDisplay` hook; its file appears ONLY when the engine's
+///     app-server subscriber resumed this session's thread (mid-turn narration active) —
+///     otherwise `streamed = false` and `Stop` is its narration path, exactly as before.
+/// [`mark_streaming_session`] also SEEDS this file at `SessionStart` for STREAMING hook
+/// clients (Claude Code), so the witness is present from session open — closing the timing
+/// edge of a `Stop` racing the first batch's write.
 /// `pub(crate)` so `hook_core`'s greet-only tests can probe the witness directly.
 pub(crate) fn streamed_via_message_display(paths: &Paths, session: &str) -> bool {
-    display_state_path(paths, session).exists()
+    ds_narrate::witness_exists(paths, session)
 }
 
+/// The pure Stop decision — re-exported from the shared core so `hook_core`'s tests keep
+/// driving it through this module (the seam the double-narration regression tests use).
+pub(crate) use ds_narrate::stop_utterances;
+
 /// Stop notify: speak the FINAL assistant reply, once — the NON-STREAMING analogue of
-/// [`message_display`] for non-streaming clients (OpenAI Codex, Qwen Code), whose hooks fire
-/// only at end-of-turn with the whole `last_assistant_message` and no `MessageDisplay` stream.
-/// Claude Code ALSO wires `Stop` and delivers `last_assistant_message` on it, so without a
-/// guard we'd re-voice every reply MessageDisplay already streamed (heard twice). Guard:
-/// [`streamed_via_message_display`] — a session with a MessageDisplay state file already
-/// narrated ⇒ stay silent. Pure decision in [`stop_utterances`]; this is the IO wrapper
-/// (config load, mic probe, witness, engine send).
+/// [`message_display`] for clients whose replies weren't streamed this session (Qwen Code,
+/// plain-TUI Codex), whose hooks fire only at end-of-turn with the whole
+/// `last_assistant_message`. Claude Code ALSO wires `Stop` and delivers
+/// `last_assistant_message` on it, so without a guard we'd re-voice every reply the
+/// streaming path already narrated (heard twice). Guard: [`streamed_via_message_display`]
+/// — a session with a streaming state file already narrated ⇒ stay silent. Pure decision
+/// in [`stop_utterances`]; this is the IO wrapper (config load, mic probe, witness,
+/// engine send).
 pub fn speak_reply(paths: &Paths, payload: &str) {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests);
@@ -152,56 +153,21 @@ pub fn speak_reply(paths: &Paths, payload: &str) {
     }
 }
 
-/// Decide what the `Stop` hook should voice, PURELY (no IO) so it is exhaustively
-/// unit-testable — the seam the double-narration regression tests drive. Returns the
-/// blockquote / short utterances to speak, in order, or EMPTY when `Stop` must stay silent:
-///   • narration off (`!messages_on && !short_on`),
-///   • mid-dictation (`mic_active` — don't talk over the user, mirrors the MessageDisplay gate),
-///   • `streamed` — a MessageDisplay pass already narrated this turn (Claude Code); re-voicing
-///     here is the double-narration bug, so we suppress it,
-///   • no usable final text.
-/// Otherwise the whole reply is fed through a fresh `Accum` as ONE final batch, yielding the
-/// exact runs the streaming path would emit (every top-level blockquote in order; or, under
-/// `short`, a brief blockquote-less reply whole) — so a Codex reply is voiced just like a
-/// Claude Code one. `pub(crate)` so `hook_core`'s greet-only tests can feed the witness
-/// value they observed straight into the Stop decision.
-pub(crate) fn stop_utterances(
-    last_assistant_message: Option<&str>,
-    messages_on: bool,
-    short_on: bool,
-    mic_active: bool,
-    streamed: bool,
-) -> Vec<String> {
-    if !messages_on && !short_on {
-        return Vec::new();
-    }
-    if mic_active {
-        return Vec::new();
-    }
-    if streamed {
-        return Vec::new(); // MessageDisplay already narrated this session ⇒ never double-speak
-    }
-    let Some(text) = last_assistant_message
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return Vec::new();
-    };
-    crate::narrate::Accum::default().feed(0, text, None, true, messages_on, short_on)
-}
-
 // ── MessageDisplay hook (speak-as-it-streams) ───────────────────────────────────
 
-/// The MessageDisplay hook payload (Claude Code ≥ 2.1.x). The hook fires repeatedly
-/// while a message streams: CC 2.1.183 sends an incremental `delta` chunk per batch
-/// (we accumulate it per `message_id` into the cumulative text), while some versions
-/// are documented to send a cumulative `displayedText` instead — we accept either and
-/// emit each top-level blockquote run as it completes.
+/// The MessageDisplay hook payload — TWO clients' shapes through ONE struct:
+///   • Claude Code ≥ 2.1.x fires repeatedly while a message streams: an incremental
+///     `delta` chunk per batch (2.1.183, verified against a live payload), with some
+///     versions documented to send a cumulative `displayedText` instead — we accept either.
+///   • Qwen Code's sketched hook (QwenLM/qwen-code#6488) sends snake_case CUMULATIVE
+///     snapshots — `displayed_text` + `is_final` — which the serde ALIASES below parse
+///     through the SAME fields, so the whole future Qwen flip is registry gating
+///     (`hook_streaming: true`), zero handler changes.
 #[derive(Debug, Deserialize, Default, Clone)]
 struct MessageDisplayHook {
-    // Forward-compat: some CC versions are documented to send the CUMULATIVE text.
-    // 2.1.183 does NOT — it streams `delta` only (verified against a live payload).
-    #[serde(default, rename = "displayedText")]
+    // Cumulative whole-text snapshot. CC's documented camelCase name, plus Qwen's
+    // sketched snake_case alias.
+    #[serde(default, rename = "displayedText", alias = "displayed_text")]
     displayed_text: Option<String>,
     // The incremental text chunk for THIS streaming batch (what CC actually sends).
     #[serde(default)]
@@ -214,86 +180,60 @@ struct MessageDisplayHook {
     message_id: Option<String>,
     // Content-block index within the message. NOT a key (keying on it would split one
     // message into many false "new messages"), but ESSENTIAL for ORDER: Claude Code spawns
-    // a process per batch and they race, so they can reach us out of order. We store each
-    // delta keyed by its index and reconstruct the cumulative text in index order, making
-    // accumulation independent of arrival order.
+    // a process per batch and they race, so they can reach us out of order.
     #[serde(default)]
     index: Option<u64>,
-    // True on the last batch of a message → the final blockquote run counts as complete
-    // even with no terminating blank line after it.
-    #[serde(default, rename = "final")]
+    // True on the last batch of a message. CC's name is `final`; Qwen's sketch says
+    // `is_final` — both accepted.
+    #[serde(default, rename = "final", alias = "is_final")]
     is_final: Option<bool>,
 }
 
-/// Per-session state for the MessageDisplay diff: how many blockquote utterances of the
-/// current message we've already spoken (`offset` = spoken count), plus a short key to
-/// detect when a NEW message starts (cumulative text resets).
-#[derive(Debug, Deserialize, serde::Serialize, Default, Clone, PartialEq)]
-struct DisplayState {
-    /// Count of this message's top-level blockquotes already voiced. Each batch speaks any
-    /// newly-completed run beyond this count and advances it; a new message resets it to 0.
-    offset: usize,
-    key: String,
-    // Delta mode: each batch's chunk keyed by its content-block `index`, so the cumulative
-    // text reconstructs in INDEX order regardless of the order the racing batch-processes
-    // reached us. Empty in cumulative (`displayedText`) mode.
-    #[serde(default)]
-    parts: BTreeMap<u64, String>,
-    // Sticky "a batch with final=true has been seen" — the terminating flag must survive
-    // even when that batch is processed BEFORE the one carrying the blockquote (out of order).
-    #[serde(default)]
-    seen_final: bool,
-    // Sticky latch for the "shorts" fallback (a blockquote-less final reply voiced whole, once)
-    // — maps to `Accum::short_done`, so a late duplicate batch never re-speaks it.
-    #[serde(default)]
-    short_done: bool,
-    // The mic gate is decided ONCE per assistant message (keyed by `message_id`) and
-    // cached here, so a mid-stream mic flap can't strand the tail of a message we
-    // already started narrating — nor start one we decided to skip. `gate_msg` is the
-    // message_id the decision belongs to; `gate_on` is whether it narrates.
-    #[serde(default)]
-    gate_msg: String,
-    #[serde(default)]
-    gate_on: bool,
-}
-
 /// First ~48 chars of the message — a cheap fingerprint to detect a new message
-/// stream (each message's opening text differs), so we reset the offset.
+/// stream (each message's opening text differs) when the client sends no `message_id`,
+/// so the core resets its accumulation.
 fn message_key(s: &str) -> String {
     s.chars().take(48).collect()
 }
 
-fn display_state_path(paths: &Paths, session: &str) -> PathBuf {
-    // Sibling of narrate.pid (in the data dir). Session ids are uuid-like; keep only
-    // filename-safe chars defensively.
-    let safe: String = session
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(80)
-        .collect();
-    let dir = paths
-        .narrate_pid
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    dir.join(format!("narrate-display-{safe}.json"))
+/// Translate one parsed hook payload into the client-neutral [`StreamBatch`] the shared
+/// core consumes: the stable `message_id` (or the fingerprint fallback) becomes the key;
+/// a non-empty cumulative `displayed_text` wins over the per-index `delta`.
+fn batch_from_hook(hook: &MessageDisplayHook) -> StreamBatch {
+    let key = match hook.message_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => message_key(
+            hook.delta
+                .as_deref()
+                .or(hook.displayed_text.as_deref())
+                .unwrap_or_default(),
+        ),
+    };
+    let payload = match hook.displayed_text.as_deref() {
+        Some(dt) if !dt.trim().is_empty() => BatchPayload::Cumulative {
+            text: dt.to_string(),
+        },
+        _ => BatchPayload::Delta {
+            index: hook.index,
+            text: hook.delta.clone().unwrap_or_default(),
+        },
+    };
+    StreamBatch {
+        key,
+        payload,
+        is_final: hook.is_final.unwrap_or(false),
+    }
 }
 
 /// MessageDisplay notify: narrate this streamed batch. `payload` is the hook JSON (already
-/// read by the transport, not stdin). Accumulate the `delta` chunks (or take `displayedText`
-/// if a CC version sends it) into the cumulative text and enqueue each newly-completed
-/// blockquote run on the warm engine.
+/// read by the transport, not stdin). The shared core accumulates the chunks into the
+/// cumulative text and returns each newly-completed blockquote run; we enqueue them on the
+/// warm engine.
 ///
 /// Gates ONLY on `narrate` (on/off) and not-mid-recording — NOT on focus. Narration is
 /// forwarded TAGGED BY SESSION regardless of which app is frontmost; the ENGINE WORKER holds
 /// an inactive/backgrounded terminal's items (never dropped here) and plays them when that
-/// terminal is active + frontmost. Fast + fire-and-forget so it never delays CC's display.
+/// terminal is active + frontmost. Fast + fire-and-forget so it never delays the display.
 pub fn message_display(paths: &Paths, payload: &str) {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests); // voice the blockquotes Claude writes
@@ -305,39 +245,20 @@ pub fn message_display(paths: &Paths, payload: &str) {
         return;
     };
     let session = hook.session_id.clone().unwrap_or_default();
+    let batch = batch_from_hook(&hook);
 
-    let state_path = display_state_path(paths, &session);
-
-    // Claude Code spawns a SEPARATE `notify` process per streamed batch, and they all
-    // read-modify-write this one per-session state file. When batches arrive fast enough to
-    // OVERLAP, those processes race: the file is corrupted, or the accumulated blockquote is
-    // clobbered, so the spoken line never finishes assembling and the reply is silently
-    // dropped (measured: sequential batches narrate 15/15, overlapping 0/30). Serialize the
-    // read-modify-write under a per-session lock so the batches take turns, and write
-    // atomically (temp + rename) so a reader never sees a half-written file. The engine
-    // forward stays OUTSIDE the lock — no socket round-trip held under the mutex.
-    let speak = with_state_lock(&state_path, || {
-        let prev: DisplayState = std::fs::read_to_string(&state_path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
-        // The diff/gate/blockquote logic is pure (`step_display`); persist its decision and
-        // hand back any blockquote utterances that came ready THIS batch.
-        let step = step_display(
-            &prev,
-            &hook,
-            ds_platform::is_mic_active(),
-            messages_on,
-            short_on,
-        );
-        if let Some(next) = step.write {
-            atomic_write(
-                &state_path,
-                &serde_json::to_string(&next).unwrap_or_default(),
-            );
-        }
-        step.speak
-    });
+    // The whole cross-process dance — the per-session lock, the state-file
+    // read-modify-write, the atomic write — lives in the shared core; racing per-batch
+    // hook processes take turns there. The engine forward stays OUTSIDE the lock — no
+    // socket round-trip held under the mutex.
+    let speak = ds_narrate::narrate_batch(
+        paths,
+        &session,
+        &batch,
+        ds_platform::is_mic_active(),
+        messages_on,
+        short_on,
+    );
     // Each completed blockquote is forwarded as its OWN narration item, in order — the
     // engine's per-session worker plays them sequentially with a natural pause between, so
     // a multi-point spoken digest is heard point by point rather than in one breath.
@@ -353,228 +274,36 @@ pub fn message_display(paths: &Paths, payload: &str) {
     }
 }
 
-/// Serialize the per-session state read-modify-write across the independent processes Claude
-/// Code spawns per streamed batch. Without it, overlapping batches race on the state file and
-/// the accumulated blockquote is lost → the spoken line is silently dropped. A lock file
-/// beside the state file is the mutex: `create_new` is atomic, so exactly one process holds
-/// it and the rest spin briefly. Bounded so narration can never wedge (it proceeds without
-/// the lock after the ceiling), and a stale lock from a crashed holder is broken by age —
-/// batches are sub-second, so a 2 s floor never trips during normal streaming.
-fn with_state_lock<T>(state_path: &Path, f: impl FnOnce() -> T) -> T {
-    let lock_path = state_path.with_extension("lock");
-    const SPIN_TRIES: u32 = 400; // ×2 ms ≈ 800 ms ceiling, then proceed anyway
-    const STALE_MS: u128 = 2000;
-    let mut held = false;
-    for _ in 0..SPIN_TRIES {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(_) => {
-                held = true;
-                break;
-            }
-            Err(_) => {
-                // Break a stale lock left by a crashed holder, else wait and retry.
-                let stale = std::fs::metadata(&lock_path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| SystemTime::now().duration_since(t).ok())
-                    .map(|age| age.as_millis() > STALE_MS)
-                    .unwrap_or(false);
-                if stale {
-                    let _ = std::fs::remove_file(&lock_path);
-                    continue;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        }
-    }
-    let out = f();
-    if held {
-        let _ = std::fs::remove_file(&lock_path);
-    }
-    out
-}
-
-/// Write `contents` to `path` atomically: write a sibling temp file, then rename over the
-/// target (atomic on the same filesystem), so a concurrent reader never observes a torn or
-/// empty file — only the previous or the new complete contents.
-fn atomic_write(path: &Path, contents: &str) {
-    let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, contents).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
-    }
-}
-
-/// One MessageDisplay batch's effect, decided PURELY (no IO) so it is unit-testable —
-/// this is the seam the streaming-accumulation regression tests drive. `write = None`
-/// means "leave the state file untouched" (a no-op batch); `speak` holds the blockquote
-/// utterances that became COMPLETE this batch (one per top-level `>` run), in order, each
-/// voiced once. Usually empty or one item; a batch that completes several runs at once
-/// (out-of-order delivery, or a body line that terminates the last run) yields several.
-struct DisplayStep {
-    write: Option<DisplayState>,
-    speak: Vec<String>,
-}
-
-/// Decide what a single streamed batch does, given the previous per-session state and
-/// whether the mic is live. Pure: same inputs → same outputs, no disk/socket/platform.
+/// The test seam kept from the pre-extraction shape: hook payload in → the shared core's
+/// pure step. Production goes through [`ds_narrate::narrate_batch`] instead (same
+/// translation via [`batch_from_hook`]).
+#[cfg(test)]
 fn step_display(
-    prev: &DisplayState,
+    prev: &ds_narrate::DisplayState,
     hook: &MessageDisplayHook,
     mic_active: bool,
     messages_on: bool,
     short_on: bool,
-) -> DisplayStep {
-    let is_final = hook.is_final.unwrap_or(false);
-
-    // Per-MESSAGE mic gate. CC streams a message as many `delta` batches across its
-    // content blocks; checking the gate on EACH batch lets a momentary mic blip strand
-    // the rest of a message we already began narrating — observed as "only the first
-    // sentence spoke." So decide ONCE, when a message first appears (by `message_id`),
-    // and cache it: every later batch of the same message inherits that decision.
-    //
-    // FOCUS is NOT gated here: narration is forwarded TAGGED BY SESSION, and the engine
-    // speaks only the ACTIVE terminal's items, holding the rest until they become active
-    // (see docs/PER-TERMINAL-QUEUES.md). We still suppress narration sent WHILE the user is
-    // recording — no reason to stream fresh chatter into a dictation.
-    let msg_id = hook.message_id.clone().unwrap_or_default();
-    let gate_on = if !msg_id.is_empty() && prev.gate_msg == msg_id {
-        prev.gate_on
-    } else {
-        !mic_active
-    };
-    if !gate_on {
-        // Remember the skip so later batches of this message skip too (no re-check), while
-        // still advancing the new-message key so the NEXT message is detected.
-        return DisplayStep {
-            write: Some(DisplayState {
-                offset: 0,
-                key: String::new(),
-                parts: BTreeMap::new(),
-                seen_final: false,
-                short_done: false,
-                gate_msg: msg_id,
-                gate_on: false,
-            }),
-            speak: Vec::new(),
-        };
-    }
-
-    // New-message key: the stable `message_id` ALONE (NOT `#index`). MessageDisplay streams
-    // one assistant message as many batches with an incrementing content-block `index`; keying
-    // on the index made every batch look like a new message, resetting the accumulator each
-    // time — so the leading blockquote (in an early batch, not yet "complete") was wiped before
-    // its terminating body line arrived and never got spoken. message_id is per-message, so it
-    // alone detects a genuinely new message while letting all batches accumulate. Fall back to a
-    // text fingerprint when no id is present (older CC).
-    let cur_key = match hook.message_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(id) => id.to_string(),
-        None => message_key(
-            hook.delta
-                .as_deref()
-                .or(hook.displayed_text.as_deref())
-                .unwrap_or_default(),
-        ),
-    };
-    let same = prev.key == cur_key;
-
-    // Drive the accumulator core (`crate::narrate::Accum`) — the reconstruction +
-    // every-blockquote emit logic, kept pure so it is exhaustively unit-testable and a fix
-    // lands in one place. The per-session state FILE is this path's cross-process persistence
-    // (CC spawns one process per streamed batch), so we hydrate an `Accum` from the prior
-    // state (for the same message) or fresh, step it, and write it back.
-    // `offset` ⇆ `Accum::emitted` (runs already voiced); `parts`/`seen_final` map 1:1.
-    let mut accum = if same {
-        crate::narrate::Accum {
-            parts: prev.parts.clone(),
-            seen_final: prev.seen_final,
-            emitted: prev.offset,
-            short_done: prev.short_done,
-        }
-    } else {
-        crate::narrate::Accum::default()
-    };
-    // No `index` (older CC) → append after the highest seen, preserving arrival order.
-    let index = hook
-        .index
-        .unwrap_or_else(|| accum.parts.keys().next_back().map_or(0, |k| k + 1));
-    let speak = accum.feed(
-        index,
-        hook.delta.as_deref().unwrap_or_default(),
-        hook.displayed_text.as_deref(),
-        is_final,
+) -> ds_narrate::DisplayStep {
+    ds_narrate::step(
+        prev,
+        &batch_from_hook(hook),
+        mic_active,
         messages_on,
         short_on,
-    );
-    let next = DisplayState {
-        offset: accum.emitted,
-        key: cur_key.clone(),
-        parts: accum.parts,
-        seen_final: accum.seen_final,
-        short_done: accum.short_done,
-        gate_msg: msg_id.clone(),
-        gate_on: true,
-    };
-    DisplayStep {
-        write: Some(next),
-        speak,
-    }
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ds_narrate::DisplayState;
 
     #[test]
     fn message_key_is_first_48_chars() {
         let long = "x".repeat(100);
         assert_eq!(message_key(&long).chars().count(), 48);
         assert_eq!(message_key("short"), "short");
-    }
-
-    #[test]
-    fn state_lock_serializes_concurrent_read_modify_write() {
-        // Reproduces the batch-process race that silently dropped narration: many writers
-        // doing read-modify-write on one state file. Under `with_state_lock` every increment
-        // must land (final == N); without the lock the widened window loses updates.
-        use std::sync::Arc;
-        let dir = std::env::temp_dir().join(format!("smnarrate-locktest-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let state = Arc::new(dir.join("narrate-display-x.json"));
-        atomic_write(&state, "0");
-        const N: usize = 24;
-        let handles: Vec<_> = (0..N)
-            .map(|_| {
-                let sp = Arc::clone(&state);
-                std::thread::spawn(move || {
-                    with_state_lock(&sp, || {
-                        let cur: u64 = std::fs::read_to_string(&*sp)
-                            .ok()
-                            .and_then(|s| s.trim().parse().ok())
-                            .unwrap_or(0);
-                        // Widen the critical section so an UNLOCKED version would lose updates.
-                        std::thread::sleep(Duration::from_millis(1));
-                        atomic_write(&sp, &(cur + 1).to_string());
-                    });
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
-        }
-        let final_v: u64 = std::fs::read_to_string(&*state)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(
-            final_v, N as u64,
-            "lock must serialize all increments — no lost updates"
-        );
     }
 
     // ── MessageDisplay streaming: the leading blockquote must survive batching ───────
@@ -845,111 +574,101 @@ mod tests {
         );
     }
 
+    // ── Qwen Code payload seam (QwenLM/qwen-code#6488) ────────────────────────────────
+    //
+    // Qwen's sketched MessageDisplay payload is snake_case and CUMULATIVE:
+    // `{hook_event_name, message_id, displayed_text, is_final}` — debounced whole-text
+    // snapshots from ONE sequential in-process loop (no cross-process races; the lock
+    // idles). The serde aliases on `displayed_text` AND `is_final` route it through the
+    // SAME handler; these tests drive the exact sketched JSON.
+
+    /// Parse a raw Qwen-shaped payload string — through serde, exactly as
+    /// `message_display` would.
+    fn qwen(payload: &str) -> MessageDisplayHook {
+        serde_json::from_str(payload).expect("qwen payload parses")
+    }
+
+    #[test]
+    fn qwen_snake_case_payload_parses_through_the_aliases() {
+        let hook = qwen(
+            r#"{"hook_event_name":"MessageDisplay","session_id":"q1","message_id":"qm1",
+                "displayed_text":"> Spoken.\n\nBody.","is_final":true}"#,
+        );
+        assert_eq!(hook.displayed_text.as_deref(), Some("> Spoken.\n\nBody."));
+        assert_eq!(hook.is_final, Some(true));
+        assert_eq!(hook.message_id.as_deref(), Some("qm1"));
+    }
+
+    #[test]
+    fn qwen_cumulative_sequence_speaks_blockquote_once() {
+        // The sketched flow: debounced cumulative snapshots ending is_final=true.
+        let batches = [
+            qwen(r#"{"message_id":"qm1","displayed_text":"> Spoken","is_final":false}"#),
+            qwen(r#"{"message_id":"qm1","displayed_text":"> Spoken line.","is_final":false}"#),
+            qwen(
+                r#"{"message_id":"qm1","displayed_text":"> Spoken line.\n\nBody.","is_final":true}"#,
+            ),
+        ];
+        let (_, spoken) = drive(&batches, false);
+        assert_eq!(spoken, vec!["Spoken line.".to_string()]);
+    }
+
+    #[test]
+    fn qwen_duplicate_final_batch_is_a_noop() {
+        let fin =
+            qwen(r#"{"message_id":"qm1","displayed_text":"> Once.\n\nBody.","is_final":true}"#);
+        let (_, spoken) = drive(&[fin.clone(), fin], false);
+        assert_eq!(spoken, vec!["Once.".to_string()], "spoken exactly once");
+    }
+
+    #[test]
+    fn qwen_shorts_fallback_voices_a_blockquoteless_final_whole() {
+        let fin = qwen(
+            r#"{"message_id":"qm1","displayed_text":"Done — build is green.","is_final":true}"#,
+        );
+        let step = step_display(
+            &DisplayState::default(),
+            &fin,
+            false,
+            /*digests*/ false,
+            /*shorts*/ true,
+        );
+        assert_eq!(step.speak, vec!["Done — build is green.".to_string()]);
+    }
+
     // ── Stop hook: the double-narration guard (regression) ───────────────────────────
     //
-    // The bug: Claude Code ALSO delivers `last_assistant_message` on `Stop`, so the Stop
-    // handler re-voiced every reply that MessageDisplay had already streamed — heard twice.
-    // The fix is the `streamed` discriminator: a session whose MessageDisplay state file
-    // exists already narrated, so Stop stays silent; a non-streaming client (Codex) never
-    // writes that file, so its Stop still voices the whole reply. These pin both halves.
+    // The pure decision (`stop_utterances`) lives in ds-narrate with its own tests; here
+    // we pin the WITNESS half through this module's delegates against a tempdir.
 
-    /// A reply whose digest is two blockquotes plus body — the exact shape MessageDisplay
-    /// streams and the shape Stop would re-speak if the guard regressed.
+    /// A reply shaped like a spoken digest — what Stop would voice (or wrongly suppress).
     const DIGEST_REPLY: &str = "> First point.\n\nDetail.\n\n> Second point.\n\nMore.";
-
-    #[test]
-    fn stop_is_silent_when_already_streamed() {
-        // THE regression guard: streamed = true (Claude Code, MessageDisplay already narrated)
-        // ⇒ Stop voices NOTHING, even though the reply is full of speakable blockquotes.
-        let spoken = stop_utterances(
-            Some(DIGEST_REPLY),
-            true,
-            true,
-            false,
-            /*streamed*/ true,
-        );
-        assert!(
-            spoken.is_empty(),
-            "streamed reply must not be re-voiced on Stop, got {spoken:?}"
-        );
-    }
-
-    #[test]
-    fn stop_voices_whole_reply_when_not_streamed() {
-        // Codex (streamed = false): the entire reply is voiced from Stop — every top-level
-        // blockquote, in order, exactly as the streaming path would have emitted them.
-        let spoken = stop_utterances(
-            Some(DIGEST_REPLY),
-            true,
-            false,
-            false,
-            /*streamed*/ false,
-        );
-        assert_eq!(
-            spoken,
-            vec!["First point.".to_string(), "Second point.".to_string()],
-            "non-streaming Stop voices each blockquote once, in order"
-        );
-    }
-
-    #[test]
-    fn stop_short_fallback_only_when_not_streamed() {
-        // A brief blockquote-less reply: under `short` it's voiced whole — but ONLY when not
-        // already streamed. The same input with streamed = true stays silent (no double).
-        let reply = "Done — all three tests pass.";
-        assert_eq!(
-            stop_utterances(Some(reply), false, true, false, /*streamed*/ false),
-            vec!["Done — all three tests pass.".to_string()],
-        );
-        assert!(
-            stop_utterances(Some(reply), false, true, false, /*streamed*/ true).is_empty(),
-            "short reply already streamed ⇒ Stop silent"
-        );
-    }
-
-    #[test]
-    fn stop_silent_when_off_muted_or_empty() {
-        // The other silence gates, independent of `streamed`.
-        assert!(
-            stop_utterances(Some(DIGEST_REPLY), false, false, false, false).is_empty(),
-            "narration off ⇒ silent"
-        );
-        assert!(
-            stop_utterances(Some(DIGEST_REPLY), true, true, /*mic*/ true, false).is_empty(),
-            "mid-dictation ⇒ silent"
-        );
-        assert!(
-            stop_utterances(None, true, true, false, false).is_empty(),
-            "no final text ⇒ silent"
-        );
-        assert!(
-            stop_utterances(Some("   \n  "), true, true, false, false).is_empty(),
-            "blank final text ⇒ silent"
-        );
-    }
 
     #[test]
     fn streamed_witness_tracks_the_message_display_state_file() {
         // The IO half of the guard: `streamed_via_message_display` is true exactly when this
-        // session's MessageDisplay state file (the one `message_display` writes) exists, and is
-        // SESSION-SCOPED — a different session id (a fresh Codex session) reads false. Uses the
-        // SAME `display_state_path` the writer uses, so the witness can't drift from the writer.
-        let dir = std::env::temp_dir().join(format!("smnarrate-witness-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let paths = ds_config::Paths::rooted_at(&dir);
+        // session's streaming state file exists, and is SESSION-SCOPED — a different session
+        // id (a fresh Codex session) reads false. Uses the SAME `display_state_path` the
+        // writer uses, so the witness can't drift from the writer.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
         let cc = "cc-session-aaaa";
         let codex = "codex-session-bbbb";
 
         // No state file yet ⇒ not streamed (the pre-first-batch / Codex case).
         assert!(!streamed_via_message_display(&paths, cc));
 
-        // After a MessageDisplay batch persisted this session's state, the witness flips true —
+        // After a streamed batch persisted this session's state, the witness flips true —
         // for THAT session only; an unrelated session still reads false.
-        let sp = display_state_path(&paths, cc);
-        if let Some(parent) = sp.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        atomic_write(&sp, "{}");
+        let batch = StreamBatch {
+            key: "m1".into(),
+            payload: BatchPayload::Delta {
+                index: Some(0),
+                text: "> Hi.".into(),
+            },
+            is_final: false,
+        };
+        let _ = ds_narrate::narrate_batch(&paths, cc, &batch, false, true, false);
         assert!(
             streamed_via_message_display(&paths, cc),
             "CC session streamed"
@@ -958,19 +677,16 @@ mod tests {
             !streamed_via_message_display(&paths, codex),
             "a different (Codex) session is never marked streamed"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn session_start_seed_closes_the_first_turn_race() {
-        // The hardening: SessionStart seeds the witness so `streamed` is already true before the
-        // first Stop, even if no MessageDisplay batch has landed yet — and it's SESSION-SCOPED
-        // (a Codex session's SessionStart is greet-only, so it never reaches
+        // The hardening: SessionStart seeds the witness so `streamed` is already true before
+        // the first Stop, even if no MessageDisplay batch has landed yet — and it's
+        // SESSION-SCOPED (a Codex session's SessionStart is greet-only, so it never reaches
         // `mark_streaming_session` and is never seeded).
-        let dir = std::env::temp_dir().join(format!("smnarrate-seed-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let paths = ds_config::Paths::rooted_at(&dir);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
         let session = "cc-session-cccc";
 
         // Pre-seed: false until SessionStart runs.
@@ -985,26 +701,23 @@ mod tests {
             stop_utterances(Some(DIGEST_REPLY), true, true, false, true).is_empty(),
             "seeded session ⇒ Stop stays silent"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn session_start_seed_is_non_destructive_and_needs_a_session() {
         // It must NOT clobber real in-progress state (a re-fired SessionStart on an existing
         // session), and a payload with no session id is a no-op (nothing to scope).
-        let dir = std::env::temp_dir().join(format!("smnarrate-seed2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let paths = ds_config::Paths::rooted_at(&dir);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
         let session = "cc-session-dddd";
 
         // Existing real state must survive a re-fired SessionStart verbatim.
-        let path = display_state_path(&paths, session);
+        let path = ds_narrate::display_state_path(&paths, session);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         let sentinel = r#"{"offset":2,"key":"real-message-state"}"#;
-        atomic_write(&path, sentinel);
+        std::fs::write(&path, sentinel).unwrap();
         mark_streaming_session(&paths, &format!(r#"{{"session_id":"{session}"}}"#));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -1018,7 +731,23 @@ mod tests {
             !streamed_via_message_display(&paths, ""),
             "a session-less SessionStart seeds nothing"
         );
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn barge_session_clears_the_state_file_trio() {
+        // SessionEnd reclaims the per-session display-state file and its lock/tmp siblings
+        // (the engine ping is a best-effort no-op against the tempdir's nonexistent socket).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
+        let session = "cc-session-eeee";
+        ds_narrate::seed_witness(&paths, session);
+        let path = ds_narrate::display_state_path(&paths, session);
+        std::fs::write(path.with_extension("lock"), "").unwrap();
+        std::fs::write(path.with_extension("tmp"), "").unwrap();
+
+        barge_session(&paths, &format!(r#"{{"session_id":"{session}"}}"#));
+        assert!(!path.exists(), "state file removed");
+        assert!(!path.with_extension("lock").exists(), "lock removed");
+        assert!(!path.with_extension("tmp").exists(), "tmp removed");
     }
 }

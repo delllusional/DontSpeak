@@ -894,6 +894,40 @@ mod tests {
     }
 
     #[test]
+    fn inline_streaming_wires_messagedisplay_with_ms_timeout_and_plain_sessionstart() {
+        // The FUTURE Qwen Code streaming flip (QwenLM/qwen-code#6488), pinned NOW: once the
+        // upstream MessageDisplay hook lands, the whole flip is the registry's
+        // `hook_streaming: true` (+ version-pin bump) — no core or handler edits. This test
+        // proves the wiring side is already correct for that combination: streaming +
+        // InlineShell emits the `MessageDisplay` group with the INLINED `notify` command
+        // (no `args` key — Qwen drops it silently) and the MILLISECOND-scaled timeout
+        // (10 s → 10000 ms; an unscaled 10 would be a 10 ms SIGTERM), and SessionStart
+        // switches to the PLAIN `notify` (the streaming-witness seed, no `--greet-only`).
+        let spec_streaming = HookSpec {
+            bin: "/bin/dontspeak",
+            notif_channel: None,
+            streaming: true,
+            command_style: HookCommandStyle::InlineShell,
+        };
+        let out = merge_hooks(json!({}), &spec_streaming).expect("merge ok");
+        let md = &out["hooks"]["MessageDisplay"][0]["hooks"][0];
+        assert!(
+            md["command"].as_str().unwrap().ends_with(" notify"),
+            "MessageDisplay carries the inlined notify verb, got {md}"
+        );
+        assert!(md.get("args").is_none(), "no `args` key in the inline dialect");
+        assert_eq!(md["timeout"], json!(10_000), "10 s scaled to 10000 ms");
+        assert_eq!(md["async"], json!(true), "fire-and-forget notify sink");
+        let ss = out["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            ss.ends_with(" notify") && !ss.contains("--greet-only"),
+            "streaming SessionStart seeds the witness with plain notify, got {ss}"
+        );
+    }
+
+    #[test]
     fn inline_merge_is_idempotent_and_strips_clean() {
         let once = merge_hooks(json!({}), &inline_spec()).expect("merge ok");
         let twice = merge_hooks(once.clone(), &inline_spec()).expect("merge ok");

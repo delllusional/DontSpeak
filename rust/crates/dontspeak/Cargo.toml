@@ -25,6 +25,10 @@ path = "src/main.rs"
 [dependencies]
 ds-config = { workspace = true }
 ds-ipc = { workspace = true }
+# The shared streaming-narration core (accumulation, digests, the streaming witness) —
+# this crate is the Claude Code / Qwen Code hook ADAPTER over it; the engine's Codex
+# app-server subscriber is the third adapter (dontspeakd::codex_stream).
+ds-narrate = { workspace = true }
 # Voice/language enumeration (`ds_tts::enumerate` + `SpeakerVoice`, Kokoro bin /
 # `say -v ?`) for the list_voices tool — a config read on the SAME direct path the
 # GUI uses (the engine auto-applies a settings.json change via its mtime-watch), so

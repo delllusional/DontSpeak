@@ -198,8 +198,9 @@ fn hook_action(remove: bool) -> &'static str {
 /// Wire (or strip / print) DontSpeak's narration hooks into `cfg`, a TOML config using Claude
 /// Code's hook contract (`WireMechanism::ClaudeTomlHooks` — today Codex's `~/.codex/config.toml`;
 /// the registry names the file per client) — `SessionStart`→`notify --greet-only` (spoken
-/// greeting, no streaming-witness seed), `UserPromptSubmit`→`provide` (inject the narration
-/// spec) and `Stop`→`notify` (speak the reply). Format-preserving (toml_edit). Returns 0 on
+/// greeting, no streaming-witness seed), `UserPromptSubmit`→`notify` + `provide` (mark-active
+/// / engine session re-discovery, and the narration spec) and `Stop`→`notify` (speak the
+/// reply). Format-preserving (toml_edit). Returns 0 on
 /// success, 1 on a hard error; a malformed config is reported and left UNCHANGED (it's the
 /// user's file), which is non-fatal — same convention as `claude_json_hooks`.
 pub(crate) fn claude_toml_hooks(
@@ -575,9 +576,11 @@ mod tests {
         // `seed_and_prune` also unconditionally runs `prune_stale_bins`, which walks
         // `current_exe()`'s own directory (this test binary's build-output dir) and removes
         // any entry named exactly one of `KNOWN_LEGACY_BINS`. Safe today because no workspace
-        // `[[bin]]` target is named `ds-mcp`/`ds-speak`/`ds-narrate`/`dontspeakd` (the last is
-        // lib-only) — a future rename that violates that would need this comment (and test)
-        // revisited.
+        // `[[bin]]` target is named `ds-mcp`/`ds-speak`/`ds-narrate`/`dontspeakd` — the
+        // workspace DOES contain `ds-narrate` and `dontspeakd` CRATES again, but both are
+        // lib-only (no executable ever lands in the install dir, so the prune can never match
+        // them). A future `[[bin]]` reusing one of those names would need this comment (and
+        // test) revisited.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
 

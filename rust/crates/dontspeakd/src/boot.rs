@@ -242,6 +242,11 @@ pub fn engine_run(
         gate: status_gate.clone(),
     };
 
+    // Codex mid-turn narration: the session ids the hooks report over IPC (GreetSession /
+    // MarkActive) land in this registry; the codex_stream supervisor resumes ONLY matching
+    // app-server threads. Built before the IPC server so its arms can nudge it.
+    let codex_sessions = crate::codex_stream::SessionRegistry::new();
+
     // engine-owns-everything: host the RPC socket FIRST so ping/get/set/shutdown
     // are answerable immediately — BEFORE warming Kokoro below, whose model load
     // blocks for a few seconds (otherwise a client right after launch times out).
@@ -253,12 +258,25 @@ pub fn engine_run(
         ttsq.clone(),
         reload_requested.clone(),
         downloads.clone(),
+        codex_sessions.clone(),
     );
 
     // Barge-in TTS the instant the mic goes active (Claude Code's own voice
     // recording is invisible to the engine otherwise), so speech never plays into
     // a live recording.
     spawn_mic_barge_watcher(ttsq.clone(), stt_active.clone(), mic_watcher.handle());
+
+    // The Codex app-server SUBSCRIBER (mid-turn narration for `codex --remote` sessions —
+    // docs/STREAMING-NARRATION.md). Self-gating: parks while `codex_stream` is off,
+    // `~/.codex` is absent, or no session is registered; config is re-read per pass, so
+    // no ConfigChange plumbing is needed.
+    crate::codex_stream::spawn_supervisor(
+        paths.clone(),
+        running.clone(),
+        codex_sessions,
+        mic_watcher.handle(),
+        ttsq.clone(),
+    );
 
     // Full-duplex AEC env for the warm helper, decided BEFORE the boot start so the
     // child spawns with the right mode (Parakeet STT + Kokoro TTS — see docs/AEC.md).

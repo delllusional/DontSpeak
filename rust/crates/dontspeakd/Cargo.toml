@@ -33,6 +33,14 @@ ds-status = { workspace = true }
 # Shared localization catalog — the engine looks up the failure-reason prose it ships in
 # model_status (the %{why}) here, so those user-facing strings live in en.yml like the rest.
 ds-i18n = { workspace = true }
+# The shared streaming-narration core — the engine's Codex app-server subscriber
+# (codex_stream) is the third adapter over it (beside the Claude/Qwen hook adapters in
+# the `dontspeak` CLI): same per-session state file, same witness, same digests.
+ds-narrate = { workspace = true }
+# Sync WebSocket client for the codex app-server control socket (WS over UDS) / a
+# ws:// TCP override. See the workspace-deps comment for why not the official
+# codex protocol crate or the tokio SDK.
+tungstenite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # TOML (de)serialize for the persisted lifetime stats file (our stats.toml).

@@ -1,0 +1,26 @@
+[package]
+name = "ds-narrate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "The shared streaming-narration core: per-message accumulation, blockquote digests, and the cross-process streaming witness — one core behind the Claude Code / Qwen Code hook adapters and the Codex app-server subscriber."
+
+# LIBRARY ONLY — deliberately not a binary. An OLD binary named `ds-narrate` existed before
+# the single-binary consolidation and its name sits in `dontspeak`'s KNOWN_LEGACY_BINS prune
+# list; a lib-only crate never lands an executable in the install dir, so the prune can
+# never touch it (same situation as the lib-only `dontspeakd`).
+
+[dependencies]
+ds-config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

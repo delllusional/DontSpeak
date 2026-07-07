@@ -25,6 +25,7 @@ pub(crate) fn should_cancel_on_submit(was_voice: bool, scope_configured: bool) -
 /// apply it) flips `reload_requested` so the poll loop reloads config surgically
 /// via `Engine::reload`; the other arms drive the TTS queue, model status, the STT
 /// test, the provider switch, and speaker enroll/diarize.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_ipc_server(
     shared: EngineShared,
     paths: Paths,
@@ -33,6 +34,7 @@ pub(crate) fn spawn_ipc_server(
     ttsq: Arc<TtsQueue>,
     reload_requested: Arc<AtomicBool>,
     downloads: DownloadProg,
+    codex_sessions: Arc<crate::codex_stream::SessionRegistry>,
 ) {
     let sock = paths.engine_sock.clone();
     std::thread::spawn(move || {
@@ -63,12 +65,24 @@ pub(crate) fn spawn_ipc_server(
                 ds_ipc::Request::GreetSession { session } => {
                     // New terminal opened → greet in its assigned pool voice (no-op unless
                     // `greet_on_open` is set). Claims the session's voice at open time.
+                    // Also the codex_stream supervisor's session DISCOVERY: a session id
+                    // the hooks vouch for may map to a codex app-server thread (CC/Qwen
+                    // ids simply never match one).
+                    if let Some(s) = &session {
+                        codex_sessions.nudge(s);
+                    }
                     ttsq.greet_session(session);
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::MarkActive { session } => {
                     // UserPromptSubmit → this terminal is now the active one. The queue
                     // speaks only its items and holds the rest until they're active.
+                    // The nudge doubles as codex_stream session RE-discovery after an
+                    // engine restart (SessionStart won't re-fire mid-session), and re-arms
+                    // a negative-cached resolution.
+                    if let Some(s) = &session {
+                        codex_sessions.nudge(s);
+                    }
                     ttsq.set_active_session(session.clone());
                     // The UserPromptSubmit hook fires for EVERY submit (typed OR dictated),
                     // so this is where a genuinely-typed submit is caught. BUT a VOICE

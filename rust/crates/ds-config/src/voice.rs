@@ -284,6 +284,32 @@ pub struct VoiceConfig {
     /// historically-unwired earcon): set a bundled name or an absolute path to enable it.
     #[serde(default)]
     pub earcon_needs_input_sound: String,
+
+    // ── Codex app-server mid-turn narration (docs/STREAMING-NARRATION.md) ─────────
+    // Config-file-only for v1 (like the engine ladders; no MCP `set_config` exposure yet).
+    // The engine's codex_stream supervisor re-reads these each loop pass — no ConfigChange
+    // flag, no restart needed.
+    /// Master switch for the engine's Codex app-server SUBSCRIBER (attach + narrate
+    /// mid-turn). Default ON — it only observes the user's own daemon socket, and is inert
+    /// without `~/.codex` + a running app-server; sessions not hosted on the shared
+    /// app-server keep today's Stop-only narration either way.
+    #[serde(default = "default_enabled")]
+    pub codex_stream: bool,
+    /// Permission to run `codex app-server daemon start` (idempotent, Unix-only upstream)
+    /// when the control socket is absent. Default OFF — no surprise process spawns; turn it
+    /// on to have the engine bring the daemon up lazily.
+    #[serde(default)]
+    pub codex_stream_daemon_start: bool,
+    /// Override the app-server endpoint: empty (default) = the default unix control socket
+    /// (`$CODEX_HOME/app-server-control/app-server-control.sock`); a `ws://IP:PORT` URL
+    /// attaches over TCP instead — the Windows/custom path (`codex app-server --listen ws://…`).
+    #[serde(default)]
+    pub codex_app_server_url: String,
+    /// The codex binary the lazy daemon start shells out to. A bare name resolves via PATH
+    /// plus the common install dirs (a GUI-launched app has a minimal PATH); an absolute
+    /// path is used as-is.
+    #[serde(default = "default_codex_bin")]
+    pub codex_bin: String,
 }
 
 /// Which warm subsystems a `set_config` delta touches — computed by
@@ -358,6 +384,9 @@ fn default_endpoint_silence_ms() -> u64 {
 }
 fn default_capture_gain() -> CaptureGain {
     CaptureGain::Auto
+}
+fn default_codex_bin() -> String {
+    "codex".to_string()
 }
 
 /// Mic make-up gain before STT. `Auto` (default) normalizes each utterance to a target
@@ -443,6 +472,10 @@ impl Default for VoiceConfig {
             pause_in_background: false,
             earcon_reply_sound: default_earcon_reply(),
             earcon_needs_input_sound: String::new(),
+            codex_stream: true,
+            codex_stream_daemon_start: false,
+            codex_app_server_url: String::new(),
+            codex_bin: default_codex_bin(),
         }
     }
 }
@@ -758,6 +791,38 @@ pub(crate) mod tests {
             vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]
         );
         assert_eq!(v.tray_indicator, vec![TrayKind::Stt, TrayKind::TtsAnimated]);
+    }
+
+    #[test]
+    fn codex_stream_defaults_and_overrides() {
+        // Defaults: the subscriber is ON (inert without ~/.codex + a running app-server),
+        // the lazy daemon start is OFF (no surprise spawns), endpoint = the default unix
+        // control socket, binary = bare "codex".
+        let v: VoiceConfig = serde_json::from_str("{}").unwrap();
+        assert!(v.codex_stream);
+        assert!(!v.codex_stream_daemon_start);
+        assert_eq!(v.codex_app_server_url, "");
+        assert_eq!(v.codex_bin, "codex");
+        // All four are plain-typed overrides.
+        let v: VoiceConfig = serde_json::from_str(
+            r#"{"codex_stream":false,"codex_stream_daemon_start":true,
+                "codex_app_server_url":"ws://127.0.0.1:4550","codex_bin":"/opt/codex/bin/codex"}"#,
+        )
+        .unwrap();
+        assert!(!v.codex_stream);
+        assert!(v.codex_stream_daemon_start);
+        assert_eq!(v.codex_app_server_url, "ws://127.0.0.1:4550");
+        assert_eq!(v.codex_bin, "/opt/codex/bin/codex");
+        // The fields serialize, so `known_keys` covers them (no spurious unknown-key warns).
+        let keys = VoiceConfig::known_keys();
+        for k in [
+            "codex_stream",
+            "codex_stream_daemon_start",
+            "codex_app_server_url",
+            "codex_bin",
+        ] {
+            assert!(keys.contains(k), "{k} must be a known config key");
+        }
     }
 
     #[test]
@@ -1357,6 +1422,10 @@ pub(crate) mod tests {
             pause_in_background: true, // non-default (default is false)
             earcon_reply_sound: "Glass".into(), // non-default (default is empty/off)
             earcon_needs_input_sound: "Funk".into(),
+            codex_stream: false, // non-default (default is true)
+            codex_stream_daemon_start: true, // non-default (default is false)
+            codex_app_server_url: "ws://127.0.0.1:4550".into(), // non-default (default is empty)
+            codex_bin: "/opt/codex/bin/codex".into(), // non-default (default is "codex")
         }
     }
 
