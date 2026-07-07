@@ -84,6 +84,16 @@ the three runtime pieces (CLI, engine, host app) need different rebuild routes.
   public entry point calls with the real URL, and tests call directly with a
   `MockServer`'s URL). A test that hits the live internet is a CI-flake and
   rate-limit risk, not just a style nit — code review should treat it as a bug.
+- **Error handling is `Result<_, String>` at the boundaries.** Error messages cross
+  the IPC/FFI/MCP-tool boundaries as text (NDJSON lines, the C ABI, tool replies), so
+  `String` is the boundary error type. Typed error enums exist only where a caller
+  actually branches on the failure kind — currently four: `EngineError`
+  (`dontspeakd::boot`), `HooksMergeError` / `CodexMergeError` (`ds-config::wire`),
+  and `PreflightError` (`ds-platform`). `ds-model`'s download engine instead encodes
+  its retry classification in `io::ErrorKind` (`InvalidData` = checksum mismatch and
+  `NotFound` = HTTP 4xx, both permanent/fail-fast; `TimedOut` = transport/5xx/
+  truncation, transient/retried). No anyhow/thiserror — follow the layer's existing
+  style.
 
 ## Gates — per-commit vs release (deliberate split, not an oversight)
 

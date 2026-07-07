@@ -1,6 +1,11 @@
 //! Download engine — atomic temp + rename, retry with backoff, sha-verify, and
 //! the installer prefetch fast-path. Blocking `attohttpc` (no tokio); a
 //! socket-level per-read inactivity timeout aborts a stalled CDN.
+//!
+//! Retry classification rides on `io::ErrorKind`, not a custom error enum:
+//! `InvalidData` = checksum mismatch and `NotFound` = HTTP 4xx (permanent, fail
+//! fast); `TimedOut` = transport/5xx/truncation (transient, retried) — see
+//! `is_permanent_error`.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
