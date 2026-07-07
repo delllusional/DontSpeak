@@ -1,6 +1,6 @@
 # DontSpeak
 
-A local voice layer for Claude Code and Codex: the agent speaks its
+A local voice layer for Claude Code, Codex, and Qwen Code: the agent speaks its
 replies aloud, the user dictates back with one key (Caps Lock). One native app per OS
 (macOS SwiftUI, Windows WinUI, Linux GTK4) hosts the same Rust engine **in-process**
 over a C ABI (`ds-core`) — there is no separate daemon. The Claude Code hooks and the

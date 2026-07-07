@@ -42,12 +42,11 @@ independent of `narrate`: each plays only when its sound (`earcon_reply_sound` /
 reply ding defaults to the OS chime (`ding`/`Tink`/`message` on Windows/macOS/Linux); the
 needs-input cue ships off.
 
-**OpenAI Codex** uses the very same binary and `hook_event_name` contract, wired into
-`~/.codex/config.toml` by `dontspeak wire codex` (presence-gated: a clean skip when `~/.codex`
-doesn't exist). Codex has no `MessageDisplay` stream, so it wires
-two events instead: `UserPromptSubmit` → `provide` injects the narration spec (so Codex
-*writes* the spoken-line blockquotes), and `Stop` → `notify` speaks the final reply (the
-whole `last_assistant_message`, run through the same blockquote/short logic as streaming).
+**OpenAI Codex** and **Qwen Code** use the very same binary and `hook_event_name` contract.
+Codex is wired into `~/.codex/config.toml` by `dontspeak wire codex`, and Qwen Code is wired into `~/.qwen/settings.json` by `dontspeak wire qwen_code` (both are presence-gated and cleanly skip if their target directory does not exist).
+Neither has a `MessageDisplay` stream, so they both omit `MessageDisplay` hooks. Instead:
+- Codex wires two events: `UserPromptSubmit` → `provide` injects the narration spec (so Codex *writes* the spoken-line blockquotes), and `Stop` → `notify` speaks the final reply (the whole `last_assistant_message`, run through the same blockquote/short logic as streaming).
+- Qwen Code wires five events: `SessionStart`, `SessionEnd`, `Stop` (which voices the final reply from `last_assistant_message` AND plays the reply ding), `Notification`, and `UserPromptSubmit` (which registers the active terminal and carries the synchronous `provide` query).
 
 The narration / greet / mark-active hooks talk to the **warm engine** over the Unix
 socket (`dontspeak.sock` in our data dir), so speech is synthesized by the engine's
@@ -70,6 +69,7 @@ binaries into `~/.local/bin` (override with `DONTSPEAK_INSTALL_DIR`), and **auto
 each client's whole integration via `dontspeak wire <client>` — a safe, additive, backed-up
 merge (preview with `--print-only`, undo with `--remove`). `wire claude_code` merges the voice
 hooks into `~/.claude/settings.json` AND registers the MCP server in `~/.claude.json`;
+`wire qwen_code` wires Qwen Code's hooks and MCP server into `~/.qwen/settings.json` (when `~/.qwen` exists);
 `wire codex` wires Codex's hooks (when `~/.codex` exists).
 There is no launchd/systemd agent: the engine runs in-process inside the platform's host
 app (macOS `DontSpeak.app`, built by `apps/macos/bundle.sh`; Windows `ds-winui`; Linux

@@ -11,27 +11,28 @@ description: Re-verify the client-wiring registry against the CURRENT client ver
 > confirmed against these docs when this client version was current". This skill is the
 > re-verification loop that keeps those pins honest. `dontspeak wire --list` prints it all.
 
-## Steps — per client (both unless asked otherwise)
+## Steps — per client (three unless asked otherwise)
 
 1. **Current version.**
    - Claude Code: `claude --version`
    - Codex CLI: `codex --version` if installed, else `npm view @openai/codex version`
      (not installed ⇒ the pin means "docs read while X was current", note it as such)
+   - Qwen Code: `qwen-code --version` if installed, else `npm view @qwenlm/qwen-code version` (or check package metadata)
 
 2. **Re-read the entry's own `DocRef` URLs** (they are the source-of-truth list — don't
    search) and check the exact contract points the wiring depends on:
-   - *Hook clients (Claude Code JSON, Codex TOML — same contract):* one JSON object on stdin
+   - *Hook clients (Claude Code JSON, Codex TOML, Qwen Code JSON — same contract):* one JSON object on stdin
      routed by `hook_event_name`; `Stop` carrying `last_assistant_message`; `UserPromptSubmit`
      honouring `hookSpecificOutput.additionalContext`; the config schema (`hooks.<Event>`
-     groups in `~/.claude/settings.json` / `[[hooks.<Event>]]` tables in Codex's
+     groups in `~/.claude/settings.json` / `~/.qwen/settings.json` or `[[hooks.<Event>]]` tables in Codex's
      `~/.codex/config.toml`). Registered events — full table in
      `claude/hooks/HOOKS-README.md` — are Claude Code's six (`MessageDisplay`, `SessionStart`,
-     `SessionEnd`, `UserPromptSubmit` ×2, `Stop`, `Notification`; shaped in
-     `ds-config/src/wire/hooks.rs`) vs Codex's two (`UserPromptSubmit`, `Stop` — no
-     `MessageDisplay` stream, so `Stop` also voices the reply; shaped in
-     `ds-config/src/wire/codex.rs`).
+     `SessionEnd`, `UserPromptSubmit` ×2, `Stop`, `Notification`) vs Qwen Code's five (`SessionStart`,
+     `SessionEnd`, `UserPromptSubmit` ×2, `Stop`, `Notification`) vs Codex's two (`UserPromptSubmit`,
+     `Stop` — no `MessageDisplay` stream, so `Stop` also voices the reply; shaped in
+     `ds-config/src/wire/hooks.rs` for Claude/Qwen, or `ds-config/src/wire/codex.rs` for Codex).
    - *MCP clients:* the `mcpServers.<name>` entry shape (stdio: `command`, optional `args`)
-     and WHICH file (`~/.claude.json` user scope for Claude Code).
+     and WHICH file (`~/.claude.json` user scope for Claude Code; `~/.qwen/settings.json` for Qwen Code).
 
 3. **Verify the merge shape locally** (no client needed):
    `./rust/target/debug/dontspeak wire <client> --print-only` — the emitted document must
