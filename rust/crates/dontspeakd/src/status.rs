@@ -9,8 +9,8 @@ use ds_config::{Paths, VoiceConfig};
 
 use crate::config_gate::{
     apple_native_shim_available, apple_native_tts_active, caps_loop_enabled,
-    kokoro_onnx_files_present, kokoro_present_for, parakeet_available,
-    parakeet_onnx_files_present, stt_uses_onnx_runtime,
+    kokoro_onnx_files_present, kokoro_present_for, parakeet_available, parakeet_onnx_files_present,
+    stt_uses_onnx_runtime,
 };
 use crate::downloads::DownloadProg;
 use crate::engine::{PasteState, dictation_preview};

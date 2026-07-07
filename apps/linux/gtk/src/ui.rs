@@ -220,8 +220,9 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     // into a closed tab is pure waste. `log_push_stop` holds the current push's stop-handle (if
     // any is running); `Rc<RefCell<...>>` because GTK/glib closures are single-threaded/`Rc`-based
     // even though the spawned push thread itself is a real OS thread.
-    let log_push_stop: std::rc::Rc<std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let log_push_stop: std::rc::Rc<
+        std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    > = std::rc::Rc::new(std::cell::RefCell::new(None));
     {
         let lv = log_view.clone();
         let log_push_stop = log_push_stop.clone();

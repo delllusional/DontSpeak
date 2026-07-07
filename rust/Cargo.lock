@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "dontspeak"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "ds-config",
  "ds-ipc",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "dontspeakd"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "ds-config",
  "ds-engines",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "ds-aec"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "coreaudio-rs",
  "libpulse-binding",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "ds-config"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "directories",
  "ds-proc",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "ds-core"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "cbindgen",
  "dontspeakd",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "ds-engines"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "ds-config",
  "ds-platform",
@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "ds-helper"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "ds-aec",
  "ds-config",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "ds-i18n"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "rust-i18n",
  "serde_json",
@@ -971,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "ds-ipc"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "ds-model"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "attohttpc",
  "ds-config",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "ds-platform"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "arboard",
  "core-graphics",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "ds-proc"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "nix 0.31.3",
  "tempfile",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "ds-status"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "proptest",
  "serde",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "ds-stt"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "cpal 0.18.1",
  "ds-config",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tools"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "ds-config",
  "serde_json",
@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tts"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "ds-config",
  "ds-model",
@@ -2318,9 +2318,9 @@ dependencies = [
 
 [[package]]
 name = "num-bigint"
-version = "0.4.7"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c863e9ab5e7bf9c99ba75e1050f1e4d624ae87ed3532d6238ffbdc7b585dbbe6"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -2371,7 +2371,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
 dependencies = [
- "num-bigint 0.4.7",
+ "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
 ]

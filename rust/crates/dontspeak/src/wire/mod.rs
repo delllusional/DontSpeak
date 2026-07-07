@@ -144,9 +144,12 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
     spec.surfaces
         .iter()
         .map(|s| match s.mechanism {
-            WireMechanism::ClaudeJsonHooks => {
-                hooks::claude_json_hooks((s.config_file)(paths), s.hook_streaming, remove, print_only)
-            }
+            WireMechanism::ClaudeJsonHooks => hooks::claude_json_hooks(
+                (s.config_file)(paths),
+                s.hook_streaming,
+                remove,
+                print_only,
+            ),
             WireMechanism::ClaudeTomlHooks => {
                 hooks::claude_toml_hooks((s.config_file)(paths), remove, print_only)
             }

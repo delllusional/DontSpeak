@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "dontspeakd"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "ds-config",
  "ds-engines",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "ds-config"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "directories",
  "ds-proc",
@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "ds-core"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "dontspeakd",
  "ds-config",
@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "ds-engines"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "ds-config",
  "ds-platform",
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "ds-i18n"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "rust-i18n",
  "serde_json",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "ds-ipc"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "ds-linux-gtk"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "async-channel",
  "ds-core",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "ds-model"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "attohttpc",
  "ds-config",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "ds-platform"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "arboard",
  "core-graphics",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "ds-proc"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "nix 0.31.3",
  "tempfile",
@@ -950,14 +950,14 @@ dependencies = [
 
 [[package]]
 name = "ds-status"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ds-stt"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "cpal 0.18.1",
  "ds-config",
@@ -974,14 +974,14 @@ dependencies = [
 
 [[package]]
 name = "ds-tools"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "ds-tts"
-version = "0.2.2-dev"
+version = "0.2.2"
 dependencies = [
  "ds-config",
  "ds-model",

@@ -438,7 +438,13 @@ mod tests {
             "MessageDisplay must NOT be wired for a non-streaming client"
         );
         // The events that DO fire are all present.
-        for evt in ["SessionStart", "SessionEnd", "Stop", "Notification", "UserPromptSubmit"] {
+        for evt in [
+            "SessionStart",
+            "SessionEnd",
+            "Stop",
+            "Notification",
+            "UserPromptSubmit",
+        ] {
             assert!(
                 out["hooks"].get(evt).is_some(),
                 "{evt} wired for non-streaming client"
