@@ -766,11 +766,15 @@ impl<P: Platform + 'static> Engine<P> {
     fn toggle_dictation(&mut self) {
         // GUARD: dictation can START only if the selected STT engine is actually READY to
         // transcribe (BuiltIn/System model resident + warm; ClaudeCode delegates → always).
-        // On-but-not-ready behaves like OFF — the tap pauses/resumes the voice but never opens
-        // the mic/overlay (nothing to transcribe into yet). While ALREADY recording, keep the
-        // plain on/off gate so a tap still STOPS it (the model was ready when it started).
-        let gate = if self.is_recording() {
-            self.cfg.resolved_stt().is_some()
+        // On-but-not-ready REFUSES the tap: the visual cue armed below is the whole
+        // response, and the voice is left strictly alone — it must NOT borrow the OFF
+        // mode's pause/resume, because nothing would resume the pause when the model
+        // finishes loading (TTS went silent for the entire download window, issue #1).
+        // While ALREADY recording, readiness is moot — the model was ready when the
+        // recording started, and a tap must always still STOP it.
+        let dictation_on = self.cfg.resolved_stt().is_some();
+        let ready = if self.is_recording() {
+            true
         } else {
             let ready = self.stt_ready_to_dictate();
             // A refused START with Parakeet SELECTED may be a warm child that CRASHED
@@ -800,9 +804,14 @@ impl<P: Platform + 'static> Engine<P> {
             }
             ready
         };
-        match caps_tap_action(gate, self.is_recording(), self.voice_paused) {
+        match caps_tap_action(dictation_on, ready, self.is_recording(), self.voice_paused) {
             CapsTap::StartRecord => self.start_recording(), // opens mic; pauses the voice
             CapsTap::StopRecord => self.stop_recording(),   // stops+submits; resumes the voice
+            // Dictation ON but the engine can't start yet (model still downloading /
+            // loading): the refusal cue armed above is the whole response. Deliberately a
+            // strict no-op for the voice — the old shared pause path silenced TTS for the
+            // entire download window with nothing to resume it (issue #1).
+            CapsTap::Refused => {}
             // Dictation OFF: the mic never opens, but the tap still pauses/resumes the
             // voice — the SAME gesture, so the voice is HELD (and any narration that
             // arrives stays QUEUED), never silenced/dropped.
@@ -1557,27 +1566,45 @@ impl<P: Platform + 'static> Engine<P> {
 /// What a completed Caps TAP does — UNIFIED across dictation on/off so the gesture means
 /// the same thing either way: a tap PAUSES the voice (held, never dropped), the next tap
 /// RESUMES it. With dictation on the pause/resume rides the record start/stop; with it off
-/// the mic never opens but the voice still pauses/resumes.
+/// the mic never opens but the voice still pauses/resumes. On-but-NOT-READY is its own
+/// case ([`Refused`](CapsTap::Refused)) — neither a record toggle nor a voice pause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CapsTap {
-    /// Dictation on, idle → begin recording (which pauses the voice).
+    /// Dictation on + ready, idle → begin recording (which pauses the voice).
     StartRecord,
     /// Dictation on, recording → stop + submit (which resumes the voice).
     StopRecord,
+    /// Dictation on but NOT READY (model still downloading/loading), idle → refuse the
+    /// start: a strict no-op for the voice (the caller arms the visual refusal cue).
+    /// Deliberately NOT the OFF pause/resume gesture — a pause here has no matching
+    /// resume when the model comes ready, so it silenced TTS for the whole download
+    /// window (issue #1).
+    Refused,
     /// Dictation off, voice playing/idle → pause the voice (hold; nothing dropped).
     PauseVoice,
     /// Dictation off, voice paused → resume the voice.
     ResumeVoice,
 }
 
-/// Decide a Caps tap's action from `(dictation on?, currently recording?, voice paused?)`.
-/// Pure — the engine wires the result to the queue, and this is exhaustively unit-tested.
-pub(crate) fn caps_tap_action(stt_on: bool, recording: bool, voice_paused: bool) -> CapsTap {
-    match (stt_on, recording, voice_paused) {
-        (true, false, _) => CapsTap::StartRecord,
-        (true, true, _) => CapsTap::StopRecord,
-        (false, _, false) => CapsTap::PauseVoice,
-        (false, _, true) => CapsTap::ResumeVoice,
+/// Decide a Caps tap's action from `(dictation on?, engine ready?, currently recording?,
+/// voice paused?)`. `dictation_on` (an engine is selected) and `ready` (it can transcribe
+/// RIGHT NOW) are deliberately separate inputs: collapsing them into one gate is exactly
+/// what made on-but-not-ready borrow the OFF pause/resume path (issue #1). Pure — the
+/// engine wires the result to the queue, and this is exhaustively unit-tested.
+pub(crate) fn caps_tap_action(
+    dictation_on: bool,
+    ready: bool,
+    recording: bool,
+    voice_paused: bool,
+) -> CapsTap {
+    match (dictation_on, ready, recording, voice_paused) {
+        // Recording ignores `ready`: the model was ready when the recording started, and
+        // a tap must always still be able to STOP it.
+        (true, _, true, _) => CapsTap::StopRecord,
+        (true, true, false, _) => CapsTap::StartRecord,
+        (true, false, false, _) => CapsTap::Refused,
+        (false, _, _, false) => CapsTap::PauseVoice,
+        (false, _, _, true) => CapsTap::ResumeVoice,
     }
 }
 
@@ -1663,21 +1690,67 @@ mod tests {
 
     #[test]
     fn caps_tap_action_is_pause_resume_in_both_modes() {
-        // Dictation ON: tap toggles recording (start pauses, stop resumes) — never clears.
-        assert_eq!(caps_tap_action(true, false, false), CapsTap::StartRecord);
-        assert_eq!(caps_tap_action(true, true, false), CapsTap::StopRecord);
+        // Dictation ON + ready: tap toggles recording (start pauses, stop resumes) — never
+        // clears.
+        assert_eq!(
+            caps_tap_action(true, true, false, false),
+            CapsTap::StartRecord
+        );
+        assert_eq!(
+            caps_tap_action(true, true, true, false),
+            CapsTap::StopRecord
+        );
         // voice_paused is irrelevant while dictation is on (record state drives it).
-        assert_eq!(caps_tap_action(true, false, true), CapsTap::StartRecord);
-        assert_eq!(caps_tap_action(true, true, true), CapsTap::StopRecord);
+        assert_eq!(
+            caps_tap_action(true, true, false, true),
+            CapsTap::StartRecord
+        );
+        assert_eq!(caps_tap_action(true, true, true, true), CapsTap::StopRecord);
 
         // Dictation OFF: a tap PAUSES (held, not cleared/dropped), the next tap RESUMES —
         // the same pause/resume gesture as dictation-on, so Caps is consistent and no
-        // narration is ever silenced; it's queued while paused.
-        assert_eq!(caps_tap_action(false, false, false), CapsTap::PauseVoice);
-        assert_eq!(caps_tap_action(false, false, true), CapsTap::ResumeVoice);
-        // recording can't be true when dictation is off; both states still pause/resume.
-        assert_eq!(caps_tap_action(false, true, false), CapsTap::PauseVoice);
-        assert_eq!(caps_tap_action(false, true, true), CapsTap::ResumeVoice);
+        // narration is ever silenced; it's queued while paused. `ready` can't be true with
+        // no engine selected, but the decision must not depend on it either way.
+        for ready in [false, true] {
+            assert_eq!(
+                caps_tap_action(false, ready, false, false),
+                CapsTap::PauseVoice
+            );
+            assert_eq!(
+                caps_tap_action(false, ready, false, true),
+                CapsTap::ResumeVoice
+            );
+            // recording can't be true when dictation is off; both states still pause/resume.
+            assert_eq!(
+                caps_tap_action(false, ready, true, false),
+                CapsTap::PauseVoice
+            );
+            assert_eq!(
+                caps_tap_action(false, ready, true, true),
+                CapsTap::ResumeVoice
+            );
+        }
+    }
+
+    #[test]
+    fn caps_tap_action_refuses_on_but_not_ready_without_touching_the_voice() {
+        // Dictation ON but the engine can't start yet (model downloading/loading): the tap
+        // is REFUSED — not a record toggle, and crucially NOT the off-mode voice pause,
+        // which had no matching resume when the model came ready and so silenced TTS for
+        // the whole download window (issue #1). voice_paused must not change the verdict:
+        // a refused tap neither pauses nor resumes.
+        assert_eq!(caps_tap_action(true, false, false, false), CapsTap::Refused);
+        assert_eq!(caps_tap_action(true, false, false, true), CapsTap::Refused);
+        // Already recording: readiness is moot — the tap still STOPS (the model was ready
+        // when the recording started; a transient not-ready must never wedge a stop).
+        assert_eq!(
+            caps_tap_action(true, false, true, false),
+            CapsTap::StopRecord
+        );
+        assert_eq!(
+            caps_tap_action(true, false, true, true),
+            CapsTap::StopRecord
+        );
     }
 
     #[test]
@@ -1694,6 +1767,40 @@ mod tests {
         assert!(!d.is_recording(), "dictation off → the mic never opens");
         MockPlatform::tap(&mut d);
         assert!(!d.voice_paused, "second tap resumes the voice");
+    }
+
+    #[test]
+    fn refused_start_on_but_not_ready_never_pauses_the_voice() {
+        // Regression for issue #1: dictation ON (`built_in` selected) but the model still
+        // downloading/loading. Reaching that state needs a REAL `ttsq` —
+        // `stt_ready_to_dictate` short-circuits to plain on/off whenever `ttsq` is `None`,
+        // which is why no other engine-level test could ever hit this branch. The stub's
+        // fresh `TtsManager` reports Parakeet not resident, so the tap is refused — and a
+        // refused tap must leave the voice strictly alone: the old shared pause path had
+        // no matching resume when the model came ready, silencing TTS for the whole
+        // download window.
+        let mut d = mk(600);
+        d.cfg.stt_engine = Some(vec![ds_config::SttEngine::BuiltIn]);
+        let q = crate::ttsq::TtsQueue::test_stub();
+        d.ttsq = Some(q.clone());
+        MockPlatform::tap(&mut d);
+        assert!(!d.is_recording(), "not ready → the mic must not open");
+        assert!(
+            !d.voice_paused,
+            "a refused start must not flip the pause latch"
+        );
+        assert!(
+            !q.is_paused(),
+            "a refused start must not pause the TTS queue"
+        );
+        assert!(
+            d.paste.lock().unwrap().refused_until.is_some(),
+            "the visual refusal cue still fires (unchanged behavior)"
+        );
+        // Tap-happy user during the download: every further tap stays a pure refusal —
+        // in particular the second tap must not RESUME-toggle its way into weird states.
+        MockPlatform::tap(&mut d);
+        assert!(!d.voice_paused && !q.is_paused() && !d.is_recording());
     }
     use crate::config_gate::DEFAULT_LONG_PRESS_MS;
     use ds_platform::{CapsEdge, CapsKeyMonitor, FrontmostWindow, KeyInjector, PreflightError};

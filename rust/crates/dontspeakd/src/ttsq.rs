@@ -346,6 +346,50 @@ impl TtsQueue {
         q
     }
 
+    /// Build a queue WITHOUT spawning its worker thread (unlike [`TtsQueue::start`]) — the
+    /// "real-enough" double for tests in OTHER modules that need `ttsq: Some(..)` (the
+    /// fields here are private, so `engine.rs`'s tests can't build one themselves). The
+    /// `TtsManager` points at a nonexistent helper binary and is never started — the same
+    /// "safe to call while stopped" stub `tts.rs`'s own `status_gate_tests::mk()` uses; a
+    /// fresh manager reports `stt_loaded() == false`, so an engine holding this queue is
+    /// exactly ON-but-NOT-READY for `built_in`. The `TempDir` behind `paths` is dropped on
+    /// return — fine, nothing here ever reads those paths.
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> Arc<Self> {
+        let dir = tempfile::tempdir().unwrap();
+        let tts = Arc::new(TtsManager::new(
+            dir.path().join("ds-test-nonexistent-helper"),
+            Arc::new(crate::stats::TtsStats::new()),
+            Arc::new(crate::stats::SttStats::new()),
+            Arc::new(crate::stats::LifetimeSeconds::load(
+                dir.path().join("ds-ttsq-test-lifetime.json"),
+            )),
+        ));
+        // A real (briefly-lived) mic watcher: `MicState` has no other constructor. Dropped
+        // immediately — the handle just freezes at its last (safe) reading.
+        let mic = ds_platform::MicWatcher::spawn(|_| {}).handle();
+        Arc::new(TtsQueue {
+            items: Mutex::new(VecDeque::new()),
+            cv: Condvar::new(),
+            generation: AtomicU64::new(0),
+            paused: Mutex::new(PausedState::default()),
+            cancel_kind: Mutex::new(HashMap::new()),
+            tts_active: AtomicBool::new(false),
+            terminal_front: AtomicBool::new(true),
+            terminal_seen: AtomicBool::new(false),
+            pause_in_background: AtomicBool::new(false),
+            pool_assignments: Mutex::new(HashMap::new()),
+            active: Mutex::new(ActiveSel::default()),
+            last_voice_submit: Mutex::new(None),
+            playing_session: Mutex::new(None),
+            tts,
+            paths: Paths::rooted_at(dir.path()),
+            gate: StatusGate::new(),
+            mic,
+            healing: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
     /// Enqueue one unit of speech onto the FIFO. Empty text is ignored. There is no cap
     /// and no kind: callers (explicit `speak`, the greeting, and mid-turn narration) all
     /// land here and are played in order. `voice`/`rate` are optional per-call overrides
@@ -700,8 +744,9 @@ impl TtsQueue {
     }
 
     /// Cheap read of the live pause flag (cause-agnostic) — used by the worker's
-    /// dequeue loop and by `requeue_if_resuming`'s defensive fallback.
-    fn is_paused(&self) -> bool {
+    /// dequeue loop, by `requeue_if_resuming`'s defensive fallback, and by `engine.rs`'s
+    /// refused-start regression test (hence `pub(crate)`).
+    pub(crate) fn is_paused(&self) -> bool {
         self.paused.lock().unwrap().paused
     }
 
@@ -1315,53 +1360,13 @@ mod tests {
         assert_ne!(greeting_line(None, 0), greeting_line(None, 1)); // rotates
     }
 
-    /// A fully test-isolated `Paths` (no dependency on the real `$HOME`) — the inert
-    /// `rooted_at` fallback (same constructor `boot.rs`'s own tests use) is enough since
-    /// the `record_cancel_kind`/`requeue_if_resuming` tests below never touch `q.paths`
-    /// fields at all, only that `TtsQueue` has a validly-constructed `Paths` to hold.
-    fn test_paths(dir: &std::path::Path) -> Paths {
-        Paths::rooted_at(dir)
-    }
-
-    /// Build a `TtsQueue` WITHOUT spawning its worker thread (unlike [`TtsQueue::start`]) —
-    /// these tests exercise `record_cancel_kind`/`requeue_if_resuming` directly, so a live
-    /// worker would be pure risk (an unrelated thread touching `items`/`cancel_kind`) for zero
-    /// benefit. The `TtsManager` points at a nonexistent helper binary and is never started —
-    /// the same "safe to call while stopped" stub `tts.rs`'s own `status_gate_tests::mk()` uses.
+    /// Build a `TtsQueue` WITHOUT spawning its worker thread — these tests exercise
+    /// `record_cancel_kind`/`requeue_if_resuming` directly, so a live worker would be pure
+    /// risk (an unrelated thread touching `items`/`cancel_kind`) for zero benefit. Thin
+    /// alias for [`TtsQueue::test_stub`] (which moved out of this module so `engine.rs`'s
+    /// tests can build one too — the fields are private to this file).
     fn mk_queue() -> Arc<TtsQueue> {
-        let dir = tempfile::tempdir().unwrap();
-        let tts = Arc::new(TtsManager::new(
-            dir.path().join("ds-test-nonexistent-helper"),
-            Arc::new(crate::stats::TtsStats::new()),
-            Arc::new(crate::stats::SttStats::new()),
-            Arc::new(crate::stats::LifetimeSeconds::load(
-                dir.path().join("ds-ttsq-test-lifetime.json"),
-            )),
-        ));
-        // A real (briefly-lived) mic watcher: `MicState` has no other constructor. Dropped
-        // immediately — the handle just freezes at its last (safe) reading, which these
-        // tests never read anyway.
-        let mic = ds_platform::MicWatcher::spawn(|_| {}).handle();
-        Arc::new(TtsQueue {
-            items: Mutex::new(VecDeque::new()),
-            cv: Condvar::new(),
-            generation: AtomicU64::new(0),
-            paused: Mutex::new(PausedState::default()),
-            cancel_kind: Mutex::new(HashMap::new()),
-            tts_active: AtomicBool::new(false),
-            terminal_front: AtomicBool::new(true),
-            terminal_seen: AtomicBool::new(false),
-            pause_in_background: AtomicBool::new(false),
-            pool_assignments: Mutex::new(HashMap::new()),
-            active: Mutex::new(ActiveSel::default()),
-            last_voice_submit: Mutex::new(None),
-            playing_session: Mutex::new(None),
-            tts,
-            paths: test_paths(dir.path()),
-            gate: StatusGate::new(),
-            mic,
-            healing: Arc::new(AtomicBool::new(false)),
-        })
+        TtsQueue::test_stub()
     }
 
     /// Build a throwaway narration `Item` with the given text (voice/rate/session unused by
