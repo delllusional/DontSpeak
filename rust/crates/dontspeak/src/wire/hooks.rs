@@ -120,6 +120,7 @@ pub(crate) fn claude_json_hooks(
     streaming: bool,
     remove: bool,
     print_only: bool,
+    paths: &Paths,
 ) -> i32 {
     let Ok(existing) = io::read_json_or_bail("wire", cfg) else {
         return 1;
@@ -128,7 +129,7 @@ pub(crate) fn claude_json_hooks(
     let merged = if remove {
         Ok(ds_config::strip_hooks(existing))
     } else {
-        let Some(bin) = io::resolve_dontspeak_bin() else {
+        let Some(bin) = io::resolve_dontspeak_bin_at(Some(paths)) else {
             eprintln!("wire: could not resolve the dontspeak binary path");
             return 1;
         };
@@ -192,12 +193,17 @@ fn hook_action(remove: bool) -> &'static str {
 /// spec) and `Stop`→`notify` (speak the reply). Format-preserving (toml_edit). Returns 0 on
 /// success, 1 on a hard error; a malformed config is reported and left UNCHANGED (it's the
 /// user's file), which is non-fatal.
-pub(crate) fn claude_toml_hooks(cfg: &std::path::Path, remove: bool, print_only: bool) -> i32 {
+pub(crate) fn claude_toml_hooks(
+    cfg: &std::path::Path,
+    remove: bool,
+    print_only: bool,
+    paths: &Paths,
+) -> i32 {
     let existing = std::fs::read_to_string(cfg).unwrap_or_default();
     let result = if remove {
         ds_config::strip_codex_hooks(&existing)
     } else {
-        let Some(bin) = io::resolve_dontspeak_bin() else {
+        let Some(bin) = io::resolve_dontspeak_bin_at(Some(paths)) else {
             eprintln!("wire: could not resolve the dontspeak binary path");
             return 1;
         };
@@ -270,29 +276,23 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(cfg).unwrap()).unwrap()
     }
 
-    // NOTE on every non-`--remove` test below (the ones that call `claude_json_hooks`/
-    // `claude_toml_hooks` with `remove: false`): that path unconditionally calls
-    // `io::resolve_dontspeak_bin()` before touching the tempdir-scoped `cfg` at all. On unix
-    // this calls the REAL `ds_config::Paths::resolve()` (real `$HOME` via `BaseDirs::new()`)
-    // and does a real, READ-ONLY `.exists()` check against `$HOME/.local/bin/dontspeak` on the
-    // machine actually running the test — mirroring the disclosure already given for
-    // `wire::mod`'s `list_flag_exits_zero` test. This is benign: the check never writes
-    // anything, and none of these tests assert on the literal resolved path — only that a
-    // `dontspeak`-named binary ends up as the hook command's basename, or that a byte count/
-    // idempotence property holds — so whatever `$HOME` happens to contain on this machine can't
-    // change the assertions below.
+    // Every test below now builds its own `Paths::rooted_at(dir.path())` (see each test) and
+    // threads it through `claude_json_hooks`/`claude_toml_hooks` into
+    // `io::resolve_dontspeak_bin_at`, so the unix stable-install-path check is scoped to the
+    // tempdir — none of these tests touch the real `$HOME`/`BaseDirs` any more.
 
     #[test]
     fn claude_json_hooks_wires_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
+        let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, false, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 0);
         let v = read_json(&cfg);
         assert_eq!(v["hooks"]["MessageDisplay"].as_array().unwrap().len(), 1);
 
         // Re-run: REPLACE-OURS merge must not duplicate the group.
-        assert_eq!(claude_json_hooks(&cfg, true, false, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 0);
         let v2 = read_json(&cfg);
         assert_eq!(v2["hooks"]["MessageDisplay"].as_array().unwrap().len(), 1);
     }
@@ -301,9 +301,10 @@ mod tests {
     fn claude_json_hooks_remove_strips_previously_wired_hooks() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
+        let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, false, false), 0);
-        assert_eq!(claude_json_hooks(&cfg, true, true, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, true, false, &paths), 0);
 
         let v = read_json(&cfg);
         // `strip_hooks` drops an event array once it's emptied of our groups, and drops the
@@ -315,11 +316,12 @@ mod tests {
     fn claude_json_hooks_malformed_json_errors_and_is_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
+        let paths = Paths::rooted_at(dir.path());
         let raw = b"{ not json";
         std::fs::write(&cfg, raw).unwrap();
 
         // Fails in `io::read_json_or_bail` itself — never reaches `resolve_dontspeak_bin`.
-        assert_eq!(claude_json_hooks(&cfg, true, false, false), 1);
+        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 1);
         assert_eq!(std::fs::read(&cfg).unwrap(), raw);
     }
 
@@ -327,13 +329,14 @@ mod tests {
     fn claude_json_hooks_unmergeable_event_shape_is_left_unchanged_non_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
+        let paths = Paths::rooted_at(dir.path());
         // `hooks.MessageDisplay` as an object (not an array) is a hand-edited/foreign shape
         // `merge_hooks` refuses to clobber → `HooksMergeError::UnmergeableShape`, the first
         // canonical event merge tried, so this never reaches the write call.
         let raw = r#"{"hooks":{"MessageDisplay":{"not":"an array"}}}"#;
         std::fs::write(&cfg, raw).unwrap();
 
-        assert_eq!(claude_json_hooks(&cfg, true, false, false), 0); // non-fatal
+        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 0); // non-fatal
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw); // byte-identical
     }
 
@@ -341,8 +344,9 @@ mod tests {
     fn claude_json_hooks_print_only_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
+        let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, false, true), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, false, true, &paths), 0);
         assert!(!cfg.exists());
     }
 
@@ -354,8 +358,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("blocked"), b"not a directory").unwrap();
         let cfg = dir.path().join("blocked").join("settings.json");
+        let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, false, false), 1);
+        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 1);
     }
 
     /// Non-streaming wire (Qwen Code): `MessageDisplay` is omitted, but the same idempotent +
@@ -365,8 +370,9 @@ mod tests {
     fn claude_json_hooks_non_streaming_omits_messagedisplay() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
+        let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, false, false, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, false, false, false, &paths), 0);
         let v = read_json(&cfg);
         assert!(
             v["hooks"].get("MessageDisplay").is_none(),
@@ -380,9 +386,9 @@ mod tests {
             );
         }
         // Idempotent.
-        assert_eq!(claude_json_hooks(&cfg, false, false, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, false, false, false, &paths), 0);
         // Strips cleanly (remove removes every DontSpeak group regardless of streaming).
-        assert_eq!(claude_json_hooks(&cfg, false, true, false), 0);
+        assert_eq!(claude_json_hooks(&cfg, false, true, false, &paths), 0);
         assert!(read_json(&cfg).get("hooks").is_none());
     }
 
@@ -390,12 +396,13 @@ mod tests {
     fn claude_toml_hooks_wires_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_toml_hooks(&cfg, false, false), 0);
+        assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);
         let first = std::fs::read_to_string(&cfg).unwrap();
 
         // Re-run: an unchanged command is a true byte-for-byte no-op (see `codex_group_matches`).
-        assert_eq!(claude_toml_hooks(&cfg, false, false), 0);
+        assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);
         let second = std::fs::read_to_string(&cfg).unwrap();
         assert_eq!(first, second);
     }
@@ -404,9 +411,10 @@ mod tests {
     fn claude_toml_hooks_remove_strips_previously_wired_hooks() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_toml_hooks(&cfg, false, false), 0);
-        assert_eq!(claude_toml_hooks(&cfg, true, false), 0);
+        assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);
+        assert_eq!(claude_toml_hooks(&cfg, true, false, &paths), 0);
 
         let text = std::fs::read_to_string(&cfg).unwrap();
         assert!(!text.contains("dontspeak"));
@@ -416,11 +424,12 @@ mod tests {
     fn claude_toml_hooks_remove_on_missing_file_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
 
         // `existing` is `unwrap_or_default()` on the missing-file read → "", and
         // `strip_codex_hooks("")` short-circuits `Ok("")` before ever calling
         // `resolve_dontspeak_bin` (that call is skipped entirely on the `remove` path anyway).
-        assert_eq!(claude_toml_hooks(&cfg, true, false), 0);
+        assert_eq!(claude_toml_hooks(&cfg, true, false, &paths), 0);
         assert!(!cfg.exists());
     }
 
@@ -428,11 +437,12 @@ mod tests {
     fn claude_toml_hooks_malformed_toml_is_left_unchanged_non_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
         let raw = "hooks = [not valid toml";
         std::fs::write(&cfg, raw).unwrap();
 
         // `CodexMergeError::Parse` → the final `Err(e)` arm: reported, non-fatal, unchanged.
-        assert_eq!(claude_toml_hooks(&cfg, false, false), 0);
+        assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
     }
 
@@ -440,8 +450,9 @@ mod tests {
     fn claude_toml_hooks_print_only_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_toml_hooks(&cfg, false, true), 0);
+        assert_eq!(claude_toml_hooks(&cfg, false, true, &paths), 0);
         assert!(!cfg.exists());
     }
 
@@ -452,8 +463,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("blocked"), b"not a directory").unwrap();
         let cfg = dir.path().join("blocked").join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_toml_hooks(&cfg, false, false), 1);
+        assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 1);
     }
 
     #[test]

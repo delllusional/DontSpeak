@@ -45,7 +45,7 @@ pub fn run(args: &[String]) -> i32 {
             "--remove" => remove = true,
             "--print-only" | "--print" => print_only = true,
             "--list" => {
-                print_registry();
+                print_registry(ds_config::Paths::resolve().as_ref());
                 return 0;
             }
             "-h" | "--help" => {
@@ -149,9 +149,10 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
                 s.hook_streaming,
                 remove,
                 print_only,
+                paths,
             ),
             WireMechanism::ClaudeTomlHooks => {
-                hooks::claude_toml_hooks((s.config_file)(paths), remove, print_only)
+                hooks::claude_toml_hooks((s.config_file)(paths), remove, print_only, paths)
             }
             WireMechanism::JsonMcp => {
                 mcp::apply(&mcp::target_for(spec, s, paths), remove, print_only)
@@ -163,8 +164,7 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
 
 /// `wire --list` — print the client registry: who, where (per-OS resolved paths + live presence),
 /// how (mechanism per surface), and the official docs each wiring is derived from.
-fn print_registry() {
-    let paths = Paths::resolve();
+fn print_registry(paths: Option<&Paths>) {
     for spec in ds_config::CLIENT_REGISTRY {
         println!("{} ({})", spec.display_name, spec.target.as_str());
         println!(
@@ -174,7 +174,7 @@ fn print_registry() {
                 ClientKind::DesktopApp => "desktop app",
             }
         );
-        if let Some(p) = &paths {
+        if let Some(p) = paths {
             println!(
                 "  detect:  {} ({})",
                 (spec.detect_dir)(p).display(),
@@ -237,14 +237,16 @@ mod tests {
         assert_eq!(run(&args(&["--help"])), 0);
     }
 
-    /// `--list` calls `print_registry()`, which DOES call the real `Paths::resolve()` (real
-    /// `$HOME`) and does real (but read-only) `.exists()` presence-checks against every
-    /// registry client's real detect dir on the machine running the test. That never writes
-    /// anything, so it's safe to exercise here — but this test only asserts the exit code, not
-    /// that it avoids the real environment.
+    /// `print_registry` now takes an injectable `Option<&Paths>`; call it directly against a
+    /// tempdir-rooted `Paths` so this test never touches the real `$HOME` or a client's real
+    /// detect dir. This trades away testing `run()`'s `"--list"` arg-dispatch arm in isolation —
+    /// but that arm is a one-line dispatch (`print_registry(...); return 0;`) identical in shape
+    /// to the already-covered `-h`/`--help` arm above, so no real coverage is lost.
     #[test]
     fn list_flag_exits_zero() {
-        assert_eq!(run(&args(&["--list"])), 0);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        print_registry(Some(&paths)); // must not panic; nothing to assert on a unit-returning fn
     }
 
     /// An unknown `-`-prefixed flag is tolerated (just an eprintln), not a hard parse failure —

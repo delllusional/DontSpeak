@@ -117,6 +117,17 @@ pub fn apply(target: &Target, remove: bool, print_only: bool) -> i32 {
     code
 }
 
+// Known, separate, OUT-OF-SCOPE leak (not fixed by the io.rs/hooks.rs test-isolation pass):
+// `apply` with `remove: false` calls `io::resolve_dontspeak_bin()` (unparameterized — see that
+// fn's doc comment), which resolves the REAL `ds_config::Paths::resolve()` (real `$HOME`) and
+// does a real, READ-ONLY `.exists()` check against `$HOME/.local/bin/dontspeak` on the machine
+// running the test. `registers_into_missing_file_then_is_idempotent`,
+// `preserves_sibling_servers_and_unrelated_top_level_keys`, and
+// `backs_up_before_overwriting_an_existing_file` below all call `apply(..., present: true, remove:
+// false, ...)` and so hit this path. Benign (read-only, never asserted on) and identical in
+// character to the leaks fixed elsewhere in this crate — flagged here rather than fixed because
+// `apply`/`Target` don't yet take an injectable `Paths` param; a future pass could add one
+// alongside `io::resolve_dontspeak_bin_at`.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,6 +6,7 @@
 //! compose these; a new mechanism writer starts from here instead of copy-pasting them a
 //! fourth time.
 
+use ds_config::Paths;
 use serde_json::Value;
 use std::path::Path;
 
@@ -18,15 +19,29 @@ use std::path::Path;
 /// binary beside THIS exe, so a stale dev-deploy copy in `~/.local/bin` must not SHADOW the
 /// installed one. Fall back to this exe's own directory (the package lays the binaries down
 /// together, so the sibling path is correct even before it exists).
+///
+/// Real-env entry point used by production callers (`hooks::claude_json_hooks`/
+/// `claude_toml_hooks` via their own `paths: &Paths` param, and `mcp.rs`'s own call which
+/// stays unparameterized — out of scope here). Resolves `Paths` fresh from the real `$HOME`.
 pub(crate) fn resolve_dontspeak_bin() -> Option<String> {
+    resolve_dontspeak_bin_at(Paths::resolve().as_ref())
+}
+
+/// Injectable core: same resolution, but a caller (a test) can pass a tempdir-rooted `Paths`
+/// instead of ever touching the real `$HOME`/`BaseDirs`. `None` (no `$HOME`, or the caller
+/// deliberately withholds it) skips the unix stable-install-path check and falls straight to
+/// the sibling-of-this-exe fallback.
+pub(crate) fn resolve_dontspeak_bin_at(paths: Option<&Paths>) -> Option<String> {
     let file = format!("dontspeak{}", std::env::consts::EXE_SUFFIX);
     #[cfg(unix)]
-    if let Some(p) = ds_config::Paths::resolve() {
+    if let Some(p) = paths {
         let cand = p.home.join(".local/bin").join(&file);
         if cand.exists() {
             return Some(cand.to_string_lossy().into_owned());
         }
     }
+    #[cfg(not(unix))]
+    let _ = paths; // unused on non-unix builds (Windows) — avoid an unused-variable warning
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.join(&file).to_string_lossy().into_owned())
 }

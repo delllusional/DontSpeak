@@ -279,8 +279,7 @@ mod tests {
     }
 
     fn test_paths() -> ds_config::Paths {
-        ds_config::Paths::resolve()
-            .unwrap_or_else(|| ds_config::Paths::rooted_at(&std::env::temp_dir()))
+        ds_config::Paths::rooted_at(&std::env::temp_dir())
     }
 
     // ── TTS engine → box MAPPING (pure, ladder-free: arch-independent) ──────
