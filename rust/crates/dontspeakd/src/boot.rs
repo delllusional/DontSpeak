@@ -205,7 +205,7 @@ pub fn engine_run(
     // channel surfaced through `model_status`.
     let stt_active = Arc::new(AtomicBool::new(false));
     let caps_log: CapsLog = Arc::new(Mutex::new(VecDeque::new()));
-    // Dictation-preview buffer shared between the engine (writes partials/pending,
+    // Dictation-preview buffer shared between the engine (writes partials/finals,
     // pastes on confirm) and the IPC status handler (reads it for the `dictation`
     // object the confirm panel renders).
     let paste: PasteState = Arc::new(Mutex::new(PasteBuf::default()));
@@ -327,7 +327,7 @@ pub fn engine_run(
     // engine's dictation-change bumps wake the app's overlay push thread.
     daemon.status_gate = Some(status_gate.clone());
     // Share the SAME preview buffer the IPC status handler reads, so partials the
-    // helper writes and the `pending` transcript are visible to the confirm panel.
+    // helper writes and the landed final transcript are visible to the confirm panel.
     daemon.paste = paste.clone();
     // Parakeet dictation runs THROUGH the warm helper now (consolidation): rebuild
     // the stt as HelperStt now that daemon.tts is set (with_config built the default).

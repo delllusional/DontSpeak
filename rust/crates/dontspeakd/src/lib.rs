@@ -78,6 +78,6 @@ pub use boot::{EngineError, engine_run};
 
 // Crate-root re-exports so the sibling modules that pre-date the split keep
 // resolving their historical paths without edits: `crate::log(...)` (the function,
-// not the `logging` module) and `crate::{PasteBuf, PasteState}`.
-pub(crate) use engine::{PasteBuf, PasteState};
+// not the `logging` module) and `crate::{FinalState, PasteBuf, PasteState}`.
+pub(crate) use engine::{FinalState, PasteBuf, PasteState};
 pub(crate) use logging::log;

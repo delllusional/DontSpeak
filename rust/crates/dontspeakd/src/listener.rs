@@ -216,9 +216,12 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
                 }
             } else {
                 p.partial.clear();
-                p.pending = None;
+                // Equivalent to the old pending/final_ready clear: the Caps PTT's
+                // armed confirm state is always torn down before Always mode runs
+                // (`reload` calls `teardown_hold` before building the listener), so
+                // `final_state` here is never `Armed` — this only wipes a stale final.
+                p.final_state = crate::FinalState::Idle;
                 p.target = None;
-                p.final_ready = false;
             }
         }
     }

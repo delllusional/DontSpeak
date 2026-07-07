@@ -1,5 +1,8 @@
 //! The `Engine<P>` gesture state machine: the Caps-Lock "tap to dictate, hold to
-//! cancel" loop, plus the shared dictation-preview buffer it drives.
+//! cancel" loop, plus the shared dictation-preview buffer it drives. The states are
+//! explicit enums: [`GestureState`] (idle / recording / deferred-submit armed),
+//! [`PressState`] (the physical Caps press in flight), and [`FinalState`] (the
+//! preview buffer's finalize lifecycle).
 
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,26 +32,56 @@ use crate::ttsq::TtsQueue;
 /// does). Never armed when idle from silence, so starting dictation stays zero-latency.
 const DOUBLE_TAP_MS: u64 = 280;
 
+/// Where the dictation-preview buffer's finalized transcript is in its
+/// stop-tap → finalize → paste/disarm lifecycle. Replaces three loose fields
+/// (`pending: Option<String>`, `final_ready: bool`, and a `confirm_armed` mirror of
+/// the engine's own latch): the armed flag and the landed text are now ONE value, so
+/// a stale mirror can no longer outlive a disarm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FinalState {
+    /// No stop tap armed, no final landed. The panel shows the live partial (not
+    /// confirm mode).
+    Idle,
+    /// Mirrors the engine's [`GestureState::ConfirmArmed`]: the stop tap has fired,
+    /// but the (possibly async, seconds-long for the local engine) final transcript
+    /// hasn't landed yet. [`dictation_preview`] treats this the same as a landed final
+    /// (falling back to the still-fresh `partial`) so the panel stays up CONTINUOUSLY
+    /// across the stop-tap → finalize → paste/cancel window — otherwise `recording`
+    /// flips false immediately on the tap while the final trails behind, and the panel
+    /// hides then reappears once it lands (the flicker this state bridges).
+    Armed,
+    /// The finalized transcript landed non-empty, awaiting the confirm paste (was
+    /// `pending: Some` + `final_ready`).
+    Ready(String),
+    /// The final landed EMPTY — nothing to submit; the tick disarms without pasting
+    /// (was `pending: None` + `final_ready: true`). Still reads as "awaiting" to
+    /// [`dictation_preview`] until [`PasteBuf::disarm`] drops it, exactly as the old
+    /// mirror stayed true between the deposit and the tick's disarm.
+    Empty,
+}
+
 /// Shared dictation-preview buffer — the engine ↔ confirm-panel channel.
 ///
 /// While recording, `HelperStt` mirrors each PARTIAL transcript into `partial`.
-/// On Caps-OFF it deposits the finalized transcript into `pending` (Some ⇒ the
+/// On Caps-OFF it deposits the finalized transcript into `final_state` (`Ready` ⇒ the
 /// confirm panel is up). Confirm-before-paste is unconditional: the engine pastes
-/// `pending` on the user's confirm tap and clears it on cancel (long-press).
+/// the `Ready` text on the user's confirm tap and clears it on cancel (long-press).
 /// `target` is the app frontmost when recording started, shown in
 /// the panel. Surfaced to the app via `model_status` (the `dictation` object).
 /// Manual `Default` (not derived) so `has_paste_target` starts true (fail-open).
 pub(crate) struct PasteBuf {
-    /// Live partial transcript, updated as the helper emits PARTIAL lines.
+    /// Live partial transcript, updated as the helper emits PARTIAL lines. A plain
+    /// field, deliberately NOT folded into [`FinalState`]: it is a live mirror of the
+    /// helper's PARTIAL stream, written by a detached thread with no gesture
+    /// knowledge, and it coexists with every finalize state (held + finalized still
+    /// shows the — cleared — partial; see [`dictation_preview`]).
     pub partial: String,
-    /// Finalized transcript awaiting the confirm tap (Some ⇒ panel in confirm mode).
-    pub pending: Option<String>,
+    /// The finalize lifecycle: stop tap armed / final landed / landed empty. See
+    /// [`FinalState`]. Transitions go through [`PasteBuf::arm`]/[`PasteBuf::disarm`]
+    /// (the engine side) and the direct deposits in `helper_stt`/`listener`.
+    pub final_state: FinalState,
     /// Name of the app focused when recording started (the paste target).
     pub target: Option<String>,
-    /// Set true by the async listen-joiner when the deferred final transcript has
-    /// landed (text OR empty), so the poll loop can fire the armed auto-submit — or
-    /// disarm it on an empty result — without ever blocking on the transcription.
-    pub final_ready: bool,
     /// LIVE: whether an editable text field is currently focused to receive the paste
     /// (the engine poll thread samples `Platform::has_paste_target` each tick while
     /// the dictation panel is up). The app reads it in `model_status` and tints the
@@ -56,26 +89,18 @@ pub(crate) struct PasteBuf {
     /// spurious warning before the first sample).
     pub has_paste_target: bool,
     /// LIVE: is the Caps key physically held right now (mirrored from the poll loop each
-    /// tick)? While held, `model_status` does NOT surface the finalized `pending`
+    /// tick)? While held, `model_status` does NOT surface the finalized `Ready`
     /// transcript: the press might still become a long-press CANCEL, and showing the
     /// finalized text only to discard it ~`long_press_ms` later is the "reappear then
     /// dismiss" flicker. The transcript is revealed/submitted on RELEASE (a confirmed
     /// tap), or discarded by the long-press reset — never flashed mid-press.
     pub caps_held: bool,
-    /// Mirrors `Engine::confirm_armed`: the stop tap has armed the deferred submit, even
-    /// before the (possibly async, seconds-long for the local engine) final transcript has
-    /// landed as `pending`. `dictation_preview` treats this the same as a landed `pending`
-    /// (falling back to the still-fresh `partial`) so the panel stays up CONTINUOUSLY across
-    /// the stop-tap → finalize → paste/cancel window — otherwise `recording` flips false
-    /// immediately on the tap while `pending` trails behind, and the panel hides then
-    /// reappears once the final lands (the flicker this field closes).
-    pub confirm_armed: bool,
     /// Monotonic dictation-session counter. Bumped at every session boundary — a new
     /// `HelperStt::start`, an `abort`, a `teardown_hold` (engine hot-swap), a
     /// `cancel_all`, or a fresh `start_recording`. `HelperStt::stop` finalizes the
     /// transcript on a DETACHED joiner thread (the Parakeet final pass is slow), so by
     /// the time it lands the buffer may belong to a different session: the joiner stamps
-    /// the epoch it started under and deposits `pending`/`final_ready` ONLY if it still
+    /// the epoch it started under and deposits the final ONLY if it still
     /// matches — otherwise a stale final would overwrite a cleared buffer or a newer
     /// session's live partials.
     pub epoch: u64,
@@ -89,16 +114,43 @@ pub(crate) struct PasteBuf {
     pub refused_until: Option<Instant>,
 }
 
+impl PasteBuf {
+    /// Arm the confirm window on the stop tap: `Idle → Armed`. Deliberately a NO-OP on
+    /// `Ready`/`Empty`: the detached joiner may deposit the final in the instants
+    /// between `stt.stop()` and this arm (both run inside `stop_recording`), and
+    /// arming must not downgrade the already-landed final back to `Armed` — exactly as
+    /// the old unconditional mirror-set never clobbered `pending`. Unit-tested
+    /// directly (`paste_buf_arm_does_not_downgrade_a_landed_final`).
+    fn arm(&mut self) {
+        if matches!(self.final_state, FinalState::Idle) {
+            self.final_state = FinalState::Armed;
+        }
+    }
+
+    /// Drop the confirm window: `Armed | Empty → Idle`, leaving `Ready` untouched.
+    /// The strictly-equivalent mapping of the old mirror clear: `disarm_confirm`
+    /// cleared only the mirror bool, and a landed `pending` alone kept `awaiting`
+    /// true — every real call site has already taken/cleared the text first, so
+    /// "leave `Ready` alone" is unobservable in practice but keeps the mapping exact.
+    /// (The war story the old design earned: one disarm site forgot to clear the
+    /// mirror and the dictation bar stuck visible forever while the tray icon
+    /// correctly went idle — with the armed flag and the landed text one enum, they
+    /// can no longer diverge.)
+    fn disarm(&mut self) {
+        if matches!(self.final_state, FinalState::Armed | FinalState::Empty) {
+            self.final_state = FinalState::Idle;
+        }
+    }
+}
+
 impl Default for PasteBuf {
     fn default() -> Self {
         Self {
             partial: String::new(),
-            pending: None,
+            final_state: FinalState::Idle,
             target: None,
-            final_ready: false,
             has_paste_target: true, // fail-open: no orange warning before the first probe
             caps_held: false,
-            confirm_armed: false,
             epoch: 0,
             refused_until: None,
         }
@@ -118,36 +170,103 @@ pub(crate) fn refusal_live(refused_until: Option<Instant>, now: Instant) -> bool
 }
 
 /// What the dictation panel should display, derived from the buffer state. Returns
-/// `(text, awaiting_confirm)`. The finalized `pending` transcript is surfaced ONLY when
+/// `(text, awaiting_confirm)`. The finalized `Ready` transcript is surfaced ONLY when
 /// the Caps key is NOT held: a held press might still become a long-press CANCEL, so
 /// flashing the finalized text for ~`long_press_ms` only to discard it (the "reappear then
-/// dismiss" glitch) is suppressed — `pending` is revealed on RELEASE (a confirmed tap) or
-/// discarded by the long-press reset.
+/// dismiss" glitch) is suppressed — it is revealed on RELEASE (a confirmed tap) or
+/// discarded by the long-press reset. While the final hasn't landed yet, `Armed` keeps
+/// `awaiting_confirm` true too, showing the still-fresh `partial` in its place (the
+/// other side of the same flicker — see [`FinalState::Armed`]). Held always wins
+/// (suppresses both). PURE.
 ///
-/// While `pending` hasn't landed yet, `confirm_armed` (the stop tap has already fired —
-/// see `PasteBuf::confirm_armed`) keeps `awaiting_confirm` true too, showing the still-fresh
-/// `partial` in its place: without this, `recording` flips false the instant the stop tap
-/// releases while the (possibly async) final trails behind, and the panel would hide then
-/// reappear once it lands — the same disappear/dismiss flicker `caps_held` guards against,
-/// just on the other side of the gesture. Held always wins (suppresses both). PURE.
+/// Byte-identical mapping from the old `(pending, confirm_armed)` truth table
+/// (`pending: Some ⇒ (pending, true)`; `pending: None ⇒ (partial, confirm_armed)`):
+///   * `Ready(text)` ⇔ pending-Some ⇒ `(text, true)`;
+///   * `Armed` ⇔ pending-None + mirror-true ⇒ `(partial, true)`;
+///   * `Empty` ⇔ pending-None + mirror-true between the deposit and the tick's disarm
+///     (the deposit never cleared the mirror) ⇒ `(partial(=""), true)` — same row;
+///   * `Idle` ⇔ mirror-false ⇒ `(partial, false)`.
 pub(crate) fn dictation_preview(
-    pending: Option<&str>,
+    final_state: &FinalState,
     partial: &str,
     caps_held: bool,
-    confirm_armed: bool,
 ) -> (String, bool) {
     if caps_held {
         return (partial.to_string(), false);
     }
-    match pending {
-        Some(text) => (text.to_string(), true),
-        None => (partial.to_string(), confirm_armed),
+    match final_state {
+        FinalState::Ready(text) => (text.clone(), true),
+        FinalState::Armed | FinalState::Empty => (partial.to_string(), true),
+        FinalState::Idle => (partial.to_string(), false),
     }
 }
 
 /// Shared handle to the dictation-preview buffer (engine poll thread writes it,
 /// the listen thread mirrors partials, the IPC thread reads it for status).
 pub(crate) type PasteState = Arc<Mutex<PasteBuf>>;
+
+/// The engine's dictation-gesture mode — was two booleans (`holding`,
+/// `confirm_armed`) plus three confirm-scoped fields (`stop_tap_at`,
+/// `confirm_double_pending`, `enter_after_paste`) that every disarm site had to reset
+/// in lockstep. One enum makes the modes mutually exclusive by construction
+/// (`start_recording` always disarmed before/while recording; `stop_recording` always
+/// cleared the hold before arming, so `Recording` and `ConfirmArmed` never coexisted)
+/// and scopes the confirm sub-state to the one variant it is meaningful in — the
+/// "every disarm site must reset all four" rule is now structural: a stray
+/// window/flag from one dictation can no longer leak into the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GestureState {
+    /// No dictation in flight, no deferred submit armed.
+    Idle,
+    /// Dictation recording (mic open / delegated engine driving) — toggled on the
+    /// start TAP, off on the stop TAP. Tracked so the start tap can barge-in TTS and
+    /// publish the live dot.
+    Recording,
+    /// The stop tap fired and armed the deferred submit (engines that defer their
+    /// paste); the (possibly async, seconds-long) final hasn't necessarily landed
+    /// yet — [`Engine::tick`] pastes once it does, or disarms on an empty final.
+    /// Deliberately ONE variant, not window-open/window-closed: the flip double-tap
+    /// window closes by TIME passing, evaluated lazily (`deferred_submit_held` /
+    /// `apply_caps_edge`), not by an explicit tick-driven transition.
+    ConfirmArmed {
+        /// When the stop tap armed the deferred submit — the anchor of the flip
+        /// double-tap window: a SECOND tap within [`DOUBLE_TAP_MS`] of this instant
+        /// FLIPS the gesture's outcome (see `enter_after_paste`). While the window is
+        /// open the deferred submit in [`Engine::tick`] holds off so the double tap
+        /// can land first. `Some` while the flip gesture can still land; `None` once
+        /// a second tap consumed it — a LEGAL post-flip state (expiry is time-based
+        /// via `within_double_tap`, so it stays data, not a variant split).
+        stop_tap_at: Option<Instant>,
+        /// Latches when a Caps press BEGINS inside the stop tap's double-tap window —
+        /// that press is the second tap of the flip double (or a long-press cancel),
+        /// never a new recording. Consumed by the release; dropped with the variant
+        /// on any disarm.
+        double_pending: bool,
+        /// Whether this deferred submit still presses Enter after the paste. Armed on
+        /// the stop tap to `!cfg.double_tap_submits` (default config ⇒ true: a lone
+        /// tap submits); a second tap within the double-tap window TOGGLES it — the
+        /// gesture that isn't the armed default. Reset-to-default on disarm is
+        /// structural now (the value lives inside this variant).
+        enter_after_paste: bool,
+    },
+}
+
+/// The physical Caps press in flight — was `caps_down_since: Option<Instant>` +
+/// `long_press_fired: bool`. A SEPARATE enum from [`GestureState`], not variants of
+/// it: a press occurs in every gesture mode, so folding it in would cross-product
+/// the variants. The long-press latch is meaningful only while down, which the
+/// variant makes structural. There is deliberately no `LongPressResetting` state:
+/// `cancel_all` completes synchronously back to idle — the "this press was consumed
+/// by a long-press" memory is per-press, i.e. `long_press_fired`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PressState {
+    /// Key up.
+    Up,
+    /// Physical press in flight since `since`. `long_press_fired` latches when the
+    /// hold crossed `long_press_ms`, so the cancel fires exactly once per press —
+    /// and the release that ENDS a long-press is not mistaken for a tap.
+    Down { since: Instant, long_press_fired: bool },
+}
 
 /// The engine's mutable state + dependencies.
 ///
@@ -163,33 +282,39 @@ pub(crate) struct Engine<P: Platform + 'static> {
     pidfile: std::path::PathBuf,
     debug: bool,
 
-    /// Whether a dictation is active — toggled on the start TAP, off on the stop
-    /// TAP. Tracked so the start tap can barge-in TTS and publish the live dot.
-    holding: bool,
+    /// The dictation-gesture mode: idle / recording / deferred-submit armed. See
+    /// [`GestureState`]. The three fields below (`voice_paused`, `caps_phys_prev`,
+    /// `pending_tap_at`) are DELIBERATELY plain fields, not variants of it — each is
+    /// an orthogonal live fact that coexists with every mode (see their docs).
+    gesture: GestureState,
     /// Whether the voice is currently PAUSED by a Caps tap while dictation is OFF
     /// (`stt_engine = off`). With dictation off the mic never opens, but a tap still
     /// pauses the voice and the next tap resumes it — the SAME pause/resume gesture as
     /// the dictation path, so Caps means the same thing in both modes. Unused when
-    /// dictation is on (the `holding` record state drives pause/resume there).
+    /// dictation is on (the `Recording` state drives pause/resume there) — an
+    /// independent pause/resume axis, not a `GestureState` variant.
     voice_paused: bool,
     /// Last polled physical Caps state — the whole gesture machine (tap/hold/release)
     /// works off the down/up EDGES of this. The Caps LED is a pure OUTPUT we drive; it
     /// is never read back to decide state, so there's no latch/LED mirror to track.
+    /// A plain field: it's the polled-port edge detector (and the event-port mirror),
+    /// not gesture state.
     caps_phys_prev: bool,
 
     // ── §F long-press reset ─────────────────────────────────────────────────
     /// Physical Caps hold ≥ this (ms) force-resets to idle, LED off.
     long_press_ms: u64,
-    /// When the physical Caps key first went down (None = up).
-    caps_down_since: Option<Instant>,
-    /// Latch so a single sustained hold fires the reset exactly once — and so the
-    /// release that ENDS a long-press is not mistaken for a tap.
-    long_press_fired: bool,
+    /// The physical Caps press in flight (up, or down-since + the long-press latch).
+    /// See [`PressState`].
+    press: PressState,
     /// A Caps TAP whose action is DEFERRED while speech plays, to detect a DOUBLE-tap
     /// (skip the current message → next). `Some(release_instant)` after a first tap;
     /// the single fires from `tick` once `DOUBLE_TAP_MS` elapses with no second tap.
     /// `None` when idle or not speaking (then a tap acts immediately — no added latency
     /// on starting dictation from silence). See [`apply_caps_edge`](Self::apply_caps_edge).
+    /// Not folded into [`GestureState`]: it genuinely coexists with `Idle`,
+    /// `Recording` AND `ConfirmArmed` (the stop tap resumes the voice, so speech can
+    /// be playing again) — a variant per combination would cross-product the machine.
     pending_tap_at: Option<Instant>,
 
     // ── engine-owns-everything: last-applied config + subsystem gates ─────────
@@ -222,28 +347,12 @@ pub(crate) struct Engine<P: Platform + 'static> {
     // ── confirm-before-paste (dictation preview) ─────────────────────────────
     /// Shared dictation-preview buffer (live partials + the transcript awaiting
     /// confirmation + the paste target). `HelperStt` writes it; the engine pastes
-    /// `pending` on the confirm tap and clears it on cancel. Always present (cheap
-    /// default in tests, where no transcript is ever deposited).
+    /// the landed final on the confirm tap and clears it on cancel. Always present
+    /// (cheap default in tests, where no transcript is ever deposited). The
+    /// deferred-submit arming itself lives in `gesture`
+    /// ([`GestureState::ConfirmArmed`]) with its buffer mirror in
+    /// [`PasteBuf::final_state`].
     pub(crate) paste: PasteState,
-    /// Armed by the tap that STOPS a dictation, for engines that defer their paste:
-    /// the local-transcript engine deposits its final ASYNCHRONOUSLY, so `tick`
-    /// pastes `pending` once it lands (or disarms on an empty final). Cleared by
-    /// every cancel/teardown path via [`disarm_confirm`](Self::disarm_confirm).
-    confirm_armed: bool,
-    /// When the stop tap armed the deferred submit. A SECOND tap within
-    /// [`DOUBLE_TAP_MS`] of this instant FLIPS the gesture's outcome (see
-    /// `enter_after_paste`). While this window is open the deferred submit in
-    /// [`tick`](Self::tick) holds off so the double tap can land first.
-    stop_tap_at: Option<Instant>,
-    /// Latches when a Caps press BEGINS inside the stop tap's double-tap window —
-    /// that press is the second tap of the flip double (or a long-press cancel), never
-    /// a new recording. Consumed by the release; cleared on cancel.
-    confirm_double_pending: bool,
-    /// Whether this deferred submit still presses Enter after the paste. Armed on the
-    /// stop tap to `!cfg.double_tap_submits` (default config ⇒ true: a lone tap
-    /// submits); a second tap within the double-tap window TOGGLES it — the gesture
-    /// that isn't the armed default. Reset to true whenever the submit disarms.
-    enter_after_paste: bool,
 
     // ── status push gate (engine→app overlay PUSH) ───────────────────────────
     /// The shared push gate, bumped on each tick the dictation-overlay state changes
@@ -304,12 +413,11 @@ impl<P: Platform + 'static> Engine<P> {
             stt,
             pidfile,
             debug: debug_enabled(),
-            holding: false,
+            gesture: GestureState::Idle,
             voice_paused: false,
             caps_phys_prev: false,
             long_press_ms,
-            caps_down_since: None,
-            long_press_fired: false,
+            press: PressState::Up,
             pending_tap_at: None,
             cfg,
             // Starts `false` regardless of the computed `caps_enabled` — the call to
@@ -317,7 +425,7 @@ impl<P: Platform + 'static> Engine<P> {
             // physical Caps key, so "acquire only when starting enabled" is expressed
             // once, not re-derived here too (and here, again, on every future edit to
             // that rule). Safe post-construction: every OTHER field `set_caps_gate`
-            // touches (`holding`, `confirm_armed`, `caps_active`, `status_gate`) is still
+            // touches (`gesture`, `caps_active`, `status_gate`) is still
             // at its just-initialized default right below, so the call is a pure
             // acquire-or-not with no side effect on them.
             caps_enabled: false,
@@ -328,10 +436,6 @@ impl<P: Platform + 'static> Engine<P> {
             caps_log: None,
             listener: None,
             paste: Arc::new(Mutex::new(PasteBuf::default())),
-            confirm_armed: false,
-            stop_tap_at: None,
-            confirm_double_pending: false,
-            enter_after_paste: true,
             status_gate: None,
             dict_digest: 0,
             // `assemble`'s `stt` is always the ClaudeNative/factory engine (the test + fallback
@@ -347,6 +451,17 @@ impl<P: Platform + 'static> Engine<P> {
         if self.debug {
             log(s);
         }
+    }
+
+    /// Whether dictation is actively recording ([`GestureState::Recording`]).
+    fn is_recording(&self) -> bool {
+        matches!(self.gesture, GestureState::Recording)
+    }
+
+    /// Whether the stop tap has armed the deferred submit
+    /// ([`GestureState::ConfirmArmed`]) — the final may or may not have landed yet.
+    fn is_confirm_armed(&self) -> bool {
+        matches!(self.gesture, GestureState::ConfirmArmed { .. })
     }
 
     /// Bump the status push gate when the dictation-overlay PREVIEW changes, so a blocked
@@ -365,12 +480,7 @@ impl<P: Platform + 'static> Engine<P> {
             .paste
             .lock()
             .map(|p| {
-                let (t, a) = dictation_preview(
-                    p.pending.as_deref(),
-                    &p.partial,
-                    p.caps_held,
-                    p.confirm_armed,
-                );
+                let (t, a) = dictation_preview(&p.final_state, &p.partial, p.caps_held);
                 // LIVE refusal state folded into the digest: arming it (a refused Caps
                 // tap) AND its time-based expiry both change the hash, so the overlay's
                 // pop-up and its fade-out each get a push within one tick — no separate
@@ -428,22 +538,21 @@ impl<P: Platform + 'static> Engine<P> {
     /// Tear down an IN-FLIGHT dictation for an INTERNAL reason (a reload swapping the STT
     /// engine, or the caps gate going off mid-hold) — NOT a user cancel, so it does NOT
     /// silence the voice or barge. Aborts the listen and FULLY resets the recording state:
-    /// `holding`, the published `stt_active` (so the menu-bar icon doesn't stay "recording"
-    /// with no actual listen), the confirm latch, and the preview buffer. Idempotent when
+    /// the gesture mode, the published `stt_active` (so the menu-bar icon doesn't stay
+    /// "recording" with no actual listen), and the preview buffer. Idempotent when
     /// already idle. Callers that rebuild `self.stt` must invoke this BEFORE the swap (it
     /// aborts the CURRENT engine).
     fn teardown_hold(&mut self) {
-        if self.holding {
+        if self.is_recording() {
             self.stt.abort();
         }
-        self.holding = false;
-        self.disarm_confirm();
+        // One assignment ends the hold AND disarms any deferred submit — the confirm
+        // sub-state lives inside `ConfirmArmed`, so it can't survive this reset.
+        self.gesture = GestureState::Idle;
         if let Ok(mut p) = self.paste.lock() {
             p.partial.clear();
-            p.pending = None;
+            p.final_state = FinalState::Idle;
             p.target = None;
-            p.final_ready = false;
-            p.confirm_armed = false;
             // New session boundary: invalidate any in-flight `stop` joiner so its
             // late final can't repopulate this just-cleared buffer (the engine
             // hot-swap drops the old HelperStt, but its detached joiner survives).
@@ -451,45 +560,47 @@ impl<P: Platform + 'static> Engine<P> {
         }
         // Publish `stt_active = false` LAST: it bumps the status-push gate and can wake a
         // blocked status reader immediately, so the buffer must already be fully settled —
-        // otherwise that reader could see recording=false with a stale `pending`/
-        // `confirm_armed` from the torn-down session (see `stop_recording`'s identical
+        // otherwise that reader could see recording=false with a stale armed/landed
+        // `final_state` from the torn-down session (see `stop_recording`'s identical
         // ordering concern).
         self.set_stt_active(false);
     }
 
-    /// Drop the deferred-submit latch together with its insert-only double-tap
-    /// state — every disarm site must reset all four, or a stale window/flag from
-    /// one dictation leaks into the next.
+    /// Drop the deferred-submit latch: `ConfirmArmed → Idle`, with the whole
+    /// insert-only double-tap sub-state (`stop_tap_at`/`double_pending`/
+    /// `enter_after_paste`) dropped structurally — it lives inside the variant, so
+    /// "every disarm site must reset all four" no longer depends on discipline.
+    /// A NO-OP on `Recording` (`start_recording` calls this AFTER setting
+    /// `Recording` — the fresh session must not be knocked back to `Idle`).
     ///
-    /// Also clears the `PasteBuf::confirm_armed` MIRROR the bar's `awaiting_confirm` reads —
-    /// this is the one place that keeps the engine field and the mirror from ever diverging.
-    /// A prior version left every call site responsible for clearing the mirror itself; one
-    /// site (the tick's empty-final disarm) forgot to, and the dictation bar stuck visible
-    /// forever while `stt_active`/the tray icon correctly went idle. Callers that need the
-    /// mirror cleared EARLIER than this — `confirm_paste` clears it atomically with
-    /// `pending.take()`, before its synchronous paste/Enter syscalls, so a concurrent status
-    /// read never sees `pending=None, confirm_armed=true` mid-syscall — may still do so
-    /// themselves; the clear here is then just a harmless redundant no-op.
+    /// Also disarms the [`PasteBuf::final_state`] MIRROR the bar's `awaiting_confirm`
+    /// reads (see [`PasteBuf::disarm`], which keeps the war story of the one disarm
+    /// site that forgot the mirror). Callers that need the buffer settled EARLIER
+    /// than this — `confirm_paste` takes the text and drops to `Idle` atomically
+    /// under one lock, before its synchronous paste/Enter syscalls, so a concurrent
+    /// status read never sees a half-cleared confirm state mid-syscall — may still do
+    /// so themselves; the disarm here is then just a harmless redundant no-op.
     fn disarm_confirm(&mut self) {
-        self.confirm_armed = false;
-        self.stop_tap_at = None;
-        self.confirm_double_pending = false;
-        self.enter_after_paste = true;
+        if self.is_confirm_armed() {
+            self.gesture = GestureState::Idle;
+        }
         if let Ok(mut p) = self.paste.lock() {
-            p.confirm_armed = false;
+            p.disarm();
         }
     }
 
-    /// Whether a finalized transcript is waiting for the user's confirm tap (Some `pending`,
-    /// or the stop tap has armed the deferred submit and the final just hasn't landed yet ⇒
-    /// the confirm panel is up and the Caps key means confirm/cancel). Gates the live
-    /// paste-target probe in `tick` — without `confirm_armed` here too, that probe would skip
-    /// the exact window `dictation_preview` now keeps the panel visible through, leaving
-    /// `has_paste_target` stale for the length of the async final.
+    /// Whether a finalized transcript is waiting for the user's confirm tap (a landed
+    /// `Ready`/`Empty` final, or the stop tap has armed the deferred submit and the
+    /// final just hasn't landed yet ⇒ the confirm panel is up and the Caps key means
+    /// confirm/cancel) — i.e. any non-`Idle` [`FinalState`]. Gates the live
+    /// paste-target probe in `tick` — without the `Armed` state counting here too,
+    /// that probe would skip the exact window `dictation_preview` keeps the panel
+    /// visible through, leaving `has_paste_target` stale for the length of the async
+    /// final.
     fn awaiting_confirm(&self) -> bool {
         self.paste
             .lock()
-            .map(|p| p.pending.is_some() || p.confirm_armed)
+            .map(|p| !matches!(p.final_state, FinalState::Idle))
             .unwrap_or(false)
     }
 
@@ -512,6 +623,16 @@ impl<P: Platform + 'static> Engine<P> {
     /// Driven by the deferred-submit check once the stop tap's async final lands. The LED
     /// is already OFF (the stop tap drove it off on release); we ensure it here too.
     fn confirm_paste(&mut self) {
+        // Capture the armed outcome ONCE at entry (it is read both before and after
+        // `disarm_confirm()` below, which drops the variant that holds it). Only ever
+        // called from the tick's ConfirmArmed arm; the `true` fallback matches the
+        // field's disarmed reset default.
+        let enter_after_paste = match self.gesture {
+            GestureState::ConfirmArmed {
+                enter_after_paste, ..
+            } => enter_after_paste,
+            _ => true,
+        };
         // The confirm tap ALWAYS pastes — there's no focus refusal. The "is there a
         // paste target?" cue is a live glow on the panel (the engine samples
         // `has_paste_target` (the platform probe) each tick → `has_paste_target` (the
@@ -519,12 +640,14 @@ impl<P: Platform + 'static> Engine<P> {
         let text = self.paste.lock().ok().and_then(|mut p| {
             p.partial.clear();
             p.target = None;
-            // Clear the mirror HERE, atomically with `pending` — not later via
-            // `disarm_confirm()`, which only runs after the syscalls below (see its doc
-            // comment). A concurrent status read must never see `pending=None` paired with
-            // a still-true `confirm_armed`.
-            p.confirm_armed = false;
-            p.pending.take()
+            // Take the text and drop to `Idle` atomically under this ONE lock — not
+            // later via `disarm_confirm()`, which only runs after the syscalls below
+            // (see its doc comment). A concurrent status read must never see a
+            // half-cleared confirm state mid-syscall.
+            match std::mem::replace(&mut p.final_state, FinalState::Idle) {
+                FinalState::Ready(text) => Some(text),
+                _ => None,
+            }
         });
         if let Some(text) = text {
             // Paste into WHATEVER is focused (terminal, Notes, browser, chat, …). The
@@ -536,8 +659,8 @@ impl<P: Platform + 'static> Engine<P> {
             // just inserts the transcript and the user presses Return themselves. Which TAP
             // COUNT (single vs double) submits for this transcript is `enter_after_paste`,
             // armed per `double_tap_submits` and possibly flipped by a second tap on the
-            // stop gesture.
-            let submit = self.enter_after_paste;
+            // stop gesture (captured from the `ConfirmArmed` variant at entry above).
+            let submit = enter_after_paste;
             if submit {
                 self.plat.press_enter();
                 if let Some(q) = &self.ttsq {
@@ -561,7 +684,7 @@ impl<P: Platform + 'static> Engine<P> {
             }
         }
         self.plat.set_caps_lock(false);
-        let inserted_only = !self.enter_after_paste;
+        let inserted_only = !enter_after_paste;
         self.disarm_confirm();
         self.record_caps("confirm");
         if inserted_only {
@@ -583,7 +706,7 @@ impl<P: Platform + 'static> Engine<P> {
         self.pending_tap_at = None;
         // End any in-flight listen via ABORT: ClaudeNative releases Ctrl+G (nothing left
         // held); Parakeet/System DISCARD the capture WITHOUT injecting a partial transcript.
-        if self.holding {
+        if self.is_recording() {
             self.stt.abort();
         }
         // Silence the voice / cancel generation: clear the warm queue + barge the cold
@@ -594,23 +717,22 @@ impl<P: Platform + 'static> Engine<P> {
         }
         let _ = ds_proc::barge_in(&self.pidfile);
         // Reset to idle, LED off. The LED is a pure output — we drive it off directly (no
-        // read-back), so there's no latch-lag transient.
+        // read-back), so there's no latch-lag transient. `Idle` in one assignment ends
+        // the recording AND disarms any deferred submit (the confirm sub-state lives
+        // inside `ConfirmArmed`, so nothing of it can leak past this reset).
         self.plat.set_caps_lock(false);
-        self.holding = false;
+        self.gesture = GestureState::Idle;
         self.set_stt_active(false);
         if let Ok(mut p) = self.paste.lock() {
             p.partial.clear();
-            p.pending = None;
+            p.final_state = FinalState::Idle;
             p.target = None;
-            p.final_ready = false;
-            p.confirm_armed = false;
             // A hold means "stop everything" — that includes a still-live refusal cue.
             p.refused_until = None;
             // Invalidate any in-flight `stop` joiner (see PasteBuf::epoch) so a stale
             // final can't land after this cancel reset the buffer.
             p.epoch = p.epoch.wrapping_add(1);
         }
-        self.disarm_confirm();
         self.record_caps("cancel");
         self.dbg("HOLD cancel — dictation discarded, voice silenced, LED off, idle");
     }
@@ -635,16 +757,16 @@ impl<P: Platform + 'static> Engine<P> {
     }
 
     /// A completed Caps TAP toggles dictation: start when idle, stop+submit when recording.
-    /// Only flips `holding` — the tick re-asserts the Caps LED to match it (on this release
-    /// and every held tick), so the light always reflects the real recording state and never
-    /// changes on the press.
+    /// Only flips the gesture state — the tick re-asserts the Caps LED to match it (on this
+    /// release and every held tick), so the light always reflects the real recording state
+    /// and never changes on the press.
     fn toggle_dictation(&mut self) {
         // GUARD: dictation can START only if the selected STT engine is actually READY to
         // transcribe (BuiltIn/System model resident + warm; ClaudeCode delegates → always).
         // On-but-not-ready behaves like OFF — the tap pauses/resumes the voice but never opens
         // the mic/overlay (nothing to transcribe into yet). While ALREADY recording, keep the
         // plain on/off gate so a tap still STOPS it (the model was ready when it started).
-        let gate = if self.holding {
+        let gate = if self.is_recording() {
             self.cfg.resolved_stt().is_some()
         } else {
             let ready = self.stt_ready_to_dictate();
@@ -675,7 +797,7 @@ impl<P: Platform + 'static> Engine<P> {
             }
             ready
         };
-        match caps_tap_action(gate, self.holding, self.voice_paused) {
+        match caps_tap_action(gate, self.is_recording(), self.voice_paused) {
             CapsTap::StartRecord => self.start_recording(), // opens mic; pauses the voice
             CapsTap::StopRecord => self.stop_recording(),   // stops+submits; resumes the voice
             // Dictation OFF: the mic never opens, but the tap still pauses/resumes the
@@ -706,7 +828,7 @@ impl<P: Platform + 'static> Engine<P> {
     ///     discards the in-flight capture without injecting (§F.1).
     ///   * Swap in a fresh engine built on the SAME platform `Rc` (one event
     ///     source — never two engines fighting over the keyboard).
-    ///   * Clear `holding` so the new engine starts idle.
+    ///   * Reset the gesture state to `Idle` so the new engine starts idle.
     ///
     /// We do NOT call `set_caps_lock`: driving the LED is the gesture machine's job. A
     /// reload leaves the physical key untouched; since tap/long-press detection is
@@ -812,7 +934,9 @@ impl<P: Platform + 'static> Engine<P> {
                 // `tick`, so an in-flight dictation or a still-armed deferred submit
                 // would sit in stasis and paste a STALE transcript when the mode flips
                 // back. Same hazard as the caps gate going off — same teardown.
-                if self.holding || self.confirm_armed {
+                // (Any non-Idle gesture ⇔ the old `holding || confirm_armed`: the enum
+                // is exhaustive over exactly those two live modes.)
+                if !matches!(self.gesture, GestureState::Idle) {
                     self.teardown_hold();
                 }
                 self.listener = Some(listener::Listener::new(
@@ -843,8 +967,8 @@ impl<P: Platform + 'static> Engine<P> {
 
         // Record the applied config so the NEXT reload diffs against it.
         self.cfg = cfg.clone();
-        // NOTE: caps_down_since / long_press_fired are physical-key latches; a
-        // config reload does not change the physical key, so leave them as-is.
+        // NOTE: `press` is a physical-key latch; a config reload does not change the
+        // physical key, so leave it as-is.
         log(&format!(
             "dontspeakd reloaded config (caps={} stt={}{} tts={} long_press={}ms narrate={})",
             self.caps_enabled,
@@ -873,10 +997,11 @@ impl<P: Platform + 'static> Engine<P> {
     /// regardless of change, and re-acquiring/releasing an already-owned/released key
     /// is harmless but pointless.
     fn set_caps_gate(&mut self, now_on: bool) {
-        // Tear down when recording OR when a deferred submit is still armed: with the
-        // loop off, `tick` stops running the deferred-submit check, so an armed paste
-        // would sit in stasis and fire a STALE transcript whenever the gate comes back.
-        if !now_on && (self.holding || self.confirm_armed) {
+        // Tear down when recording OR when a deferred submit is still armed (any
+        // non-Idle gesture): with the loop off, `tick` stops running the
+        // deferred-submit check, so an armed paste would sit in stasis and fire a
+        // STALE transcript whenever the gate comes back.
+        if !now_on && !matches!(self.gesture, GestureState::Idle) {
             self.teardown_hold();
         }
         if now_on != self.caps_enabled {
@@ -886,15 +1011,15 @@ impl<P: Platform + 'static> Engine<P> {
                 // Releasing means the platform's own press-in-flight tracking is about
                 // to reset (Windows' `release_caps_key` wipes its edge queue) — any
                 // matching release for an in-flight press is now unobservable, so mirror
-                // that reset on the engine's own latches. Without this, a press that
-                // straddles the OFF edge leaves `caps_down_since` stale; the first tick
-                // after a later re-enable would see a huge elapsed time and fire a
-                // spurious long-press `cancel_all()`. Force the LED off too — nothing
-                // else on this path does (unlike `cancel_all`/the confirm-paste path,
-                // which explicitly drive it low), so it could otherwise stay lit for
-                // the rest of the session with dictation no longer able to turn it off.
-                self.caps_down_since = None;
-                self.long_press_fired = false;
+                // that reset on the engine's own latch. Without this, a press that
+                // straddles the OFF edge leaves the press latch stale (`Down` with an
+                // old `since`); the first tick after a later re-enable would see a huge
+                // elapsed time and fire a spurious long-press `cancel_all()`. Force the
+                // LED off too — nothing else on this path does (unlike `cancel_all`/the
+                // confirm-paste path, which explicitly drive it low), so it could
+                // otherwise stay lit for the rest of the session with dictation no
+                // longer able to turn it off.
+                self.press = PressState::Up;
                 self.plat.set_caps_lock(false);
                 self.plat.release_caps_key();
             }
@@ -956,7 +1081,8 @@ impl<P: Platform + 'static> Engine<P> {
     /// PHYSICAL Caps key (down/up edges via `caps_phys_prev`), NOT the OS lock latch:
     ///   * a quick TAP (release before `long_press_ms`) toggles recording;
     ///   * a LONG-PRESS (hold ≥ `long_press_ms`) force-resets to idle;
-    ///   * the Caps LED is a pure OUTPUT, re-asserted to `holding` — never read back.
+    ///   * the Caps LED is a pure OUTPUT, re-asserted to the recording state — never
+    ///     read back.
     ///
     /// See the inline GESTURE MODEL block below for the full rationale.
     pub(crate) fn tick(&mut self) {
@@ -1078,46 +1204,49 @@ impl<P: Platform + 'static> Engine<P> {
             }
         }
         // Time-based half of the gesture: a sustained HOLD fires the long-press CANCEL even
-        // when no new edge arrives this tick, and the Caps LED is re-pinned to `holding`
-        // while the key is down (a no-op on the event-driven port, which owns/suppresses
-        // the key and never drives the LED).
+        // when no new edge arrives this tick, and the Caps LED is re-pinned to the
+        // recording state while the key is down (a no-op on the event-driven port, which
+        // owns/suppresses the key and never drives the LED).
         self.check_long_press();
         // Fire a deferred single tap if its double-tap window lapsed with no second tap.
         self.check_pending_tap();
 
-        // DEFERRED submit: the stop tap armed `confirm_armed`; the local-transcript engine
+        // DEFERRED submit: the stop tap armed `ConfirmArmed`; the local-transcript engine
         // deposits its FINAL asynchronously, so paste once it lands (or disarm if empty).
         // The LED is already OFF (driven on the stop tap's release) — this only moves text.
         // Held while the stop tap's flip-gesture double-tap window is still open (so a
         // fast final can't paste under the WRONG outcome before the second tap has a
         // chance to land and flip it) and while any Caps press is in flight (so it
         // can't paste under a press meant to cancel).
-        if self.confirm_armed && !self.deferred_submit_held() {
-            // Read pending + final_ready under ONE lock so the async joiner can't straddle
-            // the two checks (deposit pending between them and get disarmed).
-            let (has_pending, ready) = self
+        if self.is_confirm_armed() && !self.deferred_submit_held() {
+            // Read the finalize state under ONE lock so the async joiner can't straddle
+            // two separate checks (deposit the final between them and get disarmed).
+            let (has_ready, is_empty) = self
                 .paste
                 .lock()
-                .map(|p| (p.pending.is_some(), p.final_ready))
+                .map(|p| {
+                    (
+                        matches!(p.final_state, FinalState::Ready(_)),
+                        matches!(p.final_state, FinalState::Empty),
+                    )
+                })
                 .unwrap_or((false, false));
-            if has_pending {
+            if has_ready {
                 self.confirm_paste();
-            } else if ready {
-                // The deferred final landed EMPTY — nothing to submit. Disarm + drop the flag.
+            } else if is_empty {
+                // The deferred final landed EMPTY — nothing to submit. Disarm
+                // (`disarm_confirm` maps the buffer's `Empty → Idle` too).
                 self.disarm_confirm();
-                if let Ok(mut p) = self.paste.lock() {
-                    p.final_ready = false;
-                    p.confirm_armed = false;
-                }
                 self.record_caps("confirm");
             }
+            // `Armed` (final not landed yet) / `Idle`: keep waiting.
         }
     }
 
     /// Whether the deferred submit must WAIT before pasting. Two holds, both bounded:
     ///   * ANY Caps press in flight while armed — the press resolves to the double's
     ///     second tap, a long-press CANCEL, or a new-dictation tap (which wipes
-    ///     `pending` anyway); pasting mid-press could drop text+Enter under a press
+    ///     the landed final anyway); pasting mid-press could drop text+Enter under a press
     ///     meant to cancel.
     ///   * The stop tap's flip-gesture double-tap window is still open and no double
     ///     has landed yet. Unconditionally honored — exactly one of the two stop-tap
@@ -1129,10 +1258,17 @@ impl<P: Platform + 'static> Engine<P> {
     /// double tap must still be waited for to flip it to `true` — gating on the
     /// current value would see `false` from the very first tick and never wait.
     fn deferred_submit_held(&self) -> bool {
-        if self.caps_down_since.is_some() {
+        if matches!(self.press, PressState::Down { .. }) {
             return true;
         }
-        self.confirm_double_pending || within_double_tap(self.stop_tap_at, Instant::now())
+        match self.gesture {
+            GestureState::ConfirmArmed {
+                stop_tap_at,
+                double_pending,
+                ..
+            } => double_pending || within_double_tap(stop_tap_at, Instant::now()),
+            _ => false,
+        }
     }
 
     /// Apply ONE physical Caps transition (`down` = pressed, `!down` = released) stamped
@@ -1151,31 +1287,48 @@ impl<P: Platform + 'static> Engine<P> {
             p.caps_held = down;
         }
         if down {
-            self.caps_down_since = Some(at);
-            self.long_press_fired = false;
+            self.press = PressState::Down {
+                since: at,
+                long_press_fired: false,
+            };
             // A press beginning inside the stop tap's double-tap window is the SECOND
             // tap of the flip double (or a long-press cancel of the pending paste) —
             // never the start of a new recording. Anchored on the PRESS so a slow
             // release can't misread the gesture as a new dictation and wipe the
             // still-unpasted transcript. Unconditional — no config gates this: consuming
             // the tap always protects the pending transcript from being wiped by an
-            // accidental new recording.
-            self.confirm_double_pending =
-                self.confirm_armed && within_double_tap(self.stop_tap_at, at);
+            // accidental new recording. (The not-armed case needs no stale-clear
+            // anymore: `double_pending` only exists inside `ConfirmArmed`.)
+            if let GestureState::ConfirmArmed {
+                stop_tap_at,
+                double_pending,
+                ..
+            } = &mut self.gesture
+            {
+                *double_pending = within_double_tap(*stop_tap_at, at);
+            }
             self.record_caps("press");
         } else {
             // The light flips HERE on release — never on the press — then we snap the LED
-            // to the final `holding` so a long-press release (no toggle) also lands
+            // to the final recording state so a long-press release (no toggle) also lands
             // consistent. On the key-owning Windows port `set_caps_lock` drives the
             // physical LED out-of-band (IOCTL) without toggling the logical Caps state.
-            let was_tap = !self.long_press_fired;
-            self.caps_down_since = None;
+            // `Up ⇒ tap` matches the old `!self.long_press_fired` (which read true even
+            // with no press latched — e.g. a release edge observed after a gate
+            // off→on cycle reset the latch but not `caps_phys_prev`).
+            let was_tap = !matches!(
+                self.press,
+                PressState::Down {
+                    long_press_fired: true,
+                    ..
+                }
+            );
+            self.press = PressState::Up;
             self.record_caps("release");
             if was_tap {
                 self.handle_tap(at);
             }
-            self.long_press_fired = false;
-            self.plat.set_caps_lock(self.holding);
+            self.plat.set_caps_lock(self.is_recording());
         }
     }
 
@@ -1189,12 +1342,19 @@ impl<P: Platform + 'static> Engine<P> {
         // Second tap of the stop double → FLIP the armed outcome (see
         // `enter_after_paste`). Checked before the speak-skip logic — the stop tap
         // resumed the voice, so speech may already be playing again by this release.
-        if self.confirm_double_pending {
-            self.confirm_double_pending = false;
-            self.enter_after_paste = !self.enter_after_paste;
-            self.stop_tap_at = None;
+        if let GestureState::ConfirmArmed {
+            stop_tap_at,
+            double_pending,
+            enter_after_paste,
+        } = &mut self.gesture
+            && *double_pending
+        {
+            *double_pending = false;
+            *enter_after_paste = !*enter_after_paste;
+            *stop_tap_at = None;
             // Match `confirm_paste`'s actual gate (`enter_after_paste`).
-            if self.enter_after_paste {
+            let submits = *enter_after_paste;
+            if submits {
                 self.dbg("double-tap on stop — will submit (paste + auto-Enter)");
             } else {
                 self.dbg("double-tap on stop — insert only (paste, no auto-Enter)");
@@ -1224,11 +1384,11 @@ impl<P: Platform + 'static> Engine<P> {
     }
 
     /// Fire a DEFERRED single tap once its [`DOUBLE_TAP_MS`] window has elapsed with no
-    /// second tap. Skipped while a Caps press is in flight (`caps_down_since` set) — that
+    /// second tap. Skipped while a Caps press is in flight (`press` is `Down`) — that
     /// could be the second tap of a double, or a hold becoming a long-press — so the single
     /// never fires mid-gesture. Run once per [`tick`].
     fn check_pending_tap(&mut self) {
-        if self.caps_down_since.is_some() {
+        if matches!(self.press, PressState::Down { .. }) {
             return;
         }
         if self.pending_tap_at.is_some() && !within_double_tap(self.pending_tap_at, Instant::now())
@@ -1241,18 +1401,25 @@ impl<P: Platform + 'static> Engine<P> {
     /// The time-based half of the gesture, run once per [`tick`] regardless of edges:
     /// a Caps hold past `long_press_ms` force-resets to idle (CANCEL — discard
     /// dictation + silence voice), exactly once per press; and the Caps LED is
-    /// re-pinned to `holding` for as long as the key is held (counters the OS's own
-    /// hold-delay latch flip on the polled ports — a no-op on Windows, which
+    /// re-pinned to the recording state for as long as the key is held (counters the
+    /// OS's own hold-delay latch flip on the polled ports — a no-op on Windows, which
     /// suppresses the key outright).
     fn check_long_press(&mut self) {
-        let Some(t) = self.caps_down_since else {
+        let PressState::Down {
+            since,
+            long_press_fired,
+        } = self.press
+        else {
             return;
         };
-        if !self.long_press_fired && t.elapsed() >= Duration::from_millis(self.long_press_ms) {
+        if !long_press_fired && since.elapsed() >= Duration::from_millis(self.long_press_ms) {
             self.cancel_all();
-            self.long_press_fired = true;
+            self.press = PressState::Down {
+                since,
+                long_press_fired: true,
+            };
         }
-        self.plat.set_caps_lock(self.holding);
+        self.plat.set_caps_lock(self.is_recording());
     }
 
     /// Start dictation — called from `toggle_dictation` on a tap's RELEASE. No-op if
@@ -1267,7 +1434,7 @@ impl<P: Platform + 'static> Engine<P> {
     /// warm queue + kills the cold-path speaker) and opens the mic, because the
     /// device cannot capture and render at once there.
     fn start_recording(&mut self) {
-        if self.holding {
+        if self.is_recording() {
             return;
         }
         // stt_engine = off: never open the mic. The Caps tap's voice pause/resume is
@@ -1291,7 +1458,9 @@ impl<P: Platform + 'static> Engine<P> {
         {
             self.dbg(&format!("barge-in: killed TTS pgid={pgid}"));
         }
-        self.holding = true;
+        // Entering `Recording` structurally drops any armed confirm sub-state (the
+        // old disarm-before-record contract, now a single assignment).
+        self.gesture = GestureState::Recording;
         // Capture the paste target (the app that's ALREADY focused) + clear any stale
         // preview so the confirm panel opens fresh, labeled with where the text will
         // land. We never steal focus here — the transcript pastes into whatever the
@@ -1299,10 +1468,8 @@ impl<P: Platform + 'static> Engine<P> {
         let target = self.plat.frontmost_app_name();
         if let Ok(mut p) = self.paste.lock() {
             p.partial.clear();
-            p.pending = None;
+            p.final_state = FinalState::Idle;
             p.target = target;
-            p.final_ready = false;
-            p.confirm_armed = false;
             // A real recording is starting: drop any still-live refusal cue (the model
             // may have become ready inside the window) so the panel shows the normal
             // listening state, not the warning wash.
@@ -1313,6 +1480,8 @@ impl<P: Platform + 'static> Engine<P> {
             // bumps just advance the counter, so the net effect is one new session.
             p.epoch = p.epoch.wrapping_add(1);
         }
+        // A no-op on `Recording` by design (see `disarm_confirm`'s doc) — kept so the
+        // buffer-side disarm contract stays exercised in one place.
         self.disarm_confirm();
         // Publish the recording flag BEFORE opening the mic. The half-duplex
         // barge-watcher reads `stt_active` to distinguish our OWN dictation mic from a
@@ -1330,10 +1499,10 @@ impl<P: Platform + 'static> Engine<P> {
     /// Stop dictation (full-mirror ON→OFF edge). No-op if not recording. Ends the
     /// listen (`stt.stop`) and arms the deferred submit for local-transcript engines.
     fn stop_recording(&mut self) {
-        if !self.holding {
+        if !self.is_recording() {
             return;
         }
-        self.holding = false;
+        self.gesture = GestureState::Idle;
         self.stt.stop();
         self.set_stt_active(false);
         // Mic freed: resume the TTS queue paused on the start-tap (half-duplex). No-op
@@ -1350,19 +1519,24 @@ impl<P: Platform + 'static> Engine<P> {
         // final lands, or disarm if it's empty. The inline path (ClaudeNative) submits
         // via Ctrl+G and never defers, so it doesn't arm.
         if self.stt.defers_paste() {
-            self.confirm_armed = true;
+            // Arm the deferred submit, anchoring the flip double-tap window on this
+            // stop gesture: a second tap within DOUBLE_TAP_MS flips the armed outcome
+            // (see handle_tap / deferred_submit_held). `double_tap_submits` off
+            // (default) arms a lone tap to submit; on, it arms a lone tap to
+            // insert-only and a double to submit.
+            self.gesture = GestureState::ConfirmArmed {
+                stop_tap_at: Some(Instant::now()),
+                double_pending: false,
+                enter_after_paste: !self.cfg.double_tap_submits,
+            };
             // Mirror into the shared buffer BEFORE the panel's next status read (see
-            // `PasteBuf::confirm_armed`) — keeps the panel up across the gap between this
-            // synchronous `recording → false` flip and the async final landing as `pending`.
+            // `FinalState::Armed`) — keeps the panel up across the gap between this
+            // synchronous `recording → false` flip and the async final landing.
+            // `arm()` never downgrades a final the detached joiner already deposited
+            // between `stt.stop()` above and this lock (see its doc).
             if let Ok(mut p) = self.paste.lock() {
-                p.confirm_armed = true;
+                p.arm();
             }
-            // Anchor the flip double-tap window on this stop gesture: a second tap
-            // within DOUBLE_TAP_MS flips the armed outcome below (see handle_tap /
-            // deferred_submit_held). `double_tap_submits` off (default) arms a lone
-            // tap to submit; on, it arms a lone tap to insert-only and a double to submit.
-            self.stop_tap_at = Some(Instant::now());
-            self.enter_after_paste = !self.cfg.double_tap_submits;
         }
         self.record_caps("stop");
         self.dbg("LED OFF — stt.stop()");
@@ -1370,7 +1544,7 @@ impl<P: Platform + 'static> Engine<P> {
 
     /// Never leave a key down on shutdown.
     pub(crate) fn shutdown(&mut self) {
-        if self.holding {
+        if self.is_recording() {
             self.stt.stop();
         }
         log("dontspeakd stopped");
@@ -1514,7 +1688,7 @@ mod tests {
         d.cfg.stt_engine_ladder = Vec::new(); // dictation off
         MockPlatform::tap(&mut d);
         assert!(d.voice_paused, "first tap pauses the voice");
-        assert!(!d.holding, "dictation off → the mic never opens");
+        assert!(!d.is_recording(), "dictation off → the mic never opens");
         MockPlatform::tap(&mut d);
         assert!(!d.voice_paused, "second tap resumes the voice");
     }
@@ -1561,7 +1735,7 @@ mod tests {
         /// Count of `acquire_caps_key`/`release_caps_key` calls — lets tests assert the
         /// engine takes/gives up physical key ownership on exactly the right
         /// construction/ON/OFF transitions (`caps_key_ownership_*` tests below), not just
-        /// that `caps_enabled`/`holding` end up in the right state.
+        /// that `caps_enabled`/`gesture` end up in the right state.
         acquire_caps_key_calls: Cell<u32>,
         release_caps_key_calls: Cell<u32>,
     }
@@ -1672,10 +1846,12 @@ mod tests {
     /// deferred submit stops waiting — tests would otherwise have to sleep out the
     /// real window on every paste.
     fn lapse_stop_window(d: &mut Engine<MockPlatform>) {
-        d.stop_tap_at = d.stop_tap_at.map(|t| {
-            t.checked_sub(Duration::from_millis(DOUBLE_TAP_MS + 1))
-                .expect("machine uptime exceeds the double-tap window")
-        });
+        if let GestureState::ConfirmArmed { stop_tap_at, .. } = &mut d.gesture {
+            *stop_tap_at = stop_tap_at.map(|t| {
+                t.checked_sub(Duration::from_millis(DOUBLE_TAP_MS + 1))
+                    .expect("machine uptime exceeds the double-tap window")
+            });
+        }
     }
 
     /// Minimal Stt that DEFERS its paste (mirrors the local-transcript helper): start/stop
@@ -1705,10 +1881,10 @@ mod tests {
         d.stt.start();
         d.plat.tap_down_calls.set(0);
         d.plat.tap_up_calls.set(0);
-        d.holding = true;
+        d.gesture = GestureState::Recording;
         d.plat.lock_state.set(true);
         d.cancel_all();
-        assert!(!d.holding, "holding cleared");
+        assert!(!d.is_recording(), "recording state cleared");
         assert_eq!(
             d.plat.tap_down_calls.get(),
             1,
@@ -1718,47 +1894,99 @@ mod tests {
     }
 
     #[test]
-    fn dictation_preview_gates_pending_on_caps_held() {
-        // Released, finalized transcript present → surfaced + panel in confirm mode.
+    fn dictation_preview_gates_the_landed_final_on_caps_held() {
+        // Released, finalized transcript landed → surfaced + panel in confirm mode.
         assert_eq!(
-            dictation_preview(Some("hello world"), "hel", false, false),
+            dictation_preview(&FinalState::Ready("hello world".into()), "hel", false),
             ("hello world".to_string(), true)
         );
         // HELD: never surface the finalized transcript (the press might still become a
-        // long-press cancel) — show the live partial, NOT in confirm mode — even with
-        // `confirm_armed` set (held always wins).
+        // long-press cancel) — show the live partial, NOT in confirm mode (held always
+        // wins, whatever the finalize state).
         assert_eq!(
-            dictation_preview(Some("hello world"), "hel", true, true),
+            dictation_preview(&FinalState::Ready("hello world".into()), "hel", true),
             ("hel".to_string(), false)
         );
-        // No pending, not armed → the live partial, not in confirm mode.
+        // Idle (no final landed, not armed) → the live partial, not in confirm mode.
         assert_eq!(
-            dictation_preview(None, "part", false, false),
+            dictation_preview(&FinalState::Idle, "part", false),
             ("part".to_string(), false)
         );
         assert_eq!(
-            dictation_preview(None, "part", true, false),
+            dictation_preview(&FinalState::Idle, "part", true),
             ("part".to_string(), false)
+        );
+        // The final landed EMPTY while armed: still "awaiting" (the old mirror stayed
+        // true between the deposit and the tick's disarm — the row that was only
+        // implicit before this enum made it a named state).
+        assert_eq!(
+            dictation_preview(&FinalState::Empty, "", false),
+            (String::new(), true)
         );
     }
 
     #[test]
-    fn dictation_preview_confirm_armed_bridges_the_async_final_gap() {
-        // The reported flicker: the stop tap has fired (armed) and `recording` already
-        // flipped false, but the local engine's async final hasn't landed as `pending`
-        // yet. Without `confirm_armed`, this reads identically to "not dictating at all"
-        // and the panel would hide, then reappear once `pending` lands. `confirm_armed`
-        // keeps `awaiting_confirm` true across the gap, showing the still-fresh partial.
+    fn dictation_preview_armed_bridges_the_async_final_gap() {
+        // The reported flicker: the stop tap has fired (`Armed`) and `recording` already
+        // flipped false, but the local engine's async final hasn't landed yet. Without
+        // `Armed` counting as awaiting, this reads identically to "not dictating at all"
+        // and the panel would hide, then reappear once the final lands. `Armed` keeps
+        // `awaiting_confirm` true across the gap, showing the still-fresh partial.
         assert_eq!(
-            dictation_preview(None, "the last thing you said", false, true),
+            dictation_preview(&FinalState::Armed, "the last thing you said", false),
             ("the last thing you said".to_string(), true)
         );
         // A press beginning in flight (second tap of a double, or a long-press cancel)
-        // still suppresses it — `caps_held` wins over `confirm_armed` too.
+        // still suppresses it — `caps_held` wins over `Armed` too.
         assert_eq!(
-            dictation_preview(None, "the last thing you said", true, true),
+            dictation_preview(&FinalState::Armed, "the last thing you said", true),
             ("the last thing you said".to_string(), false)
         );
+    }
+
+    #[test]
+    fn paste_buf_arm_does_not_downgrade_a_landed_final() {
+        // The benign race `arm()` must preserve: the detached joiner can deposit the
+        // final in the instants between `stt.stop()` and `stop_recording`'s arm. The
+        // old unconditional mirror-set never clobbered `pending`; the enum must not
+        // downgrade `Ready(text)` (or `Empty`) back to `Armed` either.
+        let mut p = PasteBuf {
+            final_state: FinalState::Ready("landed".into()),
+            ..Default::default()
+        };
+        p.arm();
+        assert_eq!(p.final_state, FinalState::Ready("landed".into()));
+        p.final_state = FinalState::Empty;
+        p.arm();
+        assert_eq!(
+            p.final_state,
+            FinalState::Empty,
+            "an early empty final must survive the arm so the tick still disarms on it"
+        );
+        // The normal path: the stop tap arms an idle buffer.
+        p.final_state = FinalState::Idle;
+        p.arm();
+        assert_eq!(p.final_state, FinalState::Armed);
+    }
+
+    #[test]
+    fn paste_buf_disarm_clears_armed_and_empty_but_leaves_ready() {
+        let mut p = PasteBuf {
+            final_state: FinalState::Armed,
+            ..Default::default()
+        };
+        p.disarm();
+        assert_eq!(p.final_state, FinalState::Idle);
+        p.final_state = FinalState::Empty;
+        p.disarm();
+        assert_eq!(p.final_state, FinalState::Idle);
+        // `Ready` is left alone — the strictly-equivalent mapping of the old
+        // `disarm_confirm`, which cleared only the mirror bool while a landed
+        // `pending` alone kept `awaiting` true (every real call site has already
+        // taken/cleared the text first).
+        p.final_state = FinalState::Ready("kept".into());
+        p.disarm();
+        assert_eq!(p.final_state, FinalState::Ready("kept".into()));
     }
 
     #[test]
@@ -1769,7 +1997,7 @@ mod tests {
         // long-press just dismisses instead of "reappear then dismiss".
         let mut d = mk(600);
         d.plat.terminal_frontmost.set(true);
-        d.paste.lock().unwrap().pending = Some("discard me".into());
+        d.paste.lock().unwrap().final_state = FinalState::Ready("discard me".into());
 
         // Physical press (long-press in flight): one tick mirrors the held state.
         d.plat.caps_phys_down.set(true);
@@ -1777,14 +2005,9 @@ mod tests {
         {
             let p = d.paste.lock().unwrap();
             assert!(p.caps_held, "down edge mirrors caps_held=true");
-            let (text, awaiting) = dictation_preview(
-                p.pending.as_deref(),
-                &p.partial,
-                p.caps_held,
-                p.confirm_armed,
-            );
+            let (text, awaiting) = dictation_preview(&p.final_state, &p.partial, p.caps_held);
             assert!(!awaiting, "held: finalized transcript is NOT surfaced");
-            assert_eq!(text, "", "held: shows the partial, not the pending");
+            assert_eq!(text, "", "held: shows the partial, not the landed final");
         }
 
         // Release clears the held state (the pending is then revealed/submitted by the
@@ -1805,7 +2028,7 @@ mod tests {
         d.plat.terminal_frontmost.set(true);
         d.plat.caps_phys_down.set(true);
         d.tick();
-        assert!(!d.holding, "press alone does not start recording");
+        assert!(!d.is_recording(), "press alone does not start recording");
         assert!(
             !d.plat.lock_state.get(),
             "press alone does not light the LED"
@@ -1825,16 +2048,16 @@ mod tests {
         // DOWN edge: still idle, still dark.
         d.plat.caps_phys_down.set(true);
         d.tick();
-        assert!(!d.holding, "not recording until release");
+        assert!(!d.is_recording(), "not recording until release");
         assert!(!d.plat.lock_state.get(), "dark until release");
 
         // UP edge (a tap): recording starts and the LED lights — ON RELEASE.
         d.plat.caps_phys_down.set(false);
         d.tick();
-        assert!(d.holding, "tap starts dictation on release");
+        assert!(d.is_recording(), "tap starts dictation on release");
         assert!(d.plat.lock_state.get(), "LED lit on release");
         assert_eq!(d.plat.tap_down_calls.get(), 1, "start posted its keypress");
-        assert!(d.caps_down_since.is_none(), "press latch released");
+        assert!(matches!(d.press, PressState::Up), "press latch released");
     }
 
     #[test]
@@ -1842,12 +2065,15 @@ mod tests {
         let mut d = mk(600);
         d.plat.terminal_frontmost.set(true);
         MockPlatform::tap(&mut d);
-        assert!(d.holding, "first tap recording");
+        assert!(d.is_recording(), "first tap recording");
 
         // Second tap's PRESS-DOWN: still recording, LED STAYS lit (no dark-on-press).
         d.plat.caps_phys_down.set(true);
         d.tick();
-        assert!(d.holding, "still recording while the stop press is held");
+        assert!(
+            d.is_recording(),
+            "still recording while the stop press is held"
+        );
         assert!(
             d.plat.lock_state.get(),
             "LED stays lit on the stop press-down"
@@ -1856,8 +2082,14 @@ mod tests {
         // RELEASE: stop + LED off — the light extinguishes on release, not on press.
         d.plat.caps_phys_down.set(false);
         d.tick();
-        assert!(!d.holding, "second tap stops dictation on release");
+        assert!(!d.is_recording(), "second tap stops dictation on release");
         assert!(!d.plat.lock_state.get(), "LED extinguished on release");
+        // The default engine (ClaudeNative) does NOT defer its paste, so the stop
+        // lands squarely in `Idle` — never `ConfirmArmed`.
+        assert!(
+            matches!(d.gesture, GestureState::Idle),
+            "non-deferring stop lands Idle, never ConfirmArmed"
+        );
     }
 
     #[test]
@@ -1877,7 +2109,7 @@ mod tests {
         let mut d = mk(600);
         d.plat.terminal_frontmost.set(true);
         MockPlatform::tap(&mut d);
-        assert!(d.holding && d.plat.lock_state.get(), "recording, lit");
+        assert!(d.is_recording() && d.plat.lock_state.get(), "recording, lit");
         d.plat.lock_state.set(false); // OS toggled the latch OFF on key-down
         d.plat.caps_phys_down.set(true);
         d.tick();
@@ -1892,7 +2124,7 @@ mod tests {
         let mut d = mk(5);
         d.plat.terminal_frontmost.set(true);
         MockPlatform::hold(&mut d);
-        assert!(!d.holding, "hold never starts recording");
+        assert!(!d.is_recording(), "hold never starts recording");
         assert!(!d.plat.lock_state.get(), "hold never lights the LED");
         assert_eq!(
             d.plat.tap_down_calls.get(),
@@ -1905,7 +2137,8 @@ mod tests {
     fn long_press_cancel_from_idle_keeps_led_off_despite_os_latch_toggle() {
         // macOS's caps-lock hold-delay toggles the OS latch ON partway through a long
         // hold — AFTER the press edge. A long-press cancel from idle must not leave the
-        // LED lit out of sync with `holding`; the held-tick re-assert pins it back off.
+        // LED lit out of sync with the recording state; the held-tick re-assert pins it
+        // back off.
         let mut d = mk(5);
         d.plat.terminal_frontmost.set(true);
 
@@ -1917,7 +2150,7 @@ mod tests {
         d.plat.lock_state.set(true);
         std::thread::sleep(Duration::from_millis(12));
         d.tick(); // past threshold → cancel_all; the held re-assert pins the LED OFF
-        assert!(!d.holding, "cancel from idle never records");
+        assert!(!d.is_recording(), "cancel from idle never records");
         assert!(
             !d.plat.lock_state.get(),
             "LED re-asserted OFF despite the OS toggle"
@@ -1932,7 +2165,7 @@ mod tests {
         d.plat.caps_phys_down.set(false);
         d.tick();
         assert!(
-            !d.holding && !d.plat.lock_state.get(),
+            !d.is_recording() && !d.plat.lock_state.get(),
             "idle + LED off after release"
         );
     }
@@ -1959,7 +2192,7 @@ mod tests {
         d.tick();
 
         assert!(
-            d.holding,
+            d.is_recording(),
             "a down+up drained in one tick still starts dictation — the tap isn't dropped"
         );
         assert!(
@@ -1972,7 +2205,7 @@ mod tests {
             "start posted its keypress from the drained pair"
         );
         assert!(
-            d.caps_down_since.is_none(),
+            matches!(d.press, PressState::Up),
             "press latch released after the drained up edge"
         );
         assert!(
@@ -1987,7 +2220,7 @@ mod tests {
         MockPlatform::queue_event(&d, false, t1 + Duration::from_millis(5));
         d.tick();
 
-        assert!(!d.holding, "second drained tap stops dictation");
+        assert!(!d.is_recording(), "second drained tap stops dictation");
         assert!(
             !d.plat.lock_state.get(),
             "LED off after the second drained tap"
@@ -2003,7 +2236,7 @@ mod tests {
         let mut d = mk(5);
         d.plat.terminal_frontmost.set(true);
         MockPlatform::tap(&mut d); // start recording
-        assert!(d.holding);
+        assert!(d.is_recording());
         let starts = d.plat.tap_down_calls.get();
 
         // Hold past the threshold → discard (abort the listen), LED off.
@@ -2011,7 +2244,7 @@ mod tests {
         d.tick();
         std::thread::sleep(Duration::from_millis(12));
         d.tick();
-        assert!(!d.holding, "hold discards the active dictation");
+        assert!(!d.is_recording(), "hold discards the active dictation");
         assert!(!d.plat.lock_state.get(), "LED off after a discard");
         assert_eq!(
             d.plat.tap_down_calls.get(),
@@ -2031,10 +2264,14 @@ mod tests {
         // The release that ENDS the hold is NOT a tap.
         d.plat.caps_phys_down.set(false);
         d.tick();
-        assert!(!d.holding, "release after a hold stays idle");
+        assert!(!d.is_recording(), "release after a hold stays idle");
         assert!(
             !d.plat.lock_state.get(),
             "still dark after the hold release"
+        );
+        assert!(
+            matches!(d.press, PressState::Up),
+            "long-press release leaves the press latch Up (tap suppressed, nothing lingers)"
         );
     }
 
@@ -2048,10 +2285,10 @@ mod tests {
         d.stt = Box::new(DeferStt);
 
         MockPlatform::tap(&mut d); // start
-        assert!(d.holding, "recording");
+        assert!(d.is_recording(), "recording");
         MockPlatform::tap(&mut d); // stop — defers
-        assert!(!d.holding, "stopped on release");
-        assert!(d.confirm_armed, "deferred submit armed");
+        assert!(!d.is_recording(), "stopped on release");
+        assert!(d.is_confirm_armed(), "deferred submit armed");
         assert!(
             !d.plat.lock_state.get(),
             "LED already off on the stop release"
@@ -2062,13 +2299,9 @@ mod tests {
             "nothing pasted while the final is pending"
         );
 
-        // The async final lands: deposit it + flag ready, then (once the insert-only
-        // double-tap window has lapsed) tick → paste + submit.
-        {
-            let mut p = d.paste.lock().unwrap();
-            p.pending = Some("hello world".into());
-            p.final_ready = true;
-        }
+        // The async final lands: deposit it, then (once the insert-only double-tap
+        // window has lapsed) tick → paste + submit.
+        d.paste.lock().unwrap().final_state = FinalState::Ready("hello world".into());
         lapse_stop_window(&mut d);
         d.tick();
         assert_eq!(
@@ -2081,7 +2314,7 @@ mod tests {
             1,
             "single tap → Enter pressed"
         );
-        assert!(!d.confirm_armed, "disarmed after the deferred submit");
+        assert!(!d.is_confirm_armed(), "disarmed after the deferred submit");
     }
 
     #[test]
@@ -2131,14 +2364,14 @@ mod tests {
         d.stt = Box::new(DeferStt);
         MockPlatform::tap(&mut d);
         MockPlatform::tap(&mut d);
-        assert!(d.confirm_armed, "armed");
+        assert!(d.is_confirm_armed(), "armed");
 
-        d.paste.lock().unwrap().final_ready = true; // empty: ready but no pending
+        d.paste.lock().unwrap().final_state = FinalState::Empty; // the final landed empty
         lapse_stop_window(&mut d);
         d.tick();
-        assert!(!d.confirm_armed, "disarmed on an empty final");
+        assert!(!d.is_confirm_armed(), "disarmed on an empty final");
         assert!(
-            !d.paste.lock().unwrap().confirm_armed,
+            matches!(d.paste.lock().unwrap().final_state, FinalState::Idle),
             "the PasteBuf mirror must clear too, or the dictation bar stays stuck showing 'awaiting'"
         );
         assert_eq!(
@@ -2167,9 +2400,7 @@ mod tests {
 
     /// Deposit the async final the deferred submit (from [`arm_stop_tap`]) is waiting on.
     fn deposit_final(d: &Engine<MockPlatform>, text: &str) {
-        let mut p = d.paste.lock().unwrap();
-        p.pending = Some(text.into());
-        p.final_ready = true;
+        d.paste.lock().unwrap().final_state = FinalState::Ready(text.into());
     }
 
     #[test]
@@ -2196,8 +2427,17 @@ mod tests {
         // The stop tap, then a SECOND tap inside the window → INSERT-ONLY: the
         // transcript pastes but the auto-Enter is suppressed for this one submit.
         let mut d = arm_stop_tap(false, true);
-        assert!(!d.enter_after_paste, "double tap latched insert-only");
-        assert!(!d.holding, "the second tap did NOT start a new recording");
+        assert!(
+            matches!(
+                d.gesture,
+                GestureState::ConfirmArmed {
+                    enter_after_paste: false,
+                    ..
+                }
+            ),
+            "double tap latched insert-only"
+        );
+        assert!(!d.is_recording(), "the second tap did NOT start a new recording");
         deposit_final(&d, "no enter");
         d.tick();
         assert_eq!(d.plat.type_text_calls.get(), 1, "pasted");
@@ -2206,10 +2446,12 @@ mod tests {
             0,
             "no Enter on the insert-only double tap"
         );
-        assert!(!d.confirm_armed, "disarmed after the paste");
+        // The old assert here ("insert-only consumed — the next dictation submits
+        // normally") checked `enter_after_paste` reset to its default; that reset is
+        // now STRUCTURAL — the flag lives inside `ConfirmArmed`, which the paste drops.
         assert!(
-            d.enter_after_paste,
-            "insert-only consumed — the next dictation submits normally"
+            matches!(d.gesture, GestureState::Idle),
+            "disarmed after the paste (insert-only consumed with the variant)"
         );
     }
 
@@ -2220,7 +2462,16 @@ mod tests {
         // race is closed: the paste must still HOLD out the double-tap window even
         // though the armed outcome starts as insert-only (see `deferred_submit_held`).
         let mut d = arm_stop_tap(true, false);
-        assert!(!d.enter_after_paste, "armed insert-only when inverted");
+        assert!(
+            matches!(
+                d.gesture,
+                GestureState::ConfirmArmed {
+                    enter_after_paste: false,
+                    ..
+                }
+            ),
+            "armed insert-only when inverted"
+        );
         deposit_final(&d, "lone tap, inverted");
         d.tick();
         assert_eq!(
@@ -2243,8 +2494,17 @@ mod tests {
         // With double_tap_submits ON, a genuine double tap on the stop gesture SUBMITS
         // (paste + Enter) instead of the default insert-only.
         let mut d = arm_stop_tap(true, true);
-        assert!(d.enter_after_paste, "double tap flipped to submit");
-        assert!(!d.holding, "the second tap did NOT start a new recording");
+        assert!(
+            matches!(
+                d.gesture,
+                GestureState::ConfirmArmed {
+                    enter_after_paste: true,
+                    ..
+                }
+            ),
+            "double tap flipped to submit"
+        );
+        assert!(!d.is_recording(), "the second tap did NOT start a new recording");
         deposit_final(&d, "double tap, inverted");
         d.tick();
         assert_eq!(d.plat.type_text_calls.get(), 1, "pasted");
@@ -2264,15 +2524,11 @@ mod tests {
         d.stt = Box::new(DeferStt);
         MockPlatform::tap(&mut d); // start
         MockPlatform::tap(&mut d); // stop — deferred submit armed
-        {
-            let mut p = d.paste.lock().unwrap();
-            p.pending = Some("discard me".into());
-            p.final_ready = true;
-        }
+        d.paste.lock().unwrap().final_state = FinalState::Ready("discard me".into());
         MockPlatform::hold(&mut d); // long-press → cancel_all
-        assert!(!d.confirm_armed, "cancel disarmed the deferred submit");
+        assert!(!d.is_confirm_armed(), "cancel disarmed the deferred submit");
         assert!(
-            !d.paste.lock().unwrap().confirm_armed,
+            matches!(d.paste.lock().unwrap().final_state, FinalState::Idle),
             "cancel also clears the panel-visibility mirror — the panel must not \
              stay up or reappear after a long-press cancel"
         );
@@ -2298,12 +2554,8 @@ mod tests {
         MockPlatform::tap(&mut d); // start
         MockPlatform::tap(&mut d); // stop
         MockPlatform::tap(&mut d); // double tap (µs later — inside the window)
-        assert!(!d.holding, "the second tap did NOT start a new recording");
-        {
-            let mut p = d.paste.lock().unwrap();
-            p.pending = Some("kept".into());
-            p.final_ready = true;
-        }
+        assert!(!d.is_recording(), "the second tap did NOT start a new recording");
+        d.paste.lock().unwrap().final_state = FinalState::Ready("kept".into());
         d.tick();
         assert_eq!(
             d.plat.type_text_calls.get(),
@@ -2327,11 +2579,7 @@ mod tests {
         d.stt = Box::new(DeferStt);
         MockPlatform::tap(&mut d); // start
         MockPlatform::tap(&mut d); // stop — armed
-        {
-            let mut p = d.paste.lock().unwrap();
-            p.pending = Some("late".into());
-            p.final_ready = true;
-        }
+        d.paste.lock().unwrap().final_state = FinalState::Ready("late".into());
         lapse_stop_window(&mut d); // the double-tap window is long gone
         d.plat.caps_phys_down.set(true);
         d.tick(); // press in flight → the deferred submit is HELD, not pasted
@@ -2342,9 +2590,9 @@ mod tests {
         );
         d.plat.caps_phys_down.set(false);
         d.tick(); // release → a plain tap → new recording (wipes the pending transcript)
-        assert!(d.holding, "tap after the window starts a new recording");
+        assert!(d.is_recording(), "tap after the window starts a new recording");
         assert!(
-            d.paste.lock().unwrap().pending.is_none(),
+            matches!(d.paste.lock().unwrap().final_state, FinalState::Idle),
             "the unpasted transcript is dropped by the new session"
         );
         d.tick();
@@ -2367,7 +2615,7 @@ mod tests {
         d.plat.tap_down_calls.set(0);
         d.plat.tap_up_calls.set(0);
         // Simulate an in-flight dictation on the outgoing engine.
-        d.holding = true;
+        d.gesture = GestureState::Recording;
 
         // Reload to a config that CHANGES the RESOLVED STT engine, forcing a rebuild (the
         // surgical reload only aborts + swaps when the engine actually changes). Disabling
@@ -2382,7 +2630,10 @@ mod tests {
 
         // The outgoing in-flight HOLD was released via abort() (ClaudeNative
         // abort == ctrl_g_up); the new engine starts from idle.
-        assert!(!d.holding, "holding cleared after engine-changing reload");
+        assert!(
+            !d.is_recording(),
+            "recording cleared after engine-changing reload"
+        );
         assert_eq!(
             d.plat.tap_up_calls.get(),
             1,
@@ -2402,7 +2653,7 @@ mod tests {
         // Surgical reload: a change that touches only per-call params (here the
         // voice id) must NOT rebuild the engine or interrupt an in-flight HOLD.
         let mut d = mk(600);
-        d.holding = true;
+        d.gesture = GestureState::Recording;
 
         let cfg = VoiceConfig {
             tts_built_in_voices: vec!["am_michael".into()],
@@ -2410,7 +2661,10 @@ mod tests {
         };
         d.reload(&cfg);
 
-        assert!(d.holding, "a per-call-only change must not drop the HOLD");
+        assert!(
+            d.is_recording(),
+            "a per-call-only change must not drop the HOLD"
+        );
         assert_eq!(
             d.plat.tap_up_calls.get(),
             0,
@@ -2436,14 +2690,14 @@ mod tests {
         d.stt.start();
         d.plat.tap_down_calls.set(0);
         d.plat.tap_up_calls.set(0);
-        d.holding = true;
+        d.gesture = GestureState::Recording;
         let cfg = VoiceConfig {
             caps_enabled: false,
             ..Default::default()
         };
         d.reload(&cfg);
         assert!(!d.caps_enabled, "caps loop disabled");
-        assert!(!d.holding, "HOLD ended when caps disabled mid-hold");
+        assert!(!d.is_recording(), "HOLD ended when caps disabled mid-hold");
         assert_eq!(d.plat.tap_up_calls.get(), 1, "in-flight HOLD released");
     }
 
@@ -2593,7 +2847,7 @@ mod tests {
 
     #[test]
     fn caps_gate_off_clears_a_stale_in_flight_press_latch_and_forces_the_led_off() {
-        // A physical press straddling the OFF edge must not leave `caps_down_since`
+        // A physical press straddling the OFF edge must not leave the press latch
         // stale: release_caps_key resets the platform's own press tracking (on Windows,
         // it wipes the edge queue, so the matching release becomes unobservable), so
         // without this the first tick after a LATER re-enable would read a huge elapsed
@@ -2601,7 +2855,10 @@ mod tests {
         // forced off here — unlike `cancel_all`/the confirm-paste path, nothing else on
         // this route drives it low.
         let mut d = mk(600);
-        d.caps_down_since = Some(Instant::now());
+        d.press = PressState::Down {
+            since: Instant::now(),
+            long_press_fired: false,
+        };
         d.plat.set_caps_off_calls.set(0);
         let off_cfg = VoiceConfig {
             caps_enabled: false,
@@ -2609,10 +2866,9 @@ mod tests {
         };
         d.reload(&off_cfg);
         assert!(
-            d.caps_down_since.is_none(),
+            matches!(d.press, PressState::Up),
             "stale in-flight press latch cleared on release"
         );
-        assert!(!d.long_press_fired);
         assert_eq!(
             d.plat.set_caps_off_calls.get(),
             1,
@@ -2645,7 +2901,7 @@ mod tests {
             "queued edges must be drained (and discarded) even while bypassed by Always mode"
         );
         assert!(
-            !d.holding,
+            !d.is_recording(),
             "the discarded backlog must never be applied as a real gesture"
         );
     }
@@ -2659,8 +2915,8 @@ mod tests {
         d.plat.terminal_frontmost.set(true);
         let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         d.stt_active = Some(active.clone());
-        d.holding = true;
-        d.paste.lock().unwrap().pending = Some("stale".into());
+        d.gesture = GestureState::Recording;
+        d.paste.lock().unwrap().final_state = FinalState::Ready("stale".into());
 
         // Disabling dictation (empty ladder) flips the resolved engine → stt_changed → rebuilt
         // (platform-independent, unlike naming an engine the default may already resolve to).
@@ -2669,13 +2925,13 @@ mod tests {
             ..Default::default()
         };
         d.reload(&cfg);
-        assert!(!d.holding, "hold ended on engine swap");
+        assert!(!d.is_recording(), "hold ended on engine swap");
         assert!(
             !active.load(Ordering::Relaxed),
             "recording icon (stt_active) cleared on the swap"
         );
         assert!(
-            d.paste.lock().unwrap().pending.is_none(),
+            matches!(d.paste.lock().unwrap().final_state, FinalState::Idle),
             "stale preview cleared"
         );
     }
@@ -2705,9 +2961,9 @@ mod tests {
 
     #[test]
     fn reload_while_idle_does_not_abort() {
-        // A reload when NOT holding must not call abort() (nothing in flight).
+        // A reload when NOT recording must not call abort() (nothing in flight).
         let mut d = mk(600);
-        assert!(!d.holding);
+        assert!(!d.is_recording());
         d.reload(&VoiceConfig::default());
         assert_eq!(
             d.plat.tap_up_calls.get(),
@@ -2776,7 +3032,7 @@ mod tests {
         // An in-flight PTT hold before the mode flips to Always must be torn down — Always
         // bypasses the Caps gesture machine entirely, so a stranded HOLD would sit in stasis
         // and paste a stale transcript once the mode later flips back.
-        d.holding = true;
+        d.gesture = GestureState::Recording;
 
         let cfg = VoiceConfig {
             listen_mode: ds_config::ListenMode::Always,
@@ -2788,7 +3044,7 @@ mod tests {
             "entering Always mode builds the listener"
         );
         assert!(
-            !d.holding,
+            !d.is_recording(),
             "in-flight PTT hold torn down when Always takes over"
         );
 
@@ -2809,13 +3065,16 @@ mod tests {
 
         // Simulate a stray hold present when Always is left (same hazard as the caps gate
         // going off mid-hold): leaving the mode must tear it down too.
-        d.holding = true;
+        d.gesture = GestureState::Recording;
 
         d.reload(&VoiceConfig::default());
         assert!(
             d.listener.is_none(),
             "leaving Always mode drops the listener"
         );
-        assert!(!d.holding, "leaving Always tears down any in-flight hold");
+        assert!(
+            !d.is_recording(),
+            "leaving Always tears down any in-flight hold"
+        );
     }
 }

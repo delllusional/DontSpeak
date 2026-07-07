@@ -275,12 +275,7 @@ pub(crate) fn model_status_json(
     let (dict_text, dict_awaiting, dict_target, dict_has_target, dict_refused) = paste
         .lock()
         .map(|p| {
-            let (text, awaiting) = dictation_preview(
-                p.pending.as_deref(),
-                &p.partial,
-                p.caps_held,
-                p.confirm_armed,
-            );
+            let (text, awaiting) = dictation_preview(&p.final_state, &p.partial, p.caps_held);
             (
                 text,
                 awaiting,

@@ -4,11 +4,11 @@
 //! Caps-ON `start()` spawns a thread that tells the helper to `listen` (it opens
 //! the mic + transcribes), streaming PARTIAL lines into the shared dictation
 //! buffer for the live confirm panel; on Caps-OFF `stop()` ends the listen,
-//! joins the FINAL transcript, and DEPOSITS it as `pending` for confirmation —
-//! it no longer pastes directly. Confirm-before-paste is unconditional: the
-//! ENGINE pastes `pending` on the user's confirm tap (focus-gated) and discards
-//! it on cancel. `abort()` (§F long-press reset) ends the listen and clears the
-//! buffer (no paste).
+//! joins the FINAL transcript, and DEPOSITS it as `FinalState::Ready` for
+//! confirmation — it no longer pastes directly. Confirm-before-paste is
+//! unconditional: the ENGINE pastes the landed final on the user's confirm tap
+//! (focus-gated) and discards it on cancel. `abort()` (§F long-press reset) ends
+//! the listen and clears the buffer (no paste).
 //!
 //! The model lives in the one warm helper, not the engine; this type owns no
 //! platform handle anymore (the engine performs the gated paste).
@@ -19,29 +19,28 @@ use std::thread::JoinHandle;
 use ds_stt::Stt;
 
 use crate::tts::TtsManager;
-use crate::{PasteBuf, PasteState};
+use crate::{FinalState, PasteBuf, PasteState};
 
-/// Deposit a finalized transcript into the shared dictation buffer as `pending` (the
-/// engine pastes it, focus-gated), but ONLY if the buffer is still on the session
-/// `epoch` this listen started under. `stop` runs the slow Parakeet final pass on a
-/// detached joiner, so by the time it lands a later `start`/`abort`/`teardown`/`cancel`
-/// may have advanced the epoch — depositing then would repopulate a cleared buffer or
-/// clobber a newer session's live partials. An empty transcript deposits no `pending`
-/// but still sets `final_ready` so the deferred-submit machinery disarms. Returns
-/// whether the deposit was applied (the epoch matched). Extracted from the `stop` joiner
-/// so the guard is unit-testable without spawning threads.
+/// Deposit a finalized transcript into the shared dictation buffer as
+/// `FinalState::Ready` (the engine pastes it, focus-gated), but ONLY if the buffer is
+/// still on the session `epoch` this listen started under. `stop` runs the slow
+/// Parakeet final pass on a detached joiner, so by the time it lands a later
+/// `start`/`abort`/`teardown`/`cancel` may have advanced the epoch — depositing then
+/// would repopulate a cleared buffer or clobber a newer session's live partials. An
+/// empty transcript deposits `FinalState::Empty` so the deferred-submit machinery
+/// disarms. Returns whether the deposit was applied (the epoch matched). Extracted
+/// from the `stop` joiner so the guard is unit-testable without spawning threads.
 fn deposit_final(p: &mut PasteBuf, epoch: u64, text: &str) -> bool {
     if p.epoch != epoch {
         return false;
     }
     p.partial.clear();
     let trimmed = text.trim();
-    p.pending = if trimmed.is_empty() {
-        None
+    p.final_state = if trimmed.is_empty() {
+        FinalState::Empty
     } else {
-        Some(trimmed.to_string())
+        FinalState::Ready(trimmed.to_string())
     };
-    p.final_ready = true;
     true
 }
 
@@ -78,7 +77,9 @@ impl Stt for HelperStt {
         }
         // Fresh capture: clear any stale preview text so the panel starts empty, and
         // open a new session epoch so this session's `stop` joiner can recognize whether
-        // the buffer still belongs to it when its (slow) final lands.
+        // the buffer still belongs to it when its (slow) final lands. Deliberately does
+        // NOT touch `final_state`: the engine's `start_recording` already reset it to
+        // `Idle` under its own lock before calling this.
         if let Ok(mut p) = self.paste.lock() {
             p.partial.clear();
             p.epoch = p.epoch.wrapping_add(1);
@@ -105,7 +106,8 @@ impl Stt for HelperStt {
         // Parakeet pass is SLOW (seconds of audio re-run through the model), so do
         // NOT join here — that would freeze the engine's poll thread. Instead a short
         // background joiner waits for it and deposits the result, while the poll loop
-        // stays responsive (pill keeps updating, the deferred submit fires on `final_ready`).
+        // stays responsive (pill keeps updating, the deferred submit fires once the
+        // deposited `final_state` reads `Ready`/`Empty`).
         self.tts.stop_listen();
         let Some(handle) = self.handle.take() else {
             return;
@@ -156,8 +158,11 @@ impl Stt for HelperStt {
         }
         if let Ok(mut p) = self.paste.lock() {
             p.partial.clear();
-            p.pending = None;
-            p.final_ready = false;
+            // Straight to `Idle` (the engine caller disarms its own side a few
+            // instructions later on the same thread — under the old fields it also
+            // cleared the mirror then, so this collapses only a microsecond-scale
+            // window where a concurrent status read saw ("", true) vs ("", false)).
+            p.final_state = FinalState::Idle;
             // Advance the session epoch so any earlier detached `stop` joiner still in
             // its final pass is invalidated and can't deposit into this cleared buffer.
             p.epoch = p.epoch.wrapping_add(1);
@@ -184,10 +189,10 @@ impl Stt for HelperStt {
 #[cfg(test)]
 mod tests {
     use super::deposit_final;
-    use crate::PasteBuf;
+    use crate::{FinalState, PasteBuf};
 
     /// Happy path: the session epoch is unchanged when the (async) final lands, so the
-    /// transcript deposits as `pending` for the deferred submit.
+    /// transcript deposits as `Ready` for the deferred submit.
     #[test]
     fn deposits_when_epoch_matches() {
         let mut p = PasteBuf {
@@ -196,8 +201,7 @@ mod tests {
             ..Default::default()
         };
         assert!(deposit_final(&mut p, 5, "  hello world  "));
-        assert_eq!(p.pending.as_deref(), Some("hello world")); // trimmed
-        assert!(p.final_ready);
+        assert_eq!(p.final_state, FinalState::Ready("hello world".into())); // trimmed
         assert!(p.partial.is_empty(), "partial cleared on deposit");
     }
 
@@ -212,13 +216,16 @@ mod tests {
             ..Default::default()
         };
         assert!(!deposit_final(&mut p, 5, "stale final")); // joiner started under epoch 5
-        assert!(p.pending.is_none(), "stale final must not deposit");
-        assert!(!p.final_ready, "stale final must not signal ready");
+        assert_eq!(
+            p.final_state,
+            FinalState::Idle,
+            "stale final must not deposit or signal ready"
+        );
         assert_eq!(p.partial, "newer session partial", "live partial untouched");
     }
 
-    /// An empty/whitespace final deposits no `pending` but still flags `final_ready` so
-    /// the armed deferred-submit disarms instead of hanging.
+    /// An empty/whitespace final deposits `Empty` (never `Ready`) so the armed
+    /// deferred-submit disarms instead of hanging.
     #[test]
     fn empty_final_signals_ready_without_pending() {
         let mut p = PasteBuf {
@@ -226,7 +233,6 @@ mod tests {
             ..Default::default()
         };
         assert!(deposit_final(&mut p, 1, "   "));
-        assert!(p.pending.is_none());
-        assert!(p.final_ready);
+        assert_eq!(p.final_state, FinalState::Empty);
     }
 }
