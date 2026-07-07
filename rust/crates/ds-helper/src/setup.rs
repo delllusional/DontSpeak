@@ -7,6 +7,11 @@
 /// process exit code (0 ok, 1 failed). `what` = "models" | "cuda" | a per-model token;
 /// anything unrecognized (including the no-arg "all" default) ⇒ both models + CUDA.
 pub(crate) fn run_prefetch(what: &str) -> i32 {
+    ds_config::log_cached(
+        ds_config::LogLevel::Info,
+        "helper",
+        &format!("ds-helper: prefetch '{what}' started"),
+    );
     let p = |_done: u64, _total: u64| {};
     let models = || -> std::io::Result<()> {
         ds_model::run_setup_kokoro_with_progress(&p).map(|_| ())?;
@@ -63,9 +68,17 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         _ => models().and_then(|_| cuda()),
     };
     match r {
-        Ok(()) => 0,
+        Ok(()) => {
+            ds_config::log_cached(
+                ds_config::LogLevel::Info,
+                "helper",
+                &format!("ds-helper: prefetch '{what}' finished"),
+            );
+            0
+        }
         Err(e) => {
             let msg = format!("ds-helper: prefetch '{what}' failed: {e}");
+            ds_config::log_cached(ds_config::LogLevel::Warn, "helper", &msg);
             eprintln!("{msg}");
             // stderr is discarded under the GUI subsystem (a GUI-subsystem caller can't read
             // it), so leave a diagnosable trace on disk the caller/user can find.

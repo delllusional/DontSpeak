@@ -183,6 +183,16 @@ fn finish_download(s: &mut DownloadState, which: DownloadTarget, result: &std::i
     }
 }
 
+/// Format one download lifecycle log line (`"started"` / `"finished"` / `"failed"`),
+/// with an optional detail (e.g. the error string) appended after a colon. Pure, so
+/// the exact wording is unit-testable without spawning a download thread.
+fn download_event_msg(which: DownloadTarget, phase: &str, detail: Option<&str>) -> String {
+    match detail {
+        Some(d) => format!("model download ({}) {phase}: {d}", which.as_str()),
+        None => format!("model download ({}) {phase}", which.as_str()),
+    }
+}
+
 /// Kick off a background download for `which` (e.g. [`DownloadTarget::KokoroModel`] /
 /// [`DownloadTarget::ParakeetModel`] / [`DownloadTarget::KokoroCoreml`]). Returns
 /// immediately; progress is observed via `model_status`. Targets download in PARALLEL —
@@ -195,6 +205,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
     if !begin_download(&mut dl.lock().unwrap(), which) {
         return; // this target is already downloading — attach, don't retrigger
     }
+    log(&download_event_msg(which, "started", None));
     let dl = dl.clone();
     std::thread::spawn(move || {
         // Grab the warm-child reload hook up front (wired once at boot); used after the fetch.
@@ -287,11 +298,12 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 ))),
             }
         };
-        if let Err(e) = &result {
-            log(&format!(
-                "WARN: model download ({}) failed: {e}",
-                which.as_str()
-            ));
+        match &result {
+            Ok(()) => log(&download_event_msg(which, "finished", None)),
+            Err(e) => log(&format!(
+                "WARN: {}",
+                download_event_msg(which, "failed", Some(&e.to_string()))
+            )),
         }
         finish_download(&mut dl.lock().unwrap(), which, &result);
         // This thread is DETACHED and can outlive `ds_engine_stop()` (which only joins the
@@ -317,6 +329,8 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             && download_needs_child_reload(which, &VoiceConfig::load(&paths))
             && tts.reload_models()
         {
+            // Supplementary detail AFTER the unconditional "finished" line logged above —
+            // not the sole success signal anymore.
             log(&format!(
                 "warm child restarted to load freshly-downloaded '{}'",
                 which.as_str()
@@ -564,7 +578,7 @@ fn apply_tts_provider(tts: &Arc<TtsManager>, which: Provider) -> bool {
 mod tests {
     use super::{
         DownloadNeeds, DownloadProgress, DownloadState, ane_needs_voices_npz, begin_download,
-        fetch_plan, finish_download, needed_downloads, target_hosts_engine,
+        download_event_msg, fetch_plan, finish_download, needed_downloads, target_hosts_engine,
     };
     use ds_model::DownloadTarget;
 
@@ -806,6 +820,18 @@ mod tests {
         assert!(
             !s.last_done.contains_key(&kok),
             "begin_download must clear any stale last_done entry for this target"
+        );
+    }
+
+    #[test]
+    fn download_event_msg_formats_phase_with_and_without_detail() {
+        assert_eq!(
+            download_event_msg(DownloadTarget::KokoroModel, "started", None),
+            "model download (kokoro_model) started"
+        );
+        assert_eq!(
+            download_event_msg(DownloadTarget::KokoroModel, "failed", Some("boom")),
+            "model download (kokoro_model) failed: boom"
         );
     }
 
