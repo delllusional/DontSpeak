@@ -303,11 +303,15 @@ pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
             // Hosts must serialize stop→start (stop JOINS the old monitor via
             // `MacOsPlatform`'s Drop; today macOS calls ds_engine_start once per
             // process and stops only at quit), so no prior monitor's retained ref
-            // should still occupy the slot. NOTE this is a requirement on hosts, not
-            // something ds-core enforces: its `engine_start` does not join a stale
-            // non-running engine thread (host.rs), so a host starting a new engine
-            // while an old one is still DRAINING would overlap two monitors — the
-            // debug_assert below is the dev-build tripwire for that contract.
+            // should still occupy the slot. `ds-core::host::engine_start` now joins a
+            // stale non-running engine thread (bounded — see its `join_stale`) before
+            // spawning a replacement, closing the ordinary "old engine thread still
+            // draining" overlap window this assert used to catch on every affected
+            // build. It stays as the dev-build tripwire for what's left: a genuinely
+            // wedged prior thread past `engine_start`'s own join timeout (it detaches
+            // rather than blocking the caller forever), or two `engine_start` calls
+            // actually racing from different threads at once (not a scenario any
+            // confirmed host call site produces today).
             debug_assert_eq!(prev, 0, "caps-HID monitor spawned over a live slot");
             // Leak ONE Arc clone as the callback context, reused across retry
             // attempts; the manager that finally opens owns it until shutdown (see
