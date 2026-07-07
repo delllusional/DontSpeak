@@ -38,7 +38,7 @@ arboard = { workspace = true }
 # Clipboard for the paste-based text injection (KeyInjector::type_text) — an atomic
 # Ctrl+V paste, mirroring the macOS Cmd+V path (per-char SendInput crawled in a console).
 arboard = { workspace = true }
-windows = { version = "0.62", features = [
+windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

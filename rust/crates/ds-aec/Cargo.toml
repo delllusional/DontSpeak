@@ -31,9 +31,9 @@ ringbuf = "0.5"
 # BEFORE Initialize, which engages the OS capture-side AEC APO (+ Win11 Voice
 # Clarity). rodio keeps rendering TTS; the OS taps the render endpoint as the echo
 # reference itself, so this backend is capture-only (`owns_render() == false`).
-# Version pinned to match ds-platform so the workspace resolves ONE `windows` 0.62.
+# Version comes from the workspace pin, so the workspace resolves ONE `windows`.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = [
+windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_System_Com",

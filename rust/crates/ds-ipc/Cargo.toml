@@ -25,7 +25,7 @@ uds_windows = "1.2"
 # ACL hardening of the socket dir/file in transport::bind() (no chmod-bit model
 # on NTFS). Already an MIT dependency used elsewhere in the workspace (ds-platform,
 # ds-proc, ds-aec, ds-model) at the same version.
-windows = { version = "0.62", features = [
+windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",

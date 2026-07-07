@@ -17,7 +17,7 @@ nix = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Single-PID OpenProcess/TerminateProcess. Behind cfg; UNCOMPILED on this host.
-windows = { version = "0.62", features = [
+windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Threading",
 ] }

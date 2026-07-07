@@ -43,10 +43,10 @@ winresource = { workspace = true }
 
 # Best-effort scheduling priority boost for latency-critical threads (see src/priority.rs).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_System_Threading", "Win32_Foundation"] }
+windows = { workspace = true, features = ["Win32_System_Threading", "Win32_Foundation"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
+libc = { workspace = true }
 
 [lints]
 workspace = true

@@ -37,7 +37,7 @@ kaldi-native-fbank = "0.1.0"
 # dlopen libsmkokoro.dylib (the FluidAudio Core ML / ANE shim) at runtime, like
 # the apple-native TTS backend. Resolved via SMKOKORO_DYLIB_PATH.
 [target.'cfg(target_os = "macos")'.dependencies]
-libloading = "0.9"
+libloading = { workspace = true }
 
 [dev-dependencies]
 # WAV reader for the `diarize_wav` example (manual on-device diarizer check).

@@ -42,7 +42,7 @@ nix = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 # dlopen libsmkokoro.dylib (the FluidAudio Core ML / ANE Kokoro shim) for the
 # apple-native TTS backend. Loaded at runtime, like ort's load-dynamic onnxruntime.
-libloading = "0.9"
+libloading = { workspace = true }
 
 [lints]
 workspace = true

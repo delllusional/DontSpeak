@@ -68,6 +68,9 @@ winresource = "0.1"
 # Property-based testing (dev-only). Classic macro API only (`proptest!` /
 # `prop_compose!`), not the optional proc-macro attribute variant. MIT OR Apache-2.0.
 proptest = "1"
+# Local HTTP mock server (dev-only): every outbound-HTTP test points here, never a
+# real endpoint (see AGENTS.md's no-real-network invariant).
+httpmock = "0.8.3"
 
 # ── Phase-2 engine deps (pinned once) ────────────────────────────────────────
 # Model download (ds-model): tiny blocking HTTP, checksum, atomic rename. We use
@@ -128,6 +131,20 @@ rodio = "0.22"
 # Extract libonnxruntime.dylib from the microsoft .tgz (ds-model route A).
 flate2 = "1"
 tar = "0.4"
+
+# ── Target-specific deps (version pinned once; features stay per-member) ─────
+# Win32 API bindings. NO features here — each member opts into exactly the Win32
+# feature gates it calls; cargo unifies them additively across the workspace.
+windows = "0.62"
+# Runtime dlopen of dylibs we deliberately don't link at build time (the FluidAudio
+# Core ML / ANE shim, NVML) — resolved by env var/path, like ort's load-dynamic.
+libloading = "0.9"
+# Raw libc calls std doesn't wrap (RTLD_GLOBAL dlopen preloads, thread QoS).
+libc = "0.2"
+# Zip reader for model archives (Windows ONNX Runtime .zip, Linux CUDA wheels).
+# deflate-only (the format MS/PyPI use); no bzip2/zstd/aes to keep it lean —
+# flate2 is already in the graph.
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # ── macOS platform deps ──────────────────────────────────────────────────────
 # objc2 tree used by ds-platform (NSWorkspace frontmost-app check). The native
