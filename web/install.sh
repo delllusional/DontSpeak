@@ -108,7 +108,7 @@ place_uninstaller() {
 #     and dev (apps/macos/bundle.sh) share this ONE per-user layout; DONTSPEAK_APP_DIR
 #     overrides it in both
 #   • CLI/engine binaries in ~/.local/bin (all flows, and the whole Linux install)
-# plus the client wiring (Claude Code hooks + MCP, Claude Desktop MCP, Codex hooks),
+# plus the client wiring (Claude Code hooks + MCP, Codex hooks),
 # ALL app data / downloaded models / caches / logs / state, the launchers / login
 # item, and the placed standalone uninstaller itself.
 #
@@ -156,10 +156,9 @@ case "$(uname -s)" in
     # bystander like `tail -f ds-helper.log` or an editor with ds-helper.rs open dies too.
     pkill -x ds-helper 2>/dev/null || true
 
-    echo "==> 2. un-wire every client (Claude Code hooks + MCP, Desktop MCP, Codex) before deleting binaries"
+    echo "==> 2. un-wire every client (Claude Code hooks + MCP, Codex) before deleting binaries"
     # `wire --all --remove` strips EVERY client's integration: claude_code = hooks
-    # (settings.json) + MCP (~/.claude.json); claude_desktop = MCP
-    # (claude_desktop_config.json); codex = hooks (~/.codex/config.toml). Prefer the
+    # (settings.json) + MCP (~/.claude.json); codex = hooks (~/.codex/config.toml). Prefer the
     # ~/.local/bin CLI, else the CLI bundled in the app (Contents/Helpers).
     APP_DIR="${DONTSPEAK_APP_DIR:-$H/Applications/DontSpeak.app}"
     CLI=""
@@ -173,7 +172,7 @@ case "$(uname -s)" in
         || echo "   (wire --all --remove failed or nothing to remove)"
     else
       echo "   (no dontspeak CLI found — skipping un-wire; strip mcpServers.DontSpeak from"
-      echo "    ~/.claude.json and claude_desktop_config.json by hand if they linger)"
+      echo "    ~/.claude.json by hand if it lingers)"
     fi
 
     echo "==> 3. remove the app bundle + installed engine binaries"

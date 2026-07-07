@@ -1,8 +1,9 @@
-//! MCP server registration (Claude Desktop's claude_desktop_config.json)
+//! MCP server registration: the `mcpServers.<name>` JSON shaper.
 //!
-//! Claude Desktop has no hook system, so its DontSpeak integration is purely
-//! registering the stdio MCP bridge as a server — Claude then calls speak/listen/…
-//! on demand (no auto-narration). The config is the standard MCP shape:
+//! [`merge_mcp_server`] / [`strip_mcp_server`] are the generic `mcpServers.<name>` JsonMcp
+//! shaper used by any JSON-MCP client — currently Claude Code's `~/.claude.json`. It registers
+//! the stdio MCP bridge as a server so the client can call speak/listen/… on demand. The
+//! config is the standard MCP shape:
 //!   { "mcpServers": { "DontSpeak": { "command": "`<abs path>`", "args": [...] } } }
 //! We edit it the same way as settings.json: additive (preserve other servers/keys), our
 //! entry's `command`/`args` UPDATED IN PLACE (not the whole object replaced) so a reinstall
@@ -102,8 +103,7 @@ mod tests {
 
     #[test]
     fn merge_mcp_server_records_args_when_given() {
-        // The real desktop registration is stdio (no args); this just pins that args ARE
-        // recorded when a caller supplies them.
+        // args are recorded when a caller supplies them (the registration is stdio, no args).
         let out = merge_mcp_server(
             Value::Null,
             "dontspeak",

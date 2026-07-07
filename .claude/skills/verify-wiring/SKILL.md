@@ -11,12 +11,10 @@ description: Re-verify the client-wiring registry against the CURRENT client ver
 > confirmed against these docs when this client version was current". This skill is the
 > re-verification loop that keeps those pins honest. `dontspeak wire --list` prints it all.
 
-## Steps — per client (all three unless asked otherwise)
+## Steps — per client (both unless asked otherwise)
 
 1. **Current version.**
    - Claude Code: `claude --version`
-   - Claude Desktop: `defaults read /Applications/Claude.app/Contents/Info CFBundleShortVersionString`
-     (Windows/Linux: the app's About screen or package metadata)
    - Codex CLI: `codex --version` if installed, else `npm view @openai/codex version`
      (not installed ⇒ the pin means "docs read while X was current", note it as such)
 
@@ -33,8 +31,7 @@ description: Re-verify the client-wiring registry against the CURRENT client ver
      `MessageDisplay` stream, so `Stop` also voices the reply; shaped in
      `ds-config/src/wire/codex.rs`).
    - *MCP clients:* the `mcpServers.<name>` entry shape (stdio: `command`, optional `args`)
-     and WHICH file (`~/.claude.json` user scope for Claude Code; `claude_desktop_config.json`
-     for Desktop).
+     and WHICH file (`~/.claude.json` user scope for Claude Code).
 
 3. **Verify the merge shape locally** (no client needed):
    `./rust/target/debug/dontspeak wire <client> --print-only` — the emitted document must

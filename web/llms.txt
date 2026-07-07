@@ -1,6 +1,6 @@
 # DontSpeak
 
-> A local voice layer for Claude Code, Claude Desktop, and Codex: your AI agent speaks its
+> A local voice layer for Claude Code and Codex: your AI agent speaks its
 > replies aloud through a local neural voice, and you dictate back with one key. It runs a
 > native host app (speech engine in-process, on-device models) plus an MCP server that any
 > MCP-capable client can call. Models download on first launch.

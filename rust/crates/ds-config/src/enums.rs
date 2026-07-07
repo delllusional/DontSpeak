@@ -611,8 +611,6 @@ pub enum WireTarget {
     NarrationSpec,
     /// Claude Code's voice hooks in `~/.claude/settings.json`.
     ClaudeCode,
-    /// The DontSpeak MCP-server entry in Claude Desktop's config.
-    ClaudeDesktop,
     /// OpenAI Codex's narration hooks in `~/.codex/config.toml`.
     Codex,
     /// Qwen Code's voice hooks + MCP server in `~/.qwen/settings.json`.
@@ -625,7 +623,6 @@ impl WireTarget {
     pub const ALL: &'static [WireTarget] = &[
         WireTarget::NarrationSpec,
         WireTarget::ClaudeCode,
-        WireTarget::ClaudeDesktop,
         WireTarget::Codex,
         WireTarget::QwenCode,
     ];
@@ -635,7 +632,6 @@ impl WireTarget {
     /// installers, which used to hand-copy this list in three different shells.
     pub const CLIENTS: &'static [WireTarget] = &[
         WireTarget::ClaudeCode,
-        WireTarget::ClaudeDesktop,
         WireTarget::Codex,
         WireTarget::QwenCode,
     ];
@@ -644,7 +640,6 @@ impl WireTarget {
         match s.trim().to_ascii_lowercase().as_str() {
             "narration_spec" => Some(WireTarget::NarrationSpec),
             "claude_code" => Some(WireTarget::ClaudeCode),
-            "claude_desktop" => Some(WireTarget::ClaudeDesktop),
             "codex" => Some(WireTarget::Codex),
             "qwen_code" => Some(WireTarget::QwenCode),
             _ => None,
@@ -656,7 +651,6 @@ impl WireTarget {
         match self {
             WireTarget::NarrationSpec => "narration_spec",
             WireTarget::ClaudeCode => "claude_code",
-            WireTarget::ClaudeDesktop => "claude_desktop",
             WireTarget::Codex => "codex",
             WireTarget::QwenCode => "qwen_code",
         }

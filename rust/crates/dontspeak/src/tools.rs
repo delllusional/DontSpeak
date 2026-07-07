@@ -293,7 +293,7 @@ fn call_wire(paths: &Paths, args: &Value) -> Result<String, String> {
     }
 
     // Build the per-client `wire <client> [--remove]` argv and run the SAME orchestrator the
-    // installers use. `wire` self-skips a client that isn't installed; for Desktop/Codex we
+    // installers use. `wire` self-skips a client that isn't installed; for Codex we
     // pre-check presence so an `enabled=true` on an absent client reports honestly instead of
     // claiming a no-op wire succeeded.
     let flags = |client: &str| -> Vec<String> {
@@ -326,11 +326,7 @@ fn call_wire(paths: &Paths, args: &Value) -> Result<String, String> {
         ));
     }
     let verb = if a.enabled { "Registered" } else { "Removed" };
-    let note = if target == WireTarget::ClaudeDesktop {
-        " — restart Claude Desktop to load it"
-    } else {
-        ""
-    };
+    let note = "";
     Ok(format!(
         "{verb} the DontSpeak integration for {label}{note}."
     ))

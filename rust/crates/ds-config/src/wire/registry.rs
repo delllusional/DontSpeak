@@ -81,7 +81,7 @@ pub struct DocRef {
 
 /// One wireable client: WHO it is, WHERE it lives, HOW it's wired, and the docs saying so.
 pub struct ClientSpec {
-    /// The canonical [`WireTarget`] token (`claude_code` / `claude_desktop` / `codex`).
+    /// The canonical [`WireTarget`] token (`claude_code` / `codex`).
     pub target: WireTarget,
     /// Human-facing name for messages ("Claude Code", "OpenAI Codex", …).
     pub display_name: &'static str,
@@ -145,27 +145,6 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             },
         ],
         verified_client_version: "2.1.198",
-        verified_on: "2026-07-02",
-    },
-    ClientSpec {
-        target: WireTarget::ClaudeDesktop,
-        display_name: "Claude Desktop",
-        kind: ClientKind::DesktopApp,
-        present: |p| p.is_claude_desktop_present(),
-        detect_dir: |p| &p.claude_desktop_dir,
-        gate_on_presence: true,
-        // Desktop has no hook system — MCP is its whole integration.
-        surfaces: &[Surface {
-            mechanism: WireMechanism::JsonMcp,
-            config_file: |p| &p.claude_desktop_config, // per-OS app-support/Claude/…
-            load_hint: Some("quit and reopen Claude Desktop to load the server"),
-            hook_streaming: false,
-        }],
-        docs: &[DocRef {
-            topic: "mcp",
-            url: "https://modelcontextprotocol.io/quickstart/user",
-        }],
-        verified_client_version: "1.15962.1",
         verified_on: "2026-07-02",
     },
     ClientSpec {

@@ -24,7 +24,7 @@ use ds_config::{ClientKind, Paths, WireMechanism, WireTarget};
 
 /// Parse `<client> [--remove] [--print-only]` and wire (or unwire) that client's whole integration.
 /// Returns a process exit code (0 ok / skipped, 1 hard error). `client` is a [`WireTarget`] token
-/// (`claude_code`/`claude_desktop`/`codex`); `narration_spec` is a config-file concern of the
+/// (`claude_code`/`codex`); `narration_spec` is a config-file concern of the
 /// `setup_integration` tool, not a client, so it is rejected here.
 pub fn run(args: &[String]) -> i32 {
     let mut client: Option<WireTarget> = None;

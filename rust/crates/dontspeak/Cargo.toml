@@ -10,11 +10,11 @@ publish.workspace = true
 description = "DontSpeak's CLI: MCP server, Claude Code hook verbs, and client installer — thin clients of the resident engine."
 
 # ONE binary, busybox-style — argv selects the role (see src/main.rs):
-#   (no args)        the stdio MCP server (registered with Claude Code/Desktop)
+#   (no args)        the stdio MCP server (registered with Claude Code)
 #   notify           COMMAND hook sink: run the event's side effect, no reply (async)
 #   provide          QUERY hook: return the event's hookSpecificOutput JSON (sync)
 #   wire <client> …  wire/unwire ONE client's whole integration (claude_code = hooks + MCP,
-#                    claude_desktop = MCP, codex = hooks); `--remove` to unwire
+#                    codex = hooks); `--remove` to unwire
 [[bin]]
 name = "dontspeak"
 path = "src/main.rs"

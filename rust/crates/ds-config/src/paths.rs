@@ -69,16 +69,6 @@ pub struct Paths {
     /// writes [`crate::DEFAULT_NARRATION_SPEC`] here on startup if it's absent; edit it to shape how
     /// replies are narrated.
     pub narration_spec: PathBuf,
-    /// Claude DESKTOP's config dir — `BaseDirs::config_dir()/Claude`, which is
-    /// `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows),
-    /// `~/.config/Claude` (Linux). Its existence is how `wire claude_desktop` detects that
-    /// Claude Desktop has run at least once. (Distinct from `claude_dir` = Claude
-    /// CODE's `~/.claude`.)
-    pub claude_desktop_dir: PathBuf,
-    /// Claude Desktop's `claude_desktop_config.json` — where `wire claude_desktop` adds (or
-    /// removes) the `mcpServers.DontSpeak` stdio entry so Desktop can spawn our MCP
-    /// bridge. Desktop has no hook system, so this is registration ONLY (no narration).
-    pub claude_desktop_config: PathBuf,
     /// OpenAI Codex CLI's config dir (`~/.codex`). Its existence is how `wire codex`
     /// presence-gates the narration-hook wiring (a clean skip when Codex isn't installed).
     pub codex_dir: PathBuf,
@@ -111,11 +101,6 @@ impl Paths {
         // startup, and every writer create_dir_all's its own parent too.
         let config_dir = data_dir()?;
         let state_dir = state_root(&base);
-        // Claude Desktop keeps its config under the OS roaming-config dir (Application
-        // Support on macOS, %APPDATA% on Windows, ~/.config on Linux) — exactly what
-        // `BaseDirs::config_dir()` resolves, so no per-OS branching here.
-        let claude_desktop_dir = base.config_dir().join("Claude");
-        let claude_desktop_config = claude_desktop_dir.join("claude_desktop_config.json");
         Some(Self {
             // Runtime/state files live under the LOCAL state root (machine-specific, never
             // roamed); settings live under the roaming config root.
@@ -133,8 +118,6 @@ impl Paths {
             narration_spec: config_dir.join("narration-spec.md"),
             config_dir,
             state_dir,
-            claude_desktop_dir,
-            claude_desktop_config,
             codex_config: codex_dir.join("config.toml"),
             codex_dir,
             qwen_settings: qwen_dir.join("settings.json"),
@@ -159,8 +142,6 @@ impl Paths {
         let codex_dir = home.join(".codex");
         let qwen_dir = home.join(".qwen");
         let ds_dir = home.join(".dontspeak");
-        let claude_desktop_dir = home.join("Claude");
-        let claude_desktop_config = claude_desktop_dir.join("claude_desktop_config.json");
         Self {
             pidfile: ds_dir.join("speak-hook.pid"),
             log_file: home.join("dontspeak.log"),
@@ -177,8 +158,6 @@ impl Paths {
             // The inert fallback uses ONE dir for both roots (layout is immaterial here).
             config_dir: ds_dir.clone(),
             state_dir: ds_dir,
-            claude_desktop_dir,
-            claude_desktop_config,
             codex_config: codex_dir.join("config.toml"),
             codex_dir,
             qwen_settings: qwen_dir.join("settings.json"),
@@ -186,33 +165,6 @@ impl Paths {
             home,
             claude_dir,
             hooks_dir,
-        }
-    }
-
-    /// True if Claude Desktop appears installed: its config dir exists (it has run at
-    /// least once) OR its app/install location is present (installed, maybe never
-    /// launched). Gates the optional Desktop MCP registration so we never scatter a
-    /// stray `Claude/` config dir on a machine that doesn't have Desktop.
-    pub fn is_claude_desktop_present(&self) -> bool {
-        if self.claude_desktop_dir.exists() {
-            return true;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            std::path::Path::new("/Applications/Claude.app").exists()
-                || self.home.join("Applications/Claude.app").exists()
-        }
-        #[cfg(target_os = "windows")]
-        {
-            // Claude Desktop installs per-user under %LOCALAPPDATA%.
-            self.home.join("AppData/Local/AnthropicClaude").exists()
-                || self.home.join("AppData/Local/Programs/claude").exists()
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            // No official Claude Desktop on Linux — the config dir check above is the
-            // only signal (community builds use ~/.config/Claude).
-            false
         }
     }
 

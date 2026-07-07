@@ -1,6 +1,6 @@
 # DontSpeak
 
-A local voice layer for Claude Code, Codex, and Claude Desktop: your agent speaks its replies aloud, and you dictate back with one key.
+A local voice layer for Claude Code and Codex: your agent speaks its replies aloud, and you dictate back with one key.
 
 ## Install
 

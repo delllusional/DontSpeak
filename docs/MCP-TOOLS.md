@@ -151,10 +151,10 @@ or `tts_system_voice`.
 ## setup_integration
 
 Write a config file, or register/remove a client integration — the same setup the
-installer does. Targets: `"narration_spec"`, `"claude_code"`, `"claude_desktop"`,
+installer does. Targets: `"narration_spec"`, `"claude_code"`,
 `"codex"`, `"qwen_code"`. Additive and backed up; `enabled=false` removes only our entry.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `target` | enum: `narration_spec`, `claude_code`, `claude_desktop`, `codex`, `qwen_code` | yes | What to wire: the narration spec, or a client integration. |
+| `target` | enum: `narration_spec`, `claude_code`, `codex`, `qwen_code` | yes | What to wire: the narration spec, or a client integration. |
 | `enabled` | boolean | yes | `true` = register; `false` = remove. |

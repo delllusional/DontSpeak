@@ -1,6 +1,6 @@
 //! Shared MCP-registration core for the [`wire`](crate::wire) orchestrator — the
 //! `WireMechanism::JsonMcp` writer of the client registry, used today by Claude CODE
-//! (`~/.claude.json`) and Claude DESKTOP (`claude_desktop_config.json`). Every client registers
+//! (`~/.claude.json`). Every client registers
 //! the IDENTICAL stdio `mcpServers.DontSpeak` entry and differs only in WHICH config file, how
 //! it's detected, and the user-facing labels — all declared on the client's
 //! `ds_config::ClientSpec`, from which [`target_for`] builds the [`Target`] this one
@@ -19,7 +19,7 @@ use ds_config::{ClientSpec, Paths, Surface};
 pub struct Target<'a> {
     /// Label for log lines (the `wire` orchestrator sets `"wire"`).
     pub tool: &'a str,
-    /// The config file to edit (Code's `~/.claude.json`, Desktop's `claude_desktop_config.json`).
+    /// The config file to edit (Code's `~/.claude.json`).
     pub config: &'a Path,
     /// Whether the client is installed. Gates a REAL write so we never scatter a stray config
     /// on a machine without the client; consulted only for a non-remove, non-print wire.

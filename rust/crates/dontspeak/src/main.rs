@@ -1,6 +1,6 @@
 //! `dontspeak` — the single multi-call binary. With NO args (this file's default role)
 //! it is a stdio Model Context Protocol (MCP) server that exposes the DontSpeak engine's
-//! TTS/STT to MCP clients (Claude Code, Claude Desktop). With a subcommand it is instead
+//! TTS/STT to MCP clients (e.g. Claude Code). With a subcommand it is instead
 //! a Claude Code hook executor or installer step — see the front-door dispatch in `main`
 //! and the `hook_speak` / `hook_narrate` modules (the former `ds-speak` /
 //! `ds-narrate` binaries, now folded in here).
@@ -91,8 +91,8 @@ fn main() {
     //                                   the narration spec). The only entry Claude Code waits on.
     //   `dontspeak wire <client> [--remove]` — the ONE per-client integration installer: it
     //                                   wires (or removes) EVERYTHING that client needs in a
-    //                                   single step — claude_code = hooks + MCP, claude_desktop
-    //                                   = MCP, codex = hooks. See `wire.rs`.
+    //                                   single step — claude_code = hooks + MCP, codex
+    //                                   = hooks. See `wire.rs`.
     // With no argv it is the stdio MCP server (the default, spawned by Claude Code / the app).
     // ALL communication is stdio: the MCP tool surface (JSON-RPC over stdio) and the two
     // Claude Code hook verbs above. There is no HTTP transport.
