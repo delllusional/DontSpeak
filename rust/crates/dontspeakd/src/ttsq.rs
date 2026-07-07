@@ -868,8 +868,9 @@ impl TtsQueue {
             // gate clears, dropping nothing. Two independent "hold, don't drop" gates:
             //   * mic live (HALF-DUPLEX only): never speak into a recording. Full-duplex
             //     skips this — the VPIO mic is always live (`is_mic_active()` permanently
-            //     true), so the AEC lets us speak into the open mic and `BARGE` handles
-            //     overlap.
+            //     true), so the AEC lets us speak into the open mic (coexist: playback and
+            //     dictation overlap; the voice stops only on an explicit `stop`/`stopfade`
+            //     op, not an implicit talk-over barge).
             //   * no terminal frontmost: you've tabbed to a browser/other app — the
             //     cross-platform focus gate (applies in BOTH duplex modes). The worker
             //     reads the flag the poll thread publishes (NSWorkspace is poll/main-
@@ -1004,7 +1005,8 @@ fn should_requeue(paused: bool, text: &str) -> bool {
 /// play it now. Two independent "hold, don't drop" gates, OR-ed together:
 ///
 /// - MIC LIVE (half-duplex only): never speak into a recording. Full-duplex skips this
-///   — the VPIO mic is always live, so the AEC + `BARGE` handle overlap instead.
+///   — the VPIO mic is always live, so the AEC handles the overlap instead (coexist;
+///   the voice stops only on an explicit `stop`/`stopfade` op, never a talk-over barge).
 /// - FOCUS (both modes, only when `pause_in_background`): no terminal frontmost (you
 ///   tabbed to a browser) → hold. Self-arming via `terminal_seen`, so an unrecognized
 ///   terminal emulator (never seen frontmost) degrades to always-play, never mute.

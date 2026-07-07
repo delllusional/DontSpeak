@@ -29,6 +29,9 @@ ds-aec = { workspace = true }
 ds-model = { workspace = true }
 # Default voice + the DiarizerProvider config enum the serve loop reads.
 ds-config = { workspace = true }
+# The stdout reply-token vocabulary shared with the parsing engine (dontspeakd),
+# so the emitted tokens can't drift from what tts.rs's reader matches.
+ds-helper-proto = { workspace = true }
 # The `--serve` stdin request objects + the diarize/embed JSON replies.
 serde = { workspace = true }
 serde_json = { workspace = true }

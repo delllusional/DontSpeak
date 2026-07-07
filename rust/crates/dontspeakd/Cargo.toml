@@ -21,6 +21,9 @@ ds-ipc = { workspace = true }
 ds-model = { workspace = true }
 ds-stt = { workspace = true }
 ds-engines = { workspace = true }
+# The warm helper's stdout reply-token vocabulary — tts.rs's two reader loops parse
+# with these consts so they can't drift from what ds-helper emits.
+ds-helper-proto = { workspace = true }
 # System-`say` wpm mapping (rate_to_wpm) + the shared say-command builder so the
 # warm engine's System-TTS path matches ds-tts's spawners exactly.
 ds-tts = { workspace = true }

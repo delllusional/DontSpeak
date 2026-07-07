@@ -874,6 +874,7 @@ version = "0.2.3-dev"
 dependencies = [
  "ds-config",
  "ds-engines",
+ "ds-helper-proto",
  "ds-i18n",
  "ds-ipc",
  "ds-model",
@@ -948,6 +949,7 @@ version = "0.2.3-dev"
 dependencies = [
  "ds-aec",
  "ds-config",
+ "ds-helper-proto",
  "ds-model",
  "ds-stt",
  "ds-tts",
@@ -958,6 +960,10 @@ dependencies = [
  "windows",
  "winresource",
 ]
+
+[[package]]
+name = "ds-helper-proto"
+version = "0.2.3-dev"
 
 [[package]]
 name = "ds-i18n"

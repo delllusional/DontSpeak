@@ -4,6 +4,7 @@
 //! `speak`/etc.).
 
 use ds_aec::DuplexAudio;
+use ds_helper_proto as proto;
 use ds_tts::batch::{chunk_text, stream_batches};
 use ds_tts::g2p;
 use serde::Deserialize;
@@ -89,8 +90,8 @@ fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
     use std::io::Write as _;
 
     let emit_err = |msg: &str| {
-        println!("DIARERR {}", msg.replace('\n', " "));
-        println!("DDONE");
+        println!("{}{}", proto::DIARERR_PREFIX, msg.replace('\n', " "));
+        println!("{}", proto::DDONE);
         let _ = std::io::stdout().flush();
     };
 
@@ -121,8 +122,8 @@ fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
                 )
                 .collect();
             let json = serde_json::json!({ "segments": segments, "speakers": out.speakers });
-            println!("DIAR {json}");
-            println!("DDONE");
+            println!("{}{json}", proto::DIAR_PREFIX);
+            println!("{}", proto::DDONE);
             let _ = std::io::stdout().flush();
         }
         Err(e) => emit_err(&e),
@@ -140,8 +141,8 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
     use std::io::Write as _;
 
     let emit_err = |msg: &str| {
-        println!("ENROLLERR {}", msg.replace('\n', " "));
-        println!("EDONE");
+        println!("{}{}", proto::ENROLLERR_PREFIX, msg.replace('\n', " "));
+        println!("{}", proto::EDONE);
         let _ = std::io::stdout().flush();
     };
 
@@ -164,8 +165,8 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
     match diarizer.embed(&pcm) {
         Ok(emb) => {
             let json = serde_json::json!(emb);
-            println!("EMB {json}");
-            println!("EDONE");
+            println!("{}{json}", proto::EMB_PREFIX);
+            println!("{}", proto::EDONE);
             let _ = std::io::stdout().flush();
         }
         Err(e) => emit_err(&e),
@@ -247,7 +248,7 @@ pub(crate) fn serve() -> ! {
             // manager before this helper was (re)started; preload() loads them offline).
             // "Starting…" until STTLOADED (preload runs a warmup inference, so STTLOADED
             // honestly means resident + warm).
-            println!("WARMING stt");
+            println!("{}stt", proto::WARMING_PREFIX);
             let _ = std::io::stdout().flush();
             let mut t = transcriber.lock().unwrap();
             ds_config::log_cached(
@@ -264,8 +265,8 @@ pub(crate) fn serve() -> ! {
                     crate::listen::preload_streaming(&stt_provider);
                     // STT_PROVIDER mirrors the TTS `PROVIDER` line: the REALIZED ort EP the STT
                     // sessions loaded on, so the engine reports the same realized runtime for both.
-                    println!("STTLOADED");
-                    println!("STT_PROVIDER {}", t.provider().as_str());
+                    println!("{}", proto::STTLOADED);
+                    println!("{}{}", proto::STT_PROVIDER_PREFIX, t.provider().as_str());
                     let _ = std::io::stdout().flush();
                     stt_claimed.resolve_ok();
                 }
@@ -278,7 +279,7 @@ pub(crate) fn serve() -> ! {
                     // happening to fully RESTART this helper (mirrors Job::LoadTts below, which
                     // rechecks `synth.is_none()` fresh each time instead of a one-shot latch).
                     stt_claimed.mark_unloaded();
-                    println!("STTLOADERR {e}");
+                    println!("{}{e}", proto::STTLOADERR_PREFIX);
                     let _ = std::io::stdout().flush();
                     ds_config::log_cached(
                         ds_config::LogLevel::Warn,
@@ -294,7 +295,7 @@ pub(crate) fn serve() -> ! {
     // ENGINE's download manager; load_backend only loads them offline). Tell the engine so
     // the dot reads "Starting…" through the load + warmup (which can be slow on the first
     // ANE compile), instead of a premature green, until READY below.
-    println!("WARMING tts");
+    println!("{}tts", proto::WARMING_PREFIX);
     let _ = std::io::stdout().flush();
     // Load once. READY/ERR let the UI know the model is warm.
     // Held as Option so a `unload tts` can free the Kokoro model while the helper
@@ -304,12 +305,12 @@ pub(crate) fn serve() -> ! {
             // PROVIDER (before READY) lets the engine report the active execution provider.
             // READY is emitted LATER — only after the audio OUTPUT is opened + primed below —
             // so green honestly means "warm AND able to make sound", not just "model loaded".
-            println!("PROVIDER {}", s.provider().as_str());
+            println!("{}{}", proto::PROVIDER_PREFIX, s.provider().as_str());
             let _ = std::io::stdout().flush();
             Some(s)
         }
         Err(e) => {
-            println!("ERR {e}");
+            println!("{} {e}", proto::ERR);
             let _ = std::io::stdout().flush();
             unsafe { _exit(1) };
         }
@@ -408,7 +409,7 @@ pub(crate) fn serve() -> ! {
                 Some(d)
             }
             Err(e) => {
-                println!("ERR audio: {e}");
+                println!("{} audio: {e}", proto::ERR);
                 let _ = std::io::stdout().flush();
                 unsafe { _exit(1) };
             }
@@ -423,7 +424,7 @@ pub(crate) fn serve() -> ! {
     // audio-stream RESUME latency (rodio pauses the CoreAudio output when idle) is handled
     // per-utterance below — a brief leading silence absorbs the resume so the speech onset
     // isn't clipped (the "purple icon, no sound" first speak).
-    println!("READY");
+    println!("{}", proto::READY);
     let _ = std::io::stdout().flush();
     // A `Send` handle so the stdin reader can barge the VPIO render from its thread
     // (the unit itself is !Send and lives here on the playback thread).
@@ -881,8 +882,11 @@ pub(crate) fn serve() -> ! {
                 {
                     let _ = secs;
                     use std::io::Write as _;
-                    println!("DIARERR diarization is only available on macOS");
-                    println!("DDONE");
+                    println!(
+                        "{}diarization is only available on macOS",
+                        proto::DIARERR_PREFIX
+                    );
+                    println!("{}", proto::DDONE);
                     let _ = std::io::stdout().flush();
                 }
                 continue;
@@ -904,8 +908,11 @@ pub(crate) fn serve() -> ! {
                 {
                     let _ = secs;
                     use std::io::Write as _;
-                    println!("ENROLLERR enrollment is only available on macOS");
-                    println!("EDONE");
+                    println!(
+                        "{}enrollment is only available on macOS",
+                        proto::ENROLLERR_PREFIX
+                    );
+                    println!("{}", proto::EDONE);
                     let _ = std::io::stdout().flush();
                 }
                 continue;
@@ -962,7 +969,7 @@ pub(crate) fn serve() -> ! {
                         }
                         Err(e) => {
                             use std::io::Write as _;
-                            println!("TTSLOADERR {e}");
+                            println!("{}{e}", proto::TTSLOADERR_PREFIX);
                             let _ = std::io::stdout().flush();
                             ds_config::log_cached(
                                 ds_config::LogLevel::Warn,
@@ -974,7 +981,7 @@ pub(crate) fn serve() -> ! {
                 }
                 if resident {
                     use std::io::Write as _;
-                    println!("TTSLOADED");
+                    println!("{}", proto::TTSLOADED);
                     let _ = std::io::stdout().flush();
                 }
                 continue;
@@ -1004,8 +1011,8 @@ pub(crate) fn serve() -> ! {
                         // `unload stt` + `load stt` cycle must re-warm BOTH caches, not just
                         // `transcriber`.
                         crate::listen::preload_streaming(&stt_provider);
-                        println!("STTLOADED");
-                        println!("STT_PROVIDER {}", t.provider().as_str());
+                        println!("{}", proto::STTLOADED);
+                        println!("{}{}", proto::STT_PROVIDER_PREFIX, t.provider().as_str());
                         let _ = std::io::stdout().flush();
                         stt_claimed.resolve_ok();
                     }
@@ -1014,7 +1021,7 @@ pub(crate) fn serve() -> ! {
                         // reconciling again once the file it's still fetching actually lands)
                         // can retry instead of silently no-op'ing on the stuck claim forever.
                         stt_claimed.mark_unloaded();
-                        println!("STTLOADERR {e}");
+                        println!("{}{e}", proto::STTLOADERR_PREFIX);
                         let _ = std::io::stdout().flush();
                         ds_config::log_cached(
                             ds_config::LogLevel::Warn,
@@ -1036,7 +1043,7 @@ pub(crate) fn serve() -> ! {
                     // so `dontspeakd`'s reader_loop clears any stale `tts_load_error` and
                     // marks the engine loaded again — without this the lazy reload silently
                     // resurrected the model but never told the engine it happened.
-                    println!("TTSLOADED");
+                    println!("{}", proto::TTSLOADED);
                     let _ = std::io::stdout().flush();
                 }
                 Err(e) => {
@@ -1045,8 +1052,8 @@ pub(crate) fn serve() -> ! {
                         "helper",
                         &format!("synth reload failed: {e}"),
                     );
-                    println!("TTSLOADERR {e}");
-                    println!("DONE");
+                    println!("{}{e}", proto::TTSLOADERR_PREFIX);
+                    println!("{}", proto::DONE);
                     let _ = std::io::stdout().flush();
                     continue;
                 }
@@ -1226,10 +1233,13 @@ pub(crate) fn serve() -> ! {
         if produced && !cancel.load(Ordering::SeqCst) {
             let synth_ms = synth_nanos as f64 / 1e6;
             let audio_ms = total_samples as f64 / 24_000.0 * 1000.0;
-            println!("STATS synth_ms={synth_ms:.1} audio_ms={audio_ms:.1} first_ms={first_ms:.1}");
+            println!(
+                "{}synth_ms={synth_ms:.1} audio_ms={audio_ms:.1} first_ms={first_ms:.1}",
+                proto::STATS_PREFIX
+            );
         }
         // Exactly one DONE per speak/preview request (even if cancelled).
-        println!("DONE");
+        println!("{}", proto::DONE);
         let _ = std::io::stdout().flush();
     }
 }

@@ -12,6 +12,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use ds_aec::CaptureHandle;
+use ds_helper_proto as proto;
 use ds_stt::{OnnxStreamer, StreamSession, StreamingStt};
 
 /// Control flags for the full-duplex concurrent listen thread (set by the stdin
@@ -169,7 +170,7 @@ fn transcribe_loop(
     };
 
     let _ = drain(); // drop stale pre-listen audio
-    println!("LISTENING");
+    println!("{}", proto::LISTENING);
     flush();
 
     // Streaming dictation: keep the full capture buffer but cut it at speech→silence
@@ -266,7 +267,7 @@ fn transcribe_loop(
                 preview_cadence = t0.elapsed().clamp(base_cadence, preview_ceiling);
                 last_preview_at = fingerprint;
                 if let Some(merged) = next_overlay(&committed, tail_text.as_deref(), &last_text) {
-                    println!("PARTIAL {merged}");
+                    println!("{}{merged}", proto::PARTIAL_PREFIX);
                     flush();
                     last_text = merged;
                     partials += 1;
@@ -343,13 +344,14 @@ fn transcribe_loop(
     //   preview_ms  GPU/CPU spent on the live overlay re-passes (not part of the transcript)
     //   partials/segments/gain/rms/rate  capture-side context (mirrors the helper-log line)
     println!(
-        "STTSTATS transcribe_ms={total_transcribe_ms:.1} audio_ms={audio_ms:.1} \
+        "{}transcribe_ms={total_transcribe_ms:.1} audio_ms={audio_ms:.1} \
          wall_ms={wall_ms:.1} final_ms={final_ms:.1} preview_ms={total_preview_ms:.1} \
          partials={partials} segments={} gain={final_gain:.2} rms={rms:.4} rate={rate}",
+        proto::STTSTATS_PREFIX,
         committed.len(),
     );
-    println!("FINAL {text}");
-    println!("LDONE");
+    println!("{}{text}", proto::FINAL_PREFIX);
+    println!("{}", proto::LDONE);
     flush();
 }
 
@@ -435,8 +437,8 @@ pub(crate) fn run_listen(
     let capture = match ds_stt::Capture::open() {
         Ok(c) => c,
         Err(e) => {
-            println!("STTERR {}", e.replace('\n', " "));
-            println!("LDONE");
+            println!("{}{}", proto::STTERR_PREFIX, e.replace('\n', " "));
+            println!("{}", proto::LDONE);
             let _ = std::io::Write::flush(&mut std::io::stdout());
             return;
         }
@@ -621,7 +623,7 @@ fn try_streaming(
         let _ = std::io::stdout().flush();
     };
     let _ = drain(); // drop stale pre-listen audio
-    println!("LISTENING");
+    println!("{}", proto::LISTENING);
     flush();
     let started = Instant::now();
     let mut last_text = String::new();
@@ -635,7 +637,7 @@ fn try_streaming(
         match session.accept(&block) {
             Ok(text) => {
                 if text != last_text && !text.trim().is_empty() {
-                    println!("PARTIAL {text}");
+                    println!("{}{text}", proto::PARTIAL_PREFIX);
                     flush();
                     last_text = text;
                     partials += 1;
@@ -664,11 +666,12 @@ fn try_streaming(
     // STTSTATS schema shared with the offline path; `preview_ms=0` (no re-encode) + `streaming=1`
     // are the success markers in the activity-log `STT listen ...` line under DONTSPEAK_DEBUG.
     println!(
-        "STTSTATS transcribe_ms={transcribe_ms:.1} audio_ms={audio_ms:.1} wall_ms={wall_ms:.1} \
-         final_ms={final_ms:.1} preview_ms=0.0 partials={partials} streaming=1"
+        "{}transcribe_ms={transcribe_ms:.1} audio_ms={audio_ms:.1} wall_ms={wall_ms:.1} \
+         final_ms={final_ms:.1} preview_ms=0.0 partials={partials} streaming=1",
+        proto::STTSTATS_PREFIX
     );
-    println!("FINAL {}", text.replace('\n', " "));
-    println!("LDONE");
+    println!("{}{}", proto::FINAL_PREFIX, text.replace('\n', " "));
+    println!("{}", proto::LDONE);
     flush();
     // Restore the backend (model stays resident) for the next listen.
     *cell.lock().unwrap() = Some((p, session.into_backend()));

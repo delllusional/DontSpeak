@@ -9,7 +9,7 @@
 //!
 //! Concurrency (full-duplex coexist): ONE persistent reader thread owns the
 //! child's stdout and DEMUXES its lines into two slots — a [`SpeakSlot`] (DONE/
-//! STATS/ERR/BARGE) and a [`ListenSlot`] (LISTENING/PARTIAL/FINAL/STTSTATS/
+//! STATS/ERR) and a [`ListenSlot`] (LISTENING/PARTIAL/FINAL/STTSTATS/
 //! STTERR/LDONE). A `speak` waits on the speak slot while a `listen` drains the
 //! listen slot AT THE SAME TIME — neither holds stdout, so they run concurrently
 //! (dictate while the voice talks). `stop` only takes the brief `stdin` lock, so
@@ -21,6 +21,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
+
+use ds_helper_proto as proto;
 
 use crate::child_slot::ChildSlot;
 use crate::log;
@@ -823,7 +825,7 @@ impl TtsManager {
                 }
                 Ok(_) => {
                     let l = line.trim();
-                    if l == "READY" {
+                    if l == proto::READY {
                         break;
                     }
                     // STT preloads in PARALLEL, so its terminal can land on either side of
@@ -832,36 +834,36 @@ impl TtsManager {
                     // trace lines fall through to the ignore arm: model downloads run in the
                     // engine's download manager, so there is no per-child fetch state here.)
                     let gate = self.gate.get().map(|g| g.as_ref());
-                    if l == "STTLOADED" {
+                    if l == proto::STTLOADED {
                         self.stt_model.transition(ModelState::Loaded, gate);
                         continue;
                     }
                     // Symmetric with STTLOADED: a mid-session `load tts` confirms residency here
                     // (though it normally lands post-READY, in the persistent reader below).
-                    if l == "TTSLOADED" {
+                    if l == proto::TTSLOADED {
                         self.tts_model.transition(ModelState::Loaded, gate);
                         continue;
                     }
                     // STT preloads in PARALLEL, so a failed preload can also report here
                     // (before READY) rather than only in the post-READY persistent reader —
                     // see `set_stt_load_error`'s doc.
-                    if let Some(msg) = l.strip_prefix("STTLOADERR ") {
+                    if let Some(msg) = l.strip_prefix(proto::STTLOADERR_PREFIX) {
                         self.set_stt_load_error(msg.trim());
                         continue;
                     }
-                    if let Some(msg) = l.strip_prefix("TTSLOADERR ") {
+                    if let Some(msg) = l.strip_prefix(proto::TTSLOADERR_PREFIX) {
                         self.set_tts_load_error(msg.trim());
                         continue;
                     }
-                    if let Some(p) = l.strip_prefix("STT_PROVIDER ") {
+                    if let Some(p) = l.strip_prefix(proto::STT_PROVIDER_PREFIX) {
                         *self.stt_realized.lock().unwrap() = p.trim().to_string();
                         continue;
                     }
-                    if let Some(p) = l.strip_prefix("PROVIDER ") {
+                    if let Some(p) = l.strip_prefix(proto::PROVIDER_PREFIX) {
                         *self.provider.lock().unwrap() = p.trim().to_string();
                         continue;
                     }
-                    if let Some(msg) = l.strip_prefix("ERR") {
+                    if let Some(msg) = l.strip_prefix(proto::ERR) {
                         let _ = child.kill();
                         let _ = child.wait();
                         self.set_error(msg.trim());
@@ -1183,11 +1185,11 @@ impl TtsManager {
                 Ok(_) => {
                     let l = line.trim();
                     // ── speak terminals ──────────────────────────────────────────
-                    if l == "DONE" {
+                    if l == proto::DONE {
                         let (m, cv) = &*speak_slot;
                         m.lock().unwrap().done = true;
                         cv.notify_all();
-                    } else if let Some(rest) = l.strip_prefix("STATS ") {
+                    } else if let Some(rest) = l.strip_prefix(proto::STATS_PREFIX) {
                         // Persist the per-utterance playback timing to the activity log (it
                         // otherwise only fed the in-app stats view, so a clipped/short reply left
                         // no trace — the gap that made the tail-clip bug hard to diagnose). DEBUG
@@ -1197,22 +1199,22 @@ impl TtsManager {
                         if let Some(secs) = stats.record_stats_line(rest) {
                             lifetime.add_tts(secs);
                         }
-                    } else if let Some(msg) = l.strip_prefix("ERR") {
+                    } else if let Some(msg) = l.strip_prefix(proto::ERR) {
                         let (m, cv) = &*speak_slot;
                         let mut s = m.lock().unwrap();
                         s.err = Some(format!("TTS child error:{msg}"));
                         s.done = true; // soft error: child stays alive
                         cv.notify_all();
                     // ── listen events ────────────────────────────────────────────
-                    } else if l == "LDONE" {
+                    } else if l == proto::LDONE {
                         push_listen(ListenEvt::Done);
-                    } else if let Some(rest) = l.strip_prefix("PARTIAL ") {
+                    } else if let Some(rest) = l.strip_prefix(proto::PARTIAL_PREFIX) {
                         push_listen(ListenEvt::Partial(rest.to_string()));
-                    } else if l == "FINAL" {
+                    } else if l == proto::FINAL {
                         push_listen(ListenEvt::Final(String::new()));
-                    } else if let Some(rest) = l.strip_prefix("FINAL ") {
+                    } else if let Some(rest) = l.strip_prefix(proto::FINAL_PREFIX) {
                         push_listen(ListenEvt::Final(rest.to_string()));
-                    } else if let Some(rest) = l.strip_prefix("STTSTATS ") {
+                    } else if let Some(rest) = l.strip_prefix(proto::STTSTATS_PREFIX) {
                         // Per-listen transcription timing → the activity log, the speech-IN
                         // mirror of the `TTS speak` line above (so a slow dictation leaves a
                         // trace, not just an in-app stats bump). DEBUG: off by default, one
@@ -1221,21 +1223,21 @@ impl TtsManager {
                         if let Some(secs) = stt_stats.record_stt_line(rest) {
                             lifetime.add_stt(secs);
                         }
-                    } else if let Some(rest) = l.strip_prefix("STTERR ") {
+                    } else if let Some(rest) = l.strip_prefix(proto::STTERR_PREFIX) {
                         push_listen(ListenEvt::Err(rest.to_string()));
                     // STT lifecycle — the SAME `ModelSlot::transition` `start()`'s wait loop
                     // uses, so the pre-/post-READY paths can't drift (STT preloads in parallel →
                     // its terminal lands on either side of READY).
-                    } else if l == "TTSLOADED" {
+                    } else if l == proto::TTSLOADED {
                         // The Kokoro analogue of STTLOADED: the helper confirms the model is
                         // resident after a `load tts`, so the dot greens only now — not on the
                         // optimistic request. (The COMMON path for a mid-session TTS (re)select.)
                         // One write does what used to be two kept in lockstep (mark loaded +
                         // clear any stale load error) — see `ModelSlot::transition`.
                         tts_model.transition(ModelState::Loaded, gate.as_deref());
-                    } else if l == "STTLOADED" {
+                    } else if l == proto::STTLOADED {
                         stt_model.transition(ModelState::Loaded, gate.as_deref());
-                    } else if let Some(msg) = l.strip_prefix("STTLOADERR ") {
+                    } else if let Some(msg) = l.strip_prefix(proto::STTLOADERR_PREFIX) {
                         // A mid-session `load stt`/preload failure (e.g. a transient AV-scan
                         // file-not-found on an already-downloaded model) — surfaced per-model so
                         // `model_status`'s `parakeet` row can show it without touching `kokoro`.
@@ -1245,31 +1247,31 @@ impl TtsManager {
                             ModelState::Failed(msg.trim().to_string()),
                             gate.as_deref(),
                         );
-                    } else if let Some(msg) = l.strip_prefix("TTSLOADERR ") {
+                    } else if let Some(msg) = l.strip_prefix(proto::TTSLOADERR_PREFIX) {
                         tts_model.transition(
                             ModelState::Failed(msg.trim().to_string()),
                             gate.as_deref(),
                         );
-                    } else if let Some(p) = l.strip_prefix("STT_PROVIDER ") {
+                    } else if let Some(p) = l.strip_prefix(proto::STT_PROVIDER_PREFIX) {
                         // The REALIZED STT EP (mirrors the pre-READY parse in start()). Post-READY is
                         // the COMMON path — the parallel preload usually reports after READY — so
                         // this is what keeps the STT status row honest on a GPU box.
                         *stt_realized.lock().unwrap() = p.trim().to_string();
                     // ── diarize events ───────────────────────────────────────────
-                    } else if let Some(rest) = l.strip_prefix("DIAR ") {
+                    } else if let Some(rest) = l.strip_prefix(proto::DIAR_PREFIX) {
                         diarize_slot.0.lock().unwrap().result = Some(Ok(rest.to_string()));
-                    } else if let Some(rest) = l.strip_prefix("DIARERR ") {
+                    } else if let Some(rest) = l.strip_prefix(proto::DIARERR_PREFIX) {
                         diarize_slot.0.lock().unwrap().result = Some(Err(rest.to_string()));
-                    } else if l == "DDONE" {
+                    } else if l == proto::DDONE {
                         let (m, cv) = &*diarize_slot;
                         m.lock().unwrap().done = true;
                         cv.notify_all();
                     // ── enroll events ────────────────────────────────────────────
-                    } else if let Some(rest) = l.strip_prefix("EMB ") {
+                    } else if let Some(rest) = l.strip_prefix(proto::EMB_PREFIX) {
                         enroll_slot.0.lock().unwrap().result = Some(Ok(rest.to_string()));
-                    } else if let Some(rest) = l.strip_prefix("ENROLLERR ") {
+                    } else if let Some(rest) = l.strip_prefix(proto::ENROLLERR_PREFIX) {
                         enroll_slot.0.lock().unwrap().result = Some(Err(rest.to_string()));
-                    } else if l == "EDONE" {
+                    } else if l == proto::EDONE {
                         let (m, cv) = &*enroll_slot;
                         m.lock().unwrap().done = true;
                         cv.notify_all();

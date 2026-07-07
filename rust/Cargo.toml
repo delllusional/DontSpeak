@@ -13,6 +13,9 @@ members = [
     # process (synth + dictation + duplex AEC). Not a library dep of anything; the engine
     # spawns it by path. Kept out of [workspace.dependencies] for that reason.
     "crates/ds-helper",
+    # The helper's stdout reply-token vocabulary — shared by the emitter (ds-helper)
+    # and the parser (dontspeakd) so the two sides of that wire contract can't drift.
+    "crates/ds-helper-proto",
     "crates/ds-engines",
     "crates/ds-tools",
     "crates/ds-i18n",
@@ -163,6 +166,7 @@ ds-model = { path = "crates/ds-model" }
 ds-tts = { path = "crates/ds-tts" }
 ds-stt = { path = "crates/ds-stt" }
 ds-aec = { path = "crates/ds-aec" }
+ds-helper-proto = { path = "crates/ds-helper-proto" }
 ds-engines = { path = "crates/ds-engines" }
 ds-tools = { path = "crates/ds-tools" }
 ds-i18n = { path = "crates/ds-i18n" }
