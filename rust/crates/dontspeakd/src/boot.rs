@@ -453,7 +453,7 @@ pub fn engine_run(
         // green (running) or a RED dot + failure note — instead of a stuck ring. Shared engine
         // loop ⇒ identical on all UIs.
         if last_dl_bump.elapsed() >= DL_PROGRESS_BUMP_INTERVAL {
-            let downloading = !downloads.lock().unwrap().active.is_empty();
+            let downloading = downloads.lock().unwrap().any_active();
             if downloading || dl_was_active {
                 status_gate.bump();
             }

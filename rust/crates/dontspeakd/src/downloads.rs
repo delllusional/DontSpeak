@@ -39,23 +39,36 @@ impl DownloadProgress {
     }
 }
 
+/// One target's download lifecycle. A target ABSENT from the map has never been
+/// (re)started this session — absence IS the idle state (no explicit `Idle` variant:
+/// `DownloadState::default()` is an empty map, and a second representation of "idle"
+/// would reintroduce exactly the ambiguity this enum removes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetState {
+    /// In flight, with its live byte progress — several targets download in
+    /// parallel, each with its own `done/total`.
+    Active(DownloadProgress),
+    /// The most recent download of this target FAILED, with its error message —
+    /// kept until a new download for that target starts.
+    Failed(String),
+    /// The most recent download SUCCEEDED, carrying its final progress — kept after
+    /// the fetch retires so a row's ring reads its finished % (typically 100%)
+    /// instead of falling through to an unrelated still-live fetch's progress (e.g.
+    /// the shared Cuda runtime) the instant the row's own download completes.
+    /// Replaced on a fresh [`begin_download`] for that target (a new fetch
+    /// shouldn't show the PREVIOUS one's stale "done" progress).
+    Done(DownloadProgress),
+}
+
 /// Background model-download progress, polled via `model_status` so the app's
 /// status dots can show an orange progress ring (downloading) and a red dot
-/// (a failed download). `active` holds one entry PER in-flight target — several
-/// targets download in parallel, each with its own `done/total` — and `last_error`
-/// keeps the most recent FAILED download's message per target, until a new
-/// download for that target starts.
+/// (a failed download).
 #[derive(Default)]
 pub(crate) struct DownloadState {
-    pub active: HashMap<DownloadTarget, DownloadProgress>,
-    pub last_error: HashMap<DownloadTarget, String>,
-    /// The final progress of the most recent SUCCESSFUL download per target, kept after it's
-    /// retired from `active` — so a row's ring reads its finished % (typically 100%) instead
-    /// of falling through to an unrelated still-live fetch's progress (e.g. the shared Cuda
-    /// runtime) the instant the row's own download completes. Cleared on a fresh
-    /// [`begin_download`] for that target (a new fetch shouldn't show the PREVIOUS one's
-    /// stale "done" progress). No entry on a failed download — `last_error` covers that case.
-    pub last_done: HashMap<DownloadTarget, DownloadProgress>,
+    /// Per-target download lifecycle. One entry per target that has ever started
+    /// this session; downloading XOR failed XOR done is now structural — see
+    /// [`TargetState`].
+    pub targets: HashMap<DownloadTarget, TargetState>,
     /// Warm-child reload hook, wired ONCE at boot via [`wire`]: the warm-child
     /// owner plus the config paths. On a SUCCESSFUL download, [`start_download`] restarts the
     /// warm child iff it hosts the freshly-downloaded model (see [`download_needs_child_reload`])
@@ -82,6 +95,18 @@ pub(crate) struct DownloadState {
     /// unconditional behavior — needed so tests / a caller that never wires this keep working.
     pub shutdown: Option<Arc<AtomicBool>>,
 }
+
+impl DownloadState {
+    /// True while ANY target is in flight — the poll loop's "keep nudging the
+    /// status gate" predicate. NOT `targets.is_empty()`: Done/Failed entries
+    /// persist after a fetch ends.
+    pub fn any_active(&self) -> bool {
+        self.targets
+            .values()
+            .any(|t| matches!(t, TargetState::Active(_)))
+    }
+}
+
 pub(crate) type DownloadProg = Arc<Mutex<DownloadState>>;
 
 /// Wire the warm-child reload hook AND the shutdown observer (call ONCE at boot, after the
@@ -153,33 +178,36 @@ pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceCon
 /// instead of retriggering it. Other targets' entries are untouched: downloads run in
 /// parallel. Pure state transition, split out of [`start_download`] for unit tests.
 fn begin_download(s: &mut DownloadState, which: DownloadTarget) -> bool {
-    use std::collections::hash_map::Entry;
-    match s.active.entry(which) {
-        Entry::Occupied(_) => false,
-        Entry::Vacant(v) => {
-            v.insert(DownloadProgress::default());
-            s.last_error.remove(&which);
-            // A fresh fetch shouldn't show the PREVIOUS successful download's stale "done"
-            // progress (e.g. a re-download after the file was removed) — clear it here so
-            // `row_download_frac` falls through to this fetch's own live `active` entry.
-            s.last_done.remove(&which);
-            true
-        }
+    if matches!(s.targets.get(&which), Some(TargetState::Active(_))) {
+        return false; // already downloading — attach, don't retrigger
     }
+    // Inserting Active OVERWRITES any prior Done/Failed — a fresh fetch shouldn't
+    // show the PREVIOUS one's stale error or finished "done" progress (the old
+    // manual `last_error.remove` / `last_done.remove` are now one structural write).
+    s.targets
+        .insert(which, TargetState::Active(DownloadProgress::default()));
+    true
 }
 
-/// Retire `which` from the active set, recording its error message on failure, or (on
-/// success) moving its final progress into `last_done` so the row's ring can keep showing
+/// Retire `which` from `Active`, recording its error message on failure, or (on
+/// success) moving its final progress into `Done` so the row's ring can keep showing
 /// its finished % instead of falling through to an unrelated still-live fetch (e.g. Cuda)
-/// the instant it's retired from `active`. Pure counterpart of [`begin_download`].
+/// the instant it's retired. Pure counterpart of [`begin_download`].
 fn finish_download(s: &mut DownloadState, which: DownloadTarget, result: &std::io::Result<()>) {
-    if let Some(progress) = s.active.remove(&which)
-        && result.is_ok()
-    {
-        s.last_done.insert(which, progress);
-    }
-    if let Err(e) = result {
-        s.last_error.insert(which, e.to_string());
+    match result {
+        // An error is ALWAYS recorded, active or not (matching the old unconditional
+        // `last_error` insert — an `Ok`-less caller path stays visible as a red dot).
+        Err(e) => {
+            s.targets.insert(which, TargetState::Failed(e.to_string()));
+        }
+        // Success only retires an Active fetch into Done, carrying its final
+        // progress; Ok on a non-active target leaves state untouched (as before).
+        Ok(()) => {
+            if let Some(TargetState::Active(p)) = s.targets.get(&which) {
+                let p = *p;
+                s.targets.insert(which, TargetState::Done(p));
+            }
+        }
     }
 }
 
@@ -219,8 +247,10 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             )
         };
         let prog = |done: u64, total: u64| {
-            // Update ONLY this target's entry — concurrent targets own their own.
-            if let Some(p) = dl.lock().unwrap().active.get_mut(&which) {
+            // Update ONLY this target's entry — concurrent targets own their own. A late
+            // callback after `finish_download` no longer matches `Active`, so it can't
+            // resurrect a retired entry's progress.
+            if let Some(TargetState::Active(p)) = dl.lock().unwrap().targets.get_mut(&which) {
                 *p = DownloadProgress { done, total };
             }
         };
@@ -577,8 +607,9 @@ fn apply_tts_provider(tts: &Arc<TtsManager>, which: Provider) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        DownloadNeeds, DownloadProgress, DownloadState, ane_needs_voices_npz, begin_download,
-        download_event_msg, fetch_plan, finish_download, needed_downloads, target_hosts_engine,
+        DownloadNeeds, DownloadProgress, DownloadState, TargetState, ane_needs_voices_npz,
+        begin_download, download_event_msg, fetch_plan, finish_download, needed_downloads,
+        target_hosts_engine,
     };
     use ds_model::DownloadTarget;
 
@@ -741,85 +772,147 @@ mod tests {
         let (kok, par) = (DownloadTarget::KokoroModel, DownloadTarget::ParakeetModel);
 
         assert!(begin_download(&mut s, kok), "fresh target begins");
+        assert_eq!(
+            s.targets[&kok],
+            TargetState::Active(DownloadProgress::default()),
+            "a fresh begin starts Active at zero progress"
+        );
         assert!(
             begin_download(&mut s, par),
             "second target begins IN PARALLEL"
         );
         // A re-request of an in-flight target attaches (no restart, progress kept).
-        s.active.insert(
+        s.targets.insert(
             kok,
-            DownloadProgress {
+            TargetState::Active(DownloadProgress {
                 done: 10,
                 total: 100,
-            },
+            }),
         );
         assert!(!begin_download(&mut s, kok), "in-flight target attaches");
         assert_eq!(
-            s.active[&kok],
-            DownloadProgress {
+            s.targets[&kok],
+            TargetState::Active(DownloadProgress {
                 done: 10,
                 total: 100
-            },
+            }),
             "attach must not reset the running fetch's progress"
         );
 
         // Independent progress per target.
-        s.active
-            .insert(par, DownloadProgress { done: 5, total: 50 });
-        assert_eq!(s.active[&kok].frac(), 0.1);
-        assert_eq!(s.active[&par].frac(), 0.1);
+        s.targets.insert(
+            par,
+            TargetState::Active(DownloadProgress { done: 5, total: 50 }),
+        );
+        assert!(
+            matches!(s.targets[&kok], TargetState::Active(p) if p.frac() == 0.1),
+            "kokoro tracks its own fraction"
+        );
+        assert!(
+            matches!(s.targets[&par], TargetState::Active(p) if p.frac() == 0.1),
+            "parakeet tracks its own fraction"
+        );
 
         // Parakeet fails: ITS error is recorded; Kokoro is still downloading, untouched.
+        // The variant IS `Failed` — no Active progress, no Done progress — structurally,
+        // where the old maps only promised it by begin/finish discipline.
         finish_download(&mut s, par, &Err(std::io::Error::other("boom")));
-        assert!(!s.active.contains_key(&par));
-        assert_eq!(s.last_error[&par], "boom");
-        assert_eq!(s.active[&kok].done, 10, "other target unaffected");
-        assert!(!s.last_error.contains_key(&kok));
-        // A failed download populates NEITHER `last_done` — only `last_error` covers it.
-        assert!(
-            !s.last_done.contains_key(&par),
-            "a failed download must not populate last_done"
+        assert_eq!(s.targets[&par], TargetState::Failed("boom".into()));
+        assert_eq!(
+            s.targets[&kok],
+            TargetState::Active(DownloadProgress {
+                done: 10,
+                total: 100
+            }),
+            "other target unaffected"
         );
 
         // Re-beginning the failed target clears its error (fresh attempt).
         assert!(begin_download(&mut s, par));
-        assert!(!s.last_error.contains_key(&par));
-
-        // Kokoro succeeds: no error, retired from the active set, and its FINAL progress
-        // lands in `last_done` (so the row's ring keeps reading its finished % afterward).
-        finish_download(&mut s, kok, &Ok(()));
-        assert!(!s.active.contains_key(&kok));
-        assert!(!s.last_error.contains_key(&kok));
         assert_eq!(
-            s.last_done[&kok],
-            DownloadProgress {
+            s.targets[&par],
+            TargetState::Active(DownloadProgress::default()),
+            "a fresh begin over Failed drops the error"
+        );
+
+        // Kokoro succeeds: retired into `Done`, carrying its FINAL progress (so the
+        // row's ring keeps reading its finished % afterward).
+        finish_download(&mut s, kok, &Ok(()));
+        assert_eq!(
+            s.targets[&kok],
+            TargetState::Done(DownloadProgress {
                 done: 10,
                 total: 100
-            },
-            "a successful finish must move the retired progress into last_done"
+            }),
+            "a successful finish must retire the Active progress into Done"
         );
     }
 
-    /// `begin_download` on a target that has a stale `last_done` entry (from a PREVIOUS
-    /// successful download) must clear it — a fresh fetch shouldn't show the previous
+    /// `begin_download` on a target with a stale `Done` entry (from a PREVIOUS
+    /// successful download) must replace it — a fresh fetch shouldn't show the previous
     /// download's finished % before its own progress arrives.
     #[test]
-    fn begin_download_clears_stale_last_done() {
+    fn fresh_begin_replaces_prior_done() {
         let mut s = DownloadState::default();
         let kok = DownloadTarget::KokoroModel;
 
         assert!(begin_download(&mut s, kok));
         finish_download(&mut s, kok, &Ok(()));
         assert!(
-            s.last_done.contains_key(&kok),
-            "setup: a successful finish must populate last_done"
+            matches!(s.targets[&kok], TargetState::Done(_)),
+            "setup: a successful finish must land in Done"
         );
 
-        // A fresh begin (e.g. re-download after the file was removed) clears the stale entry.
+        // A fresh begin (e.g. re-download after the file was removed) replaces the stale entry.
         assert!(begin_download(&mut s, kok), "fresh start begins again");
+        assert_eq!(
+            s.targets[&kok],
+            TargetState::Active(DownloadProgress::default()),
+            "begin_download must replace a stale Done entry with a fresh Active one"
+        );
+    }
+
+    /// The preserved non-active-finish edge: `finish_download` with an `Err` on a target
+    /// ABSENT from the map still records `Failed` (the old unconditional `last_error`
+    /// insert), while an `Ok` on an absent target leaves the map unchanged.
+    #[test]
+    fn finish_on_non_active_target_records_error_but_not_done() {
+        let mut s = DownloadState::default();
+        let kok = DownloadTarget::KokoroModel;
+
+        finish_download(&mut s, kok, &Ok(()));
         assert!(
-            !s.last_done.contains_key(&kok),
-            "begin_download must clear any stale last_done entry for this target"
+            !s.targets.contains_key(&kok),
+            "Ok on a never-begun target must not conjure a Done entry"
+        );
+
+        finish_download(&mut s, kok, &Err(std::io::Error::other("boom")));
+        assert_eq!(
+            s.targets[&kok],
+            TargetState::Failed("boom".into()),
+            "Err is always recorded, active or not"
+        );
+    }
+
+    /// `any_active` is the boot poll loop's "keep nudging the status gate" predicate —
+    /// it must read false once every fetch has ENDED, even though Done/Failed entries
+    /// persist in the map (`!targets.is_empty()` would bump the gate forever after the
+    /// session's first download).
+    #[test]
+    fn any_active_ignores_done_and_failed_entries() {
+        let mut s = DownloadState::default();
+        let (kok, par) = (DownloadTarget::KokoroModel, DownloadTarget::ParakeetModel);
+        assert!(!s.any_active(), "fresh state has nothing in flight");
+
+        assert!(begin_download(&mut s, kok));
+        assert!(s.any_active(), "an Active entry reads in flight");
+
+        finish_download(&mut s, kok, &Ok(()));
+        assert!(begin_download(&mut s, par));
+        finish_download(&mut s, par, &Err(std::io::Error::other("boom")));
+        assert!(
+            !s.targets.is_empty() && !s.any_active(),
+            "Done/Failed entries persist but must NOT read as in flight"
         );
     }
 

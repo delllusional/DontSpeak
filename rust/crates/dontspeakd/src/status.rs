@@ -12,7 +12,7 @@ use crate::config_gate::{
     kokoro_onnx_files_present, kokoro_present_for, parakeet_available, parakeet_onnx_files_present,
     stt_uses_onnx_runtime,
 };
-use crate::downloads::DownloadProg;
+use crate::downloads::{DownloadProg, TargetState};
 use crate::engine::{PasteState, dictation_preview};
 use crate::stats;
 use crate::tts::TtsManager;
@@ -299,17 +299,22 @@ pub(crate) fn model_status_json(
     // download in PARALLEL, one progress entry each — every row reports its OWN
     // target's fraction, never a shared value mirrored onto whichever row happened
     // to be fetching.
-    let (dl_active, dl_errors, dl_done) = {
-        let s = downloads.lock().unwrap();
-        (s.active.clone(), s.last_error.clone(), s.last_done.clone())
-    };
+    let dl = downloads.lock().unwrap().targets.clone();
     // A row lights "downloading" for exactly ITS OWN in-flight target. (Note: the
     // voices-only `KokoroVoices` fetch does NOT light the Kokoro row — it only gates the
     // ACTIVE VOICE of an already-runnable model, so a ring there would read as "TTS not
     // ready" while TTS actually works.)
-    let downloading = |eng: DownloadTarget| dl_active.contains_key(&eng);
-    let frac_for = |eng: DownloadTarget| dl_active.get(&eng).map(|p| p.frac()).unwrap_or(0.0);
-    let dl_err_for = |eng: DownloadTarget| dl_errors.get(&eng).cloned();
+    let downloading = |eng: DownloadTarget| matches!(dl.get(&eng), Some(TargetState::Active(_)));
+    // Active-only: a Done entry's finished % must NOT feed these direct per-target
+    // fractions (the row-level Done fallback lives in `row_download_frac`).
+    let frac_for = |eng: DownloadTarget| match dl.get(&eng) {
+        Some(TargetState::Active(p)) => p.frac(),
+        _ => 0.0,
+    };
+    let dl_err_for = |eng: DownloadTarget| match dl.get(&eng) {
+        Some(TargetState::Failed(e)) => Some(e.clone()),
+        _ => None,
+    };
     // Kokoro row reflects the Kokoro MODEL: running = warm child up; enabled =
     // Kokoro is the selected TTS engine AND TTS is on; failed = warm-load error
     // (present but won't start) or a failed Kokoro download. BOTH flavors of the
@@ -390,14 +395,12 @@ pub(crate) fn model_status_json(
     // Each row's ring shows ITS OWN target's fraction (downloads run in parallel) —
     // see `row_download_frac` for the model-wins-over-CUDA priority.
     let kokoro_frac = row_download_frac(
-        &dl_active,
-        &dl_done,
+        &dl,
         DownloadTarget::KokoroModel,
         DownloadTarget::KokoroCoreml,
     );
     let parakeet_frac = row_download_frac(
-        &dl_active,
-        &dl_done,
+        &dl,
         DownloadTarget::ParakeetModel,
         DownloadTarget::ParakeetCoreml,
     );
@@ -756,22 +759,31 @@ fn combined_error(
 
 /// The fraction a MODEL row's download ring shows, picked from the row's OWN targets in
 /// priority order: the ONNX model fetch's live progress, then its just-finished progress
-/// (so a completed fetch's ring reads 100% rather than snapping back to 0 the instant it's
-/// retired from `active`), then the apple-native Core ML set the same way, then the shared
+/// (so a completed fetch's ring reads 100% rather than snapping back to 0 the instant it
+/// retires into `Done`), then the apple-native Core ML set the same way, then the shared
 /// CUDA runtime's LIVE progress (the compute dependency — shown only when it is the sole
 /// fetch blocking the row; a concurrent model fetch wins). 0.0 when none of the above apply —
 /// the caller's `engine_obj` zeroes progress anyway unless the row reads "downloading". Pure,
 /// so the row↔target wiring is unit-tested.
 fn row_download_frac(
-    active: &std::collections::HashMap<DownloadTarget, crate::downloads::DownloadProgress>,
-    done: &std::collections::HashMap<DownloadTarget, crate::downloads::DownloadProgress>,
+    targets: &std::collections::HashMap<DownloadTarget, TargetState>,
     model: DownloadTarget,
     coreml: DownloadTarget,
 ) -> f64 {
     [model, coreml]
         .iter()
-        .find_map(|t| active.get(t).or_else(|| done.get(t)).map(|p| p.frac()))
-        .or_else(|| active.get(&DownloadTarget::Cuda).map(|p| p.frac()))
+        .find_map(|t| match targets.get(t) {
+            // A row's OWN target feeds its ring whether live or just finished;
+            // Failed feeds nothing (the error channel covers it).
+            Some(TargetState::Active(p) | TargetState::Done(p)) => Some(p.frac()),
+            _ => None,
+        })
+        .or_else(|| match targets.get(&DownloadTarget::Cuda) {
+            // The Cuda fallback is LIVE-only: a finished Cuda fetch must not keep
+            // feeding rows' rings after it ends.
+            Some(TargetState::Active(p)) => Some(p.frac()),
+            _ => None,
+        })
         .unwrap_or(0.0)
 }
 
@@ -914,12 +926,12 @@ mod tests {
     /// Each model row picks ITS OWN target's fraction from the parallel-download map:
     /// the model fetch wins over the Core ML set, which wins over the shared CUDA
     /// runtime; a foreign target's progress never bleeds into the row; idle rows read 0.
-    /// Also: a just-FINISHED target's `done` progress wins over the (unrelated) live Cuda
+    /// Also: a just-FINISHED target's `Done` progress wins over the (unrelated) live Cuda
     /// fetch, so a completed row's ring reads its final % instead of snapping to the
     /// runtime's — the fix for the ring falling back down after a finished download.
     #[test]
     fn row_download_frac_picks_the_rows_own_target() {
-        use crate::downloads::DownloadProgress;
+        use crate::downloads::{DownloadProgress, TargetState};
         use ds_model::DownloadTarget::*;
         use std::collections::HashMap;
         let p = |done, total| DownloadProgress { done, total };
@@ -927,65 +939,76 @@ mod tests {
 
         // Kokoro model + Parakeet model + CUDA all in flight at once, distinct fractions.
         let active: HashMap<_, _> = [
-            (KokoroModel, p(10, 100)),   // 0.10
-            (ParakeetModel, p(30, 100)), // 0.30
-            (Cuda, p(90, 100)),          // 0.90
+            (KokoroModel, TargetState::Active(p(10, 100))), // 0.10
+            (ParakeetModel, TargetState::Active(p(30, 100))), // 0.30
+            (Cuda, TargetState::Active(p(90, 100))),        // 0.90
         ]
         .into_iter()
         .collect();
         // Each row shows its OWN model %, not the other row's and not CUDA's.
+        assert_eq!(row_download_frac(&active, KokoroModel, KokoroCoreml), 0.10);
         assert_eq!(
-            row_download_frac(&active, &empty, KokoroModel, KokoroCoreml),
-            0.10
-        );
-        assert_eq!(
-            row_download_frac(&active, &empty, ParakeetModel, ParakeetCoreml),
+            row_download_frac(&active, ParakeetModel, ParakeetCoreml),
             0.30
         );
 
         // Only CUDA in flight (models present): both rows show the runtime's %.
-        let cuda_only: HashMap<_, _> = [(Cuda, p(50, 100))].into_iter().collect();
+        let cuda_only: HashMap<_, _> = [(Cuda, TargetState::Active(p(50, 100)))]
+            .into_iter()
+            .collect();
         assert_eq!(
-            row_download_frac(&cuda_only, &empty, KokoroModel, KokoroCoreml),
+            row_download_frac(&cuda_only, KokoroModel, KokoroCoreml),
             0.5
         );
         assert_eq!(
-            row_download_frac(&cuda_only, &empty, ParakeetModel, ParakeetCoreml),
+            row_download_frac(&cuda_only, ParakeetModel, ParakeetCoreml),
             0.5
         );
 
         // Core ML flavor in flight → the row's second-priority target.
-        let coreml: HashMap<_, _> = [(KokoroCoreml, p(25, 100))].into_iter().collect();
-        assert_eq!(
-            row_download_frac(&coreml, &empty, KokoroModel, KokoroCoreml),
-            0.25
-        );
+        let coreml: HashMap<_, _> = [(KokoroCoreml, TargetState::Active(p(25, 100)))]
+            .into_iter()
+            .collect();
+        assert_eq!(row_download_frac(&coreml, KokoroModel, KokoroCoreml), 0.25);
         // ...and it does NOT bleed into the Parakeet row.
         assert_eq!(
-            row_download_frac(&coreml, &empty, ParakeetModel, ParakeetCoreml),
+            row_download_frac(&coreml, ParakeetModel, ParakeetCoreml),
             0.0
         );
 
         // Nothing in flight ⇒ 0.
-        assert_eq!(
-            row_download_frac(&empty, &empty, KokoroModel, KokoroCoreml),
-            0.0
-        );
+        assert_eq!(row_download_frac(&empty, KokoroModel, KokoroCoreml), 0.0);
 
-        // THE FIX: Kokoro's own fetch just finished (retired from `active` into `done`) while
-        // Cuda is STILL live for some unrelated reason — the row must show its own finished
-        // %, never fall back to Cuda's, and must NOT bleed into the Parakeet row (which has
-        // nothing of its own in either map, so it falls through to Cuda).
-        let done: HashMap<_, _> = [(KokoroModel, p(100, 100))].into_iter().collect();
+        // THE FIX: Kokoro's own fetch just finished (retired into `Done`) while Cuda is
+        // STILL live for some unrelated reason — the row must show its own finished %,
+        // never fall back to Cuda's, and must NOT bleed into the Parakeet row (which has
+        // nothing of its own, so it falls through to Cuda).
+        let kokoro_done_cuda_live: HashMap<_, _> = [
+            (KokoroModel, TargetState::Done(p(100, 100))),
+            (Cuda, TargetState::Active(p(50, 100))),
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(
-            row_download_frac(&cuda_only, &done, KokoroModel, KokoroCoreml),
+            row_download_frac(&kokoro_done_cuda_live, KokoroModel, KokoroCoreml),
             1.0,
             "a finished own-target download wins over a still-live Cuda fetch"
         );
         assert_eq!(
-            row_download_frac(&cuda_only, &done, ParakeetModel, ParakeetCoreml),
+            row_download_frac(&kokoro_done_cuda_live, ParakeetModel, ParakeetCoreml),
             0.5,
-            "Parakeet has nothing of its own in active/done, so it still falls back to Cuda"
+            "Parakeet has nothing of its own, so it still falls back to Cuda"
+        );
+
+        // The Cuda fallback is LIVE-only: a FINISHED Cuda entry must not keep feeding
+        // rows' rings (today's `active`-map-only read, pinned).
+        let cuda_done: HashMap<_, _> = [(Cuda, TargetState::Done(p(100, 100)))]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            row_download_frac(&cuda_done, KokoroModel, KokoroCoreml),
+            0.0,
+            "a Done Cuda entry must not feed the fallback"
         );
     }
 
