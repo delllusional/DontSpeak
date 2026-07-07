@@ -25,9 +25,8 @@ pub struct Paths {
     /// Claude CODE's user-scope config (`~/.claude.json`) — where `wire claude_code` adds (or
     /// removes) the `mcpServers.DontSpeak` stdio entry so the `claude` CLI and Claude Code
     /// sessions spawn our MCP bridge and can call `speak`/`listen`/… as tools. This is the MCP
-    /// half of `wire claude_code` (the other half being the `settings_json` hooks); the same
-    /// shared MCP core targets Desktop's separate config. (Distinct from `claude_dir`, the
-    /// `~/.claude` DIRECTORY.)
+    /// half of `wire claude_code` (the other half being the `settings_json` hooks). (Distinct
+    /// from `claude_dir`, the `~/.claude` DIRECTORY.)
     pub claude_code_config: PathBuf,
     /// Side file holding the running `ds-narrate` pid (for `--stop`).
     pub narrate_pid: PathBuf,

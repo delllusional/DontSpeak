@@ -232,8 +232,8 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<St
 /// Register or remove the DontSpeak integration for one AI client, at runtime. SHARED
 /// LOGIC: this is a thin adapter that maps (client, enabled) to the SAME per-client
 /// `wire::run` orchestrator the installers use — never a reimplementation, so install-time and
-/// tool-time wiring can't drift. Each client's wire scopes its own surfaces (Claude Code = hooks +
-/// MCP, Desktop = MCP, Codex = hooks); `enabled=false` removes only our entries (additive +
+/// tool-time wiring can't drift. Each client's wire scopes its own surfaces (Claude Code and
+/// Qwen Code = hooks + MCP, Codex = hooks); `enabled=false` removes only our entries (additive +
 /// backed-up, like the installer).
 fn call_wire(paths: &Paths, args: &Value) -> Result<String, String> {
     #[derive(serde::Deserialize)]
