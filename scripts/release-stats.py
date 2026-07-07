@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""release-stats.py — code vs. test line-change table for a release's diff.
+"""release-stats.py — code vs. test vs. comment line-change table for a release's diff.
 
 Buckets the diff between two git refs into the workspace's four areas (the
 shared `rust/` workspace plus the three `apps/<platform>/` hosts — see
@@ -9,7 +9,8 @@ file's `#[cfg(test)]` module boundary, or the whole file's path has a
 component ending in `test`/`tests` case-insensitively (`tests/`, `Tests/`,
 `winui.tests/`, `*Tests.swift`/`.cs` — covers this repo's Rust integration
 tests, macOS XCTest target, and Windows xunit project). Full-line `//`
-comments are excluded from both counts.
+comments are tallied separately in their own "comments" column, regardless
+of whether they fall in code or test regions.
 
 Used by the `make-release` skill's step 6 (write real release notes) to
 generate the change-stats table appended there. Run from the repo root:
@@ -67,7 +68,7 @@ def bucket_stats(old_ref, new_ref, paths):
         for f in sh(["git", "diff", "--name-only", f"{old_ref}..{new_ref}", "--", *paths]).splitlines()
         if f
     ]
-    code_add = code_del = test_add = test_del = 0
+    code_add = code_del = test_add = test_del = comment_add = comment_del = 0
     for path in files:
         whole_file_is_test = bool(TEST_PATH_RE.search(path))
         old_boundary = None if whole_file_is_test else test_module_boundary(old_ref, path)
@@ -80,17 +81,19 @@ def bucket_stats(old_ref, new_ref, paths):
             added = [l[1:] for l in body_lines if l.startswith("+")]
             for i, line in enumerate(removed):
                 if is_comment(line):
+                    comment_del += 1
                     continue
                 is_test = whole_file_is_test or (old_boundary is not None and old_start + i >= old_boundary)
                 test_del += is_test
                 code_del += not is_test
             for i, line in enumerate(added):
                 if is_comment(line):
+                    comment_add += 1
                     continue
                 is_test = whole_file_is_test or (new_boundary is not None and new_start + i >= new_boundary)
                 test_add += is_test
                 code_add += not is_test
-    return code_add, code_del, test_add, test_del
+    return code_add, code_del, test_add, test_del, comment_add, comment_del
 
 
 def fmt(added, removed):
@@ -104,17 +107,20 @@ def main():
     old_ref, new_ref = sys.argv[1], sys.argv[2]
 
     rows = []
-    totals = [0, 0, 0, 0]
+    totals = [0, 0, 0, 0, 0, 0]
     for label, paths in BUCKETS:
         stats = bucket_stats(old_ref, new_ref, paths)
         rows.append((label, stats))
         totals = [t + s for t, s in zip(totals, stats)]
 
-    print("| Area | Code | Tests |")
-    print("|---|---:|---:|")
-    for label, (code_add, code_del, test_add, test_del) in rows:
-        print(f"| `{label}` | {fmt(code_add, code_del)} | {fmt(test_add, test_del)} |")
-    print(f"| **Total** | **{fmt(totals[0], totals[1])}** | **{fmt(totals[2], totals[3])}** |")
+    print("| Area | Code | Tests | Comments |")
+    print("|---|---:|---:|---:|")
+    for label, (code_add, code_del, test_add, test_del, comment_add, comment_del) in rows:
+        print(f"| `{label}` | {fmt(code_add, code_del)} | {fmt(test_add, test_del)} | {fmt(comment_add, comment_del)} |")
+    print(
+        f"| **Total** | **{fmt(totals[0], totals[1])}** | **{fmt(totals[2], totals[3])}** "
+        f"| **{fmt(totals[4], totals[5])}** |"
+    )
 
 
 if __name__ == "__main__":

@@ -107,24 +107,25 @@ scripted, since it's arithmetic, not judgment:
 2. Group into sections that fit what ACTUALLY changed — don't force categories that end up
    empty. Typical shape: `## Bug fixes`, `## Features`, `## Shared changes` (rust/ engine,
    cross-platform), plus one section per platform that got platform-specific work this
-   release (`## macOS`, `## Windows`, `## Linux`). One concise, plain-English line per
-   change (not the raw commit subject — write what it means for the user), linking to its
-   commit: `- <description> ([`<short-sha>`](https://github.com/delllusional/DontSpeak/commit/<sha>))`.
-3. Append the change-stats table under its own `## LOC` heading — same level as the summary
+   release (`## macOS`, `## Windows`, `## Linux`). One brief, plain-English line per change
+   (not the raw commit subject — write what it means for the user, kept to a single line),
+   linking to its commit with the link in square brackets, not wrapped in parens:
+   `- <brief description>. [`<short-sha>`](https://github.com/delllusional/DontSpeak/commit/<sha>)`.
+3. Append the change-stats table under its own `## Lines` heading — same level as the summary
    sections above, not a `---` divider — so it reads as one more section, not an appendix.
    The diff link (step 4) goes first, bare (no `**Diff**:` label), then the table under it:
    `scripts/release-stats.py <prev-tag> v$ver` prints the ready-to-paste markdown table
-   splitting code vs. test line changes across the `rust` (shared) / `apps/macos` /
-   `apps/windows` / `apps/linux` buckets.
+   splitting code vs. test vs. comment-only line changes across the `rust` (shared) /
+   `apps/macos` / `apps/windows` / `apps/linux` buckets.
    ```
-   ## LOC
+   ## Lines
 
    https://github.com/delllusional/DontSpeak/compare/<prev-tag>...v$ver
 
    <script output>
    ```
 4. The diff link (GitHub's own compare view — every commit, not just the ones summarized
-   above) is the bare URL at the top of the `## LOC` section, per step 3.
+   above) is the bare URL at the top of the `## Lines` section, per step 3.
 5. Submit it: `gh release edit "v$ver" --repo delllusional/DontSpeak --notes-file <file>`
    (or `--notes "..."` inline for something short).
 
