@@ -126,7 +126,7 @@ pub(crate) fn claude_json_hooks(
 ) -> i32 {
     let Ok(existing) = io::read_json_or_bail("wire", cfg) else {
         return 0; // malformed existing file is the user's own — leave it, don't fail the run,
-                  // matching `claude_toml_hooks`'s convention below.
+        // matching `claude_toml_hooks`'s convention below.
     };
 
     let merged = if remove {

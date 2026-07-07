@@ -265,7 +265,10 @@ enum PressState {
     /// Physical press in flight since `since`. `long_press_fired` latches when the
     /// hold crossed `long_press_ms`, so the cancel fires exactly once per press —
     /// and the release that ENDS a long-press is not mistaken for a tap.
-    Down { since: Instant, long_press_fired: bool },
+    Down {
+        since: Instant,
+        long_press_fired: bool,
+    },
 }
 
 /// The engine's mutable state + dependencies.
@@ -2109,7 +2112,10 @@ mod tests {
         let mut d = mk(600);
         d.plat.terminal_frontmost.set(true);
         MockPlatform::tap(&mut d);
-        assert!(d.is_recording() && d.plat.lock_state.get(), "recording, lit");
+        assert!(
+            d.is_recording() && d.plat.lock_state.get(),
+            "recording, lit"
+        );
         d.plat.lock_state.set(false); // OS toggled the latch OFF on key-down
         d.plat.caps_phys_down.set(true);
         d.tick();
@@ -2437,7 +2443,10 @@ mod tests {
             ),
             "double tap latched insert-only"
         );
-        assert!(!d.is_recording(), "the second tap did NOT start a new recording");
+        assert!(
+            !d.is_recording(),
+            "the second tap did NOT start a new recording"
+        );
         deposit_final(&d, "no enter");
         d.tick();
         assert_eq!(d.plat.type_text_calls.get(), 1, "pasted");
@@ -2504,7 +2513,10 @@ mod tests {
             ),
             "double tap flipped to submit"
         );
-        assert!(!d.is_recording(), "the second tap did NOT start a new recording");
+        assert!(
+            !d.is_recording(),
+            "the second tap did NOT start a new recording"
+        );
         deposit_final(&d, "double tap, inverted");
         d.tick();
         assert_eq!(d.plat.type_text_calls.get(), 1, "pasted");
@@ -2554,7 +2566,10 @@ mod tests {
         MockPlatform::tap(&mut d); // start
         MockPlatform::tap(&mut d); // stop
         MockPlatform::tap(&mut d); // double tap (µs later — inside the window)
-        assert!(!d.is_recording(), "the second tap did NOT start a new recording");
+        assert!(
+            !d.is_recording(),
+            "the second tap did NOT start a new recording"
+        );
         d.paste.lock().unwrap().final_state = FinalState::Ready("kept".into());
         d.tick();
         assert_eq!(
@@ -2590,7 +2605,10 @@ mod tests {
         );
         d.plat.caps_phys_down.set(false);
         d.tick(); // release → a plain tap → new recording (wipes the pending transcript)
-        assert!(d.is_recording(), "tap after the window starts a new recording");
+        assert!(
+            d.is_recording(),
+            "tap after the window starts a new recording"
+        );
         assert!(
             matches!(d.paste.lock().unwrap().final_state, FinalState::Idle),
             "the unpasted transcript is dropped by the new session"
