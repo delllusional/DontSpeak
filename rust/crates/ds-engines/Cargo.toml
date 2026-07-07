@@ -14,5 +14,10 @@ ds-config = { workspace = true }
 ds-stt = { workspace = true }
 ds-platform = { workspace = true }
 
+[dev-dependencies]
+# Tempdir-rooted Paths for stt_box_maps_each_engine, keeping its ClaudeCode arm off the real
+# $HOME.
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

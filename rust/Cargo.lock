@@ -941,6 +941,7 @@ dependencies = [
  "ds-config",
  "ds-platform",
  "ds-stt",
+ "tempfile",
 ]
 
 [[package]]

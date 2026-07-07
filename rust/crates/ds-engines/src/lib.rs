@@ -66,9 +66,14 @@ where
 /// The key Claude Code's `voice:pushToTalk` is bound to, READ from Claude Code's config
 /// (default `Space`), parsed into a [`ds_platform::KeyChord`] for `ClaudeNative` to tap.
 /// Read-don't-write: we only read Claude Code's keybindings.json, never modify it.
-fn claude_code_chord() -> ds_platform::KeyChord {
-    ds_config::Paths::resolve()
-        .map(|p| ds_platform::KeyChord::parse(&ds_config::read_claude_code_voice(&p).key))
+///
+/// Injectable seam: production (`make_stt_with`/`stt_box`) passes the real resolved `Paths`;
+/// tests pass a tempdir-rooted one instead so this never touches the real `$HOME`. `None` (no
+/// `$HOME`, or the caller deliberately withholds it) yields the default chord — the same
+/// fallback `Paths::resolve()` failing used to produce.
+fn claude_code_chord(paths: Option<&ds_config::Paths>) -> ds_platform::KeyChord {
+    paths
+        .map(|p| ds_platform::KeyChord::parse(&ds_config::read_claude_code_voice(p).key))
         .unwrap_or_default()
 }
 
@@ -90,7 +95,12 @@ where
     // engine that runs on this build, then map it. `None` (off, or no usable rung) = dictation
     // off — the engine routes a Caps tap to voice-silence and never calls `stt.start()`, so
     // the inert box is never used.
-    stt_box(cfg.resolved_stt(), plat, avail)
+    stt_box(
+        cfg.resolved_stt(),
+        plat,
+        avail,
+        ds_config::Paths::resolve().as_ref(),
+    )
 }
 
 /// Map a SINGLE (already-resolved) STT engine to its box — the ladder-free inverse of
@@ -98,10 +108,14 @@ where
 /// just taps a key); `built_in` (this helper-less factory can never host real Parakeet) and
 /// an unavailable `system` degrade to the SAME INERT `SystemStt` the off (`None`) case uses —
 /// NO substitution to a different, working engine.
+///
+/// `paths` is forwarded to `claude_code_chord` for the `ClaudeCode` arm — see its doc for the
+/// injectable-seam rationale.
 fn stt_box<P>(
     engine: Option<SttEngine>,
     plat: Rc<P>,
     avail: &dyn EngineAvailability,
+    paths: Option<&ds_config::Paths>,
 ) -> Box<dyn Stt>
 where
     P: KeyInjector + FrontmostWindow + 'static,
@@ -109,7 +123,7 @@ where
     match engine {
         // Off — inert.
         None => Box::new(SystemStt::new()),
-        Some(SttEngine::ClaudeCode) => Box::new(ClaudeNative::new(plat, claude_code_chord())),
+        Some(SttEngine::ClaudeCode) => Box::new(ClaudeNative::new(plat, claude_code_chord(paths))),
         Some(SttEngine::BuiltIn) => {
             // This helper-less factory can never host real Parakeet (it runs through the warm
             // helper — dontspeakd::build_stt uses HelperStt whenever that's actually available,
@@ -179,7 +193,13 @@ mod tests {
         // dontspeakd's warm helper) — maps to the INERT SystemStt box, NEVER substituted to
         // claude_code's cloud dictation. system (available or not) already followed this
         // no-substitution rule. None (off) is inert.
+        //
+        // The ClaudeCode arm builds `claude_code_chord(paths)`, which reads Claude Code's
+        // keybindings.json — a tempdir-rooted `Paths` keeps that read off the real `$HOME`
+        // (see `claude_code_chord`).
         let avail = FakeAvail { system_stt: true };
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
         for (engine, want) in [
             (Some(SttEngine::ClaudeCode), "claude_code"),
             (Some(SttEngine::BuiltIn), "system"), // inert SystemStt, NOT claude_code
@@ -187,7 +207,7 @@ mod tests {
             (None, "system"), // inert SystemStt
         ] {
             assert_eq!(
-                stt_box(engine, plat(), &avail).kind(),
+                stt_box(engine, plat(), &avail, Some(&paths)).kind(),
                 want,
                 "stt_engine {engine:?} must map to the expected box",
             );
