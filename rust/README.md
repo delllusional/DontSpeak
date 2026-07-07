@@ -41,7 +41,7 @@ rust/
     ds-aec/       # echo-cancelled duplex-audio primitive (macOS VPIO, Windows WASAPI)
     ds-helper/    # bin: the warm native-media child process — unions ds-tts + ds-stt +
                   #   ds-aec, one-shot (cold) and --serve (warm) modes
-    ds-engines/   # make_stt / make_tts engine factories (config → boxed engine)
+    ds-engines/   # make_stt engine factory (config → boxed STT engine)
     ds-tools/     # the MCP tool catalog — single source for MCP and the app's Tools view
     ds-i18n/      # the shared UI string catalog (locales/en.yml), rendered over the FFI
     ds-status/    # the model_status engine→UI contract (serde source of truth)

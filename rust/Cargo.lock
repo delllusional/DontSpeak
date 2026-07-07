@@ -940,7 +940,6 @@ dependencies = [
  "ds-config",
  "ds-platform",
  "ds-stt",
- "ds-tts",
 ]
 
 [[package]]

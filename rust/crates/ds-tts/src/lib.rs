@@ -1,7 +1,8 @@
 //! ds-tts — pluggable text-to-speech engines for dontspeak (ARCHITECTURE §A.1).
 //!
-//! One trait [`Tts`] behind dynamic dispatch, selected by config enum via the
-//! `ds-engines` factory. Two implementors:
+//! One trait [`Tts`] behind dynamic dispatch — ds-tts's public engine seam,
+//! selected by config enum (`VoiceConfig::resolved_tts`, driven by the engine's
+//! TTS manager). Two implementors:
 //!   * [`KokoroTts`] — the DEFAULT. NATIVE in-process Kokoro synthesis (ort +
 //!     voice-g2p + rodio), spawned via the thin `ds-helper` helper bin in
 //!     its own process group, recorded in the single-speaker pidfile. NO Python,

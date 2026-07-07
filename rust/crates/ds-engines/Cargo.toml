@@ -7,11 +7,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
-description = "Selects and builds DontSpeak's configured TTS/STT engines, degrading to a default instead of going silent."
+description = "Selects and builds DontSpeak's configured STT engine, degrading to an inert placeholder instead of silently substituting another."
 
 [dependencies]
 ds-config = { workspace = true }
-ds-tts = { workspace = true }
 ds-stt = { workspace = true }
 ds-platform = { workspace = true }
 

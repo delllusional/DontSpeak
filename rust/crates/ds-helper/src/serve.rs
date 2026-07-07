@@ -69,23 +69,14 @@ fn record_16k(seconds: u64, cancel: &std::sync::atomic::AtomicBool) -> Result<Ve
     Ok(pcm)
 }
 
-/// The Core ML / ANE backend is the only diarizer wired today. Returns `Err` (a
-/// user-facing message) when the config selects a runtime that resolves to anything
-/// else — e.g. `onnx`, or any provider off macOS — so `diarizer_provider` is honored
-/// instead of silently falling through to Core ML. `Ok` ⇒ Core ML is the right backend.
+/// The Core ML / ANE backend is the only diarizer wired today. Resolves the config's
+/// provider ladder, then delegates the provider → backend gate to
+/// [`ds_stt::diarize::ensure_coreml_backend`] — THE single mapping site — so this helper
+/// can't drift from it. Returns that gate's `Err` (a user-facing message) when the
+/// resolved provider is anything Core ML can't serve; `Ok` ⇒ Core ML is the right backend.
 #[cfg(target_os = "macos")]
 fn ensure_coreml_diarizer(cfg: &ds_config::VoiceConfig) -> Result<(), String> {
-    use ds_config::DiarizerProvider;
-    match cfg.resolved_diarizer_provider() {
-        DiarizerProvider::AppleNative => Ok(()),
-        // Defensive: `AppleNative` is the only variant today (so this arm is unreachable),
-        // but keep the rejection so adding an unwired provider can't silently fall through.
-        #[allow(unreachable_patterns)]
-        other => Err(format!(
-            "diarizer_provider={} is not available on this platform (only apple-native is wired)",
-            other.as_str()
-        )),
-    }
+    ds_stt::diarize::ensure_coreml_backend(cfg.resolved_diarizer_provider())
 }
 
 /// One-shot diarization: record `seconds`, then diarize with the config's clustering

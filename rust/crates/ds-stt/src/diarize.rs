@@ -18,6 +18,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use ds_config::DiarizerProvider;
 use ds_config::speakers::SpeakerStore;
 
 /// One contiguous span attributed to a single speaker. Times are seconds from the start
@@ -125,6 +126,29 @@ pub trait Diarizer {
     /// Whether this backend is usable right now (models present, supported platform).
     fn is_available(&self) -> bool {
         true
+    }
+}
+
+/// THE `diarizer_provider` → backend gate — the single place a provider rung is mapped to
+/// (the availability of) a diarizer backend; every diarize entry point (the warm helper's
+/// `diarize`/`enroll` ops) delegates here rather than re-deriving the mapping. Takes an
+/// ALREADY-RESOLVED rung (callers walk the ladder via
+/// `VoiceConfig::resolved_diarizer_provider`): `Ok` ⇒ the Core ML / ANE backend
+/// (`CoremlDiarizer`, the only diarizer wired today) is the right backend for it. `Err` (a
+/// user-facing message) for any other provider — and for EVERY provider off macOS — so
+/// `diarizer_provider` is honored instead of silently falling through to Core ML.
+pub fn ensure_coreml_backend(provider: DiarizerProvider) -> Result<(), String> {
+    match provider {
+        #[cfg(target_os = "macos")]
+        DiarizerProvider::AppleNative => Ok(()),
+        // Defensive: `AppleNative` is the only variant today (so on macOS this arm is
+        // unreachable), but keep the rejection so adding an unwired provider can't silently
+        // fall through. Off macOS this arm rejects every provider, `AppleNative` included.
+        #[allow(unreachable_patterns)]
+        other => Err(format!(
+            "diarizer_provider={} is not available on this platform (only apple-native is wired)",
+            other.as_str()
+        )),
     }
 }
 
@@ -331,6 +355,22 @@ mod tests {
         assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
         assert_eq!(cosine(&[1.0], &[1.0, 2.0]), 0.0); // length mismatch
         assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0); // zero magnitude
+    }
+
+    #[test]
+    fn ensure_coreml_backend_gates_provider_per_platform() {
+        // AppleNative is the one provider rung today: Ok (Core ML is the backend) on macOS,
+        // Err on every other OS. The Err message is the exact user-facing string the warm
+        // helper's diarize/enroll ops emit — keep it byte-stable.
+        let res = ensure_coreml_backend(DiarizerProvider::AppleNative);
+        #[cfg(target_os = "macos")]
+        assert_eq!(res, Ok(()));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            res.unwrap_err(),
+            "diarizer_provider=apple_native is not available on this platform \
+             (only apple-native is wired)"
+        );
     }
 
     #[test]
