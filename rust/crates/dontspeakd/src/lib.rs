@@ -53,6 +53,7 @@
 // Always-listening: `listen` is the pure, unit-tested core (endpointer, stopword,
 // turn logic); `listener` is the runtime glue the poll loop drives. The allow
 // covers a couple of inspector methods exercised only by `listen`'s unit tests.
+mod child_slot;
 mod helper_stt;
 #[allow(dead_code)]
 mod listen;

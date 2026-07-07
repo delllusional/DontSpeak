@@ -18,10 +18,11 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
+use crate::child_slot::ChildSlot;
 use crate::log;
 use crate::model_slot::{ModelSlot, ModelState};
 use crate::status::StatusGate;
@@ -177,17 +178,16 @@ struct ReaderStats {
 }
 
 /// The model-residency state [`TtsManager::reader_loop`] flips on
-/// `TTSLOADED`/`STTLOADED`/unexpected EOF, plus the shared child handle it peeks
-/// (never kills) to log the real exit status. Bundled so the reader doesn't
-/// thread a fixed-order run of positional args that share a type (three
-/// `Arc<AtomicBool>`s among them) — an easy mis-ordering footgun.
+/// `TTSLOADED`/`STTLOADED`/unexpected EOF, plus the shared [`ChildSlot`] it asks
+/// whether an EOF was deliberate and peeks (never kills) for the real exit
+/// status. Bundled so the reader doesn't thread a fixed-order run of positional
+/// args that share a type — an easy mis-ordering footgun.
 struct ReaderModelState {
     tts_model: Arc<ModelSlot>,
     stt_model: Arc<ModelSlot>,
     stt_realized: Arc<Mutex<String>>,
     gate: Option<Arc<StatusGate>>,
-    expected_eof: Arc<AtomicBool>,
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<ChildSlot>,
 }
 
 pub struct TtsManager {
@@ -203,12 +203,16 @@ pub struct TtsManager {
     /// (see `restart_child`) and doubles as a debug aid for spotting a rapid-fire
     /// restart storm. `None` until the first restart.
     last_restart: Mutex<Option<std::time::Instant>>,
-    /// The live Kokoro `--serve` child (None when not warm). `Arc` so the persistent
-    /// reader thread can share it too — its unexpected-EOF handler `try_wait`s it
-    /// (peek only, never taking/killing) to log the real exit status/signal instead
-    /// of just "died, reason unknown"; the actual reap still happens later via
+    /// The warm child's process-lifecycle slot — the live Kokoro `--serve` handle
+    /// (empty when not warm), its incarnation number, and the deliberate-teardown
+    /// marker, consolidated behind named transitions so the three can't drift
+    /// apart by convention (see [`ChildSlot`]). `Arc` so the persistent reader
+    /// thread can share it too — its unexpected-EOF handler classifies the EOF
+    /// (deliberate stop vs post-READY crash) and `try_wait`s the child (peek only,
+    /// never taking/killing) to log the real exit status/signal instead of just
+    /// "died, reason unknown"; the actual reap still happens later via
     /// `mark_dead`/`restart_if_crashed`.
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<ChildSlot>,
     /// Kokoro child stdin — written by speak/preview/listen AND stop (brief sections).
     stdin: Mutex<Option<ChildStdin>>,
     /// The persistent stdout reader thread (one per warm child). Owns the child's
@@ -236,6 +240,8 @@ pub struct TtsManager {
     /// Last warm-child START failure (e.g. "onnxruntime dylib is not <ver>",
     /// "kokoro model not downloaded"), surfaced to the app's status dot as the
     /// red "failed" state. `None` once a start succeeds or TTS is toggled off.
+    /// Invariant: only ever `Some` while no child is installed — set exclusively
+    /// by `start_locked`'s failure returns, cleared by success and `stop_child`.
     last_error: Mutex<Option<String>>,
     /// Live TTS stats (realtime factor / latency / counts) for the app's stats
     /// view, fed by the child's per-utterance `STATS` line.
@@ -289,18 +295,6 @@ pub struct TtsManager {
     /// flag is part of `model_status`). `OnceLock`-empty in tests / before wiring, where
     /// `set_muted` simply skips the bump.
     gate: OnceLock<Arc<StatusGate>>,
-    /// True while a DELIBERATE teardown (`stop_child` / `mark_dead`) is killing the child,
-    /// so the reader can tell that EOF apart from a post-READY CRASH (AV false-positive on
-    /// freshly written dylibs, OOM, GPU driver) — only the crash is reported and unloads
-    /// the models from the reader; the deliberate paths own their flags and logging.
-    /// Reset by each successful `start` when it installs the new reader.
-    expected_eof: Arc<AtomicBool>,
-    /// Bumped by every successful (re)start right when the new child is installed — the
-    /// child's "incarnation number". `play`/`listen`/`diarize`/`enroll` capture it before
-    /// sending a request; if the reader's EOF only wakes them up AFTER a concurrent
-    /// restart has already bumped this, the death they're reacting to belongs to an OLD,
-    /// already-superseded child — see [`mark_dead_if_current`](Self::mark_dead_if_current).
-    child_gen: AtomicU64,
     /// When [`restart_if_crashed`](Self::restart_if_crashed) last ATTEMPTED a heal — its
     /// [`HEAL_COOLDOWN`] throttle, so a deterministic crasher can't turn every speak/tap
     /// into a blocking spawn+load.
@@ -324,7 +318,7 @@ impl TtsManager {
             bin,
             lifecycle: Mutex::new(()),
             last_restart: Mutex::new(None),
-            child: Arc::new(Mutex::new(None)),
+            child: Arc::new(ChildSlot::new()),
             stdin: Mutex::new(None),
             reader: Mutex::new(None),
             speak_slot: Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new())),
@@ -350,8 +344,6 @@ impl TtsManager {
             stt_model: Arc::new(ModelSlot::new()),
             muted: AtomicBool::new(false),
             gate: OnceLock::new(),
-            expected_eof: Arc::new(AtomicBool::new(false)),
-            child_gen: AtomicU64::new(0),
             last_heal: Mutex::new(None),
         }
     }
@@ -528,14 +520,7 @@ impl TtsManager {
         // could go stale across a concurrent `reload_models` restart (a full stop+start —
         // seconds), and the reap below would then kill the healthy replacement child.
         let _lifecycle = self.lifecycle.lock().unwrap();
-        let (present, exited) = {
-            let mut child = self.child.lock().unwrap();
-            match child.as_mut() {
-                // `try_wait` Err ⇒ treat as exited: the handle is unusable either way.
-                Some(c) => (true, !matches!(c.try_wait(), Ok(None))),
-                None => (false, false),
-            }
-        };
+        let (present, exited) = self.child.probe();
         let error = self.last_error().is_some();
         let action = crate::config_gate::warm_child_heal_action(present, exited, error);
         if action == HealAction::Nothing {
@@ -647,7 +632,7 @@ impl TtsManager {
 
     /// True when a warm child is running.
     pub fn is_running(&self) -> bool {
-        self.child.lock().unwrap().is_some()
+        self.child.is_running()
     }
 
     /// The last warm-child start failure, if the most recent start attempt failed
@@ -903,22 +888,17 @@ impl TtsManager {
         // one was actually set).
         self.clear_stt_load_error();
         self.clear_tts_load_error();
-        {
-            // Bump the generation WHILE still holding the `child` lock: anyone who next
-            // observes this child via `is_running()`/`child.lock()` is then guaranteed
-            // (by the mutex's own happens-before edge) to see the new generation too —
-            // see `mark_dead_if_current`.
-            let mut child_guard = self.child.lock().unwrap();
-            *child_guard = Some(child);
-            self.child_gen.fetch_add(1, Ordering::Relaxed);
-        }
+        // Install the new child: handle + generation bump + expected-EOF reset are
+        // ONE `ChildSlot` transition (see `ChildSlot::install`) — anyone who next
+        // observes this child is guaranteed to see its new generation too (see
+        // `mark_dead_if_current`), and from here an EOF is a CRASH unless a
+        // deliberate teardown (`stop_child`/`mark_dead`) re-marks it expected
+        // before killing.
+        self.child.install(child);
         *self.stdin.lock().unwrap() = Some(stdin);
         // Spawn the persistent demux reader: it owns stdout and routes the child's
         // lines into the speak/listen slots, so a speak and a listen can be in
         // flight at once (full-duplex coexist). It exits on EOF (child killed).
-        // The new child is healthy: from here an EOF is a CRASH unless a deliberate
-        // teardown (`stop_child`/`mark_dead`) re-marks it expected before killing.
-        self.expected_eof.store(false, Ordering::Relaxed);
         let handle = {
             let speak_slot = self.speak_slot.clone();
             let listen_slot = self.listen_slot.clone();
@@ -929,11 +909,11 @@ impl TtsManager {
             let lifetime = self.lifetime.clone();
             let tts_model = self.tts_model.clone();
             let stt_model = self.stt_model.clone();
-            let expected_eof = self.expected_eof.clone();
-            // So the reader's unexpected-EOF handler can try_wait() the real exit
-            // status/signal (peek only — the actual reap stays with mark_dead/
-            // restart_if_crashed, so no double-teardown race).
-            let child_handle = self.child.clone();
+            // So the reader's unexpected-EOF handler can classify the EOF (deliberate
+            // vs crash) and try_wait() the real exit status/signal (peek only — the
+            // actual reap stays with mark_dead/restart_if_crashed, so no
+            // double-teardown race).
+            let child_slot = self.child.clone();
             // STT preloads on a PARALLEL thread, so its `STT_PROVIDER` line often lands AFTER READY
             // (and always for a lazy `load stt`) — i.e. in THIS persistent reader, not start()'s
             // pre-READY wait loop. Clone the realized-provider slot in so the reader can capture it;
@@ -961,8 +941,7 @@ impl TtsManager {
                         stt_model,
                         stt_realized,
                         gate,
-                        expected_eof,
-                        child: child_handle,
+                        child: child_slot,
                     },
                 );
             })
@@ -1008,7 +987,7 @@ impl TtsManager {
     fn stop_child(&self) {
         let _lifecycle = self.lifecycle.lock().unwrap();
         // This teardown is DELIBERATE — the reader must not report the kill's EOF as a crash.
-        self.expected_eof.store(true, Ordering::Relaxed);
+        self.child.begin_deliberate_stop();
         // Toggled off ⇒ not a failure; clear any stale start error.
         self.clear_error();
         // Drop stdin first so the child sees EOF, then hard-kill to be sure.
@@ -1022,7 +1001,9 @@ impl TtsManager {
         // "CUDA" — to be read before the new child reports. (The status row is gated on
         // `stt_loaded` too, but keep the slot strictly fresh.)
         *self.stt_realized.lock().unwrap() = "CPU".to_string();
-        if let Some(mut child) = self.child.lock().unwrap().take() {
+        // `reap` has already released the slot's lock when it returns, so the
+        // kill/wait below run OUTSIDE any lock.
+        if let Some(mut child) = self.child.reap() {
             let _ = child.kill();
             let _ = child.wait();
             log("TTS warm Kokoro child stopped (model freed)");
@@ -1045,14 +1026,16 @@ impl TtsManager {
     fn mark_dead_locked(&self) {
         // The kill below is deliberate reaping; the reader (if still up) already saw —
         // and reported — the child's own EOF.
-        self.expected_eof.store(true, Ordering::Relaxed);
+        self.child.begin_deliberate_stop();
         *self.stdin.lock().unwrap() = None;
         // A dead child holds no models — clear the residency flags so the dot doesn't
         // show a stale "running" until the next start (this comment used to claim that
         // already, without actually doing it — the exact bug class fixed in
         // set_caps_gate, engine.rs).
         self.clear_loaded_flags();
-        if let Some(mut child) = self.child.lock().unwrap().take() {
+        // `reap` has already released the slot's lock when it returns, so the
+        // try_wait/kill/wait below run OUTSIDE any lock.
+        if let Some(mut child) = self.child.reap() {
             let pid = child.id();
             // Debug aid: mark_dead runs after an IO error already suggested the
             // child is gone — try_wait() BEFORE kill() so a genuine crash's real
@@ -1085,7 +1068,7 @@ impl TtsManager {
     /// silently kill the brand-new child, with no error logged.
     fn mark_dead_if_current(&self, expected_gen: u64) {
         let _lifecycle = self.lifecycle.lock().unwrap();
-        if self.child_gen.load(Ordering::Relaxed) != expected_gen {
+        if self.child.generation() != expected_gen {
             log(
                 "TTS: stale child-death signal from a superseded child ignored \
                  (already restarted)",
@@ -1132,7 +1115,6 @@ impl TtsManager {
             stt_model,
             stt_realized,
             gate,
-            expected_eof,
             child,
         } = model;
         let push_listen = |evt: ListenEvt| {
@@ -1171,7 +1153,7 @@ impl TtsManager {
                     // NOW (the status dots go amber immediately) and say so; the worker's
                     // `restart_if_crashed` revives the child on the next speak. Deliberate
                     // teardowns (`stop_child`/`mark_dead`) own their flags and logging.
-                    if !expected_eof.load(Ordering::Relaxed) {
+                    if !child.eof_was_expected() {
                         // `ModelSlot::transition` to `Idle` clears any per-model "failed to
                         // load" state too (mirrors every other teardown path —
                         // `start_locked`'s fresh-install, `clear_loaded_flags`,
@@ -1189,11 +1171,7 @@ impl TtsManager {
                         // learned lazily, whenever the next speak/listen happened to
                         // trigger restart_if_crashed — which may be minutes later, or
                         // never before the app itself restarts.
-                        let status = child
-                            .lock()
-                            .unwrap()
-                            .as_mut()
-                            .and_then(|c| c.try_wait().ok().flatten());
+                        let status = child.peek_exit_status();
                         log(&format!(
                             "WARN: TTS warm child exited unexpectedly ({}) — models \
                              unloaded; the next speak restarts it",
@@ -1450,13 +1428,13 @@ impl TtsManager {
     }
 
     fn play(&self, op: &str, text: &str, voice: &str, rate: f32) -> std::io::Result<()> {
-        if !self.is_running() {
+        // Snapshot the child's generation for THIS request (one acquisition also serves
+        // as the is-running gate) — if the reader only wakes us (fatal) after a
+        // concurrent restart has ALREADY installed a new child, this lets us tell "our
+        // child died" apart from "a stale EOF from an old, superseded child".
+        let Some(my_gen) = self.child.running_gen() else {
             return Err(std::io::Error::other("TTS child not running"));
-        }
-        // Snapshot the child's generation for THIS request — if the reader only wakes us
-        // (fatal) after a concurrent restart has ALREADY installed a new child, this lets
-        // us tell "our child died" apart from "a stale EOF from an old, superseded child".
-        let my_gen = self.child_gen.load(Ordering::Relaxed);
+        };
         // Fresh request: reset the speak slot so it reflects THIS speak only.
         {
             let (m, _cv) = &*self.speak_slot;
@@ -1823,6 +1801,19 @@ mod reader_eof_tests {
         slot
     }
 
+    /// A canned [`ChildSlot`]: EMPTY (no real process behind it) with the
+    /// deliberate-stop marker optionally pre-set — reproduces the exact
+    /// `{child: None, expected_eof}` pairs the raw fields used to take, so the
+    /// crash case (empty slot, `expected_eof = false`) stays representable
+    /// WITHOUT spawning a real process in every reader test.
+    fn canned_slot(expected_eof: bool) -> Arc<ChildSlot> {
+        let slot = Arc::new(ChildSlot::new());
+        if expected_eof {
+            slot.begin_deliberate_stop();
+        }
+        slot
+    }
+
     /// Drive `reader_loop` over a canned child stdout (ending in EOF, like a real death)
     /// and return `(tts_loaded, stt_loaded, speak_fatal)` afterwards. Both models start
     /// `Loaded` — see [`loaded_slot`].
@@ -1851,8 +1842,7 @@ mod reader_eof_tests {
                 stt_model: stt_model.clone(),
                 stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                 gate: None,
-                expected_eof: Arc::new(AtomicBool::new(expected_eof)),
-                child: Arc::new(Mutex::new(None)),
+                child: canned_slot(expected_eof),
             },
         );
         let fatal = speak_slot.0.lock().unwrap().fatal;
@@ -1876,9 +1866,9 @@ mod reader_eof_tests {
     fn unexpected_eof_reads_the_real_exit_status_through_the_shared_child_handle() {
         // End-to-end through the ACTUAL wiring `start()` uses (not just a canned byte slice
         // with no child behind it): a real spawned process, sharing the same
-        // `Arc<Mutex<Option<Child>>>` production hands the reader thread. Proves try_wait()
-        // sees a genuine ExitStatus through the new `child` param — this is what lets a log
-        // line say WHY the child died instead of "reason unknown".
+        // `Arc<ChildSlot>` production hands the reader thread. Proves the slot's peek
+        // sees a genuine ExitStatus — this is what lets a log line say WHY the child
+        // died instead of "reason unknown".
         let dir = tempfile::tempdir().unwrap();
         let mut child = std::process::Command::new("true")
             .stdout(std::process::Stdio::piped())
@@ -1886,7 +1876,10 @@ mod reader_eof_tests {
             .expect("spawn `true`");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         let _ = child.wait(); // let it actually exit before the reader sees stdout EOF
-        let child_handle = Arc::new(Mutex::new(Some(child)));
+        let child_slot = Arc::new(ChildSlot::new());
+        child_slot.install(child);
+        // `install` reset the deliberate-stop marker — so the reader takes the
+        // UNEXPECTED-EOF (crash-detection) path below, same as production.
 
         let speak_slot = Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new()));
         TtsManager::reader_loop(
@@ -1909,17 +1902,16 @@ mod reader_eof_tests {
                 stt_model: loaded_slot(),
                 stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                 gate: None,
-                expected_eof: Arc::new(AtomicBool::new(false)), // unexpected — the crash-detection path
-                child: child_handle.clone(),
+                child: child_slot.clone(),
             },
         );
 
         // The peek must not have consumed/broken the handle — a real teardown (mark_dead)
         // still needs to try_wait()/kill() it afterwards without erroring.
-        let status = child_handle.lock().unwrap().as_mut().unwrap().try_wait();
-        assert!(
-            matches!(status, Ok(Some(_))),
-            "exit status still readable after the reader's peek: {status:?}"
+        assert_eq!(
+            child_slot.probe(),
+            (true, true),
+            "exit status still readable after the reader's peek"
         );
     }
 
@@ -1982,8 +1974,7 @@ mod reader_eof_tests {
                 stt_model: stt_model.clone(),
                 stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                 gate: None,
-                expected_eof: Arc::new(AtomicBool::new(true)),
-                child: Arc::new(Mutex::new(None)),
+                child: canned_slot(true),
             },
         );
         (tts_model.is_loaded(), stt_model.is_loaded())
@@ -2035,8 +2026,7 @@ mod reader_eof_tests {
                 stt_model: stt_model.clone(),
                 stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                 gate: None,
-                expected_eof: Arc::new(AtomicBool::new(true)),
-                child: Arc::new(Mutex::new(None)),
+                child: canned_slot(true),
             },
         );
         (
@@ -2153,8 +2143,7 @@ mod reader_eof_tests {
                     stt_model: reader_stt,
                     stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                     gate: None,
-                    expected_eof: Arc::new(AtomicBool::new(true)),
-                    child: Arc::new(Mutex::new(None)),
+                    child: canned_slot(true),
                 },
             );
         });
@@ -2226,8 +2215,7 @@ mod reader_eof_tests {
                 stt_model: loaded_slot(),
                 stt_realized: Arc::new(Mutex::new("CPU".to_string())),
                 gate: None,
-                expected_eof: Arc::new(AtomicBool::new(true)),
-                child: Arc::new(Mutex::new(None)),
+                child: canned_slot(true),
             },
         );
         let events: Vec<ListenEvt> = listen_slot.0.lock().unwrap().events.drain(..).collect();
