@@ -8,6 +8,9 @@
 //! rc.exe there. A missing rc.exe only drops the metadata (a warning), never fails the build.
 
 fn main() {
+    // Narrow cargo's default rescan-the-whole-package behavior: this script reads no
+    // other file (CARGO_CFG_TARGET_OS/CARGO_PKG_* are already fingerprint inputs).
+    println!("cargo:rerun-if-changed=build.rs");
     #[cfg(windows)]
     {
         if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {

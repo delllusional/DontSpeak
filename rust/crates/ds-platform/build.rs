@@ -2,6 +2,9 @@
 // Generic input libraries can't read modifier *lock* (Caps-Lock LED) state — that
 // requires IOKit's IOHIDSystem param connection, so we link the framework directly.
 fn main() {
+    // Narrow cargo's default rescan-the-whole-package behavior: this script reads no
+    // other file (CARGO_CFG_TARGET_OS is already a fingerprint input on its own).
+    println!("cargo:rerun-if-changed=build.rs");
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "macos" {
         println!("cargo:rustc-link-lib=framework=IOKit");
