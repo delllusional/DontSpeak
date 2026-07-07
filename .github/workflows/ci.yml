@@ -25,8 +25,16 @@ on:
   push:
   pull_request:
   # Manual runs (workflow_dispatch) and the release gate (workflow_call from release.yml)
-  # also run tests; the release passes full-matrix: true for all three OSes.
-  workflow_dispatch: {}
+  # also run tests; the release passes full-matrix: true for all three OSes. Manual runs
+  # can too (gh workflow run ci.yml --ref <branch> -f full-matrix=true) — the way to get
+  # a macOS/Windows compile of cfg-gated code onto a branch BEFORE the release gate,
+  # e.g. after touching macOS-only unsafe code that Linux per-commit CI never builds.
+  workflow_dispatch:
+    inputs:
+      full-matrix:
+        description: Run on all three OSes (Linux + Windows + macOS) instead of just Linux.
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       full-matrix:
