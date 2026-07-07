@@ -196,7 +196,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             },
         ],
         verified_client_version: "0.142.5",
-        verified_on: "2026-07-02",
+        verified_on: "2026-07-07",
     },
     ClientSpec {
         target: WireTarget::QwenCode,
