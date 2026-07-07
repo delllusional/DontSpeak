@@ -34,6 +34,7 @@ mod proto;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -251,6 +252,7 @@ pub(crate) enum Endpoint {
 /// The default codex control socket: `$CODEX_HOME/app-server-control/app-server-control.sock`
 /// (verified against openai/codex `app-server-transport`). `codex_home_env` is passed in —
 /// NOT read from `std::env` here — so tests never mutate process-global env.
+#[cfg(unix)]
 pub(crate) fn control_socket_path(
     codex_home_env: Option<&std::ffi::OsStr>,
     paths: &Paths,
@@ -295,6 +297,7 @@ pub(crate) fn resolve_endpoint(
 /// PURE decision for the opt-in lazy daemon start — extracted so the shell-out itself is
 /// never exercised in tests: start only when the user opted in, the socket is absent, and
 /// a codex binary was actually resolved.
+#[cfg(unix)]
 pub(crate) fn should_start_daemon(
     daemon_start_enabled: bool,
     socket_present: bool,

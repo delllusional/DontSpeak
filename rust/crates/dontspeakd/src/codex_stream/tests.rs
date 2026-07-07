@@ -74,6 +74,7 @@ fn coalescer_turn_flush_scopes_to_one_session() {
     assert_eq!(rest[0].0, "s2");
 }
 
+#[cfg(unix)]
 #[test]
 fn control_socket_path_prefers_env_over_codex_dir() {
     let dir = tempfile::tempdir().unwrap();
@@ -134,6 +135,7 @@ fn ws_url_parses_and_endpoint_resolution_prefers_the_override() {
     assert!(resolve_endpoint("http://nope", None, &paths).is_none());
 }
 
+#[cfg(unix)]
 #[test]
 fn should_start_daemon_decision_table() {
     // Only: opted in AND socket absent AND binary resolved.

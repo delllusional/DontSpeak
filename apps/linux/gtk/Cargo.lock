@@ -708,6 +708,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
+name = "data-encoding"
+version = "2.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
+
+[[package]]
 name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -809,13 +815,15 @@ dependencies = [
 
 [[package]]
 name = "dontspeakd"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "ds-config",
  "ds-engines",
+ "ds-helper-proto",
  "ds-i18n",
  "ds-ipc",
  "ds-model",
+ "ds-narrate",
  "ds-platform",
  "ds-proc",
  "ds-status",
@@ -826,11 +834,12 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 1.1.2+spec-1.1.0",
+ "tungstenite",
 ]
 
 [[package]]
 name = "ds-config"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "directories",
  "ds-proc",
@@ -844,7 +853,7 @@ dependencies = [
 
 [[package]]
 name = "ds-core"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "dontspeakd",
  "ds-config",
@@ -859,17 +868,20 @@ dependencies = [
 
 [[package]]
 name = "ds-engines"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "ds-config",
  "ds-platform",
  "ds-stt",
- "ds-tts",
 ]
 
 [[package]]
+name = "ds-helper-proto"
+version = "0.2.3"
+
+[[package]]
 name = "ds-i18n"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "rust-i18n",
  "serde_json",
@@ -878,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "ds-ipc"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -888,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "ds-linux-gtk"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "async-channel",
  "ds-core",
@@ -905,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "ds-model"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "attohttpc",
  "ds-config",
@@ -925,8 +937,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds-narrate"
+version = "0.2.3"
+dependencies = [
+ "ds-config",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ds-platform"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "arboard",
  "core-graphics",
@@ -941,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "ds-proc"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "nix 0.31.3",
  "tempfile",
@@ -950,14 +971,14 @@ dependencies = [
 
 [[package]]
 name = "ds-status"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ds-stt"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "cpal 0.18.1",
  "ds-config",
@@ -974,14 +995,14 @@ dependencies = [
 
 [[package]]
 name = "ds-tools"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "ds-tts"
-version = "0.2.3-dev"
+version = "0.2.3"
 dependencies = [
  "ds-config",
  "ds-model",
@@ -1453,13 +1474,25 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi 5.3.0",
+ "wasip2",
+]
+
+[[package]]
+name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
  "libc",
- "r-efi",
+ "r-efi 6.0.0",
  "rand_core 0.10.1",
 ]
 
@@ -1800,6 +1833,12 @@ dependencies = [
  "bytes",
  "itoa",
 ]
+
+[[package]]
+name = "httparse"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "humantime"
@@ -3151,6 +3190,12 @@ dependencies = [
 
 [[package]]
 name = "r-efi"
+version = "5.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+
+[[package]]
+name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
@@ -3188,6 +3233,16 @@ dependencies = [
 
 [[package]]
 name = "rand"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
+dependencies = [
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rand"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
@@ -3218,6 +3273,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.5",
+]
+
+[[package]]
 name = "rand_core"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3233,6 +3298,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
+dependencies = [
+ "getrandom 0.3.4",
 ]
 
 [[package]]
@@ -3732,6 +3806,17 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -4439,6 +4524,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.4",
+ "sha1",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "typed-path"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4644,6 +4745,15 @@ name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+
+[[package]]
+name = "wasip2"
+version = "1.0.4+wasi-0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
+dependencies = [
+ "wit-bindgen",
+]
 
 [[package]]
 name = "wasm-bindgen"
@@ -5092,6 +5202,12 @@ checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "wit-bindgen"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "writeable"

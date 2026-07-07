@@ -915,7 +915,10 @@ mod tests {
             md["command"].as_str().unwrap().ends_with(" notify"),
             "MessageDisplay carries the inlined notify verb, got {md}"
         );
-        assert!(md.get("args").is_none(), "no `args` key in the inline dialect");
+        assert!(
+            md.get("args").is_none(),
+            "no `args` key in the inline dialect"
+        );
         assert_eq!(md["timeout"], json!(10_000), "10 s scaled to 10000 ms");
         assert_eq!(md["async"], json!(true), "fire-and-forget notify sink");
         let ss = out["hooks"]["SessionStart"][0]["hooks"][0]["command"]

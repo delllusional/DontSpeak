@@ -1422,7 +1422,7 @@ pub(crate) mod tests {
             pause_in_background: true, // non-default (default is false)
             earcon_reply_sound: "Glass".into(), // non-default (default is empty/off)
             earcon_needs_input_sound: "Funk".into(),
-            codex_stream: false, // non-default (default is true)
+            codex_stream: false,             // non-default (default is true)
             codex_stream_daemon_start: true, // non-default (default is false)
             codex_app_server_url: "ws://127.0.0.1:4550".into(), // non-default (default is empty)
             codex_bin: "/opt/codex/bin/codex".into(), // non-default (default is "codex")

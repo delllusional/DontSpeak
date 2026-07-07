@@ -559,7 +559,9 @@ mod tests {
         // ceilings, both type = "command", NO `async` flag anywhere (Codex skips
         // `async = true` hooks outright).
         let doc: DocumentMut = merged("").parse().unwrap();
-        let groups = doc["hooks"]["UserPromptSubmit"].as_array_of_tables().unwrap();
+        let groups = doc["hooks"]["UserPromptSubmit"]
+            .as_array_of_tables()
+            .unwrap();
         assert_eq!(groups.len(), 1, "one group of ours");
         let inner = groups.iter().next().unwrap()["hooks"]
             .as_array_of_tables()
@@ -610,7 +612,10 @@ mod tests {
             !stripped.contains("dontspeak"),
             "both inner hooks removed with the group"
         );
-        assert!(!stripped.contains("UserPromptSubmit"), "empty event dropped");
+        assert!(
+            !stripped.contains("UserPromptSubmit"),
+            "empty event dropped"
+        );
     }
 
     #[test]
