@@ -1,12 +1,13 @@
 export const meta = {
   name: 'plan-review-implement',
   description: 'Plan a DontSpeak change, adversarially review the plan, implement it, and — only if risk was flagged — run a dedicated risk audit.',
-  whenToUse: 'A nontrivial DontSpeak change: touches more than one crate/app, crosses the ds-core FFI boundary, or must land on more than one OS host. Pass the task description as args.',
+  whenToUse: 'A nontrivial DontSpeak change: touches more than one crate/app, crosses the ds-core FFI boundary, or must land on more than one OS host. Pass the task description as args — either the string itself, or { task, sessionEffort } where sessionEffort is the harness effort you are running at (if known), so hot sessions right-size the downstream stages.',
   phases: [
     { title: 'Plan' },
     { title: 'Review' },
     { title: 'Implement' },
     { title: 'Audit' },
+    { title: 'Land' },
   ],
 }
 
@@ -15,6 +16,17 @@ export const meta = {
 // don't have registered as selectable subagent types. Stand in for them with the
 // closest built-in type + their persona/checklist inlined as instructions, so this
 // workflow runs the same way regardless of whether those custom types are registered.
+
+const ISSUE_FILING_NOTE = `
+
+If you notice a real problem that isn't part of what you were asked to do here — a
+bug, a missing test, a stale doc, a gap in one of this repo's invariants — don't
+silently drop it and don't silently expand scope to fix it anyway. File it as a
+GitHub issue instead: 'gh issue create --repo delllusional/DontSpeak --title "..."
+--body "..."' (label with 'bug'/'enhancement'/'documentation'/'question' if one
+fits). Run 'gh issue list --repo delllusional/DontSpeak' first so you don't file a
+duplicate of something already open. List anything you filed, by number, in the
+filedIssues field.`
 
 const PLANNER_PERSONA = `You plan changes for DontSpeak (see CLAUDE.md and ARCHITECTURE.md, which you should
 read before planning anything). Your plan is consumed by a reviewer agent next, then
@@ -66,7 +78,7 @@ the FFI boundary, the 'ds-ipc' socket protocol, model download/checksum pinning
 release/signing pipeline — these need a dedicated audit after implementation, not just
 ordinary review. State which risk area(s) apply so the auditor knows where to look.
 
-Do not edit or write any files — you only research and produce the plan text.`
+Do not edit or write any files — you only research and produce the plan text.${ISSUE_FILING_NOTE}`
 
 const REVIEWER_PERSONA = `You review implementation plans for DontSpeak against the actual state of the repo —
 not against the plan's own claims. Read CLAUDE.md and ARCHITECTURE.md first, then
@@ -110,12 +122,17 @@ final verdict of 'approve' (plan is safe to implement as written) or 'revise' (l
 exactly what must change before implementation starts). Do not soften a fail into a
 suggestion — if it violates an invariant, it's a fail.
 
-Do not edit or write any files — you only research and produce the review text.`
+Do not edit or write any files — you only research and produce the review text.${ISSUE_FILING_NOTE}`
 
 const IMPLEMENTER_PERSONA = `You implement a slice of a plan someone else already wrote and reviewed for
 DontSpeak. You were not part of planning it — treat the plan you're given as
 settled, not a draft to second-guess. Read CLAUDE.md first for the invariants
 (config location, FFI mirror requirements, i18n catalog, deploy routes, licensing).
+
+Before touching any file: call EnterWorktree, naming it after this task (short
+kebab-case, e.g. the GitHub issue slug if one exists). Other sessions may be editing
+this same clone right now — the worktree is what keeps your edits from colliding
+with theirs. Do the entire implementation inside that worktree.
 
 Rules:
 
@@ -131,13 +148,22 @@ Rules:
 - Verify against the correct rebuild route for what you changed (see
   'docs/BUILD-DEPLOY.md') — don't claim a fix works based on a stale running app.
 - Run the relevant tests/clippy for the crate(s) you touched before reporting done.
+- Commit your change on the worktree's branch (a normal commit message, no push —
+  landing happens in a later stage) before you finish. Do not call ExitWorktree
+  yourself; leave the worktree in place with your commit on it.
 - Report back: what you changed (files, not prose summaries), what you verified it
-  against, and any deviation from the plan with your reason.`
+  against, any deviation from the plan with your reason, and the exact worktree name
+  you passed to EnterWorktree (also put it in the worktreeName field).${ISSUE_FILING_NOTE}`
 
 const AUDITOR_PERSONA = `You audit a specific class of DontSpeak change that ordinary code review tends to
 miss because it requires cross-file, cross-language, or cross-repo-doc knowledge.
 Read CLAUDE.md and ARCHITECTURE.md first. Audit only the risk area(s) named in the
 handoff — go deep on those, don't do a generic pass.
+
+The change lives in an isolated git worktree, not the main working tree (the
+handoff below names it — a directory under '.claude/worktrees/'). Read files and
+run 'git diff' from inside that worktree; the main working tree may be on a
+different, unrelated state. Do not edit anything there either way — you only read.
 
 Per risk area, verify:
 
@@ -168,7 +194,35 @@ Report each risk area as 'clear' or 'finding' with the specific file/line and
 the concrete failure scenario (not a style nitpick — this audit exists to catch
 things that break silently in production, not to gate on preference).
 
-Do not edit or write any files — you only research and produce the audit findings.`
+Do not edit or write any files — you only research and produce the audit findings.${ISSUE_FILING_NOTE}`
+
+const LANDER_PERSONA = `You land a finished, isolated worktree change for DontSpeak onto main and push it.
+Implementation (and, when flagged, the risk audit) has already passed — you are not
+re-reviewing the change's substance, just landing it safely.
+
+Steps, in order, stopping and reporting instead of proceeding if any step fails:
+
+1. cd into the worktree named in the handoff below (a directory under
+   '.claude/worktrees/'). Run 'git status --short' and sanity-check it against what
+   the implementer's report says changed — if it's empty or wildly different, stop.
+2. From that worktree, run the per-commit gates: 'cd rust && cargo clippy
+   --workspace --all-targets --locked -- -D warnings && cargo test --workspace
+   --locked'. Do not land on a red gate.
+3. From the main working tree (the repo root, not the isolated worktree), run
+   'git fetch origin main', then merge the worktree's branch into local 'main'
+   (fast-forward if possible, otherwise a merge commit). If 'main' has moved in a
+   way that conflicts, stop and report — do not resolve conflicts unilaterally.
+4. Push 'main' to 'origin' (the public delllusional/DontSpeak repo — never 'wip').
+   Check the active account first ('gh auth status'); if it isn't 'yanchenko', run
+   'gh auth switch --user yanchenko' first — 'axy-yanchenko' gets a 403 on this repo.
+5. Remove the worktree and its branch now that it's merged: 'ExitWorktree' with
+   'action: remove' (fall back to 'git worktree remove' + 'git branch -d' if that
+   tool isn't available to you).
+
+Report: whether you landed successfully, the resulting main commit SHA, and
+anything you stopped short on and why.`
+
+const FILED_ISSUES_PROP = { filedIssues: { type: 'array', items: { type: 'string' }, description: 'GitHub issue numbers/URLs filed for out-of-scope findings, if any.' } }
 
 const PLAN_SCHEMA = {
   type: 'object',
@@ -176,6 +230,7 @@ const PLAN_SCHEMA = {
     plan: { type: 'string', description: 'The full implementation plan, in Markdown.' },
     risk: { type: 'boolean', description: 'True if the change touches a risk area needing a dedicated audit.' },
     riskAreas: { type: 'array', items: { type: 'string' }, description: 'Which risk area(s) apply, if risk is true.' },
+    ...FILED_ISSUES_PROP,
   },
   required: ['plan', 'risk'],
 }
@@ -186,6 +241,7 @@ const REVIEW_SCHEMA = {
     verdict: { type: 'string', enum: ['approve', 'revise'] },
     notes: { type: 'string', description: 'Findings — required detail if verdict is revise.' },
     riskOverride: { type: ['boolean', 'null'], description: 'Set only if overruling the plan\'s own risk call; null to leave it as-is.' },
+    ...FILED_ISSUES_PROP,
   },
   required: ['verdict', 'notes'],
 }
@@ -205,30 +261,73 @@ const AUDIT_SCHEMA = {
         required: ['area', 'verdict', 'detail'],
       },
     },
+    ...FILED_ISSUES_PROP,
   },
   required: ['findings'],
 }
 
-if (!args || typeof args !== 'string' || !args.trim()) {
-  throw new Error('plan-review-implement needs the task description passed as args, e.g. Workflow({ name: "plan-review-implement", args: "add X to Y" })')
+const IMPLEMENT_SCHEMA = {
+  type: 'object',
+  properties: {
+    report: { type: 'string', description: 'What changed (files, not prose summaries), what you verified it against, any deviation from the plan.' },
+    worktreeName: { type: 'string', description: 'The exact name you passed to EnterWorktree — the change lives at .claude/worktrees/<worktreeName>.' },
+    ...FILED_ISSUES_PROP,
+  },
+  required: ['report', 'worktreeName'],
 }
+
+const LAND_SCHEMA = {
+  type: 'object',
+  properties: {
+    landed: { type: 'boolean', description: 'True if merged into main and pushed to origin.' },
+    commitSha: { type: ['string', 'null'], description: 'The resulting main commit SHA, if landed.' },
+    notes: { type: 'string', description: 'What happened, or what blocked landing.' },
+  },
+  required: ['landed', 'notes'],
+}
+
+// args: the task description string, or { task, sessionEffort } where sessionEffort
+// is the harness effort this workflow was launched under ('low'…'max', pass it when
+// known). Plan always inherits the session effort — it's near-pure reasoning and its
+// output steers every downstream token, so that's where depth compounds. When the
+// session runs hot (xhigh/max), the bounded stages (review/implement/audit) are pinned
+// ONE NOTCH DOWN: checklist review, executing a settled plan, and a scoped audit are
+// execution, not decisions — the extra depth buys nothing there. A cooler session is
+// never upgraded: effort pins are absolute, so pinning from a 'medium' session would
+// raise cost, and scripts can't read the session effort themselves — hence the
+// caller-passed value.
+const logFiled = (stage, result) => {
+  if (result && result.filedIssues && result.filedIssues.length) {
+    log(`${stage} filed: ${result.filedIssues.join(', ')}`)
+  }
+}
+
+const task = typeof args === 'string' ? args : args && typeof args === 'object' ? args.task : null
+if (!task || typeof task !== 'string' || !task.trim()) {
+  throw new Error('plan-review-implement needs the task description passed as args — a string, or { task, sessionEffort }, e.g. Workflow({ name: "plan-review-implement", args: "add X to Y" })')
+}
+const notchDown = { max: 'xhigh', xhigh: 'high' }[(typeof args === 'object' && args.sessionEffort) || '']
+const bounded = notchDown ? { effort: notchDown } : {}
 
 phase('Plan')
 const planned = await agent(
-  `${PLANNER_PERSONA}\n\n---\n\nPlan this DontSpeak change:\n\n${args}`,
+  `${PLANNER_PERSONA}\n\n---\n\nPlan this DontSpeak change:\n\n${task}`,
   { agentType: 'Plan', phase: 'Plan', schema: PLAN_SCHEMA }
 )
 log(`Plan ready (risk: ${planned.risk ? 'yes — ' + (planned.riskAreas || []).join(', ') : 'no'})`)
+logFiled('Plan', planned)
 
 phase('Review')
 const reviewed = await agent(
   `${REVIEWER_PERSONA}\n\n---\n\nReview this plan for DontSpeak before any code is written:\n\n${planned.plan}\n\nPlanner's own risk call: ${planned.risk ? 'yes' : 'no'}${planned.riskAreas ? ' (' + planned.riskAreas.join(', ') + ')' : ''}.`,
-  { agentType: 'Plan', phase: 'Review', schema: REVIEW_SCHEMA }
+  { agentType: 'Plan', phase: 'Review', schema: REVIEW_SCHEMA, ...bounded }
 )
+
+logFiled('Review', reviewed)
 
 if (reviewed.verdict === 'revise') {
   log('Plan-reviewer requested revisions — stopping before implementation.')
-  return { plan: planned.plan, review: reviewed, implementation: null, audit: null }
+  return { plan: planned.plan, review: reviewed, implementation: null, audit: null, land: null }
 }
 
 const risk = reviewed.riskOverride === null || reviewed.riskOverride === undefined
@@ -238,20 +337,37 @@ const risk = reviewed.riskOverride === null || reviewed.riskOverride === undefin
 phase('Implement')
 const implementation = await agent(
   `${IMPLEMENTER_PERSONA}\n\n---\n\nImplement this approved DontSpeak plan:\n\n${planned.plan}\n\nReviewer notes to account for: ${reviewed.notes}`,
-  { agentType: 'general-purpose', phase: 'Implement' }
+  { agentType: 'general-purpose', phase: 'Implement', schema: IMPLEMENT_SCHEMA, ...bounded }
 )
-log('Implementation complete.')
+log(`Implementation complete (worktree: ${implementation.worktreeName}).`)
+logFiled('Implement', implementation)
 
 let audit = null
 if (risk) {
   phase('Audit')
   log('Risk flagged — running the risk-audit stage before calling this done.')
   audit = await agent(
-    `${AUDITOR_PERSONA}\n\n---\n\nAudit this DontSpeak change. Risk area(s) to focus on: ${(planned.riskAreas || []).join(', ') || 'unspecified — infer from the plan and diff.'}\n\nPlan:\n${planned.plan}\n\nWhat was implemented:\n${implementation}`,
-    { agentType: 'Plan', phase: 'Audit', schema: AUDIT_SCHEMA }
+    `${AUDITOR_PERSONA}\n\n---\n\nAudit this DontSpeak change. Risk area(s) to focus on: ${(planned.riskAreas || []).join(', ') || 'unspecified — infer from the plan and diff.'}\n\nThe change lives in the worktree ".claude/worktrees/${implementation.worktreeName}".\n\nPlan:\n${planned.plan}\n\nWhat was implemented:\n${implementation.report}`,
+    { agentType: 'Plan', phase: 'Audit', schema: AUDIT_SCHEMA, ...bounded }
   )
+  logFiled('Audit', audit)
 } else {
   log('No risk flagged — skipping the dedicated audit stage (use code-review as usual).')
 }
 
-return { plan: planned.plan, review: reviewed, implementation, audit }
+const clean = !risk || (audit && audit.findings.every((f) => f.verdict !== 'finding'))
+
+let land = null
+if (clean) {
+  phase('Land')
+  log('Clean — merging the worktree into main and pushing.')
+  land = await agent(
+    `${LANDER_PERSONA}\n\n---\n\nLand the worktree ".claude/worktrees/${implementation.worktreeName}".\n\nWhat was implemented:\n${implementation.report}`,
+    { agentType: 'general-purpose', phase: 'Land', schema: LAND_SCHEMA, ...bounded }
+  )
+  log(land.landed ? `Landed: ${land.commitSha || 'main'}.` : `Not landed: ${land.notes}`)
+} else {
+  log('Audit findings need a fix before landing — worktree left in place for a follow-up.')
+}
+
+return { plan: planned.plan, review: reviewed, implementation, audit, land }
