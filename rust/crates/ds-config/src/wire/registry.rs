@@ -53,6 +53,21 @@ pub enum WireMechanism {
     JsonMcp,
 }
 
+/// HOW the client's hook runner EXECUTES one wired command entry — the dialect the
+/// `ClaudeJsonHooks` shaper must emit. Two clients share the JSON hook contract but run
+/// the commands completely differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookCommandStyle {
+    /// Claude Code: spawns `command` + the `args` array directly (no shell);
+    /// `timeout` is in SECONDS.
+    ArgsArray,
+    /// Qwen Code: passes ONLY the `command` string to a shell (`executeCommandHook` spawns
+    /// `shellConfig.executable` with `[...argsPrefix, hookConfig.command]`); its
+    /// `CommandHookConfig` has NO `args` field, so the verbs must be inlined into the
+    /// command string; `timeout` is in MILLISECONDS (default 60000).
+    InlineShell,
+}
+
 /// ONE config file the wire edits for a client, and how.
 pub struct Surface {
     pub mechanism: WireMechanism,
@@ -68,6 +83,10 @@ pub struct Surface {
     /// [`WireMechanism::JsonMcp`] and [`WireMechanism::ClaudeTomlHooks`] (Codex's streaming-ness
     /// is baked into its own TOML shaper's fixed hook set).
     pub hook_streaming: bool,
+    /// For [`WireMechanism::ClaudeJsonHooks`]: how the client's hook runner executes a wired
+    /// command entry (see [`HookCommandStyle`]). Ignored by the other mechanisms — same
+    /// convention as [`hook_streaming`](Self::hook_streaming).
+    pub hook_command_style: HookCommandStyle,
 }
 
 /// A pointer to the OFFICIAL documentation a wiring is derived from — so every registry
@@ -126,12 +145,14 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 config_file: |p| &p.settings_json, // ~/.claude/settings.json
                 load_hint: None,
                 hook_streaming: true,
+                hook_command_style: HookCommandStyle::ArgsArray,
             },
             Surface {
                 mechanism: WireMechanism::JsonMcp,
                 config_file: |p| &p.claude_code_config, // ~/.claude.json (user scope)
                 load_hint: Some("start a new Claude Code session to load the server"),
                 hook_streaming: false,
+                hook_command_style: HookCommandStyle::ArgsArray, // ignored by JsonMcp
             },
         ],
         docs: &[
@@ -162,6 +183,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             config_file: |p| &p.codex_config, // ~/.codex/config.toml
             load_hint: None,
             hook_streaming: false,
+            hook_command_style: HookCommandStyle::ArgsArray, // ignored by ClaudeTomlHooks
         }],
         docs: &[
             DocRef {
@@ -185,35 +207,41 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         gate_on_presence: true,
         // Qwen Code reuses Claude Code's hook contract (same events, same stdin JSON,
         // `Stop.last_assistant_message`, `UserPromptSubmit` honors `additionalContext`), so the
-        // SAME dontspeak binary serves it via the JSON writer. It has NO `MessageDisplay`
-        // stream, so `hook_streaming: false` and the reply is voiced whole from `Stop`
-        // (the non-streaming path the binary already serves Codex through). Hooks + MCP both
-        // live in the ONE `~/.qwen/settings.json`, so the two surfaces share a config_file.
+        // SAME dontspeak binary serves it via the JSON writer — but its RUNNER differs: it
+        // passes ONLY the `command` string to a shell (no `args` field exists in its
+        // `CommandHookConfig`, `timeout` is milliseconds), so the surface is
+        // `HookCommandStyle::InlineShell` — verbs inlined into the command string, timeouts
+        // scaled. It has NO `MessageDisplay` stream, so `hook_streaming: false` and the reply
+        // is voiced whole from `Stop` (the non-streaming path the binary already serves Codex
+        // through). Hooks + MCP both live in the ONE `~/.qwen/settings.json`, so the two
+        // surfaces share a config_file.
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::ClaudeJsonHooks,
                 config_file: |p| &p.qwen_settings, // ~/.qwen/settings.json
                 load_hint: None,
                 hook_streaming: false,
+                hook_command_style: HookCommandStyle::InlineShell,
             },
             Surface {
                 mechanism: WireMechanism::JsonMcp,
                 config_file: |p| &p.qwen_settings, // same file
                 load_hint: Some("start a new Qwen Code session to load the server"),
                 hook_streaming: false,
+                hook_command_style: HookCommandStyle::ArgsArray, // ignored by JsonMcp
             },
         ],
         docs: &[
             DocRef {
                 topic: "hooks",
-                url: "https://github.com/QwenLM/qwen-code/blob/main/bundled/qc-helper/docs/features/hooks.md",
+                url: "https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/hooks.md",
             },
             DocRef {
                 topic: "mcp",
-                url: "https://github.com/QwenLM/qwen-code/blob/main/bundled/qc-helper/docs/features/mcp.md",
+                url: "https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/mcp.md",
             },
         ],
-        verified_client_version: "0.19.6",
+        verified_client_version: "0.19.7",
         verified_on: "2026-07-07",
     },
 ];

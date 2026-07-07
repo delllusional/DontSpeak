@@ -1,12 +1,16 @@
-//! Claude Code hook wiring — the SINGLE cross-platform source of truth for the
-//! DontSpeak voice hooks in ~/.claude/settings.json. Replaces the old per-platform
-//! copies (macOS claude/settings.snippet.json, Windows settings.snippet.json,
-//! linux/settings.snippet.json), which had drifted. PURE merge/strip here (no disk); the
-//! `dontspeak wire claude_code` orchestrator (via `wire_hooks::claude_code_hooks`) owns path
-//! resolution, backup, and the atomic write. Mirrors `merge_settings`'
-//! coerce-to-object / get-or-create / additive discipline so unrelated keys (Claude
-//! Code's own hooks, permissions, model) are never clobbered.
+//! Claude-contract JSON hook wiring — the SINGLE cross-platform source of truth for the
+//! DontSpeak voice hooks in any client using Claude Code's JSON hook contract: Claude
+//! Code's `~/.claude/settings.json` (args-array runner) and Qwen Code's
+//! `~/.qwen/settings.json` (inline-shell runner — see [`HookCommandStyle`]). Replaces the
+//! old per-platform copies (macOS claude/settings.snippet.json, Windows
+//! settings.snippet.json, linux/settings.snippet.json), which had drifted. PURE
+//! merge/strip here (no disk); the `dontspeak wire <client>` orchestrator (via the
+//! `dontspeak` crate's `wire::hooks::claude_json_hooks`) owns path resolution, backup, and
+//! the atomic write. Mirrors `merge_settings`' coerce-to-object / get-or-create / additive
+//! discipline so unrelated keys (the client's own hooks, permissions, model) are never
+//! clobbered.
 
+use super::registry::HookCommandStyle;
 use serde_json::{Map, Value, json};
 
 /// The base names (no extension) of every executable DontSpeak installs into a binary
@@ -22,8 +26,10 @@ pub const INSTALLED_BINS: &[&str] = &["dontspeak", "ds-helper", "ds-winui", "ds-
 /// so the caller owns path formatting (incl. the platform `.exe` suffix).
 pub struct HookSpec<'a> {
     /// Absolute path to the single `dontspeak[.exe]` multi-call binary. Every hook is this
-    /// one binary with a different `args` head (`notify` for the async sinks, `provide` for
-    /// the synchronous narration-spec query).
+    /// one binary with a different verb head (`notify` for the async sinks, `provide` for
+    /// the synchronous narration-spec query) — carried in the `args` array
+    /// ([`HookCommandStyle::ArgsArray`]) or inlined into the command string
+    /// ([`HookCommandStyle::InlineShell`]).
     pub bin: &'a str,
     /// Optional `preferredNotifChannel` (e.g. macOS iTerm's `"iterm2_with_bell"`).
     pub notif_channel: Option<&'a str>,
@@ -32,14 +38,35 @@ pub struct HookSpec<'a> {
     /// (Qwen Code, Codex) omits it — the full reply is voiced from `Stop`'s
     /// `last_assistant_message` via the non-streaming `speak_reply` path.
     pub streaming: bool,
+    /// How the client's hook runner executes a wired entry — Claude Code spawns
+    /// `command` + `args` directly (timeout in seconds); Qwen Code hands ONLY the
+    /// `command` string to a shell (no `args` field; timeout in milliseconds).
+    pub command_style: HookCommandStyle,
 }
 
-/// The basename (no extension) of the command we install — the single `dontspeak` binary.
+/// Is this wired `command` string OURS — the single `dontspeak` binary, in ANY dialect we
+/// have ever written? Accepts the bare binary path (args-array style, and the pre-inline
+/// Qwen shape a re-wire self-heals) AND the inlined shell forms (`"<bin>" notify`,
+/// `C:/…/dontspeak.exe notify --greet-only`, `& "C:\…\dontspeak.exe" provide`). A manual,
+/// OS-separator-INDEPENDENT parse — `std::path::Path` won't split `\` on Linux, and Linux
+/// CI runs the Windows-flavor tests — so: trim → strip an optional leading `&` (the
+/// PowerShell call operator) → take the path token (a quoted span if it opens with `"`,
+/// else up to the first whitespace) → basename after the last `/` or `\` → stem (one final
+/// `.ext` stripped) → `== "dontspeak"`.
 fn command_is_ours(cmd: &str) -> bool {
-    std::path::Path::new(cmd)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .is_some_and(|stem| stem == "dontspeak")
+    let s = cmd.trim();
+    let s = s.strip_prefix('&').map(str::trim_start).unwrap_or(s);
+    let path = match s.strip_prefix('"') {
+        // Quoted span; an unterminated quote takes the rest (defensive — we never write one).
+        Some(rest) => rest.split('"').next().unwrap_or(rest),
+        None => s.split_whitespace().next().unwrap_or(""),
+    };
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let stem = match base.rfind('.') {
+        Some(i) if i > 0 => &base[..i],
+        _ => base, // no extension, or a leading-dot name — the whole base is the stem
+    };
+    stem == "dontspeak"
 }
 
 /// A hook group is "ours" if any of its commands is our `dontspeak` binary — used for
@@ -57,6 +84,94 @@ fn hook_group_is_ours(group: &Value) -> bool {
         })
 }
 
+/// The OS command-line dialect an [`HookCommandStyle::InlineShell`] command string is
+/// formatted for. A parameter (not `cfg!` inside the formatter) so BOTH forms are
+/// unit-tested on Linux CI; production selects via [`host_inline_flavor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineFlavor {
+    /// Qwen's Unix hook shell is `bash -c`.
+    Unix,
+    /// Qwen's Windows hook shell is `%ComSpec%` (`cmd /d /s /c`) by default, Git Bash `-c`
+    /// under MSYS/MinGW, or `powershell -NoProfile -Command` if ComSpec is repointed —
+    /// plus a per-hook `"shell": "powershell"` override we set for spaced paths.
+    Windows,
+}
+
+/// The inline dialect for THIS host OS — production callers use this; tests drive
+/// [`inline_command`] with both flavors explicitly so Linux CI covers the Windows form too.
+fn host_inline_flavor() -> InlineFlavor {
+    if cfg!(windows) {
+        InlineFlavor::Windows
+    } else {
+        InlineFlavor::Unix
+    }
+}
+
+/// Inline the hook verbs into ONE shell command string — the [`HookCommandStyle::InlineShell`]
+/// dialect (Qwen Code, whose hook runner passes only `command` to a shell; there is no `args`
+/// field). Returns `(command, per-hook shell override)`. Every form below was verified
+/// empirically through Qwen's exact spawn chain (`spawn(shell, [...prefix, command],
+/// {shell:false})`, no `windowsVerbatimArguments`):
+///
+///   * Unix (`bash -c`): `"<bin>" <verbs>` — path always double-quoted. Fine for spaced
+///     paths; backslash/`$`-in-path edge cases don't occur in real install paths.
+///   * Windows, spaceless bin path (the normal `%LOCALAPPDATA%\Programs\DontSpeak` case):
+///     forward-slash-normalized, UNQUOTED, no shell override — runs under all three possible
+///     global shells (cmd `/d /s /c`, `powershell -NoProfile -Command`, Git Bash `-c`),
+///     keeping the common case shell-agnostic and free of PowerShell's startup tax on the
+///     synchronous per-prompt `provide`.
+///   * Windows, spaced bin path (e.g. a username with a space): `& "<bin>" <verbs>` PLUS
+///     `"shell": "powershell"`. The only deterministic option: no single string survives
+///     both cmd (which chokes on Node's `\"` re-escaping of embedded quotes) and Git Bash
+///     (which needs the quotes), and Qwen's `shell: "bash"` maps to a bare `bash` executable
+///     that isn't guaranteed on Windows.
+///
+/// Note: Qwen's `expandCommand` rewrites literal `$GEMINI_PROJECT_DIR`/`$CLAUDE_PROJECT_DIR`
+/// in the command string before spawning — our inlined commands contain neither, so that
+/// pass is a no-op.
+fn inline_command(flavor: InlineFlavor, bin: &str, verbs: &[&str]) -> (String, Option<&'static str>) {
+    let verbs = verbs.join(" ");
+    match flavor {
+        InlineFlavor::Unix => (format!("\"{bin}\" {verbs}"), None),
+        InlineFlavor::Windows if bin.contains(char::is_whitespace) => {
+            (format!("& \"{bin}\" {verbs}"), Some("powershell"))
+        }
+        InlineFlavor::Windows => (format!("{} {verbs}", bin.replace('\\', "/")), None),
+    }
+}
+
+/// Build ONE hook command entry in the dialect `spec.command_style` selects:
+/// [`HookCommandStyle::ArgsArray`] (Claude Code) → `command` = bin, verbs in `args`,
+/// `timeout` in SECONDS; [`HookCommandStyle::InlineShell`] (Qwen Code) → NO `args` key,
+/// verbs inlined into `command` (see [`inline_command`]), `timeout` scaled to MILLISECONDS
+/// (Qwen SIGTERMs the hook at `timeout` ms — an unscaled `5` would be 5 ms). A zero
+/// `timeout_secs` omits the field (Claude Code default; Qwen falls to its 60 s default).
+fn hook_entry(spec: &HookSpec, verbs: &[&str], timeout_secs: u64, is_async: bool) -> Value {
+    let mut h = match spec.command_style {
+        HookCommandStyle::ArgsArray => {
+            json!({ "type": "command", "command": spec.bin, "args": verbs })
+        }
+        HookCommandStyle::InlineShell => {
+            let (cmd, shell) = inline_command(host_inline_flavor(), spec.bin, verbs);
+            let mut v = json!({ "type": "command", "command": cmd });
+            if let Some(sh) = shell {
+                v["shell"] = json!(sh);
+            }
+            v
+        }
+    };
+    if is_async {
+        h["async"] = json!(true);
+    }
+    if timeout_secs > 0 {
+        h["timeout"] = match spec.command_style {
+            HookCommandStyle::ArgsArray => json!(timeout_secs),
+            HookCommandStyle::InlineShell => json!(timeout_secs * 1000),
+        };
+    }
+    h
+}
+
 /// The canonical `(event, group)` hook set in settings.json shape — the ONE
 /// definition every platform installs.
 fn canonical_hook_groups(spec: &HookSpec) -> Vec<(&'static str, Value)> {
@@ -65,33 +180,34 @@ fn canonical_hook_groups(spec: &HookSpec) -> Vec<(&'static str, Value)> {
     //               routes on the payload's `hook_event_name`, so the wiring is uniform — only
     //               the event list + per-entry flags differ, never the command.
     //   `provide` — QUERY, SYNCHRONOUS, returns the `hookSpecificOutput` JSON. The ONE verb
-    //               Claude Code waits on (an async run would drop the output → no context).
-    let notify = |timeout: u64| {
-        let mut h =
-            json!({ "type": "command", "command": spec.bin, "args": ["notify"], "async": true });
-        if timeout > 0 {
-            h["timeout"] = json!(timeout);
-        }
-        h
-    };
+    //               the client waits on (an async run would drop the output → no context).
+    let notify = |timeout: u64| hook_entry(spec, &["notify"], timeout, true);
     // One group per event (ours, so merge stays idempotent + strip stays clean). `notify` on
     // every fire-and-forget event; `MessageDisplay` is the streaming narration pipeline
     // (Claude Code ≥ 2.1.x streams it per batch) — omitted for non-streaming clients
-    // (Qwen Code, Codex) where the reply is voiced whole from `Stop`. SessionStart greets +
-    // seeds the streaming witness; SessionEnd barges this window's playback;
-    // UserPromptSubmit marks THIS terminal active so narration follows it AND carries the
-    // synchronous `provide` (the narration spec as `additionalContext`). Stop fires once
-    // when the turn ends → the reply "ding" earcon (and, for non-streaming clients, the
-    // `speak_reply` fallback voices the whole reply). Notification fires on a permission
-    // prompt / idle → the needs-input earcon.
+    // (Qwen Code, Codex) where the reply is voiced whole from `Stop`. SessionStart greets
+    // (and, for streaming clients only, seeds the streaming witness); SessionEnd barges this
+    // window's playback; UserPromptSubmit marks THIS terminal active so narration follows it
+    // AND carries the synchronous `provide` (the narration spec as `additionalContext`).
+    // Stop fires once when the turn ends → the reply "ding" earcon (and, for non-streaming
+    // clients, the `speak_reply` fallback voices the whole reply). Notification fires on a
+    // permission prompt / idle → the needs-input earcon.
     let mut groups: Vec<(&'static str, Value)> = Vec::new();
     if spec.streaming {
         groups.push(("MessageDisplay", json!({ "hooks": [ notify(10) ] })));
     }
-    // SessionStart is async-notify ONLY: the engine voice greet + streaming-witness seed,
-    // off the critical path. The greeting is voice-only — there is no visible banner, so no
-    // synchronous `provide` twin (CC 2.1+ drops a SessionStart hook's stdout anyway).
-    groups.push(("SessionStart", json!({ "hooks": [ notify(0) ] })));
+    // SessionStart is async-notify ONLY: the engine voice greet, off the critical path. The
+    // greeting is voice-only — there is no visible banner, so no synchronous `provide` twin
+    // (CC 2.1+ drops a SessionStart hook's stdout anyway). Streaming clients get the plain
+    // `notify` (greet + streaming-witness seed); NON-streaming clients get
+    // `notify --greet-only` — on a client with no `MessageDisplay` stream, seeding the
+    // witness would mark every session "already narrated" and silence each Stop reply.
+    let session_start = if spec.streaming {
+        notify(0)
+    } else {
+        hook_entry(spec, &["notify", "--greet-only"], 0, true)
+    };
+    groups.push(("SessionStart", json!({ "hooks": [ session_start ] })));
     groups.push(("SessionEnd", json!({ "hooks": [ notify(0) ] })));
     // Stop fires once when the turn finishes → the reply "ding" earcon. Notification
     // fires on a permission prompt / idle → the needs-input earcon. Both are async notify
@@ -103,7 +219,7 @@ fn canonical_hook_groups(spec: &HookSpec) -> Vec<(&'static str, Value)> {
         "UserPromptSubmit",
         json!({ "hooks": [
             notify(5),
-            { "type": "command", "command": spec.bin, "args": ["provide"], "timeout": 5 } ] }),
+            hook_entry(spec, &["provide"], 5, false) ] }),
     ));
     groups
 }
@@ -239,6 +355,17 @@ mod tests {
             bin: "/bin/dontspeak",
             notif_channel: None,
             streaming: true,
+            command_style: HookCommandStyle::ArgsArray,
+        }
+    }
+
+    /// The Qwen Code combination: inline-shell commands, no `MessageDisplay` stream.
+    fn inline_spec() -> HookSpec<'static> {
+        HookSpec {
+            bin: "/bin/dontspeak",
+            notif_channel: None,
+            streaming: false,
+            command_style: HookCommandStyle::InlineShell,
         }
     }
 
@@ -431,6 +558,7 @@ mod tests {
             bin: "/bin/dontspeak",
             notif_channel: None,
             streaming: false,
+            command_style: HookCommandStyle::ArgsArray,
         };
         let out = merge_hooks(json!({}), &spec_ns).expect("merge ok");
         assert!(
@@ -507,6 +635,7 @@ mod tests {
             bin: "/bin/dontspeak",
             notif_channel: Some("iterm2_with_bell"),
             streaming: true,
+            command_style: HookCommandStyle::ArgsArray,
         };
         let once = merge_hooks(json!({}), &spec_a).expect("merge ok");
         assert_eq!(once["preferredNotifChannel"], json!("iterm2_with_bell"));
@@ -515,6 +644,7 @@ mod tests {
             bin: "/bin/dontspeak",
             notif_channel: Some("other_channel"),
             streaming: true,
+            command_style: HookCommandStyle::ArgsArray,
         };
         let twice = merge_hooks(once, &spec_b).expect("merge ok");
         assert_eq!(
@@ -534,6 +664,7 @@ mod tests {
             bin: "/bin/dontspeak",
             notif_channel: Some("iterm2_with_bell"),
             streaming: true,
+            command_style: HookCommandStyle::ArgsArray,
         };
         let wired = merge_hooks(json!({ "model": "opus" }), &spec_with_channel).expect("merge ok");
         assert!(wired.get("preferredNotifChannel").is_some());
@@ -561,6 +692,214 @@ mod tests {
         assert!(
             matches!(&err, HooksMergeError::UnmergeableShape(s) if s.contains("MessageDisplay")),
             "error names the offending path: {err}"
+        );
+    }
+
+    // ── InlineShell (Qwen Code) — verbs inlined into the command string ─────────────
+    //
+    // Qwen's hook runner passes ONLY `command` to a shell; its CommandHookConfig has NO
+    // `args` field (silently dropped), and `timeout` is MILLISECONDS. These pin the whole
+    // dialect: no `args` key anywhere, inlined verbs, scaled timeouts, and the per-OS
+    // command forms — BOTH flavors driven on any OS so Linux CI covers the Windows form too.
+
+    #[test]
+    fn inline_command_unix_always_quotes_the_path() {
+        // bash -c: the path is double-quoted (spaced or not), verbs follow unquoted.
+        assert_eq!(
+            inline_command(InlineFlavor::Unix, "/bin/dontspeak", &["notify"]),
+            ("\"/bin/dontspeak\" notify".to_string(), None)
+        );
+        assert_eq!(
+            inline_command(InlineFlavor::Unix, "/opt/x y/dontspeak", &["provide"]),
+            ("\"/opt/x y/dontspeak\" provide".to_string(), None)
+        );
+        assert_eq!(
+            inline_command(InlineFlavor::Unix, "/bin/dontspeak", &["notify", "--greet-only"]),
+            ("\"/bin/dontspeak\" notify --greet-only".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn inline_command_windows_spaceless_path_is_forward_slashed_unquoted_shell_agnostic() {
+        // The normal %LOCALAPPDATA%\Programs\DontSpeak case: forward slashes, NO quotes, no
+        // shell override — the one form that runs under all three possible global shells
+        // (cmd /d /s /c, powershell -NoProfile -Command, Git Bash -c).
+        assert_eq!(
+            inline_command(
+                InlineFlavor::Windows,
+                r"C:\Users\u\AppData\Local\Programs\DontSpeak\dontspeak.exe",
+                &["notify"]
+            ),
+            (
+                "C:/Users/u/AppData/Local/Programs/DontSpeak/dontspeak.exe notify".to_string(),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn inline_command_windows_spaced_path_uses_powershell_call_operator() {
+        // A spaced install path: `& "..."` + a per-hook powershell pin — the only
+        // deterministic form (cmd chokes on Node's \" re-escaping; Git Bash needs the
+        // quotes; Qwen's shell:"bash" is a bare `bash` not guaranteed on Windows).
+        assert_eq!(
+            inline_command(
+                InlineFlavor::Windows,
+                r"C:\Users\Jo Smith\AppData\Local\Programs\DontSpeak\dontspeak.exe",
+                &["notify", "--greet-only"]
+            ),
+            (
+                r#"& "C:\Users\Jo Smith\AppData\Local\Programs\DontSpeak\dontspeak.exe" notify --greet-only"#
+                    .to_string(),
+                Some("powershell")
+            )
+        );
+    }
+
+    #[test]
+    fn command_is_ours_accepts_every_dialect_we_write_and_rejects_the_rest() {
+        // Bare paths (args-array style, and the pre-inline Qwen shape we self-heal).
+        assert!(command_is_ours("/bin/dontspeak"));
+        assert!(command_is_ours(r"C:\Users\u\AppData\Local\Programs\DontSpeak\dontspeak.exe"));
+        // Inlined forms, all three flavors.
+        assert!(command_is_ours("\"/opt/x y/dontspeak\" notify"));
+        assert!(command_is_ours(
+            "C:/Users/u/AppData/Local/Programs/DontSpeak/dontspeak.exe notify --greet-only"
+        ));
+        assert!(command_is_ours(
+            r#"& "C:\Program Files\DontSpeak\dontspeak.exe" provide"#
+        ));
+        // Not ours: foreign commands, prefix-sharing names, and near-misses.
+        assert!(!command_is_ours("/usr/bin/true"));
+        assert!(!command_is_ours("dontspeak-uninstall"));
+        assert!(!command_is_ours("ds-sync"));
+        assert!(!command_is_ours(""));
+    }
+
+    #[test]
+    fn inline_shell_entries_have_no_args_key_and_millisecond_timeouts() {
+        // The Qwen dialect end-to-end through merge: NO `args` key on ANY entry (Qwen drops
+        // it silently — the root cause of the dead wiring), verbs inlined into `command`,
+        // UserPromptSubmit timeouts scaled seconds→ms (5 → 5000; an unscaled 5 would be a
+        // 5 ms SIGTERM), zero-timeout events omit the field (Qwen's 60 s default), `async`
+        // preserved on notify entries, and `provide` never async (its stdout is read).
+        let out = merge_hooks(json!({}), &inline_spec()).expect("merge ok");
+        let hooks = out["hooks"].as_object().expect("hooks object");
+        assert!(hooks.get("MessageDisplay").is_none(), "non-streaming");
+        for (evt, groups) in hooks {
+            for g in groups.as_array().expect("array of groups") {
+                for h in g["hooks"].as_array().expect("hooks array") {
+                    assert!(
+                        h.get("args").is_none(),
+                        "{evt}: Qwen has no `args` field — verbs must be inlined, got {h}"
+                    );
+                    let cmd = h["command"].as_str().expect("command string");
+                    assert!(cmd.contains("dontspeak"), "{evt}: our binary, got {cmd}");
+                    assert!(
+                        cmd.contains(" notify") || cmd.contains(" provide"),
+                        "{evt}: verb inlined into the command string, got {cmd}"
+                    );
+                }
+            }
+        }
+        // SessionStart carries the greet-only flag (no witness seed on a non-streaming client).
+        let ss = out["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            ss.ends_with(" notify --greet-only"),
+            "non-streaming SessionStart is greet-only, got {ss}"
+        );
+        // Zero-timeout events omit the field entirely.
+        for evt in ["SessionStart", "SessionEnd", "Stop", "Notification"] {
+            let h = &out["hooks"][evt][0]["hooks"][0];
+            assert!(h.get("timeout").is_none(), "{evt}: no timeout field");
+            assert_eq!(h["async"], json!(true), "{evt}: async notify sink");
+        }
+        // UserPromptSubmit: notify (async, 5000 ms) + provide (sync, 5000 ms).
+        let ups = out["hooks"]["UserPromptSubmit"][0]["hooks"]
+            .as_array()
+            .unwrap();
+        let notify = ups
+            .iter()
+            .find(|h| h["command"].as_str().unwrap().ends_with(" notify"))
+            .expect("notify entry");
+        assert_eq!(notify["timeout"], json!(5000), "seconds scaled to ms");
+        assert_eq!(notify["async"], json!(true));
+        let provide = ups
+            .iter()
+            .find(|h| h["command"].as_str().unwrap().ends_with(" provide"))
+            .expect("provide entry");
+        assert_eq!(provide["timeout"], json!(5000), "seconds scaled to ms");
+        assert!(
+            provide.get("async").is_none(),
+            "provide must not be async (its stdout is read)"
+        );
+    }
+
+    #[test]
+    fn args_array_sessionstart_is_greet_only_iff_non_streaming() {
+        // The args-array dialect carries the same greet-only split: a streaming client
+        // (Claude Code) seeds the witness with plain `notify`; a non-streaming args-array
+        // wire gets `--greet-only` so the seed can't silence its Stop replies.
+        let streaming = merged(json!({}));
+        assert_eq!(
+            streaming["hooks"]["SessionStart"][0]["hooks"][0]["args"],
+            json!(["notify"]),
+            "streaming SessionStart seeds the witness with plain notify"
+        );
+        let spec_ns = HookSpec {
+            bin: "/bin/dontspeak",
+            notif_channel: None,
+            streaming: false,
+            command_style: HookCommandStyle::ArgsArray,
+        };
+        let non_streaming = merge_hooks(json!({}), &spec_ns).expect("merge ok");
+        assert_eq!(
+            non_streaming["hooks"]["SessionStart"][0]["hooks"][0]["args"],
+            json!(["notify", "--greet-only"]),
+            "non-streaming SessionStart must skip the witness seed"
+        );
+    }
+
+    #[test]
+    fn inline_merge_is_idempotent_and_strips_clean() {
+        let once = merge_hooks(json!({}), &inline_spec()).expect("merge ok");
+        let twice = merge_hooks(once.clone(), &inline_spec()).expect("merge ok");
+        assert_eq!(twice, once, "second inline merge is a no-op");
+        let stripped = strip_hooks(once);
+        assert!(
+            stripped.get("hooks").is_none(),
+            "inlined groups recognized as ours and stripped clean"
+        );
+    }
+
+    #[test]
+    fn rewire_self_heals_a_stale_args_array_group_to_the_inlined_shape() {
+        // The live-install fix: a Qwen settings.json wired by the broken version holds the
+        // bare-command + `args` groups (which Qwen silently ran as the arg-less MCP server).
+        // `command_is_ours` still matches the bare path, so a plain re-wire REPLACES each
+        // stale group with exactly one inlined group — no manual unwire needed.
+        let stale = json!({
+            "hooks": { "Stop": [
+                { "hooks": [ { "type": "command", "command": "/bin/dontspeak",
+                               "args": ["notify"], "async": true } ] },
+                { "hooks": [ { "type": "command", "command": "/usr/bin/true" } ] }
+            ] }
+        });
+        let out = merge_hooks(stale, &inline_spec()).expect("merge ok");
+        let stop = out["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "user group kept, ours replaced not duplicated");
+        let ours: Vec<&Value> = stop.iter().filter(|g| hook_group_is_ours(g)).collect();
+        assert_eq!(ours.len(), 1, "exactly one group of ours after re-wire");
+        let healed = &ours[0]["hooks"][0];
+        assert!(
+            healed.get("args").is_none(),
+            "healed to the inlined shape (no args), got {healed}"
+        );
+        assert!(
+            healed["command"].as_str().unwrap().ends_with(" notify"),
+            "verb now inlined in the command string"
         );
     }
 }

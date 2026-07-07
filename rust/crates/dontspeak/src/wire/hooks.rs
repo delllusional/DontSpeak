@@ -16,7 +16,7 @@
 //! merged-as-empty. `print_only` emits the merged document without touching disk.
 
 use super::io::{self, WriteBody};
-use ds_config::{HookSpec, INSTALLED_BINS, Paths};
+use ds_config::{HookCommandStyle, HookSpec, INSTALLED_BINS, Paths};
 
 /// Binary names this app has shipped and later dropped or renamed. The single-binary
 /// consolidation replaced `ds-mcp`/`ds-speak`/`ds-narrate`; the standalone `dontspeakd` engine
@@ -111,15 +111,19 @@ pub(crate) fn seed_and_prune(paths: &Paths) {
 
 /// Wire (or strip / print) the DontSpeak voice hooks into `cfg`, a JSON settings file using
 /// Claude Code's hook contract (`WireMechanism::ClaudeJsonHooks` — today Claude Code's
-/// `~/.claude/settings.json`; the registry names the file per client). `streaming` selects
-/// the hook SET: `true` (Claude Code) wires `MessageDisplay` for per-batch narration; `false`
-/// (Qwen Code) omits it, so the reply is voiced whole from `Stop`. Returns 0 on success —
-/// including a malformed or unmergeable existing file, which is left byte-identical and
-/// reported, not treated as fatal (matching `claude_toml_hooks`) — or 1 on a hard error
-/// (bin-resolution failure, write failure).
+/// `~/.claude/settings.json` and Qwen Code's `~/.qwen/settings.json`; the registry names the
+/// file per client). `streaming` selects the hook SET: `true` (Claude Code) wires
+/// `MessageDisplay` for per-batch narration; `false` (Qwen Code) omits it, so the reply is
+/// voiced whole from `Stop`. `command_style` selects the command DIALECT: `ArgsArray`
+/// (Claude Code — bin + `args`, timeout in seconds) or `InlineShell` (Qwen Code — verbs
+/// inlined into the one command string its shell runner executes, timeout in ms). Returns 0
+/// on success — including a malformed or unmergeable existing file, which is left
+/// byte-identical and reported, not treated as fatal (matching `claude_toml_hooks`) — or 1
+/// on a hard error (bin-resolution failure, write failure).
 pub(crate) fn claude_json_hooks(
     cfg: &std::path::Path,
     streaming: bool,
+    command_style: HookCommandStyle,
     remove: bool,
     print_only: bool,
     paths: &Paths,
@@ -145,6 +149,7 @@ pub(crate) fn claude_json_hooks(
             bin: &bin,
             notif_channel,
             streaming,
+            command_style,
         };
         ds_config::merge_hooks(existing, &spec)
     };
@@ -290,12 +295,12 @@ mod tests {
         let cfg = dir.path().join("settings.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 0);
         let v = read_json(&cfg);
         assert_eq!(v["hooks"]["MessageDisplay"].as_array().unwrap().len(), 1);
 
         // Re-run: REPLACE-OURS merge must not duplicate the group.
-        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 0);
         let v2 = read_json(&cfg);
         assert_eq!(v2["hooks"]["MessageDisplay"].as_array().unwrap().len(), 1);
     }
@@ -306,8 +311,8 @@ mod tests {
         let cfg = dir.path().join("settings.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 0);
-        assert_eq!(claude_json_hooks(&cfg, true, true, false, &paths), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, true, false, &paths), 0);
 
         let v = read_json(&cfg);
         // `strip_hooks` drops an event array once it's emptied of our groups, and drops the
@@ -325,7 +330,7 @@ mod tests {
 
         // Caught in `io::read_json_or_bail`, but non-fatal — reported and the file left
         // byte-identical — never reaches `resolve_dontspeak_bin`.
-        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 0);
         assert_eq!(std::fs::read(&cfg).unwrap(), raw);
     }
 
@@ -340,7 +345,7 @@ mod tests {
         let raw = r#"{"hooks":{"MessageDisplay":{"not":"an array"}}}"#;
         std::fs::write(&cfg, raw).unwrap();
 
-        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 0); // non-fatal
+        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 0); // non-fatal
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw); // byte-identical
     }
 
@@ -350,7 +355,7 @@ mod tests {
         let cfg = dir.path().join("settings.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, false, true, &paths), 0);
+        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, true, &paths), 0);
         assert!(!cfg.exists());
     }
 
@@ -364,35 +369,43 @@ mod tests {
         let cfg = dir.path().join("blocked").join("settings.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 1);
+        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 1);
     }
 
-    /// Non-streaming wire (Qwen Code): `MessageDisplay` is omitted, but the same idempotent +
-    /// additive + clean-strip guarantees hold. The `streaming: false` path must wire the
-    /// events that DO fire and never install a dead `MessageDisplay` hook.
+    /// Non-streaming inline-shell wire (Qwen Code): `MessageDisplay` is omitted AND the
+    /// on-disk entries are the INLINED dialect — no `args` key (Qwen's runner silently drops
+    /// it), the verb inside the one `command` string — with the same idempotent + additive +
+    /// clean-strip guarantees.
     #[test]
     fn claude_json_hooks_non_streaming_omits_messagedisplay() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
         let paths = Paths::rooted_at(dir.path());
+        let qwen = HookCommandStyle::InlineShell;
 
-        assert_eq!(claude_json_hooks(&cfg, false, false, false, &paths), 0);
+        assert_eq!(claude_json_hooks(&cfg, false, qwen, false, false, &paths), 0);
         let v = read_json(&cfg);
         assert!(
             v["hooks"].get("MessageDisplay").is_none(),
             "non-streaming wire must NOT install MessageDisplay"
         );
-        // Stop / UserPromptSubmit / SessionStart / Notification ARE wired.
+        // Stop / UserPromptSubmit / SessionStart / Notification ARE wired — in the inlined
+        // shape: no `args` key, verb in the command string.
         for evt in ["Stop", "UserPromptSubmit", "SessionStart", "Notification"] {
+            let h = &v["hooks"][evt][0]["hooks"][0];
             assert!(
-                v["hooks"].get(evt).is_some(),
-                "{evt} wired for non-streaming client"
+                h.get("args").is_none(),
+                "{evt}: on-disk Qwen shape must be inlined (no `args`), got {h}"
+            );
+            assert!(
+                h["command"].as_str().unwrap().contains(" notify"),
+                "{evt}: verb inlined into the command string"
             );
         }
         // Idempotent.
-        assert_eq!(claude_json_hooks(&cfg, false, false, false, &paths), 0);
-        // Strips cleanly (remove removes every DontSpeak group regardless of streaming).
-        assert_eq!(claude_json_hooks(&cfg, false, true, false, &paths), 0);
+        assert_eq!(claude_json_hooks(&cfg, false, qwen, false, false, &paths), 0);
+        // Strips cleanly (remove removes every DontSpeak group regardless of dialect).
+        assert_eq!(claude_json_hooks(&cfg, false, qwen, true, false, &paths), 0);
         assert!(read_json(&cfg).get("hooks").is_none());
     }
 

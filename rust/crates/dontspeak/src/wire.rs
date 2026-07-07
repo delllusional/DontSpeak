@@ -147,6 +147,7 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
             WireMechanism::ClaudeJsonHooks => hooks::claude_json_hooks(
                 (s.config_file)(paths),
                 s.hook_streaming,
+                s.hook_command_style,
                 remove,
                 print_only,
                 paths,
@@ -316,7 +317,19 @@ mod tests {
             v["hooks"].get("MessageDisplay").is_none(),
             "non-streaming: no MessageDisplay"
         );
+        // …in Qwen's INLINE dialect: its hook runner passes only `command` to a shell and its
+        // config has no `args` field, so the verb must live in the command string and no
+        // `args` key may be written (Qwen would silently drop it → the bare binary is the
+        // arg-less stdio MCP server, i.e. every hook dead).
+        let stop = &v["hooks"]["Stop"][0]["hooks"][0];
+        assert!(
+            stop["command"].as_str().unwrap().contains(" notify"),
+            "hook command carries the inlined verb"
+        );
+        assert!(stop.get("args").is_none(), "no `args` key for Qwen hooks");
         // …AND the MCP entry, in the SAME file, without clobbering the hooks written just above.
+        // (The mcpServers entry is spawned DIRECTLY by Qwen — not via its hook shell — so it
+        // keeps the plain binary path + no inlining.)
         assert!(
             v["mcpServers"]["DontSpeak"]["command"]
                 .as_str()

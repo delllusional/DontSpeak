@@ -80,7 +80,8 @@ pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};
 pub use wire::hooks::{HookSpec, HooksMergeError, INSTALLED_BINS, merge_hooks, strip_hooks};
 pub use wire::json_mcp::{merge_mcp_server, strip_mcp_server};
 pub use wire::registry::{
-    CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, Surface, WireMechanism, client_spec,
+    CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, HookCommandStyle, Surface, WireMechanism,
+    client_spec,
 };
 pub use wire::settings::{
     atomic_write_json, atomic_write_str, backup_before_write, merge_settings, voice_from_value,
