@@ -61,7 +61,7 @@ pub fn session_id_from_payload(payload: &str) -> Option<String> {
 /// COMMAND: run the side effect for `event` from its `payload`; no reply. Unknown events are
 /// ignored (forward-compatible — a newly-wired event we don't handle yet is a no-op).
 /// `greet_only` is the `dontspeak notify --greet-only` flag, wired on SessionStart for
-/// NON-streaming clients (Qwen Code): greet, but skip the streaming-witness seed — see
+/// NON-streaming clients (Qwen Code, OpenAI Codex): greet, but skip the streaming-witness seed — see
 /// [`notify_at`]. Resolves the real `Paths` and delegates to the injectable core.
 pub fn notify(event: &str, payload: &str, greet_only: bool) {
     let Some(paths) = ds_config::Paths::resolve() else {
@@ -79,10 +79,10 @@ pub(crate) fn notify_at(paths: &ds_config::Paths, event: &str, payload: &str, gr
             hook_speak::engine_ping(paths, hook_speak::Ping::Greet, payload);
             // Seed this session's streaming witness so the Stop handler reliably knows Claude
             // Code narrates via MessageDisplay (closing the only timing gap in the double-
-            // narration guard). ONLY for streaming clients: `--greet-only` (Qwen Code, which
-            // wires SessionStart but has NO MessageDisplay stream) skips the seed — seeding
-            // would mark every session "already narrated" and silence each Stop reply. Codex
-            // wires no SessionStart at all, so it never seeds either way.
+            // narration guard). ONLY for streaming clients: `--greet-only` (Qwen Code and
+            // OpenAI Codex, which wire SessionStart but have NO MessageDisplay stream) skips
+            // the seed — seeding would mark every session "already narrated" and silence
+            // each Stop reply.
             if !greet_only {
                 hook_narrate::mark_streaming_session(paths, payload);
             }

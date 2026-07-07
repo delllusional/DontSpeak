@@ -197,7 +197,8 @@ fn hook_action(remove: bool) -> &'static str {
 
 /// Wire (or strip / print) DontSpeak's narration hooks into `cfg`, a TOML config using Claude
 /// Code's hook contract (`WireMechanism::ClaudeTomlHooks` — today Codex's `~/.codex/config.toml`;
-/// the registry names the file per client) — `UserPromptSubmit`→`provide` (inject the narration
+/// the registry names the file per client) — `SessionStart`→`notify --greet-only` (spoken
+/// greeting, no streaming-witness seed), `UserPromptSubmit`→`provide` (inject the narration
 /// spec) and `Stop`→`notify` (speak the reply). Format-preserving (toml_edit). Returns 0 on
 /// success, 1 on a hard error; a malformed config is reported and left UNCHANGED (it's the
 /// user's file), which is non-fatal — same convention as `claude_json_hooks`.
@@ -489,6 +490,17 @@ mod tests {
 
         assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);
         let first = std::fs::read_to_string(&cfg).unwrap();
+
+        // SessionStart is wired as a greet-only group: the greeting speaks, but the
+        // streaming-witness seed is skipped (Codex is non-streaming — a seed would silence
+        // its Stop narration). The trailing quote pins the flag as the END of the command;
+        // toml_edit renders the command as a basic (`"`) or literal (`'`) string depending
+        // on what the resolved binary path contains (backslashes on Windows ⇒ literal).
+        assert!(first.contains("[[hooks.SessionStart]]"), "got {first}");
+        assert!(
+            first.contains(" notify --greet-only\"") || first.contains(" notify --greet-only'"),
+            "got {first}"
+        );
 
         // Re-run: an unchanged command is a true byte-for-byte no-op (see `codex_group_matches`).
         assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);

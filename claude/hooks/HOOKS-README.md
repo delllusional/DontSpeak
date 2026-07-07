@@ -29,7 +29,9 @@ repo [README](../../README.md).
 | `Notification` | `notify` | A `permission_prompt` / `idle_prompt` notification → the **needs-input** earcon (`Earcon{needs_input}`). Other notification types are ignored. |
 
 Every `notify` entry is `async` fire-and-forget; the lone `provide` entry is synchronous —
-Claude Code reads its stdout for the injected context, so it cannot be async.
+Claude Code reads its stdout for the injected context, so it cannot be async. (Exception:
+Codex's TOML entries carry no `async` flag at all — Codex *skips* `async: true` hooks
+outright, so its entries run synchronously, with tight explicit timeouts instead.)
 
 For **Claude Code** the final reply and tool-step narration are **not** special-cased — they
 are just streamed assistant messages handled by `MessageDisplay` (no per-reply mode, no
@@ -45,7 +47,7 @@ needs-input cue ships off.
 **OpenAI Codex** and **Qwen Code** use the very same binary and `hook_event_name` contract.
 Codex is wired into `~/.codex/config.toml` by `dontspeak wire codex`, and Qwen Code is wired into `~/.qwen/settings.json` by `dontspeak wire qwen_code` (both are presence-gated and cleanly skip if their target directory does not exist).
 Neither has a `MessageDisplay` stream, so they both omit `MessageDisplay` hooks. Instead:
-- Codex wires two events: `UserPromptSubmit` → `provide` injects the narration spec (so Codex *writes* the spoken-line blockquotes), and `Stop` → `notify` speaks the final reply (the whole `last_assistant_message`, run through the same blockquote/short logic as streaming).
+- Codex wires three events: `SessionStart` → `notify --greet-only` speaks the session-open greeting (greet-only so the streaming witness is never seeded on a non-streaming client — a seed would silence every `Stop` reply), `UserPromptSubmit` → `provide` injects the narration spec (so Codex *writes* the spoken-line blockquotes), and `Stop` → `notify` speaks the final reply (the whole `last_assistant_message`, run through the same blockquote/short logic as streaming).
 - Qwen Code wires five events: `SessionStart`, `SessionEnd`, `Stop` (which voices the final reply from `last_assistant_message` AND plays the reply ding), `Notification`, and `UserPromptSubmit` (which registers the active terminal and carries the synchronous `provide` query).
 
 The narration / greet / mark-active hooks talk to the **warm engine** over the Unix

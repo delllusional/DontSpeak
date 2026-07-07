@@ -177,7 +177,10 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         gate_on_presence: true,
         // Codex adopted Claude Code's hook contract (same events, same stdin JSON,
         // `Stop.last_assistant_message`), so the SAME dontspeak binary serves it; only
-        // the file format (TOML) differs. Codex has no MCP surface we register.
+        // the file format (TOML) differs. Its hook set is three events — `SessionStart`
+        // (greet-only), `UserPromptSubmit`, `Stop`; `SessionStart` landed in Codex CLI
+        // 0.142.x, it didn't exist when Codex was first wired. Codex has no MCP surface
+        // we register.
         surfaces: &[Surface {
             mechanism: WireMechanism::ClaudeTomlHooks,
             config_file: |p| &p.codex_config, // ~/.codex/config.toml

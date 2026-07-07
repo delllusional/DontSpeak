@@ -57,8 +57,9 @@ pub fn barge_session(paths: &Paths, payload: &str) {
 ///   • Claude Code (streaming) wires `SessionStart` with plain `notify` → seeds the witness.
 ///   • Qwen Code (non-streaming) wires `SessionStart` with `--greet-only` → greet runs but the
 ///     seed is SKIPPED — otherwise the witness would suppress Qwen Code's only narration path.
-///   • OpenAI Codex wires NEITHER `SessionStart` nor `MessageDisplay` (its set is
-///     `UserPromptSubmit` + `Stop` only — see `wire/codex.rs`), so it never reaches here.
+///   • OpenAI Codex (non-streaming) likewise wires `SessionStart` with `--greet-only` (see
+///     `wire/codex.rs`): greet runs, seed skipped — it still has no `MessageDisplay`, so a
+///     seed would suppress its only narration path too; it never reaches this function.
 /// Idempotent + non-destructive: never clobbers real in-progress state (a re-fired
 /// SessionStart is a no-op), and the seeded default reads exactly like "no file yet" (fresh
 /// `Accum`), so streaming is unaffected.
@@ -105,8 +106,8 @@ struct StopHook {
 ///     file is NEVER written ⇒ `streamed = false`, and `Stop` is Codex's only narration path.
 /// [`mark_streaming_session`] also SEEDS this file at `SessionStart` for STREAMING clients
 /// (Claude Code), so the witness is present from session open — closing the timing edge of a
-/// `Stop` racing the first batch's write. Qwen Code's `--greet-only` flag skips that seed, and
-/// Codex doesn't wire `SessionStart` at all, so both non-streaming clients keep `streamed = false`.
+/// `Stop` racing the first batch's write. Both non-streaming clients (Qwen Code, OpenAI Codex)
+/// pass `--greet-only` on `SessionStart`, so neither seeds and both keep `streamed = false`.
 /// `pub(crate)` so `hook_core`'s greet-only tests can probe the witness directly.
 pub(crate) fn streamed_via_message_display(paths: &Paths, session: &str) -> bool {
     display_state_path(paths, session).exists()
@@ -965,7 +966,8 @@ mod tests {
     fn session_start_seed_closes_the_first_turn_race() {
         // The hardening: SessionStart seeds the witness so `streamed` is already true before the
         // first Stop, even if no MessageDisplay batch has landed yet — and it's SESSION-SCOPED
-        // (a Codex session, which never fires SessionStart, is never seeded).
+        // (a Codex session's SessionStart is greet-only, so it never reaches
+        // `mark_streaming_session` and is never seeded).
         let dir = std::env::temp_dir().join(format!("smnarrate-seed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let paths = ds_config::Paths::rooted_at(&dir);

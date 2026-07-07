@@ -28,8 +28,9 @@ description: Re-verify the client-wiring registry against the CURRENT client ver
      `~/.codex/config.toml`). Registered events — full table in
      `claude/hooks/HOOKS-README.md` — are Claude Code's six (`MessageDisplay`, `SessionStart`,
      `SessionEnd`, `UserPromptSubmit` ×2, `Stop`, `Notification`) vs Qwen Code's five (`SessionStart`,
-     `SessionEnd`, `UserPromptSubmit` ×2, `Stop`, `Notification`) vs Codex's two (`UserPromptSubmit`,
-     `Stop` — no `MessageDisplay` stream, so `Stop` also voices the reply; shaped in
+     `SessionEnd`, `UserPromptSubmit` ×2, `Stop`, `Notification`) vs Codex's three (`SessionStart`,
+     `UserPromptSubmit`, `Stop` — no `MessageDisplay` stream, so `Stop` also voices the reply
+     and `SessionStart` is greet-only; shaped in
      `ds-config/src/wire/hooks.rs` for Claude/Qwen, or `ds-config/src/wire/codex.rs` for Codex).
    - *MCP clients:* the `mcpServers.<name>` entry shape (stdio: `command`, optional `args`)
      and WHICH file (`~/.claude.json` user scope for Claude Code; `~/.qwen/settings.json` for Qwen Code).

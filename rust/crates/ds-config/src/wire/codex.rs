@@ -7,6 +7,10 @@
 //! the Claude Code wiring: the file is TOML (so we edit it with `toml_edit` to preserve the
 //! user's tables + comments), and the per-event set is Codex-shaped:
 //!
+//!   * `SessionStart` → `dontspeak notify --greet-only` — the spoken greeting when a session
+//!     opens. `--greet-only` because Codex is NON-streaming (no `MessageDisplay`): the plain
+//!     `notify` would seed the streaming witness, which on a non-streaming client marks every
+//!     session "already narrated" and suppresses the `Stop` narration entirely.
 //!   * `UserPromptSubmit` → `dontspeak provide` — inject the narration spec so Codex WRITES
 //!     the spoken-line blockquotes (without this it has nothing to speak).
 //!   * `Stop` → `dontspeak notify` — speak the final reply. Codex has no `MessageDisplay`
@@ -27,10 +31,19 @@
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item as TomlItem, Table as TomlTable, value};
 
 /// The `(event, verb, timeout)` hooks we wire into Codex. Codex has no MessageDisplay stream,
-/// so the reply is voiced from `Stop`; and the narration spec is injected at `UserPromptSubmit`
-/// via the synchronous `provide` verb (its stdout `additionalContext` is read by Codex).
-const CODEX_HOOKS: &[(&str, &str, i64)] =
-    &[("UserPromptSubmit", "provide", 5), ("Stop", "notify", 1800)];
+/// so the reply is voiced from `Stop`; the narration spec is injected at `UserPromptSubmit`
+/// via the synchronous `provide` verb (its stdout `additionalContext` is read by Codex); and
+/// `SessionStart` greets with `--greet-only` — the flag skips the streaming-witness seed,
+/// which on a non-streaming client would silence every `Stop` reply. Timeouts are SECONDS,
+/// and every entry runs SYNCHRONOUSLY: Codex SKIPS `async = true` hooks outright, so we never
+/// emit an `async` flag here. That's also why SessionStart carries an explicit 30 s ceiling —
+/// the greet ping returns in milliseconds, and a tight bound beats inheriting Codex's 600 s
+/// default on a hook it blocks on.
+const CODEX_HOOKS: &[(&str, &str, i64)] = &[
+    ("SessionStart", "notify --greet-only", 30),
+    ("UserPromptSubmit", "provide", 5),
+    ("Stop", "notify", 1800),
+];
 
 /// Why a [`merge_codex_hooks`]/[`strip_codex_hooks`] call could not apply. The caller must
 /// treat BOTH variants as a non-success: an unmergeable shape must NOT be reported as a
@@ -260,7 +273,8 @@ fn group_to_inline(group: &TomlTable) -> toml_edit::Value {
     toml_edit::Value::InlineTable(outer)
 }
 
-/// Merge DontSpeak's Codex hooks (UserPromptSubmit → provide, Stop → notify) into a Codex
+/// Merge DontSpeak's Codex hooks (SessionStart → notify --greet-only, UserPromptSubmit →
+/// provide, Stop → notify) into a Codex
 /// `config.toml` (its text), preserving every other key. ADDITIVE + idempotent per event,
 /// and REPLACE-OURS (not keep-if-present, see `append_to_event`): a re-wire after the
 /// resolved `dontspeak` path changes updates the existing group to the new command instead
@@ -331,17 +345,41 @@ mod tests {
         merge_codex_hooks(existing, BIN).expect("merge ok")
     }
 
+    /// The ONE inner command string wired on `event` in a parsed doc — asserting along the
+    /// way that the event holds exactly one group with exactly one inner hook, so callers
+    /// comparing the returned command also pin "not duplicated". Exact-string comparison is
+    /// deliberate: a substring check like `contains("\" notify")` stopped discriminating the
+    /// moment SessionStart's `notify --greet-only` entered the set (it contains ` notify`).
+    fn event_command(doc: &DocumentMut, event: &str) -> String {
+        let groups = doc["hooks"][event]
+            .as_array_of_tables()
+            .unwrap_or_else(|| panic!("{event}: array-of-tables"));
+        assert_eq!(groups.len(), 1, "{event}: exactly one group");
+        let inner = groups.iter().next().unwrap()["hooks"]
+            .as_array_of_tables()
+            .unwrap_or_else(|| panic!("{event}: inner hooks array-of-tables"));
+        assert_eq!(inner.len(), 1, "{event}: exactly one inner hook");
+        inner.iter().next().unwrap()["command"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{event}: command is a string"))
+            .to_string()
+    }
+
     #[test]
-    fn merge_into_empty_wires_both_events() {
+    fn merge_into_empty_wires_all_events() {
         let out = merged("");
-        assert!(
-            out.contains("[[hooks.UserPromptSubmit]]") || out.contains("hooks.UserPromptSubmit")
-        );
-        assert!(out.contains("[[hooks.Stop]]") || out.contains("hooks.Stop"));
-        assert!(out.contains("\"/home/u/.local/bin/dontspeak\" provide"));
-        assert!(out.contains("\"/home/u/.local/bin/dontspeak\" notify"));
         // Round-trips to valid TOML.
-        let _: DocumentMut = out.parse().unwrap();
+        let doc: DocumentMut = out.parse().unwrap();
+        // Exact per-event command strings (see `event_command` on why not substrings).
+        assert_eq!(
+            event_command(&doc, "SessionStart"),
+            format!("\"{BIN}\" notify --greet-only")
+        );
+        assert_eq!(
+            event_command(&doc, "UserPromptSubmit"),
+            format!("\"{BIN}\" provide")
+        );
+        assert_eq!(event_command(&doc, "Stop"), format!("\"{BIN}\" notify"));
     }
 
     #[test]
@@ -356,18 +394,18 @@ mod tests {
         // Re-merging must not duplicate our groups.
         let twice = merged(&once);
         assert_eq!(once, twice, "idempotent");
+        // Exactly one group per event, each with its exact command (`event_command` asserts
+        // the one-group/one-hook shape, so this also pins "no duplicates").
+        let doc: DocumentMut = twice.parse().unwrap();
         assert_eq!(
-            twice
-                .matches("\"/home/u/.local/bin/dontspeak\" notify")
-                .count(),
-            1
+            event_command(&doc, "SessionStart"),
+            format!("\"{BIN}\" notify --greet-only")
         );
         assert_eq!(
-            twice
-                .matches("\"/home/u/.local/bin/dontspeak\" provide")
-                .count(),
-            1
+            event_command(&doc, "UserPromptSubmit"),
+            format!("\"{BIN}\" provide")
         );
+        assert_eq!(event_command(&doc, "Stop"), format!("\"{BIN}\" notify"));
     }
 
     #[test]
@@ -440,7 +478,7 @@ mod tests {
         );
         // Exactly one group per event — replaced, not duplicated alongside the stale one.
         let doc: DocumentMut = second.parse().unwrap();
-        for event in ["UserPromptSubmit", "Stop"] {
+        for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
             let aot = doc["hooks"][event].as_array_of_tables().unwrap();
             assert_eq!(
                 aot.len(),
@@ -448,6 +486,62 @@ mod tests {
                 "{event}: stale group replaced, not duplicated"
             );
         }
+    }
+
+    #[test]
+    fn sessionstart_is_greet_only_while_stop_is_plain_notify() {
+        // Pins the witness-seed invariant: on a NON-streaming client (no `MessageDisplay`),
+        // a plain `notify` at SessionStart would seed the streaming witness and suppress ALL
+        // Stop narration — the Qwen bug. So Codex's SessionStart must carry `--greet-only`,
+        // while Stop must stay a flag-free plain `notify` (it's Codex's only narration path).
+        let doc: DocumentMut = merged("").parse().unwrap();
+        let ss = event_command(&doc, "SessionStart");
+        assert!(
+            ss.ends_with(" notify --greet-only"),
+            "SessionStart is greet-only, got {ss}"
+        );
+        let stop = event_command(&doc, "Stop");
+        assert!(
+            stop.ends_with(" notify") && !stop.contains("--greet-only"),
+            "Stop is plain notify with NO flag, got {stop}"
+        );
+    }
+
+    #[test]
+    fn preexisting_hooks_subtable_survives_merge_and_strip() {
+        // Codex may keep its own bookkeeping under the same `[hooks]` table (e.g. a
+        // `[hooks.state]` sub-table holding a `trusted_hash`). Merging must wire our event
+        // groups WITHOUT disturbing that sub-table, and stripping must remove only our
+        // groups — keeping `[hooks]` alive because `state` remains under it.
+        let existing = "[hooks.state]\ntrusted_hash = \"abc123\"\n";
+        let out = merged(existing);
+        assert!(
+            out.contains("[hooks.state]") && out.contains("trusted_hash = \"abc123\""),
+            "state sub-table survives merge byte-wise"
+        );
+        let doc: DocumentMut = out.parse().unwrap();
+        assert_eq!(
+            doc["hooks"]["state"]["trusted_hash"].as_str(),
+            Some("abc123"),
+            "state sub-table survives merge structurally"
+        );
+        // Our three events wired alongside it (shape asserted by `event_command`).
+        for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+            let _ = event_command(&doc, event);
+        }
+
+        let stripped = strip_codex_hooks(&out).unwrap();
+        assert!(!stripped.contains("dontspeak"), "all ours removed");
+        assert!(
+            stripped.contains("trusted_hash = \"abc123\""),
+            "state sub-table survives strip"
+        );
+        let doc: DocumentMut = stripped.parse().unwrap();
+        assert_eq!(
+            doc["hooks"]["state"]["trusted_hash"].as_str(),
+            Some("abc123"),
+            "`[hooks]` kept — `state` still lives under it"
+        );
     }
 
     #[test]
