@@ -69,6 +69,12 @@ type CFIndex = isize;
 const KERN_SUCCESS: IoReturn = 0; // kIOReturnSuccess
 const KIO_HID_OPTIONS_TYPE_NONE: IoOptionBits = 0;
 
+/// `CFRunLoopRunInMode` result: the mode has no sources or timers attached, so the call
+/// returned WITHOUT blocking. Should not happen while the `IOHIDManager` stays scheduled
+/// on the loop, but IOKit doesn't promise it — the monitor loop sleeps briefly on this
+/// code so a source-less mode can't become a hot spin. (Stopped = 2, TimedOut = 3.)
+const K_CF_RUN_LOOP_RUN_FINISHED: i32 = 1;
+
 // HID usage page / usage for the physical Caps Lock key.
 const K_HID_PAGE_KEYBOARD: u32 = 0x07; // kHIDPage_KeyboardOrKeypad
 const K_HID_USAGE_CAPSLOCK: u32 = 0x39; // kHIDUsage_KeyboardCapsLock
@@ -125,11 +131,20 @@ unsafe extern "C" {
 
     // CoreFoundation run-loop plumbing for the dedicated monitor thread.
     fn CFRunLoopGetCurrent() -> CFRunLoopRef;
-    fn CFRunLoopRun();
-    // Unblocks a `CFRunLoopRun()` call in progress on ANY thread — documented safe to
-    // call from a thread other than the one running the loop, which is exactly how
+    // Bounded-run alternative to `CFRunLoopRun`: services `mode`'s sources until
+    // stopped, `seconds` elapses, or — when the mode has NO sources/timers attached —
+    // returns `kCFRunLoopRunFinished` immediately (see the spin guard in the monitor
+    // loop). CFTimeInterval = f64, Boolean = u8, SInt32 = i32 on this ABI.
+    fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source_handled: u8) -> i32;
+    // Unblocks a run-loop pass in progress on ANY thread — documented safe to call
+    // from a thread other than the one running the loop, which is exactly how
     // `stop_caps_hid_monitor` uses it (called from whichever thread drives shutdown).
     fn CFRunLoopStop(rl: CFRunLoopRef);
+    // Retain for the run-loop ref published to `MONITOR_RUN_LOOP`: `CFRunLoopGetCurrent`
+    // follows CF's Get rule (unretained — the object dies with its thread), so the slot
+    // parks one owned retain that keeps the ref valid for a cross-thread `CFRunLoopStop`
+    // even after the monitor thread exits. See `MONITOR_RUN_LOOP`'s ownership contract.
+    fn CFRetain(cf: *const c_void) -> *const c_void;
     static kCFRunLoopDefaultMode: CFStringRef;
 }
 
@@ -181,15 +196,26 @@ use super::stuck_grant::STUCK_RETRIES_BEFORE_RELAUNCH;
 
 /// The monitor thread's `CFRunLoopRef`, published once it starts (before the retry loop,
 /// since `CFRunLoopGetCurrent` is valid immediately) so [`stop_caps_hid_monitor`] can
-/// `CFRunLoopStop` it from another thread. Stored as `usize` — `CFRunLoopRef` is a raw
-/// `*mut c_void` and isn't `Sync`, but `CFRunLoopStop` is documented safe to call, given a
-/// valid ref, from any thread. 0 = no monitor thread currently running.
+/// `CFRunLoopStop` it from another thread.
+///
+/// OWNERSHIP: the slot holds one `CFRetain` on the ref (`CFRunLoopGetCurrent` itself is
+/// unretained — CF's Get rule — and the object otherwise dies with its thread),
+/// transferred by `swap(0)`: whoever swaps out a non-zero value owes exactly one
+/// `CFRelease` — the stopper after its `CFRunLoopStop`, or the monitor thread itself on
+/// its exit paths ([`take_and_release_run_loop_slot`]). The retain keeps the ref's
+/// memory valid for the stopper even if the monitor thread has already exited (a
+/// retained run loop whose thread died is defunct but safe to message), closing the
+/// use-after-free window the old load-then-stop sequence had. Stored as `usize` —
+/// `CFRunLoopRef` is a raw `*mut c_void` and isn't `Sync`. 0 = nothing to stop (no
+/// monitor running, or the stopper already took the ref while the thread drains).
 static MONITOR_RUN_LOOP: AtomicUsize = AtomicUsize::new(0);
 /// One-shot "tear down and exit" signal, checked at the top of the retry loop (so a stop
 /// requested while still waiting on an ungranted Accessibility permission — which retries
 /// forever otherwise — exits within one [`HID_OPEN_RETRY`] tick instead of never) and
-/// raced against just before the blocking `CFRunLoopRun()` call (so a stop that lands in
-/// the narrow window between publishing the run loop and entering it is still observed).
+/// re-checked between the monitor's bounded `CFRunLoopRunInMode` passes (so a
+/// `CFRunLoopStop` that lands in the window before a pass is actually running — which
+/// stops nothing, `CFRunLoopStop` doesn't latch — costs at most one ~1 s tick instead of
+/// hanging the stopper's join forever on a run loop nothing will ever wake again).
 static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
 /// The monitor thread's `JoinHandle`, so [`stop_caps_hid_monitor`] can wait for the
 /// teardown (manager close/release, leaked `Arc` drop) to actually finish before
@@ -212,6 +238,21 @@ static STUCK_GRANT: StuckGrantLatch = StuckGrantLatch::new(STUCK_RETRIES_BEFORE_
 /// already-trusted Accessibility grant) — see [`STUCK_GRANT`].
 pub fn is_caps_hid_stuck() -> bool {
     STUCK_GRANT.is_stuck()
+}
+
+/// Take [`MONITOR_RUN_LOOP`]'s retained ref — unless [`stop_caps_hid_monitor`] already
+/// did — and drop the retain. Called on the monitor thread's exit paths; exactly-once
+/// release holds because BOTH sides use `swap`, so precisely one observes the non-zero
+/// value.
+fn take_and_release_run_loop_slot() {
+    let prev = MONITOR_RUN_LOOP.swap(0, Ordering::SeqCst);
+    if prev != 0 {
+        // SAFETY: a non-zero slot value is the run-loop ref the monitor thread published
+        // with one owned CFRetain (see MONITOR_RUN_LOOP's doc); the swap above
+        // transferred that retain to us, so releasing it exactly once here upholds the
+        // slot's ownership contract.
+        unsafe { CFRelease(prev as *const c_void) };
+    }
 }
 
 /// Spawn the dedicated `IOHIDManager` run-loop thread that publishes the PHYSICAL
@@ -243,15 +284,31 @@ pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
         // unscheduled/closed/CFReleased on THIS thread's own run loop, each discarded or
         // torn-down manager released exactly once; `ctx` is one leaked `Arc` clone whose
         // pointee outlives every manager registration (un-leaked via `Arc::from_raw`
-        // exactly once, on the two exit paths, after callbacks can no longer fire);
-        // `kCFRunLoopDefaultMode` is a static CFString, and CFRunLoopGetCurrent/CFRunLoopRun
-        // take no pointers that could dangle.
+        // exactly once, on the two exit paths, after callbacks can no longer fire); the
+        // run-loop ref is retained ONCE (CFRetain below) with that retain's ownership
+        // parked in MONITOR_RUN_LOOP and transferred by swap to whichever side — this
+        // thread's exit paths (`take_and_release_run_loop_slot`) or `stop_caps_hid_monitor`
+        // — releases it, exactly once by construction; `kCFRunLoopDefaultMode` is a static
+        // CFString, and CFRunLoopGetCurrent/CFRunLoopRunInMode run on this thread's own
+        // loop and take no pointers that could dangle.
         .spawn(move || unsafe {
             let run_loop = CFRunLoopGetCurrent();
-            // Published immediately (before the retry loop, which can otherwise spin
-            // for a while waiting on Accessibility) so `stop_caps_hid_monitor` can
+            // One CFRetain, owned by the slot (see MONITOR_RUN_LOOP's doc): keeps the
+            // ref alive for a concurrent `stop_caps_hid_monitor` even past this
+            // thread's exit. Published immediately (before the retry loop, which can
+            // otherwise spin for a while waiting on Accessibility) so the stopper can
             // always find this thread's run loop to `CFRunLoopStop`.
-            MONITOR_RUN_LOOP.store(run_loop as usize, Ordering::SeqCst);
+            CFRetain(run_loop as *const c_void);
+            let prev = MONITOR_RUN_LOOP.swap(run_loop as usize, Ordering::SeqCst);
+            // Hosts must serialize stop→start (stop JOINS the old monitor via
+            // `MacOsPlatform`'s Drop; today macOS calls ds_engine_start once per
+            // process and stops only at quit), so no prior monitor's retained ref
+            // should still occupy the slot. NOTE this is a requirement on hosts, not
+            // something ds-core enforces: its `engine_start` does not join a stale
+            // non-running engine thread (host.rs), so a host starting a new engine
+            // while an old one is still DRAINING would overlap two monitors — the
+            // debug_assert below is the dev-build tripwire for that contract.
+            debug_assert_eq!(prev, 0, "caps-HID monitor spawned over a live slot");
             // Leak ONE Arc clone as the callback context, reused across retry
             // attempts; the manager that finally opens owns it until shutdown (see
             // the teardown below, which un-leaks it via `Arc::from_raw`). The
@@ -273,8 +330,9 @@ pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
                 if SHOULD_STOP.load(Ordering::SeqCst) {
                     // Shutdown requested while still waiting on Accessibility (or
                     // between retries) — nothing is open yet, so just release the
-                    // context and exit; nothing to unschedule/close/release.
-                    MONITOR_RUN_LOOP.store(0, Ordering::SeqCst);
+                    // slot's run-loop retain + the context and exit; nothing to
+                    // unschedule/close.
+                    take_and_release_run_loop_slot();
                     drop(Arc::from_raw(ctx as *const AtomicBool));
                     return;
                 }
@@ -297,23 +355,34 @@ pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
                     if warned {
                         eprintln!("[dontspeak] caps HOLD armed (Accessibility granted)");
                     }
-                    // Race guard: if `stop_caps_hid_monitor` already fired between the
-                    // loop-top check above and here, skip the blocking call entirely
-                    // rather than trust a `CFRunLoopStop` that may have landed before
-                    // this run loop was actually running.
-                    if !SHOULD_STOP.load(Ordering::SeqCst) {
-                        CFRunLoopRun(); // blocks until `stop_caps_hid_monitor`'s CFRunLoopStop
+                    // Serve HID input until told to stop. Bounded (1 s) passes instead
+                    // of one blocking `CFRunLoopRun`: `CFRunLoopStop` only stops a loop
+                    // pass that is actually RUNNING (it doesn't latch), so a stop
+                    // landing in the window before the pass starts would be LOST — the
+                    // old single blocking call then hung `stop_caps_hid_monitor`'s join
+                    // forever. With the bound, a lost stop costs at most one tick; a
+                    // stop landing mid-pass still returns immediately (Stopped), and
+                    // HID input callbacks stay fully event-driven inside each pass.
+                    while !SHOULD_STOP.load(Ordering::SeqCst) {
+                        let rc = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, 0);
+                        // Finished = the mode lost its last source (shouldn't happen
+                        // while the manager stays scheduled, but IOKit doesn't promise
+                        // it) and returns immediately — sleep so this can't hot-spin.
+                        if rc == K_CF_RUN_LOOP_RUN_FINISHED {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
                     }
                     // Torn down: stop delivering input, close + release the manager
-                    // (pairs `IOHIDManagerOpen`/`Create`), publish "no monitor running",
-                    // and un-leak the context — dropping this Arc clone brings the
-                    // strong count back down to just the caller's own clone (see
-                    // `macos.rs`'s `caps_down.clone()` call site), instead of pinning
-                    // it at +1 for the rest of the process.
+                    // (pairs `IOHIDManagerOpen`/`Create`), release the slot's run-loop
+                    // retain (unless the stopper already swapped it out), and un-leak
+                    // the context — dropping this Arc clone brings the strong count
+                    // back down to just the caller's own clone (see `macos.rs`'s
+                    // `caps_down.clone()` call site), instead of pinning it at +1 for
+                    // the rest of the process.
                     IOHIDManagerUnscheduleFromRunLoop(manager, run_loop, kCFRunLoopDefaultMode);
                     IOHIDManagerClose(manager, KIO_HID_OPTIONS_TYPE_NONE);
                     CFRelease(manager);
-                    MONITOR_RUN_LOOP.store(0, Ordering::SeqCst);
+                    take_and_release_run_loop_slot();
                     drop(Arc::from_raw(ctx as *const AtomicBool));
                     return;
                 }
@@ -360,29 +429,32 @@ pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
 ///
 /// Signals [`SHOULD_STOP`] (observed at the top of the retry loop, so a monitor still
 /// waiting on an ungranted Accessibility permission exits within one [`HID_OPEN_RETRY`]
-/// tick instead of retrying forever) and, if a manager is currently open and blocked in
-/// `CFRunLoopRun`, calls `CFRunLoopStop` to unblock it immediately. Then JOINS the
-/// monitor thread so the manager close/release and the `Arc` un-leak are CONFIRMED
-/// complete before returning — not just requested. Idempotent: a no-op if no monitor
-/// thread is currently running (never spawned, or already stopped).
-///
-/// `#[allow(dead_code)]`: not called yet — wiring this in is a one-line addition where
-/// `MacOsPlatform`'s teardown/`Platform::shutdown()` lives (`macos.rs`), left for the
-/// central pass so this crate keeps building in the meantime.
-#[allow(dead_code)]
+/// tick instead of retrying forever) and, if the slot still holds the monitor's run-loop
+/// ref, takes it (atomic swap — see [`MONITOR_RUN_LOOP`]'s ownership contract) and
+/// `CFRunLoopStop`s a monitor blocked serving input, releasing the retain afterwards.
+/// The swap makes the stop-vs-exit race benign: if the monitor thread wins and exits
+/// first, our swap yields 0 and there is nothing to stop; if we win, the retained ref
+/// stays valid for the `CFRunLoopStop` even if the thread exits mid-call. A stop that
+/// lands before a run-loop pass is actually running stops nothing (`CFRunLoopStop`
+/// doesn't latch) — the monitor's bounded `CFRunLoopRunInMode` loop re-checks the flag
+/// within ~1 s, so that window delays shutdown by at most one tick instead of hanging
+/// it. Then JOINS the monitor thread so the manager close/release and the `Arc` un-leak
+/// are CONFIRMED complete before returning — not just requested. Idempotent: a no-op if
+/// no monitor thread is currently running (never spawned, or already stopped). Called
+/// from `MacOsPlatform`'s `Drop` (`macos.rs`) on every engine stop.
 pub fn stop_caps_hid_monitor() {
     SHOULD_STOP.store(true, Ordering::SeqCst);
-    let rl = MONITOR_RUN_LOOP.load(Ordering::SeqCst);
+    let rl = MONITOR_RUN_LOOP.swap(0, Ordering::SeqCst);
     if rl != 0 {
-        // SAFETY: a non-zero `rl` was published by the monitor thread from its own
-        // CFRunLoopGetCurrent and is zeroed before that thread exits, and CFRunLoopStop is
-        // documented safe to call from another thread given a valid ref. NOTE: a monitor
-        // thread that observed SHOULD_STOP at its loop top can zero the slot and exit
-        // between our load above and this call, leaving `rl` stale for that narrow window
-        // (CFRunLoopGetCurrent's ref is unretained and dies with its thread); the join
-        // below serializes everything after this call, not the call itself.
+        // SAFETY: the non-zero slot value is the ref the monitor thread published with
+        // one owned CFRetain; the swap above transferred that retain to us, so the
+        // object is alive for both calls even if its thread has already exited (a
+        // retained run loop whose thread died is defunct but safe to message), and we
+        // release it exactly once, upholding the slot's ownership contract.
+        // CFRunLoopStop is documented safe to call from any thread.
         unsafe {
             CFRunLoopStop(rl as CFRunLoopRef);
+            CFRelease(rl as *const c_void);
         }
     }
     if let Some(handle) = MONITOR_JOIN.lock().unwrap().take() {
