@@ -295,12 +295,32 @@ mod tests {
         let cfg = dir.path().join("settings.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 0);
+        assert_eq!(
+            claude_json_hooks(
+                &cfg,
+                true,
+                HookCommandStyle::ArgsArray,
+                false,
+                false,
+                &paths
+            ),
+            0
+        );
         let v = read_json(&cfg);
         assert_eq!(v["hooks"]["MessageDisplay"].as_array().unwrap().len(), 1);
 
         // Re-run: REPLACE-OURS merge must not duplicate the group.
-        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 0);
+        assert_eq!(
+            claude_json_hooks(
+                &cfg,
+                true,
+                HookCommandStyle::ArgsArray,
+                false,
+                false,
+                &paths
+            ),
+            0
+        );
         let v2 = read_json(&cfg);
         assert_eq!(v2["hooks"]["MessageDisplay"].as_array().unwrap().len(), 1);
     }
@@ -311,8 +331,21 @@ mod tests {
         let cfg = dir.path().join("settings.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 0);
-        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, true, false, &paths), 0);
+        assert_eq!(
+            claude_json_hooks(
+                &cfg,
+                true,
+                HookCommandStyle::ArgsArray,
+                false,
+                false,
+                &paths
+            ),
+            0
+        );
+        assert_eq!(
+            claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, true, false, &paths),
+            0
+        );
 
         let v = read_json(&cfg);
         // `strip_hooks` drops an event array once it's emptied of our groups, and drops the
@@ -330,7 +363,17 @@ mod tests {
 
         // Caught in `io::read_json_or_bail`, but non-fatal — reported and the file left
         // byte-identical — never reaches `resolve_dontspeak_bin`.
-        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 0);
+        assert_eq!(
+            claude_json_hooks(
+                &cfg,
+                true,
+                HookCommandStyle::ArgsArray,
+                false,
+                false,
+                &paths
+            ),
+            0
+        );
         assert_eq!(std::fs::read(&cfg).unwrap(), raw);
     }
 
@@ -345,7 +388,17 @@ mod tests {
         let raw = r#"{"hooks":{"MessageDisplay":{"not":"an array"}}}"#;
         std::fs::write(&cfg, raw).unwrap();
 
-        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 0); // non-fatal
+        assert_eq!(
+            claude_json_hooks(
+                &cfg,
+                true,
+                HookCommandStyle::ArgsArray,
+                false,
+                false,
+                &paths
+            ),
+            0
+        ); // non-fatal
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw); // byte-identical
     }
 
@@ -355,7 +408,10 @@ mod tests {
         let cfg = dir.path().join("settings.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, true, &paths), 0);
+        assert_eq!(
+            claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, true, &paths),
+            0
+        );
         assert!(!cfg.exists());
     }
 
@@ -369,7 +425,17 @@ mod tests {
         let cfg = dir.path().join("blocked").join("settings.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, false, &paths), 1);
+        assert_eq!(
+            claude_json_hooks(
+                &cfg,
+                true,
+                HookCommandStyle::ArgsArray,
+                false,
+                false,
+                &paths
+            ),
+            1
+        );
     }
 
     /// Non-streaming inline-shell wire (Qwen Code): `MessageDisplay` is omitted AND the
@@ -383,7 +449,10 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
         let qwen = HookCommandStyle::InlineShell;
 
-        assert_eq!(claude_json_hooks(&cfg, false, qwen, false, false, &paths), 0);
+        assert_eq!(
+            claude_json_hooks(&cfg, false, qwen, false, false, &paths),
+            0
+        );
         let v = read_json(&cfg);
         assert!(
             v["hooks"].get("MessageDisplay").is_none(),
@@ -403,7 +472,10 @@ mod tests {
             );
         }
         // Idempotent.
-        assert_eq!(claude_json_hooks(&cfg, false, qwen, false, false, &paths), 0);
+        assert_eq!(
+            claude_json_hooks(&cfg, false, qwen, false, false, &paths),
+            0
+        );
         // Strips cleanly (remove removes every DontSpeak group regardless of dialect).
         assert_eq!(claude_json_hooks(&cfg, false, qwen, true, false, &paths), 0);
         assert!(read_json(&cfg).get("hooks").is_none());

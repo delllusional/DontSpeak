@@ -8,9 +8,10 @@
 //! blockquote (no code fence / path / URL) is instead voiced whole, lightly cleaned. Fast +
 //! fire-and-forget so it never delays the display.
 //!
-//! [`speak_reply`] (`Stop`): the non-streaming analogue for OpenAI Codex — voices the whole
-//! final reply, guarded so it never double-speaks what `MessageDisplay` already streamed.
-//! [`mark_streaming_session`] (`SessionStart`) seeds that guard's witness.
+//! [`speak_reply`] (`Stop`): the non-streaming analogue for OpenAI Codex and Qwen Code — voices
+//! the whole final reply, guarded so it never double-speaks what `MessageDisplay` already
+//! streamed. [`mark_streaming_session`] (`SessionStart`) seeds that guard's witness for
+//! streaming clients only (Claude Code); non-streaming clients pass `--greet-only` to skip it.
 //!
 //! [`barge_session`] (`SessionEnd`): barge THIS session's engine playback (a scoped
 //! `StopSpeech{session}`) so closing a window silences its OWN reply, not another's. No
@@ -52,10 +53,13 @@ pub fn barge_session(paths: &Paths, payload: &str) {
 /// SessionStart notify (the streaming-witness seed): pre-create THIS session's MessageDisplay
 /// state file so [`speak_reply`]'s `streamed` guard is reliably true before the first `Stop`,
 /// closing the only timing gap in the double-narration fix. The discriminator is the event
-/// wiring itself: Claude Code wires `SessionStart`, so this seeds the witness at session open;
-/// OpenAI Codex wires NEITHER SessionStart nor MessageDisplay (its set is `UserPromptSubmit` +
-/// `Stop` only — see `wire/codex.rs`), so a Codex session never seeds it and its `Stop` still
-/// narrates. Idempotent + non-destructive: never clobbers real in-progress state (a re-fired
+/// wiring + the `--greet-only` flag (see [`crate::hook_core::notify`]):
+///   • Claude Code (streaming) wires `SessionStart` with plain `notify` → seeds the witness.
+///   • Qwen Code (non-streaming) wires `SessionStart` with `--greet-only` → greet runs but the
+///     seed is SKIPPED — otherwise the witness would suppress Qwen Code's only narration path.
+///   • OpenAI Codex wires NEITHER `SessionStart` nor `MessageDisplay` (its set is
+///     `UserPromptSubmit` + `Stop` only — see `wire/codex.rs`), so it never reaches here.
+/// Idempotent + non-destructive: never clobbers real in-progress state (a re-fired
 /// SessionStart is a no-op), and the seeded default reads exactly like "no file yet" (fresh
 /// `Accum`), so streaming is unaffected.
 pub fn mark_streaming_session(paths: &Paths, payload: &str) {
@@ -75,12 +79,12 @@ pub fn mark_streaming_session(paths: &Paths, payload: &str) {
     );
 }
 
-// ── Stop hook (speak the FINAL reply — OpenAI Codex) ─────────────────────────────
+// ── Stop hook (speak the FINAL reply — non-streaming clients) ───────────────────
 
-/// Stop hook payload (subset): the final assistant text + the session id. BOTH Claude Code
-/// and OpenAI Codex deliver `last_assistant_message` on the `Stop` event (this was once
-/// assumed CC-empty — it is NOT), so the field alone can't tell the clients apart; the
-/// streaming witness in [`speak_reply`] does that instead.
+/// Stop hook payload (subset): the final assistant text + the session id. ALL clients that
+/// wire `Stop` (Claude Code, OpenAI Codex, Qwen Code) deliver `last_assistant_message` (this
+/// was once assumed CC-empty — it is NOT), so the field alone can't tell the clients apart;
+/// the streaming witness in [`speak_reply`] does that instead.
 #[derive(Debug, Deserialize, Default)]
 struct StopHook {
     #[serde(default)]
@@ -90,28 +94,32 @@ struct StopHook {
 }
 
 /// Witness that a `MessageDisplay` streaming pass ran for this session: its per-session state
-/// file (which [`message_display`] writes on EVERY batch) exists. The deterministic CC-vs-Codex
-/// discriminator the `Stop` path needs (see [`speak_reply`]):
-///   • Claude Code wires `MessageDisplay` and streams every turn, so the file is present when
-///     `Stop` fires ⇒ the reply was ALREADY narrated; `Stop` must not re-speak it.
+/// file (which [`message_display`] writes on EVERY batch) exists. The deterministic
+/// client-discriminator the `Stop` path needs (see [`speak_reply`]):
+///   • Claude Code (streaming) wires `MessageDisplay` and streams every turn, so the file is
+///     present when `Stop` fires ⇒ the reply was ALREADY narrated; `Stop` must not re-speak it.
+///   • Qwen Code (non-streaming) wires `SessionStart` with `--greet-only` (no witness seed)
+///     and NO `MessageDisplay` hook, so the file is NEVER written ⇒ `streamed = false`, and
+///     `Stop` is Qwen Code's only narration path.
 ///   • OpenAI Codex wires NO `MessageDisplay` hook (see `wire/codex.rs` `CODEX_HOOKS`), so the
 ///     file is NEVER written ⇒ `streamed = false`, and `Stop` is Codex's only narration path.
-/// [`mark_streaming_session`] also SEEDS this file at `SessionStart` (which Codex doesn't wire;
-/// Qwen Code wires SessionStart with `--greet-only`, which skips the seed for the same reason),
-/// so the witness is present from session open — closing the timing edge of a `Stop` racing the
-/// first batch's write, while its absence for Codex/Qwen keeps that case correct too.
+/// [`mark_streaming_session`] also SEEDS this file at `SessionStart` for STREAMING clients
+/// (Claude Code), so the witness is present from session open — closing the timing edge of a
+/// `Stop` racing the first batch's write. Qwen Code's `--greet-only` flag skips that seed, and
+/// Codex doesn't wire `SessionStart` at all, so both non-streaming clients keep `streamed = false`.
 /// `pub(crate)` so `hook_core`'s greet-only tests can probe the witness directly.
 pub(crate) fn streamed_via_message_display(paths: &Paths, session: &str) -> bool {
     display_state_path(paths, session).exists()
 }
 
 /// Stop notify: speak the FINAL assistant reply, once — the NON-STREAMING analogue of
-/// [`message_display`] for OpenAI Codex, whose hooks fire only at end-of-turn with the whole
-/// `last_assistant_message` and no `MessageDisplay` stream. Claude Code ALSO wires `Stop` and
-/// delivers `last_assistant_message` on it, so without a guard we'd re-voice every reply
-/// MessageDisplay already streamed (heard twice). Guard: [`streamed_via_message_display`] — a
-/// session with a MessageDisplay state file already narrated ⇒ stay silent. Pure decision in
-/// [`stop_utterances`]; this is the IO wrapper (config load, mic probe, witness, engine send).
+/// [`message_display`] for non-streaming clients (OpenAI Codex, Qwen Code), whose hooks fire
+/// only at end-of-turn with the whole `last_assistant_message` and no `MessageDisplay` stream.
+/// Claude Code ALSO wires `Stop` and delivers `last_assistant_message` on it, so without a
+/// guard we'd re-voice every reply MessageDisplay already streamed (heard twice). Guard:
+/// [`streamed_via_message_display`] — a session with a MessageDisplay state file already
+/// narrated ⇒ stay silent. Pure decision in [`stop_utterances`]; this is the IO wrapper
+/// (config load, mic probe, witness, engine send).
 pub fn speak_reply(paths: &Paths, payload: &str) {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests);

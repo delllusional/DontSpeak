@@ -129,7 +129,11 @@ fn host_inline_flavor() -> InlineFlavor {
 /// Note: Qwen's `expandCommand` rewrites literal `$GEMINI_PROJECT_DIR`/`$CLAUDE_PROJECT_DIR`
 /// in the command string before spawning — our inlined commands contain neither, so that
 /// pass is a no-op.
-fn inline_command(flavor: InlineFlavor, bin: &str, verbs: &[&str]) -> (String, Option<&'static str>) {
+fn inline_command(
+    flavor: InlineFlavor,
+    bin: &str,
+    verbs: &[&str],
+) -> (String, Option<&'static str>) {
     let verbs = verbs.join(" ");
     match flavor {
         InlineFlavor::Unix => (format!("\"{bin}\" {verbs}"), None),
@@ -714,7 +718,11 @@ mod tests {
             ("\"/opt/x y/dontspeak\" provide".to_string(), None)
         );
         assert_eq!(
-            inline_command(InlineFlavor::Unix, "/bin/dontspeak", &["notify", "--greet-only"]),
+            inline_command(
+                InlineFlavor::Unix,
+                "/bin/dontspeak",
+                &["notify", "--greet-only"]
+            ),
             ("\"/bin/dontspeak\" notify --greet-only".to_string(), None)
         );
     }
@@ -760,7 +768,9 @@ mod tests {
     fn command_is_ours_accepts_every_dialect_we_write_and_rejects_the_rest() {
         // Bare paths (args-array style, and the pre-inline Qwen shape we self-heal).
         assert!(command_is_ours("/bin/dontspeak"));
-        assert!(command_is_ours(r"C:\Users\u\AppData\Local\Programs\DontSpeak\dontspeak.exe"));
+        assert!(command_is_ours(
+            r"C:\Users\u\AppData\Local\Programs\DontSpeak\dontspeak.exe"
+        ));
         // Inlined forms, all three flavors.
         assert!(command_is_ours("\"/opt/x y/dontspeak\" notify"));
         assert!(command_is_ours(
@@ -838,6 +848,27 @@ mod tests {
     }
 
     #[test]
+    fn args_array_entries_keep_second_timeouts() {
+        // Claude Code (args-array) reads `timeout` in SECONDS — the seconds→ms scaling is
+        // strictly an InlineShell dialect rule, so `timeout: 5` must stay 5, not 5000.
+        let out = merged(json!({}));
+        let ups = out["hooks"]["UserPromptSubmit"][0]["hooks"]
+            .as_array()
+            .unwrap();
+        for verb in ["notify", "provide"] {
+            let h = ups
+                .iter()
+                .find(|h| h["args"] == json!([verb]))
+                .expect("entry for verb");
+            assert_eq!(
+                h["timeout"],
+                json!(5),
+                "{verb}: args-array timeout stays in seconds"
+            );
+        }
+    }
+
+    #[test]
     fn args_array_sessionstart_is_greet_only_iff_non_streaming() {
         // The args-array dialect carries the same greet-only split: a streaming client
         // (Claude Code) seeds the witness with plain `notify`; a non-streaming args-array
@@ -889,7 +920,11 @@ mod tests {
         });
         let out = merge_hooks(stale, &inline_spec()).expect("merge ok");
         let stop = out["hooks"]["Stop"].as_array().unwrap();
-        assert_eq!(stop.len(), 2, "user group kept, ours replaced not duplicated");
+        assert_eq!(
+            stop.len(),
+            2,
+            "user group kept, ours replaced not duplicated"
+        );
         let ours: Vec<&Value> = stop.iter().filter(|g| hook_group_is_ours(g)).collect();
         assert_eq!(ours.len(), 1, "exactly one group of ours after re-wire");
         let healed = &ours[0]["hooks"][0];
