@@ -499,8 +499,11 @@ impl TtsManager {
     /// if it is NOT running we START it — it EXITED when it tried to load before the model
     /// existed (fresh install / provider switch), and nothing else re-spawns it after a fatal
     /// "not downloaded", so without starting it here the engine would sit on its stale failure
-    /// until a manual restart. The sole caller (the download-completion hook) only reaches here
-    /// for a target whose engine is wanted, so starting is correct. Reuses the shared start path.
+    /// until a manual restart. "Not running" now also covers `start_locked`'s cheap presence
+    /// gate having skipped the spawn entirely (not just "toggled off") — either way the fix is
+    /// the same: try again now that the model is actually on disk. The sole caller (the
+    /// download-completion hook) only reaches here for a target whose engine is wanted, so
+    /// starting is correct. Reuses the shared start path.
     /// Returns whether a warm child is running afterwards.
     pub(crate) fn reload_models(&self) -> bool {
         if !self.is_running() {
@@ -720,6 +723,56 @@ impl TtsManager {
         if self.is_running() {
             return;
         }
+        // Copy the whole spawn-prefs struct out from under its lock up front: the new
+        // model-presence gate below AND the env-assembly further down both read it, and a
+        // guard must never be held across the blocking spawn+read-loop that follows.
+        let prefs = self.spawn_prefs.lock().unwrap().clone();
+
+        // CHEAP, is_file()-only Kokoro presence gate, resolved per-backend from `prefs` (NOT a
+        // fresh VoiceConfig re-read — start_locked has no cfg; boot/reload keep `spawn_prefs`
+        // current, see the provider-freshness fix in boot.rs/engine.rs). Skips the spawn on a
+        // fresh install / provider switch instead of paying the guaranteed-fail transient
+        // ("kokoro model not downloaded" / "smk_init failed") — `reload_models` (unchanged)
+        // performs the sole, successful start once the background fetch lands.
+        //
+        // Kokoro is gated UNCONDITIONALLY (not role-gated on whether TTS is even selected):
+        // `ds-helper --serve` calls `load_backend()` (Kokoro) unconditionally whenever it runs at
+        // all (oneshot::load_backend — no DONTSPEAK_TTS_PRELOAD-style role gate exists there, a
+        // separate pre-existing gap, not fixed here), and a missing/mismatched Kokoro asset set
+        // is FATAL to the WHOLE child (serve.rs's `_exit(1)`), mirroring `status.rs`'s own
+        // `kokoro_present` computation, which is ALSO computed unconditionally. Parakeet is
+        // deliberately NOT gated here: its preload is genuinely conditional
+        // (DONTSPEAK_STT_PRELOAD) and a failed preload is non-fatal (STTLOADERR, no `_exit`) —
+        // the child boots fine either way, and the existing per-model
+        // `stt_load_error`/ModelSlot machinery already reports it correctly. Gating on Parakeet
+        // too would incorrectly block a healthy Kokoro from starting whenever only Parakeet's
+        // download is still pending.
+        let kokoro_apple_native =
+            Self::resolve_provider(&prefs.provider) == ds_config::RealizedProvider::CoreMlAne;
+        let kokoro_ready = if kokoro_apple_native {
+            ds_model::coreml_repo::is_coreml_set_present(&ds_model::coreml_repo::KOKORO_COREML_SET)
+        } else {
+            crate::config_gate::kokoro_onnx_files_present()
+        };
+        if !kokoro_ready {
+            // Mirrors every OTHER early-return below (spawn error, missing stdio, ERR line):
+            // set_error() so `warm_child_heal_action` sees error=true and resolves to
+            // `HealAction::Nothing` — a Caps-Lock-triggered `restart_if_crashed` must NOT retry
+            // this doomed spawn on every tap; only the download-completion hook retries it, once,
+            // when the fetch actually lands. Safe for the status UI: `combined_error` only
+            // surfaces a model's `last_error` while that SAME model reads `present` — false here
+            // by construction — so the Kokoro row shows "Missing" (offer Download), never a
+            // stale "Failed".
+            self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
+            log(&format!(
+                "TTS/STT warm child start skipped — Kokoro model not yet present on disk \
+                 (provider={}); the background download will restart it automatically once it \
+                 finishes",
+                prefs.provider
+            ));
+            return;
+        }
+
         let mut cmd = Command::new(&self.bin);
         cmd.arg("--serve")
             .stdin(Stdio::piped())
@@ -727,8 +780,7 @@ impl TtsManager {
             // Helper stderr → a log file (full-duplex status, capture levels,
             // barge-debug, errors) so the warm child is diagnosable; was discarded.
             .stderr(helper_stderr());
-        // The daemon→helper env contract, resolved from the spawn prefs. Copy the whole
-        // struct out from under its lock first (never hold a guard across the apply loop):
+        // The daemon→helper env contract, resolved from the spawn prefs:
         //   • DONTSPEAK_PROVIDER      — Kokoro TTS execution provider ("cpu"|"cuda"|…).
         //   • DONTSPEAK_STT_PROVIDER  — local STT backend the child serves ("cpu"|"ane"|…).
         //   • DONTSPEAK_FULL_DUPLEX   — AEC duplex mode (Parakeet+Kokoro only); off ⇒ half-duplex.
@@ -737,7 +789,6 @@ impl TtsManager {
         //                               it resolves to "cpu" even for Off/ClaudeCode).
         // Applied as ONE set-or-remove pass so every OFF flag is explicitly CLEARED — an
         // inherited ambient value can't override the config-resolved intent. See [`child_env`].
-        let prefs = self.spawn_prefs.lock().unwrap().clone();
         for (key, val) in child_env(&prefs) {
             match val {
                 Some(v) => cmd.env(key, v),
@@ -2490,10 +2541,102 @@ mod status_gate_tests {
         assert_eq!(tts.spawn_prefs.lock().unwrap().provider, "cpu");
     }
 
+    /// Points `DONTSPEAK_MODEL_DIR` at a fresh EMPTY tempdir and clears
+    /// `ORT_DYLIB_PATH`/`SMKOKORO_DYLIB_PATH` — forces the new Kokoro-presence gate's ONNX
+    /// branch deterministically on every OS and guarantees "not present". Caller must hold
+    /// `crate::config_gate::ENV_LOCK` and restore the returned previous values.
+    fn clear_kokoro_env() -> (
+        tempfile::TempDir,
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
+        let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
+        let prev_smk = std::env::var_os("SMKOKORO_DYLIB_PATH");
+        unsafe {
+            std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path());
+            std::env::remove_var("ORT_DYLIB_PATH");
+            std::env::remove_var("SMKOKORO_DYLIB_PATH");
+        }
+        (tmp, prev_model_dir, prev_ort, prev_smk)
+    }
+
+    fn restore_kokoro_env(
+        prev_model_dir: Option<std::ffi::OsString>,
+        prev_ort: Option<std::ffi::OsString>,
+        prev_smk: Option<std::ffi::OsString>,
+    ) {
+        unsafe {
+            match prev_model_dir {
+                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
+                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
+            }
+            match prev_ort {
+                Some(v) => std::env::set_var("ORT_DYLIB_PATH", v),
+                None => std::env::remove_var("ORT_DYLIB_PATH"),
+            }
+            match prev_smk {
+                Some(v) => std::env::set_var("SMKOKORO_DYLIB_PATH", v),
+                None => std::env::remove_var("SMKOKORO_DYLIB_PATH"),
+            }
+        }
+    }
+
+    #[test]
+    fn start_locked_skips_the_spawn_when_kokoro_is_not_present() {
+        // The new cheap presence gate: on a fresh install / provider switch, before the
+        // Kokoro model has been downloaded, `start_locked` must skip the spawn entirely
+        // rather than pay the guaranteed-fail "kokoro model not downloaded" transient.
+        let _guard = crate::config_gate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_tmp, prev_model_dir, prev_ort, prev_smk) = clear_kokoro_env();
+
+        let (tts, gate) = mk();
+        let seq0 = gate.seq();
+
+        tts.start();
+
+        assert!(
+            !tts.is_running(),
+            "the gate must skip the spawn, never even reaching Command::spawn"
+        );
+        assert_eq!(
+            tts.last_error(),
+            Some(ds_i18n::t("status.engine.reason.tts_failed")),
+            "a skipped spawn surfaces the same start-error key every other early return uses"
+        );
+        assert_ne!(
+            gate.seq(),
+            seq0,
+            "a fresh skip must bump the status-push gate"
+        );
+
+        restore_kokoro_env(prev_model_dir, prev_ort, prev_smk);
+    }
+
     #[test]
     fn start_against_a_nonexistent_binary_sets_last_error_and_bumps_the_gate() {
         // Exercises start_locked's real spawn-failure branch (Command::spawn erroring on
-        // a path that doesn't exist) — no mock, no real ds-helper binary needed.
+        // a path that doesn't exist) — no mock, no real ds-helper binary needed. With the
+        // presence gate now wired in, this must route through fixture files that read
+        // "present" (else it would exercise the new skip path instead of ever reaching
+        // Command::spawn, on any host whose real ambient model cache happens to be empty
+        // OR already populated).
+        let _guard = crate::config_gate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (tmp, prev_model_dir, prev_ort, prev_smk) = clear_kokoro_env();
+        std::fs::write(tmp.path().join(ds_model::KOKORO_ONNX_FILE), b"dummy").unwrap();
+        std::fs::write(tmp.path().join(ds_model::KOKORO_VOICES_FILE), b"dummy").unwrap();
+        let dylib = tmp.path().join("dummy-onnxruntime.dylib");
+        std::fs::write(&dylib, b"dummy").unwrap();
+        unsafe {
+            std::env::set_var("ORT_DYLIB_PATH", &dylib);
+        }
+
         let (tts, gate) = mk();
         assert_eq!(tts.last_error(), None);
         let seq0 = gate.seq();
@@ -2510,5 +2653,7 @@ mod status_gate_tests {
             seq0,
             "a fresh start failure must bump the status-push gate"
         );
+
+        restore_kokoro_env(prev_model_dir, prev_ort, prev_smk);
     }
 }

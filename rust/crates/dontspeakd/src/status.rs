@@ -8,8 +8,9 @@ use std::time::Duration;
 use ds_config::{Paths, VoiceConfig};
 
 use crate::config_gate::{
-    apple_native_shim_available, apple_native_tts_active, caps_loop_enabled, kokoro_present_for,
-    parakeet_available, stt_uses_onnx_runtime,
+    apple_native_shim_available, apple_native_tts_active, caps_loop_enabled,
+    kokoro_onnx_files_present, kokoro_present_for, parakeet_available,
+    parakeet_onnx_files_present, stt_uses_onnx_runtime,
 };
 use crate::downloads::DownloadProg;
 use crate::engine::{PasteState, dictation_preview};
@@ -165,7 +166,6 @@ pub(crate) fn model_status_json(
     // the 325MB Kokoro onnx + the Parakeet ONNX files would delay the dots by
     // many seconds. Correctness-critical sha checks stay in the load path
     // (load_synth / ParakeetModel::load), not here.
-    let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
     // The Kokoro row reflects the ACTIVE TTS backend (mirrors the Parakeet row below):
     //   * apple-native → gated on the shim (the loader) + the downloaded Core ML sets (the
     //                    engine's download manager fetches them — target `kokoro_coreml` —
@@ -185,20 +185,14 @@ pub(crate) fn model_status_json(
     let kokoro_files = if tts_uses_apple_native {
         ds_model::coreml_repo::is_coreml_set_present(&ds_model::coreml_repo::KOKORO_COREML_SET)
     } else {
-        exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
-            && exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
-            && exists(ds_model::onnxruntime_dylib_path())
+        kokoro_onnx_files_present()
     };
     let kokoro_present = kokoro_present_for(tts_uses_apple_native, shim, kokoro_files);
     // The STT engine is `parakeet`; the ACTIVE runtime is the resolved provider.
     //   * onnx         → gated on the downloaded ONNX model files (+ shared dylib).
     //   * apple-native → gated on the shim + ITS downloaded Core ML sets (target
     //                    `parakeet_coreml`), marker-checked like the Kokoro row above.
-    let parakeet_onnx_files = exists(ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE))
-        && exists(ds_model::model_path(ds_model::PARAKEET_DECODER_FILE))
-        && exists(ds_model::model_path(ds_model::PARAKEET_JOINER_FILE))
-        && exists(ds_model::model_path(ds_model::PARAKEET_TOKENS_FILE))
-        && exists(ds_model::onnxruntime_dylib_path());
+    let parakeet_onnx_files = parakeet_onnx_files_present();
     // Same shim-aware downgrade as Kokoro above: the STT provider resolves to `Ane` as a static
     // preference, but with no Core ML shim the warm child runs Parakeet on the ONNX-CPU path — so
     // the row must gate on the downloaded ONNX files, not the (absent) apple-native cache.

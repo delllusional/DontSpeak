@@ -148,6 +148,31 @@ pub(crate) fn helper_stt_provider(cfg: &VoiceConfig) -> &'static str {
     }
 }
 
+/// CHEAP, is_file()-only presence of the Kokoro ONNX asset set (model + voices + the
+/// shared onnxruntime dylib) — no sha256 (see [`kokoro_present_for`]'s doc for why). Shared
+/// by `status.rs::model_status_json`'s Kokoro row AND `tts::TtsManager::start_locked`'s spawn
+/// gate, so the two can never drift into two copies of the same logic.
+pub(crate) fn kokoro_onnx_files_present() -> bool {
+    let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
+    exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
+        && exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
+        && exists(ds_model::onnxruntime_dylib_path())
+}
+
+/// CHEAP, is_file()-only presence of the Parakeet ONNX asset set (encoder, decoder, joiner,
+/// tokens, and the shared onnxruntime dylib) — the STT counterpart of
+/// [`kokoro_onnx_files_present`]. Currently consumed only by `status.rs`'s Parakeet row (NOT
+/// by any spawn gate — Parakeet's absence is non-fatal to the warm child, see
+/// `tts::TtsManager::start_locked`'s doc).
+pub(crate) fn parakeet_onnx_files_present() -> bool {
+    let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
+    exists(ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE))
+        && exists(ds_model::model_path(ds_model::PARAKEET_DECODER_FILE))
+        && exists(ds_model::model_path(ds_model::PARAKEET_JOINER_FILE))
+        && exists(ds_model::model_path(ds_model::PARAKEET_TOKENS_FILE))
+        && exists(ds_model::onnxruntime_dylib_path())
+}
+
 /// Whether the Kokoro-TTS status row should read "present", per the ACTIVE backend
 /// (mirrors the Parakeet STT row). `files` is the ACTIVE backend's on-disk model gate —
 /// the downloaded Core ML sets (revision-pinned completion markers) on the apple-native
@@ -426,6 +451,14 @@ pub(crate) fn debug_enabled() -> bool {
     std::env::var("DONTSPEAK_DEBUG").as_deref() == Ok("1")
 }
 
+/// Serializes every `dontspeakd`-crate test (here and in `tts.rs`) that mutates the
+/// process-wide `DONTSPEAK_MODEL_DIR` / `SMKOKORO_DYLIB_PATH` / `ORT_DYLIB_PATH` env vars —
+/// mirrors `ds-model/src/spec.rs`'s own `ENV_LOCK` idiom (`spec.rs:326`). ONE shared lock, not
+/// a per-file one, so a `config_gate.rs` test and a `tts.rs` test touching the SAME var can't
+/// interleave (`dontspeakd`'s test binary runs multi-threaded by default).
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +491,83 @@ mod tests {
         // onnx providers: gated on the downloaded ONNX model+voices+runtime, shim irrelevant.
         assert!(kokoro_present_for(false, false, true));
         assert!(!kokoro_present_for(false, true, false));
+    }
+
+    #[test]
+    fn kokoro_onnx_files_present_needs_model_voices_and_dylib() {
+        // Hermetic: point `model_dir()` at a FRESH, EMPTY temp dir via `DONTSPEAK_MODEL_DIR`
+        // (the same override `ds_config::model_dir()` respects) so this never reads the real
+        // ambient OS model cache. `ORT_DYLIB_PATH` is checked BEFORE the `DONTSPEAK_MODEL_DIR`-
+        // honoring fallback (`ds_model::onnxruntime_dylib_path()`), so clear it too for a
+        // genuinely hermetic claim.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
+        let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path());
+            std::env::remove_var("ORT_DYLIB_PATH");
+        }
+        // Empty dir, no dylib override: definitely false. `&&` short-circuits on the first
+        // missing file, so this doesn't even need `ORT_DYLIB_PATH` set deliberately.
+        assert!(!kokoro_onnx_files_present());
+
+        std::fs::write(tmp.path().join(ds_model::KOKORO_ONNX_FILE), b"dummy").unwrap();
+        std::fs::write(tmp.path().join(ds_model::KOKORO_VOICES_FILE), b"dummy").unwrap();
+        let dylib = tmp.path().join("dummy-onnxruntime.dylib");
+        std::fs::write(&dylib, b"dummy").unwrap();
+        unsafe {
+            std::env::set_var("ORT_DYLIB_PATH", &dylib);
+        }
+        assert!(kokoro_onnx_files_present());
+
+        unsafe {
+            match prev_model_dir {
+                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
+                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
+            }
+            match prev_ort {
+                Some(v) => std::env::set_var("ORT_DYLIB_PATH", v),
+                None => std::env::remove_var("ORT_DYLIB_PATH"),
+            }
+        }
+    }
+
+    #[test]
+    fn parakeet_onnx_files_present_needs_all_four_plus_dylib() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
+        let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path());
+            std::env::remove_var("ORT_DYLIB_PATH");
+        }
+        assert!(!parakeet_onnx_files_present());
+
+        std::fs::write(tmp.path().join(ds_model::PARAKEET_ENCODER_FILE), b"dummy").unwrap();
+        std::fs::write(tmp.path().join(ds_model::PARAKEET_DECODER_FILE), b"dummy").unwrap();
+        std::fs::write(tmp.path().join(ds_model::PARAKEET_JOINER_FILE), b"dummy").unwrap();
+        std::fs::write(tmp.path().join(ds_model::PARAKEET_TOKENS_FILE), b"dummy").unwrap();
+        let dylib = tmp.path().join("dummy-onnxruntime.dylib");
+        std::fs::write(&dylib, b"dummy").unwrap();
+        unsafe {
+            std::env::set_var("ORT_DYLIB_PATH", &dylib);
+        }
+        assert!(parakeet_onnx_files_present());
+
+        unsafe {
+            match prev_model_dir {
+                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
+                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
+            }
+            match prev_ort {
+                Some(v) => std::env::set_var("ORT_DYLIB_PATH", v),
+                None => std::env::remove_var("ORT_DYLIB_PATH"),
+            }
+        }
     }
 
     #[test]

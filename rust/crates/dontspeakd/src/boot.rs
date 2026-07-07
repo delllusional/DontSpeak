@@ -268,6 +268,13 @@ pub fn engine_run(
     // engine — `helper_stt_provider` resolves to "cpu" even for Off/ClaudeCode, so it
     // can't gate this.
     tts.set_stt_wanted(helper_uses_stt(&cfg));
+    // Seed the TTS provider preference BEFORE the boot start below: the new model-presence
+    // gate in `start_locked` resolves ANE-vs-ONNX from `spawn_prefs.provider`, and without this
+    // the FIRST start would gate on `TtsManager::new`'s hardcoded "auto" default instead of the
+    // config's actually-resolved provider (`apply_provider_and_autofetch` below only applies it
+    // AFTER `set_enabled`). `set_provider` is a no-op beyond storing the preference while
+    // stopped — its restart logic only fires once a child is already running.
+    tts.set_provider(cfg.resolved_tts_provider().as_str());
     // Warm Kokoro only when TTS is on AND Kokoro is the engine (System uses `say`,
     // which needs no warm model). Blocks on the model load, but the RPC server
     // thread above is already serving.

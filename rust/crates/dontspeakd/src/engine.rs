@@ -760,6 +760,12 @@ impl<P: Platform + 'static> Engine<P> {
             tts.set_full_duplex_pref(full_duplex_wanted(cfg));
             tts.set_stt_provider_pref(helper_stt_provider(cfg));
             tts.set_stt_wanted(helper_uses_stt(cfg));
+            // See the identical seeding + rationale in `boot::engine_run`: without this the
+            // model-presence gate in `start_locked` would resolve ANE-vs-ONNX from a stale
+            // provider preference on the FIRST `set_enabled` below whenever this reload flips
+            // TTS on (`apply_provider_and_autofetch` only applies the resolved provider AFTER
+            // `daemon.reload` returns, in `boot.rs`'s `ReloadTick::Run` arm).
+            tts.set_provider(cfg.resolved_tts_provider().as_str());
         }
 
         // Warm helper lifecycle: it hosts BOTH engines now, so (re)gate it whenever
