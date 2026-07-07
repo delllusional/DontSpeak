@@ -146,6 +146,13 @@ extern "C" fn caps_value_callback(
     if context.is_null() || value.is_null() {
         return;
     }
+    // SAFETY: `value` is a live IOHIDValueRef for the duration of this manager callback
+    // (null-checked above), so the IOHIDValue/IOHIDElement getters meet their contracts
+    // (the element is null-checked before use too). `context` is the `Arc<AtomicBool>`
+    // leaked by `spawn_caps_hid_monitor`, alive until the monitor un-leaks it during
+    // teardown — which happens only after the manager is unscheduled/closed, i.e. after
+    // the last possible invocation of this callback. We only borrow it (an atomic store);
+    // ownership is never reconstructed here.
     unsafe {
         let element = IOHIDValueGetElement(value);
         if element.is_null() {
@@ -231,6 +238,14 @@ pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
     SHOULD_STOP.store(false, Ordering::SeqCst);
     let handle = std::thread::Builder::new()
         .name("ds-caps-hid".into())
+        // SAFETY: every IOKit/CF call in this thread meets its C contract: manager refs
+        // come from IOHIDManagerCreate (null-checked) and are scheduled, opened, and later
+        // unscheduled/closed/CFReleased on THIS thread's own run loop, each discarded or
+        // torn-down manager released exactly once; `ctx` is one leaked `Arc` clone whose
+        // pointee outlives every manager registration (un-leaked via `Arc::from_raw`
+        // exactly once, on the two exit paths, after callbacks can no longer fire);
+        // `kCFRunLoopDefaultMode` is a static CFString, and CFRunLoopGetCurrent/CFRunLoopRun
+        // take no pointers that could dangle.
         .spawn(move || unsafe {
             let run_loop = CFRunLoopGetCurrent();
             // Published immediately (before the retry loop, which can otherwise spin
@@ -359,6 +374,13 @@ pub fn stop_caps_hid_monitor() {
     SHOULD_STOP.store(true, Ordering::SeqCst);
     let rl = MONITOR_RUN_LOOP.load(Ordering::SeqCst);
     if rl != 0 {
+        // SAFETY: a non-zero `rl` was published by the monitor thread from its own
+        // CFRunLoopGetCurrent and is zeroed before that thread exits, and CFRunLoopStop is
+        // documented safe to call from another thread given a valid ref. NOTE: a monitor
+        // thread that observed SHOULD_STOP at its loop top can zero the slot and exit
+        // between our load above and this call, leaving `rl` stale for that narrow window
+        // (CFRunLoopGetCurrent's ref is unretained and dies with its thread); the join
+        // below serializes everything after this call, not the call itself.
         unsafe {
             CFRunLoopStop(rl as CFRunLoopRef);
         }

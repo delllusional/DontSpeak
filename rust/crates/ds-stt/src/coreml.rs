@@ -57,6 +57,9 @@ impl CoremlTranscriber {
         }
         self.ensure_lib()?;
         let lib = self.lib.as_ref().expect("lib opened above");
+        // SAFETY: `smk_asr_init` is looked up by NUL-terminated name from the app-signed
+        // shim and has exactly `AsrInitFn`'s signature (smkokoro.h); the Symbol borrows
+        // `lib`, and `dir` is a live CString across the blocking call.
         let rc = unsafe {
             let init: Symbol<AsrInitFn> = lib
                 .get(b"smk_asr_init\0")
@@ -96,10 +99,15 @@ impl CoremlTranscriber {
         }
         self.preload()?;
         let lib = self.lib.as_ref().expect("lib loaded above");
+        // SAFETY: `smk_transcribe` in the app-signed shim has exactly `TranscribeFn`'s
+        // signature (smkokoro.h); the returned Symbol borrows `lib`.
         let tr: Symbol<TranscribeFn> = unsafe { lib.get(b"smk_transcribe\0") }
             .map_err(|e| format!("smk_transcribe symbol: {e}"))?;
         // The shim borrows the transcript to our sink, which copies it out (no smk_free_str).
         // The call blocks; `pcm` lives across it.
+        // SAFETY: `pcm.as_ptr()`/`len()` describe a live buffer that outlives the blocking
+        // call, and `ctx`/`cb` are the borrowed-result pair `collect_str` supplies, fired
+        // synchronously per smkokoro.h's callback contract.
         ds_model::shim::collect_str(|ctx, cb| unsafe {
             tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
@@ -152,8 +160,14 @@ impl CoremlStreamer {
     }
 
     fn push(&self, sym: &[u8], pcm: &[f32]) -> Result<String, String> {
+        // SAFETY: `sym` is a NUL-terminated shim symbol name with exactly `StreamPushFn`'s
+        // signature per smkokoro.h (the one caller passes `smk_asr_stream_push`); the
+        // returned Symbol borrows `self.lib`.
         let f: Symbol<StreamPushFn> = unsafe { self.lib.get(sym) }
             .map_err(|e| format!("{} symbol: {e}", String::from_utf8_lossy(sym)))?;
+        // SAFETY: `pcm.as_ptr()`/`len()` describe a live buffer that outlives the blocking
+        // call, and `ctx`/`cb` are the borrowed-result pair `collect_str` supplies, fired
+        // synchronously per smkokoro.h's callback contract.
         ds_model::shim::collect_str(|ctx, cb| unsafe {
             f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
@@ -163,6 +177,10 @@ impl CoremlStreamer {
 
 impl StreamingStt for CoremlStreamer {
     fn reset(&mut self) -> Result<(), String> {
+        // SAFETY: `smk_asr_stream_start` is looked up by NUL-terminated name from the
+        // app-signed shim and has exactly `StreamStartFn`'s signature (smkokoro.h); the
+        // Symbol borrows `self.lib`, and `self.model_dir` is a live CString across the
+        // blocking call.
         let rc = unsafe {
             let f: Symbol<StreamStartFn> = self
                 .lib
@@ -188,9 +206,14 @@ impl StreamingStt for CoremlStreamer {
     }
 
     fn finalize(&mut self) -> Result<String, String> {
+        // SAFETY: `smk_asr_stream_finish` in the app-signed shim has exactly
+        // `StreamFinishFn`'s signature (smkokoro.h); the returned Symbol borrows `self.lib`.
         let f: Symbol<StreamFinishFn> = unsafe { self.lib.get(b"smk_asr_stream_finish\0") }
             .map_err(|e| format!("smk_asr_stream_finish symbol: {e}"))?;
         let (result, elapsed_ms) = timed(|| {
+            // SAFETY: `ctx`/`cb` are the borrowed-result pair `collect_str` supplies,
+            // fired synchronously per smkokoro.h's callback contract; the call takes no
+            // other pointers.
             ds_model::shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
                 .map_err(|rc| format!("smk_asr_stream_finish failed (rc={rc})"))
         });

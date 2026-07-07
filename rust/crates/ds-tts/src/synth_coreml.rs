@@ -42,6 +42,10 @@ impl KokoroCoremlTts {
         // Pass our DontSpeak-controlled Core ML cache dir (not "" → FluidAudio's scattered
         // default) so the Kokoro model downloads under our cache folder; compute_units 0 →
         // default ANE routing.
+        // SAFETY: `smk_init` is looked up by NUL-terminated name from the app-signed shim
+        // and has exactly `InitFn`'s signature (smkokoro.h); the Symbol borrows `me.lib`,
+        // so it can't outlive the dylib, and `dir` is a live CString across the blocking
+        // call.
         let rc = unsafe {
             let init: Symbol<InitFn> = me
                 .lib
@@ -116,6 +120,9 @@ impl KokoroCoremlTts {
     fn synthesize_one(&self, text: &str, voice: &str, speed: f32) -> Result<Vec<f32>, String> {
         let c_text = CString::new(text).map_err(|_| "text contains NUL".to_string())?;
         let c_voice = CString::new(voice).map_err(|_| "voice contains NUL".to_string())?;
+        // SAFETY: `smk_synthesize_text` in the app-signed shim has exactly `SynthFn`'s
+        // signature (smkokoro.h); the returned Symbol borrows `self.lib`, so it can't
+        // outlive the dylib.
         let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"smk_synthesize_text\0") }
             .map_err(|e| format!("smk_synthesize_text symbol: {e}"))?;
         // The shim BORROWS the PCM to our sink, which copies it into a `Vec<f32>` while the shim
@@ -123,6 +130,9 @@ impl KokoroCoremlTts {
         // guards here. The call blocks; `c_text`/`c_voice` live across it. The sample rate is
         // 24_000 for Kokoro (the pipeline assumes 24 kHz, so we don't resample); an empty/no-audio
         // result comes back as an empty Vec.
+        // SAFETY: `c_text`/`c_voice` are live NUL-terminated CStrings across the blocking
+        // call, and `ctx`/`cb` are the borrowed-result pair `collect_pcm` supplies (its
+        // own stack slot + sink, fired synchronously per smkokoro.h's callback contract).
         ds_model::shim::collect_pcm(|ctx, cb| unsafe {
             synth(c_text.as_ptr(), c_voice.as_ptr(), speed, ctx, cb)
         })

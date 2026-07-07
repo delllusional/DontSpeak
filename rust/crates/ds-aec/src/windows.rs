@@ -196,6 +196,10 @@ fn capture_thread(
     tx: mpsc::Sender<Result<u32, String>>,
     last_error: Arc<Mutex<Option<String>>>,
 ) {
+    // SAFETY: COM FFI confined to this dedicated capture thread — CoInitializeEx runs
+    // first, every COM object created below (via open_capture) lives and dies on this
+    // thread, and CoUninitialize only balances an init that returned S_OK/S_FALSE
+    // (`did_init`).
     unsafe {
         // MTA on this thread. S_OK/S_FALSE ⇒ we balance with CoUninitialize;
         // RPC_E_CHANGED_MODE (err) ⇒ COM already up elsewhere — proceed, don't uninit.
@@ -297,6 +301,8 @@ struct OpenedCapture {
 
 impl Drop for OpenedCapture {
     fn drop(&mut self) {
+        // SAFETY: `client` is a live COM interface owned by this struct, and `event` is
+        // the handle CreateEventW returned in open_capture — closed exactly once, here.
         unsafe {
             let _ = self.client.Stop();
             let _ = CloseHandle(self.event);
@@ -313,6 +319,11 @@ unsafe fn open_capture() -> Result<OpenedCapture, String> {
     // `&'static str` context so the returned closure owns no borrow (call sites pass
     // string literals).
     let map = |ctx: &'static str| move |e: windows::core::Error| format!("{ctx}: {e}");
+    // SAFETY: COM/WASAPI FFI on the caller's (COM-initialized) capture thread. `pwfx`
+    // is null-checked before the `&*pwfx` deref, reinterpreted as WAVEFORMATEXTENSIBLE
+    // only when wFormatTag says the buffer has that layout, and freed via CoTaskMemFree
+    // on every path once Initialize has copied it; `event` ownership moves into
+    // OpenedCapture, whose Drop closes it.
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(map("enumerator"))?;
@@ -406,6 +417,11 @@ unsafe fn run_capture_loop(
     stop: &Arc<AtomicBool>,
 ) -> Result<(), String> {
     let map = |ctx: &'static str| move |e: windows::core::Error| format!("{ctx}: {e}");
+    // SAFETY: WASAPI FFI against the live session in `opened` (COM initialized on this
+    // thread by capture_thread). GetBuffer's out-params are stack locals it fills
+    // before we read them, every GetBuffer is paired with a ReleaseBuffer, and `pdata`
+    // is dereferenced (in downmix) only when non-null, for exactly the `nframes` the
+    // driver reported.
     unsafe {
         let cap_limit = opened.rate as usize * CAPTURE_SECS;
         let mut acc: Vec<f32> = Vec::new();
@@ -463,6 +479,9 @@ unsafe fn downmix(
     let total = frames * channels;
     let inv = 1.0 / channels as f32;
     if is_float {
+        // SAFETY: the caller got `pdata` + `frames` from GetBuffer — a valid packet of
+        // `frames * channels` interleaved f32 samples (the negotiated format when
+        // `is_float`), alive until ReleaseBuffer runs after this returns.
         let s = unsafe { std::slice::from_raw_parts(pdata as *const f32, total) };
         for f in 0..frames {
             let base = f * channels;
@@ -473,6 +492,8 @@ unsafe fn downmix(
             out.push(sum * inv);
         }
     } else {
+        // SAFETY: as above, but the negotiated format is 16-bit PCM, so the packet
+        // holds `frames * channels` interleaved i16 samples.
         let s = unsafe { std::slice::from_raw_parts(pdata as *const i16, total) };
         for f in 0..frames {
             let base = f * channels;

@@ -19,6 +19,8 @@ pub(crate) fn coexist_probe() -> ! {
         Ok(d) => d,
         Err(e) => {
             eprintln!("coexist-probe: VPIO open failed: {e}");
+            // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+            // destructors is this crate's teardown convention (see main.rs's top comment).
             unsafe { _exit(1) }
         }
     };
@@ -26,6 +28,8 @@ pub(crate) fn coexist_probe() -> ! {
         Ok(c) => c,
         Err(e) => {
             eprintln!("coexist-probe: cpal Capture open FAILED alongside VPIO: {e}");
+            // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+            // destructors is this crate's teardown convention (see main.rs's top comment).
             unsafe { _exit(2) }
         }
     };
@@ -50,10 +54,14 @@ pub(crate) fn coexist_probe() -> ! {
             "got NOTHING (conflict)"
         }
     );
+    // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+    // destructors is this crate's teardown convention (see main.rs's top comment).
     unsafe { _exit(if cpal_total > 0 { 0 } else { 3 }) }
 }
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn coexist_probe() -> ! {
     eprintln!("coexist-probe: macOS-only");
+    // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+    // destructors is this crate's teardown convention (see main.rs's top comment).
     unsafe { _exit(1) }
 }

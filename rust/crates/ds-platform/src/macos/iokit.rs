@@ -123,6 +123,10 @@ unsafe fn role_is_text_input(role: CFTypeRef) -> bool {
         b"AXSearchField\0",
         b"AXSecureTextField\0",
     ];
+    // SAFETY: `role` is a live CFTypeRef for the duration of this call (caller contract —
+    // `focused_element_accepts_paste` holds its +1 ref across it); each `cf` is an owned
+    // (+1) CFString from `cfstr` (skipped when null) that is compared with CFEqual and
+    // then released exactly once, per the CF Create/Release rule.
     unsafe {
         for r in TEXT_ROLES {
             let cf = cfstr(r);
@@ -153,6 +157,10 @@ const KCF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 /// `CFRelease` it. Returns null on failure.
 unsafe fn cfstr(name: &[u8]) -> CFStringRef {
     debug_assert_eq!(name.last(), Some(&0), "cfstr name must be NUL-terminated");
+    // SAFETY: `name` is a NUL-terminated byte literal (debug-asserted, and every caller
+    // passes a `b"...\0"` constant), so CFStringCreateWithCString reads within its bounds;
+    // a null allocator selects the default CF allocator. The +1 result is the caller's to
+    // release (documented above).
     unsafe {
         CFStringCreateWithCString(
             std::ptr::null(),
@@ -180,6 +188,12 @@ unsafe fn cfstr(name: &[u8]) -> CFStringRef {
 /// target" here — the engine compensates by also treating a frontmost terminal as a paste
 /// target (see `Engine::tick`), so a terminal never shows a spurious "no target" glow.
 pub fn focused_element_accepts_paste() -> bool {
+    // SAFETY: every AX/CF call follows the CoreFoundation ownership rules: `sys`, the
+    // attribute CFStrings, and the Copy results are owned (+1) refs, each null-checked
+    // before use and CFReleased exactly once; the out-params (`focused`, `role`,
+    // `settable`) are live stack slots the callee writes during its call. The AX queries
+    // are synchronous, in-process, and have no main-thread affinity (see the caller,
+    // `MacOsPlatform::has_paste_target`).
     unsafe {
         let sys = AXUIElementCreateSystemWide();
         if sys.is_null() {
@@ -245,11 +259,19 @@ pub struct CapsReader {
     service: IoService,
 }
 
-// The connection is only touched from the engine's single poll thread.
+// SAFETY: `CapsReader` wraps two plain integer mach-port handles (IoConnect/IoService)
+// that IOKit does not bind to the opening thread, and the connection is only touched from
+// the engine's single poll thread — so moving the owner across threads is sound.
 unsafe impl Send for CapsReader {}
 
 impl CapsReader {
     pub fn open() -> Option<Self> {
+        // SAFETY: plain IOKit C calls with checked results — the class name is a
+        // NUL-terminated literal; `matching`'s ownership passes INTO
+        // IOServiceGetMatchingService (reference transfer, see the comment below);
+        // `connect` is a live stack out-param written during IOServiceOpen;
+        // `mach_task_self_` is this process's own task port; and `service` is released
+        // on the failure path here (`Drop` releases both handles on the success path).
         unsafe {
             let matching = IOServiceMatching(IOHID_SYSTEM_CLASS.as_ptr() as *const c_char);
             if matching.is_null() {
@@ -285,6 +307,9 @@ impl CapsReader {
     /// PHYSICAL LED is driven directly in `super::led::CapsLed`. Best-effort (ignores
     /// the KernReturn).
     pub fn set_caps_lock(&self, on: bool) {
+        // SAFETY: `self.connect` is the param connection `open()` established and still
+        // owns (closed only in `Drop`), and IOHIDSetModifierLockState takes only plain
+        // integer arguments.
         unsafe {
             let _ = IOHIDSetModifierLockState(self.connect, KIO_HID_CAPS_LOCK_STATE, on as Boolean);
         }
@@ -293,6 +318,9 @@ impl CapsReader {
 
 impl Drop for CapsReader {
     fn drop(&mut self) {
+        // SAFETY: `connect`/`service` are the handles `open()` established; each is
+        // closed/released at most once (zeroed right after), matching IOServiceOpen's and
+        // IOServiceGetMatchingService's ownership rules.
         unsafe {
             if self.connect != 0 {
                 IOServiceClose(self.connect);
@@ -308,6 +336,8 @@ impl Drop for CapsReader {
 
 /// `AXIsProcessTrusted()` — read-only Accessibility trust check (no prompt).
 pub fn ax_is_process_trusted() -> bool {
+    // SAFETY: AXIsProcessTrusted takes no arguments and only reads this process's own
+    // Accessibility-trust state.
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
@@ -328,6 +358,11 @@ struct CfDictionaryCallBacks {
 /// Call this ONCE at startup. The hot re-probe loop must keep using the silent
 /// [`ax_is_process_trusted`] so it neither re-prompts nor stalls.
 pub fn ax_prompt_for_trust() -> bool {
+    // SAFETY: `keys`/`vals` are live one-element stack arrays of well-known CF constants
+    // that CFDictionaryCreate copies out during the call, using the standard CF type
+    // callbacks (we only take their addresses; CF reads them); the resulting +1 dict is
+    // released exactly once after AXIsProcessTrustedWithOptions — which tolerates a null
+    // options dict — returns.
     unsafe {
         let keys = [kAXTrustedCheckOptionPrompt];
         let vals = [kCFBooleanTrue];

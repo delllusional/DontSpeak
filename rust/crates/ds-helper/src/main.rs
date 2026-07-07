@@ -69,6 +69,9 @@ fn main() {
         // hardcodes or drifts from them. `what` = "models" | "cuda" | a per-model token;
         // the no-arg "all" default (not a DownloadTarget) ⇒ models + CUDA in run_prefetch.
         let what = args.next().unwrap_or_else(|| "all".to_string());
+        // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+        // destructors is deliberate (see this file's top comment — ort/cpal abort on
+        // teardown).
         unsafe { _exit(setup::run_prefetch(&what)) };
     }
 
@@ -95,6 +98,8 @@ fn main() {
                 1
             }
         };
+        // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+        // destructors is deliberate (see this file's top comment).
         unsafe { _exit(code) };
     }
 
@@ -105,6 +110,8 @@ fn main() {
         let dir = args.next().unwrap_or_default();
         let what = args.next().unwrap_or_else(|| "all".to_string());
         ds_model::set_prefetch_source(Some(std::path::PathBuf::from(dir)));
+        // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+        // destructors is deliberate (see this file's top comment).
         unsafe { _exit(setup::run_prefetch(&what)) };
     }
 
@@ -121,6 +128,8 @@ fn main() {
     let rate: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0_f32);
 
     if text.trim().is_empty() {
+        // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+        // destructors is deliberate (see this file's top comment).
         unsafe { _exit(0) };
     }
 
@@ -134,5 +143,7 @@ fn main() {
             1
         }
     };
+    // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+    // destructors is deliberate (see this file's top comment).
     unsafe { _exit(code) };
 }

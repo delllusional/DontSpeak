@@ -155,10 +155,15 @@ impl SystemTranscriber {
         }
         self.ensure_lib()?;
         let lib = self.lib.as_ref().expect("lib opened above");
+        // SAFETY: `smk_sys_transcribe` in the app-signed shim has exactly
+        // `SysTranscribeFn`'s signature (smkokoro.h); the returned Symbol borrows `lib`.
         let tr: Symbol<SysTranscribeFn> = unsafe { lib.get(b"smk_sys_transcribe\0") }
             .map_err(|e| format!("smk_sys_transcribe symbol: {e}"))?;
         // The shim borrows the transcript to our sink, which copies it out (no smk_free_str).
         // The call blocks; `pcm` lives across it.
+        // SAFETY: `pcm.as_ptr()`/`len()` describe a live buffer that outlives the blocking
+        // call, and `ctx`/`cb` are the borrowed-result pair `collect_str` supplies, fired
+        // synchronously per smkokoro.h's callback contract.
         ds_model::shim::collect_str(|ctx, cb| unsafe {
             tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
@@ -201,11 +206,16 @@ impl SystemStreamer {
     }
 
     fn push(&self, pcm: &[f32]) -> Result<String, String> {
+        // SAFETY: `smk_sys_stream_push` in the app-signed shim has exactly
+        // `SysStreamPushFn`'s signature (smkokoro.h); the returned Symbol borrows `self.lib`.
         let f: Symbol<SysStreamPushFn> = unsafe { self.lib.get(b"smk_sys_stream_push\0") }
             .map_err(|e| format!("smk_sys_stream_push symbol: {e}"))?;
         // Mirrors `SystemTranscriber::transcribe_pcm_16k`'s borrowed-callback pattern for the
         // batch symbol: the shim copies the transcript out during the call, so there's no
         // out-param and no `smk_free_str`.
+        // SAFETY: `pcm.as_ptr()`/`len()` describe a live buffer that outlives the blocking
+        // call, and `ctx`/`cb` are the borrowed-result pair `collect_str` supplies, fired
+        // synchronously per smkokoro.h's callback contract.
         ds_model::shim::collect_str(|ctx, cb| unsafe {
             f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
@@ -215,6 +225,9 @@ impl SystemStreamer {
 
 impl StreamingStt for SystemStreamer {
     fn reset(&mut self) -> Result<(), String> {
+        // SAFETY: `smk_sys_stream_start` is looked up by NUL-terminated name from the
+        // app-signed shim and has exactly `SysStreamStartFn`'s signature (smkokoro.h — no
+        // arguments); the Symbol borrows `self.lib`.
         let rc = unsafe {
             let f: Symbol<SysStreamStartFn> = self
                 .lib
@@ -239,9 +252,15 @@ impl StreamingStt for SystemStreamer {
     }
 
     fn finalize(&mut self) -> Result<String, String> {
+        // SAFETY: `smk_sys_stream_finish` in the app-signed shim has exactly
+        // `SysStreamFinishFn`'s signature (smkokoro.h); the returned Symbol borrows
+        // `self.lib`.
         let f: Symbol<SysStreamFinishFn> = unsafe { self.lib.get(b"smk_sys_stream_finish\0") }
             .map_err(|e| format!("smk_sys_stream_finish symbol: {e}"))?;
         let (result, elapsed_ms) = timed(|| {
+            // SAFETY: `ctx`/`cb` are the borrowed-result pair `collect_str` supplies,
+            // fired synchronously per smkokoro.h's callback contract; the call takes no
+            // other pointers.
             ds_model::shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
                 .map_err(|rc| format!("smk_sys_stream_finish failed (rc={rc})"))
         });

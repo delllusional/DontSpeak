@@ -127,6 +127,9 @@ fn cstr_or(p: *const c_char, default: &str) -> String {
     if p.is_null() {
         return default.to_string();
     }
+    // SAFETY: `p` is non-null (checked above); per this C ABI's contract the caller
+    // passes a NUL-terminated string that stays valid for the call, and the borrowed
+    // CStr is copied into an owned String before returning.
     unsafe { std::ffi::CStr::from_ptr(p) }
         .to_str()
         .unwrap_or(default)
@@ -503,6 +506,9 @@ pub extern "C" fn ds_set_provider(provider: *const c_char) -> u8 {
 pub extern "C" fn ds_string_free(s: *mut c_char) {
     guard_val((), || {
         if !s.is_null() {
+            // SAFETY: per `ds_string_free`'s contract, `s` is a pointer previously
+            // returned by `to_cstring` (CString::into_raw) and not yet freed — from_raw
+            // reclaims that exact allocation exactly once; NULL was screened out above.
             unsafe { drop(CString::from_raw(s)) };
         }
     });
@@ -529,6 +535,9 @@ mod tests {
         });
 
         let ptr = ds_update_check_json_at(&server.base_url());
+        // SAFETY: `ptr` was just returned by ds_update_check_json_at, which always
+        // yields a non-null, NUL-terminated C string (guard_str/to_cstring); it is
+        // freed only after this read, via ds_string_free below.
         let json = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_str()
             .unwrap()
@@ -552,6 +561,9 @@ mod tests {
         });
 
         let ptr = ds_update_check_json_at(&server.base_url());
+        // SAFETY: `ptr` was just returned by ds_update_check_json_at, which always
+        // yields a non-null, NUL-terminated C string (guard_str/to_cstring); it is
+        // freed only after this read, via ds_string_free below.
         let json = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_str()
             .unwrap()
@@ -568,6 +580,9 @@ mod tests {
     #[test]
     fn ds_tools_json_enriches_every_param_with_detail() {
         let ptr = ds_tools_json();
+        // SAFETY: `ptr` was just returned by ds_tools_json, which always yields a
+        // non-null, NUL-terminated C string (guard_str/to_cstring); it is freed only
+        // after this read, via ds_string_free below.
         let json = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_str()
             .unwrap()

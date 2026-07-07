@@ -283,6 +283,10 @@ fn preload_cuda_libs(dir: &std::path::Path) {
                 };
                 // RTLD_NOW so a success means every dep resolved; RTLD_GLOBAL so the symbols are
                 // visible to the provider plugin ORT loads later.
+                //
+                // SAFETY: `c` is a valid NUL-terminated CString alive across the call;
+                // the returned handle is deliberately never dlclose'd — the point is
+                // keeping the RTLD_GLOBAL symbols resident for ORT's later dlopen.
                 let h = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
                 h.is_null() // keep (retry next pass) if it failed
             });
@@ -633,10 +637,14 @@ pub fn is_cuda_driver_present() -> bool {
         // dlopen the driver lib through the loader's normal search path; a non-null handle ⇒ the
         // NVIDIA driver is installed. Close it again — this is only a presence probe.
         let name = c"libcuda.so.1";
+        // SAFETY: dlopen gets a NUL-terminated `&CStr` literal; the returned handle is
+        // null-checked before use.
         let h = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
         if h.is_null() {
             false
         } else {
+            // SAFETY: `h` was just returned non-null by dlopen; dlclose releases that
+            // same handle exactly once.
             unsafe { libc::dlclose(h) };
             true
         }
@@ -649,8 +657,13 @@ pub fn is_cuda_driver_present() -> bool {
         // LoadLibraryW("nvcuda.dll") through the OS's standard DLL search order (NO hardcoded
         // path) — a successful load ⇒ the NVIDIA driver is installed. Free it again: this is a
         // live presence probe, evaluated each time, never cached at a stale moment.
+        // SAFETY: LoadLibraryW gets a static NUL-terminated wide literal (`w!`) and
+        // returns an owned module handle; nvcuda.dll is the system's NVIDIA driver stub,
+        // loaded here only as a presence probe and freed right below.
         match unsafe { LoadLibraryW(w!("nvcuda.dll")) } {
             Ok(h) => {
+                // SAFETY: `h` is the live module handle LoadLibraryW just returned Ok;
+                // freed exactly once.
                 let _ = unsafe { FreeLibrary(h) };
                 true
             }

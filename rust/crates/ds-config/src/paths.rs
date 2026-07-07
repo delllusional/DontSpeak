@@ -382,6 +382,7 @@ mod tests {
         unsafe { std::env::remove_var("DONTSPEAK_MODEL_DIR") };
         let dir = model_dir().expect("cache dir resolves");
         assert!(dir.ends_with("models"), "expected .../models, got {dir:?}");
+        // SAFETY: restore the prior value (or clear it) so later tests see the real env again.
         unsafe {
             match prev {
                 Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),

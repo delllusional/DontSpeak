@@ -222,6 +222,9 @@ mod coreml_impl {
             }
             self.ensure_lib()?;
             let lib = self.lib.as_ref().expect("lib opened above");
+            // SAFETY: `smk_diar_init` is looked up by NUL-terminated name from the
+            // app-signed shim and has exactly `DiarInitFn`'s signature (smkokoro.h); the
+            // Symbol borrows `lib`, and `dir` is a live CString across the blocking call.
             let rc = unsafe {
                 let init: Symbol<DiarInitFn> = lib
                     .get(b"smk_diar_init\0")
@@ -243,10 +246,15 @@ mod coreml_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
+            // SAFETY: `smk_diarize` in the app-signed shim has exactly `DiarizeFn`'s
+            // signature (smkokoro.h); the returned Symbol borrows `lib`.
             let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"smk_diarize\0") }
                 .map_err(|e| format!("smk_diarize symbol: {e}"))?;
             // The shim borrows the JSON to our sink, which copies it out (no smk_free_str).
             // The call blocks; `pcm` lives across it.
+            // SAFETY: `pcm.as_ptr()`/`len()` describe a live buffer that outlives the
+            // blocking call, and `ctx`/`cb` are the borrowed-result pair `collect_str`
+            // supplies, fired synchronously per smkokoro.h's callback contract.
             let json = ds_model::shim::collect_str(|ctx, cb| unsafe {
                 dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
@@ -260,10 +268,15 @@ mod coreml_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
+            // SAFETY: `smk_diar_embed` in the app-signed shim has exactly `EmbedFn`'s
+            // signature (smkokoro.h); the returned Symbol borrows `lib`.
             let ex: Symbol<EmbedFn> = unsafe { lib.get(b"smk_diar_embed\0") }
                 .map_err(|e| format!("smk_diar_embed symbol: {e}"))?;
             // The shim borrows the embedding to our sink, which copies it out (no smk_free).
             // The call blocks; `pcm` lives across it.
+            // SAFETY: `pcm.as_ptr()`/`len()` describe a live buffer that outlives the
+            // blocking call, and `ctx`/`cb` are the borrowed-result pair `collect_pcm`
+            // supplies, fired synchronously per smkokoro.h's callback contract.
             let emb = ds_model::shim::collect_pcm(|ctx, cb| unsafe {
                 ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
@@ -277,6 +290,9 @@ mod coreml_impl {
         fn download(&mut self) -> Result<(), String> {
             self.ensure_lib()?;
             let lib = self.lib.as_ref().expect("lib opened above");
+            // SAFETY: `smk_diar_download` is looked up by NUL-terminated name from the
+            // app-signed shim and has exactly `DownloadFn`'s signature (smkokoro.h — no
+            // arguments); the Symbol borrows `lib`.
             let rc = unsafe {
                 let dl: Symbol<DownloadFn> = lib
                     .get(b"smk_diar_download\0")

@@ -23,6 +23,8 @@ pub(crate) fn elevate_process() {
         use windows::Win32::System::Threading::{
             ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, SetPriorityClass,
         };
+        // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no close, and
+        // SetPriorityClass on it only adjusts our own process's priority class.
         unsafe {
             let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
         }
@@ -43,6 +45,9 @@ pub(crate) fn elevate_current_thread() {
     {
         use windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
         let mut task_index: u32 = 0;
+        // SAFETY: `task_index` is a live stack out-param for the duration of the call
+        // and the task name is a static wide literal (`w!`); the returned MMCSS handle
+        // is intentionally leaked (see below).
         unsafe {
             // Leaked HANDLE is intentional: this thread lives for the process's
             // lifetime, which ends via `_exit()` (skips destructors) — reverting
@@ -52,6 +57,9 @@ pub(crate) fn elevate_current_thread() {
     }
     #[cfg(target_os = "macos")]
     {
+        // SAFETY: pthread_set_qos_class_self_np adjusts only the CALLING thread's QoS
+        // class; QOS_CLASS_USER_INTERACTIVE with relative priority 0 is a valid argument
+        // pair, and the call touches no caller-owned memory.
         unsafe {
             let _ = libc::pthread_set_qos_class_self_np(
                 libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,

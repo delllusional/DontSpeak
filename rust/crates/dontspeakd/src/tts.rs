@@ -2545,6 +2545,8 @@ mod status_gate_tests {
         let prev_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
         let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
         let prev_smk = std::env::var_os("SMKOKORO_DYLIB_PATH");
+        // SAFETY: test-only env mutation; the caller holds `config_gate::ENV_LOCK` (see
+        // this fn's doc) and restores the returned previous values.
         unsafe {
             std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path());
             std::env::remove_var("ORT_DYLIB_PATH");
@@ -2558,6 +2560,8 @@ mod status_gate_tests {
         prev_ort: Option<std::ffi::OsString>,
         prev_smk: Option<std::ffi::OsString>,
     ) {
+        // SAFETY: restore the prior values (or clear them) so later tests see the real
+        // env again; the caller still holds `config_gate::ENV_LOCK`.
         unsafe {
             match prev_model_dir {
                 Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
@@ -2623,6 +2627,8 @@ mod status_gate_tests {
         std::fs::write(tmp.path().join(ds_model::KOKORO_VOICES_FILE), b"dummy").unwrap();
         let dylib = tmp.path().join("dummy-onnxruntime.dylib");
         std::fs::write(&dylib, b"dummy").unwrap();
+        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above), restored
+        // below via restore_kokoro_env.
         unsafe {
             std::env::set_var("ORT_DYLIB_PATH", &dylib);
         }

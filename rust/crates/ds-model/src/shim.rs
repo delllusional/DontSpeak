@@ -32,19 +32,31 @@ pub type PcmCb = unsafe extern "C" fn(*mut c_void, *const f32, usize, i32);
 pub type StrCb = unsafe extern "C" fn(*mut c_void, *const c_char);
 
 unsafe extern "C" fn pcm_sink(ctx: *mut c_void, ptr: *const f32, len: usize, _rate: i32) {
+    // SAFETY: `ctx` is the `&mut Option<Vec<f32>>` stack slot `collect_pcm` threaded through
+    // the shim call, which fires this callback once, synchronously, on the same thread
+    // before returning — so the slot is live and nothing else aliases it during this call.
     let slot = unsafe { &mut *(ctx as *mut Option<Vec<f32>>) };
     *slot = Some(if ptr.is_null() || len == 0 {
         Vec::new()
     } else {
+        // SAFETY: per the borrowed-result contract (smkokoro.h), a non-null `ptr` points to
+        // `len` valid f32s owned by the shim for the duration of this callback; `.to_vec()`
+        // copies them out before we return.
         unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
     });
 }
 
 unsafe extern "C" fn str_sink(ctx: *mut c_void, ptr: *const c_char) {
+    // SAFETY: `ctx` is the `&mut Option<String>` stack slot `collect_str` threaded through
+    // the shim call, which fires this callback once, synchronously, on the same thread
+    // before returning — so the slot is live and nothing else aliases it during this call.
     let slot = unsafe { &mut *(ctx as *mut Option<String>) };
     *slot = Some(if ptr.is_null() {
         String::new()
     } else {
+        // SAFETY: per the borrowed-result contract (smkokoro.h), a non-null `ptr` is a
+        // NUL-terminated C string owned by the shim for the duration of this callback;
+        // `to_string_lossy().into_owned()` copies it out before we return.
         unsafe { CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned()

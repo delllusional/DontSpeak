@@ -167,6 +167,10 @@ mod macos {
         let a = prop_addr(kAudioHardwarePropertyDefaultInputDevice);
         let mut id: u32 = 0;
         let mut size = std::mem::size_of::<u32>() as u32;
+        // SAFETY: CoreAudio property read on the system object — live stack property
+        // address, null in-qualifier (size 0), and `size`/`id` are live stack u32s with
+        // `size` initialized to 4, so the API writes at most 4 bytes into `id` during the
+        // call. Addresses of stack locals are never null.
         let rc = unsafe {
             AudioObjectGetPropertyData(
                 SYS,
@@ -208,6 +212,11 @@ mod macos {
         _addrs: NonNull<AudioObjectPropertyAddress>,
         ctx: *mut c_void,
     ) -> i32 {
+        // SAFETY: `ctx` is the heap-stable `Ctx` that `Listener::start` registered with
+        // this listener; it is never freed (see `Listener`'s drop, which intentionally
+        // leaks it precisely so an in-flight callback like this one can't dangle), and all
+        // its fields are Sync (atomics + Arc), so a shared borrow from a CoreAudio thread
+        // is sound.
         unsafe { &*(ctx as *const Ctx) }.recompute();
         0
     }
@@ -220,11 +229,18 @@ mod macos {
         _addrs: NonNull<AudioObjectPropertyAddress>,
         ctx: *mut c_void,
     ) -> i32 {
+        // SAFETY: same as `running_cb` — `ctx` is the heap-stable, intentionally-leaked
+        // `Ctx` registered at start; its fields are Sync, so this shared borrow is sound.
         let ctx_ref = unsafe { &*(ctx as *const Ctx) };
         let new_dev = default_input_device();
         let old_dev = ctx_ref.dev.swap(new_dev, Ordering::Relaxed);
         if new_dev != old_dev {
             let run = prop_addr(kAudioDevicePropertyDeviceIsRunningSomewhere);
+            // SAFETY: Add/RemovePropertyListener are called with a live device id, a live
+            // stack property address (read during the call), our own `extern "C-unwind"`
+            // callback, and the same heap-stable `ctx` the registration contract requires;
+            // the removal names the exact object/address/callback/ctx quadruple a prior
+            // Add registered on `old_dev`.
             unsafe {
                 if old_dev != 0 {
                     AudioObjectRemovePropertyListener(
@@ -252,9 +268,13 @@ mod macos {
         ctx: *mut Ctx,
     }
 
-    // The raw ptr is used only to detach on drop; all concurrent access is owned by the
-    // CoreAudio callbacks via atomics. Safe to move the handle across threads.
+    // SAFETY: the raw `ctx` ptr is dereferenced only to detach on drop (`&mut self`); all
+    // concurrent access to the pointee is done by the CoreAudio callbacks through its Sync
+    // fields (atomics + Arc), so moving the handle to another thread is sound.
     unsafe impl Send for Listener {}
+    // SAFETY: `Listener` exposes no `&self` method that touches the pointee (the only
+    // dereferences are in `drop`, which takes `&mut self`), and the pointee's fields are
+    // all Sync — shared references across threads can't race.
     unsafe impl Sync for Listener {}
 
     impl Listener {
@@ -269,6 +289,11 @@ mod macos {
 
             let dev_addr = prop_addr(kAudioHardwarePropertyDefaultInputDevice);
             // Always watch default-device changes on the system object.
+            // SAFETY: AddPropertyListener on the system object with a live stack property
+            // address (copied during the call), our own `extern "C-unwind"` callback, and
+            // the heap allocation behind `ctx` (created just above), which stays valid for
+            // the whole registration — it is only freed on the rc != 0 path below, where
+            // this registration never took effect.
             let rc_dev = unsafe {
                 AudioObjectAddPropertyListener(
                     SYS,
@@ -279,6 +304,9 @@ mod macos {
             };
             if rc_dev != 0 {
                 // Couldn't even attach the device-change listener → free ctx, use poll.
+                // SAFETY: `ctx` came from `Box::into_raw` above and no registration
+                // succeeded, so no callback can ever receive it — reclaiming the Box here
+                // is its unique owner freeing it exactly once.
                 drop(unsafe { Box::from_raw(ctx) });
                 return Err(());
             }
@@ -286,6 +314,10 @@ mod macos {
             // no run events until one appears, which the device-change path then arms).
             if dev != 0 {
                 let run_addr = prop_addr(kAudioDevicePropertyDeviceIsRunningSomewhere);
+                // SAFETY: same contract as the device-change registration above — a live
+                // device id, live stack property address, our callback, and the same
+                // heap-stable `ctx`, which now lives until process end (see the
+                // intentional leak in `Listener`'s drop).
                 unsafe {
                     AudioObjectAddPropertyListener(
                         dev,
@@ -296,6 +328,9 @@ mod macos {
                 }
             }
             // Seed the cached state from a live read now that the listeners are armed.
+            // SAFETY: `ctx` is the live heap allocation created above and is never freed
+            // from here on (see `Listener`'s drop); its fields are Sync, so this shared
+            // borrow can't race the already-armed callbacks.
             unsafe { &*ctx }.recompute();
             Ok(Listener { ctx })
         }
@@ -306,7 +341,14 @@ mod macos {
             let dev_addr = prop_addr(kAudioHardwarePropertyDefaultInputDevice);
             let run_addr = prop_addr(kAudioDevicePropertyDeviceIsRunningSomewhere);
             let ctx_void = self.ctx as *mut c_void;
+            // SAFETY: `self.ctx` is the heap-stable `Ctx` from `start`, never freed (see
+            // the intentional-leak note below), and `dev` is an atomic field — a shared
+            // borrow here can't race the still-armed callbacks.
             let dev = unsafe { &*self.ctx }.dev.load(Ordering::Relaxed);
+            // SAFETY: each RemovePropertyListener names the exact object/address/callback/
+            // ctx quadruple a matching Add registered (the system object in `start`; `dev`
+            // by `start` or the last `device_cb` re-arm), with live stack addresses read
+            // during the call — so every removal balances a live registration.
             unsafe {
                 AudioObjectRemovePropertyListener(
                     SYS,

@@ -229,6 +229,7 @@ mod candidate_sources_tests {
     #[test]
     fn no_override_falls_back_to_both_defaults_in_order() {
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above).
         unsafe { std::env::remove_var(VAR) };
         assert_eq!(
             candidate_sources(),
@@ -239,8 +240,11 @@ mod candidate_sources_tests {
     #[test]
     fn explicit_override_is_tried_first_then_both_defaults() {
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above); removed
+        // again below.
         unsafe { std::env::set_var(VAR, "my-custom-source") };
         let got = candidate_sources();
+        // SAFETY: still under ENV_LOCK; clears the var this test set above.
         unsafe { std::env::remove_var(VAR) };
         assert_eq!(
             got,
@@ -255,8 +259,11 @@ mod candidate_sources_tests {
     #[test]
     fn empty_override_is_guarded_out_not_tried_as_a_source_name() {
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above); removed
+        // again below.
         unsafe { std::env::set_var(VAR, "") };
         let got = candidate_sources();
+        // SAFETY: still under ENV_LOCK; clears the var this test set above.
         unsafe { std::env::remove_var(VAR) };
         // The empty string must NOT appear as a (bogus) first candidate — same
         // fallback list as if the var were unset entirely.

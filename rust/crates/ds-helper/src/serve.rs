@@ -312,6 +312,9 @@ pub(crate) fn serve() -> ! {
         Err(e) => {
             println!("{} {e}", proto::ERR);
             let _ = std::io::stdout().flush();
+            // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+            // destructors is this crate's teardown convention (see main.rs's top
+            // comment — ort/cpal abort on teardown).
             unsafe { _exit(1) };
         }
     };
@@ -411,6 +414,9 @@ pub(crate) fn serve() -> ! {
             Err(e) => {
                 println!("{} audio: {e}", proto::ERR);
                 let _ = std::io::stdout().flush();
+                // SAFETY: `_exit` takes only an exit code and never returns; skipping
+                // Rust destructors is this crate's teardown convention (see main.rs's
+                // top comment).
                 unsafe { _exit(1) };
             }
         }
@@ -841,6 +847,9 @@ pub(crate) fn serve() -> ! {
                 Job::LoadStt
             } else {
                 drop(s);
+                // SAFETY: `_exit` takes only an exit code and never returns; skipping
+                // Rust destructors is this crate's teardown convention (see main.rs's
+                // top comment).
                 unsafe { _exit(0) };
             }
         };

@@ -39,6 +39,9 @@ impl SystemTts {
 #[cfg(unix)]
 pub(crate) fn set_new_pgroup(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
+    // SAFETY: the pre_exec closure runs in the forked child before exec; setsid is
+    // async-signal-safe, and the closure captures nothing, allocates nothing, and takes
+    // no locks — meeting pre_exec's contract.
     unsafe {
         cmd.pre_exec(|| {
             nix::unistd::setsid()

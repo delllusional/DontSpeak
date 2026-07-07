@@ -505,6 +505,8 @@ mod tests {
         let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
 
         let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above), restored
+        // below before returning.
         unsafe {
             std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path());
             std::env::remove_var("ORT_DYLIB_PATH");
@@ -517,11 +519,15 @@ mod tests {
         std::fs::write(tmp.path().join(ds_model::KOKORO_VOICES_FILE), b"dummy").unwrap();
         let dylib = tmp.path().join("dummy-onnxruntime.dylib");
         std::fs::write(&dylib, b"dummy").unwrap();
+        // SAFETY: test-only env mutation, still serialized by ENV_LOCK (held for the
+        // whole test), restored below.
         unsafe {
             std::env::set_var("ORT_DYLIB_PATH", &dylib);
         }
         assert!(kokoro_onnx_files_present());
 
+        // SAFETY: restore the prior values (or clear them) so later tests see the real
+        // env again.
         unsafe {
             match prev_model_dir {
                 Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
@@ -541,6 +547,8 @@ mod tests {
         let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
 
         let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above), restored
+        // below before returning.
         unsafe {
             std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path());
             std::env::remove_var("ORT_DYLIB_PATH");
@@ -553,11 +561,15 @@ mod tests {
         std::fs::write(tmp.path().join(ds_model::PARAKEET_TOKENS_FILE), b"dummy").unwrap();
         let dylib = tmp.path().join("dummy-onnxruntime.dylib");
         std::fs::write(&dylib, b"dummy").unwrap();
+        // SAFETY: test-only env mutation, still serialized by ENV_LOCK (held for the
+        // whole test), restored below.
         unsafe {
             std::env::set_var("ORT_DYLIB_PATH", &dylib);
         }
         assert!(parakeet_onnx_files_present());
 
+        // SAFETY: restore the prior values (or clear them) so later tests see the real
+        // env again.
         unsafe {
             match prev_model_dir {
                 Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),

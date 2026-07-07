@@ -135,6 +135,8 @@ mod imp {
     };
 
     pub fn group_alive(pid: i32) -> bool {
+        // SAFETY: OpenProcess/CloseHandle take no pointers; the handle is closed in the
+        // same arm that received it, before we return.
         unsafe {
             match OpenProcess(PROCESS_TERMINATE, false, pid as u32) {
                 Ok(h) if !h.is_invalid() => {
@@ -147,6 +149,8 @@ mod imp {
     }
 
     pub fn kill_group(pid: i32) {
+        // SAFETY: `h` is used only after OpenProcess returns it Ok and non-invalid, with
+        // the PROCESS_TERMINATE right TerminateProcess needs; it is closed exactly once.
         unsafe {
             if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid as u32)
                 && !h.is_invalid()
@@ -166,6 +170,9 @@ mod imp {
     /// PROCESS_TERMINATE and reads access-denied as DEAD — wrong for a liveness probe.
     pub fn pid_alive(pid: i32) -> bool {
         const STILL_ACTIVE: u32 = 259;
+        // SAFETY: `code` is a stack local that outlives the GetExitCodeProcess call
+        // writing it; `h` is closed exactly once in the arm that received it;
+        // GetLastError reads only thread-local state.
         unsafe {
             match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid as u32) {
                 Ok(h) if !h.is_invalid() => {

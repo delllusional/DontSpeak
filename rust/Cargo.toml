@@ -44,6 +44,10 @@ publish = false
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+# Every unsafe block/impl carries a `// SAFETY:` comment (CI's -D warnings promotes this;
+# macOS-cfg blocks are outside the Linux/Windows clippy runs — covered by the manual audit
+# plus an advisory clippy run on the macOS host next time that code is touched).
+undocumented_unsafe_blocks = "warn"
 
 # Shared dependency versions pinned once; crates opt in via `workspace = true`.
 [workspace.dependencies]

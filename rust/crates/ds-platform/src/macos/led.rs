@@ -94,8 +94,9 @@ pub struct CapsLed {
     manager: IoHidManagerRef,
 }
 
-// Touched only from the engine's single poll thread — same contract as
-// `iokit::CapsReader` (whose connection carries the identical `unsafe impl Send`).
+// SAFETY: `CapsLed` wraps only the IOHIDManagerRef it owns, and HID Manager calls are not
+// bound to the creating thread; it is touched only from the engine's single poll thread —
+// same contract as `iokit::CapsReader` (whose connection carries the identical Send impl).
 unsafe impl Send for CapsLed {}
 
 /// Why [`CapsLed::try_open`] returns this instead of a bare `Option`: `RetryingCapsLed`
@@ -112,6 +113,10 @@ enum OpenFailure {
 impl CapsLed {
     /// Create + open the manager, distinguishing WHY it failed (see [`OpenFailure`]).
     fn try_open() -> Result<Self, OpenFailure> {
+        // SAFETY: IOHIDManagerCreate's result is null-checked before use;
+        // SetDeviceMatching accepts a NULL dictionary (match all devices); and on the open-
+        // denied path the manager is released exactly once here — on success `CapsLed`
+        // owns it and `Drop` closes/releases it.
         unsafe {
             let manager = IOHIDManagerCreate(ptr::null(), KIO_HID_OPTIONS_TYPE_NONE);
             if manager.is_null() {
@@ -130,6 +135,11 @@ impl CapsLed {
     /// logical caps state. Best-effort: re-enumerates devices each call (so a
     /// hot-plugged keyboard is covered) and ignores per-device failures.
     pub fn set(&self, on: bool) {
+        // SAFETY: `self.manager` is the manager `try_open` created and opened, owned until
+        // `Drop`. IOHIDManagerCopyDevices returns a +1 CFSet (null-checked, released
+        // exactly once below); CFSetGetValues fills a Vec sized to CFSetGetCount, and the
+        // device refs it yields are borrowed from that set (never released individually)
+        // and null-checked before use.
         unsafe {
             let devices = IOHIDManagerCopyDevices(self.manager);
             if devices.is_null() {
@@ -162,6 +172,13 @@ impl CapsLed {
 
 /// Find the device's Caps-Lock LED element and set it. `device` is borrowed.
 unsafe fn set_caps_led_on_device(device: IoHidDeviceRef, on: bool) {
+    // SAFETY: `device` is a live, manager-opened device for the duration of the call
+    // (caller contract — `set` borrows it from a CFSet it still holds, and
+    // IOHIDManagerOpen opened every device the manager owns, as IOHIDDeviceSetValue
+    // requires). IOHIDDeviceCopyMatchingElements returns a +1 CFArray (null-checked,
+    // released exactly once below) whose elements are borrowed and null-checked; index
+    // reads stay within CFArrayGetCount; the created IOHIDValue is a +1 ref released right
+    // after the synchronous SetValue.
     unsafe {
         // NULL matching = all elements; filter to the Caps LED by usage page/usage.
         let elements =
@@ -196,6 +213,9 @@ unsafe fn set_caps_led_on_device(device: IoHidDeviceRef, on: bool) {
 
 impl Drop for CapsLed {
     fn drop(&mut self) {
+        // SAFETY: `self.manager` is the manager `try_open` created and opened; it is
+        // closed and released at most once (nulled right after), pairing
+        // IOHIDManagerCreate/IOHIDManagerOpen.
         unsafe {
             if !self.manager.is_null() {
                 IOHIDManagerClose(self.manager, KIO_HID_OPTIONS_TYPE_NONE);

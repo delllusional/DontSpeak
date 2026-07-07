@@ -433,6 +433,11 @@ pub(crate) fn is_mic_active() -> bool {
         kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
     };
 
+    // SAFETY: both AudioObjectGetPropertyData calls satisfy the CoreAudio contract: a live
+    // stack property address, null in-qualifier (with size 0), and `size`/data out-params
+    // pointing at live stack u32s with the size initialized to their byte count — the API
+    // writes at most that many bytes during the call. `NonNull::new(..).unwrap()` cannot
+    // fail on addresses of stack locals.
     unsafe {
         // 1. Resolve the default input device.
         let dev_addr = AudioObjectPropertyAddress {

@@ -109,6 +109,9 @@ unsafe extern "system" fn caps_hook_proc(code: i32, wparam: WPARAM, lparam: LPAR
     // HC_ACTION (0) is the only code that carries a key event; anything else MUST be
     // forwarded untouched per the hook contract.
     if code == 0 {
+        // SAFETY: for HC_ACTION (code == 0, checked above) the OS passes a valid
+        // KBDLLHOOKSTRUCT pointer in lparam, alive for the duration of this callback
+        // (the WH_KEYBOARD_LL contract); we only read from it.
         let kb = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         // Ignore synthetic events (our own SendInput, other tools) — only real hardware
         // Caps presses drive dictation; injected ones must never feed back in.
@@ -131,6 +134,8 @@ unsafe extern "system" fn caps_hook_proc(code: i32, wparam: WPARAM, lparam: LPAR
             return LRESULT(1);
         }
     }
+    // SAFETY: forwards the exact code/wparam/lparam the OS handed this callback, as the
+    // hook-chain contract requires for events we don't consume; no pointers of ours cross.
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
@@ -156,6 +161,10 @@ fn ensure_caps_hook() {
     }
     let spawned = std::thread::Builder::new()
         .name("caps-ll-hook".into())
+        // SAFETY: plain Win32 FFI on this dedicated thread — `caps_hook_proc` is a `fn`
+        // item (it can never dangle), `msg` is a live stack local for every
+        // GetMessageW/DispatchMessageW call, and UnhookWindowsHookEx gets the handle
+        // SetWindowsHookExW just returned, on the same thread that installed it.
         .spawn(|| unsafe {
             let hmod = GetModuleHandleW(None).unwrap_or_default();
             let hook =
@@ -225,6 +234,8 @@ fn ensure_caps_hook() {
 fn shutdown_caps_hook() {
     let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
     if tid != 0 {
+        // SAFETY: PostThreadMessageW passes no pointers (both message params are 0); a
+        // stale or already-exited `tid` just makes the call fail, which we ignore.
         unsafe {
             let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
         }
@@ -310,6 +321,8 @@ impl WindowsPlatform {
     }
 
     fn send(inputs: &[INPUT]) {
+        // SAFETY: `inputs` is a live, fully initialized slice for the duration of the
+        // call, and cbSize is the true size of INPUT, as SendInput requires.
         unsafe {
             SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
         }
@@ -403,6 +416,11 @@ impl FrontmostWindow for WindowsPlatform {
         // Parakeet STT engine gates transcript injection on this, so it FAILS
         // CLOSED: any failure (no foreground window, OpenProcess denied, query
         // fails) returns false and nothing is injected.
+        //
+        // SAFETY: Win32 FFI with locally owned buffers — `pid`/`buf`/`size` are stack
+        // locals that outlive the calls that write them, `handle` comes from a
+        // successful OpenProcess and is closed exactly once below, and the
+        // `buf[..size]` slice uses the length QueryFullProcessImageNameW reported.
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd.0.is_null() {
@@ -480,6 +498,10 @@ impl FrontmostWindow for WindowsPlatform {
         UIA.with(|cell| {
             let mut slot = cell.borrow_mut();
             if slot.is_none() {
+                // SAFETY: COM FFI with no caller pointers — CoInitializeEx runs on this
+                // thread before CoCreateInstance, and the created IUIAutomation is an
+                // owned, refcounted wrapper kept in a thread-local (never crosses
+                // threads).
                 unsafe {
                     // Best-effort COM init for THIS thread as MTA — harmless (S_FALSE) if
                     // already initialized; UI Automation works in either apartment.
@@ -495,6 +517,9 @@ impl FrontmostWindow for WindowsPlatform {
                 }
             }
             let automation = slot.as_ref().unwrap();
+            // SAFETY: UIA calls on the thread-local IUIAutomation created above (COM is
+            // initialized on this thread); every result is an owned `windows`-crate
+            // wrapper checked through Result — no raw pointers escape this block.
             unsafe {
                 // No focus / unreadable focus ⇒ no paste target (macOS parity).
                 let Ok(el) = automation.GetFocusedElement() else {
@@ -578,6 +603,8 @@ mod caps_led {
 
     /// The latched toggle (low) bit of a lock key, via `GetKeyState`.
     fn lock_on(vk: u16) -> bool {
+        // SAFETY: GetKeyState takes no pointers and merely returns a state word; any
+        // virtual-key value is acceptable input.
         unsafe { (GetKeyState(vk as i32) & 0x0001) != 0 }
     }
 
@@ -603,6 +630,10 @@ mod caps_led {
             let dos = format!("DontSpeakKbd{}_{}", std::process::id(), idx);
             let dos_w = wide(&dos);
             let target_w = wide(&format!(r"\Device\KeyboardClass{idx}"));
+            // SAFETY: every pointer arg is a NUL-terminated wide buffer (`dos_w`/
+            // `target_w`/`path_w`) or the stack `kip` struct (with its exact size
+            // passed), each alive across the one call that reads it; `h` is used only
+            // after CreateFileW returns Ok and non-invalid, and is closed exactly once.
             unsafe {
                 if DefineDosDeviceW(
                     DDD_RAW_TARGET_PATH,
@@ -756,6 +787,10 @@ pub(crate) fn is_mic_active() -> bool {
         CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
 
+    // SAFETY: COM FFI confined to this thread — CoInitializeEx runs first; every
+    // interface is an owned `windows`-crate wrapper dropped inside the closure before
+    // CoUninitialize, which only balances an init that returned S_OK/S_FALSE
+    // (`did_init`).
     unsafe {
         // Init COM on this thread. S_OK/S_FALSE (.is_ok()) ⇒ we own a balancing
         // CoUninitialize; RPC_E_CHANGED_MODE (err) ⇒ COM is already up in another
