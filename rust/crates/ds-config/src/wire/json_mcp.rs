@@ -1,7 +1,8 @@
 //! MCP server registration: the `mcpServers.<name>` JSON shaper.
 //!
 //! [`merge_mcp_server`] / [`strip_mcp_server`] are the generic `mcpServers.<name>` JsonMcp
-//! shaper used by any JSON-MCP client — currently Claude Code's `~/.claude.json`. It registers
+//! shaper used by any JSON-MCP client — currently Claude Code's `~/.claude.json` and Qwen
+//! Code's `~/.qwen/settings.json`. It registers
 //! the stdio MCP bridge as a server so the client can call speak/listen/… on demand. The
 //! config is the standard MCP shape:
 //!   { "mcpServers": { "DontSpeak": { "command": "`<abs path>`", "args": [...] } } }

@@ -1,6 +1,7 @@
 //! Shared MCP-registration core for the [`wire`](crate::wire) orchestrator — the
-//! `WireMechanism::JsonMcp` writer of the client registry, used today by Claude CODE
-//! (`~/.claude.json`). Every client registers
+//! `WireMechanism::JsonMcp` writer of the client registry, used today by Claude Code
+//! (`~/.claude.json`) and Qwen Code (`~/.qwen/settings.json`, shared with its hooks surface).
+//! Every client registers
 //! the IDENTICAL stdio `mcpServers.DontSpeak` entry and differs only in WHICH config file, how
 //! it's detected, and the user-facing labels — all declared on the client's
 //! `ds_config::ClientSpec`, from which [`target_for`] builds the [`Target`] this one

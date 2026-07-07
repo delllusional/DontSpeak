@@ -6,7 +6,7 @@
 #     and dev (apps/macos/bundle.sh) share this ONE per-user layout; DONTSPEAK_APP_DIR
 #     overrides it in both
 #   • CLI/engine binaries in ~/.local/bin (all flows, and the whole Linux install)
-# plus the client wiring (Claude Code hooks + MCP, Codex hooks),
+# plus the client wiring (Claude Code hooks + MCP, Codex hooks, Qwen Code hooks + MCP),
 # ALL app data / downloaded models / caches / logs / state, the launchers / login
 # item, and the placed standalone uninstaller itself.
 #
@@ -54,10 +54,11 @@ case "$(uname -s)" in
     # bystander like `tail -f ds-helper.log` or an editor with ds-helper.rs open dies too.
     pkill -x ds-helper 2>/dev/null || true
 
-    echo "==> 2. un-wire every client (Claude Code hooks + MCP, Codex) before deleting binaries"
+    echo "==> 2. un-wire every client (Claude Code hooks + MCP, Codex, Qwen Code hooks + MCP) before deleting binaries"
     # `wire --all --remove` strips EVERY client's integration: claude_code = hooks
-    # (settings.json) + MCP (~/.claude.json); codex = hooks (~/.codex/config.toml). Prefer the
-    # ~/.local/bin CLI, else the CLI bundled in the app (Contents/Helpers).
+    # (settings.json) + MCP (~/.claude.json); codex = hooks (~/.codex/config.toml); qwen_code =
+    # hooks + MCP (~/.qwen/settings.json). Prefer the ~/.local/bin CLI, else the CLI bundled in
+    # the app (Contents/Helpers).
     APP_DIR="${DONTSPEAK_APP_DIR:-$H/Applications/DontSpeak.app}"
     CLI=""
     for c in \

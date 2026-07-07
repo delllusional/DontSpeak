@@ -9,8 +9,9 @@
 # (Linux) with in-process rotation (no conf needed).
 #
 # This wrapper adds the things specific to a fresh CLI install: wiring each client's whole
-# integration via `dontspeak wire <client>` (Claude Code = hooks + MCP, Codex = hooks; additive,
-# backed-up; preview with --print-only, undo with --remove) and the next-steps notes.
+# integration via `dontspeak wire <client>` (Claude Code = hooks + MCP, Codex = hooks, Qwen
+# Code = hooks + MCP; additive, backed-up; preview with --print-only, undo with --remove) and
+# the next-steps notes.
 #
 # ENGINE HOST: the engine runs IN-PROCESS inside the platform's resident host app on EVERY
 # platform — macOS DontSpeak.app (apps/macos/bundle.sh), Linux the GTK host ds-gtk
@@ -48,7 +49,7 @@ echo "==> binaries + hooks installed (BUILD_ID=$BUILD_ID)"
 # step — Claude Code = voice hooks + MCP server; Codex = narration hooks.
 # Preview with --print-only; undo with --remove; a client that isn't installed is a clean skip.
 echo
-echo "==> 5. wire all clients (Claude Code hooks + MCP, Codex hooks)"
+echo "==> 5. wire all clients (Claude Code hooks + MCP, Codex hooks, Qwen Code hooks + MCP)"
 # `wire --all` is the ONE wiring call every install flow uses (bundle.sh, the web
 # installers, the tarball installer) — each client self-skips if not installed.
 "$INSTALL_DIR/dontspeak" wire --all \
@@ -67,6 +68,8 @@ Done. Installed:
     undo any time with 'dontspeak wire claude_code --remove')
   • ~/.codex/config.toml narration hooks (only if ~/.codex exists; 'dontspeak wire codex';
     undo with 'dontspeak wire codex --remove')
+  • ~/.qwen/settings.json voice hooks + MCP server (only if ~/.qwen exists;
+    'dontspeak wire qwen_code'; undo with 'dontspeak wire qwen_code --remove')
   • logs: $LOG_HINT (in-process rotation, no sudo)
 
 Next steps:

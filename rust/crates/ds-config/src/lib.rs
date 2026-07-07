@@ -64,7 +64,7 @@ pub use set_config::SetConfigArgs;
 pub use speakers::{Speaker, SpeakerStore};
 pub use voice::{CaptureGain, ConfigChange, DEFAULT_KOKORO_VOICE, HandsFreePhrases, VoiceConfig};
 pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};
-pub use wire::desktop::{merge_mcp_server, strip_mcp_server};
+pub use wire::json_mcp::{merge_mcp_server, strip_mcp_server};
 pub use wire::hooks::{HookSpec, HooksMergeError, INSTALLED_BINS, merge_hooks, strip_hooks};
 pub use wire::registry::{
     CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, Surface, WireMechanism, client_spec,

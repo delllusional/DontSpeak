@@ -11,9 +11,9 @@
 //! `io` core (see `super::io`).
 //!
 //! Safe by construction: additive + idempotent merge (never duplicates ours, never clobbers the
-//! user's own hooks/keys), a timestamped backup before writing, and a malformed existing file is
-//! treated as empty rather than destroyed. `print_only` emits the merged document without touching
-//! disk.
+//! user's own hooks/keys), a timestamped backup before writing, and a malformed OR unmergeable
+//! existing file is left completely untouched (non-fatal, reported) rather than destroyed or
+//! merged-as-empty. `print_only` emits the merged document without touching disk.
 
 use super::io::{self, WriteBody};
 use ds_config::{HookSpec, INSTALLED_BINS, Paths};
@@ -113,8 +113,10 @@ pub(crate) fn seed_and_prune(paths: &Paths) {
 /// Claude Code's hook contract (`WireMechanism::ClaudeJsonHooks` — today Claude Code's
 /// `~/.claude/settings.json`; the registry names the file per client). `streaming` selects
 /// the hook SET: `true` (Claude Code) wires `MessageDisplay` for per-batch narration; `false`
-/// (Qwen Code) omits it, so the reply is voiced whole from `Stop`. Returns 0 on success,
-/// 1 on a hard error.
+/// (Qwen Code) omits it, so the reply is voiced whole from `Stop`. Returns 0 on success —
+/// including a malformed or unmergeable existing file, which is left byte-identical and
+/// reported, not treated as fatal (matching `claude_toml_hooks`) — or 1 on a hard error
+/// (bin-resolution failure, write failure).
 pub(crate) fn claude_json_hooks(
     cfg: &std::path::Path,
     streaming: bool,
@@ -123,7 +125,8 @@ pub(crate) fn claude_json_hooks(
     paths: &Paths,
 ) -> i32 {
     let Ok(existing) = io::read_json_or_bail("wire", cfg) else {
-        return 1;
+        return 0; // malformed existing file is the user's own — leave it, don't fail the run,
+                  // matching `claude_toml_hooks`'s convention below.
     };
 
     let merged = if remove {
@@ -192,7 +195,7 @@ fn hook_action(remove: bool) -> &'static str {
 /// the registry names the file per client) — `UserPromptSubmit`→`provide` (inject the narration
 /// spec) and `Stop`→`notify` (speak the reply). Format-preserving (toml_edit). Returns 0 on
 /// success, 1 on a hard error; a malformed config is reported and left UNCHANGED (it's the
-/// user's file), which is non-fatal.
+/// user's file), which is non-fatal — same convention as `claude_json_hooks`.
 pub(crate) fn claude_toml_hooks(
     cfg: &std::path::Path,
     remove: bool,
@@ -313,15 +316,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_json_hooks_malformed_json_errors_and_is_untouched() {
+    fn claude_json_hooks_malformed_json_is_left_unchanged_non_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
         let paths = Paths::rooted_at(dir.path());
         let raw = b"{ not json";
         std::fs::write(&cfg, raw).unwrap();
 
-        // Fails in `io::read_json_or_bail` itself — never reaches `resolve_dontspeak_bin`.
-        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 1);
+        // Caught in `io::read_json_or_bail`, but non-fatal — reported and the file left
+        // byte-identical — never reaches `resolve_dontspeak_bin`.
+        assert_eq!(claude_json_hooks(&cfg, true, false, false, &paths), 0);
         assert_eq!(std::fs::read(&cfg).unwrap(), raw);
     }
 
@@ -441,7 +445,8 @@ mod tests {
         let raw = "hooks = [not valid toml";
         std::fs::write(&cfg, raw).unwrap();
 
-        // `CodexMergeError::Parse` → the final `Err(e)` arm: reported, non-fatal, unchanged.
+        // `CodexMergeError::Parse` → the final `Err(e)` arm: reported, non-fatal, unchanged —
+        // same convention `claude_json_hooks` now matches.
         assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
     }

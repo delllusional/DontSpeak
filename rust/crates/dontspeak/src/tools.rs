@@ -293,9 +293,10 @@ fn call_wire(paths: &Paths, args: &Value) -> Result<String, String> {
     }
 
     // Build the per-client `wire <client> [--remove]` argv and run the SAME orchestrator the
-    // installers use. `wire` self-skips a client that isn't installed; for Codex we
-    // pre-check presence so an `enabled=true` on an absent client reports honestly instead of
-    // claiming a no-op wire succeeded.
+    // installers use. `wire` self-skips a client that isn't installed; for any gated client
+    // (today Codex and Qwen Code — see `gate_on_presence` in ds-config's registry) we pre-check
+    // presence so an `enabled=true` on an absent client reports honestly instead of claiming a
+    // no-op wire succeeded.
     let flags = |client: &str| -> Vec<String> {
         if a.enabled {
             vec![client.into()]

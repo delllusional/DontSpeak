@@ -291,4 +291,45 @@ mod tests {
             1
         );
     }
+
+    /// Qwen Code is the only client whose two surfaces (`ClaudeJsonHooks` + `JsonMcp`) share ONE
+    /// config file (`~/.qwen/settings.json`) — prove they coexist without clobbering each other in
+    /// either direction (wire creates hooks then merges MCP into the same file; `--remove` strips
+    /// both back out cleanly), against a tempdir-rooted `Paths` (never the real `$HOME`).
+    ///
+    /// NOTE: like every other real (non-`--remove`) wire test in this crate touching a `JsonMcp`
+    /// surface, this exercises `mcp::apply`'s already-documented, benign, read-only leak (it calls
+    /// the unparameterized `io::resolve_dontspeak_bin()`, which checks for a real
+    /// `$HOME/.local/bin/dontspeak` — see the comment block in `wire/mcp.rs` above its own tests).
+    #[test]
+    fn wire_client_qwen_code_wires_hooks_and_mcp_into_one_file_then_removes_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.qwen_dir).unwrap(); // satisfy Qwen's presence gate
+
+        assert_eq!(wire_client(WireTarget::QwenCode, &paths, false, false), 0);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
+        // Hooks group present (non-streaming: MessageDisplay omitted, Stop/UserPromptSubmit/etc. present)…
+        assert!(v["hooks"]["Stop"].as_array().is_some(), "hooks wired");
+        assert!(
+            v["hooks"].get("MessageDisplay").is_none(),
+            "non-streaming: no MessageDisplay"
+        );
+        // …AND the MCP entry, in the SAME file, without clobbering the hooks written just above.
+        assert!(
+            v["mcpServers"]["DontSpeak"]["command"]
+                .as_str()
+                .unwrap()
+                .contains("dontspeak"),
+            "mcp entry wired alongside hooks in the same file"
+        );
+
+        // `--remove` cleanly strips BOTH back out.
+        assert_eq!(wire_client(WireTarget::QwenCode, &paths, true, false), 0);
+        let v2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
+        assert!(v2.get("hooks").is_none(), "hooks stripped");
+        assert!(v2.get("mcpServers").is_none(), "mcp entry stripped");
+    }
 }
