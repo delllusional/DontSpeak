@@ -12,7 +12,9 @@
 //! serde field names ARE the wire keys. `Option<String>` serializes to JSON `null`
 //! (never omitted): the apps read every key unconditionally.
 
+mod dictation_state;
 mod state;
+pub use dictation_state::DictationState;
 pub use state::EngineState;
 
 /// One engine row (Kokoro / Parakeet / diarization / system / claude_code /
@@ -64,6 +66,14 @@ pub struct Dictation {
     /// so a payload from an older engine still parses (reads as false).
     #[serde(default)]
     pub refused: bool,
+    /// The canonical confirm-panel state token — its vocabulary is [`DictationState`]
+    /// (the producer stores `DictationState::as_str`, Rust consumers route the token back
+    /// through [`DictationState::parse`]). Every host shows the panel exactly when the
+    /// token is not `"hidden"`, instead of re-deriving visibility from the booleans above.
+    /// `default` so a payload from an older engine (key absent) still parses — it reads as
+    /// `""` and consumers fall back to the legacy boolean derivation.
+    #[serde(default)]
+    pub state: String,
 }
 
 /// Which models are currently resident in the warm helper.
@@ -210,6 +220,7 @@ mod tests {
                 has_paste_target: true,
                 prompt_glow: false,
                 refused: false,
+                state: DictationState::Hidden.as_str().to_string(),
             },
             tray_indicator: vec!["stt".to_string(), "tts".to_string()],
             stats: Stats {
@@ -267,6 +278,7 @@ mod tests {
             v["dictation"]["target"].is_null(),
             "dictation.target null when None"
         );
+        assert!(v["dictation"]["state"].is_string(), "dictation.state");
         assert!(v["seq"].is_u64());
         assert!(v["stats"]["tts"]["rtf_avg"].is_f64());
         assert!(v["stats"]["stt"]["transcriptions"].is_u64());
@@ -283,6 +295,17 @@ mod tests {
         assert!(
             !old.dictation.refused,
             "absent dictation.refused reads false"
+        );
+
+        // `dictation.state` was also added after a release: a payload from an older engine
+        // omits the key, so it must still parse (`#[serde(default)]`) and read as "" —
+        // the signal for consumers to fall back to the legacy boolean derivation.
+        let mut old = v.clone();
+        old["dictation"].as_object_mut().unwrap().remove("state");
+        let old: ModelStatus = serde_json::from_value(old).unwrap();
+        assert!(
+            old.dictation.state.is_empty(),
+            "absent dictation.state reads \"\""
         );
 
         // A deserialize off the same bytes reconstructs the value (the FFI path).
@@ -376,6 +399,7 @@ mod tests {
             has_paste_target in any::<bool>(),
             prompt_glow in any::<bool>(),
             refused in any::<bool>(),
+            state in short_string(),
         ) -> Dictation {
             Dictation {
                 recording,
@@ -386,6 +410,7 @@ mod tests {
                 has_paste_target,
                 prompt_glow,
                 refused,
+                state,
             }
         }
     }

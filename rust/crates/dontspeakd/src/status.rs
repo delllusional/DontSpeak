@@ -18,8 +18,8 @@ use crate::stats;
 use crate::tts::TtsManager;
 use ds_model::DownloadTarget;
 use ds_status::{
-    CapsEvent as CapsEventDto, DiarStats, Dictation, EngineObj, EngineState, Loaded, ModelStatus,
-    Running, Stats,
+    CapsEvent as CapsEventDto, DiarStats, Dictation, DictationState, EngineObj, EngineState,
+    Loaded, ModelStatus, Running, Stats,
 };
 
 /// Epoch milliseconds, for ordering caps events the app displays as a live log.
@@ -400,6 +400,11 @@ pub(crate) fn model_status_json(
         DownloadTarget::ParakeetCoreml,
     );
 
+    // Dictation flags hoisted to ONE read each so `recording`/`prompt_glow`/`state` below
+    // can't tear across separate atomic loads within a single snapshot.
+    let dict_recording = stt_active.load(Ordering::Relaxed);
+    let dict_local = dictation_local_stt(parakeet_running, system_running);
+
     let status = ModelStatus {
         // Removable only on the ONNX path (apple-native has no DontSpeak-managed Kokoro
         // files — FluidAudio self-manages its cache, mirroring the Parakeet row) AND
@@ -573,7 +578,7 @@ pub(crate) fn model_status_json(
         // first partial); ClaudeNative produces no partials, so its panel stays
         // suppressed (it submits straight to Claude).
         dictation: Dictation {
-            recording: stt_active.load(Ordering::Relaxed),
+            recording: dict_recording,
             awaiting_confirm: dict_awaiting,
             text: dict_text.clone(),
             target: dict_target,
@@ -583,7 +588,7 @@ pub(crate) fn model_status_json(
             // `running.parakeet`/`running.system` — extracted to `dictation_local_stt` so
             // that OR relationship is pinned by a test and a future edit to either row can't
             // silently desync them (see `tests::local_stt_matches_running_flags`).
-            local_stt: dictation_local_stt(parakeet_running, system_running),
+            local_stt: dict_local,
             // LIVE: is an editable text field focused to receive the paste? Sampled each
             // tick while the panel is up. The app tints the dictation glow when false
             // ("no input to submit into"). Replaces the old `no_target_warn` red flash.
@@ -594,14 +599,18 @@ pub(crate) fn model_status_json(
             // empty pill prompting the user to talk. Once words arrive (or we're awaiting
             // confirmation, or capture stopped) it goes static. The no-target warning glow
             // is a SEPARATE cue driven by `has_paste_target`.
-            prompt_glow: stt_active.load(Ordering::Relaxed)
-                && dict_text.is_empty()
-                && !dict_awaiting,
+            prompt_glow: dict_recording && dict_text.is_empty() && !dict_awaiting,
             // A dictation START was just refused (engine enabled but can't transcribe yet —
             // model missing/downloading/loading). Each overlay shows the panel washed in
             // the SAME warning glow as `has_paste_target == false` for the refusal window,
             // so a Caps tap on a fresh install is never a silent no-op.
             refused: dict_refused,
+            // The canonical panel state every host switches on for visibility, derived
+            // HERE so no UI re-derives the mode from the booleans above (state-machine
+            // survey item 3). Vocabulary: `DictationState`.
+            state: dictation_state(dict_recording, dict_awaiting, dict_local, dict_refused)
+                .as_str()
+                .to_string(),
         },
         // Menu-bar icon preference (app-only; the engine just passes it through): a SET of
         // tokens, e.g. ["stt","tts"] (both), ["stt"], or [] (never color). Drives which states
@@ -856,14 +865,42 @@ pub(crate) fn engine_state(
     }
 }
 
+/// PURE confirm-panel state (the canonical `dictation.state` token every host switches on
+/// for panel visibility). Precedence: `awaiting_confirm > (recording && local_stt) >
+/// refused > hidden` — `awaiting` first because `dictation_preview` can report awaiting
+/// while `stt_active` hasn't flipped yet in the stop-tap window (the finalized transcript
+/// must win); `refused` below `recording` because `refused_until` is cleared when a real
+/// recording starts, so that pair can't legitimately coexist. A recording WITHOUT
+/// `local_stt` (ClaudeNative) is `hidden` — that engine's panel is deliberately
+/// suppressed. Pinned by test to satisfy the show-gate equivalence
+/// `state != Hidden ⇔ awaiting || (recording && local_stt) || refused` — exactly the
+/// legacy per-host expression this token replaces.
+pub(crate) fn dictation_state(
+    recording: bool,
+    awaiting: bool,
+    local_stt: bool,
+    refused: bool,
+) -> DictationState {
+    if awaiting {
+        DictationState::AwaitingConfirm
+    } else if recording && local_stt {
+        DictationState::Recording
+    } else if refused {
+        DictationState::Refused
+    } else {
+        DictationState::Hidden
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        StatusGate, combined_error, dictation_local_stt, engine_state, realized_ort_token,
-        row_download_frac, row_downloading, stt_provider_token, tts_provider_token,
+        StatusGate, combined_error, dictation_local_stt, dictation_state, engine_state,
+        realized_ort_token, row_download_frac, row_downloading, stt_provider_token,
+        tts_provider_token,
     };
     use ds_config::{Provider, SttEngine, TtsEngine};
-    use ds_status::EngineState;
+    use ds_status::{DictationState, EngineState};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -1189,5 +1226,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The canonical `dictation.state` token must reproduce every host's legacy show gate
+    /// exactly: `state != Hidden ⇔ awaiting || (recording && local_stt) || refused` —
+    /// pinned across the FULL 16-row truth table so a precedence edit can't silently
+    /// change any host's panel visibility.
+    #[test]
+    fn dictation_state_matches_the_legacy_show_gate_for_all_inputs() {
+        for recording in [false, true] {
+            for awaiting in [false, true] {
+                for local_stt in [false, true] {
+                    for refused in [false, true] {
+                        let state = dictation_state(recording, awaiting, local_stt, refused);
+                        assert_eq!(
+                            state != DictationState::Hidden,
+                            awaiting || (recording && local_stt) || refused,
+                            "show-gate equivalence (recording={recording}, \
+                             awaiting={awaiting}, local_stt={local_stt}, refused={refused})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pins the precedence ladder itself: `awaiting_confirm > (recording && local_stt) >
+    /// refused > hidden` — including that a non-local recording (ClaudeNative) stays
+    /// `hidden` (its panel is deliberately suppressed).
+    #[test]
+    fn dictation_state_precedence_table() {
+        // awaiting wins over everything (the finalized transcript must show).
+        assert_eq!(
+            dictation_state(true, true, true, true),
+            DictationState::AwaitingConfirm
+        );
+        // recording (local) wins over refused (refused_until is cleared on a real start).
+        assert_eq!(
+            dictation_state(true, false, true, true),
+            DictationState::Recording
+        );
+        // refused shows even while a non-local recording is active.
+        assert_eq!(
+            dictation_state(true, false, false, true),
+            DictationState::Refused
+        );
+        // A ClaudeNative recording (no local transcript) keeps the panel hidden.
+        assert_eq!(
+            dictation_state(true, false, false, false),
+            DictationState::Hidden
+        );
     }
 }

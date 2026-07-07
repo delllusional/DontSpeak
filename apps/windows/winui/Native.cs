@@ -256,6 +256,20 @@ public sealed record Dictation
     // window washed in the SAME warning glow as DictHasTarget == false, so a Caps tap on a
     // fresh install is never a silent no-op. False by default (fail-quiet; mirrors macOS).
     public bool DictRefused;
+    // The canonical confirm-panel state token (vocabulary:
+    // rust/crates/ds-status/src/dictation_state.rs). Empty = older engine payload (key
+    // absent) ⇒ ShowPanel falls back to the legacy boolean derivation.
+    public string DictState = "";
+
+    /// <summary>Panel visibility from the canonical `dictation.state` token (vocabulary:
+    /// rust/crates/ds-status/src/dictation_state.rs); absent/unknown token (older engine
+    /// DLL) falls back to the legacy boolean derivation — removed with the booleans later.</summary>
+    public bool ShowPanel(bool recording) => DictState switch
+    {
+        "hidden" => false,
+        "recording" or "awaiting_confirm" or "refused" => true,
+        _ => DictAwaitingConfirm || (recording && DictLocalStt) || DictRefused,
+    };
 }
 
 /// <summary>TTS realtime / first-audio / throughput stats for the expandable Kokoro row
@@ -393,6 +407,7 @@ internal sealed class HealthSnapshot
                 s.Dictation.DictHasTarget = d.HasPasteTarget ?? true;
                 s.Dictation.DictPromptGlow = d.PromptGlow;
                 s.Dictation.DictRefused = d.Refused;
+                s.Dictation.DictState = d.State ?? "";
             }
             // Active-engine tokens + their runtime EPs drive which TTS/STT row renders
             // (default to the engine's own defaults so a partial payload still picks a row).
@@ -536,6 +551,9 @@ internal sealed record DictationDto
     [JsonPropertyName("prompt_glow")] public bool PromptGlow { get; init; }
     // Absent (older engine) ⇒ false: fail-quiet, no spurious refusal glow.
     [JsonPropertyName("refused")] public bool Refused { get; init; }
+    // The canonical confirm-panel state token; absent (older engine) ⇒ the consumer
+    // falls back to the legacy boolean derivation (never straight to hidden).
+    [JsonPropertyName("state")] public string? State { get; init; }
 }
 
 internal sealed record StatsDto

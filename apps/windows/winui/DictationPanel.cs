@@ -76,7 +76,8 @@ namespace DontSpeak;
 /// **blur-replaces** — old glyphs blur out as the new ones blur in, at the same slot.
 ///
 /// The caller drives it from its status poll via <see cref="Update"/>: show with the current
-/// transcript while <c>awaiting_confirm || (recording &amp;&amp; local_stt)</c>, hide otherwise.
+/// transcript while the canonical <c>dictation.state</c> token is not <c>hidden</c>
+/// (falling back to the legacy boolean derivation for an older engine), hide otherwise.
 /// </summary>
 internal sealed class DictationPanel : IDisposable
 {

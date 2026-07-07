@@ -360,11 +360,11 @@ public partial class App : Application
                 since = s.StatusSeq;
                 if (!changed) continue;
                 delivered = true;
-                // Overlay gate: engine running + a local-STT (Parakeet) dictation recording or
-                // awaiting the confirm tap (mirrors the macOS panel gate), off the JSON we got.
-                // A REFUSED start (Caps tap while the engine can't transcribe yet) also shows —
-                // the brief warning-washed pill is the feedback that the tap did nothing.
-                bool showPanel = s.Activity.EngineRunning && (s.Dictation.DictAwaitingConfirm || (s.Activity.Recording && s.Dictation.DictLocalStt) || s.Dictation.DictRefused);
+                // Overlay gate: engine running (host-side liveness AND — not dictation state)
+                // + the canonical `dictation.state` token, decided ONCE in the engine so every
+                // platform's panel shows identically. Absent/unknown token (older engine DLL)
+                // ⇒ ShowPanel falls back to the legacy boolean derivation.
+                bool showPanel = s.Activity.EngineRunning && s.Dictation.ShowPanel(s.Activity.Recording);
                 // A refused start REUSES the no-target warning wash verbatim (fold it into
                 // hasTarget here, so DictationPanel stays single-cue — mirrors the macOS fold).
                 bool hasTarget = s.Dictation.DictHasTarget && !s.Dictation.DictRefused;

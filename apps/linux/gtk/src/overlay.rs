@@ -7,7 +7,7 @@
 //! `gtk4-layer-shell` (an OVERLAY-layer surface with `KeyboardMode::None`); on GNOME/Mutter
 //! (no wlr-layer-shell) and X11 we fall back to a plain undecorated non-focusing window —
 //! best-effort, the documented Wayland limitation. Shown exactly when the macOS/Windows hosts
-//! show theirs: `awaiting_confirm || (recording && local_stt)`.
+//! show theirs: the canonical `dictation.state` token is not `hidden`.
 //!
 //! Drag + resize (macOS/Windows parity): on the plain-toplevel path the pill is
 //! DRAGGABLE (press the body → `Toplevel::begin_move`) and horizontally RESIZABLE (press
@@ -28,6 +28,7 @@ use gtk::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::status::Snapshot;
+use ds_status::DictationState;
 
 /// Default pill width; the user's dragged width is persisted and restored over this.
 const DEFAULT_WIDTH: i32 = 460;
@@ -111,15 +112,23 @@ impl Overlay {
 
     /// Show/update or hide the overlay from a status push (same gate as the other hosts).
     pub fn apply(&self, snap: &Snapshot) {
-        // A REFUSED start (Caps tap while the engine can't transcribe yet — model
-        // missing/downloading/loading) also shows: the brief warning-glow pill is the
-        // feedback that the tap did nothing (mirrors the macOS/Windows gates).
-        let show = matches!(
-            &snap.status,
-            Some(s) if s.dictation.awaiting_confirm
-                || (s.dictation.recording && s.dictation.local_stt)
-                || s.dictation.refused
-        );
+        // Visibility is decided ONCE in the engine and shipped as the canonical
+        // `dictation.state` token (vocabulary: `ds_status::DictationState`), so this pill
+        // shows exactly when the macOS/Windows overlays do — including the REFUSED start
+        // (the brief warning-glow pill is the feedback that the Caps tap did nothing).
+        let show = match &snap.status {
+            Some(s) => match DictationState::parse(&s.dictation.state) {
+                Some(st) => st != DictationState::Hidden,
+                // Older engine (no/unknown token): the legacy boolean derivation, removed
+                // with the redundant booleans once every producer ships the token.
+                None => {
+                    s.dictation.awaiting_confirm
+                        || (s.dictation.recording && s.dictation.local_stt)
+                        || s.dictation.refused
+                }
+            },
+            None => false,
+        };
 
         if !show {
             if self.visible.replace(false) {

@@ -88,6 +88,56 @@ public class HealthSnapshotTests
         Assert.True(Parse("""{"dictation": {"refused": true}}""").Dictation.DictRefused);
     }
 
+    /// <summary>The canonical dictation.state token parses through; absent (older engine)
+    /// reads as "" — the ShowPanel fallback signal.</summary>
+    [Fact]
+    public void DictationStateParsesAndDefaultsEmpty()
+    {
+        Assert.Equal("recording", Parse("""{"dictation": {"state": "recording"}}""").Dictation.DictState);
+        Assert.Equal("", Parse("""{"dictation": {"text": "hi"}}""").Dictation.DictState);
+    }
+
+    /// <summary>ShowPanel switches on the canonical token (vocabulary:
+    /// rust/crates/ds-status/src/dictation_state.rs): hidden ⇒ false, the three visible
+    /// states ⇒ true, regardless of what the legacy booleans say.</summary>
+    [Theory]
+    [InlineData("hidden", false)]
+    [InlineData("recording", true)]
+    [InlineData("awaiting_confirm", true)]
+    [InlineData("refused", true)]
+    public void ShowPanelFollowsTheCanonicalToken(string token, bool expected)
+    {
+        // Legacy booleans deliberately CONTRADICT the token so the token provably wins.
+        var visible = new Dictation { DictState = token };
+        Assert.Equal(expected, visible.ShowPanel(recording: false));
+        var hidden = new Dictation
+        {
+            DictState = token,
+            DictAwaitingConfirm = true,
+            DictLocalStt = true,
+            DictRefused = true,
+        };
+        Assert.Equal(expected, hidden.ShowPanel(recording: true));
+    }
+
+    /// <summary>An absent/unknown token (older engine DLL) falls back to the legacy boolean
+    /// derivation — a showing case and a hidden case each way, so skew can't kill the panel.</summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("bogus_token")]
+    public void ShowPanelFallsBackToBooleansOnUnknownToken(string token)
+    {
+        // awaiting_confirm alone shows.
+        Assert.True(new Dictation { DictState = token, DictAwaitingConfirm = true }.ShowPanel(recording: false));
+        // recording needs local_stt.
+        Assert.True(new Dictation { DictState = token, DictLocalStt = true }.ShowPanel(recording: true));
+        Assert.False(new Dictation { DictState = token, DictLocalStt = false }.ShowPanel(recording: true));
+        // refused alone shows.
+        Assert.True(new Dictation { DictState = token, DictRefused = true }.ShowPanel(recording: false));
+        // nothing set ⇒ hidden.
+        Assert.False(new Dictation { DictState = token }.ShowPanel(recording: false));
+    }
+
     /// <summary>Missing/empty engine tokens fall to each engine's own default so a partial
     /// payload still picks a row to render.</summary>
     [Fact]

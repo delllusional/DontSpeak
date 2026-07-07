@@ -123,6 +123,11 @@ struct Dictation: Sendable, Equatable {
     /// refusal window washed in the SAME warning glow as `hasTarget == false`, so a Caps
     /// tap on a fresh install is never a silent no-op. False by default (fail-quiet).
     var refused = false
+    /// The canonical confirm-panel state token the panel's show gate switches on
+    /// (vocabulary: rust/crates/ds-status/src/dictation_state.rs — "hidden" /
+    /// "recording" / "awaiting_confirm" / "refused"). Empty = older engine payload
+    /// (key absent) ⇒ the panel falls back to the legacy boolean derivation.
+    var state = ""
 }
 
 /// An immutable, Sendable health snapshot produced off the main thread and carried to
@@ -342,6 +347,7 @@ final class Core {
         if stats != s.stats { stats = s.stats }
         maybeRequestMicAccess()
         DictationPanelController.shared.apply(
+            state: s.dictation.state,
             recording: s.dictation.recording,
             awaiting: s.dictation.awaiting,
             text: s.dictation.text,
@@ -486,6 +492,7 @@ final class Core {
             s.dictation.hasTarget = d.hasPasteTarget ?? true
             s.dictation.promptGlow = d.promptGlow ?? false
             s.dictation.refused = d.refused ?? false
+            s.dictation.state = d.state ?? ""
         }
         return (s, dto.seq)
     }
@@ -606,6 +613,9 @@ struct DictationDTO: Decodable {
     var hasPasteTarget: Bool?
     var promptGlow: Bool?
     var refused: Bool?
+    /// The canonical confirm-panel state token; nil (older engine) ⇒ the consumer
+    /// falls back to the legacy boolean derivation (never straight to hidden).
+    var state: String?
 
     enum CodingKeys: String, CodingKey {
         case recording
@@ -616,6 +626,7 @@ struct DictationDTO: Decodable {
         case hasPasteTarget = "has_paste_target"
         case promptGlow = "prompt_glow"
         case refused
+        case state
     }
 }
 

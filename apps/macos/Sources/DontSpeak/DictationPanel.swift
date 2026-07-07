@@ -289,9 +289,11 @@ final class DictationPanelController {
             display: true)
     }
 
-    /// Apply one dictation snapshot from `Core`. Shows the panel while recording or
-    /// awaiting confirmation, hides it otherwise. Cheap to call on every push.
+    /// Apply one dictation snapshot from `Core`. Shows the panel while the canonical
+    /// `dictation.state` token is not "hidden", hides it otherwise. Cheap to call on
+    /// every push.
     func apply(
+        state: String,
         recording: Bool, awaiting: Bool, text: String, target: String?, local: Bool, hasTarget: Bool,
         promptGlow: Bool, refused: Bool
     ) {
@@ -309,14 +311,22 @@ final class DictationPanelController {
         if model.hasTarget != hasTarget { model.hasTarget = hasTarget }
         if model.promptGlow != promptGlow { model.promptGlow = promptGlow }
 
-        // Show as soon as a LOCAL (Parakeet) dictation starts recording — immediate
-        // feedback ("Listening…") the moment you tap Caps, not after the first
-        // partial — or when a transcript is awaiting confirmation. The `local` gate
-        // keeps the overlay scoped to the local-transcript path: ClaudeNative
-        // produces no partials and submits straight to Claude, so it never shows
-        // (recording is true but `local` is false). A REFUSED start also shows —
-        // the brief warning-washed pill is the feedback that the tap did nothing.
-        let show = awaiting || (recording && local) || refused
+        // Visibility is decided ONCE in the engine and shipped as the canonical
+        // `dictation.state` token (source of truth: rust/crates/ds-status/src/
+        // dictation_state.rs), so every platform's overlay shows identically:
+        // "recording" the moment a LOCAL (Parakeet) dictation starts — immediate
+        // feedback ("Listening…") on the Caps tap; "awaiting_confirm" while a
+        // transcript waits for the confirm tap; "refused" for the brief
+        // warning-washed pill that says the tap did nothing; "hidden" otherwise
+        // (ClaudeNative records without a panel — it submits straight to Claude).
+        let show: Bool
+        switch state {
+        case "hidden": show = false
+        case "recording", "awaiting_confirm", "refused": show = true
+        // Older engine (no/unknown token): the legacy derivation, removed with the
+        // redundant booleans once every producer ships the token.
+        default: show = awaiting || (recording && local) || refused
+        }
         guard show else {
             if panel.isVisible { panel.orderOut(nil) }
             return
