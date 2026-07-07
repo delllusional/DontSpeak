@@ -20,6 +20,19 @@
 //! `ds_config::X` paths they always have. `enums` is declared first (with
 //! `#[macro_use]`) so its declarative deserialize/serialize macros are textually
 //! in scope.
+//!
+//! # What belongs here (and what doesn't)
+//!
+//! This crate is where configuration is DEFINED and read, not where it is acted
+//! on: [`Paths`], the `config.toml` schema and its enums, the read-only
+//! `settings.json` bridge, the client wire shapers, and the shared log-file
+//! helpers.
+//!
+//! It is NOT a home for runtime state machines, engine behavior, or protocol
+//! definitions — nearly everything depends on this crate, so code parked here
+//! is code everything transitively rebuilds and links. If a new piece's only
+//! tie to config is that it reads some of it, it doesn't belong here: put the
+//! behavior next to its owner and pass the config value in.
 
 // `enums` FIRST: its `macro_rules!` (`fail_open_de!`, `serialize_as_str!`, `strict_de!`)
 // are textually scoped, so it must be declared before anything that uses them.
