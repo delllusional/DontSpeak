@@ -7,7 +7,14 @@
 //!                 in this session's pool voice IF `greet_on_open` is set (engine self-gates).
 //!   MarkActive  — UserPromptSubmit. You just prompted HERE → `MarkActive`, so the TTS queue
 //!                 speaks only this terminal's items and HOLDS the rest until they become
-//!                 active (narration follows the terminal you're working in).
+//!                 active (narration follows the terminal you're working in). EXCEPT: when
+//!                 the prompt body is classified [`is_synthetic_continuation`] — a
+//!                 harness-injected continuation (e.g. Claude Code auto-re-invoking the agent
+//!                 with a `<task-notification>` block after a background task finishes), not
+//!                 something a human typed and submitted — the "you just moved your attention
+//!                 here" side effects (claiming active-terminal status, cancelling stale
+//!                 narration on submit) are skipped engine-side; only session-liveness
+//!                 bookkeeping still happens. See issue #11.
 //!
 //! Spoken REPLIES and tool-step narration are NOT here: for streaming clients (Claude Code)
 //! every assistant message rides the ONE `MessageDisplay` → `hook_narrate::message_display`
@@ -25,15 +32,71 @@ pub enum Ping {
     MarkActive,
 }
 
+/// Prompt-body markers that identify a harness-injected CONTINUATION — Claude Code
+/// auto-re-invoking the agent with a synthetic user-turn message — rather than
+/// something a human actually typed and submitted. Checked as a PREFIX (after
+/// trimming leading whitespace), never a substring: a harness continuation IS the
+/// entire synthetic prompt (nothing human precedes it), so `starts_with` can't
+/// misfire on a human prompt that merely mentions or pastes the tag partway through
+/// (e.g. "why did narration cut off — I see `<task-notification>` in the log?").
+///
+/// Only ONE entry is confirmed today: `<task-notification>`, captured live from a
+/// background Bash task's completion re-invoking Claude Code (issue #11, DontSpeak
+/// v0.2.2, macOS). Docs research for this fix (Agent Teams' teammate/idle-message
+/// delivery, `/loop`/cron scheduled-task wakeups) confirms OTHER harness
+/// continuations exist — they also inject between turns with no human present — but
+/// Anthropic does not publish their literal wrapper text, so guessing one here would
+/// risk either missing real occurrences or matching human text by accident. Add an
+/// entry the moment a sibling shape is actually observed (a captured payload, or a
+/// documented format) — this table exists precisely so that's a one-line change.
+const SYNTHETIC_PROMPT_MARKERS: &[&str] = &["<task-notification>"];
+
+/// PURE: does `prompt` (the `UserPromptSubmit` hook's `prompt` field) look like a
+/// harness-injected continuation rather than a genuine human submit? See
+/// [`SYNTHETIC_PROMPT_MARKERS`] for the marker table and the prefix-vs-contains
+/// rationale.
+fn is_synthetic_continuation(prompt: &str) -> bool {
+    let trimmed = prompt.trim_start();
+    SYNTHETIC_PROMPT_MARKERS
+        .iter()
+        .any(|m| trimmed.starts_with(m))
+}
+
+/// The `UserPromptSubmit` hook's `prompt` field (fail-open: absent/malformed JSON or
+/// a non-string value reads as `""`, same idiom as [`crate::hook_core::event_name`] /
+/// [`crate::hook_core::session_id_from_payload`]).
+#[derive(Deserialize, Default)]
+struct PromptEnvelope {
+    #[serde(default)]
+    prompt: String,
+}
+
+fn prompt_from_payload(payload: &str) -> String {
+    serde_json::from_str::<PromptEnvelope>(payload.trim())
+        .map(|e| e.prompt)
+        .unwrap_or_default()
+}
+
+/// Build the `MarkActive` request for a `UserPromptSubmit` `payload`: the ambient
+/// session id plus the synthetic classification of the prompt body. Split out from
+/// [`engine_ping`] so payload → wire-request shape is unit-testable without a socket.
+fn mark_active_request(payload: &str) -> ds_ipc::Request {
+    ds_ipc::Request::MarkActive {
+        session: crate::hook_core::session_id_from_payload(payload),
+        synthetic: is_synthetic_continuation(&prompt_from_payload(payload)),
+    }
+}
+
 /// Fire ONE best-effort ping to the warm engine from a hook `payload` (the Claude Code hook
 /// JSON, already read from stdin by the `notify` dispatch — NOT re-read here). Pulls the
 /// ambient `session_id` so the engine scopes the greet / active-mark to the right session.
 /// Engine down ⇒ no-op; never blocks or fails the hook.
 pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str) {
-    let session = crate::hook_core::session_id_from_payload(payload);
     let req = match ping {
-        Ping::Greet => ds_ipc::Request::GreetSession { session },
-        Ping::MarkActive => ds_ipc::Request::MarkActive { session },
+        Ping::Greet => ds_ipc::Request::GreetSession {
+            session: crate::hook_core::session_id_from_payload(payload),
+        },
+        Ping::MarkActive => mark_active_request(payload),
     };
     if let Ok(mut c) = ds_ipc::connect(&paths.engine_sock)
         && c.send(&req).is_ok()
@@ -144,5 +207,71 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         engine_earcon(&paths, "needs_input");
+    }
+
+    #[test]
+    fn task_notification_prefix_is_classified_synthetic() {
+        assert!(is_synthetic_continuation(
+            "<task-notification>\nBackground task \"watch tests\" finished.\n</task-notification>"
+        ));
+    }
+
+    #[test]
+    fn leading_whitespace_before_marker_is_still_detected() {
+        assert!(is_synthetic_continuation(
+            "\n  <task-notification>\nBackground task finished.\n</task-notification>"
+        ));
+    }
+
+    #[test]
+    fn human_prompt_mentioning_the_tag_is_not_misclassified() {
+        assert!(!is_synthetic_continuation(
+            "why did narration cut off — I see <task-notification> in the transcript?"
+        ));
+    }
+
+    #[test]
+    fn ordinary_human_prompt_is_not_synthetic() {
+        assert!(!is_synthetic_continuation("fix the bug in foo.rs"));
+    }
+
+    #[test]
+    fn empty_and_missing_prompt_are_not_synthetic() {
+        assert!(!is_synthetic_continuation(""));
+        assert_eq!(prompt_from_payload(r#"{"session_id":"s1"}"#), "");
+        assert!(!is_synthetic_continuation(&prompt_from_payload(
+            r#"{"session_id":"s1"}"#
+        )));
+    }
+
+    #[test]
+    fn malformed_json_prompt_payload_is_not_synthetic() {
+        assert_eq!(prompt_from_payload("not json at all"), "");
+        assert_eq!(prompt_from_payload("{unterminated"), "");
+        assert!(!is_synthetic_continuation(&prompt_from_payload(
+            "not json at all"
+        )));
+    }
+
+    #[test]
+    fn mark_active_request_carries_synthetic_flag_from_payload_shape() {
+        let synthetic_payload =
+            r#"{"session_id":"s1","prompt":"<task-notification>\nfoo\n</task-notification>"}"#;
+        match mark_active_request(synthetic_payload) {
+            ds_ipc::Request::MarkActive { session, synthetic } => {
+                assert_eq!(session, Some("s1".to_string()));
+                assert!(synthetic);
+            }
+            other => panic!("expected MarkActive, got {other:?}"),
+        }
+
+        let ordinary_payload = r#"{"session_id":"s2","prompt":"fix the bug in foo.rs"}"#;
+        match mark_active_request(ordinary_payload) {
+            ds_ipc::Request::MarkActive { session, synthetic } => {
+                assert_eq!(session, Some("s2".to_string()));
+                assert!(!synthetic);
+            }
+            other => panic!("expected MarkActive, got {other:?}"),
+        }
     }
 }

@@ -20,6 +20,70 @@ pub(crate) fn should_cancel_on_submit(was_voice: bool, scope_configured: bool) -
     !was_voice && scope_configured
 }
 
+/// Apply a `MarkActive` ping (UserPromptSubmit hook — every submit: typed, dictated,
+/// or, when `synthetic`, a harness-injected continuation Claude Code auto-re-invokes,
+/// e.g. a background-task `<task-notification>` re-invocation — issue #11).
+///
+/// The `codex_sessions` nudge ALWAYS runs, `synthetic` or not: it's pure
+/// session-liveness bookkeeping (this session id is still alive), not a claim about
+/// human intent, and it doubles as `codex_stream` RE-discovery after an engine
+/// restart.
+///
+/// Everything else is the "you just moved your attention here" half of `MarkActive`
+/// — claiming active-terminal status (`set_active_session`) and applying
+/// `input_clears` — and is skipped ENTIRELY when `synthetic`: a harness continuation
+/// expresses no human "I've moved on" intent, so it must neither steal active-terminal
+/// status from whatever real terminal the user is actually in, nor prune/cancel
+/// in-flight speech the user may be mid-listen to. See
+/// `dontspeak::hook_speak::is_synthetic_continuation`, the hook-side classifier that
+/// sets this flag from the prompt body's shape.
+fn handle_mark_active(
+    ttsq: &TtsQueue,
+    codex_sessions: &crate::codex_stream::SessionRegistry,
+    paths: &Paths,
+    session: Option<String>,
+    synthetic: bool,
+) {
+    // The nudge doubles as codex_stream session RE-discovery after an engine restart
+    // (SessionStart won't re-fire mid-session), and re-arms a negative-cached
+    // resolution. Runs unconditionally: session-liveness, not human intent.
+    if let Some(s) = &session {
+        codex_sessions.nudge(s);
+    }
+    if synthetic {
+        // A harness-injected continuation carries no "I've moved on" human intent:
+        // don't steal active-terminal status, don't touch the TTS queue at all.
+        return;
+    }
+    // UserPromptSubmit → this terminal is now the active one. The queue speaks only
+    // its items and holds the rest until they're active.
+    ttsq.set_active_session(session.clone());
+    // The UserPromptSubmit hook fires for EVERY genuine submit (typed OR dictated), so
+    // this is where a genuinely-typed submit is caught. BUT a VOICE submit also
+    // pressed Enter via the engine — de-dup so that auto-Enter isn't treated as a
+    // second, separate submit: if a voice submit just happened, this hook is its echo
+    // (the voice path already applied `input_clears` directly), so skip. Read config
+    // live so a runtime `set_config` change takes effect without an engine restart.
+    let was_voice = ttsq.take_recent_voice_submit();
+    // Short-circuit: skip the settings.json read entirely when `was_voice` already
+    // decides it (`should_cancel_on_submit` would read `false` either way, but
+    // there's no reason to load config to learn that).
+    if !was_voice {
+        let scopes = VoiceConfig::load(paths).input_clears;
+        if should_cancel_on_submit(was_voice, scopes.contains(&CancelSpeechScope::Current)) {
+            ttsq.clear_session(session.clone());
+        }
+        if should_cancel_on_submit(was_voice, scopes.contains(&CancelSpeechScope::Other)) {
+            // Pass this REQUEST's own `session` as the target directly, rather than
+            // re-deriving "active" via `ttsq.active_session()` — `set_active_session`
+            // above already set it to exactly this session, but re-reading it would
+            // reopen a window for a concurrent MarkActive from another terminal to
+            // land in between and be treated as "other" instead of this one.
+            ttsq.cancel_for_submit(session.clone(), false, true);
+        }
+    }
+}
+
 /// Host the RPC socket on a dedicated thread (blocking accept loop), dispatching
 /// each request inline. A `Reload` (the MCP/GUI wrote settings.json and asks us to
 /// apply it) flips `reload_requested` so the poll loop reloads config surgically
@@ -74,49 +138,8 @@ pub(crate) fn spawn_ipc_server(
                     ttsq.greet_session(session);
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::MarkActive { session } => {
-                    // UserPromptSubmit → this terminal is now the active one. The queue
-                    // speaks only its items and holds the rest until they're active.
-                    // The nudge doubles as codex_stream session RE-discovery after an
-                    // engine restart (SessionStart won't re-fire mid-session), and re-arms
-                    // a negative-cached resolution.
-                    if let Some(s) = &session {
-                        codex_sessions.nudge(s);
-                    }
-                    ttsq.set_active_session(session.clone());
-                    // The UserPromptSubmit hook fires for EVERY submit (typed OR dictated),
-                    // so this is where a genuinely-typed submit is caught. BUT a VOICE
-                    // submit also pressed Enter via the engine — de-dup so that auto-Enter
-                    // isn't treated as a second, separate submit: if a voice submit just
-                    // happened, this hook is its echo (the voice path already applied
-                    // `input_clears` directly), so skip. Read config live so a runtime
-                    // `set_config` change takes effect without an engine restart.
-                    let was_voice = ttsq.take_recent_voice_submit();
-                    // Short-circuit: skip the settings.json read entirely when `was_voice`
-                    // already decides it (`should_cancel_on_submit` would read `false`
-                    // either way, but there's no reason to load config to learn that).
-                    if !was_voice {
-                        let scopes = VoiceConfig::load(&paths).input_clears;
-                        if should_cancel_on_submit(
-                            was_voice,
-                            scopes.contains(&CancelSpeechScope::Current),
-                        ) {
-                            ttsq.clear_session(session.clone());
-                        }
-                        if should_cancel_on_submit(
-                            was_voice,
-                            scopes.contains(&CancelSpeechScope::Other),
-                        ) {
-                            // Pass this REQUEST's own `session` as the target directly,
-                            // rather than re-deriving "active" via `ttsq.active_session()`
-                            // — `set_active_session` above already set it to exactly this
-                            // session, but re-reading it would reopen a window for a
-                            // concurrent MarkActive from another terminal to land in
-                            // between and be treated as
-                            // "other" instead of this one.
-                            ttsq.cancel_for_submit(session.clone(), false, true);
-                        }
-                    }
+                ds_ipc::Request::MarkActive { session, synthetic } => {
+                    handle_mark_active(&ttsq, &codex_sessions, &paths, session, synthetic);
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::Speak {
@@ -391,6 +414,50 @@ mod tests {
         // A genuine submit: cancels only when the user opted into that scope.
         assert!(should_cancel_on_submit(false, true));
         assert!(!should_cancel_on_submit(false, false));
+    }
+
+    #[test]
+    fn mark_active_synthetic_does_not_claim_active_or_cancel_speech() {
+        let ttsq = TtsQueue::test_stub();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path()); // no config.toml → default input_clears=[current]
+        let codex_sessions = crate::codex_stream::SessionRegistry::new();
+
+        ttsq.set_active_session(Some("other".into()));
+        ttsq.enqueue("hi".into(), None, None, Some("a".into()));
+
+        handle_mark_active(&ttsq, &codex_sessions, &paths, Some("a".into()), true);
+
+        assert_eq!(
+            ttsq.active_session(),
+            Some("other".into()),
+            "a synthetic continuation must not steal active-terminal status"
+        );
+        assert_eq!(
+            ttsq.snapshot().1,
+            1,
+            "a synthetic continuation must not cancel queued speech"
+        );
+    }
+
+    #[test]
+    fn mark_active_genuine_submit_still_claims_active_and_cancels_current_scope() {
+        // Regression guard: proves the fix didn't change real-submit behavior.
+        let ttsq = TtsQueue::test_stub();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let codex_sessions = crate::codex_stream::SessionRegistry::new();
+
+        ttsq.enqueue("hi".into(), None, None, Some("a".into()));
+
+        handle_mark_active(&ttsq, &codex_sessions, &paths, Some("a".into()), false);
+
+        assert_eq!(ttsq.active_session(), Some("a".into()));
+        assert_eq!(
+            ttsq.snapshot().1,
+            0,
+            "default input_clears=[current] still prunes a genuine submit's own queued item"
+        );
     }
 
     #[test]

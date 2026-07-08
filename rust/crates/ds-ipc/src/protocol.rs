@@ -41,6 +41,19 @@ pub enum Request {
     MarkActive {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// True when the hook classified the `UserPromptSubmit` prompt body as a
+        /// harness-injected CONTINUATION rather than something a human typed and
+        /// submitted — e.g. Claude Code auto-re-invoking the agent with a
+        /// `<task-notification>` block after a background task finishes (issue #11).
+        /// No human expressed "I've moved on" here, so a synthetic ping registers
+        /// session-liveness bookkeeping ONLY: it must NOT claim active-terminal status
+        /// and must NOT apply `input_clears`. `#[serde(default)]` so an older hook
+        /// build that predates this field round-trips as `false` — today's (pre-fix)
+        /// behavior — never silently softening a genuine submit from a client that
+        /// hasn't been rebuilt yet. See `dontspeak::hook_speak::is_synthetic_continuation`
+        /// for the classifier that sets this on the wire.
+        #[serde(default)]
+        synthetic: bool,
     },
     /// Speak `text` as a Reply on the engine's TTS queue (survives a record-barge when
     /// the resume policy is set). Used by the MCP `speak` tool for explicit, model-driven
@@ -269,6 +282,14 @@ mod tests {
             Request::StopSpeech {
                 session: Some("sess-1".into()),
             },
+            Request::MarkActive {
+                session: Some("sess-1".into()),
+                synthetic: false,
+            },
+            Request::MarkActive {
+                session: None,
+                synthetic: true,
+            },
             Request::TestRecognitionStart,
             Request::ModelStatus,
             Request::SetProvider {
@@ -323,6 +344,23 @@ mod tests {
         );
         assert!(!Response::Listening.is_terminal());
         assert!(!Response::Partial { text: "x".into() }.is_terminal());
+    }
+
+    /// Backward-compat regression guard (issue #11): an older hook build's wire line
+    /// predates the `synthetic` field entirely. `#[serde(default)]` must decode the
+    /// absent key as `false` — today's (pre-fix) behavior — never silently softening
+    /// a genuine submit from a client that hasn't been rebuilt yet.
+    #[test]
+    fn mark_active_synthetic_defaults_to_false_when_absent_on_the_wire() {
+        let old_client_line = r#"{"cmd":"mark_active","session":"sess-1"}"#;
+        let req: Request = serde_json::from_str(old_client_line).unwrap();
+        assert!(matches!(
+            req,
+            Request::MarkActive {
+                session: Some(ref s),
+                synthetic: false,
+            } if s == "sess-1"
+        ));
     }
 
     /// Version-skew regression guard: a future response variant this build

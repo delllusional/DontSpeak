@@ -19,7 +19,11 @@ APIs directly):
 2. **Which session is active** — the session you last submitted a prompt to, set by a
    `MarkActive` RPC carried on the `UserPromptSubmit` hook. Tracking last-*prompted*
    rather than last-to-*produce-audio* means a background agent's output can't steal
-   the foreground session's voice.
+   the foreground session's voice. A `MarkActive` ping classified `synthetic` — a
+   harness-injected continuation (e.g. Claude Code auto-re-invoking the agent with a
+   `<task-notification>` block after a background task finishes), not something a
+   human typed — does NOT reassign active-terminal status; only a genuine submit does
+   (issue #11).
 
 Since there's no cheap, portable way to map "which window/tab has focus" to "which
 Claude session," the active session tracks the terminal you last typed in rather than
