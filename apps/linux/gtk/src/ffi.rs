@@ -15,6 +15,11 @@ fn take(p: *mut c_char) -> String {
     if p.is_null() {
         return String::new();
     }
+    // SAFETY: `p` is non-null (checked above); per this module's contract (see the file
+    // doc comment above), every `ds_*` call returns a `*mut c_char` that is either NULL
+    // or a valid, NUL-terminated string owned by `ds-core` until freed —
+    // `to_string_lossy().into_owned()` copies it into an owned `String` before
+    // `sys::ds_string_free(p)` frees the original allocation on the next line.
     let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
     sys::ds_string_free(p);
     s
