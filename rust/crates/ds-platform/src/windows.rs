@@ -71,6 +71,69 @@ const TERM_EXES: &[&str] = &[
     "mintty.exe", // Git Bash / MSYS2
 ];
 
+/// Process image base-names (lowercased, no path) for editors that render their main text
+/// surface with a custom GPU/canvas toolkit rather than a native Win32 edit control, so UI
+/// Automation exposes no Edit/Document role (and no settable Value pattern) on the focused
+/// buffer even though a synthetic paste + Enter lands in it fine. Same underlying cause as
+/// the terminal exemption in `has_paste_target()` below (a custom-drawn text view with no
+/// AX/UIA text pattern) — kept as a SEPARATE list rather than folded into `TERM_EXES`,
+/// because `is_terminal_frontmost()` also gates unrelated behavior (mic pause-in-background
+/// in `ttsq.rs`, dictation-key/transcript leak prevention in `ds-stt`) that a code editor
+/// should not opt into just because its buffer view happens to be UIA-invisible.
+///
+/// - "zed.exe": Zed's GPUI framework draws the buffer itself; its Windows UI Automation
+///   support is still partial (accessibility is an explicitly ongoing project — see
+///   zed-industries/zed discussion #6576) and doesn't yet expose the buffer as Edit/Document.
+const CUSTOM_TEXT_EXES: &[&str] = &["zed.exe"];
+
+/// `GetForegroundWindow` -> `GetWindowThreadProcessId` -> `OpenProcess(LIMITED)` ->
+/// `QueryFullProcessImageNameW` -> the lowercased basename, or `None` on any failure (no
+/// foreground window, access denied, query failure). Shared by `is_terminal_frontmost()`
+/// and the `has_paste_target()` custom-editor exemption so the raw Win32 FFI to resolve
+/// "what process owns the foreground window" isn't duplicated between them.
+fn frontmost_process_basename() -> Option<String> {
+    // SAFETY: Win32 FFI with locally owned buffers — `pid`/`buf`/`size` are stack locals
+    // that outlive the calls that write them, `handle` comes from a successful
+    // `OpenProcess` and is closed exactly once below, and the `buf[..size]` slice uses the
+    // length `QueryFullProcessImageNameW` reported.
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return None;
+        };
+        // QueryFullProcessImageNameW writes a full path into the buffer and updates `size`
+        // to the length actually written.
+        let mut buf = [0u16; 260]; // MAX_PATH
+        let mut size = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..size as usize]);
+        Some(
+            path.rsplit(['\\', '/'])
+                .next()
+                .unwrap_or(&path)
+                .to_ascii_lowercase(),
+        )
+    }
+}
+
 // ── Caps-Lock low-level keyboard hook ────────────────────────────────────────
 //
 // We OWN the Caps key. A `WH_KEYBOARD_LL` hook (installed on a dedicated thread
@@ -411,52 +474,11 @@ impl KeyInjector for WindowsPlatform {
 
 impl FrontmostWindow for WindowsPlatform {
     fn is_terminal_frontmost(&self) -> bool {
-        // GetForegroundWindow -> GetWindowThreadProcessId -> OpenProcess(LIMITED) ->
-        // QueryFullProcessImageNameW -> match the basename against TERM_EXES. The
-        // Parakeet STT engine gates transcript injection on this, so it FAILS
-        // CLOSED: any failure (no foreground window, OpenProcess denied, query
-        // fails) returns false and nothing is injected.
-        //
-        // SAFETY: Win32 FFI with locally owned buffers — `pid`/`buf`/`size` are stack
-        // locals that outlive the calls that write them, `handle` comes from a
-        // successful OpenProcess and is closed exactly once below, and the
-        // `buf[..size]` slice uses the length QueryFullProcessImageNameW reported.
-        unsafe {
-            let hwnd = GetForegroundWindow();
-            if hwnd.0.is_null() {
-                return false;
-            }
-            let mut pid: u32 = 0;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if pid == 0 {
-                return false;
-            }
-            let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-                return false;
-            };
-            // QueryFullProcessImageNameW writes a full path into the buffer and
-            // updates `size` to the length actually written.
-            let mut buf = [0u16; 260]; // MAX_PATH
-            let mut size = buf.len() as u32;
-            let ok = QueryFullProcessImageNameW(
-                handle,
-                PROCESS_NAME_WIN32,
-                PWSTR(buf.as_mut_ptr()),
-                &mut size,
-            )
-            .is_ok();
-            let _ = CloseHandle(handle);
-            if !ok {
-                return false;
-            }
-            let path = String::from_utf16_lossy(&buf[..size as usize]);
-            let base = path
-                .rsplit(['\\', '/'])
-                .next()
-                .unwrap_or(&path)
-                .to_ascii_lowercase();
-            TERM_EXES.contains(&base.as_str())
-        }
+        // Match the frontmost process's basename against TERM_EXES. The Parakeet STT
+        // engine gates transcript injection on this, so it FAILS CLOSED: any failure to
+        // resolve the frontmost process (see `frontmost_process_basename`) returns false
+        // and nothing is injected.
+        frontmost_process_basename().is_some_and(|base| TERM_EXES.contains(&base.as_str()))
     }
 
     fn has_paste_target(&self) -> bool {
@@ -478,10 +500,14 @@ impl FrontmostWindow for WindowsPlatform {
         //
         // A TERMINAL always accepts a paste, but its focused element reports as a
         // console/custom control with no Edit/Document type and no Value pattern, so the
-        // UIA probe below would wrongly read "no target" (the orange glow). Treat a
-        // terminal-frontmost window as a valid target up front — reusing is_terminal_frontmost,
-        // and matching macOS where a terminal's AXTextArea reads as editable.
-        if self.is_terminal_frontmost() {
+        // UIA probe below would wrongly read "no target" (the orange glow); same story for
+        // a frontmost CUSTOM_TEXT_EXES editor (its buffer view isn't UIA-visible either).
+        // Treat either as a valid target up front, resolving the frontmost process ONCE
+        // (rather than calling `is_terminal_frontmost()`, which would re-resolve it) —
+        // matching macOS where a terminal's AXTextArea reads as editable.
+        if frontmost_process_basename().is_some_and(|base| {
+            TERM_EXES.contains(&base.as_str()) || CUSTOM_TEXT_EXES.contains(&base.as_str())
+        }) {
             return true;
         }
         use windows::Win32::System::Com::{
@@ -838,6 +864,30 @@ mod keycode_parity {
     #[test]
     fn unsupported_base_has_no_keycode() {
         assert!(vk_for_base(&KeyBase::Unsupported("f5".into())).is_none());
+    }
+}
+
+#[cfg(test)]
+mod custom_text_exes {
+    use super::*;
+
+    #[test]
+    fn zed_is_listed_and_lowercase() {
+        // `frontmost_process_basename()` always lowercases before matching, so an
+        // uppercase entry here would silently never match.
+        assert!(CUSTOM_TEXT_EXES.contains(&"zed.exe"));
+        for exe in CUSTOM_TEXT_EXES {
+            assert_eq!(*exe, exe.to_ascii_lowercase(), "{exe} must be lowercase");
+        }
+    }
+
+    #[test]
+    fn disjoint_from_term_exes() {
+        // The two lists gate different behavior (see CUSTOM_TEXT_EXES's doc comment);
+        // an exe in both would be redundant and signals it belongs in one, not both.
+        for exe in CUSTOM_TEXT_EXES {
+            assert!(!TERM_EXES.contains(exe), "{exe} listed in both exe tables");
+        }
     }
 }
 
