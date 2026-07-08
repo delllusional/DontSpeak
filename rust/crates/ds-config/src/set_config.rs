@@ -42,6 +42,7 @@ pub struct SetConfigArgs {
     pub tray_indicator: Option<Vec<TrayKind>>,
     pub capture_gain: Option<CaptureGain>,
     pub double_tap_submits: Option<bool>,
+    pub paste_submit_delay_ms: Option<u64>,
     pub input_clears: Option<Vec<CancelSpeechScope>>,
     pub pause_in_background: Option<bool>,
     pub earcon_reply_sound: Option<String>,
@@ -74,6 +75,7 @@ impl SetConfigArgs {
             tray_indicator,
             capture_gain,
             double_tap_submits,
+            paste_submit_delay_ms,
             input_clears,
             pause_in_background,
             earcon_reply_sound,
@@ -237,6 +239,11 @@ impl SetConfigArgs {
         if let Some(b) = double_tap_submits {
             cfg.double_tap_submits = b;
             changes.push(format!("double_tap_submits={b}"));
+        }
+        if let Some(d) = paste_submit_delay_ms {
+            let d = d.clamp(0, 5000);
+            cfg.paste_submit_delay_ms = d;
+            changes.push(format!("paste_submit_delay_ms={d}"));
         }
         if let Some(scopes) = input_clears {
             // De-dup, preserving order (the array IS the setting — `[]` = never cancel).

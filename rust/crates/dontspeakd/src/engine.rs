@@ -319,6 +319,12 @@ pub(crate) struct Engine<P: Platform + 'static> {
     /// `Recording` AND `ConfirmArmed` (the stop tap resumes the voice, so speech can
     /// be playing again) — a variant per combination would cross-product the machine.
     pending_tap_at: Option<Instant>,
+    /// A confirmed submit's Enter press, deferred by `paste_submit_delay_ms` so the
+    /// async paste settles first. Polled once per [`tick`] via
+    /// [`crate::timer::deferred_ready`] rather than blocking the tick thread with
+    /// `std::thread::sleep` — same non-blocking-timer idiom as `pending_tap_at`.
+    /// `None` when zero-delay (or no submit is pending).
+    pending_enter_at: Option<Instant>,
 
     // ── engine-owns-everything: last-applied config + subsystem gates ─────────
     /// The config the engine last APPLIED. Held so [`Engine::reload`] can diff
@@ -422,6 +428,7 @@ impl<P: Platform + 'static> Engine<P> {
             long_press_ms,
             press: PressState::Up,
             pending_tap_at: None,
+            pending_enter_at: None,
             cfg,
             // Starts `false` regardless of the computed `caps_enabled` — the call to
             // `set_caps_gate` below is the ONE place that decides whether to acquire the
@@ -665,24 +672,27 @@ impl<P: Platform + 'static> Engine<P> {
             // stop gesture (captured from the `ConfirmArmed` variant at entry above).
             let submit = enter_after_paste;
             if submit {
-                self.plat.press_enter();
                 if let Some(q) = &self.ttsq {
-                    // Mark the voice submit's own auto-Enter so the `MarkActive` path
-                    // doesn't double-count it as a separate submit. Gated on `submit` —
-                    // when this gesture is insert-only the engine never presses Enter, so
-                    // a later manual Enter is a real, separate submit caught by
-                    // `MarkActive`.
-                    q.note_voice_submit();
-                    // Apply `input_clears` before the new turn answers, scoped per token:
-                    // `current` drops this window's own now-stale pending speech, `other`
-                    // drops every other window's (and untagged global audio). Resolve
-                    // "active" ONCE and hand it to `cancel_for_submit` so the two scopes
-                    // can't disagree with each other (see its doc).
+                    // Apply `input_clears` immediately at submit — must not wait on the
+                    // deferred Enter below; a playing reply is silenced (or not)
+                    // exactly when the user submits, not delayed by
+                    // `paste_submit_delay_ms`. `current` drops this window's own
+                    // now-stale pending speech, `other` drops every other window's (and
+                    // untagged global audio). Resolve "active" ONCE and hand it to
+                    // `cancel_for_submit` so the two scopes can't disagree (see its doc).
                     q.cancel_for_submit(
                         q.active_session(),
                         self.cfg.input_clears.contains(&CancelSpeechScope::Current),
                         self.cfg.input_clears.contains(&CancelSpeechScope::Other),
                     );
+                }
+                // Let the async paste settle before Enter lands — deferred via a polled
+                // timer (see `pending_enter_at`) rather than a blocking sleep, since this
+                // runs on the engine's single tick thread.
+                if self.cfg.paste_submit_delay_ms > 0 {
+                    self.pending_enter_at = Some(Instant::now());
+                } else {
+                    self.press_deferred_enter();
                 }
             }
         }
@@ -931,6 +941,11 @@ impl<P: Platform + 'static> Engine<P> {
         // Always-listening lifecycle: (re)build the listener when the mode turns
         // on or its params change; drop it when the mode turns off. Compared
         // against the still-current self.cfg (replaced just below).
+        // `paste_submit_delay_ms` deliberately does NOT gate a rebuild: unlike
+        // `submit_confirm_ms`/`endpoint_silence_ms`, which are baked into
+        // `TurnLogic::new`/`Endpointer::new` at construction, it's just a plain `u64`
+        // the listener reads at submit time — pushed live below instead, so changing
+        // it mid-utterance doesn't drop an in-flight hands-free capture.
         let listen_changed = cfg.listen_mode != self.cfg.listen_mode
             || cfg.hands_free != self.cfg.hands_free
             || cfg.submit_confirm_ms != self.cfg.submit_confirm_ms
@@ -975,6 +990,11 @@ impl<P: Platform + 'static> Engine<P> {
             // through the same teardown the caps-gate-off and engine-rebuild paths use.
             self.teardown_hold();
             self.listener = None;
+        }
+        // Live-push the delay onto whatever listener now exists (freshly built above,
+        // or untouched) — cheap field copy, no rebuild needed.
+        if let Some(l) = self.listener.as_mut() {
+            l.set_paste_submit_delay_ms(cfg.paste_submit_delay_ms);
         }
 
         // Record the applied config so the NEXT reload diffs against it.
@@ -1098,6 +1118,11 @@ impl<P: Platform + 'static> Engine<P> {
     ///
     /// See the inline GESTURE MODEL block below for the full rationale.
     pub(crate) fn tick(&mut self) {
+        // A confirmed submit's deferred Enter (see `confirm_paste`/`pending_enter_at`)
+        // must still fire even if caps gets disabled or the mode changes mid-delay —
+        // same belt-and-suspenders reasoning as `discard_stale_caps_backlog` below, so
+        // run this before any mode early-return.
+        self.check_pending_enter();
         // Publish whether a terminal is the frontmost app for the TTS worker's focus
         // gate. The worker thread can't call this (NSWorkspace is poll/main-thread
         // affine), so the poll thread samples it here — every tick, before any mode
@@ -1407,6 +1432,30 @@ impl<P: Platform + 'static> Engine<P> {
         {
             self.pending_tap_at = None;
             self.toggle_dictation();
+        }
+    }
+
+    /// Fire a deferred submit's Enter once `paste_submit_delay_ms` has elapsed. Run
+    /// once per [`tick`], regardless of gesture state, so a delay armed by
+    /// `confirm_paste` still fires even if the gesture moves on in the meantime.
+    fn check_pending_enter(&mut self) {
+        if crate::timer::deferred_ready(&mut self.pending_enter_at, self.cfg.paste_submit_delay_ms)
+        {
+            self.press_deferred_enter();
+        }
+    }
+
+    /// Press Enter for a confirmed submit and mark it so `MarkActive` doesn't
+    /// double-count its own echo as a separate submit. Called either immediately
+    /// (zero delay) or once `check_pending_enter`'s timer elapses.
+    fn press_deferred_enter(&mut self) {
+        self.plat.press_enter();
+        if let Some(q) = &self.ttsq {
+            // Mark the voice submit's own auto-Enter so the `MarkActive` path doesn't
+            // double-count it as a separate submit. This must stay pinned to the REAL
+            // Enter keystroke (not the earlier paste/cancel step) since
+            // `note_voice_submit`'s de-dup window is a few seconds wide.
+            q.note_voice_submit();
         }
     }
 
@@ -1910,11 +1959,16 @@ mod tests {
     }
 
     fn mk(long_press_ms: u64) -> Engine<MockPlatform> {
-        Engine::new(
+        let mut d = Engine::new(
             MockPlatform::default(),
             std::path::PathBuf::from("/tmp/ds-test-nonexistent.pid"),
             long_press_ms,
-        )
+        );
+        // Zero the paste-submit delay so submit-path tests can assert
+        // `press_enter_calls` synchronously instead of waiting out a real
+        // Instant-based timer — mirrors `listener.rs`'s `for_test` doing the same.
+        d.cfg.paste_submit_delay_ms = 0;
+        d
     }
 
     impl MockPlatform {

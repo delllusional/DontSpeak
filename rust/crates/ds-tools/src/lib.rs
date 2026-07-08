@@ -242,6 +242,12 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_DOUBLE_TAP_SUBMITS,
             ),
+            p(
+                "paste_submit_delay_ms",
+                PType::Int(0, 5000),
+                false,
+                SET_CONFIG_PASTE_SUBMIT_DELAY_MS,
+            ),
             p("full_duplex", PType::Bool, false, SET_CONFIG_FULL_DUPLEX),
             // ── Compute backend ──
             p(
@@ -699,6 +705,7 @@ mod tests {
             tray_indicator: Some(vec![TrayKind::Stt, TrayKind::Tts]),
             capture_gain: Some(CaptureGain::Manual(2.0)),
             double_tap_submits: Some(true),
+            paste_submit_delay_ms: Some(100),
             input_clears: Some(vec![CancelSpeechScope::Current, CancelSpeechScope::Other]),
             pause_in_background: Some(true),
             earcon_reply_sound: Some("Tink".to_string()),

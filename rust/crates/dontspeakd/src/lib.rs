@@ -76,6 +76,7 @@ mod engine;
 mod ipc;
 mod logging;
 mod status;
+mod timer;
 
 // The in-process host (the `ds-core` FFI crate) consumes ONLY these two items.
 pub use boot::{EngineError, engine_run};

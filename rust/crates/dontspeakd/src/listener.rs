@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use ds_config::VoiceConfig;
 use ds_platform::{FrontmostWindow, KeyInjector};
@@ -66,6 +67,15 @@ pub struct Listener<P: KeyInjector + FrontmostWindow> {
     input_rate: u32,
     /// Parakeet model present at construction — false ⇒ the loop no-ops (logged).
     available: bool,
+    /// Delay (ms) between the clipboard paste and the Enter keypress on submit, so
+    /// the async paste settles before Enter arrives. Mirrors the engine's Caps path.
+    /// Live-updated by `set_paste_submit_delay_ms` — deliberately NOT baked into
+    /// `endpointer`/`turn` at construction, so changing it doesn't need a rebuild.
+    paste_submit_delay_ms: u64,
+    /// A confirmed submit's Enter press, deferred by `paste_submit_delay_ms`. Polled
+    /// once per [`tick`] via [`crate::timer::deferred_ready`] instead of blocking
+    /// this thread with `std::thread::sleep` — mirrors `Engine::pending_enter_at`.
+    pending_enter_at: Option<Instant>,
     /// The engine TTS queue, so a hands-free SUBMIT can drop this window's pending
     /// speech per `input_clears`. `None` in tests.
     ttsq: Option<Arc<TtsQueue>>,
@@ -110,9 +120,17 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
             segment: Vec::new(),
             input_rate: 16_000,
             available,
+            paste_submit_delay_ms: cfg.paste_submit_delay_ms,
+            pending_enter_at: None,
             ttsq,
             gate,
         }
+    }
+
+    /// Live-update the paste→Enter delay without rebuilding the listener (see the
+    /// field's doc) — called from `Engine::reload` on every config apply.
+    pub(crate) fn set_paste_submit_delay_ms(&mut self, ms: u64) {
+        self.paste_submit_delay_ms = ms;
     }
 
     /// Test-only constructor: skips the Parakeet-availability probe and starts with no
@@ -133,6 +151,8 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
             segment: Vec::new(),
             input_rate: 16_000,
             available: true,
+            paste_submit_delay_ms: 0,
+            pending_enter_at: None,
             ttsq: None,
             gate,
         }
@@ -143,6 +163,9 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
     /// queue can play; when false the mic is open and we drive the VAD + turn loop.
     /// `cancel_current`/`cancel_other` mirror the live `input_clears` config.
     pub fn tick(&mut self, tts_busy: bool, cancel_current: bool, cancel_other: bool) {
+        // A submit's deferred Enter must still fire even if a reply starts speaking
+        // (tts_busy) during the delay window, so poll it before the play-gate below.
+        self.check_pending_enter();
         if tts_busy {
             self.gate_off();
             return;
@@ -240,7 +263,7 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
     /// there's no focus refusal here: the stop-word confirm (mirroring the Caps confirm
     /// tap) IS the deliberate gate, so once armed a submit always pastes wherever is
     /// focused.
-    fn exec(&self, action: TurnAction, cancel_current: bool, cancel_other: bool) {
+    fn exec(&mut self, action: TurnAction, cancel_current: bool, cancel_other: bool) {
         match action {
             // Paste the whole captured text + Enter — ALWAYS, like the Caps path's
             // `confirm_paste`. The stop-word-plus-confirm-silence gesture that got us here
@@ -248,20 +271,47 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
             // focused, never silently refused for focus.
             TurnAction::SubmitText(text) => {
                 self.plat.type_text(&text);
-                self.plat.press_enter();
                 if let Some(q) = &self.ttsq {
-                    // Mark the voice submit's auto-Enter so `MarkActive` de-dups it as
-                    // this same submit rather than a separate one. Then apply
-                    // `input_clears` per scope, atomically (see `cancel_for_submit`'s
-                    // doc for why both scopes must share one resolved "active").
+                    // Apply `input_clears` immediately at submit, atomically per scope
+                    // (see `cancel_for_submit`'s doc for why both scopes must share one
+                    // resolved "active") — must not wait on the deferred Enter below.
                     // Only on SubmitText — never on Cancel.
-                    q.note_voice_submit();
                     q.cancel_for_submit(q.active_session(), cancel_current, cancel_other);
+                }
+                // Let the async paste settle before Enter lands — deferred via a polled
+                // timer (`check_pending_enter`, run from `tick`) rather than a blocking
+                // sleep, since this runs on the engine's single tick thread.
+                if self.paste_submit_delay_ms > 0 {
+                    self.pending_enter_at = Some(Instant::now());
+                } else {
+                    self.press_deferred_enter();
                 }
             }
             // Discard: nothing to inject (sync_pill already hid the pill), and NO cancel —
             // cancelling your dictation must not silence the in-flight reply.
             TurnAction::Cancel => {}
+        }
+    }
+
+    /// Fire a deferred submit's Enter once `paste_submit_delay_ms` has elapsed. Run
+    /// once per [`tick`], mirrors `Engine::check_pending_enter`.
+    fn check_pending_enter(&mut self) {
+        if crate::timer::deferred_ready(&mut self.pending_enter_at, self.paste_submit_delay_ms) {
+            self.press_deferred_enter();
+        }
+    }
+
+    /// Press Enter for a confirmed submit and mark it so `MarkActive` doesn't
+    /// double-count its own echo as a separate submit. Called either immediately
+    /// (zero delay) or once `check_pending_enter`'s timer elapses.
+    fn press_deferred_enter(&mut self) {
+        self.plat.press_enter();
+        if let Some(q) = &self.ttsq {
+            // Mark the voice submit's auto-Enter so `MarkActive` de-dups it as this
+            // same submit rather than a separate one. Must stay pinned to the REAL
+            // Enter keystroke (not the earlier paste/cancel step) since
+            // `note_voice_submit`'s de-dup window is a few seconds wide.
+            q.note_voice_submit();
         }
     }
 }
@@ -335,7 +385,7 @@ mod tests {
     #[test]
     fn exec_always_pastes_submit_regardless_of_focus() {
         let plat = Rc::new(MockPlatform::default());
-        let l = Listener::for_test(plat.clone(), turn(), None);
+        let mut l = Listener::for_test(plat.clone(), turn(), None);
 
         // Not frontmost → still pastes and presses Enter: the stop-word confirm
         // itself is the gate, mirroring `confirm_paste`'s unconditional paste.
@@ -355,7 +405,7 @@ mod tests {
     fn exec_cancel_is_always_a_noop() {
         let plat = Rc::new(MockPlatform::default());
         plat.terminal_frontmost.set(true); // even when focus WOULD allow a paste
-        let l = Listener::for_test(plat.clone(), turn(), None);
+        let mut l = Listener::for_test(plat.clone(), turn(), None);
 
         l.exec(TurnAction::Cancel, false, false);
         assert_eq!(plat.type_text_calls.get(), 0);

@@ -253,6 +253,15 @@ pub struct VoiceConfig {
     #[serde(default)]
     pub double_tap_submits: bool,
 
+    /// Delay (ms) between the clipboard paste (Ctrl+V) and the Enter keypress that
+    /// submits the prompt. The paste is asynchronous — the terminal reads the clipboard
+    /// and streams the text into stdin — so a back-to-back Enter can arrive before the
+    /// target app has finished processing the paste and get dropped. Default 100 ms,
+    /// long enough for the paste to settle yet short enough to feel instant. Set to 0
+    /// to restore the old zero-delay behavior.
+    #[serde(default = "default_paste_submit_delay_ms")]
+    pub paste_submit_delay_ms: u64,
+
     /// Whose pending speech a submit cancels — a SET of `current`/`other` (default
     /// `["current"]` = cancel this window's own speech; `[]` = never). Any submit, typed
     /// or spoken, triggers the check — how you submitted no longer matters, only whose
@@ -382,6 +391,9 @@ fn default_submit_confirm_ms() -> u64 {
 fn default_endpoint_silence_ms() -> u64 {
     700
 }
+fn default_paste_submit_delay_ms() -> u64 {
+    100
+}
 fn default_capture_gain() -> CaptureGain {
     CaptureGain::Auto
 }
@@ -468,6 +480,7 @@ impl Default for VoiceConfig {
             full_duplex: false,
             capture_gain: default_capture_gain(),
             double_tap_submits: false,
+            paste_submit_delay_ms: default_paste_submit_delay_ms(),
             input_clears: default_input_clears(),
             pause_in_background: false,
             earcon_reply_sound: default_earcon_reply(),
@@ -623,6 +636,12 @@ impl VoiceConfig {
         self.tts_rate = self.tts_rate.clamp(0.5, 2.0);
         self.clustering_threshold = self.clustering_threshold.clamp(0.5, 0.9);
         self.speaker_threshold = self.speaker_threshold.clamp(0.0, 1.0);
+        // Unlike `submit_confirm_ms`/`endpoint_silence_ms` (only ever compared against
+        // elapsed time, so an out-of-range value is merely inert), this one directly
+        // parameterizes a real timer — a hand-edited config.toml with an unbounded
+        // value would otherwise defer the post-paste Enter indefinitely. Same 0..5000
+        // range as the MCP `set_config` path (`ds-config::set_config`).
+        self.paste_submit_delay_ms = self.paste_submit_delay_ms.clamp(0, 5000);
     }
 
     /// True when the active TTS is the apple-native (FluidAudio Core ML / ANE) Kokoro. It
@@ -786,6 +805,7 @@ pub(crate) mod tests {
         assert_eq!(v.hands_free.submit, "submit");
         assert_eq!(v.submit_confirm_ms, 1000);
         assert_eq!(v.endpoint_silence_ms, 700);
+        assert_eq!(v.paste_submit_delay_ms, 100);
         assert_eq!(
             v.provider,
             vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]
@@ -1417,9 +1437,10 @@ pub(crate) mod tests {
             endpoint_silence_ms: 650,
             full_duplex: true,
             capture_gain: CaptureGain::Manual(2.5),
-            double_tap_submits: true, // non-default (default is false)
+            double_tap_submits: true,   // non-default (default is false)
+            paste_submit_delay_ms: 150, // non-default (default is 100)
             input_clears: vec![CancelSpeechScope::Other], // non-default (default is [current])
-            pause_in_background: true, // non-default (default is false)
+            pause_in_background: true,  // non-default (default is false)
             earcon_reply_sound: "Glass".into(), // non-default (default is empty/off)
             earcon_needs_input_sound: "Funk".into(),
             codex_stream: false,             // non-default (default is true)

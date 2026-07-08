@@ -125,6 +125,7 @@ or `tts_system_voice`.
 | `stt_engine` | enum: `built_in`, `system`, `claude_code`, `off` | Dictation engine: `built_in` (on-device), `system` (OS recognizer, macOS only), or `claude_code` (Claude Code's voice key) to force exactly that engine, or `off` to turn dictation off. Omit to keep the automatic preference (config-file only). Rejected if the engine isn't usable on this platform/build; `system` is also checked for on-device availability/authorization when set. |
 | `capture_gain` | `"auto"` or number 0.5–20.0 | Mic gain before recognition. Default `"auto"`. |
 | `double_tap_submits` | boolean | Default false: a single tap submits (paste + Return), a fast double tap only inserts. `true` swaps them. |
+| `paste_submit_delay_ms` | integer 0–5000 | Delay between the paste and the Enter that submits — lets the async clipboard paste settle before Enter. Default 100; 0 = instant. |
 | `full_duplex` | boolean | Keep the mic open while replies play, using platform echo cancellation, instead of closing it during speech. Default false; only takes effect with built-in dictation and built-in speech output. |
 
 **Compute backend**

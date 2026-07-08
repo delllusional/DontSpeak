@@ -95,6 +95,8 @@ pub const SET_CONFIG_CAPTURE_GAIN: &str =
     "Mic gain before recognition: \"auto\" (default) or a fixed 0.5–20.0 multiplier.";
 pub const SET_CONFIG_DOUBLE_TAP_SUBMITS: &str = "Default false: a single tap submits (paste + \
     Return), a fast double tap only inserts. true swaps them.";
+pub const SET_CONFIG_PASTE_SUBMIT_DELAY_MS: &str = "Delay (ms) between the paste and the Enter \
+    that submits — lets the async clipboard paste settle before Enter. Default 100; 0 = instant.";
 pub const SET_CONFIG_PROVIDER: &str = "Compute-backend ladder for speech output and recognition \
     (first usable wins): \"ane\" (on-device accelerator), \"cuda\" (GPU), \"coreml\" \
     (platform accelerator, speech output only), \"cpu\" (CPU). Default [\"ane\",\"cuda\",\"cpu\"].";
