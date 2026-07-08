@@ -2,7 +2,7 @@
 //! engine and no config write). Used by the `list_voices` tool.
 
 use ds_config::TtsEngine;
-use ds_tts::enumerate;
+use ds_voices::enumerate;
 use serde_json::{Value, json};
 
 /// Build voice groups for `engine`, filtered to one `language` primary subtag. Each
@@ -80,7 +80,7 @@ mod tests {
         // `SpeakerVoice` fixture rather than `voice_groups(TtsEngine::System, ..)`
         // directly — the latter would call the real, unmocked
         // `enumerate::system_voices()`, which shells out to `say -v ?` on macOS.
-        let voices = vec![ds_tts::SpeakerVoice {
+        let voices = vec![ds_voices::SpeakerVoice {
             id: "Samantha".into(),
             name: "Samantha".into(),
             language_tag: "en-US".into(),

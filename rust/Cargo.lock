@@ -869,7 +869,7 @@ dependencies = [
  "ds-narrate",
  "ds-platform",
  "ds-tools",
- "ds-tts",
+ "ds-voices",
  "serde",
  "serde_json",
  "tempfile",
@@ -1093,6 +1093,7 @@ dependencies = [
  "ds-config",
  "ds-model",
  "ds-proc",
+ "ds-voices",
  "grapheme_to_phoneme",
  "libloading",
  "nix 0.31.3",
@@ -1101,6 +1102,14 @@ dependencies = [
  "serde",
  "serde_json",
  "voice-g2p",
+]
+
+[[package]]
+name = "ds-voices"
+version = "0.2.4-dev"
+dependencies = [
+ "ds-config",
+ "ds-model",
 ]
 
 [[package]]

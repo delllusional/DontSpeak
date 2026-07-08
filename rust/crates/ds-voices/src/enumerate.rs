@@ -43,6 +43,16 @@ pub const KOKORO_FALLBACK_IDS: &[&str] = &[
     "bm_george",
 ];
 
+/// The Kokoro voices asset's bare on-disk file name — a DELIBERATE duplicate of just the
+/// name, NOT a new source of truth. `ds_model::KOKORO_VOICES_FILE` remains the single
+/// source of truth for the actual download pin (URL + SHA-256 + size); this crate is not
+/// allowed to depend on `ds-model` as a real (non-dev) dependency (issue #5's whole
+/// point), so it can't read that constant at build time. The dev-only test
+/// `kokoro_voices_filename_matches_ds_model_registry` below is the drift guard that keeps
+/// this literal honest without pulling `ds-model` (and its attohttpc/ort/flate2/tar) into
+/// this crate's real dependency graph.
+const KOKORO_VOICES_FILE: &str = "voices-v1.0.bin";
+
 // ── Kokoro id parsing (PURE) ─────────────────────────────────────────────────
 
 /// The language subtag a Kokoro id belongs to, from its leading family char
@@ -141,7 +151,7 @@ pub fn gender_str(g: Option<Gender>) -> Option<&'static str> {
 /// Read Kokoro voice ids from the downloaded `voices-v1.0.bin` if it is present;
 /// otherwise return the static fallback set. NEVER downloads. Probes disk only.
 pub fn kokoro_voice_ids() -> Vec<String> {
-    if let Some(path) = ds_model::model_path(ds_model::KOKORO_VOICES_FILE)
+    if let Some(path) = ds_config::model_dir().map(|d| d.join(KOKORO_VOICES_FILE))
         && path.is_file()
         && let Ok(bytes) = std::fs::read(&path)
         && let Ok(names) = voices::voice_names(&bytes)
@@ -288,6 +298,14 @@ pub fn current_voice_name(cfg: &VoiceConfig) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kokoro_voices_filename_matches_ds_model_registry() {
+        // Dev-only drift guard (see KOKORO_VOICES_FILE's doc comment): keeps this crate's
+        // local duplicate byte-for-byte in sync with ds-model's real download-registry
+        // pin, without ds-model ever becoming a real (non-dev) dependency of this crate.
+        assert_eq!(KOKORO_VOICES_FILE, ds_model::KOKORO_VOICES_FILE);
+    }
 
     #[test]
     fn kokoro_language_from_family_char() {

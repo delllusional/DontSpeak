@@ -1,0 +1,23 @@
+[package]
+name = "ds-voices"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Voice/language enumeration for DontSpeak's TTS engines (Kokoro voices bin + `say -v ?`) — split out of ds-tts (issue #5) so the CLI can list voices without linking ort/rodio/voice-g2p/grapheme_to_phoneme/ds-model."
+
+[dependencies]
+ds-config = { workspace = true }
+
+[dev-dependencies]
+# Dev-only drift guard (see enumerate.rs's KOKORO_VOICES_FILE doc comment): asserts our
+# local filename literal stays byte-for-byte in sync with ds-model's own download-registry
+# pin, WITHOUT ds-model (and its attohttpc/ort/flate2/tar) ever becoming a real dependency
+# of this crate — same pattern ds-tools already uses to keep itself a build leaf.
+ds-model = { workspace = true }
+
+[lints]
+workspace = true

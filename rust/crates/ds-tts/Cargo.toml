@@ -12,6 +12,11 @@ description = "Pluggable TTS engines for DontSpeak: Kokoro (native in-process sy
 [dependencies]
 ds-config = { workspace = true }
 ds-proc = { workspace = true }
+# Voice/language enumeration + Gender/Quality/SpeakerVoice (issue #5): split out so the
+# `dontspeak` CLI can list voices without the heavy synth deps below. Re-exported under
+# this crate's old `enumerate`/`Gender`/`Quality`/`SpeakerVoice` paths (see lib.rs) so
+# every existing call site keeps compiling unchanged.
+ds-voices = { workspace = true }
 # The shared ORT session builder + the apple-native FluidAudio shim loader (used by
 # synth_coreml). The warm-media helper that unions synth + dictation + AEC is its OWN
 # crate now (ds-helper), so this TTS library no longer depends on ds-stt / ds-aec.
@@ -20,8 +25,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 # ── Phase-2b native Kokoro synth ─────────────────────────────────────────────
-# The pure modules (vocab/voices/trim/group) need NONE of these; the synth path does.
-# Pinned once in the workspace.
+# The pure modules (vocab/trim) need NONE of these; the synth path does. `voices`/`say`/
+# `enumerate` moved to `ds-voices` (issue #5) — reached here via the re-export shim in
+# lib.rs — so they're no longer pure modules of THIS crate. Pinned once in the workspace.
 # ONNX inference (load-dynamic: no onnxruntime baked, resolved at runtime).
 ort = { workspace = true }
 # Pure-Rust English G2P (per-word wrapper avoids the espeak-ng fallback).

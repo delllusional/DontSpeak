@@ -36,12 +36,10 @@ use std::io;
 pub mod ane_voices;
 /// Phoneme batching / streaming for gapless synth (used by the helper bin).
 pub mod batch;
-pub mod enumerate;
 pub mod g2p;
 pub(crate) mod kokoro;
 pub(crate) mod numbers;
 pub mod play;
-pub(crate) mod say;
 pub mod synth;
 /// Apple-native (FluidAudio Core ML / ANE) Kokoro backend. macOS only.
 #[cfg(target_os = "macos")]
@@ -49,46 +47,28 @@ pub mod synth_coreml;
 pub mod system;
 pub(crate) mod trim;
 pub(crate) mod vocab;
-pub(crate) mod voices;
 #[doc(hidden)]
 pub mod wav;
 
 pub use kokoro::KokoroTts;
 pub use system::SystemTts;
 
+/// Voice/language enumeration + the enumeration-only Gender/Quality/SpeakerVoice types now
+/// live in `ds-voices` (issue #5) — a crate with no ort/rodio/voice-g2p/grapheme_to_phoneme/
+/// ds-model in its graph, so the CLI can depend on it directly instead of this (heavy) crate.
+/// Re-exported here so this crate's own synth code below and every existing
+/// `ds_tts::enumerate` / `ds_tts::SpeakerVoice` call site elsewhere keep compiling unchanged.
+pub use ds_voices::enumerate;
+pub use ds_voices::{Gender, Quality, SpeakerVoice};
+// Crate-PRIVATE alias — `voices` was never part of ds-tts's public API and still isn't;
+// synth.rs/ane_voices.rs reach the Kokoro npz parser via `crate::voices::...` exactly as before.
+pub(crate) use ds_voices::voices;
+
 /// The process-GROUP id of a spawned speaker — recorded in the pidfile so the
 /// engine's caps-ON barge-in (`killpg(-pgid, SIGTERM)`) can preempt it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpeakHandle {
     pub pgid: i32,
-}
-
-/// Voice gender where the engine reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Gender {
-    Female,
-    Male,
-}
-
-/// Voice quality tier where the engine reports it (macOS/SAPI). `qualityRank`
-/// for the picker sort is the discriminant order (Default < Enhanced < Premium).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Quality {
-    Default,
-    Enhanced,
-    Premium,
-}
-
-/// A voice for the settings picker. `id` is the opaque handle the engine expects back.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpeakerVoice {
-    pub id: String,
-    pub name: String,
-    /// BCP-47 tag, groups voices into variations in the picker.
-    pub language_tag: String,
-    pub downloadable: bool,
-    pub gender: Option<Gender>,
-    pub quality: Option<Quality>,
 }
 
 /// A text-to-speech backend. Object-safe so the factory hands back `Box<dyn Tts>`.

@@ -35,6 +35,8 @@ rust/
                   #   per OS (macos.rs, windows.rs, linux.rs)
     ds-model/     # download + checksum-verify Kokoro/onnx/Parakeet assets; the shared
                   #   ORT session builder; the macOS FluidAudio shim loader
+    ds-voices/    # voice/language enumeration (Kokoro voices bin + `say -v ?`), split out
+                  #   of ds-tts so the CLI can list voices without the synth stack
     ds-tts/       # native Kokoro TTS pipeline (the Tts trait)
     ds-stt/       # STT engines: streaming FastConformer Parakeet, ClaudeNative
                   #   (delegates to Claude Code's own push-to-talk), SystemStt

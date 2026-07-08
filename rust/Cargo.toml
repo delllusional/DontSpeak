@@ -6,6 +6,10 @@ members = [
     "crates/ds-proc",
     "crates/ds-platform",
     "crates/ds-model",
+    # Voice/language enumeration split out of ds-tts (issue #5) so the CLI (dontspeak)
+    # can list voices without linking ds-tts's heavy synth stack (ort/rodio/voice-g2p/
+    # grapheme_to_phoneme/ds-model); ds-tts re-exports this crate's items unchanged.
+    "crates/ds-voices",
     "crates/ds-tts",
     "crates/ds-stt",
     "crates/ds-aec",
@@ -175,6 +179,7 @@ ds-ipc = { path = "crates/ds-ipc" }
 ds-proc = { path = "crates/ds-proc" }
 ds-platform = { path = "crates/ds-platform" }
 ds-model = { path = "crates/ds-model" }
+ds-voices = { path = "crates/ds-voices" }
 ds-tts = { path = "crates/ds-tts" }
 ds-stt = { path = "crates/ds-stt" }
 ds-aec = { path = "crates/ds-aec" }
