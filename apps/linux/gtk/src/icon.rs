@@ -93,8 +93,10 @@ pub fn render(size: u32, ink: Rgb, muted: bool) -> ksni::Icon {
             pb.finish()
         };
         if let Some(path) = path {
-            let mut gap = tiny_skia::Paint::default();
-            gap.blend_mode = tiny_skia::BlendMode::Clear;
+            let gap = tiny_skia::Paint {
+                blend_mode: tiny_skia::BlendMode::Clear,
+                ..Default::default()
+            };
             let mut stroke = tiny_skia::Stroke {
                 width: size as f32 * 0.186,
                 line_cap: tiny_skia::LineCap::Round,
