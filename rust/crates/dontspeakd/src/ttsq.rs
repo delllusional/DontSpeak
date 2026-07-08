@@ -262,9 +262,9 @@ pub struct TtsQueue {
     /// true: fail-open, never silence before the first sample.
     terminal_front: AtomicBool,
     /// Latches true the first time a terminal IS seen frontmost. The focus gate only
-    /// engages once this is set — so a user whose terminal emulator isn't in
-    /// `TERM_BUNDLES` (frontmost always reads false) is NEVER silenced; they degrade
-    /// to today's always-play instead of going mute.
+    /// engages once this is set — so a user whose terminal emulator isn't in the shared
+    /// terminal table (`ds_platform::KNOWN_TERMINALS`) (frontmost always reads false) is
+    /// NEVER silenced; they degrade to today's always-play instead of going mute.
     terminal_seen: AtomicBool,
     /// Config `pause_in_background`: when true, the frontmost focus gate HOLDS the queue
     /// while no terminal is frontmost; when false it's disabled (speech plays regardless of

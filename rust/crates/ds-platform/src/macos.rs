@@ -8,7 +8,7 @@
 //! * Dictation key: `core-graphics` `CGEvent` keyboard events (modifiers carried
 //!   as flags on the base key), posted to the session event tap.
 //! * Frontmost app: `NSWorkspace.frontmostApplication.bundleIdentifier` via
-//!   objc2-app-kit, matched against [`crate::TERM_BUNDLES`].
+//!   objc2-app-kit, matched against [`crate::KNOWN_TERMINALS`].
 //! * Preflight: `AXIsProcessTrusted()` (read-only, no prompt).
 
 mod capskey;
@@ -27,8 +27,8 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use objc2_app_kit::NSWorkspace;
 
 use crate::{
-    CapsKeyMonitor, FrontmostWindow, KeyBase, KeyChord, KeyInjector, Platform, PreflightError,
-    TERM_BUNDLES,
+    CapsKeyMonitor, FrontmostWindow, KNOWN_TERMINALS, KeyBase, KeyChord, KeyInjector, Platform,
+    PreflightError,
 };
 
 /// kVK_ANSI_V — for the synthetic Cmd+V paste in `type_text` (§C.3).
@@ -280,6 +280,13 @@ impl KeyInjector for MacOsPlatform {
     }
 }
 
+/// Is `bid` (a macOS bundle identifier) one of the shared table's known terminal
+/// identifiers (`ds_platform::KNOWN_TERMINALS`)? Replaces the old hand-maintained
+/// `TERM_BUNDLES` array.
+fn is_known_terminal_bundle(bid: &str) -> bool {
+    KNOWN_TERMINALS.iter().any(|t| t.macos_bundle == Some(bid))
+}
+
 impl FrontmostWindow for MacOsPlatform {
     fn is_terminal_frontmost(&self) -> bool {
         // THREAD SAFETY (reviewed 2026-06-20, macOS 14/15 Apple Silicon):
@@ -306,7 +313,7 @@ impl FrontmostWindow for MacOsPlatform {
         match app.bundleIdentifier() {
             Some(bid) => {
                 let s = bid.to_string();
-                TERM_BUNDLES.contains(&s.as_str())
+                is_known_terminal_bundle(&s)
             }
             None => false,
         }
@@ -476,5 +483,38 @@ pub(crate) fn is_mic_active() -> bool {
             NonNull::new(&mut running as *mut u32 as *mut c_void).unwrap(),
         );
         rc2 == 0 && running != 0
+    }
+}
+
+#[cfg(test)]
+mod known_terminal_table {
+    use super::*;
+
+    /// The exact literal `TERM_BUNDLES` this crate carried before `KNOWN_TERMINALS`
+    /// (ds-platform/src/lib.rs) replaced it — pinned here so a future edit to the
+    /// shared table can't silently drop (or duplicate away) a macOS entry.
+    const OLD_TERM_BUNDLES: &[&str] = &[
+        "com.googlecode.iterm2",
+        "com.apple.Terminal",
+        "com.mitchellh.ghostty",
+    ];
+
+    #[test]
+    fn matches_old_term_bundles_exactly() {
+        let entries: Vec<&str> = KNOWN_TERMINALS
+            .iter()
+            .filter_map(|t| t.macos_bundle)
+            .collect();
+        let derived: std::collections::BTreeSet<&str> = entries.iter().copied().collect();
+        let old: std::collections::BTreeSet<&str> = OLD_TERM_BUNDLES.iter().copied().collect();
+        assert_eq!(
+            derived, old,
+            "KNOWN_TERMINALS' macos_bundle entries drifted from the pre-refactor TERM_BUNDLES list"
+        );
+        assert_eq!(
+            entries.len(),
+            derived.len(),
+            "a macos_bundle value is duplicated across two KNOWN_TERMINALS rows"
+        );
     }
 }

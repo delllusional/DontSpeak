@@ -272,12 +272,242 @@ pub fn current() -> Result<LinuxPlatform, PreflightError> {
     LinuxPlatform::new()
 }
 
-/// The terminal bundle/identifier set used by the focus gate (macOS bundle ids
-/// here; Windows/Linux impls keep their own equivalent lists).
-pub const TERM_BUNDLES: &[&str] = &[
-    "com.googlecode.iterm2",
-    "com.apple.Terminal",
-    "com.mitchellh.ghostty",
+/// One entry in the shared "known terminal" table — the apps whose main text surface
+/// isn't visible to at least one OS's accessibility API, so `is_terminal_frontmost()`
+/// still treats a synthetic paste/tap as landing on a valid target. `name` is for
+/// readability/debugging only and is never matched against anything; each platform
+/// field is `Some` only where this app needs (and has) an identifier on that OS — a
+/// platform-only terminal (PowerShell, GNOME Terminal) leaves the other two `None`.
+/// An app that ships TWO identifiers on the SAME OS (WezTerm's modern vs. legacy exe/
+/// wm_class, Ghostty's two Linux wm_class spellings) gets one extra row rather than a
+/// list-valued field, since every platform's lookup just filters non-`None` values
+/// across ALL rows regardless of how many rows one logical app spans.
+pub struct KnownTerminal {
+    pub name: &'static str,
+    pub windows_exe: Option<&'static str>,
+    pub macos_bundle: Option<&'static str>,
+    pub linux_wm_class: Option<&'static str>,
+}
+
+/// The single shared source of truth for "which app counts as a terminal" across all
+/// three platforms' `is_terminal_frontmost()`. Covers exactly the identifiers
+/// previously hand-maintained as three separate flat lists (Windows's old `TERM_EXES`,
+/// macOS's old `TERM_BUNDLES`, Linux's old `TERM_WM_CLASSES` — see each platform
+/// module's golden-list test, which pins this table against those pre-refactor
+/// literals). Adding a new cross-platform terminal with ONE identifier per OS is one
+/// row here instead of up to three separate edits.
+pub const KNOWN_TERMINALS: &[KnownTerminal] = &[
+    // ---- cross-platform ---------------------------------------------------------
+    KnownTerminal {
+        name: "Alacritty",
+        windows_exe: Some("alacritty.exe"),
+        macos_bundle: None,
+        linux_wm_class: Some("alacritty"),
+    },
+    KnownTerminal {
+        name: "Kitty",
+        windows_exe: Some("kitty.exe"),
+        macos_bundle: None,
+        linux_wm_class: Some("kitty"),
+    },
+    // WezTerm ships a modern canonical identifier and a legacy/alternate one on BOTH
+    // Windows and Linux; both rows must stay present.
+    KnownTerminal {
+        name: "WezTerm",
+        windows_exe: Some("wezterm-gui.exe"),
+        macos_bundle: None,
+        linux_wm_class: Some("org.wezfurlong.wezterm"),
+    },
+    KnownTerminal {
+        name: "WezTerm (legacy exe / bare wm_class)",
+        windows_exe: Some("wezterm.exe"),
+        macos_bundle: None,
+        linux_wm_class: Some("wezterm"),
+    },
+    // Ghostty: one macOS bundle id + two Linux wm_class spellings.
+    KnownTerminal {
+        name: "Ghostty",
+        windows_exe: None,
+        macos_bundle: Some("com.mitchellh.ghostty"),
+        linux_wm_class: Some("com.mitchellh.ghostty"),
+    },
+    KnownTerminal {
+        name: "Ghostty (bare wm_class)",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("ghostty"),
+    },
+    // ---- Windows-only -------------------------------------------------------------
+    KnownTerminal {
+        name: "Windows Terminal",
+        windows_exe: Some("windowsterminal.exe"),
+        macos_bundle: None,
+        linux_wm_class: None,
+    },
+    KnownTerminal {
+        name: "Windows Terminal's console host",
+        windows_exe: Some("openconsole.exe"),
+        macos_bundle: None,
+        linux_wm_class: None,
+    },
+    KnownTerminal {
+        name: "classic console host",
+        windows_exe: Some("conhost.exe"),
+        macos_bundle: None,
+        linux_wm_class: None,
+    },
+    KnownTerminal {
+        name: "Windows PowerShell 5.1",
+        windows_exe: Some("powershell.exe"),
+        macos_bundle: None,
+        linux_wm_class: None,
+    },
+    KnownTerminal {
+        name: "PowerShell 7+",
+        windows_exe: Some("pwsh.exe"),
+        macos_bundle: None,
+        linux_wm_class: None,
+    },
+    KnownTerminal {
+        name: "Command Prompt",
+        windows_exe: Some("cmd.exe"),
+        macos_bundle: None,
+        linux_wm_class: None,
+    },
+    KnownTerminal {
+        name: "Hyper",
+        windows_exe: Some("hyper.exe"),
+        macos_bundle: None,
+        linux_wm_class: None,
+    },
+    KnownTerminal {
+        name: "Git Bash / MSYS2 (mintty)",
+        windows_exe: Some("mintty.exe"),
+        macos_bundle: None,
+        linux_wm_class: None,
+    },
+    // ---- macOS-only -----------------------------------------------------------
+    KnownTerminal {
+        name: "iTerm2",
+        windows_exe: None,
+        macos_bundle: Some("com.googlecode.iterm2"),
+        linux_wm_class: None,
+    },
+    KnownTerminal {
+        name: "Terminal.app",
+        windows_exe: None,
+        macos_bundle: Some("com.apple.Terminal"),
+        linux_wm_class: None,
+    },
+    // ---- Linux-only -----------------------------------------------------------
+    KnownTerminal {
+        name: "GNOME Terminal (VTE)",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("gnome-terminal-server"),
+    },
+    KnownTerminal {
+        name: "Konsole (KDE)",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("konsole"),
+    },
+    KnownTerminal {
+        name: "xterm",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("xterm"),
+    },
+    KnownTerminal {
+        name: "uxterm",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("uxterm"),
+    },
+    KnownTerminal {
+        name: "urxvt",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("urxvt"),
+    },
+    KnownTerminal {
+        name: "rxvt",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("rxvt"),
+    },
+    KnownTerminal {
+        name: "Terminator",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("terminator"),
+    },
+    KnownTerminal {
+        name: "Tilix",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("tilix"),
+    },
+    KnownTerminal {
+        name: "Xfce Terminal",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("xfce4-terminal"),
+    },
+    KnownTerminal {
+        name: "QTerminal",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("qterminal"),
+    },
+    KnownTerminal {
+        name: "LXTerminal",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("lxterminal"),
+    },
+    KnownTerminal {
+        name: "MATE Terminal",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("mate-terminal"),
+    },
+    KnownTerminal {
+        name: "st (suckless)",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("st"),
+    },
+    KnownTerminal {
+        name: "foot",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("foot"),
+    },
+    KnownTerminal {
+        name: "foot (client mode)",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("footclient"),
+    },
+    KnownTerminal {
+        name: "Terminology",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("terminology"),
+    },
+    KnownTerminal {
+        name: "Guake",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("guake"),
+    },
+    KnownTerminal {
+        name: "Tilda",
+        windows_exe: None,
+        macos_bundle: None,
+        linux_wm_class: Some("tilda"),
+    },
 ];
 
 // ── Microphone-in-use probe (TTS feedback gate) ──────────────────────────────

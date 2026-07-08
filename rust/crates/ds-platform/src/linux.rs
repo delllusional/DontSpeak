@@ -46,35 +46,14 @@ use crate::{
     CapsKeyMonitor, FrontmostWindow, KeyBase, KeyChord, KeyInjector, Platform, PreflightError,
 };
 
-/// WM_CLASS values (lowercased, second/class field) that count as "a terminal is
-/// frontmost" for the dictation-key / transcript-injection focus gate. Mirrors the
-/// macOS TERM_BUNDLES / Windows TERM_EXES allowlists for the common Linux terminals.
-const TERM_WM_CLASSES: &[&str] = &[
-    "gnome-terminal-server", // GNOME Terminal (VTE)
-    "konsole",               // KDE
-    "xterm",
-    "uxterm",
-    "urxvt",
-    "rxvt",
-    "terminator",
-    "tilix",
-    "xfce4-terminal",
-    "qterminal",
-    "lxterminal",
-    "mate-terminal",
-    "kitty",
-    "alacritty",
-    "org.wezfurlong.wezterm",
-    "wezterm",
-    "st", // suckless
-    "foot",
-    "footclient",
-    "com.mitchellh.ghostty",
-    "ghostty",
-    "terminology",
-    "guake",
-    "tilda",
-];
+/// Is `name` (a lowercased X11 WM_CLASS value) one of the shared table's known
+/// terminal identifiers (`ds_platform::KNOWN_TERMINALS`)? Replaces the old
+/// hand-maintained `TERM_WM_CLASSES` array.
+fn is_known_terminal_wm_class(name: &str) -> bool {
+    crate::KNOWN_TERMINALS
+        .iter()
+        .any(|t| t.linux_wm_class == Some(name))
+}
 
 /// Map a [`KeyBase`] to its Linux evdev key code (US-QWERTY physical position — uinput
 /// emits scancodes that the compositor maps to keysyms via the active layout). `None`
@@ -525,7 +504,7 @@ impl X11Focus {
         [class, instance]
             .into_iter()
             .flatten()
-            .any(|name| TERM_WM_CLASSES.contains(&name.as_str()))
+            .any(|name| is_known_terminal_wm_class(&name))
     }
 }
 
@@ -547,5 +526,57 @@ mod keycode_parity {
     #[test]
     fn unsupported_base_has_no_keycode() {
         assert!(key_for_base(&KeyBase::Unsupported("f5".into())).is_none());
+    }
+}
+
+#[cfg(test)]
+mod known_terminal_table {
+    /// The exact literal `TERM_WM_CLASSES` this crate carried before `KNOWN_TERMINALS`
+    /// (ds-platform/src/lib.rs) replaced it — pinned here so a future edit to the
+    /// shared table can't silently drop (or duplicate away) a Linux entry.
+    const OLD_TERM_WM_CLASSES: &[&str] = &[
+        "gnome-terminal-server",
+        "konsole",
+        "xterm",
+        "uxterm",
+        "urxvt",
+        "rxvt",
+        "terminator",
+        "tilix",
+        "xfce4-terminal",
+        "qterminal",
+        "lxterminal",
+        "mate-terminal",
+        "kitty",
+        "alacritty",
+        "org.wezfurlong.wezterm",
+        "wezterm",
+        "st",
+        "foot",
+        "footclient",
+        "com.mitchellh.ghostty",
+        "ghostty",
+        "terminology",
+        "guake",
+        "tilda",
+    ];
+
+    #[test]
+    fn matches_old_term_wm_classes_exactly() {
+        let entries: Vec<&str> = crate::KNOWN_TERMINALS
+            .iter()
+            .filter_map(|t| t.linux_wm_class)
+            .collect();
+        let derived: std::collections::BTreeSet<&str> = entries.iter().copied().collect();
+        let old: std::collections::BTreeSet<&str> = OLD_TERM_WM_CLASSES.iter().copied().collect();
+        assert_eq!(
+            derived, old,
+            "KNOWN_TERMINALS' linux_wm_class entries drifted from the pre-refactor TERM_WM_CLASSES list"
+        );
+        assert_eq!(
+            entries.len(),
+            derived.len(),
+            "a linux_wm_class value is duplicated across two KNOWN_TERMINALS rows"
+        );
     }
 }

@@ -51,35 +51,25 @@ fn vk_for_base(base: &KeyBase) -> Option<u16> {
     })
 }
 
-/// Process image base-names (lowercased, no path) that count as "a terminal is
-/// frontmost" for the dictation-key / transcript-injection focus gate. The foreground
-/// window belongs to the terminal HOST (Windows Terminal, the console host, or a
-/// third-party emulator), so those are what `GetForegroundWindow` resolves to; the
-/// shell exes are included for the rare case the window is attributed to them.
-const TERM_EXES: &[&str] = &[
-    "windowsterminal.exe", // Windows Terminal
-    "openconsole.exe",     // Windows Terminal's console host
-    "conhost.exe",         // classic console host
-    "powershell.exe",      // Windows PowerShell 5.1
-    "pwsh.exe",            // PowerShell 7+
-    "cmd.exe",
-    "alacritty.exe",
-    "wezterm-gui.exe",
-    "wezterm.exe",
-    "hyper.exe",
-    "kitty.exe",
-    "mintty.exe", // Git Bash / MSYS2
-];
+/// Is `exe` (a lowercased Windows process basename) one of the shared table's known
+/// terminal identifiers (`ds_platform::KNOWN_TERMINALS`)? Replaces the old
+/// hand-maintained `TERM_EXES` array.
+fn is_known_terminal_exe(exe: &str) -> bool {
+    crate::KNOWN_TERMINALS
+        .iter()
+        .any(|t| t.windows_exe == Some(exe))
+}
 
 /// Process image base-names (lowercased, no path) for editors that render their main text
 /// surface with a custom GPU/canvas toolkit rather than a native Win32 edit control, so UI
 /// Automation exposes no Edit/Document role (and no settable Value pattern) on the focused
 /// buffer even though a synthetic paste + Enter lands in it fine. Same underlying cause as
 /// the terminal exemption in `has_paste_target()` below (a custom-drawn text view with no
-/// AX/UIA text pattern) — kept as a SEPARATE list rather than folded into `TERM_EXES`,
-/// because `is_terminal_frontmost()` also gates unrelated behavior (mic pause-in-background
-/// in `ttsq.rs`, dictation-key/transcript leak prevention in `ds-stt`) that a code editor
-/// should not opt into just because its buffer view happens to be UIA-invisible.
+/// AX/UIA text pattern) — kept as a SEPARATE list rather than folded into the shared
+/// `KNOWN_TERMINALS` terminal table, because `is_terminal_frontmost()` also gates
+/// unrelated behavior (mic pause-in-background in `ttsq.rs`, dictation-key/transcript
+/// leak prevention in `ds-stt`) that a code editor should not opt into just because its
+/// buffer view happens to be UIA-invisible.
 ///
 /// - "zed.exe": Zed's GPUI framework draws the buffer itself; its Windows UI Automation
 ///   support is still partial (accessibility is an explicitly ongoing project — see
@@ -474,11 +464,11 @@ impl KeyInjector for WindowsPlatform {
 
 impl FrontmostWindow for WindowsPlatform {
     fn is_terminal_frontmost(&self) -> bool {
-        // Match the frontmost process's basename against TERM_EXES. The Parakeet STT
-        // engine gates transcript injection on this, so it FAILS CLOSED: any failure to
-        // resolve the frontmost process (see `frontmost_process_basename`) returns false
-        // and nothing is injected.
-        frontmost_process_basename().is_some_and(|base| TERM_EXES.contains(&base.as_str()))
+        // Match the frontmost process's basename against the shared KNOWN_TERMINALS
+        // table. The Parakeet STT engine gates transcript injection on this, so it
+        // FAILS CLOSED: any failure to resolve the frontmost process (see
+        // `frontmost_process_basename`) returns false and nothing is injected.
+        frontmost_process_basename().is_some_and(|base| is_known_terminal_exe(&base))
     }
 
     fn has_paste_target(&self) -> bool {
@@ -506,7 +496,7 @@ impl FrontmostWindow for WindowsPlatform {
         // (rather than calling `is_terminal_frontmost()`, which would re-resolve it) —
         // matching macOS where a terminal's AXTextArea reads as editable.
         if frontmost_process_basename().is_some_and(|base| {
-            TERM_EXES.contains(&base.as_str()) || CUSTOM_TEXT_EXES.contains(&base.as_str())
+            is_known_terminal_exe(&base) || CUSTOM_TEXT_EXES.contains(&base.as_str())
         }) {
             return true;
         }
@@ -886,8 +876,51 @@ mod custom_text_exes {
         // The two lists gate different behavior (see CUSTOM_TEXT_EXES's doc comment);
         // an exe in both would be redundant and signals it belongs in one, not both.
         for exe in CUSTOM_TEXT_EXES {
-            assert!(!TERM_EXES.contains(exe), "{exe} listed in both exe tables");
+            assert!(
+                !is_known_terminal_exe(exe),
+                "{exe} listed in both exe tables"
+            );
         }
+    }
+}
+
+#[cfg(test)]
+mod known_terminal_table {
+    /// The exact literal `TERM_EXES` this crate carried before `KNOWN_TERMINALS`
+    /// (ds-platform/src/lib.rs) replaced it — pinned here so a future edit to the
+    /// shared table can't silently drop (or duplicate away) a Windows entry.
+    const OLD_TERM_EXES: &[&str] = &[
+        "windowsterminal.exe",
+        "openconsole.exe",
+        "conhost.exe",
+        "powershell.exe",
+        "pwsh.exe",
+        "cmd.exe",
+        "alacritty.exe",
+        "wezterm-gui.exe",
+        "wezterm.exe",
+        "hyper.exe",
+        "kitty.exe",
+        "mintty.exe",
+    ];
+
+    #[test]
+    fn matches_old_term_exes_exactly() {
+        let entries: Vec<&str> = crate::KNOWN_TERMINALS
+            .iter()
+            .filter_map(|t| t.windows_exe)
+            .collect();
+        let derived: std::collections::BTreeSet<&str> = entries.iter().copied().collect();
+        let old: std::collections::BTreeSet<&str> = OLD_TERM_EXES.iter().copied().collect();
+        assert_eq!(
+            derived, old,
+            "KNOWN_TERMINALS' windows_exe entries drifted from the pre-refactor TERM_EXES list"
+        );
+        assert_eq!(
+            entries.len(),
+            derived.len(),
+            "a windows_exe value is duplicated across two KNOWN_TERMINALS rows"
+        );
     }
 }
 
