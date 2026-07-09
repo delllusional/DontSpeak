@@ -390,6 +390,15 @@ impl TtsQueue {
         })
     }
 
+    /// Force `tts_active` directly, bypassing the real playback pipeline — lets
+    /// `engine.rs`'s own test module simulate "TTS is speaking" (to drive
+    /// `Engine::handle_tap`'s defer-while-speaking path) on a [`test_stub`], which
+    /// deliberately never spawns the worker that would flip this for real. Test-only.
+    #[cfg(test)]
+    pub(crate) fn set_active_for_test(&self, on: bool) {
+        self.tts_active.store(on, Ordering::SeqCst);
+    }
+
     /// Enqueue one unit of speech onto the FIFO. Empty text is ignored. There is no cap
     /// and no kind: callers (explicit `speak`, the greeting, and mid-turn narration) all
     /// land here and are played in order. `voice`/`rate` are optional per-call overrides

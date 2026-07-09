@@ -289,6 +289,12 @@ pub(crate) struct Engine<P: Platform + 'static> {
     /// [`GestureState`]. The three fields below (`voice_paused`, `caps_phys_prev`,
     /// `pending_tap_at`) are DELIBERATELY plain fields, not variants of it — each is
     /// an orthogonal live fact that coexists with every mode (see their docs).
+    /// INVARIANT: any new `self.gesture = ...` assignment must be immediately
+    /// followed by `self.sync_caps_led()` (or go through a function that already
+    /// does: `teardown_hold`/`disarm_confirm`/`cancel_all`/`start_recording`/
+    /// `stop_recording`) — the LED is derived from this field, not tracked
+    /// separately, and a call site that forgets this is exactly the bug class
+    /// `sync_caps_led`'s doc warns about.
     gesture: GestureState,
     /// Whether the voice is currently PAUSED by a Caps tap while dictation is OFF
     /// (`stt_engine = off`). With dictation off the mic never opens, but a tap still
@@ -468,6 +474,16 @@ impl<P: Platform + 'static> Engine<P> {
         matches!(self.gesture, GestureState::Recording)
     }
 
+    /// Re-drive the physical Caps LED to match the current gesture
+    /// (`is_recording()`). Call this as the LAST statement of any function that
+    /// assigns `self.gesture` — it is the ONE place in this file that writes
+    /// `Platform::set_caps_lock`, so "did I forget to sync the LED after changing
+    /// gesture" reduces to "did I call this line". (`check_long_press`'s per-tick
+    /// call is the one exception that isn't about a gesture change — see its doc.)
+    fn sync_caps_led(&self) {
+        self.plat.set_caps_lock(self.is_recording());
+    }
+
     /// Whether the stop tap has armed the deferred submit
     /// ([`GestureState::ConfirmArmed`]) — the final may or may not have landed yet.
     fn is_confirm_armed(&self) -> bool {
@@ -559,6 +575,13 @@ impl<P: Platform + 'static> Engine<P> {
         // One assignment ends the hold AND disarms any deferred submit — the confirm
         // sub-state lives inside `ConfirmArmed`, so it can't survive this reset.
         self.gesture = GestureState::Idle;
+        // If this was actually recording, the LED must go dark to match — an INTERNAL
+        // reason for ending dictation is still the dictation ending, and a caller who
+        // silently swaps the STT engine (or bounces into/out of always-listen mode) out
+        // from under an active hold must not leave the LED lit with no future edge left
+        // to correct it (there may be no physical release coming at all, e.g. the key
+        // was already up when the reload landed).
+        self.sync_caps_led();
         if let Ok(mut p) = self.paste.lock() {
             p.partial.clear();
             p.final_state = FinalState::Idle;
@@ -593,6 +616,7 @@ impl<P: Platform + 'static> Engine<P> {
     fn disarm_confirm(&mut self) {
         if self.is_confirm_armed() {
             self.gesture = GestureState::Idle;
+            self.sync_caps_led();
         }
         if let Ok(mut p) = self.paste.lock() {
             p.disarm();
@@ -630,8 +654,10 @@ impl<P: Platform + 'static> Engine<P> {
     /// Return whenever `enter_after_paste` is set (armed per `double_tap_submits` and the
     /// stop gesture's tap count — one of the two gestures always submits, the other always
     /// just inserts).
-    /// Driven by the deferred-submit check once the stop tap's async final lands. The LED
-    /// is already OFF (the stop tap drove it off on release); we ensure it here too.
+    /// Driven by the deferred-submit check once the stop tap's async final lands.
+    /// `disarm_confirm()` below owns the LED sync (it's already off from the stop
+    /// tap's own `stop_recording` call anyway; this just goes through the one
+    /// shared path rather than re-deriving it here too).
     fn confirm_paste(&mut self) {
         // Capture the armed outcome ONCE at entry (it is read both before and after
         // `disarm_confirm()` below, which drops the variant that holds it). Only ever
@@ -696,7 +722,6 @@ impl<P: Platform + 'static> Engine<P> {
                 }
             }
         }
-        self.plat.set_caps_lock(false);
         let inserted_only = !enter_after_paste;
         self.disarm_confirm();
         self.record_caps("confirm");
@@ -729,12 +754,13 @@ impl<P: Platform + 'static> Engine<P> {
             q.clear();
         }
         let _ = ds_proc::barge_in(&self.pidfile);
-        // Reset to idle, LED off. The LED is a pure output — we drive it off directly (no
-        // read-back), so there's no latch-lag transient. `Idle` in one assignment ends
-        // the recording AND disarms any deferred submit (the confirm sub-state lives
-        // inside `ConfirmArmed`, so nothing of it can leak past this reset).
-        self.plat.set_caps_lock(false);
+        // Reset to idle, LED off. `Idle` in one assignment ends the recording AND
+        // disarms any deferred submit (the confirm sub-state lives inside
+        // `ConfirmArmed`, so nothing of it can leak past this reset); `sync_caps_led`
+        // derives the off write from that same assignment rather than a separate
+        // hardcoded literal.
         self.gesture = GestureState::Idle;
+        self.sync_caps_led();
         self.set_stt_active(false);
         if let Ok(mut p) = self.paste.lock() {
             p.partial.clear();
@@ -770,9 +796,10 @@ impl<P: Platform + 'static> Engine<P> {
     }
 
     /// A completed Caps TAP toggles dictation: start when idle, stop+submit when recording.
-    /// Only flips the gesture state — the tick re-asserts the Caps LED to match it (on this
-    /// release and every held tick), so the light always reflects the real recording state
-    /// and never changes on the press.
+    /// `start_recording`/`stop_recording` each sync the LED themselves as they flip the
+    /// gesture state, so the light reflects the real recording state whether this fires
+    /// immediately (from a tap's release) or later (from a speaking-deferred tap) — see
+    /// [`sync_caps_led`](Self::sync_caps_led)'s doc.
     fn toggle_dictation(&mut self) {
         // GUARD: dictation can START only if the selected STT engine is actually READY to
         // transcribe (BuiltIn/System model resident + warm; ClaudeCode delegates → always).
@@ -843,8 +870,8 @@ impl<P: Platform + 'static> Engine<P> {
     /// §E.4 hot-reload: re-read VoiceConfig and REBUILD the boxed Stt via the
     /// factory, WITHOUT corrupting the running state machine.
     ///
-    /// In-flight handling (mirrors `cancel_all`'s teardown, but deliberately
-    /// WITHOUT driving the LED):
+    /// In-flight handling (mirrors `cancel_all`'s teardown, via the same
+    /// `teardown_hold` helper):
     ///   * If a dictation is active, `abort()` the OUTGOING engine first —
     ///     ClaudeNative releases Ctrl+G cleanly (nothing left held); Parakeet
     ///     discards the in-flight capture without injecting (§F.1).
@@ -852,10 +879,14 @@ impl<P: Platform + 'static> Engine<P> {
     ///     source — never two engines fighting over the keyboard).
     ///   * Reset the gesture state to `Idle` so the new engine starts idle.
     ///
-    /// We do NOT call `set_caps_lock`: driving the LED is the gesture machine's job. A
-    /// reload leaves the physical key untouched; since tap/long-press detection is
-    /// edge-based on the physical key (not the LED), a reload never fabricates a
-    /// spurious tap.
+    /// `teardown_hold` DOES sync the LED off when it actually ends an in-flight
+    /// recording (an internal reason for ending dictation is still the dictation
+    /// ending — the LED must not lie that it's still recording just because nothing
+    /// physically released the key). This does NOT fabricate a spurious tap: `reload`
+    /// leaves the physical key untouched, and tap/long-press detection is edge-based
+    /// on the physical key only (never reads the LED/lock state back) — so driving
+    /// the LED here has no effect on gesture detection, only on the indicator's
+    /// accuracy.
     pub(crate) fn reload(&mut self, cfg: &VoiceConfig) {
         // Diff against the last-applied config and touch ONLY what changed — the
         // "no extra reloads" contract. Per-call params
@@ -1046,13 +1077,13 @@ impl<P: Platform + 'static> Engine<P> {
                 // that reset on the engine's own latch. Without this, a press that
                 // straddles the OFF edge leaves the press latch stale (`Down` with an
                 // old `since`); the first tick after a later re-enable would see a huge
-                // elapsed time and fire a spurious long-press `cancel_all()`. Force the
-                // LED off too — nothing else on this path does (unlike `cancel_all`/the
-                // confirm-paste path, which explicitly drive it low), so it could
-                // otherwise stay lit for the rest of the session with dictation no
-                // longer able to turn it off.
+                // elapsed time and fire a spurious long-press `cancel_all()`. Sync the
+                // LED too: `teardown_hold` above already did it if gesture was
+                // non-Idle, but this also covers the case it was already Idle (a
+                // cheap, correct no-op write) — belt-and-suspenders, and harmless
+                // since this whole branch only runs on a real, rare gate flip.
                 self.press = PressState::Up;
-                self.plat.set_caps_lock(false);
+                self.sync_caps_led();
                 self.plat.release_caps_key();
             }
         }
@@ -1113,8 +1144,9 @@ impl<P: Platform + 'static> Engine<P> {
     /// PHYSICAL Caps key (down/up edges via `caps_phys_prev`), NOT the OS lock latch:
     ///   * a quick TAP (release before `long_press_ms`) toggles recording;
     ///   * a LONG-PRESS (hold ≥ `long_press_ms`) force-resets to idle;
-    ///   * the Caps LED is a pure OUTPUT, re-asserted to the recording state — never
-    ///     read back.
+    ///   * the Caps LED is a pure OUTPUT derived from `is_recording()` via
+    ///     `sync_caps_led()`, called at every point `self.gesture` changes — never
+    ///     read back to decide state.
     ///
     /// See the inline GESTURE MODEL block below for the full rationale.
     pub(crate) fn tick(&mut self) {
@@ -1210,15 +1242,23 @@ impl<P: Platform + 'static> Engine<P> {
         // PHYSICAL Caps key (down / hold / up), NOT the OS lock latch:
         //   • DOWN    — nothing yet. Start the press timer; re-assert the LED to the
         //               real recording state so the OS's own latch-flip never changes
-        //               the light on a press (the light only moves on RELEASE).
+        //               the light on a press.
         //   • HOLD ≥ long_press_ms — CANCEL: discard any in-flight dictation AND silence
         //               the voice/generation, back to idle. Never records, never lights.
         //   • quick UP (released before the threshold) — a TAP toggles dictation: start
-        //               when idle, stop+submit when recording. The LED flips HERE.
-        // The Caps LED is a pure OUTPUT we drive on these edges — never read back to
-        // decide state, so there is no latch/LED desync. (A sub-poll tap too fast for the
-        // ~30 ms poll to even observe the key-down is missed — tap again; the old latch-
-        // mirror caught those, at the cost of the desync bugs this model removes.)
+        //               when idle, stop+submit when recording, via `start_recording`/
+        //               `stop_recording` — which sync the LED themselves. For an
+        //               IMMEDIATE tap (not speaking) that happens right here, on this
+        //               release; for a speaking-DEFERRED tap it happens on a LATER
+        //               tick instead (see `check_pending_tap`), since there's no
+        //               release edge left by then to hang it off of.
+        // The Caps LED is a pure OUTPUT derived from `is_recording()` — every function
+        // that assigns `self.gesture` calls `sync_caps_led()` (or a helper that does),
+        // so the light is never read back to decide state and can't independently
+        // drift from the gesture that's supposed to drive it. (A sub-poll tap too fast
+        // for the ~30 ms poll to even observe the key-down is missed — tap again; the
+        // old latch-mirror caught those, at the cost of the desync bugs this model
+        // removes.)
         // Feed the gesture machine from whichever source the platform exposes:
         //   • EVENT-DRIVEN (Windows low-level hook) — drain the lossless queue and replay
         //     every real transition. A down+up that both fell inside one tick is two edges
@@ -1346,13 +1386,16 @@ impl<P: Platform + 'static> Engine<P> {
             }
             self.record_caps("press");
         } else {
-            // The light flips HERE on release — never on the press — then we snap the LED
-            // to the final recording state so a long-press release (no toggle) also lands
-            // consistent. On the key-owning Windows port `set_caps_lock` drives the
-            // physical LED out-of-band (IOCTL) without toggling the logical Caps state.
-            // `Up ⇒ tap` matches the old `!self.long_press_fired` (which read true even
-            // with no press latched — e.g. a release edge observed after a gate
-            // off→on cycle reset the latch but not `caps_phys_prev`).
+            // The light only ever moves via `start_recording`/`stop_recording`'s own
+            // `sync_caps_led()` call — never here directly. For an IMMEDIATE tap (not
+            // speaking), `handle_tap` below calls `toggle_dictation` synchronously, so
+            // the LED is already correct by the time this function returns. A DEFERRED
+            // tap (speaking) instead resolves later from `check_pending_tap`, with no
+            // release edge left by then — which is exactly why the write had to move
+            // into `start_recording`/`stop_recording` themselves rather than staying
+            // here. `Up ⇒ tap` matches the old `!self.long_press_fired` (which read
+            // true even with no press latched — e.g. a release edge observed after a
+            // gate off→on cycle reset the latch but not `caps_phys_prev`).
             let was_tap = !matches!(
                 self.press,
                 PressState::Down {
@@ -1365,7 +1408,6 @@ impl<P: Platform + 'static> Engine<P> {
             if was_tap {
                 self.handle_tap(at);
             }
-            self.plat.set_caps_lock(self.is_recording());
         }
     }
 
@@ -1480,11 +1522,14 @@ impl<P: Platform + 'static> Engine<P> {
                 long_press_fired: true,
             };
         }
-        self.plat.set_caps_lock(self.is_recording());
+        self.sync_caps_led();
     }
 
-    /// Start dictation — called from `toggle_dictation` on a tap's RELEASE. No-op if
-    /// already recording. ClaudeNative posts the focus-gated initial Ctrl+G key-DOWN. A
+    /// Start dictation — called from `toggle_dictation`, either immediately (a tap's
+    /// RELEASE while nothing is speaking) or later (a speaking-deferred tap, resolved
+    /// from `check_pending_tap` on a subsequent tick once the double-tap window
+    /// lapses with no second tap — see `handle_tap`'s doc). No-op if already
+    /// recording. ClaudeNative posts the focus-gated initial Ctrl+G key-DOWN. A
     /// long-press (`cancel_all`) cancels everything.
     ///
     /// COEXIST (full-duplex): a dictation tap runs the listen ALONGSIDE an in-flight
@@ -1522,6 +1567,12 @@ impl<P: Platform + 'static> Engine<P> {
         // Entering `Recording` structurally drops any armed confirm sub-state (the
         // old disarm-before-record contract, now a single assignment).
         self.gesture = GestureState::Recording;
+        // Sync the LED HERE, not left to the caller: `toggle_dictation` (this
+        // function's only production caller) can fire either immediately from a
+        // tap's release edge, or later from `check_pending_tap` once a
+        // speaking-deferred tap's double-tap window lapses — in the deferred case
+        // there is no release edge left to snap the LED, so this must own it.
+        self.sync_caps_led();
         // Capture the paste target (the app that's ALREADY focused) + clear any stale
         // preview so the confirm panel opens fresh, labeled with where the text will
         // land. We never steal focus here — the transcript pastes into whatever the
@@ -1564,6 +1615,11 @@ impl<P: Platform + 'static> Engine<P> {
             return;
         }
         self.gesture = GestureState::Idle;
+        // Sync now, for the same reason `start_recording` does: this may be reached
+        // from the deferred-tap path with no release edge left to snap the LED. The
+        // possible re-assignment to `ConfirmArmed` just below is still "not
+        // recording", so this write stays correct either way.
+        self.sync_caps_led();
         self.stt.stop();
         self.set_stt_active(false);
         // Mic freed: resume the TTS queue paused on the start-tap (half-duplex). No-op
@@ -2338,6 +2394,86 @@ mod tests {
     }
 
     #[test]
+    fn deferred_tap_while_speaking_still_syncs_the_led_on_start_and_stop() {
+        // Regression: a Caps tap that lands while TTS is speaking is DEFERRED
+        // (`handle_tap` → `TapAction::Defer`) and only resolves later, from
+        // `check_pending_tap` on a subsequent tick, once the double-tap window
+        // lapses with no second tap. That later `toggle_dictation()` call used to
+        // reach `start_recording`/`stop_recording` with NO LED write at all — only
+        // the immediate (not-speaking) tap path was covered, via the release-edge
+        // snap `apply_caps_edge` no longer has. `start_recording`/`stop_recording`
+        // now own their own `sync_caps_led()` call, so both ends must light/
+        // extinguish correctly with no release edge in sight.
+        let mut d = mk(600);
+        // ClaudeCode "delegates" and is always ready (see `stt_ready_to_dictate`'s
+        // doc) — avoids the unrelated readiness gate that a `BuiltIn`/`test_stub`
+        // combination would hit (the stub's fresh `TtsManager` reports Parakeet not
+        // resident, refusing the tap before it ever reaches `start_recording` — see
+        // `refused_start_on_but_not_ready_never_pauses_the_voice`).
+        d.cfg.stt_engine = Some(vec![ds_config::SttEngine::ClaudeCode]);
+        let q = crate::ttsq::TtsQueue::test_stub();
+        d.ttsq = Some(q.clone());
+        q.set_active_for_test(true); // "speaking"
+
+        // Tap while speaking: deferred, not immediate.
+        MockPlatform::tap(&mut d);
+        assert!(
+            !d.is_recording(),
+            "deferred tap does not start recording yet"
+        );
+        assert!(
+            !d.plat.lock_state.get(),
+            "LED stays off while the tap is deferred"
+        );
+        assert!(
+            d.pending_tap_at.is_some(),
+            "tap parked pending the double-tap window"
+        );
+
+        // Age the deferred tap past DOUBLE_TAP_MS with no second tap, then tick:
+        // this is the check_pending_tap → toggle_dictation → start_recording path
+        // the immediate-tap tests never exercise.
+        d.pending_tap_at = d.pending_tap_at.map(|t| {
+            t.checked_sub(Duration::from_millis(DOUBLE_TAP_MS + 1))
+                .expect("machine uptime exceeds the double-tap window")
+        });
+        d.tick();
+        assert!(
+            d.is_recording(),
+            "deferred single tap still starts dictation"
+        );
+        assert!(
+            d.plat.lock_state.get(),
+            "THE BUG: LED must light even though no release-edge snap ran this tick"
+        );
+
+        // Stop tap, ALSO deferred (`tap_decision` only looks at `speaking` and any
+        // recent pending tap, not recording state — re-arm "speaking" since
+        // `start_recording`'s `pause_for_record()` may have cleared it for real).
+        q.set_active_for_test(true);
+        MockPlatform::tap(&mut d);
+        assert!(d.is_recording(), "stop tap deferred — still recording");
+        assert!(
+            d.plat.lock_state.get(),
+            "LED still lit while the stop tap is deferred"
+        );
+
+        d.pending_tap_at = d.pending_tap_at.map(|t| {
+            t.checked_sub(Duration::from_millis(DOUBLE_TAP_MS + 1))
+                .expect("machine uptime exceeds the double-tap window")
+        });
+        d.tick();
+        assert!(
+            !d.is_recording(),
+            "deferred single tap still stops dictation"
+        );
+        assert!(
+            !d.plat.lock_state.get(),
+            "LED must go dark on a deferred stop too"
+        );
+    }
+
+    #[test]
     fn event_driven_drains_a_sub_poll_tap_in_one_tick() {
         // The only real `is_caps_event_driven` implementor is the Windows low-level hook
         // (`ds_platform::windows`); every other platform (and, until now, every test)
@@ -2782,7 +2918,7 @@ mod tests {
     // ── §E.4 Engine::reload over MockPlatform ───────────────────────────────
 
     #[test]
-    fn reload_clears_state_aborts_inflight_and_never_drives_led() {
+    fn reload_clears_state_aborts_inflight_and_drives_led_off() {
         let mut d = mk(600);
         d.plat.terminal_frontmost.set(true);
         // ClaudeNative's abort()/stop() now pair against its own remembered `toggled_on`
@@ -2818,12 +2954,16 @@ mod tests {
             1,
             "in-flight HOLD released via engine abort"
         );
-        // Reload must NOT drive the LED (that is the gesture machine's job and
-        // would itself create a synthetic edge).
+        // Reload DOES drive the LED off now, via `teardown_hold`'s `sync_caps_led()`:
+        // an internal reason for ending dictation (here, an engine-changing reload)
+        // is still the dictation ending, and the LED must not lie that it's still
+        // recording when nothing physically released the key to correct it later.
+        // This does not fabricate a spurious tap — gesture detection is edge-based
+        // on the physical key only and never reads the LED back.
         assert_eq!(
             d.plat.set_caps_off_calls.get(),
-            0,
-            "reload must never drive the Caps LED off"
+            1,
+            "reload must drive the Caps LED off when it ends an in-flight recording"
         );
     }
 
