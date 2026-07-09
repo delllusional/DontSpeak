@@ -5,21 +5,21 @@
 //! that pre-date the split — reach the function as `crate::log(...)` without a
 //! module/function name collision.
 
-/// Engine logging → the unified activity log (`ds_config::log_cached`, source = `engine`).
+/// Engine logging → the unified activity log (`ds_log::log_cached`, source = `engine`).
 /// Call sites keep their `"WARN:"` / `"FATAL:"` / `"ERROR:"` message prefixes; we
-/// map those to a structured [`ds_config::LogLevel`] and strip the prefix so the
-/// stored line carries the level separately. The `Paths`-caching + actual `log()` call is
-/// shared plumbing in `ds_config::log_cached` (fail-quiet: a no-op if `$HOME` can't resolve) —
+/// map those to a structured [`ds_log::LogLevel`] and strip the prefix so the
+/// stored line carries the level separately. The caching + actual `log()` call is
+/// shared plumbing in `ds_log::log_cached` (fail-quiet: a no-op if `$HOME` can't resolve) —
 /// this module only owns the engine-specific prefix parsing/level-mapping/DEBUG-gating.
 pub(crate) fn log(s: &str) {
     let (level, msg) = split_level(s);
     // DEBUG lines are verbose per-event telemetry — drop them unless debug is on (same
     // `DONTSPEAK_DEBUG` gate the engine's `dbg()` uses), so normal logs stay clean while the
     // detail is one env var away when diagnosing.
-    if level == ds_config::LogLevel::Debug && !crate::config_gate::debug_enabled() {
+    if level == ds_log::LogLevel::Debug && !crate::config_gate::debug_enabled() {
         return;
     }
-    ds_config::log_cached(level, "engine", msg);
+    ds_log::log_cached(level, "engine", msg);
 }
 
 /// Log a `DEBUG`-level line — written only when `DONTSPEAK_DEBUG` is on (see [`log`]). For
@@ -29,10 +29,10 @@ pub(crate) fn debug(s: &str) {
     log(&format!("DEBUG:{s}"));
 }
 
-/// Map a leading severity word to a [`ds_config::LogLevel`], returning the message
+/// Map a leading severity word to a [`ds_log::LogLevel`], returning the message
 /// with that prefix stripped. Unprefixed lines are `INFO`.
-fn split_level(s: &str) -> (ds_config::LogLevel, &str) {
-    use ds_config::LogLevel::*;
+fn split_level(s: &str) -> (ds_log::LogLevel, &str) {
+    use ds_log::LogLevel::*;
     for (pfx, lvl) in [
         ("FATAL:", Error),
         ("ERROR:", Error),

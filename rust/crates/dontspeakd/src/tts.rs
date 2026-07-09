@@ -39,11 +39,11 @@ use crate::status::StatusGate;
 /// conditions) now go through the unified activity log (source `helper`) via `ds-helper`'s own
 /// `logging::log`, NOT this raw stderr redirect. This redirect is retained purely as a
 /// last-resort safety net for anything that bypasses explicit logging entirely — a native-
-/// library abort, an unhandled panic, or a startup failure before `ds_config::log_cached` can
+/// library abort, an unhandled panic, or a startup failure before `ds_log::log_cached` can
 /// even initialize.
 fn helper_stderr() -> Stdio {
     ds_config::Paths::resolve()
-        .and_then(|p| ds_config::open_aux_log(&p, "ds-helper.log"))
+        .and_then(|p| ds_log::open_aux_log(&p.log_file, "ds-helper.log"))
         .map(Stdio::from)
         .unwrap_or_else(Stdio::null)
 }

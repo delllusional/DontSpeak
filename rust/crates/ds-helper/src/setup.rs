@@ -7,8 +7,8 @@
 /// process exit code (0 ok, 1 failed). `what` = "models" | "cuda" | a per-model token;
 /// anything unrecognized (including the no-arg "all" default) ⇒ both models + CUDA.
 pub(crate) fn run_prefetch(what: &str) -> i32 {
-    ds_config::log_cached(
-        ds_config::LogLevel::Info,
+    ds_log::log_cached(
+        ds_log::LogLevel::Info,
         "helper",
         &format!("ds-helper: prefetch '{what}' started"),
     );
@@ -69,8 +69,8 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
     };
     match r {
         Ok(()) => {
-            ds_config::log_cached(
-                ds_config::LogLevel::Info,
+            ds_log::log_cached(
+                ds_log::LogLevel::Info,
                 "helper",
                 &format!("ds-helper: prefetch '{what}' finished"),
             );
@@ -78,7 +78,7 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         }
         Err(e) => {
             let msg = format!("ds-helper: prefetch '{what}' failed: {e}");
-            ds_config::log_cached(ds_config::LogLevel::Warn, "helper", &msg);
+            ds_log::log_cached(ds_log::LogLevel::Warn, "helper", &msg);
             eprintln!("{msg}");
             // stderr is discarded under the GUI subsystem (a GUI-subsystem caller can't read
             // it), so leave a diagnosable trace on disk the caller/user can find.

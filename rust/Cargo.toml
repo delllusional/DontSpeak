@@ -2,6 +2,10 @@
 resolver = "3"
 members = [
     "crates/ds-config",
+    # Workspace-wide logging, split out of ds-config (issue #6) — depends on nothing
+    # in this workspace, so ds-config can depend on it for its own internal
+    # diagnostics without a cycle.
+    "crates/ds-log",
     "crates/ds-ipc",
     "crates/ds-proc",
     "crates/ds-platform",
@@ -175,6 +179,7 @@ objc2-foundation = "=0.3.2"
 
 # internal crates
 ds-config = { path = "crates/ds-config" }
+ds-log = { path = "crates/ds-log" }
 ds-ipc = { path = "crates/ds-ipc" }
 ds-proc = { path = "crates/ds-proc" }
 ds-platform = { path = "crates/ds-platform" }

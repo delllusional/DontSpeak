@@ -8,7 +8,8 @@
 //!
 //! The unified activity log lives in the per-OS logs dir (macOS:
 //! `~/Library/Logs/DontSpeak/dontspeak.log`) with lean, sudo-free in-process
-//! size rotation (rename-based) — see `Paths::log_file` and `log()`. No `newsyslog`.
+//! size rotation (rename-based) — see `Paths::log_file` and `ds_log::log()`
+//! (the writer itself lives in the `ds-log` crate, split out per issue #6). No `newsyslog`.
 //!
 //! Synthesis is NATIVE in-process Kokoro (ds-tts: ort + voice-g2p + rodio).
 //! Model assets (kokoro onnx + voices + the onnxruntime dylib) live in the
@@ -25,8 +26,7 @@
 //!
 //! This crate is where configuration is DEFINED and read, not where it is acted
 //! on: [`Paths`], the `config.toml` schema and its enums, the read-only
-//! `settings.json` bridge, the client wire shapers, and the shared log-file
-//! helpers.
+//! `settings.json` bridge, and the client wire shapers.
 //!
 //! It is NOT a home for runtime state machines, engine behavior, or protocol
 //! definitions — nearly everything depends on this crate, so code parked here
@@ -42,8 +42,6 @@ mod enums;
 mod brand;
 mod claude_code;
 mod earcon;
-mod log;
-mod log_watch;
 mod narration;
 mod paths;
 mod pidfile;
@@ -63,11 +61,6 @@ pub use enums::{
     SttEngine, TrayKind, TtsEngine, WireTarget, intel_mac_builtin_ort_available,
     provider_pref_wants_gpu,
 };
-pub use log::{
-    LogLevel, aux_log_path, clear_logs, combined_log_json, log, log_cached, log_cached_echoed,
-    log_tail, open_aux_log, rotate_if_large,
-};
-pub use log_watch::wait_logs_changed;
 pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
 pub use paths::{
     Paths, brew_onnxruntime_dylib, coreml_dir, coreml_model_present, data_dir, model_dir,

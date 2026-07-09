@@ -21,6 +21,9 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [dependencies]
 # Read-only probes need these; the in-process engine host pulls the full stack.
 ds-config = { workspace = true }
+# The unified activity log (ds_logs_json/ds_logs_wait/ds_logs_clear), split out of
+# ds-config (issue #6).
+ds-log = { workspace = true }
 ds-ipc = { workspace = true }
 ds-model = { workspace = true }
 # The canonical engine→app lifecycle-state vocabulary (EngineState): the shared

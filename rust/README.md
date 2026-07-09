@@ -25,6 +25,8 @@ rust/
   crates/
     ds-config/    # paths (data dir, pidfile, socket) + config.toml + the Claude Code
                   #   settings.json hooks/voice merge + config enums + changes_since diff
+    ds-log/       # the workspace-wide unified activity log (engine/hooks/mcp/helper
+                  #   share one file) — split out of ds-config (issue #6)
     ds-ipc/       # NDJSON RPC over dontspeak.sock — protocol + server + client
                   #   (engine is the server; app/hooks are clients). Its own
                   #   independent cargo-fuzz workspace lives at fuzz/ — see

@@ -15,8 +15,6 @@ use std::time::{Duration, Instant};
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
-use crate::Paths;
-
 /// Trailing-edge quiet window: once the first relevant event lands, keep
 /// draining for this long before returning, so a burst of rapid appends (many
 /// log lines in one flush) settles into one wake instead of one per line. Short
@@ -24,15 +22,15 @@ use crate::Paths;
 /// `RELOAD_QUIET_WINDOW` is 750ms); logs should feel closer to instant.
 const LOG_WAIT_DEBOUNCE: Duration = Duration::from_millis(150);
 
-/// Block until the logs directory (`paths.log_file`'s parent) has a relevant
+/// Block until the logs directory (`log_file`'s parent) has a relevant
 /// change — any `*.log` file created/modified/removed, including the unified
 /// log itself and every sibling aux log, but excluding rotated `*.log.N`
 /// (same predicate `combined_log_json_at` already uses: extension must be
 /// exactly `log`) — or until `timeout` elapses. Always returns; the caller
 /// re-reads `combined_log_json` unconditionally afterward (same content on a
 /// timeout as before the call, which is harmless).
-pub fn wait_logs_changed(paths: &Paths, timeout: Duration) {
-    wait_logs_changed_at(paths.log_file.parent(), timeout);
+pub fn wait_logs_changed(log_file: &Path, timeout: Duration) {
+    wait_logs_changed_at(log_file.parent(), timeout);
 }
 
 fn wait_logs_changed_at(dir: Option<&Path>, timeout: Duration) {

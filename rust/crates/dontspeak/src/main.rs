@@ -127,7 +127,7 @@ fn main() {
                 "dontspeak: unknown subcommand {sub:?}; expected `notify`, `provide`, or `wire` \
                  (run with no arguments for the stdio MCP server)"
             );
-            ds_config::log_cached_echoed(ds_config::LogLevel::Error, "hook", &msg);
+            ds_log::log_cached_echoed(ds_log::LogLevel::Error, "hook", &msg);
             std::process::exit(2);
         }
         // No arguments: run the stdio MCP server loop.

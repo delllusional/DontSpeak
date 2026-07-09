@@ -1,0 +1,27 @@
+[package]
+name = "ds-log"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Workspace-wide unified activity log for DontSpeak (one leveled, size-rotated file shared by engine/hooks/mcp/helper) — split out of ds-config (issue #6)."
+
+[dependencies]
+serde_json = { workspace = true }
+# Client-side push for the Logs tab: watch the logs dir instead of polling on a timer.
+notify = { workspace = true }
+# Resolves the per-OS default log-file location for log_cached/log_cached_echoed's
+# self-caching convenience. See log.rs's `default_log_file` doc comment: this is a
+# deliberate, small duplicate of ds_config::paths's own resolution — ds-log must NOT
+# depend on ds-config, since ds-config depends on ds-log for its own internal
+# diagnostic logging (VoiceConfig::load).
+directories = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

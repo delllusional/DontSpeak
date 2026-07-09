@@ -17,6 +17,9 @@ description = "DontSpeak's voice engine: Caps-Lock dictation, the TTS queue, loc
 ds-platform = { workspace = true }
 ds-proc = { workspace = true }
 ds-config = { workspace = true }
+# The unified activity log — engine logging + codex-stream diagnostics, split out of
+# ds-config (issue #6).
+ds-log = { workspace = true }
 ds-ipc = { workspace = true }
 ds-model = { workspace = true }
 ds-stt = { workspace = true }

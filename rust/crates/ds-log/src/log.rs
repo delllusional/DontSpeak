@@ -1,6 +1,6 @@
 //! Unified activity log — one readable file with lean in-process rotation.
 //!
-//! One file (`paths.log_file`, e.g. macOS `~/Library/Logs/DontSpeak/dontspeak.log`), one leveled format,
+//! One file (the caller's `log_file`, e.g. macOS `~/Library/Logs/DontSpeak/dontspeak.log`), one leveled format,
 //! shared by every process (engine + hooks + mcp). Each call opens the file
 //! `O_APPEND` and writes the whole line in a SINGLE `write_all`; POSIX guarantees
 //! an append write lands atomically at EOF, so concurrent writers never interleave.
@@ -25,8 +25,6 @@
 //! just POSIX ones.
 
 use std::path::{Path, PathBuf};
-
-use crate::Paths;
 
 /// Rotate when the active log file reaches this size (~5 MiB).
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
@@ -86,8 +84,8 @@ pub fn rotate_if_large(path: &Path) {
     let _ = std::fs::rename(path, rotated_path(path, 1));
 }
 
-/// An auxiliary log file's path — a sibling of the unified engine log (`paths.log_file`) with
-/// the given `file_name`. THE single way to place an extra log, so every log shares one per-OS
+/// An auxiliary log file's path — a sibling of the unified engine log with the given
+/// `file_name`. THE single way to place an extra log, so every log shares one per-OS
 /// logs dir and none drift to a second location (`with_file_name` keeps the engine log's dir).
 pub fn aux_log_path(engine_log: &Path, file_name: &str) -> PathBuf {
     engine_log.with_file_name(file_name)
@@ -98,8 +96,8 @@ pub fn aux_log_path(engine_log: &Path, file_name: &str) -> PathBuf {
 /// the file FIRST (so a long-lived sink that inherits the handle starts bounded), then opens it
 /// `O_APPEND`. Returns the open file, or `None` on any IO error. Use this for EVERY new log so
 /// location + rotation stay consistent across platforms — see the drift-guard test.
-pub fn open_aux_log(paths: &Paths, file_name: &str) -> Option<std::fs::File> {
-    let path = aux_log_path(&paths.log_file, file_name);
+pub fn open_aux_log(log_file: &Path, file_name: &str) -> Option<std::fs::File> {
+    let path = aux_log_path(log_file, file_name);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -114,51 +112,102 @@ pub fn open_aux_log(paths: &Paths, file_name: &str) -> Option<std::fs::File> {
 /// Append one line to the unified activity log. `source` is the subsystem token
 /// (engine, tts, stt, caps, hook, mcp, helper). Fail-quiet: any IO error is a no-op —
 /// logging must never take down a hook or the engine.
-pub fn log(paths: &Paths, level: LogLevel, source: &str, msg: &str) {
+pub fn log(log_file: &Path, level: LogLevel, source: &str, msg: &str) {
     use std::io::Write;
-    if let Some(dir) = paths.log_file.parent() {
+    if let Some(dir) = log_file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    rotate_if_large(&paths.log_file);
+    rotate_if_large(log_file);
     // One formatted line, one write_all → atomic append (no interleave).
     let line = format!("[{}] {} {source} {msg}\n", epoch_secs(), level.as_str());
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&paths.log_file)
+        .open(log_file)
     {
         let _ = f.write_all(line.as_bytes());
     }
 }
 
-static CACHED_PATHS: std::sync::OnceLock<Option<Paths>> = std::sync::OnceLock::new();
-
-/// Convenience wrapper over `log()` for callers with no `Paths` of their own in scope
-/// (the dontspeak CLI's hook/MCP paths, ds-helper's diagnostics) — resolves+caches `Paths`
-/// once per process so callers don't each reimplement the same OnceLock cache. Fail-quiet:
-/// a no-op if `$HOME` can't resolve.
+/// Re-derive the per-OS default unified-log path, WITHOUT depending on `ds-config`.
 ///
-/// Callers that already have a `Paths` in scope (e.g. anything reached from a test harness
-/// rooted at a tempdir via `Paths::rooted_at`) must call `log()` directly instead — this
-/// function always resolves the REAL per-OS paths via `Paths::resolve()` and ignores any
-/// caller-local `Paths`, so using it from a path that's supposed to stay test-isolated would
-/// silently leak writes into the real `$HOME`-based log directory.
+/// `ds-log` cannot depend on `ds_config::Paths` for this: `ds-config`'s own `voice.rs`
+/// (`VoiceConfig::load`) calls this crate's `log()` for an internal diagnostic, so if
+/// `ds-log` also depended on `ds-config` (for `Paths`), that would be a Cargo workspace
+/// dependency cycle — a hard build error. So this is a small, deliberate duplicate of
+/// `ds_config::paths::log_path`/`state_root`/`APP_DIR` (same per-OS convention, same
+/// `directories::BaseDirs` primitive), kept in sync by convention rather than by a shared
+/// dependency. Mirrors the existing precedent in `log_watch.rs`'s `is_relevant` helper,
+/// which duplicates `dontspeakd::config_watch` logic for the same reason (a real cross-
+/// crate cycle, not laziness).
+///
+///   macOS:   `~/Library/Logs/DontSpeak/dontspeak.log`
+///   Windows: `%LOCALAPPDATA%\DontSpeak\logs\dontspeak.log`
+///   Linux:   `$XDG_STATE_HOME`/`~/.local/state/dontspeak/logs/dontspeak.log`
+fn default_log_file() -> Option<PathBuf> {
+    let base = directories::BaseDirs::new()?;
+
+    #[cfg(not(target_os = "linux"))]
+    const APP_DIR: &str = "DontSpeak";
+    #[cfg(target_os = "linux")]
+    const APP_DIR: &str = "dontspeak";
+
+    #[cfg(target_os = "macos")]
+    {
+        Some(
+            base.home_dir()
+                .join("Library/Logs")
+                .join(APP_DIR)
+                .join("dontspeak.log"),
+        )
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Some(
+            base.data_local_dir()
+                .join(APP_DIR)
+                .join("logs")
+                .join("dontspeak.log"),
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let state = base
+            .state_dir()
+            .unwrap_or_else(|| base.data_dir())
+            .join(APP_DIR);
+        Some(state.join("logs").join("dontspeak.log"))
+    }
+}
+
+static CACHED_LOG_FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Convenience wrapper over `log()` for callers with no log-file path of their own in scope
+/// (the dontspeak CLI's hook/MCP paths, ds-helper's diagnostics) — resolves+caches the
+/// default per-OS log file once per process so callers don't each reimplement the same
+/// OnceLock cache. Fail-quiet: a no-op if `$HOME` can't resolve.
+///
+/// Callers that already have a resolved log-file path in scope (e.g. anything reached from
+/// a test harness rooted at a tempdir) must call `log()` directly instead — this function
+/// always resolves the REAL per-OS path via `default_log_file()` and ignores any caller-local
+/// path, so using it from a path that's supposed to stay test-isolated would silently leak
+/// writes into the real `$HOME`-based log directory.
 pub fn log_cached(level: LogLevel, source: &str, msg: &str) {
-    match CACHED_PATHS.get_or_init(Paths::resolve) {
-        Some(paths) => log(paths, level, source, msg),
+    match CACHED_LOG_FILE.get_or_init(default_log_file) {
+        Some(log_file) => log(log_file, level, source, msg),
         None => eprintln!("[{source}] {msg}"),
     }
 }
 
 /// Like `log_cached`, but also echoes the message to stderr — for callers where a human might
 /// be watching a terminal in real time (a hand-run MCP server, the interactive `dontspeak wire`
-/// subcommand) in addition to the persisted unified log. Checks `CACHED_PATHS` itself (rather
-/// than calling `log_cached` and letting its own failure-path `eprintln!` run too) so a
-/// `Paths::resolve()` failure prints exactly once, not twice.
+/// subcommand) in addition to the persisted unified log. Checks `CACHED_LOG_FILE` itself
+/// (rather than calling `log_cached` and letting its own failure-path `eprintln!` run too) so a
+/// resolution failure prints exactly once, not twice.
 pub fn log_cached_echoed(level: LogLevel, source: &str, msg: &str) {
     eprintln!("{msg}");
-    if let Some(paths) = CACHED_PATHS.get_or_init(Paths::resolve) {
-        log(paths, level, source, msg);
+    if let Some(log_file) = CACHED_LOG_FILE.get_or_init(default_log_file) {
+        log(log_file, level, source, msg);
     }
 }
 
@@ -208,8 +257,8 @@ fn parse_unified_line(line: &str) -> Option<(u64, String, String, String)> {
 /// the next `log()`/`open_aux_log()` call recreates a fresh file. Fail-quiet per file (a file may
 /// already be gone, or another process may hold it open on Windows); irreversible, so the UI must
 /// confirm before calling. Cross-platform — every UI's Clear button goes through this.
-pub fn clear_logs(paths: &Paths) {
-    clear_logs_at(&paths.log_file);
+pub fn clear_logs(log_file: &Path) {
+    clear_logs_at(log_file);
 }
 
 fn clear_logs_at(unified_log: &Path) {
@@ -245,8 +294,8 @@ fn clear_logs_at(unified_log: &Path) {
 /// (`ds-helper.log` → `helper`) at the file's mtime. Rotated files (`*.log.N`) are
 /// excluded. So the UI gets ALL distinct log types in one list, and can derive the filter set
 /// from the distinct `source` values. `max_bytes` caps the tail read PER file.
-pub fn combined_log_json(paths: &Paths, max_bytes: u64) -> String {
-    combined_log_json_at(&paths.log_file, max_bytes)
+pub fn combined_log_json(log_file: &Path, max_bytes: u64) -> String {
+    combined_log_json_at(log_file, max_bytes)
 }
 
 fn combined_log_json_at(unified_log: &Path, max_bytes: u64) -> String {

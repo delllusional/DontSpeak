@@ -19,9 +19,11 @@ use crate::enums::{
     default_provider, default_stt_engine_ladder, default_tray_indicator, default_tts_engine_ladder,
     se_stt_engine_pref, se_tts_engine_pref,
 };
+use ds_log::{LogLevel, log};
+
 use crate::{
-    CancelSpeechScope, DiarizerProvider, ListenMode, LogLevel, NarrateKind, Paths, Provider,
-    SttEngine, TrayKind, TtsEngine, log,
+    CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Paths, Provider, SttEngine,
+    TrayKind, TtsEngine,
 };
 
 /// Spoken wake phrases for the hands-free (always-listening) mode: the word that opens
@@ -619,7 +621,7 @@ impl VoiceConfig {
         };
         let Ok(table) = toml::from_str::<toml::Table>(&text) else {
             log(
-                paths,
+                &paths.log_file,
                 LogLevel::Warn,
                 "config",
                 "config.toml is not valid TOML; using defaults",
@@ -632,7 +634,7 @@ impl VoiceConfig {
         for k in table.keys() {
             if !known.contains(k.as_str()) {
                 log(
-                    paths,
+                    &paths.log_file,
                     LogLevel::Warn,
                     "config",
                     &format!("unknown key in config.toml: {k:?} (ignored)"),

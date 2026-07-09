@@ -26,10 +26,9 @@ ds-proc = { workspace = true }
 # proven ds_proc::write_speaker pattern so a crash never leaves a half-written
 # settings.json (the file Claude Code itself also reads).
 tempfile = { workspace = true }
-# Client-side push for the Logs tab: watch the logs dir instead of polling on a
-# timer — the same crate/idiom `dontspeakd::config_watch` already uses for
-# settings.json.
-notify = { workspace = true }
+# The unified activity log (issue #6 split): VoiceConfig::load logs a warning on
+# bad/unknown config.toml keys via this crate's log()/LogLevel.
+ds-log = { workspace = true }
 
 [lints]
 workspace = true

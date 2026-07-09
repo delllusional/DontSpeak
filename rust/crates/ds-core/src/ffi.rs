@@ -248,7 +248,7 @@ pub extern "C" fn ds_libraries_json() -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_logs_json(max_bytes: u32) -> *mut c_char {
     guard_str("[]", || match ds_config::Paths::resolve() {
-        Some(paths) => to_cstring(ds_config::combined_log_json(&paths, max_bytes as u64)),
+        Some(paths) => to_cstring(ds_log::combined_log_json(&paths.log_file, max_bytes as u64)),
         None => to_cstring("[]"),
     })
 }
@@ -269,8 +269,11 @@ pub extern "C" fn ds_logs_wait(max_bytes: u32, timeout_ms: u32) -> *mut c_char {
         let Some(paths) = ds_config::Paths::resolve() else {
             return to_cstring("[]");
         };
-        ds_config::wait_logs_changed(&paths, std::time::Duration::from_millis(timeout_ms as u64));
-        to_cstring(ds_config::combined_log_json(&paths, max_bytes as u64))
+        ds_log::wait_logs_changed(
+            &paths.log_file,
+            std::time::Duration::from_millis(timeout_ms as u64),
+        );
+        to_cstring(ds_log::combined_log_json(&paths.log_file, max_bytes as u64))
     })
 }
 
@@ -282,7 +285,7 @@ pub extern "C" fn ds_logs_wait(max_bytes: u32, timeout_ms: u32) -> *mut c_char {
 pub extern "C" fn ds_logs_clear() {
     guard_val((), || {
         if let Some(paths) = ds_config::Paths::resolve() {
-            ds_config::clear_logs(&paths);
+            ds_log::clear_logs(&paths.log_file);
         }
     })
 }

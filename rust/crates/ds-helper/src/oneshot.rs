@@ -67,8 +67,8 @@ pub(crate) fn load_backend() -> Result<Backend, String> {
         if pref.eq_ignore_ascii_case("ane") || pref.eq_ignore_ascii_case("auto") {
             match ds_tts::synth_coreml::KokoroCoremlTts::load() {
                 Ok(c) => return Ok(Backend::Coreml(c)),
-                Err(e) => ds_config::log_cached(
-                    ds_config::LogLevel::Warn,
+                Err(e) => ds_log::log_cached(
+                    ds_log::LogLevel::Warn,
                     "helper",
                     &format!("ANE (FluidAudio) TTS unavailable ({e}); falling back to ONNX"),
                 ),

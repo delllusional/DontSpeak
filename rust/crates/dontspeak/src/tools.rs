@@ -335,13 +335,13 @@ fn call_wire(paths: &Paths, args: &Value) -> Result<String, String> {
 
 /// Persist the `wiring {label} failed` diagnostic to the unified log — closes the gap where
 /// `call_wire`'s error message promised "see the engine log" but nothing actually wrote there.
-/// Takes `paths` directly (not `ds_config::log_cached`) since `call_wire` already has a real
+/// Takes `paths` directly (not `ds_log::log_cached`) since `call_wire` already has a real
 /// `&Paths` in scope, keeping this trivially unit-testable against an isolated tempdir `Paths`
 /// without touching the real `$HOME` log.
 fn log_wire_failure(paths: &Paths, label: &str, code: i32) {
-    ds_config::log(
-        paths,
-        ds_config::LogLevel::Error,
+    ds_log::log(
+        &paths.log_file,
+        ds_log::LogLevel::Error,
         "mcp",
         &format!("setup_integration: wiring {label} failed (exit {code})"),
     );

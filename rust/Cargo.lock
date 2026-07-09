@@ -866,6 +866,7 @@ version = "0.2.5-dev"
 dependencies = [
  "ds-config",
  "ds-ipc",
+ "ds-log",
  "ds-narrate",
  "ds-platform",
  "ds-tools",
@@ -884,6 +885,7 @@ dependencies = [
  "ds-helper-proto",
  "ds-i18n",
  "ds-ipc",
+ "ds-log",
  "ds-model",
  "ds-narrate",
  "ds-platform",
@@ -917,8 +919,8 @@ name = "ds-config"
 version = "0.2.5-dev"
 dependencies = [
  "directories",
+ "ds-log",
  "ds-proc",
- "notify",
  "serde",
  "serde_json",
  "tempfile",
@@ -935,6 +937,7 @@ dependencies = [
  "ds-config",
  "ds-i18n",
  "ds-ipc",
+ "ds-log",
  "ds-model",
  "ds-status",
  "ds-tools",
@@ -960,6 +963,7 @@ dependencies = [
  "ds-aec",
  "ds-config",
  "ds-helper-proto",
+ "ds-log",
  "ds-model",
  "ds-stt",
  "ds-tts",
@@ -993,6 +997,16 @@ dependencies = [
  "tempfile",
  "uds_windows",
  "windows",
+]
+
+[[package]]
+name = "ds-log"
+version = "0.2.5-dev"
+dependencies = [
+ "directories",
+ "notify",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

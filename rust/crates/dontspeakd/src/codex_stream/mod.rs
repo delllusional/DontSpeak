@@ -652,9 +652,9 @@ fn run_attached<S: Read + Write>(
                                 }
                             }
                         } else {
-                            ds_config::log(
-                                paths,
-                                ds_config::LogLevel::Debug,
+                            ds_log::log(
+                                &paths.log_file,
+                                ds_log::LogLevel::Debug,
                                 "codex-stream",
                                 "thread/loaded/list returned an error — keeping sessions; will relist",
                             );
@@ -943,9 +943,9 @@ fn supervise(
             Err(e) => {
                 // Could not attach at all — quiet, common case (no daemon running).
                 backoff = next_backoff(false, backoff);
-                ds_config::log(
-                    paths,
-                    ds_config::LogLevel::Debug,
+                ds_log::log(
+                    &paths.log_file,
+                    ds_log::LogLevel::Debug,
                     "codex-stream",
                     &format!("attach failed: {e}; next try in {backoff:?}"),
                 );

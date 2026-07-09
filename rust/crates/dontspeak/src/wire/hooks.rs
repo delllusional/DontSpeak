@@ -96,11 +96,11 @@ pub(crate) fn seed_and_prune(paths: &Paths) {
         if let Err(e) = ds_config::write_settings(paths, &ds_config::VoiceConfig::default()) {
             let msg = format!("wire: could not seed {}: {e}", paths.config_toml.display());
             eprintln!("{msg}");
-            ds_config::log(paths, ds_config::LogLevel::Error, "hook", &msg);
+            ds_log::log(&paths.log_file, ds_log::LogLevel::Error, "hook", &msg);
         } else {
             let msg = format!("wire: seeded {}", paths.config_toml.display());
             eprintln!("{msg}");
-            ds_config::log(paths, ds_config::LogLevel::Info, "hook", &msg);
+            ds_log::log(&paths.log_file, ds_log::LogLevel::Info, "hook", &msg);
         }
     }
     // NOTE: we deliberately do NOT seed `narration-spec.md`. The spec lives in the binary
@@ -601,7 +601,7 @@ mod tests {
     /// `write_settings`'s `Err` branch inside `seed_and_prune`: pre-create a plain FILE at the
     /// path that would be `paths.config_toml`'s parent directory, so the underlying
     /// `create_dir_all` fails. `seed_and_prune` returns `()`, not a `Result` — reading the
-    /// function, its `Err(e)` arm only logs (via `ds_config::log`) and continues (does not
+    /// function, its `Err(e)` arm only logs (via `ds_log::log`) and continues (does not
     /// propagate, does not panic), so the only observable effect is that `config_toml` is never
     /// created.
     #[test]
