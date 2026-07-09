@@ -383,6 +383,12 @@ pub(crate) struct Engine<P: Platform + 'static> {
     /// Parakeet present WITHOUT changing the engine selection) — see [`local_stt_available`].
     /// `pub(crate)` so `engine_run` can set it alongside its initial `build_stt`.
     pub(crate) stt_is_local: bool,
+    /// Resolved filesystem paths, injected so `claude_code`'s keybindings.json read never
+    /// hits the real `$HOME` from a test. `None` only when `Paths::resolve()` itself failed
+    /// (no `$HOME`) or a test deliberately withholds it — both cases fall back to the
+    /// default chord (see `ds_engines::claude_code_chord`). Set once at construction
+    /// (`with_config`/`assemble`), never mutated by `reload`.
+    pub(crate) paths: Option<ds_config::Paths>,
 }
 
 impl<P: Platform + 'static> Engine<P> {
@@ -398,7 +404,7 @@ impl<P: Platform + 'static> Engine<P> {
             plat.clone(),
             ds_platform::KeyChord::default(),
         ));
-        Self::assemble(plat, stt, VoiceConfig::default(), pidfile, long_press_ms)
+        Self::assemble(plat, stt, VoiceConfig::default(), pidfile, long_press_ms, None)
     }
 
     /// Construct selecting the STT engine from config via the factory
@@ -408,10 +414,11 @@ impl<P: Platform + 'static> Engine<P> {
         cfg: &VoiceConfig,
         pidfile: std::path::PathBuf,
         long_press_ms: u64,
+        paths: Option<&ds_config::Paths>,
     ) -> Self {
         let plat = Rc::new(plat);
-        let stt = ds_engines::make_stt(cfg, plat.clone());
-        Self::assemble(plat, stt, cfg.clone(), pidfile, long_press_ms)
+        let stt = ds_engines::make_stt_at(cfg, plat.clone(), &ds_engines::RealAvailability, paths);
+        Self::assemble(plat, stt, cfg.clone(), pidfile, long_press_ms, paths.cloned())
     }
 
     fn assemble(
@@ -420,6 +427,7 @@ impl<P: Platform + 'static> Engine<P> {
         cfg: VoiceConfig,
         pidfile: std::path::PathBuf,
         long_press_ms: u64,
+        paths: Option<ds_config::Paths>,
     ) -> Self {
         // Caps dictation needs Accessibility trust AND the config toggle(s).
         let caps_enabled = caps_loop_enabled(&cfg) && plat.preflight().is_ok();
@@ -458,6 +466,7 @@ impl<P: Platform + 'static> Engine<P> {
             // constructors); the local helper is only ever installed by `build_stt` in
             // `engine_run`/`reload`, which set this flag alongside.
             stt_is_local: false,
+            paths,
         };
         // Push the user's extra paste-target identifiers to the freshly-constructed platform
         // (config.toml `extra_terminals`/`extra_custom_text_editors`, ADDED TO — never
@@ -933,7 +942,13 @@ impl<P: Platform + 'static> Engine<P> {
             // swap — otherwise a reload mid-dictation leaves the menu-bar icon stuck
             // "recording" with no live listen on the fresh engine.
             self.teardown_hold();
-            self.stt = build_stt(cfg, self.plat.clone(), self.tts.as_ref(), &self.paste);
+            self.stt = build_stt(
+                cfg,
+                self.plat.clone(),
+                self.tts.as_ref(),
+                &self.paste,
+                self.paths.as_ref(),
+            );
             self.stt_is_local = want_local;
         }
 
@@ -1977,6 +1992,10 @@ mod tests {
         /// both `Engine::assemble`'s initial push AND `Engine::reload`'s subsequent one.
         set_extra_terminals_calls: RefCell<Vec<Vec<String>>>,
         set_extra_custom_text_editors_calls: RefCell<Vec<Vec<String>>>,
+        /// Every chord actually tapped, in order — lets tests assert WHICH chord
+        /// `ClaudeNative` taps (e.g. distinguishing an injected-`Paths`-derived chord
+        /// from the default), not just how many taps happened.
+        tapped_chords: RefCell<Vec<ds_platform::KeyChord>>,
     }
 
     impl KeyInjector for MockPlatform {
@@ -1984,6 +2003,7 @@ mod tests {
         // counters the caps-state-machine tests assert on — keeping every existing
         // assertion valid now that ClaudeNative taps a chord instead of Ctrl+G down/up.
         fn tap_key(&self, _chord: &ds_platform::KeyChord) {
+            self.tapped_chords.borrow_mut().push(_chord.clone());
             self.tap_down_calls.set(self.tap_down_calls.get() + 1);
             self.tap_up_calls.set(self.tap_up_calls.get() + 1);
         }
@@ -3459,5 +3479,77 @@ mod tests {
             !d.is_recording(),
             "leaving Always tears down any in-flight hold"
         );
+    }
+
+    #[test]
+    fn reload_claude_code_stt_reads_keybindings_from_injected_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(paths.settings_json.parent().unwrap()).unwrap();
+        std::fs::write(
+            &paths.settings_json,
+            r#"{"voice": {"enabled": true, "mode": "tap"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &paths.keybindings_json,
+            r#"{"bindings": [{"context": "Chat", "bindings": {"ctrl+g": "voice:pushToTalk"}}]}"#,
+        )
+        .unwrap();
+
+        let mut d = mk(600);
+        d.paths = Some(paths);
+        let mut cfg = d.cfg.clone();
+        cfg.stt_engine = Some(vec![ds_config::SttEngine::ClaudeCode]);
+        // Sanity: this reload must actually enter the STT-rebuild branch, else the
+        // assertion below would pass vacuously without exercising the fix.
+        assert_ne!(
+            cfg.resolved_stt(),
+            d.cfg.resolved_stt(),
+            "test setup must force a real STT transition"
+        );
+        d.reload(&cfg);
+
+        assert_eq!(d.stt.kind(), "claude_code");
+        d.plat.terminal_frontmost.set(true);
+        d.stt.start();
+        let taps = d.plat.tapped_chords.borrow();
+        assert_eq!(
+            taps.last(),
+            Some(&ds_platform::KeyChord::parse("ctrl+g")),
+            "the claude_code engine built via reload must tap the chord read from the INJECTED Paths"
+        );
+    }
+
+    #[test]
+    fn reload_claude_code_stt_falls_back_to_default_chord_without_injected_paths() {
+        // Proves the OTHER direction: with paths left at None (no injection), the same
+        // ClaudeCode selection builds the DEFAULT chord, not whatever a stray real
+        // ~/.claude/keybindings.json on the test host happens to contain. Uses a SEPARATE
+        // engine (paths never set to Some on this instance) rather than flipping the same
+        // instance's `paths` back to None and reloading again — reload's STT-rebuild branch
+        // is gated on `change.stt_changed || local_avail_flipped`, so a second reload with
+        // an IDENTICAL resolved engine would never re-enter the rebuild branch and the
+        // still-live first instance's engine would be asserted on instead, silently testing
+        // nothing.
+        let mut d2 = mk(600);
+        assert!(
+            d2.paths.is_none(),
+            "fresh mk() engine must start with no injected Paths"
+        );
+        let mut cfg = d2.cfg.clone();
+        cfg.stt_engine = Some(vec![ds_config::SttEngine::ClaudeCode]);
+        assert_ne!(
+            cfg.resolved_stt(),
+            d2.cfg.resolved_stt(),
+            "test setup must force a real STT transition"
+        );
+        d2.reload(&cfg);
+
+        assert_eq!(d2.stt.kind(), "claude_code");
+        d2.plat.terminal_frontmost.set(true);
+        d2.stt.start();
+        let taps = d2.plat.tapped_chords.borrow();
+        assert_eq!(taps.last(), Some(&ds_platform::KeyChord::default()));
     }
 }

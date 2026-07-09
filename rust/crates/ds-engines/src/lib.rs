@@ -86,6 +86,22 @@ pub fn make_stt_with<P>(
 where
     P: KeyInjector + FrontmostWindow + 'static,
 {
+    make_stt_at(cfg, plat, avail, ds_config::Paths::resolve().as_ref())
+}
+
+/// `make_stt` with both an injected availability probe AND an injected `Paths` — the
+/// full test seam. Production entry points (`make_stt`/`make_stt_with`) wrap this with
+/// `ds_config::Paths::resolve().as_ref()`; tests pass a tempdir-rooted `Paths` so the
+/// `ClaudeCode` arm's `claude_code_chord` read never touches the real `$HOME`.
+pub fn make_stt_at<P>(
+    cfg: &VoiceConfig,
+    plat: Rc<P>,
+    avail: &dyn EngineAvailability,
+    paths: Option<&ds_config::Paths>,
+) -> Box<dyn Stt>
+where
+    P: KeyInjector + FrontmostWindow + 'static,
+{
     // `stt_engine`/`stt_engine_ladder` is the single STT-path selector: claude_code delegates
     // to Claude Code's own voice dictation (we tap its bound key); built_in/system are LOCAL
     // STT. The built-in engine runs THROUGH the warm helper (dontspeakd::build_stt →
@@ -95,12 +111,7 @@ where
     // engine that runs on this build, then map it. `None` (off, or no usable rung) = dictation
     // off — the engine routes a Caps tap to voice-silence and never calls `stt.start()`, so
     // the inert box is never used.
-    stt_box(
-        cfg.resolved_stt(),
-        plat,
-        avail,
-        ds_config::Paths::resolve().as_ref(),
-    )
+    stt_box(cfg.resolved_stt(), plat, avail, paths)
 }
 
 /// Map a SINGLE (already-resolved) STT engine to its box — the ladder-free inverse of
@@ -212,6 +223,26 @@ mod tests {
                 "stt_engine {engine:?} must map to the expected box",
             );
         }
+    }
+
+    // ── make_stt_at: the full injectable-Paths seam, exercised directly ──────
+
+    #[test]
+    fn make_stt_at_is_hermetic_with_injected_paths() {
+        // Proves the PUBLIC entry point itself (not just the private stt_box) never
+        // touches the real $HOME: a tempdir-rooted Paths is injected all the way through
+        // make_stt_at, and the ClaudeCode arm's keybindings.json read stays hermetic.
+        let cfg = VoiceConfig {
+            stt_engine: Some(vec![SttEngine::ClaudeCode]),
+            ..VoiceConfig::default()
+        };
+        let avail = FakeAvail { system_stt: true };
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
+        assert_eq!(
+            make_stt_at(&cfg, plat(), &avail, Some(&paths)).kind(),
+            "claude_code"
+        );
     }
 
     // ── Default-ladder RESOLUTION through make_* (arch-dependent) ────────────

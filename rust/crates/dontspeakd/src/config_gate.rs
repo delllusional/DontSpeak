@@ -235,6 +235,7 @@ pub(crate) fn build_stt<P: Platform + 'static>(
     plat: std::rc::Rc<P>,
     tts: Option<&Arc<tts::TtsManager>>,
     paste: &PasteState,
+    paths: Option<&ds_config::Paths>,
 ) -> Box<dyn Stt> {
     if let Some(tts) = tts
         && local_stt_available(cfg)
@@ -253,7 +254,7 @@ pub(crate) fn build_stt<P: Platform + 'static>(
         "dictation STT = factory fallback (resolved={}) — NOT the local helper",
         cfg.resolved_stt().map(|e| e.as_str()).unwrap_or("off")
     ));
-    ds_engines::make_stt(cfg, plat)
+    ds_engines::make_stt_at(cfg, plat, &ds_engines::RealAvailability, paths)
 }
 
 /// Whether the SELECTED STT engine can run LOCALLY right now (Parakeet model resident, or

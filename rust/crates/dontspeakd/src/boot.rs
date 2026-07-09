@@ -335,6 +335,7 @@ pub fn engine_run(
         &cfg,
         paths.pidfile.clone(),
         normalize_long_press(long_press_ms),
+        Some(&paths),
     );
     daemon.tts = Some(tts.clone());
     daemon.ttsq = Some(ttsq.clone());
@@ -354,6 +355,7 @@ pub fn engine_run(
         daemon.plat.clone(),
         daemon.tts.as_ref(),
         &daemon.paste,
+        Some(&paths),
     );
     // Track whether that resolved to the LOCAL helper (same predicate build_stt uses:
     // helper present AND model available) so `reload` can detect a later availability flip
