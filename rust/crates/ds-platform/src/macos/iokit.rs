@@ -187,6 +187,8 @@ unsafe fn cfstr(name: &[u8]) -> CFStringRef {
 /// (some Electron/Java/custom-drawn UIs, including most terminal TTY views) read as "no
 /// target" here — the engine compensates by also treating a frontmost terminal as a paste
 /// target (see `Engine::tick`), so a terminal never shows a spurious "no target" glow.
+/// The caller (`MacOsPlatform::has_paste_target`) additionally short-circuits frontmost
+/// `CUSTOM_TEXT_BUNDLES`/`extra_custom_text_editors` editors before this probe runs.
 pub fn focused_element_accepts_paste() -> bool {
     // SAFETY: every AX/CF call follows the CoreFoundation ownership rules: `sys`, the
     // attribute CFStrings, and the Copy results are owned (+1) refs, each null-checked

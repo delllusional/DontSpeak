@@ -134,11 +134,11 @@ pub trait FrontmostWindow {
 
     /// Add the user's extra custom-text-editor identifiers (config.toml
     /// `extra_custom_text_editors`) — mirrors `set_extra_terminals` but widens
-    /// `has_paste_target()`'s `CUSTOM_TEXT_EXES`-style exemption instead of
-    /// `is_terminal_frontmost()`'s table. Effective on WINDOWS ONLY today (no
-    /// `CUSTOM_TEXT_EXES`-equivalent on macOS/Linux — see GitHub issue #15); the other two
-    /// platforms accept but ignore the call so the config field is uniformly settable
-    /// regardless of OS. DEFAULT no-op.
+    /// `has_paste_target()`'s custom-drawn-editor exemption instead of
+    /// `is_terminal_frontmost()`'s table. Effective on Windows (`CUSTOM_TEXT_EXES`) and
+    /// macOS (`CUSTOM_TEXT_BUNDLES`); Linux accepts-and-ignores the call because its
+    /// `has_paste_target` is the always-true trait default (nothing to exempt), keeping
+    /// the config field uniformly settable regardless of OS. DEFAULT no-op.
     fn set_extra_custom_text_editors(&self, _extra: Vec<String>) {}
 }
 

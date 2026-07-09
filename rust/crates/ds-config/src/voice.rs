@@ -337,14 +337,14 @@ pub struct VoiceConfig {
 
     /// Extra custom-rendered-editor identifiers (apps like Zed whose main text surface is
     /// drawn by a GPU/canvas toolkit, so the OS accessibility API reports no editable role
-    /// even though a synthetic paste lands fine) — in ADDITION to the built-in
-    /// `ds_platform::windows::CUSTOM_TEXT_EXES` table. Config.toml only, same rationale as
-    /// `extra_terminals`. WINDOWS-ONLY EFFECT today, mirroring `CUSTOM_TEXT_EXES`'s own
-    /// current Windows-only scope: it widens `has_paste_target()`'s exemption there;
-    /// macOS/Linux accept (and currently ignore) this field pending a real complaint (see
-    /// GitHub issue #15) rather than a speculative new AX/WM detection mechanism.
-    /// Lowercased exe basename form (e.g. "myeditor.exe"), matching `CUSTOM_TEXT_EXES`'s
-    /// own form. See GitHub issue #14.
+    /// even though a synthetic paste lands fine) — in ADDITION to the built-in per-OS
+    /// tables (`CUSTOM_TEXT_EXES` on Windows, `CUSTOM_TEXT_BUNDLES` on macOS). Config.toml
+    /// only, same rationale as `extra_terminals`. Widens `has_paste_target()`'s exemption.
+    /// One identifier per entry, in THIS OS's native form (mirroring `extra_terminals`
+    /// above): the lowercased exe basename on Windows (e.g. "myeditor.exe"), the bundle id
+    /// on macOS (e.g. "dev.zed.Zed-Nightly"). Ignored on Linux, where `has_paste_target`
+    /// is the always-true trait default — there's no focus probe to exempt anything from.
+    /// See GitHub issues #14 and #15.
     #[serde(default)]
     pub extra_custom_text_editors: Vec<String>,
 }

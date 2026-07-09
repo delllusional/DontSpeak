@@ -383,8 +383,9 @@ impl FrontmostWindow for LinuxPlatform {
     }
 
     // Deliberately no `set_extra_custom_text_editors` override — `LinuxPlatform` doesn't
-    // override `has_paste_target` at all today (uses the trait's `true` default), so the
-    // no-op default stands here too (same GitHub issue #15 scoping as macOS).
+    // override `has_paste_target` at all (it uses the trait's always-true default), so an
+    // exemption list would be dead code: the "no paste target" glow can never appear here.
+    // Add one only if Linux ever grows a real focus probe.
 }
 
 impl CapsKeyMonitor for LinuxPlatform {

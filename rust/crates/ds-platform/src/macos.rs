@@ -136,6 +136,10 @@ pub struct MacOsPlatform {
     /// Same single-poll-thread reasoning as `owns_key` above (`Rc<MacOsPlatform>` is
     /// `!Send`, so plain interior mutability suffices).
     extra_terminals: RefCell<Vec<String>>,
+    /// User config.toml `extra_custom_text_editors` — extends `CUSTOM_TEXT_BUNDLES` at
+    /// lookup time. Same single-poll-thread reasoning as `extra_terminals` above
+    /// (`Rc<MacOsPlatform>` is `!Send`, so plain interior mutability suffices).
+    extra_custom_text_editors: RefCell<Vec<String>>,
 }
 
 impl MacOsPlatform {
@@ -167,6 +171,7 @@ impl MacOsPlatform {
             caps_down,
             owns_key: Cell::new(false),
             extra_terminals: RefCell::new(Vec::new()),
+            extra_custom_text_editors: RefCell::new(Vec::new()),
         })
     }
 }
@@ -295,6 +300,36 @@ fn is_known_terminal_bundle(bid: &str, extra: &[String]) -> bool {
         || extra.iter().any(|e| e.eq_ignore_ascii_case(bid))
 }
 
+/// Bundle identifiers of editors whose main text surface is drawn by a custom GPU/canvas
+/// toolkit rather than a native NSTextView, so the AX focused-element probe
+/// (`iokit::focused_element_accepts_paste`) sees no focused editable element even though a
+/// synthetic Cmd+V lands in the buffer fine. The macOS mirror of `windows.rs`'s
+/// `CUSTOM_TEXT_EXES`. Kept as a SEPARATE list rather than folded into the shared
+/// `KNOWN_TERMINALS` terminal table, because `is_terminal_frontmost()` also gates
+/// unrelated behavior (mic pause-in-background in `ttsq.rs`, dictation-key/transcript
+/// leak prevention in `ds-stt`) that a code editor should not opt into just because its
+/// buffer view happens to be AX-invisible.
+///
+/// - "dev.zed.Zed" / "dev.zed.Zed-Preview": Zed's GPUI framework draws the buffer itself
+///   and exposes no NSAccessibility tree for the editing surface (menus only — see
+///   zed-industries/zed discussion #6576). Unlike Windows (where every Zed channel shares
+///   the `zed.exe` basename), each macOS channel has its own bundle id; the Nightly/Dev
+///   ids couldn't be verified from an authoritative source, so those channels are covered
+///   by the config escape hatch below rather than this built-in list.
+///
+/// A user can extend this table without a code change via config.toml's
+/// `extra_custom_text_editors` (see [`crate::FrontmostWindow::set_extra_custom_text_editors`])
+/// — unioned in at lookup time by [`is_custom_text_bundle`], never merged into this slice.
+const CUSTOM_TEXT_BUNDLES: &[&str] = &["dev.zed.Zed", "dev.zed.Zed-Preview"];
+
+/// Is `bid` one of the built-in [`CUSTOM_TEXT_BUNDLES`], OR one of the user's config.toml
+/// `extra_custom_text_editors` entries? Case-insensitive for the user-supplied extras
+/// only (the built-in table's exact-match behavior for its own literals is untouched),
+/// matching `is_known_terminal_bundle`'s semantics.
+fn is_custom_text_bundle(bid: &str, extra: &[String]) -> bool {
+    CUSTOM_TEXT_BUNDLES.contains(&bid) || extra.iter().any(|e| e.eq_ignore_ascii_case(bid))
+}
+
 impl FrontmostWindow for MacOsPlatform {
     fn is_terminal_frontmost(&self) -> bool {
         // THREAD SAFETY (reviewed 2026-06-20, macOS 14/15 Apple Silicon):
@@ -337,6 +372,18 @@ impl FrontmostWindow for MacOsPlatform {
     }
 
     fn has_paste_target(&self) -> bool {
+        // Custom-drawn-editor exemption (macOS mirror of windows.rs's CUSTOM_TEXT_EXES):
+        // a frontmost CUSTOM_TEXT_BUNDLES editor accepts a paste even though its buffer
+        // is invisible to the AX probe below. Same off-main NSWorkspace read as
+        // `is_terminal_frontmost` (see the thread-safety note there). Unlike Windows we
+        // do NOT fold terminals in here — `Engine::tick` already ORs
+        // `is_terminal_frontmost()`, and macOS terminals expose an AXTextArea anyway.
+        let ws = NSWorkspace::sharedWorkspace();
+        if let Some(bid) = ws.frontmostApplication().and_then(|a| a.bundleIdentifier())
+            && is_custom_text_bundle(&bid.to_string(), &self.extra_custom_text_editors.borrow())
+        {
+            return true;
+        }
         // Accessibility focused-element probe (see `iokit::focused_element_accepts_paste`):
         // is an editable field focused that would accept a synthetic Cmd+V right now?
         // Read off the engine poll thread; the AX call is a synchronous in-process
@@ -349,9 +396,9 @@ impl FrontmostWindow for MacOsPlatform {
         *self.extra_terminals.borrow_mut() = extra;
     }
 
-    // Deliberately no `set_extra_custom_text_editors` override — no macOS
-    // `CUSTOM_TEXT_EXES`-equivalent exists yet (see GitHub issue #15), so the trait's
-    // no-op default stands; the field is accepted but ignored here.
+    fn set_extra_custom_text_editors(&self, extra: Vec<String>) {
+        *self.extra_custom_text_editors.borrow_mut() = extra;
+    }
 }
 
 impl CapsKeyMonitor for MacOsPlatform {
@@ -532,6 +579,43 @@ mod known_terminal_table {
             derived.len(),
             "a macos_bundle value is duplicated across two KNOWN_TERMINALS rows"
         );
+    }
+}
+
+#[cfg(test)]
+mod custom_text_bundles {
+    use super::*;
+
+    #[test]
+    fn zed_is_listed() {
+        // No lowercase invariant here — unlike Windows exe basenames, bundle ids are
+        // matched as-is with their real casing (same exact-match behavior as
+        // `is_known_terminal_bundle`'s built-in table).
+        assert!(CUSTOM_TEXT_BUNDLES.contains(&"dev.zed.Zed"));
+    }
+
+    #[test]
+    fn disjoint_from_terminal_bundles() {
+        // The two lists gate different behavior (see CUSTOM_TEXT_BUNDLES's doc comment);
+        // a bundle id in both would be redundant and signals it belongs in one, not both.
+        for bid in CUSTOM_TEXT_BUNDLES {
+            assert!(
+                !is_known_terminal_bundle(bid, &[]),
+                "{bid} listed in both bundle tables"
+            );
+        }
+    }
+
+    #[test]
+    fn is_custom_text_bundle_matches_extra_case_insensitively() {
+        let extra = vec!["dev.zed.Zed-Nightly".to_string()];
+        assert!(is_custom_text_bundle("dev.zed.Zed-Nightly", &extra));
+        assert!(is_custom_text_bundle("DEV.ZED.ZED-NIGHTLY", &extra));
+        assert!(!is_custom_text_bundle("com.example.other", &extra));
+        // Built-ins match exactly, with or without extras (regression guard for the
+        // empty-extra path).
+        assert!(is_custom_text_bundle("dev.zed.Zed", &[]));
+        assert!(!is_custom_text_bundle("com.example.notaneditor", &[]));
     }
 }
 
