@@ -122,6 +122,24 @@ pub trait FrontmostWindow {
     fn has_paste_target(&self) -> bool {
         true
     }
+
+    /// Add the user's extra terminal identifiers (config.toml `extra_terminals`) to this
+    /// platform's `KNOWN_TERMINALS` union, in THIS OS's native form. Called once right
+    /// after platform construction (`Engine::assemble`) and again on every
+    /// `Engine::reload` (config.toml is mtime-watched, so a hand-edit + save takes effect
+    /// live, no restart) — REPLACES the whole list each call, not additive. DEFAULT no-op
+    /// so the engine-test `MockPlatform`/`ds-stt`'s own mocks and any future stub keep
+    /// compiling unchanged; only the three OS impls override it.
+    fn set_extra_terminals(&self, _extra: Vec<String>) {}
+
+    /// Add the user's extra custom-text-editor identifiers (config.toml
+    /// `extra_custom_text_editors`) — mirrors `set_extra_terminals` but widens
+    /// `has_paste_target()`'s `CUSTOM_TEXT_EXES`-style exemption instead of
+    /// `is_terminal_frontmost()`'s table. Effective on WINDOWS ONLY today (no
+    /// `CUSTOM_TEXT_EXES`-equivalent on macOS/Linux — see GitHub issue #15); the other two
+    /// platforms accept but ignore the call so the config field is uniformly settable
+    /// regardless of OS. DEFAULT no-op.
+    fn set_extra_custom_text_editors(&self, _extra: Vec<String>) {}
 }
 
 /// Physical Caps-Lock key down-duration + LED write — the signal §F needs for
@@ -295,7 +313,9 @@ pub struct KnownTerminal {
 /// macOS's old `TERM_BUNDLES`, Linux's old `TERM_WM_CLASSES` — see each platform
 /// module's golden-list test, which pins this table against those pre-refactor
 /// literals). Adding a new cross-platform terminal with ONE identifier per OS is one
-/// row here instead of up to three separate edits.
+/// row here instead of up to three separate edits. A user can extend this table without a
+/// code change via config.toml's `extra_terminals` (see [`FrontmostWindow::set_extra_terminals`]) —
+/// unioned in at lookup time on each platform, never merged into this compiled-in slice.
 pub const KNOWN_TERMINALS: &[KnownTerminal] = &[
     // ---- cross-platform ---------------------------------------------------------
     KnownTerminal {

@@ -17,7 +17,7 @@ mod iokit;
 mod led;
 mod stuck_grant;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -132,6 +132,10 @@ pub struct MacOsPlatform {
     /// needed): the remap is per-login anyway, so there's nothing to reconcile across
     /// restarts the way Linux's GNOME/KDE settings need.
     owns_key: Cell<bool>,
+    /// User config.toml `extra_terminals` — extends `KNOWN_TERMINALS` at lookup time.
+    /// Same single-poll-thread reasoning as `owns_key` above (`Rc<MacOsPlatform>` is
+    /// `!Send`, so plain interior mutability suffices).
+    extra_terminals: RefCell<Vec<String>>,
 }
 
 impl MacOsPlatform {
@@ -162,6 +166,7 @@ impl MacOsPlatform {
             source,
             caps_down,
             owns_key: Cell::new(false),
+            extra_terminals: RefCell::new(Vec::new()),
         })
     }
 }
@@ -281,10 +286,13 @@ impl KeyInjector for MacOsPlatform {
 }
 
 /// Is `bid` (a macOS bundle identifier) one of the shared table's known terminal
-/// identifiers (`ds_platform::KNOWN_TERMINALS`)? Replaces the old hand-maintained
-/// `TERM_BUNDLES` array.
-fn is_known_terminal_bundle(bid: &str) -> bool {
+/// identifiers (`ds_platform::KNOWN_TERMINALS`), OR one of the user's config.toml
+/// `extra_terminals` entries? Replaces the old hand-maintained `TERM_BUNDLES` array.
+/// `extra` entries are matched case-insensitively (a user may type any casing), unlike
+/// the built-in table's exact-match literals.
+fn is_known_terminal_bundle(bid: &str, extra: &[String]) -> bool {
     KNOWN_TERMINALS.iter().any(|t| t.macos_bundle == Some(bid))
+        || extra.iter().any(|e| e.eq_ignore_ascii_case(bid))
 }
 
 impl FrontmostWindow for MacOsPlatform {
@@ -313,7 +321,7 @@ impl FrontmostWindow for MacOsPlatform {
         match app.bundleIdentifier() {
             Some(bid) => {
                 let s = bid.to_string();
-                is_known_terminal_bundle(&s)
+                is_known_terminal_bundle(&s, &self.extra_terminals.borrow())
             }
             None => false,
         }
@@ -336,6 +344,14 @@ impl FrontmostWindow for MacOsPlatform {
         // hold for CGEventPost.
         iokit::focused_element_accepts_paste()
     }
+
+    fn set_extra_terminals(&self, extra: Vec<String>) {
+        *self.extra_terminals.borrow_mut() = extra;
+    }
+
+    // Deliberately no `set_extra_custom_text_editors` override — no macOS
+    // `CUSTOM_TEXT_EXES`-equivalent exists yet (see GitHub issue #15), so the trait's
+    // no-op default stands; the field is accepted but ignored here.
 }
 
 impl CapsKeyMonitor for MacOsPlatform {
@@ -516,5 +532,21 @@ mod known_terminal_table {
             derived.len(),
             "a macos_bundle value is duplicated across two KNOWN_TERMINALS rows"
         );
+    }
+}
+
+#[cfg(test)]
+mod extra_paste_targets {
+    use super::*;
+
+    #[test]
+    fn is_known_terminal_bundle_matches_extra_case_insensitively() {
+        let extra = vec!["com.example.myterm".to_string()];
+        assert!(is_known_terminal_bundle("com.example.myterm", &extra));
+        assert!(is_known_terminal_bundle("COM.EXAMPLE.MYTERM", &extra));
+        assert!(!is_known_terminal_bundle("com.example.other", &extra));
+        // Empty extra behaves exactly as before the signature change (regression guard).
+        assert!(is_known_terminal_bundle("com.apple.Terminal", &[]));
+        assert!(!is_known_terminal_bundle("com.example.notaterm", &[]));
     }
 }

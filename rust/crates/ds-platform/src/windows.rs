@@ -9,6 +9,7 @@
 //!   the process image name and match a terminal list (WindowsTerminal.exe,
 //!   conhost.exe, powershell.exe, pwsh.exe, cmd.exe, alacritty.exe, ...).
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -52,12 +53,15 @@ fn vk_for_base(base: &KeyBase) -> Option<u16> {
 }
 
 /// Is `exe` (a lowercased Windows process basename) one of the shared table's known
-/// terminal identifiers (`ds_platform::KNOWN_TERMINALS`)? Replaces the old
-/// hand-maintained `TERM_EXES` array.
-fn is_known_terminal_exe(exe: &str) -> bool {
+/// terminal identifiers (`ds_platform::KNOWN_TERMINALS`), OR one of the user's
+/// config.toml `extra_terminals` entries? Replaces the old hand-maintained `TERM_EXES`
+/// array. `extra` entries are matched case-insensitively (a user may type any casing),
+/// unlike the built-in table's byte-exact literals.
+fn is_known_terminal_exe(exe: &str, extra: &[String]) -> bool {
     crate::KNOWN_TERMINALS
         .iter()
         .any(|t| t.windows_exe == Some(exe))
+        || extra.iter().any(|e| e.eq_ignore_ascii_case(exe))
 }
 
 /// Process image base-names (lowercased, no path) for editors that render their main text
@@ -74,7 +78,18 @@ fn is_known_terminal_exe(exe: &str) -> bool {
 /// - "zed.exe": Zed's GPUI framework draws the buffer itself; its Windows UI Automation
 ///   support is still partial (accessibility is an explicitly ongoing project — see
 ///   zed-industries/zed discussion #6576) and doesn't yet expose the buffer as Edit/Document.
+///
+/// A user can extend this table without a code change via config.toml's
+/// `extra_custom_text_editors` (see [`crate::FrontmostWindow::set_extra_custom_text_editors`])
+/// — unioned in at lookup time by [`is_custom_text_exe`], never merged into this slice.
 const CUSTOM_TEXT_EXES: &[&str] = &["zed.exe"];
+
+/// Is `exe` one of the built-in [`CUSTOM_TEXT_EXES`], OR one of the user's config.toml
+/// `extra_custom_text_editors` entries? Case-insensitive for the user-supplied extras
+/// only (the built-in table's exact-match behavior for its own literals is untouched).
+fn is_custom_text_exe(exe: &str, extra: &[String]) -> bool {
+    CUSTOM_TEXT_EXES.contains(&exe) || extra.iter().any(|e| e.eq_ignore_ascii_case(exe))
+}
 
 /// `GetForegroundWindow` -> `GetWindowThreadProcessId` -> `OpenProcess(LIMITED)` ->
 /// `QueryFullProcessImageNameW` -> the lowercased basename, or `None` on any failure (no
@@ -320,7 +335,17 @@ fn shutdown_caps_hook() {
     HOOK_STARTED.store(false, Ordering::SeqCst);
 }
 
-pub struct WindowsPlatform;
+pub struct WindowsPlatform {
+    /// User config.toml `extra_terminals` — extends `KNOWN_TERMINALS` at lookup time.
+    /// `RefCell`, not another global `static`: unlike the Caps hook state above (owned by
+    /// a free `unsafe extern "system" fn` callback with no `self`), this is only ever read/
+    /// written through ordinary `&self` trait methods on the engine's single poll thread
+    /// (via `Rc<WindowsPlatform>`, which is `!Send`), so plain interior mutability suffices.
+    extra_terminals: RefCell<Vec<String>>,
+    /// User config.toml `extra_custom_text_editors` — extends `CUSTOM_TEXT_EXES` at lookup
+    /// time. Same single-thread reasoning as `extra_terminals` above.
+    extra_custom_text_editors: RefCell<Vec<String>>,
+}
 
 impl WindowsPlatform {
     /// Does NOT acquire the Caps key — the engine calls [`CapsKeyMonitor::acquire_caps_key`]
@@ -328,7 +353,10 @@ impl WindowsPlatform {
     /// `Engine::assemble`), so a `caps_enabled=false` startup never installs the hook
     /// at all instead of installing-then-immediately-suppressing.
     pub fn new() -> Result<Self, PreflightError> {
-        Ok(WindowsPlatform)
+        Ok(WindowsPlatform {
+            extra_terminals: RefCell::new(Vec::new()),
+            extra_custom_text_editors: RefCell::new(Vec::new()),
+        })
     }
 
     /// Release every platform resource this port opened OUTSIDE its own struct's
@@ -468,7 +496,8 @@ impl FrontmostWindow for WindowsPlatform {
         // table. The Parakeet STT engine gates transcript injection on this, so it
         // FAILS CLOSED: any failure to resolve the frontmost process (see
         // `frontmost_process_basename`) returns false and nothing is injected.
-        frontmost_process_basename().is_some_and(|base| is_known_terminal_exe(&base))
+        frontmost_process_basename()
+            .is_some_and(|base| is_known_terminal_exe(&base, &self.extra_terminals.borrow()))
     }
 
     fn has_paste_target(&self) -> bool {
@@ -496,7 +525,8 @@ impl FrontmostWindow for WindowsPlatform {
         // (rather than calling `is_terminal_frontmost()`, which would re-resolve it) —
         // matching macOS where a terminal's AXTextArea reads as editable.
         if frontmost_process_basename().is_some_and(|base| {
-            is_known_terminal_exe(&base) || CUSTOM_TEXT_EXES.contains(&base.as_str())
+            is_known_terminal_exe(&base, &self.extra_terminals.borrow())
+                || is_custom_text_exe(&base, &self.extra_custom_text_editors.borrow())
         }) {
             return true;
         }
@@ -559,6 +589,14 @@ impl FrontmostWindow for WindowsPlatform {
                 false
             }
         })
+    }
+
+    fn set_extra_terminals(&self, extra: Vec<String>) {
+        *self.extra_terminals.borrow_mut() = extra;
+    }
+
+    fn set_extra_custom_text_editors(&self, extra: Vec<String>) {
+        *self.extra_custom_text_editors.borrow_mut() = extra;
     }
 }
 
@@ -877,10 +915,39 @@ mod custom_text_exes {
         // an exe in both would be redundant and signals it belongs in one, not both.
         for exe in CUSTOM_TEXT_EXES {
             assert!(
-                !is_known_terminal_exe(exe),
+                !is_known_terminal_exe(exe, &[]),
                 "{exe} listed in both exe tables"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod extra_paste_targets {
+    use super::*;
+
+    #[test]
+    fn is_known_terminal_exe_matches_extra_case_insensitively() {
+        let extra = vec!["myterm.exe".to_string()];
+        assert!(is_known_terminal_exe("myterm.exe", &extra));
+        assert!(is_known_terminal_exe("MYTERM.EXE", &extra));
+        assert!(!is_known_terminal_exe("otherterm.exe", &extra));
+        // Empty extra behaves exactly as before the signature change (regression guard).
+        assert!(is_known_terminal_exe("cmd.exe", &[]));
+        assert!(!is_known_terminal_exe("notaterm.exe", &[]));
+    }
+
+    #[test]
+    fn is_custom_text_exe_matches_extra_and_does_not_cross_contaminate() {
+        let editor_extra = vec!["myeditor.exe".to_string()];
+        assert!(is_custom_text_exe("myeditor.exe", &editor_extra));
+        assert!(is_custom_text_exe("MYEDITOR.EXE", &editor_extra));
+        assert!(!is_custom_text_exe("othereditor.exe", &editor_extra));
+        // The two extra lists are independent slices, not shared state: an entry in
+        // `extra_terminals` doesn't widen `is_custom_text_exe`'s match, and vice versa.
+        let term_extra = vec!["myterm.exe".to_string()];
+        assert!(!is_custom_text_exe("myterm.exe", &editor_extra));
+        assert!(!is_known_terminal_exe("myeditor.exe", &term_extra));
     }
 }
 
@@ -949,9 +1016,10 @@ mod caps_key_ownership {
                 at: std::time::Instant::now(),
             });
         }
-        WindowsPlatform.release_caps_key();
+        let plat = WindowsPlatform::new().unwrap();
+        plat.release_caps_key();
         assert!(
-            WindowsPlatform.drain_caps_events().is_empty(),
+            plat.drain_caps_events().is_empty(),
             "release_caps_key must discard any events queued before it ran"
         );
     }

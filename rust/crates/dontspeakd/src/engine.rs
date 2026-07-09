@@ -459,6 +459,16 @@ impl<P: Platform + 'static> Engine<P> {
             // `engine_run`/`reload`, which set this flag alongside.
             stt_is_local: false,
         };
+        // Push the user's extra paste-target identifiers to the freshly-constructed platform
+        // (config.toml `extra_terminals`/`extra_custom_text_editors`, ADDED TO — never
+        // replacing — the compiled-in KNOWN_TERMINALS/CUSTOM_TEXT_EXES tables at lookup
+        // time). `reload` below refreshes this on every config.toml change too.
+        engine
+            .plat
+            .set_extra_terminals(engine.cfg.extra_terminals.clone());
+        engine
+            .plat
+            .set_extra_custom_text_editors(engine.cfg.extra_custom_text_editors.clone());
         engine.set_caps_gate(caps_enabled);
         engine
     }
@@ -897,6 +907,12 @@ impl<P: Platform + 'static> Engine<P> {
         // long_press is a cheap scalar latch — refresh it every reload.
         self.long_press_ms = normalize_long_press(cfg.long_press_ms);
 
+        // Same reasoning as long_press_ms above: cheap to refresh unconditionally, no diff
+        // needed. See Engine::assemble for why this lives here too (first-boot coverage).
+        self.plat.set_extra_terminals(cfg.extra_terminals.clone());
+        self.plat
+            .set_extra_custom_text_editors(cfg.extra_custom_text_editors.clone());
+
         // STT engine: rebuild when the engine SELECTION changed OR when local availability
         // FLIPPED. The latter is the fresh-install case: a model download makes Parakeet
         // present without changing `resolved_stt()` (still `built_in`), so `stt_changed` is
@@ -1033,13 +1049,16 @@ impl<P: Platform + 'static> Engine<P> {
         // NOTE: `press` is a physical-key latch; a config reload does not change the
         // physical key, so leave it as-is.
         log(&format!(
-            "dontspeakd reloaded config (caps={} stt={}{} tts={} long_press={}ms narrate={})",
+            "dontspeakd reloaded config (caps={} stt={}{} tts={} long_press={}ms narrate={} \
+             extra_terminals={} extra_custom_editors={})",
             self.caps_enabled,
             cfg.resolved_stt().map(|e| e.as_str()).unwrap_or("off"),
             if change.stt_changed { " [rebuilt]" } else { "" },
             cfg.resolved_tts().map(|e| e.as_str()).unwrap_or("off"),
             self.long_press_ms,
-            cfg.narrate_summary()
+            cfg.narrate_summary(),
+            cfg.extra_terminals.len(),
+            cfg.extra_custom_text_editors.len(),
         ));
     }
 
@@ -1953,6 +1972,11 @@ mod tests {
         /// that `caps_enabled`/`gesture` end up in the right state.
         acquire_caps_key_calls: Cell<u32>,
         release_caps_key_calls: Cell<u32>,
+        /// Records every `set_extra_terminals`/`set_extra_custom_text_editors` call, in
+        /// order — lets `reload_pushes_extra_paste_target_lists_to_the_platform` assert
+        /// both `Engine::assemble`'s initial push AND `Engine::reload`'s subsequent one.
+        set_extra_terminals_calls: RefCell<Vec<Vec<String>>>,
+        set_extra_custom_text_editors_calls: RefCell<Vec<Vec<String>>>,
     }
 
     impl KeyInjector for MockPlatform {
@@ -1976,6 +2000,14 @@ mod tests {
         }
         fn has_paste_target(&self) -> bool {
             self.paste_target.get()
+        }
+        fn set_extra_terminals(&self, extra: Vec<String>) {
+            self.set_extra_terminals_calls.borrow_mut().push(extra);
+        }
+        fn set_extra_custom_text_editors(&self, extra: Vec<String>) {
+            self.set_extra_custom_text_editors_calls
+                .borrow_mut()
+                .push(extra);
         }
     }
     impl CapsKeyMonitor for MockPlatform {
@@ -3275,6 +3307,38 @@ mod tests {
         assert_eq!(
             d.long_press_ms, DEFAULT_LONG_PRESS_MS,
             "zero long_press normalizes to default on reload"
+        );
+    }
+
+    #[test]
+    fn reload_pushes_extra_paste_target_lists_to_the_platform() {
+        let mut d = mk(600);
+        // assemble() already pushed once, with the default (empty) config.
+        assert_eq!(
+            d.plat.set_extra_terminals_calls.borrow().as_slice(),
+            &[Vec::<String>::new()]
+        );
+        assert_eq!(
+            d.plat
+                .set_extra_custom_text_editors_calls
+                .borrow()
+                .as_slice(),
+            &[Vec::<String>::new()]
+        );
+
+        let cfg = VoiceConfig {
+            extra_terminals: vec!["myterm".into()],
+            extra_custom_text_editors: vec!["myeditor.exe".into()],
+            ..Default::default()
+        };
+        d.reload(&cfg);
+        assert_eq!(
+            d.plat.set_extra_terminals_calls.borrow().last(),
+            Some(&vec!["myterm".to_string()])
+        );
+        assert_eq!(
+            d.plat.set_extra_custom_text_editors_calls.borrow().last(),
+            Some(&vec!["myeditor.exe".to_string()])
         );
     }
 

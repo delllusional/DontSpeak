@@ -319,6 +319,34 @@ pub struct VoiceConfig {
     /// path is used as-is.
     #[serde(default = "default_codex_bin")]
     pub codex_bin: String,
+
+    /// Extra terminal-emulator identifiers, in ADDITION to the built-in
+    /// `ds_platform::KNOWN_TERMINALS` table — the escape hatch for an unlisted terminal
+    /// (config.toml only; no `set_config` exposure, mirroring the engine ladders). One
+    /// identifier per entry, in THIS OS's native form: the lowercased exe basename on
+    /// Windows (e.g. "myterm.exe"), the bundle id on macOS (e.g. "com.example.myterm"),
+    /// or the WM_CLASS on Linux (e.g. "myterm") — a given install only runs on one OS, so
+    /// there's no need for the full cross-platform `KnownTerminal` per-OS-field shape
+    /// here. Feeds `is_terminal_frontmost()` on ALL THREE platforms, so it ALSO gates mic
+    /// pause-in-background (`pause_in_background`) and the `claude_code` engine's
+    /// dictation-key/transcript leak guard — wider blast radius than
+    /// `extra_custom_text_editors` below, which is why it's a SEPARATE field. Matched
+    /// case-insensitively against the live frontmost identifier. See GitHub issue #14.
+    #[serde(default)]
+    pub extra_terminals: Vec<String>,
+
+    /// Extra custom-rendered-editor identifiers (apps like Zed whose main text surface is
+    /// drawn by a GPU/canvas toolkit, so the OS accessibility API reports no editable role
+    /// even though a synthetic paste lands fine) — in ADDITION to the built-in
+    /// `ds_platform::windows::CUSTOM_TEXT_EXES` table. Config.toml only, same rationale as
+    /// `extra_terminals`. WINDOWS-ONLY EFFECT today, mirroring `CUSTOM_TEXT_EXES`'s own
+    /// current Windows-only scope: it widens `has_paste_target()`'s exemption there;
+    /// macOS/Linux accept (and currently ignore) this field pending a real complaint (see
+    /// GitHub issue #15) rather than a speculative new AX/WM detection mechanism.
+    /// Lowercased exe basename form (e.g. "myeditor.exe"), matching `CUSTOM_TEXT_EXES`'s
+    /// own form. See GitHub issue #14.
+    #[serde(default)]
+    pub extra_custom_text_editors: Vec<String>,
 }
 
 /// Which warm subsystems a `set_config` delta touches — computed by
@@ -489,6 +517,8 @@ impl Default for VoiceConfig {
             codex_stream_daemon_start: false,
             codex_app_server_url: String::new(),
             codex_bin: default_codex_bin(),
+            extra_terminals: Vec::new(),
+            extra_custom_text_editors: Vec::new(),
         }
     }
 }
@@ -843,6 +873,29 @@ pub(crate) mod tests {
         ] {
             assert!(keys.contains(k), "{k} must be a known config key");
         }
+    }
+
+    #[test]
+    fn extra_terminals_and_custom_editors_default_empty_and_parse() {
+        // Default: both empty (no escape-hatch entries out of the box).
+        assert!(VoiceConfig::default().extra_terminals.is_empty());
+        assert!(VoiceConfig::default().extra_custom_text_editors.is_empty());
+
+        // A flat pass-through list: no dedup/validation, order preserved.
+        let v: VoiceConfig = serde_json::from_str(
+            r#"{"extra_terminals":["foo"],"extra_custom_text_editors":["bar.exe"]}"#,
+        )
+        .unwrap();
+        assert_eq!(v.extra_terminals, vec!["foo".to_string()]);
+        assert_eq!(v.extra_custom_text_editors, vec!["bar.exe".to_string()]);
+
+        // Neither field is `skip_serializing_if`, so both appear in the default struct's
+        // serialized table already — asserted explicitly so a future refactor that adds
+        // `skip_serializing_if` here doesn't silently reintroduce a spurious "unknown key
+        // in config.toml" warning.
+        let keys = VoiceConfig::known_keys();
+        assert!(keys.contains("extra_terminals"));
+        assert!(keys.contains("extra_custom_text_editors"));
     }
 
     #[test]
@@ -1447,6 +1500,8 @@ pub(crate) mod tests {
             codex_stream_daemon_start: true, // non-default (default is false)
             codex_app_server_url: "ws://127.0.0.1:4550".into(), // non-default (default is empty)
             codex_bin: "/opt/codex/bin/codex".into(), // non-default (default is "codex")
+            extra_terminals: vec!["myterm".into()], // non-default (default is [])
+            extra_custom_text_editors: vec!["myeditor.exe".into()], // non-default (default is [])
         }
     }
 
@@ -1514,6 +1569,8 @@ pub(crate) mod tests {
         // And load() reconstructs the written config.
         let lv = VoiceConfig::load(&paths);
         assert_eq!(lv.current_voice(), "am_michael");
+        assert_eq!(lv.extra_terminals, v.extra_terminals);
+        assert_eq!(lv.extra_custom_text_editors, v.extra_custom_text_editors);
     }
 
     #[test]

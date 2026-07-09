@@ -47,12 +47,15 @@ use crate::{
 };
 
 /// Is `name` (a lowercased X11 WM_CLASS value) one of the shared table's known
-/// terminal identifiers (`ds_platform::KNOWN_TERMINALS`)? Replaces the old
-/// hand-maintained `TERM_WM_CLASSES` array.
-fn is_known_terminal_wm_class(name: &str) -> bool {
+/// terminal identifiers (`ds_platform::KNOWN_TERMINALS`), OR one of the user's
+/// config.toml `extra_terminals` entries? Replaces the old hand-maintained
+/// `TERM_WM_CLASSES` array. `extra` entries are matched case-insensitively (a user may
+/// type any casing), unlike the built-in table's exact-match literals.
+fn is_known_terminal_wm_class(name: &str, extra: &[String]) -> bool {
     crate::KNOWN_TERMINALS
         .iter()
         .any(|t| t.linux_wm_class == Some(name))
+        || extra.iter().any(|e| e.eq_ignore_ascii_case(name))
 }
 
 /// Map a [`KeyBase`] to its Linux evdev key code (US-QWERTY physical position — uinput
@@ -181,6 +184,9 @@ pub struct LinuxPlatform {
     /// Why the input devices are unavailable, for the non-fatal `preflight()` warning;
     /// `None` once both the keyboard and uinput opened.
     init_warning: Option<String>,
+    /// User config.toml `extra_terminals` — extends `KNOWN_TERMINALS` at lookup time.
+    /// Same single-poll-thread reasoning as `kbd`/`uinput` above.
+    extra_terminals: RefCell<Vec<String>>,
 }
 
 impl LinuxPlatform {
@@ -211,6 +217,7 @@ impl LinuxPlatform {
             x11,
             wayland,
             init_warning,
+            extra_terminals: RefCell::new(Vec::new()),
         };
 
         // Does NOT own the Caps key here — the engine calls `acquire_caps_key` itself
@@ -366,10 +373,18 @@ impl FrontmostWindow for LinuxPlatform {
         // X11: read _NET_ACTIVE_WINDOW + WM_CLASS, match the terminal allowlist. FAIL-CLOSED
         // (return false) on any failure so a transcript never leaks into a non-terminal app.
         match &self.x11 {
-            Some(x11) => x11.is_terminal_frontmost(),
+            Some(x11) => x11.is_terminal_frontmost(&self.extra_terminals.borrow()),
             None => false,
         }
     }
+
+    fn set_extra_terminals(&self, extra: Vec<String>) {
+        *self.extra_terminals.borrow_mut() = extra;
+    }
+
+    // Deliberately no `set_extra_custom_text_editors` override — `LinuxPlatform` doesn't
+    // override `has_paste_target` at all today (uses the trait's `true` default), so the
+    // no-op default stands here too (same GitHub issue #15 scoping as macOS).
 }
 
 impl CapsKeyMonitor for LinuxPlatform {
@@ -479,7 +494,7 @@ impl X11Focus {
         if win == 0 { None } else { Some(win) }
     }
 
-    fn is_terminal_frontmost(&self) -> bool {
+    fn is_terminal_frontmost(&self, extra: &[String]) -> bool {
         let Some(win) = self.active_window() else {
             return false;
         };
@@ -504,7 +519,7 @@ impl X11Focus {
         [class, instance]
             .into_iter()
             .flatten()
-            .any(|name| is_known_terminal_wm_class(&name))
+            .any(|name| is_known_terminal_wm_class(&name, extra))
     }
 }
 
@@ -578,5 +593,21 @@ mod known_terminal_table {
             derived.len(),
             "a linux_wm_class value is duplicated across two KNOWN_TERMINALS rows"
         );
+    }
+}
+
+#[cfg(test)]
+mod extra_paste_targets {
+    use super::*;
+
+    #[test]
+    fn is_known_terminal_wm_class_matches_extra_case_insensitively() {
+        let extra = vec!["myterm".to_string()];
+        assert!(is_known_terminal_wm_class("myterm", &extra));
+        assert!(is_known_terminal_wm_class("MYTERM", &extra));
+        assert!(!is_known_terminal_wm_class("otherapp", &extra));
+        // Empty extra behaves exactly as before the signature change (regression guard).
+        assert!(is_known_terminal_wm_class("alacritty", &[]));
+        assert!(!is_known_terminal_wm_class("notaterm", &[]));
     }
 }
