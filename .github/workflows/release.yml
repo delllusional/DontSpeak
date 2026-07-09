@@ -116,6 +116,7 @@ jobs:
           # dontspeak-<version>-windows-<x86_64|aarch64>.zip — the only zip Output holds.
           path: apps/windows/installer/Output/*.zip
           if-no-files-found: error
+          retention-days: 7
 
       # The raw cross-built ARM64 binaries — consumed by windows-arm-smoke to RUN them on
       # real ARM64 silicon (this x64 build runner can't execute an arm64 binary).
@@ -132,6 +133,7 @@ jobs:
             rust/target/aarch64-pc-windows-msvc/release/dontspeak.exe
             rust/target/aarch64-pc-windows-msvc/release/ds-helper.exe
           if-no-files-found: error
+          retention-days: 7
 
   # ── Smoke-test the ARM64 build on REAL ARM64 Windows — DISABLED ──────────────
   # Disabled for now: fails with "module could not be found" loading ds_core.dll on
@@ -367,6 +369,7 @@ jobs:
           name: macos-apps
           path: dist/*.app.zip
           if-no-files-found: error
+          retention-days: 7
 
   # ── Linux tarball ────────────────────────────────────────────────────────────
   # The standalone GTK host (apps/linux/gtk) + the engine bins, packaged by
@@ -437,6 +440,7 @@ jobs:
           name: linux-packages-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 7
 
   # ── Publish the GitHub Release with all artifacts ───────────────────────────
   release:
