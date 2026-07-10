@@ -7,6 +7,25 @@ Claude Code– and Claude-agent–specific material only. See [AGENTS.md](AGENTS
 invariants, and CI gates — that file is the source of truth; don't duplicate it
 here.
 
+## Editing AGENTS.md or this file
+
+Both are read into every session, so keep them high-signal (this mirrors how
+zed-industries/zed maintains its own `.rules` file, which `CLAUDE.md` and `AGENTS.md`
+there both resolve to):
+
+- **High bar for new rules.** A rule earns a place here only if it's non-obvious
+  (someone who knows the repo would still get it wrong), repeatedly encountered (came
+  up more than once, including more than once in a single session), and specific
+  enough to act on. Rules scoped to one crate/app belong in that crate's own docs, not
+  here.
+- **Traps, not maps.** Don't add architectural descriptions (module layout, data flow,
+  key types) — those go stale fast and are already legible from the source. Record the
+  mistake a careful reader would still make, not a summary of the code.
+- **No drive-by additions.** If a task surfaces a pattern worth recording, call it out
+  in the commit/PR description rather than folding it into AGENTS.md as part of an
+  unrelated change, so it gets reviewed on its own before becoming a standing rule
+  every future session reads.
+
 ## Skills
 
 `build-linux` / `build-macos` / `build-windows` — build+install/package per OS.
