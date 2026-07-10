@@ -31,6 +31,9 @@ ds-model = { workspace = true }
 ds-config = { workspace = true }
 # The unified activity log (log_cached et al.), split out of ds-config (issue #6).
 ds-log = { workspace = true }
+# Logging facade macros (log::info!/warn!/error!/debug!) — call sites route through
+# ds-log's `log::Log` sink installed by `ds_log::init()` in main.rs.
+log = { workspace = true }
 # The stdout reply-token vocabulary shared with the parsing engine (dontspeakd),
 # so the emitted tokens can't drift from what tts.rs's reader matches.
 ds-helper-proto = { workspace = true }

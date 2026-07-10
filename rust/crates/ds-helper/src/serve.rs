@@ -56,17 +56,12 @@ fn record_16k(seconds: u64, cancel: &std::sync::atomic::AtomicBool) -> Result<Ve
     let pcm = ds_stt::resample_to_16k(&accum, rate);
     // Per-capture diagnostic (fires once per diarize/enroll job) — routine, so it's gated
     // behind DONTSPEAK_DEBUG like the engine's own DEBUG lines, not shown by default.
-    if crate::debug_enabled() {
-        ds_log::log_cached(
-            ds_log::LogLevel::Debug,
-            "helper",
-            &format!(
-                "capture: rate={rate} accum={} pcm16k={} secs={seconds}",
-                accum.len(),
-                pcm.len()
-            ),
-        );
-    }
+    log::debug!(
+        target: "helper",
+        "capture: rate={rate} accum={} pcm16k={} secs={seconds}",
+        accum.len(),
+        pcm.len()
+    );
     Ok(pcm)
 }
 
@@ -251,11 +246,7 @@ pub(crate) fn serve() -> ! {
             println!("{}stt", proto::WARMING_PREFIX);
             let _ = std::io::stdout().flush();
             let mut t = transcriber.lock().unwrap();
-            ds_log::log_cached(
-                ds_log::LogLevel::Info,
-                "helper",
-                &format!("load stt attempting (provider={stt_provider})"),
-            );
+            log::info!(target: "helper", "load stt attempting (provider={stt_provider})");
             match t.preload() {
                 Ok(()) => {
                     // Also warm the SEPARATE streaming-backend cache a real listen actually
@@ -281,11 +272,7 @@ pub(crate) fn serve() -> ! {
                     stt_claimed.mark_unloaded();
                     println!("{}{e}", proto::STTLOADERR_PREFIX);
                     let _ = std::io::stdout().flush();
-                    ds_log::log_cached(
-                        ds_log::LogLevel::Warn,
-                        "helper",
-                        &format!("preload stt failed: {e}"),
-                    );
+                    log::warn!(target: "helper", "preload stt failed: {e}");
                 }
             }
         });
@@ -374,19 +361,11 @@ pub(crate) fn serve() -> ! {
     let duplex: Option<DuplexAudio> = if std::env::var_os("DONTSPEAK_FULL_DUPLEX").is_some() {
         match DuplexAudio::open() {
             Ok(d) => {
-                ds_log::log_cached(
-                    ds_log::LogLevel::Info,
-                    "helper",
-                    &format!("full-duplex AEC active ({} Hz capture)", d.capture_rate()),
-                );
+                log::info!(target: "helper", "full-duplex AEC active ({} Hz capture)", d.capture_rate());
                 Some(d)
             }
             Err(e) => {
-                ds_log::log_cached(
-                    ds_log::LogLevel::Warn,
-                    "helper",
-                    &format!("full-duplex unavailable ({e}); half-duplex"),
-                );
+                log::warn!(target: "helper", "full-duplex unavailable ({e}); half-duplex");
                 None
             }
         }
@@ -929,11 +908,7 @@ pub(crate) fn serve() -> ! {
             Job::UnloadTts => {
                 // Drop the cached Kokoro model; the next speak lazily reloads it.
                 let freed = synth.take().is_some();
-                ds_log::log_cached(
-                    ds_log::LogLevel::Info,
-                    "helper",
-                    &format!("unloaded tts (kokoro), freed={freed}"),
-                );
+                log::info!(target: "helper", "unloaded tts (kokoro), freed={freed}");
                 continue;
             }
             Job::UnloadStt => {
@@ -953,13 +928,10 @@ pub(crate) fn serve() -> ! {
                 stt_claimed.mark_unloaded();
                 drop(t);
                 let freed_streaming = crate::listen::unload_streaming();
-                ds_log::log_cached(
-                    ds_log::LogLevel::Info,
-                    "helper",
-                    &format!(
-                        "unloaded stt (parakeet), freed={} (offline={freed_offline}, streaming={freed_streaming})",
-                        freed_offline || freed_streaming
-                    ),
+                log::info!(
+                    target: "helper",
+                    "unloaded stt (parakeet), freed={} (offline={freed_offline}, streaming={freed_streaming})",
+                    freed_offline || freed_streaming
                 );
                 continue;
             }
@@ -980,11 +952,7 @@ pub(crate) fn serve() -> ! {
                             use std::io::Write as _;
                             println!("{}{e}", proto::TTSLOADERR_PREFIX);
                             let _ = std::io::stdout().flush();
-                            ds_log::log_cached(
-                                ds_log::LogLevel::Warn,
-                                "helper",
-                                &format!("preload tts failed: {e}"),
-                            );
+                            log::warn!(target: "helper", "preload tts failed: {e}");
                         }
                     }
                 }
@@ -1001,19 +969,11 @@ pub(crate) fn serve() -> ! {
                 // load is already claimed (by that preload, or a prior `load stt`), skip — else
                 // claim it and load HERE (STT became wanted after startup, or preload was off).
                 if !stt_claimed.try_claim() {
-                    ds_log::log_cached(
-                        ds_log::LogLevel::Info,
-                        "helper",
-                        "load stt skipped — a load is already claimed/in flight",
-                    );
+                    log::info!(target: "helper", "load stt skipped — a load is already claimed/in flight");
                     continue;
                 }
                 let mut t = transcriber.lock().unwrap();
-                ds_log::log_cached(
-                    ds_log::LogLevel::Info,
-                    "helper",
-                    &format!("load stt attempting (provider={stt_provider})"),
-                );
+                log::info!(target: "helper", "load stt attempting (provider={stt_provider})");
                 match t.preload() {
                     Ok(()) => {
                         // Same streaming-cache warm as the startup preload (see there) — an
@@ -1032,11 +992,7 @@ pub(crate) fn serve() -> ! {
                         stt_claimed.mark_unloaded();
                         println!("{}{e}", proto::STTLOADERR_PREFIX);
                         let _ = std::io::stdout().flush();
-                        ds_log::log_cached(
-                            ds_log::LogLevel::Warn,
-                            "helper",
-                            &format!("preload stt failed: {e}"),
-                        );
+                        log::warn!(target: "helper", "preload stt failed: {e}");
                     }
                 }
                 continue;
@@ -1056,11 +1012,7 @@ pub(crate) fn serve() -> ! {
                     let _ = std::io::stdout().flush();
                 }
                 Err(e) => {
-                    ds_log::log_cached(
-                        ds_log::LogLevel::Warn,
-                        "helper",
-                        &format!("synth reload failed: {e}"),
-                    );
+                    log::warn!(target: "helper", "synth reload failed: {e}");
                     println!("{}{e}", proto::TTSLOADERR_PREFIX);
                     println!("{}", proto::DONE);
                     let _ = std::io::stdout().flush();
@@ -1196,11 +1148,7 @@ pub(crate) fn serve() -> ! {
                             append(pcm);
                         }
                         Ok(_) => {}
-                        Err(e) => ds_log::log_cached(
-                            ds_log::LogLevel::Warn,
-                            "helper",
-                            &format!("coreml synth failed: {e}"),
-                        ),
+                        Err(e) => log::warn!(target: "helper", "coreml synth failed: {e}"),
                     }
                 }
             }

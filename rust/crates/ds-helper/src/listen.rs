@@ -293,16 +293,8 @@ fn transcribe_loop(
         let dump = ds_stt::resample_to_16k(&apply_gain(&accum), rate);
         let path = std::env::temp_dir().join("ds-listen.wav");
         match ds_tts::wav::write_wav16(&path, &dump, 16_000) {
-            Ok(()) => ds_log::log_cached(
-                ds_log::LogLevel::Info,
-                "helper",
-                &format!("{label}: dumped → {}", path.display()),
-            ),
-            Err(e) => ds_log::log_cached(
-                ds_log::LogLevel::Warn,
-                "helper",
-                &format!("{label}: wav dump failed: {e}"),
-            ),
+            Ok(()) => log::info!(target: "helper", "{label}: dumped → {}", path.display()),
+            Err(e) => log::warn!(target: "helper", "{label}: wav dump failed: {e}"),
         }
     }
     if committed_until < accum.len()
@@ -325,17 +317,12 @@ fn transcribe_loop(
     };
     // Per-session summary — fires once per listen turn, routine — same DONTSPEAK_DEBUG gate
     // as the engine's own Debug lines, off by default.
-    if crate::debug_enabled() {
-        ds_log::log_cached(
-            ds_log::LogLevel::Debug,
-            "helper",
-            &format!(
-                "{label}: rate={rate} accum={} segments={} rms={rms:.4} partials={partials} gain={final_gain:.1}",
-                accum.len(),
-                committed.len(),
-            ),
-        );
-    }
+    log::debug!(
+        target: "helper",
+        "{label}: rate={rate} accum={} segments={} rms={rms:.4} partials={partials} gain={final_gain:.1}",
+        accum.len(),
+        committed.len(),
+    );
     // STTSTATS → the engine's stats + (in DONTSPEAK_DEBUG) the activity log. The first two
     // fields feed the in-app stats; the rest are diagnostics for the speech-IN latency budget
     // (the engine parser ignores unknown tokens, so adding fields is backward-compatible):
@@ -545,11 +532,7 @@ fn build_backend(provider: &str) -> Option<Box<dyn StreamingStt>> {
         return match OnnxStreamer::load(&dir, true) {
             Ok(s) => Some(Box::new(s)),
             Err(e) => {
-                ds_log::log_cached(
-                    ds_log::LogLevel::Warn,
-                    "helper",
-                    &format!("streaming: ONNX load failed, using offline: {e}"),
-                );
+                log::warn!(target: "helper", "streaming: ONNX load failed, using offline: {e}");
                 None
             }
         };
@@ -559,11 +542,7 @@ fn build_backend(provider: &str) -> Option<Box<dyn StreamingStt>> {
         return match ds_stt::coreml::CoremlStreamer::new() {
             Ok(s) => Some(Box::new(s)),
             Err(e) => {
-                ds_log::log_cached(
-                    ds_log::LogLevel::Warn,
-                    "helper",
-                    &format!("streaming: Core ML streamer unavailable, using offline: {e}"),
-                );
+                log::warn!(target: "helper", "streaming: Core ML streamer unavailable, using offline: {e}");
                 None
             }
         };
@@ -573,11 +552,7 @@ fn build_backend(provider: &str) -> Option<Box<dyn StreamingStt>> {
         return match ds_stt::sysspeech::SystemStreamer::new() {
             Ok(s) => Some(Box::new(s)),
             Err(e) => {
-                ds_log::log_cached(
-                    ds_log::LogLevel::Warn,
-                    "helper",
-                    &format!("streaming: System streamer unavailable, using offline: {e}"),
-                );
+                log::warn!(target: "helper", "streaming: System streamer unavailable, using offline: {e}");
                 None
             }
         };
@@ -611,11 +586,7 @@ fn try_streaming(
     };
     drop(guard);
     if let Err(e) = backend.reset() {
-        ds_log::log_cached(
-            ds_log::LogLevel::Warn,
-            "helper",
-            &format!("{label}: streaming reset failed, using offline: {e}"),
-        );
+        log::warn!(target: "helper", "{label}: streaming reset failed, using offline: {e}");
         return false; // broken backend dropped, not re-cached
     }
     let mut session = StreamSession::new(backend, rate);
@@ -643,20 +614,12 @@ fn try_streaming(
                     partials += 1;
                 }
             }
-            Err(e) => ds_log::log_cached(
-                ds_log::LogLevel::Warn,
-                "helper",
-                &format!("{label}: streaming accept: {e}"),
-            ),
+            Err(e) => log::warn!(target: "helper", "{label}: streaming accept: {e}"),
         }
     }
     let final_start = Instant::now();
     let text = session.finalize().unwrap_or_else(|e| {
-        ds_log::log_cached(
-            ds_log::LogLevel::Warn,
-            "helper",
-            &format!("{label}: streaming finalize: {e}"),
-        );
+        log::warn!(target: "helper", "{label}: streaming finalize: {e}");
         String::new()
     });
     let final_ms = final_start.elapsed().as_secs_f64() * 1000.0;
@@ -735,11 +698,7 @@ fn speaker_locked_pcm(pcm: &[f32]) -> Vec<f32> {
         return pcm.to_vec(); // nothing enrolled to lock to → fail open
     }
     let Some(model_path) = separator_model_path(&paths) else {
-        ds_log::log_cached(
-            ds_log::LogLevel::Warn,
-            "helper",
-            "speaker-lock: no separator model; transcribing unfiltered",
-        );
+        log::warn!(target: "helper", "speaker-lock: no separator model; transcribing unfiltered");
         return pcm.to_vec();
     };
 
@@ -749,19 +708,11 @@ fn speaker_locked_pcm(pcm: &[f32]) -> Vec<f32> {
         if slot.as_ref().map(|(p, _)| p != &model_path).unwrap_or(true) {
             match ds_stt::Separator::load(&model_path) {
                 Ok(s) => {
-                    ds_log::log_cached(
-                        ds_log::LogLevel::Info,
-                        "helper",
-                        &format!("speaker-lock: separator loaded ({})", s.provider()),
-                    );
+                    log::info!(target: "helper", "speaker-lock: separator loaded ({})", s.provider());
                     *slot = Some((model_path.clone(), s));
                 }
                 Err(e) => {
-                    ds_log::log_cached(
-                        ds_log::LogLevel::Warn,
-                        "helper",
-                        &format!("speaker-lock: separator load failed ({e}); unfiltered"),
-                    );
+                    log::warn!(target: "helper", "speaker-lock: separator load failed ({e}); unfiltered");
                     return None;
                 }
             }
@@ -769,11 +720,7 @@ fn speaker_locked_pcm(pcm: &[f32]) -> Vec<f32> {
         match slot.as_mut().unwrap().1.separate_16k(pcm) {
             Ok(st) => Some(st),
             Err(e) => {
-                ds_log::log_cached(
-                    ds_log::LogLevel::Warn,
-                    "helper",
-                    &format!("speaker-lock: separate failed ({e}); unfiltered"),
-                );
+                log::warn!(target: "helper", "speaker-lock: separate failed ({e}); unfiltered");
                 None
             }
         }
@@ -801,19 +748,14 @@ fn speaker_locked_pcm(pcm: &[f32]) -> Vec<f32> {
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     // Per-utterance diagnostic — fires every dictation while speaker-lock is on, routine —
     // same DONTSPEAK_DEBUG gate as the engine's own Debug lines, off by default.
-    if crate::debug_enabled() {
-        ds_log::log_cached(
-            ds_log::LogLevel::Debug,
-            "helper",
-            &format!(
-                "speaker-lock: stream scores {:?}",
-                scored
-                    .iter()
-                    .map(|(i, s)| (*i, (s * 100.0).round() / 100.0))
-                    .collect::<Vec<_>>()
-            ),
-        );
-    }
+    log::debug!(
+        target: "helper",
+        "speaker-lock: stream scores {:?}",
+        scored
+            .iter()
+            .map(|(i, s)| (*i, (s * 100.0).round() / 100.0))
+            .collect::<Vec<_>>()
+    );
     // RELATIVE selection: SepFormer always returns one stream per voice, so the user's
     // voice is "the stream that looks MORE like them than the other does". Pick the top
     // stream when it (a) clears a low absolute floor (not pure noise/silence) AND (b) beats
@@ -842,26 +784,17 @@ fn speaker_locked_pcm(pcm: &[f32]) -> Vec<f32> {
             }
             // Per-utterance diagnostic — fires every dictation this lock resolves, routine —
             // same DONTSPEAK_DEBUG gate as the engine's own Debug lines, off by default.
-            if crate::debug_enabled() {
-                ds_log::log_cached(
-                    ds_log::LogLevel::Debug,
-                    "helper",
-                    &format!(
-                        "speaker-lock: picked stream {i} (cos {score:.2}, +{:.2} over next, peak {peak:.3}→0.95) — background removed",
-                        score - runner
-                    ),
-                );
-            }
+            log::debug!(
+                target: "helper",
+                "speaker-lock: picked stream {i} (cos {score:.2}, +{:.2} over next, peak {peak:.3}→0.95) — background removed",
+                score - runner
+            );
             out
         }
         // Ambiguous (both streams similar) or too weak → fail OPEN, never drop.
         other => {
             let s = other.map(|(_, s)| s).unwrap_or(f32::NAN);
-            ds_log::log_cached(
-                ds_log::LogLevel::Warn,
-                "helper",
-                &format!("speaker-lock: no clear target (top cos {s:.2}); transcribing unfiltered"),
-            );
+            log::warn!(target: "helper", "speaker-lock: no clear target (top cos {s:.2}); transcribing unfiltered");
             pcm.to_vec()
         }
     }

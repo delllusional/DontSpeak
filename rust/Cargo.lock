@@ -978,6 +978,7 @@ dependencies = [
  "ds-stt",
  "ds-tts",
  "libc",
+ "log",
  "rodio",
  "serde",
  "serde_json",
