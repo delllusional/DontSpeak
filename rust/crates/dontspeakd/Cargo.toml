@@ -22,6 +22,9 @@ ds-earcon = { workspace = true }
 # The unified activity log — engine logging + codex-stream diagnostics, split out of
 # ds-config (issue #6).
 ds-log = { workspace = true }
+# Logging facade macros (log::info!/warn!/error!/debug!) — call sites route through
+# ds-log's `log::Log` sink installed by `ds_log::init()` in boot.rs.
+log = { workspace = true }
 ds-ipc = { workspace = true }
 ds-model = { workspace = true }
 ds-stt = { workspace = true }

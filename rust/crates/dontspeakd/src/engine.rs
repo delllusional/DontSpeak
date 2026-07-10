@@ -14,12 +14,10 @@ use ds_platform::Platform;
 use ds_stt::Stt;
 
 use crate::config_gate::{
-    build_stt, caps_loop_enabled, debug_enabled, full_duplex_wanted, helper_needed,
-    helper_stt_provider, helper_uses_stt, local_stt_available, normalize_long_press,
-    reconcile_helper_models,
+    build_stt, caps_loop_enabled, full_duplex_wanted, helper_needed, helper_stt_provider,
+    helper_uses_stt, local_stt_available, normalize_long_press, reconcile_helper_models,
 };
 use crate::listener;
-use crate::logging::log;
 use crate::status::{CAPS_LOG_MAX, CapsEvent, CapsLog, StatusGate, now_ms};
 use crate::tts::TtsManager;
 use crate::ttsq::TtsQueue;
@@ -283,7 +281,6 @@ pub(crate) struct Engine<P: Platform + 'static> {
     /// (ClaudeNative) reproduces Phase-1 Ctrl+G dictation exactly.
     pub(crate) stt: Box<dyn Stt>,
     pidfile: std::path::PathBuf,
-    debug: bool,
 
     /// The dictation-gesture mode: idle / recording / deferred-submit armed. See
     /// [`GestureState`]. The three fields below (`voice_paused`, `caps_phys_prev`,
@@ -449,7 +446,6 @@ impl<P: Platform + 'static> Engine<P> {
             plat,
             stt,
             pidfile,
-            debug: debug_enabled(),
             gesture: GestureState::Idle,
             voice_paused: false,
             caps_phys_prev: false,
@@ -494,12 +490,6 @@ impl<P: Platform + 'static> Engine<P> {
             .set_extra_custom_text_editors(engine.cfg.extra_custom_text_editors.clone());
         engine.set_caps_gate(caps_enabled);
         engine
-    }
-
-    fn dbg(&self, s: &str) {
-        if self.debug {
-            log(s);
-        }
     }
 
     /// Whether dictation is actively recording ([`GestureState::Recording`]).
@@ -759,11 +749,12 @@ impl<P: Platform + 'static> Engine<P> {
         self.disarm_confirm();
         self.record_caps("confirm");
         if inserted_only {
-            self.dbg(
-                "deferred submit — pasted pending transcript (insert only, no Enter), LED off",
+            log::debug!(
+                target: "engine",
+                "deferred submit — pasted pending transcript (insert only, no Enter), LED off"
             );
         } else {
-            self.dbg("deferred submit — pasted pending transcript + Enter, LED off");
+            log::debug!(target: "engine", "deferred submit — pasted pending transcript + Enter, LED off");
         }
     }
 
@@ -806,7 +797,7 @@ impl<P: Platform + 'static> Engine<P> {
             p.epoch = p.epoch.wrapping_add(1);
         }
         self.record_caps("cancel");
-        self.dbg("HOLD cancel — dictation discarded, voice silenced, LED off, idle");
+        log::debug!(target: "engine", "HOLD cancel — dictation discarded, voice silenced, LED off, idle");
     }
 
     /// Whether dictation can START right now: the selected STT engine is on AND ready to
@@ -997,10 +988,11 @@ impl<P: Platform + 'static> Engine<P> {
             // reconcile below can kill/respawn ds-helper). Logging WHICH flag fired
             // lets a burst of back-to-back reloads be tied to a cause from the log
             // alone, instead of pieced together from timestamps across several lines.
-            log(&format!(
+            log::info!(
+                target: "engine",
                 "warm helper lifecycle re-gated (tts_toggled={} stt_changed={})",
                 change.tts_toggled, change.stt_changed
-            ));
+            );
             tts.set_enabled(helper_needed(cfg));
             // …then make the helper's resident models match the selection
             // (load the selected engine, free the deselected one).
@@ -1077,7 +1069,8 @@ impl<P: Platform + 'static> Engine<P> {
         self.cfg = cfg.clone();
         // NOTE: `press` is a physical-key latch; a config reload does not change the
         // physical key, so leave it as-is.
-        log(&format!(
+        log::info!(
+            target: "engine",
             "dontspeakd reloaded config (caps={} stt={}{} tts={} long_press={}ms narrate={} \
              extra_terminals={} extra_custom_editors={})",
             self.caps_enabled,
@@ -1088,7 +1081,7 @@ impl<P: Platform + 'static> Engine<P> {
             cfg.narrate_summary(),
             cfg.extra_terminals.len(),
             cfg.extra_custom_text_editors.len(),
-        ));
+        );
     }
 
     /// Apply the effective caps-loop gate (`caps_loop_enabled(cfg) && AX trusted`).
@@ -1151,10 +1144,11 @@ impl<P: Platform + 'static> Engine<P> {
         let now_on = caps_loop_enabled(&self.cfg) && self.plat.preflight().is_ok();
         if now_on != self.caps_enabled {
             self.set_caps_gate(now_on);
-            log(&format!(
+            log::info!(
+                target: "engine",
                 "caps loop {} (Accessibility re-probe)",
                 if now_on { "ENABLED" } else { "disabled" }
-            ));
+            );
         }
     }
 
@@ -1482,9 +1476,9 @@ impl<P: Platform + 'static> Engine<P> {
             // Match `confirm_paste`'s actual gate (`enter_after_paste`).
             let submits = *enter_after_paste;
             if submits {
-                self.dbg("double-tap on stop — will submit (paste + auto-Enter)");
+                log::debug!(target: "engine", "double-tap on stop — will submit (paste + auto-Enter)");
             } else {
-                self.dbg("double-tap on stop — insert only (paste, no auto-Enter)");
+                log::debug!(target: "engine", "double-tap on stop — insert only (paste, no auto-Enter)");
             }
             return;
         }
@@ -1502,7 +1496,7 @@ impl<P: Platform + 'static> Engine<P> {
                 if let Some(q) = &self.ttsq {
                     q.skip_current();
                 }
-                self.dbg("double-tap — skipped current message, advancing to next");
+                log::debug!(target: "engine", "double-tap — skipped current message, advancing to next");
             }
             // First tap while speaking → defer; the single fires from `tick` if no
             // second tap arrives within the window.
@@ -1610,7 +1604,7 @@ impl<P: Platform + 'static> Engine<P> {
         if !self.is_full_duplex()
             && let Some(pgid) = ds_proc::barge_in(&self.pidfile)
         {
-            self.dbg(&format!("barge-in: killed TTS pgid={pgid}"));
+            log::debug!(target: "engine", "barge-in: killed TTS pgid={pgid}");
         }
         // Entering `Recording` structurally drops any armed confirm sub-state (the
         // old disarm-before-record contract, now a single assignment).
@@ -1653,7 +1647,7 @@ impl<P: Platform + 'static> Engine<P> {
         self.set_stt_active(true);
         self.stt.start();
         self.record_caps("start");
-        self.dbg("LED ON — stt.start()");
+        log::debug!(target: "engine", "LED ON — stt.start()");
     }
 
     /// Stop dictation (full-mirror ON→OFF edge). No-op if not recording. Ends the
@@ -1704,7 +1698,7 @@ impl<P: Platform + 'static> Engine<P> {
             }
         }
         self.record_caps("stop");
-        self.dbg("LED OFF — stt.stop()");
+        log::debug!(target: "engine", "LED OFF — stt.stop()");
     }
 
     /// Never leave a key down on shutdown.
@@ -1712,7 +1706,7 @@ impl<P: Platform + 'static> Engine<P> {
         if self.is_recording() {
             self.stt.stop();
         }
-        log("dontspeakd stopped");
+        log::info!(target: "engine", "dontspeakd stopped");
     }
 }
 

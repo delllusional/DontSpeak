@@ -43,7 +43,6 @@ use std::time::{Duration, Instant};
 use ds_config::{NarrateKind, Paths, VoiceConfig};
 use ds_narrate::{BatchPayload, StreamBatch};
 
-use crate::logging::log;
 use client::WsClient;
 
 // ── The session registry (fed by the IPC hook arms, drained here) ────────────────
@@ -370,22 +369,24 @@ fn start_daemon(bin: &Path) {
         .spawn();
     match spawned {
         Ok(mut child) => {
-            log(&format!(
+            log::info!(
+                target: "engine",
                 "codex-stream: launched `{} app-server daemon start` (socket was absent)",
                 bin.display()
-            ));
+            );
             std::thread::Builder::new()
                 .name("ds-codex-daemon-reap".into())
                 .spawn(move || match child.wait() {
-                    Ok(status) if !status.success() => log(&format!(
+                    Ok(status) if !status.success() => log::info!(
+                        target: "engine",
                         "codex-stream: `app-server daemon start` exited with {status} — no daemon socket will appear"
-                    )),
+                    ),
                     Ok(_) => {}
-                    Err(e) => log(&format!("codex-stream: daemon start reap failed: {e}")),
+                    Err(e) => log::info!(target: "engine", "codex-stream: daemon start reap failed: {e}"),
                 })
                 .ok();
         }
-        Err(e) => log(&format!("codex-stream: daemon start failed to spawn: {e}")),
+        Err(e) => log::info!(target: "engine", "codex-stream: daemon start failed to spawn: {e}"),
     }
 }
 
@@ -553,10 +554,11 @@ fn run_attached<S: Read + Write>(
                     ds_narrate::clear_session_state(paths, &r.session);
                     registry.remove(&r.session);
                     resolve.remove(&r.session);
-                    log(&format!(
+                    log::info!(
+                        target: "engine",
                         "codex-stream: evicted idle session {} (ttl)",
                         r.session
-                    ));
+                    );
                 }
             }
             registry.prune_older_than(tun.idle_ttl);
@@ -625,10 +627,11 @@ fn run_attached<S: Read + Write>(
                                     registry.remove(&r.session);
                                     resolve.remove(&r.session);
                                     coalescer.drop_session(&r.session);
-                                    log(&format!(
+                                    log::info!(
+                                        target: "engine",
                                         "codex-stream: session {} unloaded from the app-server — evicted",
                                         r.session
-                                    ));
+                                    );
                                 }
                             }
                             // Resume every loaded thread that maps to a registered session.
@@ -663,11 +666,9 @@ fn run_attached<S: Read + Write>(
                                 }
                             }
                         } else {
-                            ds_log::log(
-                                &paths.log_file,
-                                ds_log::LogLevel::Debug,
-                                "codex-stream",
-                                "thread/loaded/list returned an error — keeping sessions; will relist",
+                            log::debug!(
+                                target: "codex-stream",
+                                "thread/loaded/list returned an error — keeping sessions; will relist"
                             );
                         }
                     }
@@ -679,17 +680,19 @@ fn run_attached<S: Read + Write>(
                             if let Some(sid) = proto::resumed_session_id(&result)
                                 && sid != session
                             {
-                                log(&format!(
+                                log::info!(
+                                    target: "engine",
                                     "codex-stream: thread {thread_id} reports sessionId {sid} != {session} — narrating under the hook session id"
-                                ));
+                                );
                             }
                             // The witness, IMMEDIATELY on resume — closes the short-turn
                             // race where Stop could fire before the first coalesced flush.
                             ds_narrate::seed_witness(paths, &session);
                             resolve.remove(&session);
-                            log(&format!(
+                            log::info!(
+                                target: "engine",
                                 "codex-stream: attached to session {session} (thread {thread_id})"
-                            ));
+                            );
                             resumed.insert(
                                 thread_id,
                                 ResumedSession {
@@ -887,10 +890,11 @@ fn supervise(
                     if cfg.codex_stream_daemon_start && bin.is_none() {
                         if !warned_bin_unresolvable {
                             warned_bin_unresolvable = true;
-                            log(&format!(
+                            log::info!(
+                                target: "engine",
                                 "codex-stream: daemon start is enabled but `{}` was not found on PATH or the known install dirs — set codex_bin to the binary's full path",
                                 cfg.codex_bin
-                            ));
+                            );
                         }
                     } else {
                         warned_bin_unresolvable = false;
@@ -946,19 +950,18 @@ fn supervise(
                 // writes this log line per iteration.
                 let stable = attempt_started.elapsed() >= STABLE_ATTACH;
                 backoff = next_backoff(stable, backoff);
-                log(&format!(
+                log::info!(
+                    target: "engine",
                     "codex-stream: connection lost: {e}; reconnecting in {backoff:?}"
-                ));
+                );
                 pace(running, backoff);
             }
             Err(e) => {
                 // Could not attach at all — quiet, common case (no daemon running).
                 backoff = next_backoff(false, backoff);
-                ds_log::log(
-                    &paths.log_file,
-                    ds_log::LogLevel::Debug,
-                    "codex-stream",
-                    &format!("attach failed: {e}; next try in {backoff:?}"),
+                log::debug!(
+                    target: "codex-stream",
+                    "attach failed: {e}; next try in {backoff:?}"
                 );
                 pace(running, backoff);
             }

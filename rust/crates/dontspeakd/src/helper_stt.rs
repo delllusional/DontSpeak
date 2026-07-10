@@ -150,10 +150,11 @@ impl Stt for HelperStt {
                 std::thread::sleep(POLL_INTERVAL);
             }
             if !joined {
-                crate::log(&format!(
-                    "WARN: HelperStt::abort() gave up waiting {JOIN_TIMEOUT:?} for the \
+                log::warn!(
+                    target: "engine",
+                    "HelperStt::abort() gave up waiting {JOIN_TIMEOUT:?} for the \
                      listen thread to finish; detaching it instead of blocking"
-                ));
+                );
             }
         }
         if let Ok(mut p) = self.paste.lock() {

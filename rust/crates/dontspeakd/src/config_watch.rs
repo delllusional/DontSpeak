@@ -13,8 +13,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
-use crate::logging::log;
-
 /// Spawn a filesystem watcher that sets `reload_requested` whenever `config_path` is
 /// created / modified / removed / renamed. Returns the live watcher handle — the caller
 /// MUST keep it alive (dropping it stops the watch). `None` if the watcher can't start,
@@ -48,16 +46,18 @@ pub(crate) fn spawn(
     }) {
         Ok(w) => w,
         Err(e) => {
-            log(&format!(
-                "WARN: config watcher init failed ({e}); using stat backstop"
-            ));
+            log::warn!(
+                target: "engine",
+                "config watcher init failed ({e}); using stat backstop"
+            );
             return None;
         }
     };
     if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        log(&format!(
-            "WARN: config watch on {dir:?} failed ({e}); using stat backstop"
-        ));
+        log::warn!(
+            target: "engine",
+            "config watch on {dir:?} failed ({e}); using stat backstop"
+        );
         return None;
     }
     Some(watcher)

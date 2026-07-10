@@ -98,16 +98,18 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
         let available = crate::config_gate::parakeet_present_for(cfg);
         let hf = &cfg.hands_free;
         if !available {
-            crate::log(
-                "WARN: always-listening needs the Parakeet STT model — \
-                 download it in Settings › Models; the loop is idle until then",
+            log::warn!(
+                target: "engine",
+                "always-listening needs the Parakeet STT model — \
+                 download it in Settings › Models; the loop is idle until then"
             );
         } else {
-            crate::log(&format!(
+            log::info!(
+                target: "engine",
                 "always-listening ENABLED (start={:?} submit={:?} cancel={:?} \
                  confirm={}ms endpoint={}ms)",
                 hf.start, hf.submit, hf.cancel, cfg.submit_confirm_ms, cfg.endpoint_silence_ms
-            ));
+            );
         }
         Self {
             plat,
@@ -180,7 +182,7 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
                     self.input_rate = c.input_rate().max(1);
                     self.capture = Some(c);
                 }
-                Err(e) => crate::log(&format!("WARN: always-listen mic open: {e}")),
+                Err(e) => log::warn!(target: "engine", "always-listen mic open: {e}"),
             }
             return;
         }

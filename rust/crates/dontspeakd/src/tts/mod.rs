@@ -25,7 +25,6 @@ use std::thread::JoinHandle;
 use ds_helper_proto as proto;
 
 use crate::child_slot::ChildSlot;
-use crate::log;
 use crate::model_slot::{ModelSlot, ModelState};
 use crate::status::StatusGate;
 
@@ -40,7 +39,7 @@ use reader::*;
 /// Routine `ds-helper` diagnostics (load attempts, unload confirmations, capture stats,
 /// full-duplex active, wav dump ok, separator loaded, stream picked, and failure/fallback
 /// conditions) now go through the unified activity log (source `helper`) via `ds-helper`'s own
-/// `logging::log`, NOT this raw stderr redirect. This redirect is retained purely as a
+/// `log::` macros, NOT this raw stderr redirect. This redirect is retained purely as a
 /// last-resort safety net for anything that bypasses explicit logging entirely — a native-
 /// library abort, an unhandled panic, or a startup failure before `ds_log::log_cached` can
 /// even initialize.
@@ -370,15 +369,17 @@ impl TtsManager {
         if let Some(prev) = prev {
             let elapsed = now.duration_since(prev);
             if elapsed < MIN_RESTART_GAP {
-                log(&format!(
-                    "WARN: TTS warm child restart {}ms after the previous one — rapid config churn?",
+                log::warn!(
+                    target: "engine",
+                    "TTS warm child restart {}ms after the previous one — rapid config churn?",
                     elapsed.as_millis()
-                ));
+                );
                 let wait = MIN_RESTART_GAP - elapsed;
-                log(&format!(
+                log::info!(
+                    target: "engine",
                     "TTS warm child restart debounced — waiting {}ms for the previous child to settle",
                     wait.as_millis()
-                ));
+                );
                 std::thread::sleep(wait);
                 // Re-anchor to the moment we actually proceed (not the original call
                 // time) so a THIRD rapid call debounces off the real spacing instead
@@ -451,12 +452,12 @@ impl TtsManager {
         match action {
             HealAction::Nothing => {}
             HealAction::ReapAndStart => {
-                log("TTS warm child found dead — reaping and restarting it");
+                log::info!(target: "engine", "TTS warm child found dead — reaping and restarting it");
                 self.mark_dead_locked();
                 self.start_locked();
             }
             HealAction::Start => {
-                log("TTS warm child is gone — restarting it for the queued speak");
+                log::info!(target: "engine", "TTS warm child is gone — restarting it for the queued speak");
                 self.start_locked();
             }
         }
@@ -660,12 +661,13 @@ impl TtsManager {
             // by construction — so the Kokoro row shows "Missing" (offer Download), never a
             // stale "Failed".
             self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
-            log(&format!(
+            log::info!(
+                target: "engine",
                 "TTS/STT warm child start skipped — Kokoro model not yet present on disk \
                  (provider={}); the background download will restart it automatically once it \
                  finishes",
                 prefs.provider
-            ));
+            );
             return;
         }
 
@@ -703,10 +705,11 @@ impl TtsManager {
             Ok(c) => c,
             Err(e) => {
                 self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
-                log(&format!(
-                    "WARN: TTS warm child spawn failed ({}): {e}",
+                log::warn!(
+                    target: "engine",
+                    "TTS warm child spawn failed ({}): {e}",
                     self.bin.display()
-                ));
+                );
                 return;
             }
         };
@@ -716,7 +719,7 @@ impl TtsManager {
             let _ = child.kill();
             let _ = child.wait();
             self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
-            log("WARN: TTS warm child missing stdio pipes");
+            log::warn!(target: "engine", "TTS warm child missing stdio pipes");
             return;
         };
 
@@ -729,7 +732,7 @@ impl TtsManager {
                 Ok(0) => {
                     let _ = child.wait();
                     self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
-                    log("WARN: TTS warm child closed before READY");
+                    log::warn!(target: "engine", "TTS warm child closed before READY");
                     return;
                 }
                 Ok(_) => {
@@ -776,7 +779,7 @@ impl TtsManager {
                         let _ = child.kill();
                         let _ = child.wait();
                         self.set_error(msg.trim());
-                        log(&format!("WARN: TTS warm child failed to load:{msg}"));
+                        log::warn!(target: "engine", "TTS warm child failed to load:{msg}");
                         return;
                     }
                     // ignore any other chatter before READY
@@ -785,9 +788,7 @@ impl TtsManager {
                     let _ = child.kill();
                     let _ = child.wait();
                     self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
-                    log(&format!(
-                        "WARN: TTS warm child read error before READY: {e}"
-                    ));
+                    log::warn!(target: "engine", "TTS warm child read error before READY: {e}");
                     return;
                 }
             }
@@ -878,7 +879,7 @@ impl TtsManager {
         } else {
             r#"{"op":"mute","text":"off"}"#
         });
-        log("TTS warm Kokoro child READY");
+        log::info!(target: "engine", "TTS warm Kokoro child READY");
     }
 
     /// Reset BOTH models to `Idle` (the process is gone → both models go with it). Each
@@ -917,7 +918,7 @@ impl TtsManager {
         if let Some(mut child) = self.child.reap() {
             let _ = child.kill();
             let _ = child.wait();
-            log("TTS warm Kokoro child stopped (model freed)");
+            log::info!(target: "engine", "TTS warm Kokoro child stopped (model freed)");
         }
         // Killing the child closes its stdout → the reader EOFs and returns; join
         // it so a stale reader can't touch the next child's slots.
@@ -961,10 +962,11 @@ impl TtsManager {
                     child.wait().ok()
                 }
             };
-            log(&format!(
-                "WARN: TTS warm child (pid {pid}) reaped by mark_dead: {}",
+            log::warn!(
+                target: "engine",
+                "TTS warm child (pid {pid}) reaped by mark_dead: {}",
                 describe_exit(status)
-            ));
+            );
         }
         self.join_reader();
     }
@@ -980,9 +982,10 @@ impl TtsManager {
     fn mark_dead_if_current(&self, expected_gen: u64) {
         let _lifecycle = self.lifecycle.lock().unwrap();
         if self.child.generation() != expected_gen {
-            log(
+            log::info!(
+                target: "engine",
                 "TTS: stale child-death signal from a superseded child ignored \
-                 (already restarted)",
+                 (already restarted)"
             );
             return;
         }
@@ -1024,7 +1027,7 @@ impl TtsManager {
                 "stt" => self.stt_model.transition(ModelState::Idle, gate),
                 _ => {}
             }
-            log(&format!("helper: requested unload of {engine} model"));
+            log::info!(target: "engine", "helper: requested unload of {engine} model");
         }
     }
 
@@ -1044,7 +1047,7 @@ impl TtsManager {
             // confirmation (after `load_backend`) exactly as STT waits for `STTLOADED` (after
             // preload + graph warmup), so the dot stays "warming" until the model is truly
             // resident — never greening on the mere `load` request.
-            log(&format!("helper: requested preload of {engine} model"));
+            log::info!(target: "engine", "helper: requested preload of {engine} model");
         }
     }
 

@@ -21,7 +21,6 @@ use crate::downloads::{
 use crate::engine::{Engine, PasteBuf, PasteState};
 use crate::ipc::spawn_ipc_server;
 use crate::listener;
-use crate::logging::log;
 use crate::stats;
 use crate::status::{CapsLog, EngineShared, StatusGate};
 use crate::stt_test::TestSession;
@@ -69,6 +68,8 @@ pub fn engine_run(
     reload_requested: Arc<AtomicBool>,
 ) -> Result<(), EngineError> {
     let debug = debug_enabled();
+    ds_log::init();
+    log::set_max_level(if debug { log::LevelFilter::Debug } else { log::LevelFilter::Info });
 
     // FATAL startup failures RETURN an error instead of process::exit(): this fn
     // runs on a background thread INSIDE the host app (the in-process FFI host),
@@ -76,7 +77,7 @@ pub fn engine_run(
     let paths = match Paths::resolve() {
         Some(p) => p,
         None => {
-            log("FATAL: cannot resolve $HOME");
+            log::error!(target: "engine", "cannot resolve $HOME");
             return Err(EngineError::HomeUnresolved);
         }
     };
@@ -84,7 +85,7 @@ pub fn engine_run(
     let plat = match ds_platform::current() {
         Ok(p) => p,
         Err(e) => {
-            log(&format!("FATAL: platform init: {e}"));
+            log::error!(target: "engine", "platform init: {e}");
             return Err(EngineError::PlatformInit(e.to_string()));
         }
     };
@@ -101,10 +102,11 @@ pub fn engine_run(
     // the app never appears in Settings. No-op off macOS / when already trusted.
     plat.request_permissions();
     if let Err(e) = plat.preflight() {
-        log(&format!(
-            "WARN: {e} — Caps-Lock dictation is OFF until granted; \
+        log::warn!(
+            target: "engine",
+            "{e} — Caps-Lock dictation is OFF until granted; \
              other subsystems (RPC/TTS/STT) run regardless."
-        ));
+        );
     }
 
     // §F: read the physical-hold threshold from settings.json. Fail-open:
@@ -125,11 +127,12 @@ pub fn engine_run(
     // losing availability), and that path never went through `set_config` either.
     authorize_system_stt_if_needed(&cfg, &reload_requested, &running);
 
-    log(&format!(
+    log::info!(
+        target: "engine",
         "engine started (poll={POLL_MS}ms long_press={long_press_ms}ms \
          stt={} debug={debug})",
         cfg.resolved_stt().map(|e| e.as_str()).unwrap_or("off")
-    ));
+    );
 
     // Make sure both our roots exist before we write settings / the pidfile / bind the RPC
     // socket — unlike ~/.claude they aren't created by another tool. On Windows these are
@@ -144,10 +147,11 @@ pub fn engine_run(
     if !paths.narration_spec.exists()
         && let Err(e) = std::fs::write(&paths.narration_spec, ds_config::DEFAULT_NARRATION_SPEC)
     {
-        log(&format!(
-            "WARN: cannot write default narration spec {}: {e}",
+        log::warn!(
+            target: "engine",
+            "cannot write default narration spec {}: {e}",
             paths.narration_spec.display()
-        ));
+        );
     }
 
     // Single-instance guard: evict an OLDER engine BEFORE we bind the socket below.
@@ -160,19 +164,21 @@ pub fn engine_run(
     // is cross-platform (SIGTERM → clean shutdown on unix; TerminateProcess on
     // Windows, after which its helper self-exits on stdin EOF). No-op if none/dead.
     if let Some(old) = ds_config::evict_stale_engine(&paths.engine_pid, std::process::id()) {
-        log(&format!(
+        log::info!(
+            target: "engine",
             "evicted stale engine pid {old} before binding the RPC socket"
-        ));
+        );
     }
 
     // §E.4: write our own pid so the NEXT engine to start can evict US + probe our
     // liveness (see evict_stale_engine above). Tolerate a write failure: eviction just
     // no-ops, so the engine keeps running either way.
     if let Err(e) = std::fs::write(&paths.engine_pid, std::process::id().to_string()) {
-        log(&format!(
-            "WARN: cannot write engine pidfile {}: {e}",
+        log::warn!(
+            target: "engine",
+            "cannot write engine pidfile {}: {e}",
             paths.engine_pid.display()
-        ));
+        );
     }
 
     // `running` / `reload_requested` are owned by the caller: the in-app FFI host
@@ -434,11 +440,12 @@ pub fn engine_run(
             // explicit quit with a relaunch; let this shutdown be a real one.
             if daemon.needs_relaunch() && running.swap(false, Ordering::Relaxed) {
                 relaunch_reason = daemon.relaunch_reason();
-                log(&format!(
+                log::info!(
+                    target: "engine",
                     "{} is stuck denied despite an already-trusted Accessibility grant — \
                      relaunching to pick it up fresh",
                     relaunch_reason.unwrap_or("a caps-related HID resource")
-                ));
+                );
                 relaunch_after_shutdown = true;
             }
         }
@@ -600,13 +607,14 @@ pub fn engine_run(
     // Losing argv doesn't matter: nothing here reads `CommandLine.arguments`.)
     if relaunch_after_shutdown {
         if caps_relaunch_budget_exhausted(&paths) {
-            log(&format!(
+            log::info!(
+                target: "engine",
                 "caps HID relaunch: already relaunched {MAX_CAPS_RELAUNCHES} times in the \
                  last {}s over {} — giving up rather than loop forever; it stays broken \
                  until a manual restart",
                 CAPS_RELAUNCH_WINDOW.as_secs(),
                 relaunch_reason.unwrap_or("a caps-related HID resource"),
-            ));
+            );
             return Ok(());
         }
         let relaunched = std::env::current_exe()
@@ -623,11 +631,12 @@ pub fn engine_run(
                 // (current_exe/spawn failing on an already-running binary implies
                 // something like the executable vanishing from disk or the process
                 // table being exhausted).
-                log(&format!(
+                log::info!(
+                    target: "engine",
                     "relaunch failed ({e}) — NOT exiting; this instance has already released \
                      its resources (no RPC, no caps monitor) and can't serve as a fallback \
                      host, but exiting with nothing left to bring the app back is worse"
-                ));
+                );
             }
         }
     }
@@ -662,10 +671,11 @@ fn authorize_system_stt_if_needed(
     let running = running.clone();
     std::thread::spawn(move || {
         if let Err(e) = ds_stt::system_authorize() {
-            log(&format!(
-                "WARN: system STT authorization failed: {e} — dictation stays on the \
+            log::warn!(
+                target: "engine",
+                "system STT authorization failed: {e} — dictation stays on the \
                  Claude Code fallback until granted"
-            ));
+            );
         }
         if running.load(Ordering::Relaxed) {
             reload_requested.store(true, Ordering::Relaxed);

@@ -240,20 +240,22 @@ pub(crate) fn build_stt<P: Platform + 'static>(
     if let Some(tts) = tts
         && local_stt_available(cfg)
     {
-        crate::logging::log(&format!(
+        log::info!(
+            target: "engine",
             "dictation STT = local helper ({} / {})",
             cfg.resolved_stt().map(|e| e.as_str()).unwrap_or("off"),
             cfg.resolved_stt_provider().as_str()
-        ));
+        );
         return Box::new(crate::helper_stt::HelperStt::new(
             tts.clone(),
             paste.clone(),
         ));
     }
-    crate::logging::log(&format!(
+    log::info!(
+        target: "engine",
         "dictation STT = factory fallback (resolved={}) — NOT the local helper",
         cfg.resolved_stt().map(|e| e.as_str()).unwrap_or("off")
-    ));
+    );
     ds_engines::make_stt_at(cfg, plat, &ds_engines::RealAvailability, paths)
 }
 

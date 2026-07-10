@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use ds_config::{CancelSpeechScope, Paths, VoiceConfig};
 
 use crate::downloads::{DownloadProg, start_download};
-use crate::logging::log;
 use crate::status::{EngineShared, model_status_json};
 use crate::stt_test::TestSession;
 use crate::ttsq::TtsQueue;
@@ -325,7 +324,7 @@ pub(crate) fn spawn_ipc_server(
             }
         };
         if let Err(e) = ds_ipc::serve(&sock, handler) {
-            log(&format!("WARN: IPC server exited: {e}"));
+            log::warn!(target: "engine", "IPC server exited: {e}");
         }
     });
 }

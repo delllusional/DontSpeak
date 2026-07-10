@@ -971,10 +971,11 @@ impl TtsQueue {
                     self.tts.restart_if_crashed();
                 }
                 if !crate::config_gate::tts_can_play(engine, self.tts.is_tts_loaded()) {
-                    crate::logging::log(&format!(
+                    log::info!(
+                        target: "engine",
                         "TTS not ready (engine={engine:?}, tts_loaded={}) — dropping queued speak",
                         self.tts.is_tts_loaded()
-                    ));
+                    );
                     continue;
                 }
             }

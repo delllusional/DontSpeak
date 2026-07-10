@@ -9,8 +9,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use ds_helper_proto as proto;
 
 use crate::child_slot::ChildSlot;
-use crate::log;
-use crate::logging::debug;
 use crate::model_slot::{ModelSlot, ModelState};
 use crate::status::StatusGate;
 
@@ -193,11 +191,12 @@ pub(super) fn reader_loop(
                     // trigger restart_if_crashed — which may be minutes later, or
                     // never before the app itself restarts.
                     let status = child.peek_exit_status();
-                    log(&format!(
-                        "WARN: TTS warm child exited unexpectedly ({}) — models \
+                    log::warn!(
+                        target: "engine",
+                        "TTS warm child exited unexpectedly ({}) — models \
                          unloaded; the next speak restarts it",
                         describe_exit(status)
-                    ));
+                    );
                 }
                 return;
             }
@@ -214,7 +213,7 @@ pub(super) fn reader_loop(
                     // no trace — the gap that made the tail-clip bug hard to diagnose). DEBUG
                     // level: off by default, one concise line per speak when DONTSPEAK_DEBUG
                     // is on, size-rotated like the rest.
-                    debug(&format!("TTS speak {rest}"));
+                    log::debug!(target: "engine", "TTS speak {rest}");
                     if let Some(secs) = stats.record_stats_line(rest) {
                         lifetime.add_tts(secs);
                     }
@@ -238,7 +237,7 @@ pub(super) fn reader_loop(
                     // mirror of the `TTS speak` line above (so a slow dictation leaves a
                     // trace, not just an in-app stats bump). DEBUG: off by default, one
                     // concise line per listen when DONTSPEAK_DEBUG is on.
-                    debug(&format!("STT listen {rest}"));
+                    log::debug!(target: "engine", "STT listen {rest}");
                     if let Some(secs) = stt_stats.record_stt_line(rest) {
                         lifetime.add_stt(secs);
                     }

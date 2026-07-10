@@ -50,7 +50,6 @@
 //! - `barge` — the mic-barge watcher thread.
 //! - `codex_stream` — the Codex app-server subscriber: mid-turn narration for sessions
 //!   hosted on the shared codex daemon (docs/STREAMING-NARRATION.md).
-//! - `log` — engine logging → the unified activity log.
 
 // Always-listening: `listen` is the pure, unit-tested core (endpointer, stopword,
 // turn logic); `listener` is the runtime glue the poll loop drives. The allow
@@ -74,15 +73,12 @@ mod config_watch;
 mod downloads;
 mod engine;
 mod ipc;
-mod logging;
 mod status;
 mod timer;
 
 // The in-process host (the `ds-core` FFI crate) consumes ONLY these two items.
 pub use boot::{EngineError, engine_run};
 
-// Crate-root re-exports so the sibling modules that pre-date the split keep
-// resolving their historical paths without edits: `crate::log(...)` (the function,
-// not the `logging` module) and `crate::{FinalState, PasteBuf, PasteState}`.
+// Crate-root re-export so the sibling modules that pre-date the split keep
+// resolving their historical path without edits: `crate::{FinalState, PasteBuf, PasteState}`.
 pub(crate) use engine::{FinalState, PasteBuf, PasteState};
-pub(crate) use logging::log;

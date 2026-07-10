@@ -18,7 +18,6 @@ use ds_model::DownloadTarget;
 use crate::config_gate::{
     apple_native_shim_available, apple_native_tts_active, stt_uses_onnx_runtime,
 };
-use crate::logging::log;
 use crate::tts::TtsManager;
 
 /// Byte progress of one in-flight download target.
@@ -233,7 +232,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
     if !begin_download(&mut dl.lock().unwrap(), which) {
         return; // this target is already downloading — attach, don't retrigger
     }
-    log(&download_event_msg(which, "started", None));
+    log::info!(target: "engine", "{}", download_event_msg(which, "started", None));
     let dl = dl.clone();
     std::thread::spawn(move || {
         // Grab the warm-child reload hook up front (wired once at boot); used after the fetch.
@@ -329,11 +328,12 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             }
         };
         match &result {
-            Ok(()) => log(&download_event_msg(which, "finished", None)),
-            Err(e) => log(&format!(
-                "WARN: {}",
+            Ok(()) => log::info!(target: "engine", "{}", download_event_msg(which, "finished", None)),
+            Err(e) => log::warn!(
+                target: "engine",
+                "{}",
                 download_event_msg(which, "failed", Some(&e.to_string()))
-            )),
+            ),
         }
         finish_download(&mut dl.lock().unwrap(), which, &result);
         // This thread is DETACHED and can outlive `ds_engine_stop()` (which only joins the
@@ -361,10 +361,11 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
         {
             // Supplementary detail AFTER the unconditional "finished" line logged above —
             // not the sole success signal anymore.
-            log(&format!(
+            log::info!(
+                target: "engine",
                 "warm child restarted to load freshly-downloaded '{}'",
                 which.as_str()
-            ));
+            );
         }
         // Also nudge a DAEMON reload so `build_stt`/`build_tts` re-run: the engine's dictation
         // Stt/Tts SELECTION was fixed at startup, when this model may have been absent (fresh
