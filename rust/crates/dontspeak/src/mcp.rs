@@ -109,9 +109,10 @@ fn tools() -> Value {
 }
 
 /// Log to STDERR (stdout is reserved for JSON-RPC messages) AND persist to the unified
-/// activity log (source `mcp`) — see `ds_log::log_cached_echoed`.
+/// activity log (source `mcp`) via the `log` facade.
 pub(crate) fn log(msg: &str) {
-    ds_log::log_cached_echoed(ds_log::LogLevel::Info, "mcp", msg);
+    eprintln!("{msg}");
+    log::info!(target: "mcp", "{msg}");
 }
 
 #[cfg(test)]

@@ -95,6 +95,7 @@ fn main() {
     // With no argv it is the stdio MCP server (the default, spawned by Claude Code / the app).
     // ALL communication is stdio: the MCP tool surface (JSON-RPC over stdio) and the two
     // Claude Code hook verbs above. There is no HTTP transport.
+    ds_log::init();
     let argv: Vec<String> = std::env::args().collect();
     match resolve_subcommand(&argv) {
         Subcommand::Notify => {
@@ -127,7 +128,8 @@ fn main() {
                 "dontspeak: unknown subcommand {sub:?}; expected `notify`, `provide`, or `wire` \
                  (run with no arguments for the stdio MCP server)"
             );
-            ds_log::log_cached_echoed(ds_log::LogLevel::Error, "hook", &msg);
+            eprintln!("{msg}");
+            log::error!(target: "hook", "{msg}");
             std::process::exit(2);
         }
         // No arguments: run the stdio MCP server loop.

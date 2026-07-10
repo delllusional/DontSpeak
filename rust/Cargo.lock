@@ -871,6 +871,7 @@ dependencies = [
  "ds-platform",
  "ds-tools",
  "ds-voices",
+ "log",
  "serde",
  "serde_json",
  "tempfile",

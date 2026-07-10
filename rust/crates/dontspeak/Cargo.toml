@@ -26,6 +26,7 @@ path = "src/main.rs"
 ds-config = { workspace = true }
 # The unified activity log — hook/mcp diagnostics, split out of ds-config (issue #6).
 ds-log = { workspace = true }
+log = { workspace = true }
 ds-ipc = { workspace = true }
 # The shared streaming-narration core (accumulation, digests, the streaming witness) —
 # this crate is the Claude Code / Qwen Code hook ADAPTER over it; the engine's Codex

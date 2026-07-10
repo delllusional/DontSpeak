@@ -199,18 +199,6 @@ pub fn log_cached(level: LogLevel, source: &str, msg: &str) {
     }
 }
 
-/// Like `log_cached`, but also echoes the message to stderr — for callers where a human might
-/// be watching a terminal in real time (a hand-run MCP server, the interactive `dontspeak wire`
-/// subcommand) in addition to the persisted unified log. Checks `CACHED_LOG_FILE` itself
-/// (rather than calling `log_cached` and letting its own failure-path `eprintln!` run too) so a
-/// resolution failure prints exactly once, not twice.
-pub fn log_cached_echoed(level: LogLevel, source: &str, msg: &str) {
-    eprintln!("{msg}");
-    if let Some(log_file) = CACHED_LOG_FILE.get_or_init(default_log_file) {
-        log(log_file, level, source, msg);
-    }
-}
-
 /// The last `max_bytes` of a log file as UTF-8 (lossy), for a read-only in-app log view. Opens
 /// SHARED-read so it works while the engine is appending; if the window starts mid-file the
 /// (likely partial) first line is dropped so the view begins on a clean line. Empty string if
