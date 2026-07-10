@@ -15,7 +15,7 @@ name = "ds-linux-gtk"
 # asserts the two agree so drift here fails fast instead of silently shipping stale.
 version = "0.2.6-dev"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.97"
 license = "MIT"
 description = "DontSpeak Linux GUI host (GTK4 + libadwaita): tray, health panel, dictation overlay; hosts the engine in-process via ds-core."
 

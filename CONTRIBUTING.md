@@ -10,7 +10,7 @@ the app running stale code.
 ## Build prerequisites
 
 **Everywhere:** a Rust toolchain via [rustup](https://rustup.rs) (workspace pins
-`rust-version = 1.96`; plain `rustup default stable` is fine). Build with `--locked` —
+`rust-version = 1.97`; plain `rustup default stable` is fine). Build with `--locked` —
 `Cargo.lock` is committed and CI rejects drift.
 
 **macOS** — the SwiftUI host needs the **full Xcode**, not just the Command Line Tools

@@ -11,7 +11,7 @@ Build prerequisites per OS: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Workspace layout
 
-- `rust/crates/` — 21 single-purpose crates (Rust workspace, `rust-version = 1.96`).
+- `rust/crates/` — 21 single-purpose crates (Rust workspace, `rust-version = 1.97`).
   Notable ones: `ds-core` (the stable C ABI the apps link), `dontspeakd` (the engine
   library), `dontspeak` (the one CLI: MCP server + hook entries + installers),
   `ds-tools` (the single MCP tool catalog), `ds-config` (paths + `config.toml` +
