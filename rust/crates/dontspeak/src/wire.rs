@@ -7,6 +7,7 @@
 //!   • `ClaudeJsonHooks` → [`hooks::claude_json_hooks`] (Claude-contract hooks, JSON file)
 //!   • `ClaudeTomlHooks` → [`hooks::claude_toml_hooks`] (same contract, TOML file)
 //!   • `JsonMcp`         → [`mcp::apply`] (stdio `mcpServers.DontSpeak` entry)
+//!   • `TomlMcp`         → [`mcp::apply_toml`] (stdio `mcp_servers.DontSpeak` in TOML)
 //! Adding a client (Qwen Code, Gemini CLI, …) = a `WireTarget` variant + `Paths` fields + a
 //! registry entry; a new MECHANISM (a different hook contract) = one new writer + enum arm.
 //!
@@ -159,6 +160,9 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
             WireMechanism::JsonMcp => {
                 mcp::apply(&mcp::target_for(spec, s, paths), remove, print_only)
             }
+            WireMechanism::TomlMcp => {
+                mcp::apply_toml(&mcp::target_for(spec, s, paths), remove, print_only)
+            }
         })
         .max()
         .unwrap_or(0);
@@ -169,6 +173,11 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
     if client == WireTarget::Codex && !remove && !print_only && code == 0 {
         eprintln!(
             "wire: for mid-turn narration, run Codex on the shared app-server: `codex app-server daemon start` once, then `codex --remote unix://` — otherwise replies are voiced at end of turn as before"
+        );
+    }
+    if client == WireTarget::Grok && !remove && !print_only && code == 0 {
+        eprintln!(
+            "wire: use `grok mcp list` or `grok inspect` to verify; restart the session or run `grok` again to load the server"
         );
     }
     code
@@ -201,6 +210,7 @@ fn print_registry(paths: Option<&Paths>) {
                     WireMechanism::ClaudeJsonHooks => "voice hooks (Claude contract, JSON)",
                     WireMechanism::ClaudeTomlHooks => "voice hooks (Claude contract, TOML)",
                     WireMechanism::JsonMcp => "MCP server (stdio, mcpServers entry)",
+                    WireMechanism::TomlMcp => "MCP server (stdio, mcp_servers table in TOML)",
                 };
                 println!("  wires:   {} -> {}", how, (s.config_file)(p).display());
             }
@@ -355,5 +365,43 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
         assert!(v2.get("hooks").is_none(), "hooks stripped");
         assert!(v2.get("mcpServers").is_none(), "mcp entry stripped");
+    }
+
+    /// Codex is the TOML analog of the Qwen test above: its two surfaces (`ClaudeTomlHooks` +
+    /// `TomlMcp`) now share ONE config file (`~/.codex/config.toml`) — prove they coexist
+    /// without clobbering each other in either direction, against a tempdir-rooted `Paths`
+    /// (never the real `$HOME`).
+    ///
+    /// NOTE: like the Qwen test above, this exercises the already-documented, benign,
+    /// read-only leak in `mcp::apply_toml`'s merge path (`io::resolve_dontspeak_bin()` checks
+    /// for a real `$HOME/.local/bin/dontspeak` — see the comment block in `wire/mcp.rs`).
+    #[test]
+    fn wire_client_codex_wires_hooks_and_mcp_into_one_file_then_removes_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.codex_dir).unwrap(); // satisfy Codex's presence gate
+
+        assert_eq!(wire_client(WireTarget::Codex, &paths, false, false), 0);
+        let text = std::fs::read_to_string(&paths.codex_config).unwrap();
+        // Hooks present (Codex's own event set, greet-only SessionStart)…
+        assert!(text.contains("[[hooks.Stop]]"), "hooks wired: {text}");
+        // …AND the MCP entry, in the SAME file, without clobbering the hooks written just above.
+        assert!(
+            text.contains("[mcp_servers.DontSpeak]"),
+            "mcp entry wired alongside hooks in the same file: {text}"
+        );
+        assert!(
+            text.contains("command ="),
+            "mcp entry carries a command: {text}"
+        );
+
+        // `--remove` cleanly strips BOTH back out.
+        assert_eq!(wire_client(WireTarget::Codex, &paths, true, false), 0);
+        let text2 = std::fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(!text2.contains("hooks"), "hooks stripped: {text2}");
+        assert!(
+            !text2.contains("mcp_servers"),
+            "mcp entry stripped: {text2}"
+        );
     }
 }

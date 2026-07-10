@@ -9,3 +9,4 @@ pub mod hooks;
 pub mod json_mcp;
 pub mod registry;
 pub mod settings;
+pub mod toml_mcp;

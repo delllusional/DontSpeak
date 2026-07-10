@@ -81,6 +81,12 @@ pub struct Paths {
     /// the voice hooks (non-streaming: no `MessageDisplay`) and the `mcpServers.DontSpeak`
     /// stdio entry, since Qwen Code keeps hooks + MCP in one file.
     pub qwen_settings: PathBuf,
+    /// Grok CLI (Grok Build) config dir (`~/.grok`). Its existence is how `wire grok`
+    /// presence-gates the MCP wiring (a clean skip when Grok isn't installed).
+    pub grok_dir: PathBuf,
+    /// Grok's `~/.grok/config.toml` — where `wire grok` adds (or removes) the
+    /// `mcp_servers.DontSpeak` stdio entry.
+    pub grok_config: PathBuf,
 }
 
 impl Paths {
@@ -92,6 +98,7 @@ impl Paths {
         let hooks_dir = claude_dir.join("hooks");
         let codex_dir = home.join(".codex");
         let qwen_dir = home.join(".qwen");
+        let grok_dir = home.join(".grok");
         // Two roots, each idiomatic per OS (see [`data_dir`] / [`model_dir`] / `state_root`):
         //   config (roaming, user SETTINGS): config.toml, speakers.json, narration-spec.md
         //   state  (local, machine RUNTIME): stats.toml, pidfiles, the IPC socket, logs
@@ -121,6 +128,8 @@ impl Paths {
             codex_dir,
             qwen_settings: qwen_dir.join("settings.json"),
             qwen_dir,
+            grok_config: grok_dir.join("config.toml"),
+            grok_dir,
             home,
             claude_dir,
             hooks_dir,
@@ -140,6 +149,7 @@ impl Paths {
         let hooks_dir = claude_dir.join("hooks");
         let codex_dir = home.join(".codex");
         let qwen_dir = home.join(".qwen");
+        let grok_dir = home.join(".grok");
         let ds_dir = home.join(".dontspeak");
         Self {
             pidfile: ds_dir.join("speak-hook.pid"),
@@ -161,6 +171,8 @@ impl Paths {
             codex_dir,
             qwen_settings: qwen_dir.join("settings.json"),
             qwen_dir,
+            grok_config: grok_dir.join("config.toml"),
+            grok_dir,
             home,
             claude_dir,
             hooks_dir,

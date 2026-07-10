@@ -72,7 +72,7 @@ each client's whole integration via `dontspeak wire <client>` — a safe, additi
 merge (preview with `--print-only`, undo with `--remove`). `wire claude_code` merges the voice
 hooks into `~/.claude/settings.json` AND registers the MCP server in `~/.claude.json`;
 `wire qwen_code` wires Qwen Code's hooks and MCP server into `~/.qwen/settings.json` (when `~/.qwen` exists);
-`wire codex` wires Codex's hooks (when `~/.codex` exists).
+`wire codex` wires Codex's hooks AND registers the MCP server, both into `~/.codex/config.toml` (when `~/.codex` exists).
 There is no launchd/systemd agent: the engine runs in-process inside the platform's host
 app (macOS `DontSpeak.app`, built by `apps/macos/bundle.sh`; Windows `ds-winui`; Linux
 `ds-gtk`).

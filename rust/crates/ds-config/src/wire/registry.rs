@@ -51,6 +51,9 @@ pub enum WireMechanism {
     /// The stdio `mcpServers.DontSpeak` entry merged into a JSON config. Shaper:
     /// `merge_mcp_server`/`strip_mcp_server`.
     JsonMcp,
+    /// The stdio `mcp_servers.DontSpeak` entry merged into a TOML config (Grok style).
+    /// Shaper: `merge_mcp_server_toml`/`strip_mcp_server_toml`.
+    TomlMcp,
 }
 
 /// HOW the client's hook runner EXECUTES one wired command entry — the dialect the
@@ -181,23 +184,41 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         // (greet-only), `UserPromptSubmit` (ONE group, two inner hooks: `notify` for
         // mark-active routing + the engine's codex_stream session re-discovery, and the
         // synchronous `provide` for the narration spec), `Stop`; `SessionStart` landed in
-        // Codex CLI 0.142.x, it didn't exist when Codex was first wired. Codex has no MCP
-        // surface we register. Codex's hook event list has NO `SessionEnd` and no
-        // `Notification` (confirmed against the hooks doc, 2026-07-07) — per-session
-        // cleanup for Codex is owned by the engine's codex_stream supervisor, not a hook.
-        // MID-TURN narration doesn't ride hooks at all: the engine subscribes to the
-        // shared app-server (`codex app-server daemon start` + `codex --remote`) — see
-        // the "app-server" DocRef and docs/STREAMING-NARRATION.md. OPEN FINDING for the
-        // live-capture pass (§9 there): whether hooks still fire for `--remote`-hosted
-        // sessions is undocumented — if they do NOT, streaming narration still works and
-        // Stop simply never fires, but greet/`provide` would be lost for those sessions.
-        surfaces: &[Surface {
-            mechanism: WireMechanism::ClaudeTomlHooks,
-            config_file: |p| &p.codex_config, // ~/.codex/config.toml
-            load_hint: None,
-            hook_streaming: false,
-            hook_command_style: HookCommandStyle::ArgsArray, // ignored by ClaudeTomlHooks
-        }],
+        // Codex CLI 0.142.x, it didn't exist when Codex was first wired. Codex's hook
+        // event list has NO `SessionEnd` and no `Notification` (confirmed against the
+        // hooks doc, 2026-07-07) — per-session cleanup for Codex is owned by the
+        // engine's codex_stream supervisor, not a hook. MID-TURN narration doesn't ride
+        // hooks at all: the engine subscribes to the shared app-server (`codex
+        // app-server daemon start` + `codex --remote`) — see the "app-server" DocRef and
+        // docs/STREAMING-NARRATION.md. OPEN FINDING for the live-capture pass (§9
+        // there): whether hooks still fire for `--remote`-hosted sessions is
+        // undocumented — if they do NOT, streaming narration still works and Stop
+        // simply never fires, but greet/`provide` would be lost for those sessions.
+        //
+        // Codex ALSO registers external MCP servers via `[mcp_servers.<name>]` in the
+        // SAME `~/.codex/config.toml` (confirmed against the mcp doc + `codex mcp
+        // list`/`add`/`remove` on the locally installed 0.142.5 binary, 2026-07-10) —
+        // the identical stdio table shape (`command`/`args`/`env`/`startup_timeout_sec`/
+        // `tool_timeout_sec`) Grok uses, so it reuses the SAME `TomlMcp` mechanism and
+        // shaper, just pointed at Codex's own config file. Hooks and MCP share one file,
+        // same pattern as Qwen Code sharing `~/.qwen/settings.json` between its
+        // `ClaudeJsonHooks` and `JsonMcp` surfaces.
+        surfaces: &[
+            Surface {
+                mechanism: WireMechanism::ClaudeTomlHooks,
+                config_file: |p| &p.codex_config, // ~/.codex/config.toml
+                load_hint: None,
+                hook_streaming: false,
+                hook_command_style: HookCommandStyle::ArgsArray, // ignored by ClaudeTomlHooks
+            },
+            Surface {
+                mechanism: WireMechanism::TomlMcp,
+                config_file: |p| &p.codex_config, // same file
+                load_hint: Some("start a new Codex session or run `codex mcp list` to verify"),
+                hook_streaming: false,
+                hook_command_style: HookCommandStyle::ArgsArray, // ignored by TomlMcp
+            },
+        ],
         docs: &[
             DocRef {
                 topic: "hooks",
@@ -211,9 +232,13 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 topic: "app-server",
                 url: "https://developers.openai.com/codex/app-server",
             },
+            DocRef {
+                topic: "mcp",
+                url: "https://developers.openai.com/codex/mcp",
+            },
         ],
         verified_client_version: "0.142.5",
-        verified_on: "2026-07-08",
+        verified_on: "2026-07-10",
     },
     ClientSpec {
         target: WireTarget::QwenCode,
@@ -270,6 +295,46 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         ],
         verified_client_version: "0.19.7",
         verified_on: "2026-07-07",
+    },
+    ClientSpec {
+        target: WireTarget::Grok,
+        display_name: "Grok",
+        kind: ClientKind::TerminalCli,
+        present: |p| p.grok_dir.exists(),
+        detect_dir: |p| &p.grok_dir,
+        gate_on_presence: true,
+        // Grok (Grok Build) uses TOML for MCP servers under `[mcp_servers.<name>]` in
+        // `~/.grok/config.toml` (and project `.grok/config.toml`). It has strong
+        // Claude Code compatibility (reads `~/.claude.json`, `.claude/settings.json`,
+        // CLAUDE.md etc.), so `wire claude_code` already provides MCP + some hook
+        // coverage. This native entry registers the stdio DontSpeak MCP server
+        // directly in Grok's preferred TOML location.
+        //
+        // Hooks for Grok live in separate `~/.grok/hooks/*.json` files (or project
+        // equivalents) using a Claude-compatible event contract (SessionStart,
+        // UserPromptSubmit, Stop, Notification, ...). Full native hooks wiring is
+        // deferred; the existing ClaudeJsonHooks surface via compat is sufficient
+        // for initial narration support (end-of-turn via Stop + UserPromptSubmit
+        // for narration spec). No `MessageDisplay` streaming hook is documented yet.
+        surfaces: &[Surface {
+            mechanism: WireMechanism::TomlMcp,
+            config_file: |p| &p.grok_config,
+            load_hint: Some("start a new Grok session or run `grok mcp list` / `grok inspect`"),
+            hook_streaming: false,
+            hook_command_style: HookCommandStyle::ArgsArray, // ignored for MCP
+        }],
+        docs: &[
+            DocRef {
+                topic: "mcp",
+                url: "https://docs.x.ai/build/features/mcp-servers",
+            },
+            DocRef {
+                topic: "hooks",
+                url: "https://docs.x.ai/build/features/hooks",
+            },
+        ],
+        verified_client_version: "0.2.93",
+        verified_on: "2026-07-10",
     },
 ];
 

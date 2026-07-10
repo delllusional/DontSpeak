@@ -300,7 +300,7 @@ static TOOLS: &[Tool] = &[
         params: &[
             p(
                 "target",
-                PType::Enum(&["narration_spec", "claude_code", "codex", "qwen_code"]),
+                PType::Enum(&["narration_spec", "claude_code", "codex", "qwen_code", "grok"]),
                 true,
                 WIRE_TARGET,
             ),

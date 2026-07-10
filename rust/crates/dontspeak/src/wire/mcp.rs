@@ -118,17 +118,77 @@ pub fn apply(target: &Target, remove: bool, print_only: bool) -> i32 {
     code
 }
 
+/// Same as `apply` but for TOML-based MCP configs (Grok `~/.grok/config.toml`).
+/// Uses `ds_config` TOML shapers and `WriteBody::Str` for format-preserving write.
+pub fn apply_toml(target: &Target, remove: bool, print_only: bool) -> i32 {
+    let tool = target.tool;
+    let cfg = target.config;
+
+    if !remove && !print_only && !target.present {
+        eprintln!("{tool}: {}; skipping registration", target.absent_hint);
+        return 0;
+    }
+    if remove && !print_only && !cfg.exists() {
+        return 0;
+    }
+
+    let existing = std::fs::read_to_string(cfg).unwrap_or_default();
+
+    let merged = if remove {
+        match ds_config::strip_mcp_server_toml(&existing, crate::SERVER_NAME) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{tool}: {e}");
+                return 1;
+            }
+        }
+    } else {
+        let Some(cmd) = io::resolve_dontspeak_bin() else {
+            eprintln!("{tool}: could not resolve the dontspeak binary path");
+            return 1;
+        };
+        match ds_config::merge_mcp_server_toml(&existing, crate::SERVER_NAME, &cmd, &[]) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{tool}: {e}");
+                return 1;
+            }
+        }
+    };
+
+    if print_only {
+        println!("// {}\n{}", cfg.display(), merged);
+        return 0;
+    }
+
+    let action = if remove {
+        "removed dontspeak MCP server from"
+    } else {
+        "registered dontspeak MCP server ->"
+    };
+    // "toml" label is informational; the actual write uses Str + atomic_write_str
+    let code = io::backup_then_write(tool, cfg, "toml", &WriteBody::Str(&merged), action);
+    if code == 0 && !remove {
+        eprintln!("{tool}: {}", target.load_hint);
+    }
+    code
+}
+
 // Known, separate, OUT-OF-SCOPE leak (not fixed by the io.rs/hooks.rs test-isolation pass):
-// `apply` with `remove: false` calls `io::resolve_dontspeak_bin()` (unparameterized — see that
-// fn's doc comment), which resolves the REAL `ds_config::Paths::resolve()` (real `$HOME`) and
-// does a real, READ-ONLY `.exists()` check against `$HOME/.local/bin/dontspeak` on the machine
-// running the test. `registers_into_missing_file_then_is_idempotent`,
-// `preserves_sibling_servers_and_unrelated_top_level_keys`, and
-// `backs_up_before_overwriting_an_existing_file` below all call `apply(..., present: true, remove:
-// false, ...)` and so hit this path. Benign (read-only, never asserted on) and identical in
-// character to the leaks fixed elsewhere in this crate — flagged here rather than fixed because
-// `apply`/`Target` don't yet take an injectable `Paths` param; a future pass could add one
-// alongside `io::resolve_dontspeak_bin_at`.
+// `apply`/`apply_toml` with `remove: false` call `io::resolve_dontspeak_bin()` (unparameterized —
+// see that fn's doc comment), which resolves the REAL `ds_config::Paths::resolve()` (real
+// `$HOME`) and does a real, READ-ONLY `.exists()` check against `$HOME/.local/bin/dontspeak` on
+// the machine running the test. `registers_into_missing_file_then_is_idempotent`,
+// `preserves_sibling_servers_and_unrelated_top_level_keys`,
+// `backs_up_before_overwriting_an_existing_file`, and their `apply_toml` mirrors
+// (`toml_registers_into_missing_file_then_is_idempotent`,
+// `toml_preserves_sibling_tables_and_unrelated_top_level_keys`,
+// `toml_backs_up_before_overwriting_an_existing_file`, `malformed_toml_file_is_left_untouched_and_errors_on_merge`)
+// below all call `apply`/`apply_toml(..., present: true, remove: false, ...)` and so hit this
+// path. Benign (read-only, never asserted on) and identical in character to the leaks fixed
+// elsewhere in this crate — flagged here rather than fixed because `apply`/`apply_toml`/`Target`
+// don't yet take an injectable `Paths` param; a future pass could add one alongside
+// `io::resolve_dontspeak_bin_at`.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +320,127 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".claude.json");
         assert_eq!(apply(&target(&cfg, true), true, false), 0);
+        assert!(!cfg.exists());
+    }
+
+    // `apply_toml` mirrors of the `apply` (JSON) tests above — same `target()` helper (it's
+    // format-agnostic), just reading the written file as raw TOML text instead of JSON.
+
+    #[test]
+    fn toml_registers_into_missing_file_then_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        assert_eq!(apply_toml(&target(&cfg, true), false, false), 0);
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(text.contains("[mcp_servers.DontSpeak]"));
+        assert!(text.contains("command ="));
+        assert!(!text.contains("args ="), "stdio entry carries no args key");
+        // Re-wire: still exactly one DontSpeak table (idempotent re-point, not a duplicate).
+        assert_eq!(apply_toml(&target(&cfg, true), false, false), 0);
+        assert_eq!(
+            std::fs::read_to_string(&cfg)
+                .unwrap()
+                .matches("[mcp_servers.DontSpeak]")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn toml_preserves_sibling_tables_and_unrelated_top_level_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg,
+            "theme = \"dark\"\n\n[mcp_servers.keepme]\ncommand = \"/usr/bin/keep\"\n",
+        )
+        .unwrap();
+        assert_eq!(apply_toml(&target(&cfg, true), false, false), 0);
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(text.contains("[mcp_servers.DontSpeak]"));
+        assert!(text.contains("[mcp_servers.keepme]"));
+        assert!(text.contains("command = \"/usr/bin/keep\""));
+        assert!(text.contains("theme = \"dark\""));
+    }
+
+    #[test]
+    fn toml_remove_strips_only_ours_and_keeps_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg,
+            "[mcp_servers.DontSpeak]\ncommand = \"/old/dontspeak\"\n\n[mcp_servers.keepme]\ncommand = \"/usr/bin/keep\"\n",
+        )
+        .unwrap();
+        assert_eq!(apply_toml(&target(&cfg, true), true, false), 0);
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(!text.contains("DontSpeak"));
+        assert!(text.contains("[mcp_servers.keepme]"));
+    }
+
+    /// Regression for the bug this PR shipped with: `strip_mcp_server_toml` used to swallow a
+    /// parse failure into `Ok(existing)`, so `--remove` against a malformed config.toml printed
+    /// "removed dontspeak MCP server from ..." and returned 0 without ever touching the file.
+    /// Must match `apply`'s JSON convention: a hard error (1), file left byte-identical.
+    #[test]
+    fn malformed_toml_file_is_left_untouched_and_errors_on_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let bad = "this is not [ valid toml";
+        std::fs::write(&cfg, bad).unwrap();
+        assert_eq!(apply_toml(&target(&cfg, true), true, false), 1);
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), bad);
+    }
+
+    #[test]
+    fn malformed_toml_file_is_left_untouched_and_errors_on_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let bad = "this is not [ valid toml";
+        std::fs::write(&cfg, bad).unwrap();
+        assert_eq!(apply_toml(&target(&cfg, true), false, false), 1);
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), bad);
+    }
+
+    #[test]
+    fn toml_print_only_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        assert_eq!(apply_toml(&target(&cfg, true), false, true), 0);
+        assert!(!cfg.exists(), "preview must not create the file");
+    }
+
+    #[test]
+    fn toml_absent_client_skips_without_scattering_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        assert_eq!(apply_toml(&target(&cfg, false), false, false), 0);
+        assert!(!cfg.exists());
+        assert_eq!(apply_toml(&target(&cfg, false), false, true), 0);
+        assert!(!cfg.exists());
+    }
+
+    #[test]
+    fn toml_backs_up_before_overwriting_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "[mcp_servers]\n").unwrap();
+        assert_eq!(apply_toml(&target(&cfg, true), false, false), 0);
+        let has_bak = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().contains(".bak."));
+        assert!(
+            has_bak,
+            "a timestamped backup is written before the overwrite"
+        );
+    }
+
+    #[test]
+    fn toml_remove_on_missing_file_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        assert_eq!(apply_toml(&target(&cfg, true), true, false), 0);
         assert!(!cfg.exists());
     }
 }

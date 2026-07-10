@@ -615,6 +615,8 @@ pub enum WireTarget {
     Codex,
     /// Qwen Code's voice hooks + MCP server in `~/.qwen/settings.json`.
     QwenCode,
+    /// Grok (Grok Build) CLI's MCP server in `~/.grok/config.toml`.
+    Grok,
 }
 
 impl WireTarget {
@@ -625,6 +627,7 @@ impl WireTarget {
         WireTarget::ClaudeCode,
         WireTarget::Codex,
         WireTarget::QwenCode,
+        WireTarget::Grok,
     ];
 
     /// The wire-able CLIENTS: [`ALL`](Self::ALL) minus [`NarrationSpec`](Self::NarrationSpec)
@@ -634,6 +637,7 @@ impl WireTarget {
         WireTarget::ClaudeCode,
         WireTarget::Codex,
         WireTarget::QwenCode,
+        WireTarget::Grok,
     ];
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -642,6 +646,7 @@ impl WireTarget {
             "claude_code" => Some(WireTarget::ClaudeCode),
             "codex" => Some(WireTarget::Codex),
             "qwen_code" => Some(WireTarget::QwenCode),
+            "grok" => Some(WireTarget::Grok),
             _ => None,
         }
     }
@@ -653,6 +658,7 @@ impl WireTarget {
             WireTarget::ClaudeCode => "claude_code",
             WireTarget::Codex => "codex",
             WireTarget::QwenCode => "qwen_code",
+            WireTarget::Grok => "grok",
         }
     }
 }

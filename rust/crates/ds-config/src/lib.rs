@@ -69,6 +69,7 @@ pub use voice::{CaptureGain, ConfigChange, DEFAULT_KOKORO_VOICE, HandsFreePhrase
 pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};
 pub use wire::hooks::{HookSpec, HooksMergeError, INSTALLED_BINS, merge_hooks, strip_hooks};
 pub use wire::json_mcp::{merge_mcp_server, strip_mcp_server};
+pub use wire::toml_mcp::{merge_mcp_server_toml, strip_mcp_server_toml};
 pub use wire::registry::{
     CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, HookCommandStyle, Surface, WireMechanism,
     client_spec,
