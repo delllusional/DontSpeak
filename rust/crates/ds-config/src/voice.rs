@@ -383,7 +383,7 @@ fn default_enabled() -> bool {
     true
 }
 /// The default reply-ding sound: the OS's bundled chime BY NAME (resolved to the real file in
-/// the sounds folder by `earcon::resolve_cue`), so the ding rings out of the box per platform.
+/// the sounds folder by `ds_earcon::resolve_cue`), so the ding rings out of the box per platform.
 /// Windows "ding" (C:\Windows\Media\ding.wav), macOS "Tink" (the historical chime), Linux
 /// "message" (freedesktop); empty on other platforms (off).
 fn default_earcon_reply() -> String {

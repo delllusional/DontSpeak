@@ -1,0 +1,23 @@
+[package]
+name = "ds-earcon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Audible earcons for DontSpeak: OS bundled-sound introspection + cue resolution — split out of ds-config (issue #6)."
+
+[target.'cfg(target_os = "macos")'.dependencies]
+directories = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Test-only: pins the shipped default earcon sound (ds_config::VoiceConfig::default()) to the
+# platform-chime expectation this crate's own test asserts. ds-config has no dependency on
+# ds-earcon, so this is a leaf edge, not a cycle.
+ds-config = { workspace = true }
+
+[lints]
+workspace = true

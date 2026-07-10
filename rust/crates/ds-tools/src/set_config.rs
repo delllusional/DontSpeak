@@ -3,9 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
+use ds_config::{
     CancelSpeechScope, CaptureGain, DiarizerProvider, NarrateKind, Provider, SttEngine, TrayKind,
-    TtsEngine, VoiceConfig,
+    TtsEngine, VoiceConfig, de_opt_pref_stt_engine, de_opt_pref_tts_engine, default_provider,
+    normalize_tray_indicator,
 };
 
 /// The fields settable through the `set_config` MCP tool — the SINGLE source of
@@ -26,9 +27,9 @@ pub struct SetConfigArgs {
     pub tts_rate: Option<f32>,
     pub tts_built_in_voices: Option<Vec<String>>,
     pub tts_system_voice: Option<String>,
-    #[serde(deserialize_with = "crate::enums::de_opt_pref_tts_engine")]
+    #[serde(deserialize_with = "de_opt_pref_tts_engine")]
     pub tts_engine: Option<Vec<TtsEngine>>,
-    #[serde(deserialize_with = "crate::enums::de_opt_pref_stt_engine")]
+    #[serde(deserialize_with = "de_opt_pref_stt_engine")]
     pub stt_engine: Option<Vec<SttEngine>>,
     pub diarizer_provider: Option<Vec<DiarizerProvider>>,
     pub clustering_threshold: Option<f32>,
@@ -143,7 +144,7 @@ impl SetConfigArgs {
                 }
             }
             if uniq.is_empty() {
-                uniq = crate::enums::default_provider();
+                uniq = default_provider();
             }
             let toks: Vec<&str> = uniq.iter().map(|p| p.as_str()).collect();
             changes.push(format!("provider=[{}]", toks.join(",")));
@@ -224,7 +225,7 @@ impl SetConfigArgs {
         }
         if let Some(kinds) = tray_indicator {
             // Normalize to one token per state (animated form wins); `[]` = never color.
-            let norm = crate::enums::normalize_tray_indicator(kinds);
+            let norm = normalize_tray_indicator(kinds);
             let toks: Vec<&str> = norm.iter().map(|k| k.as_str()).collect();
             changes.push(format!("tray_indicator=[{}]", toks.join(",")));
             cfg.tray_indicator = norm;

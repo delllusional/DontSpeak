@@ -10,11 +10,10 @@ publish.workspace = true
 description = "DontSpeak's single MCP tool catalog, shared by the MCP server and the app FFI so the list never drifts."
 
 [dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
-
-# Test-only: the drift guard compares the set_config inputSchema against the field
-# set of ds_config::SetConfigArgs. Dev-only so the catalog crate stays a leaf at build.
-[dev-dependencies]
+# The typed SetConfigArgs surface (its fields, enums, serde attrs) lives here now (issue #6),
+# so the catalog crate depends on ds-config at build time.
 ds-config = { workspace = true }
 
 [lints]

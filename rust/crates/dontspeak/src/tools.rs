@@ -352,7 +352,7 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
     // SetConfigArgs. `deny_unknown_fields` rejects typos; enum/number/`capture_gain`
     // values are validated strictly there. What's settable == that struct's fields, so
     // this handler and the JSON schema (ds-tools) cannot drift apart.
-    let parsed: ds_config::SetConfigArgs = serde_json::from_value(args.clone())
+    let parsed: ds_tools::SetConfigArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid set_config arguments: {e}"))?;
 
     // System STT opt-in gate: making `system` the ACTIVE dictation engine must be verified by

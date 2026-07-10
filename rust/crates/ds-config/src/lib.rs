@@ -41,11 +41,9 @@
 mod enums;
 mod brand;
 mod claude_code;
-mod earcon;
 mod narration;
 mod paths;
 mod pidfile;
-mod set_config;
 pub mod speakers;
 mod voice;
 mod wire;
@@ -55,10 +53,10 @@ mod wire;
 // ── Flat public re-export facade — preserves every `ds_config::X` path ──────────
 pub use brand::{DISPLAY_NAME, VERSION, name_version};
 pub use claude_code::{ClaudeCodeVoice, read_claude_code_voice};
-pub use earcon::{EarconEvent, SystemSound, resolve_cue, system_sounds};
 pub use enums::{
     CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Provider, RealizedProvider,
-    SttEngine, TrayKind, TtsEngine, WireTarget, intel_mac_builtin_ort_available,
+    SttEngine, TrayKind, TtsEngine, WireTarget, de_opt_pref_stt_engine, de_opt_pref_tts_engine,
+    default_provider, intel_mac_builtin_ort_available, normalize_tray_indicator,
     provider_pref_wants_gpu,
 };
 pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
@@ -66,7 +64,6 @@ pub use paths::{
     Paths, brew_onnxruntime_dylib, coreml_dir, coreml_model_present, data_dir, model_dir,
 };
 pub use pidfile::{evict_stale_engine, is_engine_pid_alive, is_pid_alive, read_engine_pid};
-pub use set_config::SetConfigArgs;
 pub use speakers::{Speaker, SpeakerStore};
 pub use voice::{CaptureGain, ConfigChange, DEFAULT_KOKORO_VOICE, HandsFreePhrases, VoiceConfig};
 pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};

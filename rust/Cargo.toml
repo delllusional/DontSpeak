@@ -6,6 +6,10 @@ members = [
     # in this workspace, so ds-config can depend on it for its own internal
     # diagnostics without a cycle.
     "crates/ds-log",
+    # Audible earcons (OS bundled-sound introspection + cue resolution), split out of
+    # ds-config (issue #6) — depends on nothing in this workspace but `directories`
+    # (macOS-only) so ds-config doesn't need it for earcon resolution.
+    "crates/ds-earcon",
     "crates/ds-ipc",
     "crates/ds-proc",
     "crates/ds-platform",
@@ -180,6 +184,7 @@ objc2-foundation = "=0.3.2"
 # internal crates
 ds-config = { path = "crates/ds-config" }
 ds-log = { path = "crates/ds-log" }
+ds-earcon = { path = "crates/ds-earcon" }
 ds-ipc = { path = "crates/ds-ipc" }
 ds-proc = { path = "crates/ds-proc" }
 ds-platform = { path = "crates/ds-platform" }

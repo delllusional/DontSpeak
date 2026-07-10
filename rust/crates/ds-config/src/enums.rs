@@ -84,7 +84,7 @@ impl SttEngine {
     /// absent on x86_64 macOS; `system` (Apple's on-device recognizer) is macOS-only;
     /// `claude_code` always works (it delegates to Claude Code, no native deps). `off` never
     /// appears in a resolved ladder.
-    pub(crate) fn is_stt_usable(self) -> bool {
+    pub fn is_stt_usable(self) -> bool {
         // Intel macOS: built-in (Parakeet) ONNX STT is a RUNTIME capability (an onnxruntime dylib —
         // Homebrew keg / ORT_DYLIB_PATH), invisible to the static `(os, arch)` matrix. Absent ⇒ this
         // rung is skipped and the ladder falls through to `claude_code`.
@@ -150,7 +150,7 @@ impl TtsEngine {
     /// [`Provider::is_tts_usable`]). `built_in` (Kokoro) needs the ONNX/Core-ML stack, absent
     /// on x86_64 macOS; `system` (macOS `say` / Windows SAPI) is available on macOS + Windows
     /// (no system synth wired on Linux).
-    pub(crate) fn is_tts_usable(self) -> bool {
+    pub fn is_tts_usable(self) -> bool {
         // Intel macOS: built-in (Kokoro) ONNX TTS is a RUNTIME capability (an onnxruntime dylib —
         // Homebrew keg / ORT_DYLIB_PATH), invisible to the static `(os, arch)` matrix. Absent ⇒ this
         // rung is skipped and the ladder falls through to `system` (`say`).
@@ -500,7 +500,7 @@ impl TrayKind {
 /// Normalize a tray-indicator set to at most ONE token per state, in canonical order
 /// (stt, then tts), with the ANIMATED form winning if both forms of a state are present.
 /// `[]` stays empty (never color). Used by both the config deserialize and `set_config`.
-pub(crate) fn normalize_tray_indicator(kinds: Vec<TrayKind>) -> Vec<TrayKind> {
+pub fn normalize_tray_indicator(kinds: Vec<TrayKind>) -> Vec<TrayKind> {
     let mut stt: Option<bool> = None; // Some(animated?)
     let mut tts: Option<bool> = None;
     for k in kinds {
@@ -739,7 +739,7 @@ serialize_as_str!(NarrateKind);
 /// `fail_open_de!` deserializers above — and deliberately so. The config FILE wants
 /// fail-open (a hand-edited typo shouldn't brick the whole block), but `set_config`
 /// wants strict (the caller should be TOLD a value was rejected, not silently snapped
-/// to a default). Only [`crate::SetConfigArgs`] uses this impl; `VoiceConfig`'s fields pin
+/// to a default). Only `SetConfigArgs` (in `ds_tools`) uses this impl; `VoiceConfig`'s fields pin
 /// `deserialize_with = "de_*"`, so the file path is unchanged.
 macro_rules! strict_de {
     ($ty:ty, $valid:literal) => {
@@ -824,7 +824,7 @@ where
 /// CPU. Each engine walks it and picks the first rung usable on this platform (see
 /// [`crate::VoiceConfig::resolved_stt_provider`] / `resolved_tts_provider`). `OrtCoreMl` is
 /// intentionally NOT in the default — it's explicit-only (slower than CPU for Kokoro).
-pub(crate) fn default_provider() -> Vec<Provider> {
+pub fn default_provider() -> Vec<Provider> {
     vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]
 }
 
@@ -1079,7 +1079,7 @@ pub(crate) fn se_stt_engine_pref<S: serde::Serializer>(
 /// enum itself carries no `Off` variant). Any other shape (array, wrong type) or an
 /// unrecognized token is a hard ERROR (unlike the fail-open config-file path). `None`
 /// when the field is absent.
-pub(crate) fn de_opt_pref_tts_engine<'de, D>(d: D) -> Result<Option<Vec<TtsEngine>>, D::Error>
+pub fn de_opt_pref_tts_engine<'de, D>(d: D) -> Result<Option<Vec<TtsEngine>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1098,7 +1098,7 @@ where
 
 /// STRICT (JSON) deserialize for `set_config`'s `stt_engine` PREFERENCE — see
 /// [`de_opt_pref_tts_engine`]; same rules, STT tokens.
-pub(crate) fn de_opt_pref_stt_engine<'de, D>(d: D) -> Result<Option<Vec<SttEngine>>, D::Error>
+pub fn de_opt_pref_stt_engine<'de, D>(d: D) -> Result<Option<Vec<SttEngine>>, D::Error>
 where
     D: Deserializer<'de>,
 {

@@ -231,13 +231,17 @@ pub(crate) fn spawn_ipc_server(
                     // the configured-or-introspected sound and play it on the warm child's audio
                     // path — OUTSIDE the TTS queue, so it never waits behind queued narration.
                     // Skipped when earcons are off or muted, or the sound can't be resolved.
-                    if let Some(ev) = ds_config::EarconEvent::parse(&event) {
+                    if let Some(ev) = ds_earcon::EarconEvent::parse(&event) {
                         // The configured sound IS the on/off: `resolve_cue` returns None when
                         // this event's sound is empty or unresolvable, so an unset cue is simply
                         // silent. Still honor global mute.
                         let cfg = VoiceConfig::load(&paths);
                         if !shared.tts.is_muted()
-                            && let Some(path) = ds_config::resolve_cue(&cfg, ev)
+                            && let Some(path) = ds_earcon::resolve_cue(
+                                &cfg.earcon_reply_sound,
+                                &cfg.earcon_needs_input_sound,
+                                ev,
+                            )
                         {
                             shared.tts.cue(&path.to_string_lossy());
                         }

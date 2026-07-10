@@ -11,15 +11,18 @@
 //!   object) so the authored order survives to the UI.
 //!
 //! The dispatch (actually running a tool) lives in the MCP server; this crate is the
-//! catalog only — pure data, no I/O. It is a BUILD LEAF (no `ds-config` dep); the
-//! enum tokens are authored as strings and a dev-only test pins them to the config types.
+//! catalog only — pure data, no I/O. It depends on `ds-config` for the typed
+//! `SetConfigArgs` surface and the enum tokens it pins its authored strings against.
 
 use serde_json::{Map, Value, json};
 
 // The description strings live in ONE separate file (no structure, no logic) so they're easy to
 // read/edit in isolation; `TOOLS` below references them by name.
 mod descriptions;
+mod set_config;
 use descriptions::*;
+
+pub use set_config::SetConfigArgs;
 
 /// Diarization (`diarize`/`manage_speakers` + set_config's 4 diarization params) is
 /// implemented but not ready for general users yet — flip to `true` when it's tested
@@ -677,13 +680,14 @@ mod tests {
     }
 
     /// DRIFT GUARD: the GENERATED `set_config` schema must match the fields of
-    /// `ds_config::SetConfigArgs` — the struct the handler deserializes into — by NAME and
+    /// `crate::SetConfigArgs` — the struct the handler deserializes into — by NAME and
     /// declared TYPE. The fully-populated literal is exhaustive (no `..`), so a NEW struct
     /// field breaks this at COMPILE time; the names come from serde, so this can't go stale.
     #[test]
     fn set_config_schema_matches_args() {
+        use crate::SetConfigArgs;
         use ds_config::{
-            CancelSpeechScope, CaptureGain, DiarizerProvider, Provider, SetConfigArgs, SttEngine,
+            CancelSpeechScope, CaptureGain, DiarizerProvider, Provider, SttEngine,
             TrayKind, TtsEngine,
         };
 

@@ -16,8 +16,6 @@
 
 use std::path::PathBuf;
 
-use crate::VoiceConfig;
-
 /// The distinct eyes-free cues. `ReplyDone` = Claude finished its turn (wired to the Stop
 /// hook); `NeedsInput` = Claude is waiting on you — a permission prompt or idle (wired to the
 /// Notification hook).
@@ -46,10 +44,10 @@ impl EarconEvent {
     }
 
     /// The configured sound for this event (trimmed). Empty = this cue is OFF.
-    fn sound_in(self, cfg: &VoiceConfig) -> &str {
+    fn sound_in<'a>(self, reply_sound: &'a str, needs_input_sound: &'a str) -> &'a str {
         match self {
-            Self::ReplyDone => cfg.earcon_reply_sound.trim(),
-            Self::NeedsInput => cfg.earcon_needs_input_sound.trim(),
+            Self::ReplyDone => reply_sound.trim(),
+            Self::NeedsInput => needs_input_sound.trim(),
         }
     }
 }
@@ -164,8 +162,12 @@ pub fn system_sounds() -> Vec<SystemSound> {
 /// against the enumerated system sounds. Anything that doesn't resolve to an existing file is
 /// `None` = effectively off (e.g. `"ding"` resolves on Windows but not on macOS/Linux, which
 /// have no `ding.*` bundled sound — set an OS-appropriate name or a path there).
-pub fn resolve_cue(cfg: &VoiceConfig, event: EarconEvent) -> Option<PathBuf> {
-    let sound = event.sound_in(cfg);
+pub fn resolve_cue(
+    reply_sound: &str,
+    needs_input_sound: &str,
+    event: EarconEvent,
+) -> Option<PathBuf> {
+    let sound = event.sound_in(reply_sound, needs_input_sound);
     if sound.is_empty() {
         return None; // no sound set ⇒ this cue is off
     }
@@ -199,19 +201,16 @@ mod tests {
     #[test]
     fn empty_sound_is_off() {
         // An explicitly-empty sound ⇒ the cue is off, regardless of any installed OS sounds.
-        let cfg = VoiceConfig {
-            earcon_reply_sound: String::new(),
-            earcon_needs_input_sound: "   ".into(), // whitespace trims to empty ⇒ off
-            ..VoiceConfig::default()
-        };
-        assert_eq!(resolve_cue(&cfg, EarconEvent::ReplyDone), None);
-        assert_eq!(resolve_cue(&cfg, EarconEvent::NeedsInput), None);
+        assert_eq!(resolve_cue("", "   ", EarconEvent::ReplyDone), None);
+        assert_eq!(resolve_cue("", "   ", EarconEvent::NeedsInput), None);
     }
 
     #[test]
     fn default_reply_sound_is_the_os_chime() {
-        // The shipped default is the OS's bundled chime by NAME — on out of the box.
-        let cfg = VoiceConfig::default();
+        // The shipped default is the OS's bundled chime by NAME — on out of the box. Pin
+        // against ds_config::VoiceConfig's actual default (not just a hardcoded literal here)
+        // so a typo in ds-config's default_earcon_reply() would fail THIS test.
+        let cfg = ds_config::VoiceConfig::default();
         let expected_name = if cfg!(target_os = "macos") {
             "Tink" // /System/Library/Sounds/Tink.aiff (the historical macOS chime)
         } else if cfg!(target_os = "windows") {
@@ -229,10 +228,24 @@ mod tests {
             .into_iter()
             .find(|s| s.name.eq_ignore_ascii_case(expected_name))
             .map(|s| s.path);
-        assert_eq!(resolve_cue(&cfg, EarconEvent::ReplyDone), want);
+        assert_eq!(
+            resolve_cue(
+                &cfg.earcon_reply_sound,
+                &cfg.earcon_needs_input_sound,
+                EarconEvent::ReplyDone
+            ),
+            want
+        );
         // The needs-input cue ships off (empty) — like the historically-unwired earcon.
         assert_eq!(cfg.earcon_needs_input_sound, "");
-        assert_eq!(resolve_cue(&cfg, EarconEvent::NeedsInput), None);
+        assert_eq!(
+            resolve_cue(
+                &cfg.earcon_reply_sound,
+                &cfg.earcon_needs_input_sound,
+                EarconEvent::NeedsInput
+            ),
+            None
+        );
     }
 
     #[test]
@@ -243,17 +256,22 @@ mod tests {
         let snd = dir.path().join("ding.wav");
         std::fs::write(&snd, b"RIFF....").unwrap();
 
-        let cfg = VoiceConfig {
-            earcon_reply_sound: snd.to_string_lossy().into_owned(),
-            earcon_needs_input_sound: dir
-                .path()
-                .join("missing.wav")
-                .to_string_lossy()
-                .into_owned(),
-            ..VoiceConfig::default()
-        };
-        assert_eq!(resolve_cue(&cfg, EarconEvent::ReplyDone), Some(snd));
-        assert_eq!(resolve_cue(&cfg, EarconEvent::NeedsInput), None);
+        assert_eq!(
+            resolve_cue(
+                &snd.to_string_lossy(),
+                &dir.path().join("missing.wav").to_string_lossy(),
+                EarconEvent::ReplyDone
+            ),
+            Some(snd.clone())
+        );
+        assert_eq!(
+            resolve_cue(
+                &snd.to_string_lossy(),
+                &dir.path().join("missing.wav").to_string_lossy(),
+                EarconEvent::NeedsInput
+            ),
+            None
+        );
     }
 
     #[test]

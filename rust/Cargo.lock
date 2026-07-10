@@ -881,6 +881,7 @@ name = "dontspeakd"
 version = "0.2.5-dev"
 dependencies = [
  "ds-config",
+ "ds-earcon",
  "ds-engines",
  "ds-helper-proto",
  "ds-i18n",
@@ -944,6 +945,15 @@ dependencies = [
  "ds-tts",
  "httpmock",
  "serde_json",
+]
+
+[[package]]
+name = "ds-earcon"
+version = "0.2.5-dev"
+dependencies = [
+ "directories",
+ "ds-config",
+ "tempfile",
 ]
 
 [[package]]
@@ -1097,6 +1107,7 @@ name = "ds-tools"
 version = "0.2.5-dev"
 dependencies = [
  "ds-config",
+ "serde",
  "serde_json",
 ]
 
