@@ -1,4 +1,4 @@
-//! Hook-wiring building blocks for the [`wire`](crate::wire) orchestrator — the two hook
+//! Hook-wiring building blocks for the [`wire`](crate) orchestrator — the two hook
 //! MECHANISMS of the client registry (`ds_config::WireMechanism`): Claude-contract hooks in a
 //! JSON settings file ([`claude_json_hooks`] — Claude Code's `~/.claude/settings.json`) and the
 //! same contract in a format-preserved TOML config ([`claude_toml_hooks`] — Codex's
@@ -132,6 +132,8 @@ pub(crate) fn claude_json_hooks(
         return 0; // malformed existing file is the user's own — leave it, don't fail the run,
         // matching `claude_toml_hooks`'s convention below.
     };
+    // Keep a copy for the steady-state short-circuit below (strip/merge consume `existing`).
+    let before = existing.clone();
 
     let merged = if remove {
         Ok(ds_config::strip_hooks(existing))
@@ -176,6 +178,11 @@ pub(crate) fn claude_json_hooks(
             }
         }
     } else {
+        // Steady state (already wired / nothing to strip): write NOTHING and create NO `.bak`.
+        // LOAD-BEARING — the engine runs this every boot. (Order-independent `Value` equality.)
+        if merged == before {
+            return 0;
+        }
         io::backup_then_write(
             "wire",
             cfg,
@@ -290,6 +297,18 @@ pub(crate) fn grok_json_hooks(
             cfg.display(),
             serde_json::to_string_pretty(&v).unwrap_or_default()
         );
+        return 0;
+    }
+
+    // Steady state (already wired, shape-identical): write NOTHING and create NO `.bak`.
+    // LOAD-BEARING — the engine runs this every boot. A missing/malformed file compares
+    // unequal (order-independent `Value` equality), so a real first wire still writes.
+    if std::fs::read_to_string(cfg)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .as_ref()
+        == Some(&v)
+    {
         return 0;
     }
 

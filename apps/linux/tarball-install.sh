@@ -38,7 +38,7 @@ fi
 if [ -f "$HERE/uninstall.sh" ]; then
   install -m0755 "$HERE/uninstall.sh" "$BIN/dontspeak-uninstall"
 fi
-"$BIN/dontspeak" wire --all 2>/dev/null || echo "(wire skipped)"
+"$BIN/dontspeak" wire --reconcile 2>/dev/null || echo "(wire skipped)"
 echo
 echo "Installed to $BIN. To grant /dev/uinput (synthetic keys), once:"
 echo "  sudo install -m0644 '$HERE/udev/99-ds-input.rules' /etc/udev/rules.d/99-ds-input.rules"

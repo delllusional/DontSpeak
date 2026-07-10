@@ -1,6 +1,6 @@
 # Contributing to DontSpeak
 
-The engine and CLI are Rust (`rust/`, 15 crates, one workspace); each OS gets a thin native
+The engine and CLI are Rust (`rust/`, 22 crates, one workspace); each OS gets a thin native
 host — SwiftUI (`apps/macos/`), WinUI 3 (`apps/windows/winui/`), GTK4 (`apps/linux/gtk/`).
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit, and
 [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md) before testing a change against the *running*

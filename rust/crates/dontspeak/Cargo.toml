@@ -24,6 +24,9 @@ path = "src/main.rs"
 # stance).
 [dependencies]
 ds-config = { workspace = true }
+# The client-wiring orchestrator + writers (extracted from this crate). `dontspeak wire`
+# calls `ds_wire::run`; the engine (dontspeakd) shares the same `ds_wire::reconcile`.
+ds-wire = { workspace = true }
 # The unified activity log — hook/mcp diagnostics, split out of ds-config (issue #6).
 ds-log = { workspace = true }
 log = { workspace = true }
@@ -46,7 +49,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-# Temp config files for the wire_mcp (MCP registration) tests.
+# Tempdir-rooted Paths/config files for the tools tests (set_config / list_voices / status).
 tempfile = { workspace = true }
 
 [lints]

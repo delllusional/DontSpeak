@@ -7,7 +7,7 @@
   Downloads the self-contained portable zip for this arch from the latest GitHub Release,
   verifies its SHA-256, extracts it to %LOCALAPPDATA%\Programs\DontSpeak (no elevation, no
   runtime install — .NET + the Windows App SDK are bundled), wires the MCP server + voice
-  hooks into every client (`dontspeak wire --all`), adds a Start-menu shortcut, and launches
+  hooks into every client (`dontspeak wire --reconcile`), adds a Start-menu shortcut, and launches
   the app so the voice models download themselves on first boot. No compiler required.
 
   Programmers who want a from-source build should clone the repo and use the
@@ -65,7 +65,7 @@ $zipUrl = Resolve-Asset $zipPattern -Pattern
 if (-not $zipUrl) { throw "no Windows asset (dontspeak-<ver>-windows-$arch.zip) on the latest release of $repo" }
 Say "Windows $arch -> $zipUrl"
 
-if ($dry) { Write-Host "(dry run) would unzip to %LOCALAPPDATA%\Programs\DontSpeak then wire --all"; return }
+if ($dry) { Write-Host "(dry run) would unzip to %LOCALAPPDATA%\Programs\DontSpeak then wire --reconcile"; return }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("dontspeak-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -129,9 +129,9 @@ try {
       # AND the script races ahead before the wiring lands — leaving Claude Code unwired.
       # Start-Process -Wait blocks on the process handle regardless of subsystem, and -PassThru
       # surfaces the real exit code.
-      $wp = Start-Process -FilePath $cli -ArgumentList 'wire','--all' -Wait -PassThru -WindowStyle Hidden
-      if ($wp.ExitCode -ne 0) { Warn "wire --all reported an issue (exit $($wp.ExitCode))" }
-    } catch { Warn "wire --all reported an issue: $($_.Exception.Message)" }
+      $wp = Start-Process -FilePath $cli -ArgumentList 'wire','--reconcile' -Wait -PassThru -WindowStyle Hidden
+      if ($wp.ExitCode -ne 0) { Warn "wire --reconcile reported an issue (exit $($wp.ExitCode))" }
+    } catch { Warn "wire --reconcile reported an issue: $($_.Exception.Message)" }
   }
   else { Warn "dontspeak.exe not found under $dest — the zip layout may have changed" }
 

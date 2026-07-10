@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ds_config::{Paths, TtsEngine, VoiceConfig, WireTarget};
+use ds_config::{Paths, TtsEngine, VoiceConfig};
 use ds_ipc::{Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,7 +15,6 @@ use serde_json::{Value, json};
 use crate::engine_launch::ensure_engine;
 use crate::mcp::{ok, tool_result};
 use crate::voices::voice_groups;
-use crate::wire;
 
 pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>) -> Value {
     let params = msg.get("params");
@@ -38,13 +37,6 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
         // (or the best-effort Reload nudge). Doesn't require the engine to be up.
         "set_config" => match Paths::resolve() {
             Some(paths) => call_set_config(&paths, &args),
-            None => Err("cannot resolve ~/.claude paths".into()),
-        },
-        // Write a config to disk or register/remove a client integration (no engine needed;
-        // edits client configs via the SAME `wire <client>` orchestrator the installer uses,
-        // and writes the narration spec to the user data dir).
-        "setup_integration" => match Paths::resolve() {
-            Some(paths) => call_wire(&paths, &args),
             None => Err("cannot resolve ~/.claude paths".into()),
         },
         // Read-only introspection: config (settings.json) + live engine state.
@@ -228,124 +220,6 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<St
 
 // ── Persistent config writes (settings.json is the source of truth; the engine is
 //    nudged to apply NOW, falling back to its mtime-watch if it's down) ──────────
-
-/// Register or remove the DontSpeak integration for one AI client, at runtime. SHARED
-/// LOGIC: this is a thin adapter that maps (client, enabled) to the SAME per-client
-/// `wire::run` orchestrator the installers use — never a reimplementation, so install-time and
-/// tool-time wiring can't drift. Each client's wire scopes its own surfaces (Claude Code and
-/// Qwen Code = hooks + MCP, Codex = hooks); `enabled=false` removes only our entries (additive +
-/// backed-up, like the installer).
-fn call_wire(paths: &Paths, args: &Value) -> Result<String, String> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Args {
-        target: String,
-        enabled: bool,
-    }
-    let a: Args =
-        serde_json::from_value(args.clone()).map_err(|e| format!("invalid wire arguments: {e}"))?;
-
-    // One canonical parse of the target token. The unknown-target error references the
-    // canonical set (`WireTarget::ALL`) so the accepted tokens here can't drift from the
-    // `wire` schema enum (which a parity test pins to the same `WireTarget`).
-    let target = WireTarget::parse(&a.target).ok_or_else(|| {
-        let expected = WireTarget::ALL
-            .iter()
-            .map(|t| format!("{:?}", t.as_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("unknown target {:?}; expected one of {expected}", a.target)
-    })?;
-
-    // The narration spec is a CONFIG FILE on disk, not a client wiring — handle it first and
-    // return directly. enabled=true materializes the built-in default to the user-editable
-    // narration-spec.md (without clobbering an existing edited copy); enabled=false removes
-    // the override, reverting to the built-in DEFAULT_NARRATION_SPEC.
-    if target == WireTarget::NarrationSpec {
-        let f = &paths.narration_spec;
-        if a.enabled {
-            if f.exists() {
-                return Ok(format!(
-                    "Narration spec already on disk at {} — edit it to customize the spoken format.",
-                    f.display()
-                ));
-            }
-            if let Some(dir) = f.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| format!("create config dir: {e}"))?;
-            }
-            std::fs::write(f, ds_config::DEFAULT_NARRATION_SPEC)
-                .map_err(|e| format!("write narration spec: {e}"))?;
-            return Ok(format!(
-                "Wrote the narration spec to {} — edit it to reshape the spoken blockquote replies.",
-                f.display()
-            ));
-        }
-        return match std::fs::remove_file(f) {
-            Ok(()) => Ok(format!(
-                "Removed the narration spec override ({}) — reverting to the built-in default.",
-                f.display()
-            )),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(
-                "No narration spec override on disk — already using the built-in default.".into(),
-            ),
-            Err(e) => Err(format!("remove narration spec: {e}")),
-        };
-    }
-
-    // Build the per-client `wire <client> [--remove]` argv and run the SAME orchestrator the
-    // installers use. `wire` self-skips a client that isn't installed; for any gated client
-    // (today Codex and Qwen Code — see `gate_on_presence` in ds-config's registry) we pre-check
-    // presence so an `enabled=true` on an absent client reports honestly instead of claiming a
-    // no-op wire succeeded.
-    let flags = |client: &str| -> Vec<String> {
-        if a.enabled {
-            vec![client.into()]
-        } else {
-            vec![client.into(), "--remove".into()]
-        }
-    };
-    // `target.as_str()` is the canonical `WireTarget` token the `wire` orchestrator parses back —
-    // the ONE token vocabulary, never a re-typed literal here. Everything client-specific (the
-    // display name, the presence probe, whether presence gates a wire) comes from the client
-    // registry — the same declaration the orchestrator walks.
-    // Unreachable `expect`: an unknown token already errored at `WireTarget::parse` above, and
-    // `NarrationSpec` returned from its dedicated branch before this point.
-    let spec = ds_config::client_spec(target)
-        .expect("narration_spec handled before this point; unknown tokens errored at parse");
-    if a.enabled && spec.gate_on_presence && !(spec.present)(paths) {
-        return Ok(format!(
-            "{} is not installed — nothing to wire.",
-            spec.display_name
-        ));
-    }
-    let (label, code) = (spec.display_name, wire::run(&flags(target.as_str())));
-
-    if code != 0 {
-        log_wire_failure(paths, label, code);
-        return Err(format!(
-            "wiring {label} failed (exit {code}); see the engine log"
-        ));
-    }
-    let verb = if a.enabled { "Registered" } else { "Removed" };
-    let note = "";
-    Ok(format!(
-        "{verb} the DontSpeak integration for {label}{note}."
-    ))
-}
-
-/// Persist the `wiring {label} failed` diagnostic to the unified log — closes the gap where
-/// `call_wire`'s error message promised "see the engine log" but nothing actually wrote there.
-/// Takes `paths` directly (not `ds_log::log_cached`) since `call_wire` already has a real
-/// `&Paths` in scope, keeping this trivially unit-testable against an isolated tempdir `Paths`
-/// without touching the real `$HOME` log.
-fn log_wire_failure(paths: &Paths, label: &str, code: i32) {
-    ds_log::log(
-        &paths.log_file,
-        ds_log::LogLevel::Error,
-        "mcp",
-        &format!("setup_integration: wiring {label} failed (exit {code})"),
-    );
-}
 
 fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
     // Single source of truth: deserialize the inbound JSON args straight into
@@ -1053,129 +927,6 @@ mod engine_unavailable {
         let (_dir, sock) = no_such_socket();
         let err = call_speakers(&sock, &json!({ "action": "forget", "name": "Alex" })).unwrap_err();
         assert!(err.starts_with("engine unavailable: "), "got: {err}");
-    }
-}
-
-#[cfg(test)]
-mod wire_tests {
-    //! `call_wire`: the unknown-target parse error, and the `NarrationSpec` branch's real
-    //! disk outcomes via `Paths::rooted_at`. The non-`NarrationSpec` (client-wiring) branch
-    //! shells out to the real `wire::run` orchestrator against real client dirs — covered
-    //! separately, not duplicated here.
-    use super::*;
-
-    #[test]
-    fn unknown_target_is_rejected_with_the_canonical_token_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::rooted_at(dir.path());
-        let err = call_wire(
-            &paths,
-            &json!({ "target": "not_a_real_target", "enabled": true }),
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("unknown target \"not_a_real_target\""),
-            "got: {err}"
-        );
-        // The expected-tokens list must reference the SAME canonical set `WireTarget::ALL`
-        // enumerates, so it can't drift from the accepted tokens.
-        for target in ds_config::WireTarget::ALL {
-            assert!(
-                err.contains(&format!("{:?}", target.as_str())),
-                "expected token {:?} listed in error, got: {err}",
-                target.as_str()
-            );
-        }
-    }
-
-    #[test]
-    fn narration_spec_writes_the_default_when_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::rooted_at(dir.path());
-        assert!(!paths.narration_spec.exists());
-
-        let msg = call_wire(
-            &paths,
-            &json!({ "target": "narration_spec", "enabled": true }),
-        )
-        .expect("writes the default narration spec");
-        assert!(msg.contains("Wrote the narration spec to"), "got: {msg}");
-        assert!(paths.narration_spec.exists());
-        assert_eq!(
-            std::fs::read_to_string(&paths.narration_spec).unwrap(),
-            ds_config::DEFAULT_NARRATION_SPEC
-        );
-    }
-
-    #[test]
-    fn narration_spec_reports_already_on_disk_when_present() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(paths.narration_spec.parent().unwrap()).unwrap();
-        std::fs::write(&paths.narration_spec, "custom spec, edited by the user\n").unwrap();
-
-        let msg = call_wire(
-            &paths,
-            &json!({ "target": "narration_spec", "enabled": true }),
-        )
-        .expect("reports the existing file rather than erroring");
-        assert!(msg.contains("already on disk"), "got: {msg}");
-        // The existing, user-edited content must not be clobbered.
-        assert_eq!(
-            std::fs::read_to_string(&paths.narration_spec).unwrap(),
-            "custom spec, edited by the user\n"
-        );
-    }
-
-    #[test]
-    fn narration_spec_removes_the_override_when_present() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(paths.narration_spec.parent().unwrap()).unwrap();
-        std::fs::write(&paths.narration_spec, "custom spec\n").unwrap();
-
-        let msg = call_wire(
-            &paths,
-            &json!({ "target": "narration_spec", "enabled": false }),
-        )
-        .expect("removes the override");
-        assert!(
-            msg.contains("Removed the narration spec override"),
-            "got: {msg}"
-        );
-        assert!(!paths.narration_spec.exists());
-    }
-
-    #[test]
-    fn narration_spec_remove_is_a_noop_when_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::rooted_at(dir.path());
-        assert!(!paths.narration_spec.exists());
-
-        let msg = call_wire(
-            &paths,
-            &json!({ "target": "narration_spec", "enabled": false }),
-        )
-        .expect("a no-op remove is Ok, not an error");
-        assert!(
-            msg.contains("No narration spec override on disk"),
-            "got: {msg}"
-        );
-        assert!(!paths.narration_spec.exists());
-    }
-
-    #[test]
-    fn log_wire_failure_writes_an_error_line_to_the_unified_log() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::rooted_at(dir.path());
-        log_wire_failure(&paths, "Claude Code", 1);
-
-        let contents = std::fs::read_to_string(&paths.log_file).unwrap();
-        assert!(contents.contains("ERROR mcp"), "got: {contents}");
-        assert!(
-            contents.contains("wiring Claude Code failed (exit 1)"),
-            "got: {contents}"
-        );
     }
 }
 

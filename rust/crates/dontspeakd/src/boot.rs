@@ -154,6 +154,22 @@ pub fn engine_run(
         );
     }
 
+    // Converge each AI client's wiring to config.toml's declared `exclude_clients` (absent ⇒ all
+    // supported). Runs OFF the boot thread so a slow client-file write never delays engine
+    // startup; a steady-state boot writes nothing (the writers short-circuit on an unchanged
+    // document). Diagnostics from the writers go to the host's (discarded) stderr — the engine
+    // logs only a one-line exit-code summary. LIMITATION: a client installed while the engine is
+    // already running (with `exclude_clients` unchanged) is not wired until the next boot.
+    {
+        let paths = paths.clone(); // Paths: Clone
+        std::thread::spawn(move || {
+            let code = ds_wire::reconcile(&paths);
+            if code != 0 {
+                log::warn!(target: "engine", "wire reconcile exited {code}");
+            }
+        });
+    }
+
     // Single-instance guard: evict an OLDER engine BEFORE we bind the socket below.
     // launchd's KeepAlive only enforces one launchd-managed daemon — it does NOT
     // cover the engine running in-process inside the GUI host, and Windows/Linux
@@ -524,6 +540,16 @@ pub fn engine_run(
                 // shown in the engine's row must reflect ONLY the selected engine, never carry
                 // the previous engine's samples (e.g. Parakeet's numbers lingering under System).
                 let stt_engine_changed = new_cfg.resolved_stt() != daemon.cfg.resolved_stt();
+                // Re-run the client-wiring reconcile ONLY when the DESIRED set actually changed,
+                // so ordinary `set_config` writes (which never touch `exclude_clients`) don't churn
+                // client files. `daemon.cfg` is still the OLD config here (reload overwrites it
+                // below), so this diffs old→new. Off-thread like the boot trigger.
+                if new_cfg.excluded_clients() != daemon.cfg.excluded_clients() {
+                    let paths = paths.clone();
+                    std::thread::spawn(move || {
+                        let _ = ds_wire::reconcile(&paths);
+                    });
+                }
                 daemon.reload(&new_cfg);
                 if stt_engine_changed {
                     stt_stats.reset();

@@ -12,8 +12,7 @@
 //!
 //! Tools (the authoritative catalog — names, schemas, descriptions — lives in
 //! `ds_tools::catalog()`; this is just an orientation): speak, stop_speech,
-//! listen, get_status, list_voices, diarize, manage_speakers, set_config,
-//! setup_integration.
+//! listen, get_status, list_voices, diarize, manage_speakers, set_config.
 //!
 //! `list_voices` is config-DIRECT: it reads DontSpeak's own settings file
 //! (`our config.toml`) to mark the active voice, so it needs no engine
@@ -44,10 +43,6 @@ mod hook_speak;
 mod mcp;
 mod tools;
 mod voices;
-mod wire;
-
-// Re-exports reached via `crate::` by the hook/installer subcommands.
-pub(crate) use mcp::SERVER_NAME;
 
 /// The four things argv\[1\] can select us into, plus the fallback for an unrecognized
 /// token. Pure decision extracted from `main` so it's testable without touching stdio.
@@ -91,7 +86,7 @@ fn main() {
     //   `dontspeak wire <client> [--remove]` — the ONE per-client integration installer: it
     //                                   wires (or removes) EVERYTHING that client needs in a
     //                                   single step — claude_code = hooks + MCP, codex
-    //                                   = hooks. See `wire.rs`.
+    //                                   = hooks. See the `ds-wire` crate.
     // With no argv it is the stdio MCP server (the default, spawned by Claude Code / the app).
     // ALL communication is stdio: the MCP tool surface (JSON-RPC over stdio) and the two
     // Claude Code hook verbs above. There is no HTTP transport.
@@ -116,7 +111,7 @@ fn main() {
             std::process::exit(0);
         }
         Subcommand::Wire(args) => {
-            std::process::exit(wire::run(args));
+            std::process::exit(ds_wire::run(args));
         }
         // An explicit but UNRECOGNIZED first argument must NOT fall through to the stdio MCP
         // server: that silently blocks on stdin forever (a typo, or an OLD binary handed a

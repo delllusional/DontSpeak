@@ -41,7 +41,7 @@ Install = extract the portable zip to the per-user folder (the same thing `web/i
    ```
 4. **Wire + launch**:
    ```powershell
-   & "$dest\dontspeak.exe" wire --all
+   & "$dest\dontspeak.exe" wire --reconcile
    Start-Process "$dest\ds-winui.exe"
    ```
 5. **Verify:** binaries under `$dest` stamped with the just-built time; `ds-winui` + `ds-helper` running.

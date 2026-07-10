@@ -1,11 +1,16 @@
 # MCP tools
 
-DontSpeak exposes 8 tools over MCP by default (`speak`, `listen`, `stop_speech`, `mute`,
-`get_status`, `list_voices`, `set_config`, `setup_integration`), in the order below — the
+DontSpeak exposes 7 tools over MCP by default (`speak`, `listen`, `stop_speech`, `mute`,
+`get_status`, `list_voices`, `set_config`), in the order below — the
 same order the SwiftUI Tools window lists them in. Names, descriptions, and parameters
 are generated from one source, `ds-tools` (`rust/crates/ds-tools/src/lib.rs` +
 `descriptions.rs`), so this table can't drift from what Claude actually sees; if you
 change the catalog, update this file too.
+
+Client wiring is no longer an MCP tool: the engine keeps each AI client wired
+automatically (at boot and on config change), converging to `config.toml`'s `exclude_clients`
+(absent ⇒ all supported clients). Wire by hand with `dontspeak wire <client>` /
+`dontspeak wire --reconcile`.
 
 `diarize` and `manage_speakers` (documented below for completeness), plus `set_config`'s
 4 diarization params (`diarizer_provider`, `clustering_threshold`, `speaker_threshold`,
@@ -148,14 +153,3 @@ or `tts_system_voice`.
 | Param | Type | Description |
 |---|---|---|
 | `tray_indicator` | array of `stt`, `tts`, `stt_animated`, `tts_animated` | Tray icon: which states color it and whether it pulses. Default `["stt","tts_animated"]`. `[]` = never color. |
-
-## setup_integration
-
-Write a config file, or register/remove a client integration — the same setup the
-installer does. Targets: `"narration_spec"`, `"claude_code"`,
-`"codex"`, `"qwen_code"`, `"grok"`. Additive and backed up; `enabled=false` removes only our entry.
-
-| Param | Type | Required | Description |
-|---|---|---|---|
-| `target` | enum: `narration_spec`, `claude_code`, `codex`, `qwen_code`, `grok` | yes | What to wire: the narration spec, or a client integration. |
-| `enabled` | boolean | yes | `true` = register; `false` = remove. |

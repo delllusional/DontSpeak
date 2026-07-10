@@ -4,7 +4,7 @@ DontSpeak ships on Windows as a **self-contained portable zip** — no installer
 elevation, no runtime prerequisites. The one-command installer at
 [dontspeak.org](https://dontspeak.org) (`web/install.ps1`) downloads it, extracts it to
 `%LOCALAPPDATA%\Programs\DontSpeak`, wires the MCP server + voice hooks
-(`dontspeak wire --all`), adds a Start-menu shortcut, and launches the app.
+(`dontspeak wire --reconcile`), adds a Start-menu shortcut, and launches the app.
 
 ## What the zip contains
 - The WinUI app (`ds-winui.exe`) + the in-process engine `ds_core.dll` + the warm-synth

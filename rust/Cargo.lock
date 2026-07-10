@@ -871,6 +871,7 @@ dependencies = [
  "ds-platform",
  "ds-tools",
  "ds-voices",
+ "ds-wire",
  "log",
  "serde",
  "serde_json",
@@ -895,6 +896,7 @@ dependencies = [
  "ds-status",
  "ds-stt",
  "ds-tts",
+ "ds-wire",
  "log",
  "nix 0.31.3",
  "notify",
@@ -1139,6 +1141,16 @@ version = "0.2.6-dev"
 dependencies = [
  "ds-config",
  "ds-model",
+]
+
+[[package]]
+name = "ds-wire"
+version = "0.2.6-dev"
+dependencies = [
+ "ds-config",
+ "ds-log",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

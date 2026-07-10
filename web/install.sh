@@ -5,7 +5,7 @@
 #
 # Downloads the prebuilt app for this OS/arch from the latest GitHub Release,
 # verifies its SHA-256, installs it, wires the MCP server + voice hooks into every
-# detected client (`dontspeak wire --all`), and launches the app once so the voice
+# detected client (`dontspeak wire --reconcile`), and launches the app once so the voice
 # models download themselves on first boot. No compiler required.
 #
 # Programmers who want a from-source build should instead clone the repo and run
@@ -380,7 +380,7 @@ case "$OS" in
     [ -n "$url" ] || die "no macOS asset ($ZIP_NAME) on the latest release of $REPO"
     sums=$(asset_url "checksums\\.txt")
     say "macOS $ARCH → $url"
-    [ "$DRY" = "1" ] && { echo "(dry run) would unzip DontSpeak.app into ~/Applications and wire --all"; exit 0; }
+    [ "$DRY" = "1" ] && { echo "(dry run) would unzip DontSpeak.app into ~/Applications and wire --reconcile"; exit 0; }
 
     zip="$TMP/$(basename "$url")"; http_dl "$url" "$zip"; verify_sha "$zip" "$sums"
     # The ONE macOS install location, shared with the dev flow (apps/macos/bundle.sh):
@@ -422,8 +422,8 @@ case "$OS" in
     STAGED=""
 
     cli="$APP/Contents/Helpers/dontspeak"
-    if [ -x "$cli" ]; then say "wiring clients (MCP + hooks)"; "$cli" wire --all || warn "wire --all reported an issue"
-    else warn "no bundled dontspeak CLI in the app — start it and use the Setup Integration action to wire"; fi
+    if [ -x "$cli" ]; then say "wiring clients (MCP + hooks)"; "$cli" wire --reconcile || warn "wire --reconcile reported an issue"
+    else warn "no bundled dontspeak CLI in the app — start it; clients are wired automatically at launch"; fi
     place_uninstaller
     say "launching DontSpeak (first boot downloads the voice models)"
     open -a "$APP" || warn "could not auto-launch — open DontSpeak from ~/Applications"

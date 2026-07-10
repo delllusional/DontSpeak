@@ -15,15 +15,15 @@ pub const DEFAULT_KOKORO_VOICE: &str = "af_sarah";
 use crate::enums::{
     de_diarizer_provider, de_input_clears, de_listen_mode, de_narrate, de_provider,
     de_stt_engine_ladder, de_stt_engine_pref, de_tray_indicator, de_tts_engine_ladder,
-    de_tts_engine_pref, default_diarizer_provider, default_input_clears, default_narrate,
-    default_provider, default_stt_engine_ladder, default_tray_indicator, default_tts_engine_ladder,
-    se_stt_engine_pref, se_tts_engine_pref,
+    de_tts_engine_pref, de_exclude_clients, default_diarizer_provider, default_input_clears,
+    default_narrate, default_provider, default_stt_engine_ladder, default_tray_indicator,
+    default_tts_engine_ladder, se_stt_engine_pref, se_tts_engine_pref,
 };
 use ds_log::{LogLevel, log};
 
 use crate::{
     CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Paths, Provider, SttEngine,
-    TrayKind, TtsEngine,
+    TrayKind, TtsEngine, WireTarget,
 };
 
 /// Spoken wake phrases for the hands-free (always-listening) mode: the word that opens
@@ -349,6 +349,20 @@ pub struct VoiceConfig {
     /// See GitHub issues #14 and #15.
     #[serde(default)]
     pub extra_custom_text_editors: Vec<String>,
+
+    // ── Client wiring (config-file only; no set_config) ──────────────────────
+    /// Which AI clients to EXCLUDE from wiring (an opt-OUT list). ABSENT (`None`) or
+    /// PRESENT-EMPTY (`[]`) = exclude nothing = every supported client stays wired; a listed
+    /// client is NOT wired (and is actively unwired if present). The engine reconciles client
+    /// wiring to this declaration at boot and on config change (see the engine's `reconcile`).
+    /// Unknown / non-client tokens are dropped; a non-array value degrades to `None` (exclude
+    /// nothing). See [`Self::excluded_clients`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_exclude_clients"
+    )]
+    pub exclude_clients: Option<Vec<WireTarget>>,
 }
 
 /// Which warm subsystems a `set_config` delta touches — computed by
@@ -521,6 +535,7 @@ impl Default for VoiceConfig {
             codex_bin: default_codex_bin(),
             extra_terminals: Vec::new(),
             extra_custom_text_editors: Vec::new(),
+            exclude_clients: None,
         }
     }
 }
@@ -658,6 +673,10 @@ impl VoiceConfig {
         }
         keys.insert("tts_engine".to_string());
         keys.insert("stt_engine".to_string());
+        // `exclude_clients` is `skip_serializing_if = "Option::is_none"`, so (like the engine
+        // preference fields above) it's absent from the DEFAULT serialized table — insert it
+        // so a hand-set `exclude_clients = [...]` never warns as an unknown key.
+        keys.insert("exclude_clients".to_string());
         keys
     }
 
@@ -763,6 +782,12 @@ impl VoiceConfig {
     pub fn narrate_summary(&self) -> String {
         let toks: Vec<&str> = self.narrate.iter().map(|k| k.as_str()).collect();
         format!("[{}]", toks.join(","))
+    }
+
+    /// The clients EXCLUDED from wiring: the configured [`Self::exclude_clients`] set, or EMPTY
+    /// (exclude nothing) when unset. The engine wires every client NOT in this set.
+    pub fn excluded_clients(&self) -> Vec<WireTarget> {
+        self.exclude_clients.clone().unwrap_or_default()
     }
 }
 
@@ -898,6 +923,66 @@ pub(crate) mod tests {
         let keys = VoiceConfig::known_keys();
         assert!(keys.contains("extra_terminals"));
         assert!(keys.contains("extra_custom_text_editors"));
+    }
+
+    #[test]
+    fn exclude_clients_resolves_and_deserializes_fail_open() {
+        // `excluded_clients`: absent (None) or explicit empty ⇒ exclude nothing; an explicit
+        // single client ⇒ exactly that one excluded.
+        assert_eq!(
+            VoiceConfig::default().excluded_clients(),
+            Vec::<WireTarget>::new()
+        );
+        assert_eq!(
+            VoiceConfig {
+                exclude_clients: Some(vec![]),
+                ..VoiceConfig::default()
+            }
+            .excluded_clients(),
+            Vec::<WireTarget>::new()
+        );
+        assert_eq!(
+            VoiceConfig {
+                exclude_clients: Some(vec![WireTarget::ClaudeCode]),
+                ..VoiceConfig::default()
+            }
+            .excluded_clients(),
+            vec![WireTarget::ClaudeCode]
+        );
+
+        // `de_exclude_clients` (via the config-file deserialize): a present ARRAY keeps known client
+        // tokens in order, deduped, dropping unknown / non-client tokens.
+        let wc = |j: &str| serde_json::from_str::<VoiceConfig>(j).unwrap().exclude_clients;
+        assert_eq!(
+            wc(r#"{"exclude_clients":["claude_code","narration_spec","bogus","claude_code"]}"#),
+            Some(vec![WireTarget::ClaudeCode])
+        );
+        // A non-array value (or a bare string / number) degrades to None = exclude nothing.
+        assert_eq!(wc(r#"{"exclude_clients":"claude_code"}"#), None);
+        assert_eq!(wc(r#"{"exclude_clients":42}"#), None);
+        // Absent ⇒ None via the serde default.
+        assert_eq!(wc(r#"{}"#), None);
+
+        // `known_keys()` covers it (it's skip_serializing_if, so absent from the default table).
+        assert!(VoiceConfig::known_keys().contains("exclude_clients"));
+    }
+
+    #[test]
+    fn exclude_clients_round_trips_through_write_and_load() {
+        // Each of the tri-state values reproduces through write_settings → VoiceConfig::load,
+        // rooted at a tempdir (never the real config path). None must serialize to ABSENT (the
+        // skip_serializing_if) and reload as None — distinct from Some([]) (explicit none).
+        for state in [None, Some(vec![]), Some(vec![WireTarget::ClaudeCode])] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = Paths::rooted_at(dir.path());
+            let cfg = VoiceConfig {
+                exclude_clients: state.clone(),
+                ..VoiceConfig::default()
+            };
+            write_settings(&paths, &cfg).unwrap();
+            let loaded = VoiceConfig::load(&paths);
+            assert_eq!(loaded.exclude_clients, state, "exclude_clients round-trip: {state:?}");
+        }
     }
 
     #[test]
@@ -1504,6 +1589,7 @@ pub(crate) mod tests {
             codex_bin: "/opt/codex/bin/codex".into(), // non-default (default is "codex")
             extra_terminals: vec!["myterm".into()], // non-default (default is [])
             extra_custom_text_editors: vec!["myeditor.exe".into()], // non-default (default is [])
+            exclude_clients: Some(vec![WireTarget::ClaudeCode]), // non-default (default is None)
         }
     }
 

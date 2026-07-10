@@ -33,10 +33,10 @@ Quits the app + engine, un-wires all clients, deletes the app bundle (`~/Applica
 apps/macos/bundle.sh
 open "$HOME/Applications/DontSpeak.app"    # launch: registers login item, starts the engine
 ```
-`bundle.sh` does the whole dev install: `install-daemon.sh` (engine + helper bins → `~/.local/bin`, stable-signed, places `dontspeak-uninstall`) → `dontspeak wire --all` (every registry client: Claude Code hooks + MCP, Codex hooks, Qwen Code hooks + MCP) → `build.sh` (Rust `release-ffi` staticlib + `swift build`) → icon compile → assemble + codesign **`~/Applications/DontSpeak.app`** (`DONTSPEAK_APP_DIR` overrides; the uninstaller honors the same). Release installs (`web/install.sh`) use the SAME per-user location — one layout, no `/Applications` copy to fight over the login item, the wire target, or TCC.
+`bundle.sh` does the whole dev install: `install-daemon.sh` (engine + helper bins → `~/.local/bin`, stable-signed, places `dontspeak-uninstall`) → `dontspeak wire --reconcile` (converges every registry client to config.toml's `exclude_clients`, absent ⇒ all: Claude Code hooks + MCP, Codex hooks, Qwen Code hooks + MCP) → `build.sh` (Rust `release-ffi` staticlib + `swift build`) → icon compile → assemble + codesign **`~/Applications/DontSpeak.app`** (`DONTSPEAK_APP_DIR` overrides; the uninstaller honors the same). Release installs (`web/install.sh`) use the SAME per-user location — one layout, no `/Applications` copy to fight over the login item, the wire target, or TCC.
 
 - **Gotcha:** a helper or engine change is NOT live until a full `bundle.sh` — the app spawns its OWN bundled `ds-helper` and runs the engine in-process. Only hook/MCP changes in the `dontspeak` bin go live via `install-daemon.sh` alone.
-- `scripts/install.sh` is the CLI-only path (engine bins, then `dontspeak wire --all`; no `.app`) — normal dev uses `bundle.sh`.
+- `scripts/install.sh` is the CLI-only path (engine bins, then `dontspeak wire --reconcile`; no `.app`) — normal dev uses `bundle.sh`.
 
 ## 3 — Build the package
 

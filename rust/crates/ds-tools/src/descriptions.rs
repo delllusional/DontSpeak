@@ -114,10 +114,3 @@ pub const SET_CONFIG_FULL_DUPLEX: &str = "Keep the mic open while replies play, 
 pub const SET_CONFIG_TRAY: &str = "Tray icon: which states color it and whether it pulses — \
     any of [\"stt\",\"tts\",\"stt_animated\",\"tts_animated\"] (default [\"stt\",\"tts_animated\"]). \
     [] = never color.";
-
-// ── setup_integration ─────────────────────────────────────────────────────────────────────────────
-pub const SETUP_INTEGRATION: &str = "Write a config file, or register/remove a client integration — the same \
-    setup the installer does. Targets: \"narration_spec\", \"claude_code\", \
-    \"codex\", \"qwen_code\", \"grok\". Additive and backed up; enabled=false removes only our entry.";
-pub const WIRE_TARGET: &str = "What to wire: the narration spec, or a client integration.";
-pub const WIRE_ENABLED: &str = "true = register; false = remove.";

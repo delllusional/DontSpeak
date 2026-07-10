@@ -600,15 +600,15 @@ impl NarrateKind {
     }
 }
 
-/// What the `wire` tool acts on: either the on-disk narration spec or one of the AI-client
-/// integrations DontSpeak can register/remove (the SAME wiring the installer performs). This
-/// is a TOOL-ARGUMENT enum, not a stored config value — it lives here so the single canonical
-/// token set is shared by the `wire` schema (ds-tools, pinned by a parity test) and the
-/// dispatch handler (`dontspeak::tools::call_wire`), which can't then drift.
+/// One of the AI-client integrations DontSpeak can register/remove (the SAME wiring the
+/// installer performs). A CLIENT-only enum — there is no "narration spec" member; the
+/// narration spec is seeded/edited elsewhere, not through this type. It DOUBLES as the
+/// element type of the `exclude_clients` config value (see `VoiceConfig::exclude_clients`,
+/// deserialized via `de_exclude_clients`) — so the single canonical token set is shared by
+/// the config schema, the `wire` orchestrator, and the engine's boot-time reconcile, which
+/// can't then drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireTarget {
-    /// Materialize / remove the user-editable `narration-spec.md` (a config FILE, not a client).
-    NarrationSpec,
     /// Claude Code's voice hooks in `~/.claude/settings.json`.
     ClaudeCode,
     /// OpenAI Codex's narration hooks in `~/.codex/config.toml`.
@@ -620,19 +620,9 @@ pub enum WireTarget {
 }
 
 impl WireTarget {
-    /// All variants (canonical-token order, matching the `wire` schema enum); single source
-    /// for the catalog parity test.
-    pub const ALL: &'static [WireTarget] = &[
-        WireTarget::NarrationSpec,
-        WireTarget::ClaudeCode,
-        WireTarget::Codex,
-        WireTarget::QwenCode,
-        WireTarget::Grok,
-    ];
-
-    /// The wire-able CLIENTS: [`ALL`](Self::ALL) minus [`NarrationSpec`](Self::NarrationSpec)
-    /// (a config file, not a client). Single source for `wire --all` and the per-platform
-    /// installers, which used to hand-copy this list in three different shells.
+    /// Every wire-able client, in canonical-token order (matching the client registry). The
+    /// SINGLE source for `wire --all`, the engine's boot-time `ds_wire::reconcile`, and the
+    /// per-platform installers, which used to hand-copy this list in three different shells.
     pub const CLIENTS: &'static [WireTarget] = &[
         WireTarget::ClaudeCode,
         WireTarget::Codex,
@@ -642,7 +632,6 @@ impl WireTarget {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "narration_spec" => Some(WireTarget::NarrationSpec),
             "claude_code" => Some(WireTarget::ClaudeCode),
             "codex" => Some(WireTarget::Codex),
             "qwen_code" => Some(WireTarget::QwenCode),
@@ -654,13 +643,36 @@ impl WireTarget {
     /// The canonical token this target serializes to (round-trips through `parse()`).
     pub fn as_str(self) -> &'static str {
         match self {
-            WireTarget::NarrationSpec => "narration_spec",
             WireTarget::ClaudeCode => "claude_code",
             WireTarget::Codex => "codex",
             WireTarget::QwenCode => "qwen_code",
             WireTarget::Grok => "grok",
         }
     }
+}
+
+/// Fail-open deserialize for `exclude_clients` (config-file). A present ARRAY ⇒
+/// `Some(known client tokens, in order, deduped; unknown/non-client tokens dropped)`.
+/// A present NON-array value ⇒ `None` (defer to all-supported). ABSENT ⇒ `None` via the
+/// field's serde default. Modeled on [`de_narrate`], wrapped in `Option` to preserve the
+/// tri-state (`None` = all supported vs `Some([])` = none).
+pub(crate) fn de_exclude_clients<'de, D>(d: D) -> Result<Option<Vec<WireTarget>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(false));
+    let toml::Value::Array(items) = v else {
+        return Ok(None);
+    };
+    let mut out: Vec<WireTarget> = Vec::new();
+    for it in items {
+        if let Some(t) = it.as_str().and_then(WireTarget::parse)
+            && !out.contains(&t)
+        {
+            out.push(t);
+        }
+    }
+    Ok(Some(out))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -739,6 +751,7 @@ serialize_as_str!(TrayKind);
 serialize_as_str!(CancelSpeechScope);
 serialize_as_str!(DiarizerProvider);
 serialize_as_str!(NarrateKind);
+serialize_as_str!(WireTarget);
 
 /// STRICT `Deserialize` for a token enum: an unrecognized value ERRORS (listing the
 /// valid tokens) instead of failing open to the default. This is the opposite of the

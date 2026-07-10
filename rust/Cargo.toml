@@ -33,6 +33,9 @@ members = [
     "crates/ds-i18n",
     "crates/ds-status",
     "crates/ds-narrate",
+    # The client-wiring orchestrator + writers, extracted from the `dontspeak` CLI so the
+    # engine (dontspeakd) can drive the same reconcile at boot without depending on the CLI.
+    "crates/ds-wire",
     "crates/ds-core",
     "crates/dontspeakd",
     "crates/dontspeak",
@@ -203,6 +206,7 @@ ds-tools = { path = "crates/ds-tools" }
 ds-i18n = { path = "crates/ds-i18n" }
 ds-status = { path = "crates/ds-status" }
 ds-narrate = { path = "crates/ds-narrate" }
+ds-wire = { path = "crates/ds-wire" }
 dontspeakd = { path = "crates/dontspeakd" }
 
 [profile.release]

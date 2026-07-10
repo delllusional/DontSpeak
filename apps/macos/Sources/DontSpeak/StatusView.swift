@@ -149,8 +149,8 @@ struct StatusView: View {
         ScrollView {
             VStack(spacing: 12) {
                 // Engine platter — the headline row; expands to lifetime totals (seconds
-                // spoken + heard, all sessions). Client integrations are wired via the
-                // `wire` MCP tool, not here — the panel stays status-only.
+                // spoken + heard, all sessions). Client integrations are wired automatically by
+                // the engine at launch (reconcile), not from this panel — it stays status-only.
                 Platter {
                     DontSpeakRow()
                 }

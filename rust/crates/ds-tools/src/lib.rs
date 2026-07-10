@@ -92,8 +92,7 @@ const fn p(name: &'static str, ty: PType, required: bool, description: &'static 
 /// actions (speak · listen) so the highest-frequency tools sit first (primacy), then the
 /// output-control pair (stop_speech · mute), then read-only introspection (get_status · list_voices), then
 /// speaker diarization (diarize · manage_speakers — the voiceprint library it labels with),
-/// and finally the rare admin tools (set_config, then the one-time client wiring
-/// setup_integration) in the low-attention tail.
+/// and finally the rare admin tool (set_config) in the low-attention tail.
 static TOOLS: &[Tool] = &[
     // Core action: say something.
     Tool {
@@ -293,20 +292,6 @@ static TOOLS: &[Tool] = &[
             ),
         ],
         min_one: true,
-    },
-    Tool {
-        name: "setup_integration",
-        description: SETUP_INTEGRATION,
-        params: &[
-            p(
-                "target",
-                PType::Enum(&["narration_spec", "claude_code", "codex", "qwen_code", "grok"]),
-                true,
-                WIRE_TARGET,
-            ),
-            p("enabled", PType::Bool, true, WIRE_ENABLED),
-        ],
-        min_one: false,
     },
 ];
 
@@ -509,7 +494,7 @@ mod tests {
     fn catalog_is_a_nonempty_array_of_named_tools() {
         let c = catalog();
         let arr = c.as_array().expect("catalog is a JSON array");
-        let expected = if DIARIZATION_ENABLED { 10 } else { 8 };
+        let expected = if DIARIZATION_ENABLED { 9 } else { 7 };
         assert_eq!(arr.len(), expected, "expected {expected} visible tools");
         for t in arr {
             assert!(
@@ -534,7 +519,7 @@ mod tests {
     fn catalog_ui_params_are_ordered() {
         let ui = catalog_ui();
         let arr = ui.as_array().expect("ui catalog is an array");
-        let expected = if DIARIZATION_ENABLED { 10 } else { 8 };
+        let expected = if DIARIZATION_ENABLED { 9 } else { 7 };
         assert_eq!(arr.len(), expected, "same visible tools as the MCP catalog");
 
         let speak = arr
@@ -630,34 +615,6 @@ mod tests {
             schema_item_enum("input_clears"),
             toks(CancelSpeechScope::ALL, CancelSpeechScope::as_str)
         );
-    }
-
-    /// PARITY GUARD: the `setup_integration` tool's `target` enum must list EXACTLY the tokens
-    /// of `ds_config::WireTarget` (the type the dispatch handler matches on), so the authored
-    /// schema strings can't silently drift from the canonical set.
-    #[test]
-    fn setup_integration_target_enum_matches_config_type() {
-        use ds_config::WireTarget;
-
-        fn toks<T: Copy>(all: &[T], as_str: fn(T) -> &'static str) -> Vec<String> {
-            all.iter().map(|&v| as_str(v).to_string()).collect()
-        }
-
-        let cat = catalog();
-        let setup_integration = cat
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["name"] == "setup_integration")
-            .expect("setup_integration in catalog");
-        let schema_enum: Vec<String> =
-            setup_integration["inputSchema"]["properties"]["target"]["enum"]
-                .as_array()
-                .expect("setup_integration target has an enum array")
-                .iter()
-                .map(|v| v.as_str().unwrap().to_string())
-                .collect();
-        assert_eq!(schema_enum, toks(WireTarget::ALL, WireTarget::as_str));
     }
 
     /// Map a JSON value to the JSON-Schema scalar `type` token it satisfies.

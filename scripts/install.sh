@@ -50,10 +50,12 @@ echo "==> binaries + hooks installed (BUILD_ID=$BUILD_ID)"
 # Preview with --print-only; undo with --remove; a client that isn't installed is a clean skip.
 echo
 echo "==> 5. wire all clients (Claude Code hooks + MCP, Codex hooks, Qwen Code hooks + MCP)"
-# `wire --all` is the ONE wiring call every install flow uses (bundle.sh, the web
-# installers, the tarball installer) — each client self-skips if not installed.
-"$INSTALL_DIR/dontspeak" wire --all \
-  || echo "   !! wire --all failed; run '$INSTALL_DIR/dontspeak wire --all' manually" >&2
+# `wire --reconcile` is the ONE wiring call every install flow uses (bundle.sh, the web
+# installers, the tarball installer) — it converges each client to config.toml's `exclude_clients`
+# (absent ⇒ all, so identical to `--all` on a fresh machine), and each client self-skips if not
+# installed.
+"$INSTALL_DIR/dontspeak" wire --reconcile \
+  || echo "   !! wire --reconcile failed; run '$INSTALL_DIR/dontspeak wire --reconcile' manually" >&2
 
 # Per-platform log location (ds-config paths.rs: macOS Library/Logs, elsewhere XDG state).
 if [ "$UNAME" = "Darwin" ]; then LOG_HINT="~/Library/Logs/DontSpeak/dontspeak.log"

@@ -17,6 +17,10 @@ description = "DontSpeak's voice engine: Caps-Lock dictation, the TTS queue, loc
 ds-platform = { workspace = true }
 ds-proc = { workspace = true }
 ds-config = { workspace = true }
+# Client-wiring reconcile: the engine converges each client's wiring to config.toml's
+# declared `exclude_clients` at boot / on config change (the shared home is ds-wire, NOT the
+# `dontspeak` CLI crate — so no engine→CLI dependency is introduced).
+ds-wire = { workspace = true }
 # Audible earcons (reply ding / needs-input cue) — split out of ds-config (issue #6).
 ds-earcon = { workspace = true }
 # The unified activity log — engine logging + codex-stream diagnostics, split out of

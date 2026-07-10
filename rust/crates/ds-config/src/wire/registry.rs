@@ -359,8 +359,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
     },
 ];
 
-/// Look up the registry entry for a client token. `None` for
-/// [`WireTarget::NarrationSpec`] — a config file, not a client.
+/// Look up the registry entry for a client token. Returns `Some` for every
+/// [`WireTarget`] variant (they're all clients), so callers that iterate
+/// [`WireTarget::CLIENTS`] can `expect` a hit.
 pub fn client_spec(target: WireTarget) -> Option<&'static ClientSpec> {
     CLIENT_REGISTRY.iter().find(|s| s.target == target)
 }
@@ -420,9 +421,9 @@ mod tests {
         }
     }
 
-    /// `client_spec` resolves every client and rejects the non-client.
+    /// `client_spec` resolves every client (`WireTarget` is client-only now).
     #[test]
-    fn lookup_covers_clients_and_rejects_narration_spec() {
+    fn lookup_covers_every_client() {
         for &t in WireTarget::CLIENTS {
             assert!(
                 client_spec(t).is_some(),
@@ -430,6 +431,5 @@ mod tests {
                 t.as_str()
             );
         }
-        assert!(client_spec(WireTarget::NarrationSpec).is_none());
     }
 }

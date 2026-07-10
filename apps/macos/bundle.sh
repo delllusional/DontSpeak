@@ -66,8 +66,10 @@ echo "   binaries installed; BUILD_ID=$BUILD_ID"
 # `wire <client>` self-skips if that client isn't installed.
 echo "==> 0b. wire client integrations (Claude Code hooks + MCP, Desktop MCP, Codex hooks)"
 _bin_dir="${DONTSPEAK_INSTALL_DIR:-$HOME/.local/bin}"
-"$_bin_dir/dontspeak" wire --all \
-  || echo "   !! wire --all failed; run '$_bin_dir/dontspeak wire --all' manually" >&2
+# `wire --reconcile` converges each client to config.toml's `exclude_clients` (absent ⇒ all) —
+# identical to `--all` on a fresh machine, but a reinstall over a user-narrowed set won't thrash.
+"$_bin_dir/dontspeak" wire --reconcile \
+  || echo "   !! wire --reconcile failed; run '$_bin_dir/dontspeak wire --reconcile' manually" >&2
 
 echo "==> 1. build (Rust staticlib + swift build)"
 "$DIR/build.sh" >/dev/null

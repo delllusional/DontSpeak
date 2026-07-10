@@ -23,7 +23,7 @@ Or just tell your agent: **"Install DontSpeak.org app."** — it reads [dontspea
 
 **Build from source (developers):** `git clone https://github.com/delllusional/DontSpeak && cd DontSpeak && ./scripts/install.sh` (needs a Rust toolchain).
 
-**Uninstall** (app + integrations + all data/models): macOS/Linux — `~/.local/bin/dontspeak-uninstall` (or `scripts/uninstall.sh` from a checkout); Windows — Settings › Apps › DontSpeak. To unwire the clients but keep the app: `dontspeak wire --all --remove`.
+**Uninstall** (app + integrations + all data/models): macOS/Linux — `~/.local/bin/dontspeak-uninstall` (or `scripts/uninstall.sh` from a checkout); Windows — Settings › Apps › DontSpeak. To stop wiring a specific client while keeping the app, list it in `exclude_clients` in `config.toml` — the engine unwires it on the next launch (a one-shot `dontspeak wire --all --remove` is re-applied by the next boot's reconcile).
 
 ## What it does
 
@@ -62,7 +62,7 @@ Each model runs on the fastest backend available, picked by the `provider` ladde
 
 ## MCP tools
 
-`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `list_voices` · `set_config` · `setup_integration` — full descriptions and parameters in [docs/MCP-TOOLS.md](docs/MCP-TOOLS.md). (Diarization tools `diarize`/`manage_speakers` exist but are hidden pending more testing.)
+`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `list_voices` · `set_config` — full descriptions and parameters in [docs/MCP-TOOLS.md](docs/MCP-TOOLS.md). (Diarization tools `diarize`/`manage_speakers` exist but are hidden pending more testing.) Client wiring is automatic (the engine converges each client to `config.toml`'s `exclude_clients` at boot); wire by hand with `dontspeak wire`.
 
 ## License
 

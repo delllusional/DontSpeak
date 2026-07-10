@@ -1,21 +1,24 @@
-//! `dontspeak wire <client> [--remove] [--print-only]` — the ONE per-client integration
-//! installer. Each client gets its FULL integration wired (or removed) in a single step; there is
-//! no separate "install hooks" vs "install MCP" task. WHAT to wire is declared, not coded: the
-//! client registry (`ds_config::CLIENT_REGISTRY`) lists every client with its presence probe, its
-//! config files, the mechanism each file is written with, and the official docs the wiring is
+//! The client-wiring orchestrator + writers — SHARED by the `dontspeak` CLI's
+//! `wire <client> [--remove] [--print-only]` subcommand ([`run`]) and the `dontspeakd`
+//! engine's boot-time / config-change convergence ([`reconcile`]). Each client gets its FULL
+//! integration wired (or removed) in one step; there is no separate "install hooks" vs
+//! "install MCP" task. WHAT to wire is declared, not coded: the client registry
+//! (`ds_config::CLIENT_REGISTRY`) lists every client with its presence probe, its config
+//! files, the mechanism each file is written with, and the official docs the wiring is
 //! derived from — this orchestrator just walks a client's surfaces and dispatches on mechanism:
-//!   • `ClaudeJsonHooks` → [`hooks::claude_json_hooks`] (Claude-contract hooks, JSON file)
-//!   • `ClaudeTomlHooks` → [`hooks::claude_toml_hooks`] (same contract, TOML file)
-//!   • `JsonMcp`         → [`mcp::apply`] (stdio `mcpServers.DontSpeak` entry)
-//!   • `TomlMcp`         → [`mcp::apply_toml`] (stdio `mcp_servers.DontSpeak` in TOML)
+//!   • `ClaudeJsonHooks` → `hooks::claude_json_hooks` (Claude-contract hooks, JSON file)
+//!   • `ClaudeTomlHooks` → `hooks::claude_toml_hooks` (same contract, TOML file)
+//!   • `JsonMcp`         → `mcp::apply` (stdio `mcpServers.DontSpeak` entry)
+//!   • `TomlMcp`         → `mcp::apply_toml` (stdio `mcp_servers.DontSpeak` in TOML)
 //! Adding a client (Qwen Code, Gemini CLI, …) = a `WireTarget` variant + `Paths` fields + a
 //! registry entry; a new MECHANISM (a different hook contract) = one new writer + enum arm.
 //!
 //! Every surface REUSES the shared cores — the `ds-config` hook/MCP shapers, the
-//! [`mcp::apply`] read→merge→backup→atomic-write flow, and the [`hooks`] writers — so
-//! nothing is copy-pasted per client, and this install-time entry and the `setup_integration`
-//! tool drive the IDENTICAL code (they can't drift). Additive + idempotent + backed-up; a client
-//! that isn't installed is a clean skip (exit 0). `wire --list` prints the registry.
+//! `mcp::apply` read→merge→backup→atomic-write flow, and the `hooks` writers — so
+//! nothing is copy-pasted per client, and the interactive `wire` entry and the engine's
+//! automatic reconcile drive the IDENTICAL code (they can't drift). Additive + idempotent +
+//! backed-up; a client that isn't installed is a clean skip (exit 0). `wire --list` prints
+//! the registry.
 
 pub(crate) mod hooks;
 mod io;
@@ -23,15 +26,22 @@ pub(crate) mod mcp;
 
 use ds_config::{ClientKind, Paths, WireMechanism, WireTarget};
 
-/// Parse `<client> [--remove] [--print-only]` and wire (or unwire) that client's whole integration.
-/// Returns a process exit code (0 ok / skipped, 1 hard error). `client` is a [`WireTarget`] token
-/// (`claude_code`/`codex`); `narration_spec` is a config-file concern of the
-/// `setup_integration` tool, not a client, so it is rejected here.
+/// Our MCP server key — the `mcpServers.DontSpeak` / `mcp_servers.DontSpeak` registry name
+/// (and the `serverInfo.name` the stdio server reports). MUST stay equal to
+/// `dontspeak::mcp::SERVER_NAME`; the moved `mcp` writer registers/strips under this literal.
+pub const SERVER_NAME: &str = "DontSpeak";
+
+/// Parse `<client> [--remove] [--print-only]` (or `--all` / `--reconcile` / `--list`) and wire
+/// (or unwire) that client's whole integration. Returns a process exit code (0 ok / skipped,
+/// 1 hard error). `client` is a [`WireTarget`] token (`claude_code`/`codex`/`qwen_code`/`grok`).
+/// `--reconcile` converges every client to `config.toml`'s declared `exclude_clients` (the same
+/// core the engine runs at boot, via [`reconcile`]); `--all` wires every client unconditionally.
 pub fn run(args: &[String]) -> i32 {
     let mut client: Option<WireTarget> = None;
     let mut remove = false;
     let mut print_only = false;
     let mut all = false;
+    let mut do_reconcile = false;
     // The canonical token list, straight from the registry (usage/error text can't go stale).
     let tokens = || {
         ds_config::CLIENT_REGISTRY
@@ -43,6 +53,7 @@ pub fn run(args: &[String]) -> i32 {
     for a in args {
         match a.as_str() {
             "--all" => all = true,
+            "--reconcile" => do_reconcile = true,
             "--remove" => remove = true,
             "--print-only" | "--print" => print_only = true,
             "--list" => {
@@ -51,7 +62,7 @@ pub fn run(args: &[String]) -> i32 {
             }
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: dontspeak wire <{}> [--remove] [--print-only]\n       dontspeak wire --all [--remove] [--print-only]   (every known client; each self-skips if absent)\n       dontspeak wire --list                             (the client registry: surfaces, files, docs)",
+                    "usage: dontspeak wire <{}> [--remove] [--print-only]\n       dontspeak wire --all [--remove] [--print-only]   (every known client; each self-skips if absent)\n       dontspeak wire --reconcile                        (converge every client to config.toml's exclude_clients)\n       dontspeak wire --list                             (the client registry: surfaces, files, docs)",
                     tokens()
                 );
                 return 0;
@@ -80,7 +91,9 @@ pub fn run(args: &[String]) -> i32 {
             },
         }
     }
-    if !all && client.is_none() {
+    // `--reconcile` carries NO client token, so it must be exempt from the missing-client
+    // guard (it runs BEFORE `Paths::resolve()`).
+    if !all && !do_reconcile && client.is_none() {
         eprintln!("wire: missing client ({}), or use --all", tokens());
         return 1;
     }
@@ -90,8 +103,18 @@ pub fn run(args: &[String]) -> i32 {
     };
 
     // Client-agnostic install housekeeping on any real wire (idempotent; per-client is fine).
+    // `--reconcile` runs this too, so an install-time `wire --reconcile` still seeds config +
+    // prunes stale bins BEFORE the per-client convergence below — keeping seed/prune on the
+    // interactive `wire` path only (the engine's [`reconcile`] never seeds/prunes).
     if !remove && !print_only {
         hooks::seed_and_prune(&paths);
+    }
+
+    // `--reconcile`: converge every client to config.toml's declared `exclude_clients` (the SAME
+    // core the engine drives at boot). Placed before `--all` so `wire --reconcile` never also
+    // does an unconditional `--all`.
+    if do_reconcile {
+        return reconcile(&paths);
     }
 
     // `--all` wires (or unwires) EVERY registry client — the single source the per-platform
@@ -108,6 +131,22 @@ pub fn run(args: &[String]) -> i32 {
     wire_client(client.expect("checked above"), &paths, remove, print_only)
 }
 
+/// Converge each registry client's wiring to config.toml's declared `exclude_clients` (absent
+/// or empty ⇒ exclude nothing ⇒ all wired). ONLY per-client wiring — it never prunes/deletes
+/// binaries and does NOT seed config (the engine seeds narration-spec separately). Called
+/// in-process by the engine at boot / on config change, and by `wire --reconcile`. A client
+/// LISTED in `exclude_clients` is `--remove`d (a clean no-op when its config was never
+/// created); every other client is wired (self-skipping when the client isn't installed).
+/// Returns the WORST per-client exit code (0 ok).
+pub fn reconcile(paths: &Paths) -> i32 {
+    let excluded = ds_config::VoiceConfig::load(paths).excluded_clients();
+    WireTarget::CLIENTS
+        .iter()
+        .map(|&c| wire_client(c, paths, /*remove=*/ excluded.contains(&c), /*print_only=*/ false))
+        .max()
+        .unwrap_or(0)
+}
+
 /// Wire (or unwire) ONE client: look its spec up in the registry, apply the presence gate, then
 /// walk its surfaces dispatching on mechanism. Surfaces are attempted IN ORDER and ALL of them
 /// even if one fails (worst exit code wins): a malformed file behind one surface must not skip
@@ -115,11 +154,8 @@ pub fn run(args: &[String]) -> i32 {
 /// deleted binary). Order matters for `claude_code`: the hooks write creates `~/.claude`, which
 /// the MCP surface's presence probe then sees.
 fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool) -> i32 {
-    let Some(spec) = ds_config::client_spec(client) else {
-        // `run` rejects non-clients before we get here; `--all` iterates CLIENTS only.
-        eprintln!("wire: narration_spec is not a client; use the setup_integration tool");
-        return 1;
-    };
+    let spec = ds_config::client_spec(client)
+        .expect("WireTarget is client-only; every variant has a registry entry");
 
     if !print_only && spec.gate_on_presence {
         if remove {
@@ -161,10 +197,10 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
                 hooks::grok_json_hooks((s.config_file)(paths), remove, print_only, paths)
             }
             WireMechanism::JsonMcp => {
-                mcp::apply(&mcp::target_for(spec, s, paths), remove, print_only)
+                mcp::apply(&mcp::target_for(spec, s, paths), remove, print_only, paths)
             }
             WireMechanism::TomlMcp => {
-                mcp::apply_toml(&mcp::target_for(spec, s, paths), remove, print_only)
+                mcp::apply_toml(&mcp::target_for(spec, s, paths), remove, print_only, paths)
             }
         })
         .max()
@@ -302,28 +338,14 @@ mod tests {
         assert!(!paths.codex_config.exists());
     }
 
-    /// `WireTarget::NarrationSpec` is a config-file concern, not a client; `run` rejects it
-    /// before ever calling `wire_client`, so the only way to reach this branch is to call
-    /// `wire_client` directly.
-    #[test]
-    fn wire_client_rejects_narration_spec() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::rooted_at(dir.path());
-        assert_eq!(
-            wire_client(WireTarget::NarrationSpec, &paths, false, false),
-            1
-        );
-    }
-
     /// Qwen Code is the only client whose two surfaces (`ClaudeJsonHooks` + `JsonMcp`) share ONE
     /// config file (`~/.qwen/settings.json`) — prove they coexist without clobbering each other in
     /// either direction (wire creates hooks then merges MCP into the same file; `--remove` strips
     /// both back out cleanly), against a tempdir-rooted `Paths` (never the real `$HOME`).
     ///
-    /// NOTE: like every other real (non-`--remove`) wire test in this crate touching a `JsonMcp`
-    /// surface, this exercises `mcp::apply`'s already-documented, benign, read-only leak (it calls
-    /// the unparameterized `io::resolve_dontspeak_bin()`, which checks for a real
-    /// `$HOME/.local/bin/dontspeak` — see the comment block in `wire/mcp.rs` above its own tests).
+    /// Hermetic: `wire_client` threads this test's tempdir-rooted `Paths` all the way into
+    /// `mcp::apply`'s bin resolution (`resolve_dontspeak_bin_at(Some(paths))`), so nothing here
+    /// reads the real `$HOME`/`~/.local/bin`.
     #[test]
     fn wire_client_qwen_code_wires_hooks_and_mcp_into_one_file_then_removes_both() {
         let dir = tempfile::tempdir().unwrap();
@@ -373,9 +395,8 @@ mod tests {
     /// without clobbering each other in either direction, against a tempdir-rooted `Paths`
     /// (never the real `$HOME`).
     ///
-    /// NOTE: like the Qwen test above, this exercises the already-documented, benign,
-    /// read-only leak in `mcp::apply_toml`'s merge path (`io::resolve_dontspeak_bin()` checks
-    /// for a real `$HOME/.local/bin/dontspeak` — see the comment block in `wire/mcp.rs`).
+    /// Hermetic like the Qwen test above: `wire_client` threads the tempdir-rooted `Paths`
+    /// into `mcp::apply_toml`'s bin resolution, so nothing reads the real `$HOME`.
     #[test]
     fn wire_client_codex_wires_hooks_and_mcp_into_one_file_then_removes_both() {
         let dir = tempfile::tempdir().unwrap();
@@ -462,6 +483,128 @@ mod tests {
         assert!(
             !text2.contains("mcp_servers"),
             "mcp entry stripped: {text2}"
+        );
+    }
+
+    // ── reconcile (the engine's boot-time / config-change convergence) ──────────
+
+    /// Recursively count `.bak.<secs>` sibling files under `dir` — the backups the writers
+    /// leave before overwriting an existing config. Used to prove a steady-state reconcile
+    /// creates NONE.
+    fn count_bak_files(dir: &std::path::Path) -> usize {
+        let mut n = 0;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    n += count_bak_files(&p);
+                } else if p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.contains(".bak."))
+                {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Create every client's presence-gate dot-dir so a real (non-skip) wire happens for each.
+    fn make_all_client_dirs(paths: &Paths) {
+        for d in [
+            &paths.claude_dir,
+            &paths.codex_dir,
+            &paths.qwen_dir,
+            &paths.grok_dir,
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+    }
+
+    /// Presence-gating holds under `reconcile`: with NO config.toml (desired = all supported)
+    /// but none of the gated clients installed, each gated client is a clean skip that scatters
+    /// nothing. (Claude Code is ungated — the installers wire it unconditionally — so its files
+    /// ARE written; only the gated clients must stay untouched.)
+    #[test]
+    fn reconcile_skips_absent_gated_clients_without_scattering() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        assert_eq!(reconcile(&paths), 0);
+        assert!(!paths.codex_config.exists(), "codex not installed → skipped");
+        assert!(!paths.qwen_settings.exists(), "qwen not installed → skipped");
+        assert!(!paths.grok_config.exists(), "grok not installed → skipped");
+    }
+
+    /// Absent / empty `exclude_clients` ⇒ exclude nothing ⇒ every client wired: with all presence
+    /// gates satisfied, reconcile wires each one's surfaces.
+    #[test]
+    fn reconcile_absent_key_wires_all_supported_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        make_all_client_dirs(&paths);
+
+        assert_eq!(reconcile(&paths), 0);
+        assert!(paths.settings_json.exists(), "claude_code hooks wired");
+        assert!(paths.claude_code_config.exists(), "claude_code mcp wired");
+        assert!(paths.codex_config.exists(), "codex wired");
+        assert!(paths.qwen_settings.exists(), "qwen wired");
+        assert!(paths.grok_config.exists(), "grok wired");
+    }
+
+    /// Listing a previously-wired client in `exclude_clients` strips that client's surfaces:
+    /// wire Qwen, then reconcile with `exclude_clients = ["qwen_code"]` — Qwen's hooks + MCP
+    /// entry are removed from `~/.qwen/settings.json`.
+    #[test]
+    fn reconcile_strips_a_client_dropped_from_the_desired_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.qwen_dir).unwrap();
+
+        // Pre-wire Qwen (as a prior reconcile / installer would have).
+        assert_eq!(wire_client(WireTarget::QwenCode, &paths, false, false), 0);
+        let before: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
+        assert!(before["hooks"]["Stop"].as_array().is_some(), "qwen wired first");
+
+        // Exclude Qwen (the wired client), then reconcile → it must be stripped.
+        let cfg = ds_config::VoiceConfig {
+            exclude_clients: Some(vec![WireTarget::QwenCode]),
+            ..ds_config::VoiceConfig::default()
+        };
+        ds_config::write_settings(&paths, &cfg).unwrap();
+        assert_eq!(reconcile(&paths), 0);
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
+        assert!(after.get("hooks").is_none(), "qwen hooks stripped: {after}");
+        assert!(
+            after.get("mcpServers").is_none(),
+            "qwen mcp entry stripped: {after}"
+        );
+    }
+
+    /// Steady-state idempotency (LOAD-BEARING — the engine reconciles every boot): after a
+    /// first reconcile wires everything, a SECOND reconcile writes nothing and creates NO new
+    /// `.bak` sibling across the three newly-guarded writers (JSON hooks, JSON MCP, TOML MCP).
+    #[test]
+    fn reconcile_is_idempotent_and_creates_no_new_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        make_all_client_dirs(&paths);
+
+        assert_eq!(reconcile(&paths), 0);
+        // Fresh configs were CREATED (not overwritten), so the first pass leaves no backup.
+        let baks_after_first = count_bak_files(dir.path());
+
+        // Second pass: every writer sees an unchanged document → short-circuits before any
+        // backup+write. Without the idempotency guards each existing file would be rewritten
+        // and a `.bak` sibling dropped.
+        assert_eq!(reconcile(&paths), 0);
+        let baks_after_second = count_bak_files(dir.path());
+        assert_eq!(
+            baks_after_second, baks_after_first,
+            "a steady-state reconcile must create NO new .bak files"
         );
     }
 }

@@ -8,7 +8,7 @@
 
 use ds_config::Paths;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Resolve the deployed `dontspeak` binary — the ONE path hook commands and the MCP
 /// `command` field register.
@@ -20,17 +20,10 @@ use std::path::Path;
 /// installed one. Fall back to this exe's own directory (the package lays the binaries down
 /// together, so the sibling path is correct even before it exists).
 ///
-/// Real-env entry point used by production callers (`hooks::claude_json_hooks`/
-/// `claude_toml_hooks` via their own `paths: &Paths` param, and `mcp.rs`'s own call which
-/// stays unparameterized — out of scope here). Resolves `Paths` fresh from the real `$HOME`.
-pub(crate) fn resolve_dontspeak_bin() -> Option<String> {
-    resolve_dontspeak_bin_at(Paths::resolve().as_ref())
-}
-
-/// Injectable core: same resolution, but a caller (a test) can pass a tempdir-rooted `Paths`
-/// instead of ever touching the real `$HOME`/`BaseDirs`. `None` (no `$HOME`, or the caller
-/// deliberately withholds it) skips the unix stable-install-path check and falls straight to
-/// the sibling-of-this-exe fallback.
+/// Every production caller (the `hooks` writers and the `mcp` writers) threads its own
+/// `paths: &Paths`, and a test passes a tempdir-rooted `Paths` — so NOTHING resolves the real
+/// `$HOME` implicitly here. `None` (no `$HOME`, or a caller deliberately withholds it) skips
+/// the unix stable-install-path check and falls straight to the sibling-of-this-exe fallback.
 pub(crate) fn resolve_dontspeak_bin_at(paths: Option<&Paths>) -> Option<String> {
     let file = format!("dontspeak{}", std::env::consts::EXE_SUFFIX);
     #[cfg(unix)]
@@ -43,7 +36,35 @@ pub(crate) fn resolve_dontspeak_bin_at(paths: Option<&Paths>) -> Option<String> 
     #[cfg(not(unix))]
     let _ = paths; // unused on non-unix builds (Windows) — avoid an unused-variable warning
     let exe = std::env::current_exe().ok()?;
+    // macOS `.app` bundle boot: the engine runs from `<App>.app/Contents/MacOS/DontSpeak`,
+    // but the installer places the CLI at `<App>.app/Contents/Helpers/dontspeak` (see §H /
+    // `apps/macos/bundle-lib.sh`). Resolve THAT here so boot-time reconcile registers the same
+    // path the installer wrote — otherwise the sibling fallback below would yield the
+    // nonexistent `Contents/MacOS/dontspeak` (which case-insensitively aliases the app binary),
+    // churning every client config on each launch. Pure decision, so it's unit-tested on any OS;
+    // it only matches the macOS bundle layout, leaving Windows/dev/Linux resolution unchanged.
+    if let Some(cli) = bundle_cli_path(&exe) {
+        return Some(cli.to_string_lossy().into_owned());
+    }
     Some(exe.parent()?.join(&file).to_string_lossy().into_owned())
+}
+
+/// PURE path decision for the macOS `.app` bundle layout: if `exe` is
+/// `<App>.app/Contents/MacOS/<binary>` (parent basename `MacOS`, grandparent basename
+/// `Contents`), the co-installed CLI is at `<App>.app/Contents/Helpers/dontspeak`. `None` for
+/// any other layout (dev builds, the Windows portable dir, Linux `~/.local/bin`), so those
+/// callers fall through to the sibling-of-this-exe default. No filesystem access — testable on
+/// every OS.
+fn bundle_cli_path(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = macos_dir.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    Some(contents.join("Helpers").join("dontspeak"))
 }
 
 /// Read a client's JSON config for editing. Missing or empty → `Value::Null` (treated as
@@ -101,5 +122,30 @@ pub(crate) fn backup_then_write(
             eprintln!("{tool}: write failed: {e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A synthetic `.app` bundle exe resolves the CLI to `Contents/Helpers/dontspeak`; a
+    /// non-bundle path yields `None` (fall through to the sibling default). Pure — runs on any OS.
+    #[test]
+    fn bundle_cli_path_resolves_helpers_dontspeak() {
+        let exe = Path::new("/Applications/DontSpeak.app/Contents/MacOS/DontSpeak");
+        assert_eq!(
+            bundle_cli_path(exe),
+            Some(PathBuf::from(
+                "/Applications/DontSpeak.app/Contents/Helpers/dontspeak"
+            ))
+        );
+        // A plain co-located layout (dev build / Windows portable dir) is NOT a bundle.
+        assert_eq!(
+            bundle_cli_path(Path::new("/home/alex/.local/bin/DontSpeak")),
+            None
+        );
+        // The grandparent must be `Contents`, not just any parent named `MacOS`.
+        assert_eq!(bundle_cli_path(Path::new("/tmp/MacOS/DontSpeak")), None);
     }
 }
