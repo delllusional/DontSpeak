@@ -404,7 +404,14 @@ impl<P: Platform + 'static> Engine<P> {
             plat.clone(),
             ds_platform::KeyChord::default(),
         ));
-        Self::assemble(plat, stt, VoiceConfig::default(), pidfile, long_press_ms, None)
+        Self::assemble(
+            plat,
+            stt,
+            VoiceConfig::default(),
+            pidfile,
+            long_press_ms,
+            None,
+        )
     }
 
     /// Construct selecting the STT engine from config via the factory
@@ -418,7 +425,14 @@ impl<P: Platform + 'static> Engine<P> {
     ) -> Self {
         let plat = Rc::new(plat);
         let stt = ds_engines::make_stt_at(cfg, plat.clone(), &ds_engines::RealAvailability, paths);
-        Self::assemble(plat, stt, cfg.clone(), pidfile, long_press_ms, paths.cloned())
+        Self::assemble(
+            plat,
+            stt,
+            cfg.clone(),
+            pidfile,
+            long_press_ms,
+            paths.cloned(),
+        )
     }
 
     fn assemble(

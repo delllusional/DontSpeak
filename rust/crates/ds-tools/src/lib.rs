@@ -687,8 +687,8 @@ mod tests {
     fn set_config_schema_matches_args() {
         use crate::SetConfigArgs;
         use ds_config::{
-            CancelSpeechScope, CaptureGain, DiarizerProvider, Provider, SttEngine,
-            TrayKind, TtsEngine,
+            CancelSpeechScope, CaptureGain, DiarizerProvider, Provider, SttEngine, TrayKind,
+            TtsEngine,
         };
 
         let populated = SetConfigArgs {

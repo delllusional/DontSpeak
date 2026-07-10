@@ -78,7 +78,7 @@ impl SttEngine {
 
     /// Whether this engine can serve STT on the CURRENT build/platform — the predicate the
     /// `stt_engine` preference ladder is walked with (see [`crate::VoiceConfig::resolved_stt`]).
-    /// A STATIC preference (like [`Provider::is_stt_usable`]): runtime model/authorization gating
+    /// A STATIC preference (like `Provider::is_stt_usable`): runtime model/authorization gating
     /// still applies downstream, but a rung that can NEVER run in this build is skipped so the
     /// ladder falls through to the next. `built_in` (Parakeet) needs the ONNX/Core-ML stack,
     /// absent on x86_64 macOS; `system` (Apple's on-device recognizer) is macOS-only;
@@ -147,7 +147,7 @@ impl TtsEngine {
     /// Whether this engine can serve TTS on the CURRENT build/platform — the predicate the
     /// `tts_engine`/`tts_engine_ladder` preference is walked with (see
     /// [`crate::VoiceConfig::resolved_tts`]). A STATIC preference (like
-    /// [`Provider::is_tts_usable`]). `built_in` (Kokoro) needs the ONNX/Core-ML stack, absent
+    /// `Provider::is_tts_usable`). `built_in` (Kokoro) needs the ONNX/Core-ML stack, absent
     /// on x86_64 macOS; `system` (macOS `say` / Windows SAPI) is available on macOS + Windows
     /// (no system synth wired on Linux).
     pub fn is_tts_usable(self) -> bool {

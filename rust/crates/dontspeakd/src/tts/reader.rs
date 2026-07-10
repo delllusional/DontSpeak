@@ -262,15 +262,11 @@ pub(super) fn reader_loop(
                     // `model_status`'s `parakeet` row can show it without touching `kokoro`.
                     // Change-gated: the exact same failure can repeat identically several
                     // times in a row and must not spam `StatusGate` each time.
-                    stt_model.transition(
-                        ModelState::Failed(msg.trim().to_string()),
-                        gate.as_deref(),
-                    );
+                    stt_model
+                        .transition(ModelState::Failed(msg.trim().to_string()), gate.as_deref());
                 } else if let Some(msg) = l.strip_prefix(proto::TTSLOADERR_PREFIX) {
-                    tts_model.transition(
-                        ModelState::Failed(msg.trim().to_string()),
-                        gate.as_deref(),
-                    );
+                    tts_model
+                        .transition(ModelState::Failed(msg.trim().to_string()), gate.as_deref());
                 } else if let Some(p) = l.strip_prefix(proto::STT_PROVIDER_PREFIX) {
                     // The REALIZED STT EP (mirrors the pre-READY parse in start()). Post-READY is
                     // the COMMON path — the parallel preload usually reports after READY — so

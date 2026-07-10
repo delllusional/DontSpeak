@@ -14,7 +14,7 @@ pub struct Paths {
     /// process-group id for the single-speaker barge-in contract.
     pub pidfile: PathBuf,
     /// The ONE unified activity log every dontspeak process appends to (per-OS logs dir,
-    /// e.g. macOS `~/Library/Logs/DontSpeak/dontspeak.log`): engine + hooks + mcp share it via [`crate::log`],
+    /// e.g. macOS `~/Library/Logs/DontSpeak/dontspeak.log`): engine + hooks + mcp share it via `ds_log`,
     /// one leveled format, with sudo-free in-process size rotation.
     pub log_file: PathBuf,
     pub settings_json: PathBuf,

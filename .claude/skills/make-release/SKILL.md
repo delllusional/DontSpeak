@@ -44,10 +44,24 @@ description: Cut a DontSpeak release — tag the single-source version, push the
   (cd apps/macos && MACOSX_DEPLOYMENT_TARGET=14.0 swift test)   # must pass, 0 failures
   ```
   (Windows also runs `dotnet test` in the release, but it's `continue-on-error` — non-blocking.)
-- **`--locked` catches Cargo.lock drift.** CI runs every cargo gate with `--locked`; `prepush`
-  and the fmt commands above don't, so a `Cargo.toml` dep bump with a stale `Cargo.lock` passes
-  locally but fails the release. Re-run the two prepush gates locked before tagging:
+- **`--locked` catches Cargo.lock drift — in BOTH workspaces.** CI runs every cargo gate with
+  `--locked`; `prepush` and the fmt commands above don't, so a `Cargo.toml` dep bump with a stale
+  `Cargo.lock` passes locally but fails the release. Re-run the two prepush gates locked before
+  tagging:
   `(cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings && cargo test --workspace --locked)`.
+  **Also regenerate the GTK workspace lock** after bumping the version: the version bump changes
+  every workspace crate's version string, so `apps/linux/gtk/Cargo.lock` (a SEPARATE workspace
+  that depends on the shared crates by path) must be regenerated too, or the Linux CI leg fails
+  with a `--locked` lock-file-out-of-date error. **You MUST run `cargo generate-lockfile` (not a
+  string replace)** — Cargo tracks checksums and resolution metadata that a sed/replace will
+  leave stale:
+  ```bash
+  (cd apps/linux/gtk && cargo generate-lockfile)
+  ```
+  Verify no `-dev` suffix lingers: `grep -rn "0\.2\.X-dev" rust/Cargo.lock apps/linux/gtk/Cargo.lock`
+  (must return nothing). Also diff the lock to confirm Cargo actually changed entries beyond the
+  version string — if the diff shows zero changes, the lock was already current and something
+  else is wrong.
 - Push with a GitHub account that has write access to `delllusional/DontSpeak`.
 
 ## 2 — Tag and trigger
