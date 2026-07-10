@@ -11,6 +11,9 @@ description = "Workspace-wide unified activity log for DontSpeak (one leveled, s
 
 [dependencies]
 serde_json = { workspace = true }
+# Facade macros (log::info!/warn!/error!/debug!) — this crate implements `log::Log` as a
+# sink over log_cached, so callers use the macros instead of ds_log::log_cached directly.
+log = { workspace = true }
 # Client-side push for the Logs tab: watch the logs dir instead of polling on a timer.
 notify = { workspace = true }
 # Resolves the per-OS default log-file location for log_cached/log_cached_echoed's

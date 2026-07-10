@@ -98,6 +98,10 @@ httpmock = "0.8.3"
 # `codex-app-server-protocol` crate (stale on crates.io, drags the full surface) nor the
 # tokio SDK (the workspace's no-tokio stance): we hand-write ~8 tolerant serde DTOs.
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+# Logging facade macros (log::info!/warn!/error!/debug!) — call-site API only, zero I/O
+# of its own. Already transitively in the graph (via attohttpc, ignore/globset); promoted
+# to a direct workspace dep so ds-log can implement `log::Log` as a sink over log_cached.
+log = "0.4"
 
 # ── Phase-2 engine deps (pinned once) ────────────────────────────────────────
 # Model download (ds-model): tiny blocking HTTP, checksum, atomic rename. We use

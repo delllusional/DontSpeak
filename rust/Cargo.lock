@@ -1014,6 +1014,7 @@ name = "ds-log"
 version = "0.2.6-dev"
 dependencies = [
  "directories",
+ "log",
  "notify",
  "serde_json",
  "tempfile",
