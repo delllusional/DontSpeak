@@ -237,6 +237,16 @@ impl Coalescer {
             },
         ))
     }
+
+    /// Drop every buffer belonging to `session`. Called when the session's thread is
+    /// evicted from the daemon's loaded list: without this, a partially-streamed item
+    /// (deltas received, no `item/completed`) survives in `bufs` and could produce a
+    /// spurious utterance if the same session is re-resumed on a different thread within
+    /// the same connection -- the stale buffer would flush against the fresh high-water
+    /// mark (reset by `clear_session_state`) as a `new` message.
+    fn drop_session(&mut self, session: &str) {
+        self.bufs.retain(|(sess, _), _| sess != session);
+    }
 }
 
 // ── Endpoint + daemon-start decisions (pure, unit-tested) ────────────────────────
@@ -614,6 +624,7 @@ fn run_attached<S: Read + Write>(
                                     ds_narrate::clear_session_state(paths, &r.session);
                                     registry.remove(&r.session);
                                     resolve.remove(&r.session);
+                                    coalescer.drop_session(&r.session);
                                     log(&format!(
                                         "codex-stream: session {} unloaded from the app-server — evicted",
                                         r.session

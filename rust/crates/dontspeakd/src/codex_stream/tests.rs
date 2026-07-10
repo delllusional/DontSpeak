@@ -74,6 +74,31 @@ fn coalescer_turn_flush_scopes_to_one_session() {
     assert_eq!(rest[0].0, "s2");
 }
 
+#[test]
+fn coalescer_drop_session_clears_partial_buffers() {
+    // Eviction path: a session's thread disappears from the daemon while an item is
+    // mid-stream (deltas received, no item/completed). Without drop_session the stale
+    // buffer survives and could produce a spurious utterance if the same session is
+    // re-resumed on a different thread. drop_session must clear ALL of that session's
+    // buffers while leaving other sessions untouched.
+    let mut c = Coalescer::new();
+    let t0 = Instant::now();
+    // Two sessions with partial buffers (no newline, no completion).
+    assert!(c.on_delta("s1", "i1", "> Evicted session line", t0).is_none());
+    assert!(c.on_delta("s2", "i2", "> Surviving session line", t0).is_none());
+    // Evict s1.
+    c.drop_session("s1");
+    // s1's buffers are gone: a turn-flush for s1 produces nothing.
+    assert!(c.flush_aged(t0, Duration::ZERO, Some("s1")).is_empty());
+    // s2's buffer survives intact.
+    let rest = c.flush_aged(t0 + Duration::from_secs(1), Duration::ZERO, None);
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].0, "s2");
+    // Dropping a session that was never in the coalescer is a no-op.
+    c.drop_session("unknown");
+    assert!(!c.bufs.is_empty());
+}
+
 #[cfg(unix)]
 #[test]
 fn control_socket_path_prefers_env_over_codex_dir() {
