@@ -82,8 +82,11 @@ git push origin main "v$ver"
    - `windows` — self-contained portable zips, x64 + arm64 (unsigned; SmartScreen note).
    - `macos` — `DontSpeak.app` zips, arm64 + x86_64; Developer-ID sign + notarize + staple when
      the `APPLE_*` secrets exist, else ad-hoc (first launch hits Gatekeeper).
-   - `linux` — per-arch tarballs (ubuntu-26.04 + -arm). **`continue-on-error`**: a Linux hiccup
-     doesn't block the release, but ships it without Linux assets — check they're there.
+   - `linux` — per-arch tarballs (ubuntu-26.04 + -arm). **`continue-on-error` at the step
+     level** — but in practice a failed Linux *job* still blocks the `publish release` step
+     (which `needs` all build jobs to succeed). Don't assume a Linux failure will silently
+     ship a release without Linux assets; it usually blocks the whole publish. Fix the cause
+     and re-cut (step 7).
 4. **`publish release`** — `gh release create` with all artifacts + `checksums.txt` +
    `--generate-notes`. That flag only lists merged PULL REQUESTS — this repo pushes straight
    to `main` with no PRs, so it has nothing to draw from and renders as a bare compare link
@@ -100,6 +103,12 @@ classes: the tag≠version guard; a platform-specific test failure the Linux-onl
 never exercised (e.g. Windows CRLF checkouts once broke a byte-for-byte test); runner-image/
 toolchain drift; notarization secret expiry. If the run failed before `publish release`, no
 release exists — the tag sits there without one.
+
+**`gh run watch` network reliability:** the watcher polls GitHub every ~3s for 25+ minutes and
+can drop mid-run with `wsarecv: An existing connection was forcibly closed by the remote host`
+on long-haul connections. If the background watcher exits with a network error (not a build
+failure), just restart it or poll manually with `gh run view "$run_id" --json status,conclusion`
+— the CI run itself is unaffected.
 
 ## 5 — Verify
 
@@ -169,8 +178,9 @@ inherit — see its own header comment) to the next version with a `-dev` suffix
 `0.1.0` → `0.1.1-dev` for a patch-level next release, or `0.2.0-dev` if you already know
 the next release is minor-sized. Missing the second file doesn't fail fast: the tag/version
 guard (step 3.1) only compares them at the NEXT tag push, so a skipped bump here silently
-sits stale for a whole release cycle. Regenerate both lock files (`cargo build --offline`
-in each workspace touches it) and commit all four. This is a small, code-free commit whose
+sits stale for a whole release cycle. Regenerate both lock files — `cargo build --offline` in `rust/` and **`cargo
+generate-lockfile`** in `apps/linux/gtk/` (same lesson as step 1: a string replace is not
+enough) — and commit all four. This is a small, code-free commit whose
 only job is to make `main` visibly "ahead of the last release" — the exact-string
 tag/version guard (step 3.1) never sees this suffix since nothing ever tags a `-dev`
 version. When it's time to cut the NEXT release, first replace `-dev` with the real next
