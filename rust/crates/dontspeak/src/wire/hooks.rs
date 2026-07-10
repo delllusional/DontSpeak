@@ -240,6 +240,68 @@ pub(crate) fn claude_toml_hooks(
     }
 }
 
+/// Wire (or strip / print) DontSpeak's native voice hooks into `cfg`, the DEDICATED JSON file
+/// DontSpeak owns for a client (`WireMechanism::GrokJsonHooks` — today Grok's
+/// `~/.grok/hooks/dontspeak.json`; the registry names the file per client). Unlike
+/// [`claude_json_hooks`], the file is EXCLUSIVELY ours, so there is nothing to merge or
+/// preserve: wire OVERWRITES the whole file with the rendered hook set (a timestamped backup is
+/// taken first via the shared write tail), and `--remove` DELETES it (backing it up first so
+/// the removal is recoverable). Returns 0 on success — including a `--remove` on a file that
+/// was never created — or 1 on a hard error (bin-resolution failure, write/remove failure).
+pub(crate) fn grok_json_hooks(
+    cfg: &std::path::Path,
+    remove: bool,
+    print_only: bool,
+    paths: &Paths,
+) -> i32 {
+    if remove {
+        if !cfg.exists() {
+            return 0; // nothing of ours on disk → clean no-op
+        }
+        // Back up before deleting so the removal is recoverable — mirrors the write path's
+        // pre-write backup (`io::backup_then_write`). A backup failure is a non-fatal warning.
+        if let Err(e) = ds_config::backup_before_write(cfg, "json") {
+            eprintln!(
+                "wire: WARNING: could not back up {} before removing ({e}); proceeding without a backup",
+                cfg.display()
+            );
+        }
+        return match std::fs::remove_file(cfg) {
+            Ok(()) => {
+                eprintln!("wire: {} {}", hook_action(true), cfg.display());
+                0
+            }
+            Err(e) => {
+                eprintln!("wire: could not remove {} ({e})", cfg.display());
+                1
+            }
+        };
+    }
+
+    let Some(bin) = io::resolve_dontspeak_bin_at(Some(paths)) else {
+        eprintln!("wire: could not resolve the dontspeak binary path");
+        return 1;
+    };
+    let v = ds_config::grok_hooks_value(&bin);
+
+    if print_only {
+        println!(
+            "// {}\n{}",
+            cfg.display(),
+            serde_json::to_string_pretty(&v).unwrap_or_default()
+        );
+        return 0;
+    }
+
+    io::backup_then_write(
+        "wire",
+        cfg,
+        "json",
+        &WriteBody::Json(&v),
+        hook_action(false),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,5 +674,108 @@ mod tests {
 
         seed_and_prune(&paths); // must not panic
         assert!(!paths.config_toml.exists());
+    }
+
+    // ── GrokJsonHooks: the DEDICATED own-the-file JSON writer ────────────────────────
+    // Grok's `~/.grok/hooks/dontspeak.json` is exclusively ours: wire OVERWRITES it, unwire
+    // DELETES it. These mirror the `claude_json_hooks` tests, adapted to the own-the-file
+    // semantics (no merge, no user keys to preserve).
+
+    #[test]
+    fn grok_json_hooks_wires_the_five_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("dontspeak.json");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
+        let v = read_json(&cfg);
+        let hooks = v["hooks"].as_object().unwrap();
+        let mut keys: Vec<&str> = hooks.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "Notification",
+                "SessionEnd",
+                "SessionStart",
+                "Stop",
+                "UserPromptSubmit",
+            ]
+        );
+        // Stop voices the reply — a command carrying our binary, a seconds timeout, no async.
+        let stop = &v["hooks"]["Stop"][0]["hooks"][0];
+        assert!(
+            stop["command"].as_str().unwrap().contains("dontspeak"),
+            "Stop command invokes the dontspeak binary, got {stop}"
+        );
+        assert!(
+            stop.get("timeout")
+                .and_then(serde_json::Value::as_i64)
+                .is_some(),
+            "Stop entry carries a numeric (seconds) timeout"
+        );
+        assert!(
+            stop.get("async").is_none(),
+            "Grok hooks run synchronously — no async key"
+        );
+    }
+
+    #[test]
+    fn grok_json_hooks_is_idempotent_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("dontspeak.json");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
+        let first = std::fs::read(&cfg).unwrap();
+        // Own-the-file overwrite: a second wire re-renders the SAME content (same resolved bin),
+        // so the file is byte-for-byte identical.
+        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
+        let second = std::fs::read(&cfg).unwrap();
+        assert_eq!(first, second, "re-wire writes byte-identical contents");
+    }
+
+    #[test]
+    fn grok_json_hooks_remove_deletes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("dontspeak.json");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
+        assert!(cfg.exists());
+        assert_eq!(grok_json_hooks(&cfg, true, false, &paths), 0);
+        assert!(!cfg.exists(), "unwire deletes the dedicated file");
+    }
+
+    #[test]
+    fn grok_json_hooks_remove_on_missing_file_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("dontspeak.json");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(grok_json_hooks(&cfg, true, false, &paths), 0);
+        assert!(!cfg.exists());
+    }
+
+    #[test]
+    fn grok_json_hooks_print_only_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("dontspeak.json");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(grok_json_hooks(&cfg, false, true, &paths), 0);
+        assert!(!cfg.exists());
+    }
+
+    /// Same blocked-parent technique as `claude_json_hooks_write_failure_returns_1`: a plain
+    /// FILE at the config's would-be parent dir makes `create_dir_all` fail → exit 1.
+    #[test]
+    fn grok_json_hooks_write_failure_returns_1() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("blocked"), b"not a directory").unwrap();
+        let cfg = dir.path().join("blocked").join("dontspeak.json");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 1);
     }
 }

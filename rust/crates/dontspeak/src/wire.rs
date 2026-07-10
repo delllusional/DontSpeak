@@ -157,6 +157,9 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
             WireMechanism::ClaudeTomlHooks => {
                 hooks::claude_toml_hooks((s.config_file)(paths), remove, print_only, paths)
             }
+            WireMechanism::GrokJsonHooks => {
+                hooks::grok_json_hooks((s.config_file)(paths), remove, print_only, paths)
+            }
             WireMechanism::JsonMcp => {
                 mcp::apply(&mcp::target_for(spec, s, paths), remove, print_only)
             }
@@ -173,11 +176,6 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
     if client == WireTarget::Codex && !remove && !print_only && code == 0 {
         eprintln!(
             "wire: for mid-turn narration, run Codex on the shared app-server: `codex app-server daemon start` once, then `codex --remote unix://` — otherwise replies are voiced at end of turn as before"
-        );
-    }
-    if client == WireTarget::Grok && !remove && !print_only && code == 0 {
-        eprintln!(
-            "wire: use `grok mcp list` or `grok inspect` to verify; restart the session or run `grok` again to load the server"
         );
     }
     code
@@ -209,6 +207,9 @@ fn print_registry(paths: Option<&Paths>) {
                 let how = match s.mechanism {
                     WireMechanism::ClaudeJsonHooks => "voice hooks (Claude contract, JSON)",
                     WireMechanism::ClaudeTomlHooks => "voice hooks (Claude contract, TOML)",
+                    WireMechanism::GrokJsonHooks => {
+                        "voice hooks (Claude contract, JSON — dedicated Grok file)"
+                    }
                     WireMechanism::JsonMcp => "MCP server (stdio, mcpServers entry)",
                     WireMechanism::TomlMcp => "MCP server (stdio, mcp_servers table in TOML)",
                 };
@@ -399,6 +400,65 @@ mod tests {
         assert_eq!(wire_client(WireTarget::Codex, &paths, true, false), 0);
         let text2 = std::fs::read_to_string(&paths.codex_config).unwrap();
         assert!(!text2.contains("hooks"), "hooks stripped: {text2}");
+        assert!(
+            !text2.contains("mcp_servers"),
+            "mcp entry stripped: {text2}"
+        );
+    }
+
+    /// Grok wires TWO surfaces like Codex/Qwen — but its `GrokJsonHooks` + `TomlMcp` surfaces
+    /// live in DIFFERENT files (the dedicated `~/.grok/hooks/dontspeak.json` we own outright,
+    /// and `~/.grok/config.toml` for MCP). Prove wire creates both and `--remove` deletes our
+    /// hooks file AND strips the MCP entry from the config, against a tempdir-rooted `Paths`.
+    ///
+    /// NOTE: like the Codex/Qwen two-surface tests above, this exercises the already-documented,
+    /// benign, read-only leak in `mcp::apply_toml`'s merge path (`io::resolve_dontspeak_bin()`
+    /// checks for a real `$HOME/.local/bin/dontspeak` — see the comment block in `wire/mcp.rs`).
+    #[test]
+    fn wire_client_grok_wires_both_surfaces_then_removes_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.grok_dir).unwrap(); // satisfy Grok's presence gate
+
+        assert_eq!(wire_client(WireTarget::Grok, &paths, false, false), 0);
+        // MCP entry in the TOML config…
+        let text = std::fs::read_to_string(&paths.grok_config).unwrap();
+        assert!(
+            text.contains("[mcp_servers.DontSpeak]"),
+            "mcp entry wired into grok config: {text}"
+        );
+        // …and the dedicated hooks file, in a SEPARATE file, with a Stop hook that voices the
+        // reply (command carries our binary, a numeric seconds timeout, and NO async key).
+        assert!(
+            paths.grok_hooks_json.exists(),
+            "dedicated hooks file created"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.grok_hooks_json).unwrap())
+                .unwrap();
+        let stop = &v["hooks"]["Stop"][0]["hooks"][0];
+        assert!(
+            stop["command"].as_str().unwrap().contains("dontspeak"),
+            "Stop hook command invokes our binary: {stop}"
+        );
+        assert!(
+            stop.get("timeout")
+                .and_then(serde_json::Value::as_i64)
+                .is_some(),
+            "Stop hook carries a numeric timeout: {stop}"
+        );
+        assert!(
+            stop.get("async").is_none(),
+            "Grok hooks run synchronously — no async key: {stop}"
+        );
+
+        // `--remove` deletes our dedicated hooks file AND strips the MCP entry from the config.
+        assert_eq!(wire_client(WireTarget::Grok, &paths, true, false), 0);
+        assert!(
+            !paths.grok_hooks_json.exists(),
+            "dedicated hooks file deleted on unwire"
+        );
+        let text2 = std::fs::read_to_string(&paths.grok_config).unwrap();
         assert!(
             !text2.contains("mcp_servers"),
             "mcp entry stripped: {text2}"

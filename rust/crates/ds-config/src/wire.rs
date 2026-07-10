@@ -5,6 +5,7 @@
 //! path resolution, backups, and the atomic write live in the `dontspeak` subcommands.
 
 pub mod codex;
+pub mod grok_hooks;
 pub mod hooks;
 pub mod json_mcp;
 pub mod registry;

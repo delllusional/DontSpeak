@@ -120,7 +120,8 @@ pub fn engine_earcon(paths: &Paths, event: &str) {
 /// The `Notification` hook payload (subset): which kind of notification Claude Code surfaced.
 #[derive(Debug, Deserialize, Default)]
 struct NotificationHook {
-    #[serde(default)]
+    // Grok sends camelCase (`notificationType`); the alias accepts it alongside Claude's snake_case.
+    #[serde(default, alias = "notificationType")]
     notification_type: String,
 }
 

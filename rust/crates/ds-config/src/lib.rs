@@ -67,9 +67,9 @@ pub use pidfile::{evict_stale_engine, is_engine_pid_alive, is_pid_alive, read_en
 pub use speakers::{Speaker, SpeakerStore};
 pub use voice::{CaptureGain, ConfigChange, DEFAULT_KOKORO_VOICE, HandsFreePhrases, VoiceConfig};
 pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};
+pub use wire::grok_hooks::grok_hooks_value;
 pub use wire::hooks::{HookSpec, HooksMergeError, INSTALLED_BINS, merge_hooks, strip_hooks};
 pub use wire::json_mcp::{merge_mcp_server, strip_mcp_server};
-pub use wire::toml_mcp::{merge_mcp_server_toml, strip_mcp_server_toml};
 pub use wire::registry::{
     CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, HookCommandStyle, Surface, WireMechanism,
     client_spec,
@@ -78,3 +78,4 @@ pub use wire::settings::{
     atomic_write_json, atomic_write_str, backup_before_write, merge_settings, voice_from_value,
     voice_to_value, write_settings,
 };
+pub use wire::toml_mcp::{merge_mcp_server_toml, strip_mcp_server_toml};

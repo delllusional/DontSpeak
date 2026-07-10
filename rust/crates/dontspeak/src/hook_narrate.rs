@@ -84,9 +84,12 @@ pub fn mark_streaming_session(paths: &Paths, payload: &str) {
 /// the streaming witness in [`speak_reply`] does that instead.
 #[derive(Debug, Deserialize, Default)]
 struct StopHook {
-    #[serde(default)]
+    // Grok sends camelCase (`lastAssistantMessage` / `sessionId`); the aliases accept them
+    // alongside Claude's snake_case. NOTE: `lastAssistantMessage` is a best-guess field name
+    // pending a live-grok verification pass.
+    #[serde(default, alias = "lastAssistantMessage")]
     last_assistant_message: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
 }
 
@@ -749,5 +752,38 @@ mod tests {
         assert!(!path.exists(), "state file removed");
         assert!(!path.with_extension("lock").exists(), "lock removed");
         assert!(!path.with_extension("tmp").exists(), "tmp removed");
+    }
+
+    // ── Grok camelCase Stop payload (runtime serde aliases) ──────────────────────────
+    //
+    // Grok delivers camelCase hook payloads (`hookEventName`, `sessionId`,
+    // `lastAssistantMessage`). The serde aliases on `StopHook` + `EventEnvelope` must route
+    // them through the SAME path as Claude's snake_case. Asserted at the PURE seam — parse →
+    // event_name → `stop_utterances` with an EXPLICIT `mic_active` — deliberately NOT through
+    // `speak_reply`, which would fall through to the live, nondeterministic
+    // `ds_platform::is_mic_active()` OS audio probe (a test-isolation violation).
+
+    #[test]
+    fn grok_camelcase_stop_payload_parses_and_voices() {
+        let payload = r#"{"hookEventName":"Stop","sessionId":"g1","lastAssistantMessage":"> Hi.\n\nDetail."}"#;
+        // The event router reads the camelCase `hookEventName` via its alias.
+        assert_eq!(crate::hook_core::event_name(payload), "Stop");
+        // The Stop payload parses via the `sessionId` / `lastAssistantMessage` aliases.
+        let hook: StopHook =
+            serde_json::from_str(payload).expect("camelCase Stop parses through the serde aliases");
+        assert_eq!(hook.session_id.as_deref(), Some("g1"));
+        // The parsed message voices its blockquote — feeding an EXPLICIT `mic_active`/`streamed`
+        // rather than reaching the live OS probe.
+        assert_eq!(
+            stop_utterances(
+                hook.last_assistant_message.as_deref(),
+                /*messages_on*/ true,
+                /*short_on*/ false,
+                /*mic_active*/ false,
+                /*streamed*/ false,
+            ),
+            vec!["Hi.".to_string()],
+            "camelCase lastAssistantMessage voices the blockquote"
+        );
     }
 }

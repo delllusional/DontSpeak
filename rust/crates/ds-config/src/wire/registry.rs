@@ -48,6 +48,13 @@ pub enum WireMechanism {
     /// (`toml_edit`) — `[[hooks.<Event>]]` tables. Shaper:
     /// `merge_codex_hooks`/`strip_codex_hooks`.
     ClaudeTomlHooks,
+    /// DontSpeak's voice hooks written to a DEDICATED JSON file we own outright (Grok's
+    /// `~/.grok/hooks/dontspeak.json`). The Claude hooks-contract shape, but with an inline
+    /// quoted-path command (`"<bin>" <verb>`, no `args` array), seconds timeouts, no `async`
+    /// key, and camelCase (`hookEventName`) payloads handled by the runtime serde aliases.
+    /// Because the file is exclusively ours, there is nothing to merge: wire OVERWRITES it
+    /// (a backup is taken first) and unwire DELETES it. Shaper: `grok_hooks_value`.
+    GrokJsonHooks,
     /// The stdio `mcpServers.DontSpeak` entry merged into a JSON config. Shaper:
     /// `merge_mcp_server`/`strip_mcp_server`.
     JsonMcp,
@@ -304,25 +311,39 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         detect_dir: |p| &p.grok_dir,
         gate_on_presence: true,
         // Grok (Grok Build) uses TOML for MCP servers under `[mcp_servers.<name>]` in
-        // `~/.grok/config.toml` (and project `.grok/config.toml`). It has strong
-        // Claude Code compatibility (reads `~/.claude.json`, `.claude/settings.json`,
-        // CLAUDE.md etc.), so `wire claude_code` already provides MCP + some hook
-        // coverage. This native entry registers the stdio DontSpeak MCP server
-        // directly in Grok's preferred TOML location.
+        // `~/.grok/config.toml` (and project `.grok/config.toml`), so the MCP surface reuses
+        // the same `TomlMcp` mechanism/shaper Codex uses, pointed at Grok's config file.
         //
-        // Hooks for Grok live in separate `~/.grok/hooks/*.json` files (or project
-        // equivalents) using a Claude-compatible event contract (SessionStart,
-        // UserPromptSubmit, Stop, Notification, ...). Full native hooks wiring is
-        // deferred; the existing ClaudeJsonHooks surface via compat is sufficient
-        // for initial narration support (end-of-turn via Stop + UserPromptSubmit
-        // for narration spec). No `MessageDisplay` streaming hook is documented yet.
-        surfaces: &[Surface {
-            mechanism: WireMechanism::TomlMcp,
-            config_file: |p| &p.grok_config,
-            load_hint: Some("start a new Grok session or run `grok mcp list` / `grok inspect`"),
-            hook_streaming: false,
-            hook_command_style: HookCommandStyle::ArgsArray, // ignored for MCP
-        }],
+        // Grok ALSO reads native hook definitions from `~/.grok/hooks/*.json` (or project
+        // `.grok/hooks/*.json`) using a Claude-COMPATIBLE event contract. So DontSpeak wires
+        // its OWN dedicated `~/.grok/hooks/dontspeak.json` — a file it owns outright (wire
+        // overwrites, backing up first; unwire deletes it) — via the `GrokJsonHooks`
+        // mechanism. That makes Grok narration FIRST-CLASS and native: it no longer depends on
+        // `wire claude_code` compat being present. The hook set is the full non-streaming
+        // shape (five events): `SessionStart` (greet-only), `SessionEnd`, `UserPromptSubmit`
+        // (notify + provide), `Stop`, `Notification`. Grok has NO `MessageDisplay` streaming
+        // hook, so end-of-turn narration rides `Stop` (like Codex, voicing the whole final
+        // message). Grok's hook payloads are camelCase (`hookEventName`, `sessionId`,
+        // `lastAssistantMessage`, `notificationType`) — handled by the runtime serde aliases
+        // on the hook payload structs, so the same `dontspeak notify`/`provide` binary serves
+        // them. Hooks live in a SEPARATE file from MCP, so the two surfaces edit different
+        // files (unlike Codex/Qwen, which share one).
+        surfaces: &[
+            Surface {
+                mechanism: WireMechanism::GrokJsonHooks,
+                config_file: |p| &p.grok_hooks_json, // ~/.grok/hooks/dontspeak.json
+                load_hint: None,
+                hook_streaming: false,
+                hook_command_style: HookCommandStyle::ArgsArray, // ignored by GrokJsonHooks
+            },
+            Surface {
+                mechanism: WireMechanism::TomlMcp,
+                config_file: |p| &p.grok_config,
+                load_hint: Some("start a new Grok session or run `grok mcp list` / `grok inspect`"),
+                hook_streaming: false,
+                hook_command_style: HookCommandStyle::ArgsArray, // ignored for MCP
+            },
+        ],
         docs: &[
             DocRef {
                 topic: "mcp",

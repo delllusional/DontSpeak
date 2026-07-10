@@ -87,6 +87,9 @@ pub struct Paths {
     /// Grok's `~/.grok/config.toml` — where `wire grok` adds (or removes) the
     /// `mcp_servers.DontSpeak` stdio entry.
     pub grok_config: PathBuf,
+    /// Grok's `~/.grok/hooks/dontspeak.json` — the dedicated file `wire grok` owns for
+    /// native voice hooks; unwire deletes it.
+    pub grok_hooks_json: PathBuf,
 }
 
 impl Paths {
@@ -129,6 +132,7 @@ impl Paths {
             qwen_settings: qwen_dir.join("settings.json"),
             qwen_dir,
             grok_config: grok_dir.join("config.toml"),
+            grok_hooks_json: grok_dir.join("hooks").join("dontspeak.json"),
             grok_dir,
             home,
             claude_dir,
@@ -172,6 +176,7 @@ impl Paths {
             qwen_settings: qwen_dir.join("settings.json"),
             qwen_dir,
             grok_config: grok_dir.join("config.toml"),
+            grok_hooks_json: grok_dir.join("hooks").join("dontspeak.json"),
             grok_dir,
             home,
             claude_dir,

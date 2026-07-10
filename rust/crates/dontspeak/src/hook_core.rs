@@ -28,7 +28,8 @@ use crate::{hook_narrate, hook_prompt, hook_speak};
 /// The one field every Claude Code hook payload carries that we route on.
 #[derive(Deserialize, Default)]
 struct EventEnvelope {
-    #[serde(default)]
+    // Grok sends camelCase (`hookEventName`); the alias accepts it alongside Claude's snake_case.
+    #[serde(default, alias = "hookEventName")]
     hook_event_name: String,
 }
 
@@ -45,7 +46,8 @@ pub fn event_name(payload: &str) -> String {
 /// streaming-witness to the right Claude session.
 #[derive(Deserialize, Default)]
 struct SessionEnvelope {
-    #[serde(default)]
+    // Grok sends camelCase (`sessionId`); the alias accepts it alongside Claude's snake_case.
+    #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
 }
 
@@ -175,6 +177,28 @@ mod tests {
             hook_narrate::stop_utterances(Some(DIGEST_REPLY), true, false, false, streamed)
                 .is_empty(),
             "seeded session ⇒ Stop stays silent"
+        );
+    }
+
+    #[test]
+    fn grok_camelcase_session_start_seeds_witness_via_sessionid_alias() {
+        // Grok delivers camelCase payloads (`hookEventName`, `sessionId`). `notify_at` must
+        // extract the session from `sessionId` (the serde alias on `SessionEnvelope`) and scope
+        // the streaming-witness seed to THAT session — proving camelCase routing at the notify
+        // seam. NOTE: Grok itself wires SessionStart greet-only (which SKIPS the seed); we pass
+        // plain `notify` (greet_only=false) here purely so the parsed `sessionId` has an
+        // OBSERVABLE effect (the seed) to assert on. This arm reaches only the greet engine_ping
+        // (a best-effort no-op on the tempdir's nonexistent socket) and the witness seed — no
+        // mic probe.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
+        let session = "grok-session-zzzz";
+        let payload = format!(r#"{{"hookEventName":"SessionStart","sessionId":"{session}"}}"#);
+
+        notify_at(&paths, "SessionStart", &payload, /*greet_only*/ false);
+        assert!(
+            hook_narrate::streamed_via_message_display(&paths, session),
+            "camelCase sessionId must scope the streaming-witness seed"
         );
     }
 }
