@@ -85,6 +85,11 @@ jobs:
       # arm64 target itself.
       - uses: ./.github/actions/ring-asm-windows
 
+      # Runner images lag freshly-released toolchains by days (see ci.yml's hygiene/clippy/
+      # test jobs) — pin to current stable explicitly rather than trusting windows-2025's
+      # preinstalled rustup default.
+      - uses: dtolnay/rust-toolchain@stable
+
       # key includes matrix.arch: the x64 and arm64 legs cross-compile different Rust
       # targets from the same job name, so the automatic per-job cache key alone would
       # conflate them.
@@ -285,6 +290,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Runner images lag freshly-released toolchains by days (see ci.yml's hygiene/clippy/
+      # test jobs) — pin to current stable explicitly rather than trusting macos-26's
+      # preinstalled rustup default.
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
@@ -407,6 +417,11 @@ jobs:
         uses: ./.github/actions/linux-build-deps
         with:
           extra: build-essential libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev
+
+      # Runner images lag freshly-released toolchains by days (see ci.yml's hygiene/clippy/
+      # test jobs) — pin to current stable explicitly rather than trusting ubuntu-26.04's
+      # preinstalled rustup default.
+      - uses: dtolnay/rust-toolchain@stable
 
       # key includes matrix.arch: x86_64 and aarch64 run on different runner labels but
       # share this job name, so make the cache split explicit rather than relying on the
