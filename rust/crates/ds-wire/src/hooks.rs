@@ -271,7 +271,7 @@ pub(crate) fn claude_toml_hooks(
                 0
             }
             None => {
-                println!("\n# {}\n{merged}", cfg.display());
+                println!("// {}\n{merged}", cfg.display());
                 0
             }
         },

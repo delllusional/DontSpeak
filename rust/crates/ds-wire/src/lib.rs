@@ -378,10 +378,9 @@ pub(crate) fn wire_surfaces_print_only(
 
 /// Print a captured [`PreviewDoc`] exactly as its mechanism's own writer would have — used only
 /// for the LAST surface of a [`wire_surfaces_print_only`] group, which is captured (not
-/// self-printed) so its doc can also be returned to the caller. Deliberately reproduces each
-/// mechanism's existing (and, between the two TOML writers, inconsistent — see issue #33, not
-/// fixed here) header format rather than unifying it, so a solo surface's printed output is
-/// byte-identical to before this refactor.
+/// self-printed) so its doc can also be returned to the caller. Reproduces each mechanism's own
+/// header format (all four writers now agree: `// {path}\n{body}`, no leading blank line — see
+/// issue #33) rather than hardcoding one format here.
 fn print_captured_doc(mechanism: WireMechanism, cfg: &Path, doc: &PreviewDoc) -> i32 {
     match (mechanism, doc) {
         (WireMechanism::ClaudeJsonHooks | WireMechanism::JsonMcp, PreviewDoc::Json(v)) => {
@@ -396,11 +395,7 @@ fn print_captured_doc(mechanism: WireMechanism, cfg: &Path, doc: &PreviewDoc) ->
                 }
             }
         }
-        (WireMechanism::ClaudeTomlHooks, PreviewDoc::Toml(s)) => {
-            println!("\n# {}\n{s}", cfg.display());
-            0
-        }
-        (WireMechanism::TomlMcp, PreviewDoc::Toml(s)) => {
+        (WireMechanism::ClaudeTomlHooks | WireMechanism::TomlMcp, PreviewDoc::Toml(s)) => {
             println!("// {}\n{s}", cfg.display());
             0
         }
