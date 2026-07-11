@@ -181,6 +181,25 @@ jobs:
         working-directory: rust
         run: cargo test --workspace --locked
 
+      # Gate for issue #26: ds_log::log_cached (the log::Log facade sink) always resolves
+      # the REAL per-OS log path and writes there unconditionally, bypassing test
+      # isolation. No test is supposed to reach it — this fails the build the moment one
+      # does, instead of relying on every reviewer remembering the rule. CI runners are
+      # fresh per run, so the target file can only exist if this run's `cargo test` step
+      # created it.
+      - name: verify tests didn't leak into the real log file (issue #26)
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux)   log_file="${XDG_STATE_HOME:-$HOME/.local/state}/dontspeak/logs/dontspeak.log" ;;
+            macOS)   log_file="$HOME/Library/Logs/DontSpeak/dontspeak.log" ;;
+            Windows) log_file="${LOCALAPPDATA}/DontSpeak/logs/dontspeak.log" ;;
+          esac
+          if [ -f "$log_file" ]; then
+            echo "::error::cargo test wrote to $log_file — a test path reached ds_log::log_cached, which always resolves the real per-OS log file and ignores test isolation (see issue #26). Route the caller through ds_log::log()/log_from() with a caller-supplied (tempdir) path instead."
+            exit 1
+          fi
+
       # Swift formatting gate — DELIBERATELY DISABLED, same policy as the Rust lint
       # gates above: CI runs unit tests only. (Config: apps/macos/.swift-format.)
       # - name: swift format lint (macOS app)

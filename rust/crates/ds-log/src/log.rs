@@ -237,10 +237,14 @@ static CACHED_LOG_FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLo
 /// path, so using it from a path that's supposed to stay test-isolated would silently leak
 /// writes into the real `$HOME`-based log directory.
 ///
-/// THE RULE (issue #26 tracks mechanising it): `log_cached` must stay unreachable from any
-/// unit test. Today it is, because its ONLY caller is the `log::Log` sink in `facade.rs`, and
-/// that sink is installed only by `ds_log::init()` — which no test calls, so `log::info!` is a
-/// silent no-op under `cargo test`. There is deliberately NO `log_cached_from`: a
+/// THE RULE (issue #26): `log_cached` must stay unreachable from any unit test. Today it is,
+/// because its ONLY caller is the `log::Log` sink in `facade.rs`, and that sink is installed
+/// only by `ds_log::init()` — which no test calls, so `log::info!` is a silent no-op under
+/// `cargo test`. This is now a CI gate, not just convention: `.github/workflows/ci.yml`'s
+/// "verify tests didn't leak into the real log file" step fails the build if a test run leaves
+/// a file at the real per-OS path, which is the only way `log_cached` (as opposed to
+/// `log`/`log_from`, which take a caller-supplied path) can write. There is deliberately NO
+/// `log_cached_from`: a
 /// client-attributed cached logger would be a brand-new, tempting call site that writes to the
 /// dev's/CI runner's REAL `$HOME` log. Client-attributed logging goes through [`log_from`],
 /// which takes the path — see its doc.

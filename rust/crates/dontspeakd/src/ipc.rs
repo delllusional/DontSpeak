@@ -17,7 +17,7 @@ use crate::ttsq::TtsQueue;
 /// Always `ds_log::log_from` against `paths.log_file`, NEVER `ds_log::log_cached*`: the cached
 /// logger resolves the REAL per-OS `$HOME` log path, so a single call from engine code would
 /// write into the dev's / CI runner's actual log dir the moment any test reached it (see
-/// `ds_log::log_cached`'s doc; issue #26 tracks mechanising that rule).
+/// `ds_log::log_cached`'s doc; issue #26 turned this into a CI gate, not just convention).
 fn log_client(paths: &Paths, client: ClientSource, msg: &str) {
     ds_log::log_from(
         &paths.log_file,
