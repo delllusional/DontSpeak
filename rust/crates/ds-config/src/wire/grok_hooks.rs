@@ -57,7 +57,7 @@ const GROK_HOOKS: &[(&str, &[(&str, i64)])] = &[
 
 /// Render the dedicated Grok hooks file body — the WHOLE `dontspeak.json` (DontSpeak owns the
 /// file outright, so this is not merged into anything). `bin` is the absolute path to the
-/// `dontspeak` binary; each command is rendered by the SHARED [`super::cmdline::inline_command`]
+/// `dontspeak` binary; each command is rendered by the SHARED `super::cmdline::inline_command`
 /// (with a seconds `timeout`, and no `async`/`matcher`/`args` keys) — the same string Codex
 /// gets, because Grok's hook entry likewise carries a bare command string with NO `shell`
 /// field to pin it to a quote-tolerant shell. Each command carries the uniform trailing

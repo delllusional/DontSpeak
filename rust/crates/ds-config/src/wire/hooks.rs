@@ -45,7 +45,7 @@ pub struct HookSpec<'a> {
     /// `command` string to a shell (no `args` field; timeout in milliseconds).
     pub command_style: HookCommandStyle,
     /// WHICH client these hooks are being wired for. Stamped onto EVERY verb slice as a
-    /// trailing `--client <token>` ([`hook_entry`]), so the `dontspeak` binary the hook
+    /// trailing `--client <token>` (`hook_entry`), so the `dontspeak` binary the hook
     /// spawns knows who invoked it and can put that client on its `ds-ipc` requests and its
     /// activity-log lines. Uniform across every client and every event — no shaper hardcodes
     /// its own client, so a future client reusing this mechanism stays "a registry entry, not

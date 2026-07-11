@@ -137,7 +137,7 @@ pub fn log(log_file: &Path, level: LogLevel, source: &str, msg: &str) {
     log_from(log_file, level, source, ClientSource::DontSpeak, msg);
 }
 
-/// [`log`], attributed to the CLIENT that caused the line. Any client other than
+/// [`log()`], attributed to the CLIENT that caused the line. Any client other than
 /// [`ClientSource::DontSpeak`] appends a trailing ` client=<token>` k=v to the MESSAGE (see the
 /// module docs) — the positional `[ts] LEVEL source …` fields are untouched, so the parsed log
 /// shape every UI's Logs tab reads is byte-compatible and a `DontSpeak` line is byte-identical

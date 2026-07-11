@@ -25,9 +25,9 @@
 //! surfaces of one client share a config file (today Codex's `[ClaudeTomlHooks, TomlMcp]` and
 //! Qwen's `[ClaudeJsonHooks, JsonMcp]`, both onto one file), each writer's real disk-read
 //! becomes stale for the second surface, since print-only never writes surface 1's result
-//! before surface 2 reads. [`wire_surfaces_print_only`] is the ONE place that decision is
+//! before surface 2 reads. `wire_surfaces_print_only` is the ONE place that decision is
 //! made: it groups surfaces by resolved config file and threads each surface's merged
-//! [`PreviewDoc`] into the next instead of letting it re-read disk. See its doc for the shape.
+//! `PreviewDoc` into the next instead of letting it re-read disk. See its doc for the shape.
 
 pub(crate) mod hooks;
 mod io;

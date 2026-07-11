@@ -44,9 +44,9 @@ pub fn spawn_push(tx: async_channel::Sender<Snapshot>) {
                 let snap = parse(&json);
                 let unchanged = delivered
                     && snap
-                    .status
-                    .as_ref()
-                    .is_some_and(|status| status.seq == since);
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| status.seq == since);
                 match &snap.status {
                     Some(s) => since = s.seq,
                     None => since = 0,

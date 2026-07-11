@@ -332,9 +332,9 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bytemuck"
-version = "1.25.0"
+version = "1.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+checksum = "d6aedf8ae72766347502cf3cb4f41cf5e9cc37d28bee90f1fdaaae15f9cf9424"
 
 [[package]]
 name = "byteorder"
@@ -379,9 +379,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.66"
+version = "1.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5d6cac793997bd970000024b2934968efe83b382de4fdcf4fcb46b6ee4ad996"
+checksum = "e17dd265a7d0f31ef544e1b20e03add05d3b45b491b633b10d67145d2acc1a38"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "dontspeakd"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "ds-config",
  "ds-earcon",
@@ -831,6 +831,8 @@ dependencies = [
  "ds-status",
  "ds-stt",
  "ds-tts",
+ "ds-wire",
+ "log",
  "nix 0.31.3",
  "notify",
  "serde",
@@ -840,10 +842,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds-client"
+version = "0.2.6"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "ds-config"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "directories",
+ "ds-client",
  "ds-log",
  "ds-proc",
  "serde",
@@ -855,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "ds-core"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "dontspeakd",
  "ds-config",
@@ -871,14 +881,14 @@ dependencies = [
 
 [[package]]
 name = "ds-earcon"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "directories",
 ]
 
 [[package]]
 name = "ds-engines"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "ds-config",
  "ds-platform",
@@ -887,11 +897,11 @@ dependencies = [
 
 [[package]]
 name = "ds-helper-proto"
-version = "0.2.6-dev"
+version = "0.2.6"
 
 [[package]]
 name = "ds-i18n"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "rust-i18n",
  "serde_json",
@@ -900,8 +910,9 @@ dependencies = [
 
 [[package]]
 name = "ds-ipc"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
+ "ds-client",
  "serde",
  "serde_json",
  "uds_windows",
@@ -910,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "ds-linux-gtk"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "async-channel",
  "ds-core",
@@ -927,16 +938,18 @@ dependencies = [
 
 [[package]]
 name = "ds-log"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "directories",
+ "ds-client",
+ "log",
  "notify",
  "serde_json",
 ]
 
 [[package]]
 name = "ds-model"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "attohttpc",
  "ds-config",
@@ -957,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "ds-narrate"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "ds-config",
  "serde",
@@ -966,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "ds-platform"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "arboard",
  "core-graphics",
@@ -981,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "ds-proc"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "nix 0.31.3",
  "tempfile",
@@ -990,14 +1003,14 @@ dependencies = [
 
 [[package]]
 name = "ds-status"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ds-stt"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "cpal 0.18.1",
  "ds-config",
@@ -1006,6 +1019,7 @@ dependencies = [
  "kaldi-native-fbank",
  "libloading",
  "ort",
+ "ringbuf",
  "rubato",
  "serde",
  "serde_json",
@@ -1014,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tools"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "ds-config",
  "serde",
@@ -1023,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tts"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "ds-config",
  "ds-model",
@@ -1041,9 +1055,18 @@ dependencies = [
 
 [[package]]
 name = "ds-voices"
-version = "0.2.6-dev"
+version = "0.2.6"
 dependencies = [
  "ds-config",
+]
+
+[[package]]
+name = "ds-wire"
+version = "0.2.6"
+dependencies = [
+ "ds-config",
+ "ds-log",
+ "serde_json",
 ]
 
 [[package]]
@@ -2188,7 +2211,7 @@ checksum = "f297ca19f4c2069ccc7969cba1d4c496b46c0b88f6ceddb88a9ae3200a6cf506"
 dependencies = [
  "anyhow",
  "log",
- "rand 0.8.6",
+ "rand 0.8.7",
  "rand_distr 0.4.3",
  "realfft",
  "rustfft",
@@ -3249,9 +3272,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -3260,9 +3283,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.9.4"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
+checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
@@ -3349,7 +3372,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
 dependencies = [
  "num-traits",
- "rand 0.8.6",
+ "rand 0.8.7",
 ]
 
 [[package]]
@@ -3482,6 +3505,17 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "ringbuf"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d3ecbcab081b935fb9c618b07654924f27686b4aac8818e700580a83eedcb7f"
+dependencies = [
+ "crossbeam-utils",
+ "portable-atomic",
+ "portable-atomic-util",
 ]
 
 [[package]]
@@ -3837,9 +3871,9 @@ dependencies = [
 
 [[package]]
 name = "sha1"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
@@ -4329,9 +4363,9 @@ dependencies = [
 
 [[package]]
 name = "tinyvec"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e61e67053d25a4e82c844e8424039d9745781b3fc4f32b8d55ed50f5f667ef3"
+checksum = "bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f"
 dependencies = [
  "tinyvec_macros",
 ]
@@ -4550,7 +4584,7 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "rand 0.9.4",
+ "rand 0.9.5",
  "sha1",
  "thiserror 2.0.18",
 ]
