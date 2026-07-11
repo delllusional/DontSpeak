@@ -8,11 +8,15 @@
 //! read → merge/strip → backup → atomic-write flow consumes. It reuses the SAME `ds-config`
 //! primitives the hook writers use (`merge_mcp_server`/`strip_mcp_server`,
 //! `backup_before_write`, `atomic_write_json`), so an MCP registration is crash-safe in exactly
-//! the way a settings.json hook write is.
+//! the way a settings.json hook write is. `print_only`'s `seed`/`capture` params are the
+//! `--print-only` grouping plumbing shared with `hooks.rs` (see `crate::wire_surfaces_print_only`,
+//! issue #30): when a client's hooks and MCP surfaces share one config file, they thread the
+//! merge between surfaces instead of each independently re-reading the (never-written) disk copy.
 
 use std::path::Path;
 
 use super::io::{self, WriteBody};
+use crate::PreviewDoc;
 use ds_config::{ClientSpec, Paths, Surface};
 
 /// One client's registration target — the config file plus the client-specific gating and
@@ -62,7 +66,16 @@ pub fn target_for<'a>(
 ///   → either print, or back-up-then-atomic-write.
 /// Additive + idempotent (our entry is overwritten so a reinstall re-points `command`; every
 /// other server and top-level key is preserved). Returns a process exit code (0 ok, 1 hard error).
-pub fn apply(target: &Target, remove: bool, print_only: bool, paths: &Paths) -> i32 {
+/// `seed`/`capture`: see `hooks::claude_json_hooks`'s doc (same print-only grouping contract,
+/// `PreviewDoc::Json` side) — both `None` on the real (non-preview) path.
+pub fn apply(
+    target: &Target,
+    remove: bool,
+    print_only: bool,
+    paths: &Paths,
+    seed: Option<PreviewDoc>,
+    capture: Option<&mut Option<PreviewDoc>>,
+) -> i32 {
     let tool = target.tool;
     let cfg = target.config;
 
@@ -80,8 +93,17 @@ pub fn apply(target: &Target, remove: bool, print_only: bool, paths: &Paths) -> 
 
     // Missing/empty → `{}`; a MALFORMED file is left UNTOUCHED (it is the user's own client
     // config — other MCP servers, and for `~/.claude.json` the project/session state).
-    let Ok(existing) = io::read_json_or_bail(tool, cfg) else {
-        return 1;
+    let existing = match seed {
+        Some(PreviewDoc::Json(v)) => v,
+        Some(PreviewDoc::Toml(_)) => {
+            panic!("mcp::apply: seed must be PreviewDoc::Json for a JSON mechanism")
+        }
+        None => {
+            let Ok(v) = io::read_json_or_bail(tool, cfg) else {
+                return 1;
+            };
+            v
+        }
     };
     // Keep a copy for the steady-state short-circuit below (strip/merge consume `existing`).
     let before = existing.clone();
@@ -98,14 +120,22 @@ pub fn apply(target: &Target, remove: bool, print_only: bool, paths: &Paths) -> 
     };
 
     if print_only {
-        match serde_json::to_string_pretty(&merged) {
-            Ok(s) => println!("// {}\n{s}", cfg.display()),
-            Err(e) => {
-                eprintln!("{tool}: serialize failed: {e}");
-                return 1;
+        return match capture {
+            Some(slot) => {
+                *slot = Some(PreviewDoc::Json(merged));
+                0
             }
-        }
-        return 0;
+            None => match serde_json::to_string_pretty(&merged) {
+                Ok(s) => {
+                    println!("// {}\n{s}", cfg.display());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{tool}: serialize failed: {e}");
+                    1
+                }
+            },
+        };
     }
 
     // Steady state (idempotent re-point produced no change / nothing to strip): write NOTHING
@@ -129,7 +159,15 @@ pub fn apply(target: &Target, remove: bool, print_only: bool, paths: &Paths) -> 
 
 /// Same as `apply` but for TOML-based MCP configs (Grok `~/.grok/config.toml`).
 /// Uses `ds_config` TOML shapers and `WriteBody::Str` for format-preserving write.
-pub fn apply_toml(target: &Target, remove: bool, print_only: bool, paths: &Paths) -> i32 {
+/// `seed`/`capture`: see `apply`'s doc (same contract, `PreviewDoc::Toml` side).
+pub fn apply_toml(
+    target: &Target,
+    remove: bool,
+    print_only: bool,
+    paths: &Paths,
+    seed: Option<PreviewDoc>,
+    capture: Option<&mut Option<PreviewDoc>>,
+) -> i32 {
     let tool = target.tool;
     let cfg = target.config;
 
@@ -141,7 +179,13 @@ pub fn apply_toml(target: &Target, remove: bool, print_only: bool, paths: &Paths
         return 0;
     }
 
-    let existing = std::fs::read_to_string(cfg).unwrap_or_default();
+    let existing = match seed {
+        Some(PreviewDoc::Toml(s)) => s,
+        Some(PreviewDoc::Json(_)) => {
+            panic!("mcp::apply_toml: seed must be PreviewDoc::Toml for a TOML mechanism")
+        }
+        None => std::fs::read_to_string(cfg).unwrap_or_default(),
+    };
 
     let merged = if remove {
         match ds_config::strip_mcp_server_toml(&existing, crate::SERVER_NAME) {
@@ -166,8 +210,16 @@ pub fn apply_toml(target: &Target, remove: bool, print_only: bool, paths: &Paths
     };
 
     if print_only {
-        println!("// {}\n{}", cfg.display(), merged);
-        return 0;
+        return match capture {
+            Some(slot) => {
+                *slot = Some(PreviewDoc::Toml(merged));
+                0
+            }
+            None => {
+                println!("// {}\n{}", cfg.display(), merged);
+                0
+            }
+        };
     }
 
     // Steady state (already wired / nothing to strip): write NOTHING and create NO `.bak`.
@@ -225,7 +277,10 @@ mod tests {
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
         // First wire: file created, our entry present with a non-empty command, stdio (no args).
-        assert_eq!(apply(&target(&cfg, true), false, false, &paths), 0);
+        assert_eq!(
+            apply(&target(&cfg, true), false, false, &paths, None, None),
+            0
+        );
         let v = read(&cfg);
         assert!(
             v["mcpServers"]["DontSpeak"]["command"]
@@ -235,7 +290,10 @@ mod tests {
         );
         assert!(v["mcpServers"]["DontSpeak"].get("args").is_none());
         // Re-wire: still exactly one entry (idempotent re-point, not a duplicate).
-        assert_eq!(apply(&target(&cfg, true), false, false, &paths), 0);
+        assert_eq!(
+            apply(&target(&cfg, true), false, false, &paths, None, None),
+            0
+        );
         assert_eq!(read(&cfg)["mcpServers"].as_object().unwrap().len(), 1);
     }
 
@@ -253,7 +311,10 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert_eq!(apply(&target(&cfg, true), false, false, &paths), 0);
+        assert_eq!(
+            apply(&target(&cfg, true), false, false, &paths, None, None),
+            0
+        );
         let v = read(&cfg);
         // Ours added…
         assert!(v["mcpServers"]["DontSpeak"]["command"].is_string());
@@ -276,7 +337,10 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert_eq!(apply(&target(&cfg, true), true, false, &paths), 0);
+        assert_eq!(
+            apply(&target(&cfg, true), true, false, &paths, None, None),
+            0
+        );
         let v = read(&cfg);
         assert!(v["mcpServers"].get("DontSpeak").is_none());
         assert_eq!(v["mcpServers"]["keepme"]["command"], "/usr/bin/keep");
@@ -288,7 +352,10 @@ mod tests {
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
         std::fs::write(&cfg, "{ this is not json").unwrap();
-        assert_eq!(apply(&target(&cfg, true), false, false, &paths), 1);
+        assert_eq!(
+            apply(&target(&cfg, true), false, false, &paths, None, None),
+            1
+        );
         // The user's file is preserved byte-for-byte (recoverable), not clobbered.
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "{ this is not json");
     }
@@ -298,7 +365,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
-        assert_eq!(apply(&target(&cfg, true), false, true, &paths), 0);
+        assert_eq!(
+            apply(&target(&cfg, true), false, true, &paths, None, None),
+            0
+        );
         assert!(!cfg.exists(), "preview must not create the file");
     }
 
@@ -308,10 +378,16 @@ mod tests {
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
         // present=false → clean skip (exit 0), no stray config created.
-        assert_eq!(apply(&target(&cfg, false), false, false, &paths), 0);
+        assert_eq!(
+            apply(&target(&cfg, false), false, false, &paths, None, None),
+            0
+        );
         assert!(!cfg.exists());
         // …but a PREVIEW still works without the client present.
-        assert_eq!(apply(&target(&cfg, false), false, true, &paths), 0);
+        assert_eq!(
+            apply(&target(&cfg, false), false, true, &paths, None, None),
+            0
+        );
         assert!(!cfg.exists());
     }
 
@@ -321,7 +397,10 @@ mod tests {
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
         std::fs::write(&cfg, json!({ "mcpServers": {} }).to_string()).unwrap();
-        assert_eq!(apply(&target(&cfg, true), false, false, &paths), 0);
+        assert_eq!(
+            apply(&target(&cfg, true), false, false, &paths, None, None),
+            0
+        );
         // backup_before_write leaves a timestamped `.bak.<secs>` sibling before the overwrite.
         let has_bak = std::fs::read_dir(dir.path())
             .unwrap()
@@ -338,7 +417,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
-        assert_eq!(apply(&target(&cfg, true), true, false, &paths), 0);
+        assert_eq!(
+            apply(&target(&cfg, true), true, false, &paths, None, None),
+            0
+        );
         assert!(!cfg.exists());
     }
 
@@ -350,13 +432,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
         let paths = rooted(dir.path());
-        assert_eq!(apply_toml(&target(&cfg, true), false, false, &paths), 0);
+        assert_eq!(
+            apply_toml(&target(&cfg, true), false, false, &paths, None, None),
+            0
+        );
         let text = std::fs::read_to_string(&cfg).unwrap();
         assert!(text.contains("[mcp_servers.DontSpeak]"));
         assert!(text.contains("command ="));
         assert!(!text.contains("args ="), "stdio entry carries no args key");
         // Re-wire: still exactly one DontSpeak table (idempotent re-point, not a duplicate).
-        assert_eq!(apply_toml(&target(&cfg, true), false, false, &paths), 0);
+        assert_eq!(
+            apply_toml(&target(&cfg, true), false, false, &paths, None, None),
+            0
+        );
         assert_eq!(
             std::fs::read_to_string(&cfg)
                 .unwrap()
@@ -376,7 +464,10 @@ mod tests {
             "theme = \"dark\"\n\n[mcp_servers.keepme]\ncommand = \"/usr/bin/keep\"\n",
         )
         .unwrap();
-        assert_eq!(apply_toml(&target(&cfg, true), false, false, &paths), 0);
+        assert_eq!(
+            apply_toml(&target(&cfg, true), false, false, &paths, None, None),
+            0
+        );
         let text = std::fs::read_to_string(&cfg).unwrap();
         assert!(text.contains("[mcp_servers.DontSpeak]"));
         assert!(text.contains("[mcp_servers.keepme]"));
@@ -394,7 +485,10 @@ mod tests {
             "[mcp_servers.DontSpeak]\ncommand = \"/old/dontspeak\"\n\n[mcp_servers.keepme]\ncommand = \"/usr/bin/keep\"\n",
         )
         .unwrap();
-        assert_eq!(apply_toml(&target(&cfg, true), true, false, &paths), 0);
+        assert_eq!(
+            apply_toml(&target(&cfg, true), true, false, &paths, None, None),
+            0
+        );
         let text = std::fs::read_to_string(&cfg).unwrap();
         assert!(!text.contains("DontSpeak"));
         assert!(text.contains("[mcp_servers.keepme]"));
@@ -411,7 +505,10 @@ mod tests {
         let paths = rooted(dir.path());
         let bad = "this is not [ valid toml";
         std::fs::write(&cfg, bad).unwrap();
-        assert_eq!(apply_toml(&target(&cfg, true), true, false, &paths), 1);
+        assert_eq!(
+            apply_toml(&target(&cfg, true), true, false, &paths, None, None),
+            1
+        );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), bad);
     }
 
@@ -422,7 +519,10 @@ mod tests {
         let paths = rooted(dir.path());
         let bad = "this is not [ valid toml";
         std::fs::write(&cfg, bad).unwrap();
-        assert_eq!(apply_toml(&target(&cfg, true), false, false, &paths), 1);
+        assert_eq!(
+            apply_toml(&target(&cfg, true), false, false, &paths, None, None),
+            1
+        );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), bad);
     }
 
@@ -431,7 +531,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
         let paths = rooted(dir.path());
-        assert_eq!(apply_toml(&target(&cfg, true), false, true, &paths), 0);
+        assert_eq!(
+            apply_toml(&target(&cfg, true), false, true, &paths, None, None),
+            0
+        );
         assert!(!cfg.exists(), "preview must not create the file");
     }
 
@@ -440,9 +543,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
         let paths = rooted(dir.path());
-        assert_eq!(apply_toml(&target(&cfg, false), false, false, &paths), 0);
+        assert_eq!(
+            apply_toml(&target(&cfg, false), false, false, &paths, None, None),
+            0
+        );
         assert!(!cfg.exists());
-        assert_eq!(apply_toml(&target(&cfg, false), false, true, &paths), 0);
+        assert_eq!(
+            apply_toml(&target(&cfg, false), false, true, &paths, None, None),
+            0
+        );
         assert!(!cfg.exists());
     }
 
@@ -452,7 +561,10 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         let paths = rooted(dir.path());
         std::fs::write(&cfg, "[mcp_servers]\n").unwrap();
-        assert_eq!(apply_toml(&target(&cfg, true), false, false, &paths), 0);
+        assert_eq!(
+            apply_toml(&target(&cfg, true), false, false, &paths, None, None),
+            0
+        );
         let has_bak = std::fs::read_dir(dir.path())
             .unwrap()
             .flatten()
@@ -468,7 +580,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
         let paths = rooted(dir.path());
-        assert_eq!(apply_toml(&target(&cfg, true), true, false, &paths), 0);
+        assert_eq!(
+            apply_toml(&target(&cfg, true), true, false, &paths, None, None),
+            0
+        );
         assert!(!cfg.exists());
     }
 }

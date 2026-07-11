@@ -13,9 +13,12 @@
 //! Safe by construction: additive + idempotent merge (never duplicates ours, never clobbers the
 //! user's own hooks/keys), a timestamped backup before writing, and a malformed OR unmergeable
 //! existing file is left completely untouched (non-fatal, reported) rather than destroyed or
-//! merged-as-empty. `print_only` emits the merged document without touching disk.
+//! merged-as-empty. `print_only` emits the merged document without touching disk — when two
+//! surfaces share one file, `seed`/`capture` (see `crate::wire_surfaces_print_only`, issue #30)
+//! thread the merge between them instead of each independently re-reading disk.
 
 use super::io::{self, WriteBody};
+use crate::PreviewDoc;
 use ds_config::{ClientSource, HookCommandStyle, HookSpec, INSTALLED_BINS, Paths};
 
 /// Binary names this app has shipped and later dropped or renamed. The single-binary
@@ -121,7 +124,10 @@ pub(crate) fn seed_and_prune(paths: &Paths) {
 /// so the `dontspeak` binary the hook spawns knows who invoked it. Returns 0
 /// on success — including a malformed or unmergeable existing file, which is left
 /// byte-identical and reported, not treated as fatal (matching `claude_toml_hooks`) — or 1
-/// on a hard error (bin-resolution failure, write failure).
+/// on a hard error (bin-resolution failure, write failure). `seed`, when `Some`, stands in for
+/// the disk read (a prior surface's merged doc sharing this file); `capture`, when `Some`,
+/// suppresses the preview print and stashes the merged doc there instead — both `None` on the
+/// real (non-preview) path; see `crate::wire_surfaces_print_only`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn claude_json_hooks(
     cfg: &std::path::Path,
@@ -131,10 +137,21 @@ pub(crate) fn claude_json_hooks(
     remove: bool,
     print_only: bool,
     paths: &Paths,
+    seed: Option<PreviewDoc>,
+    capture: Option<&mut Option<PreviewDoc>>,
 ) -> i32 {
-    let Ok(existing) = io::read_json_or_bail("wire", cfg) else {
-        return 0; // malformed existing file is the user's own — leave it, don't fail the run,
-        // matching `claude_toml_hooks`'s convention below.
+    let existing = match seed {
+        Some(PreviewDoc::Json(v)) => v,
+        Some(PreviewDoc::Toml(_)) => {
+            panic!("claude_json_hooks: seed must be PreviewDoc::Json for a JSON mechanism")
+        }
+        None => {
+            let Ok(v) = io::read_json_or_bail("wire", cfg) else {
+                return 0; // malformed existing file is the user's own — leave it, don't fail
+                // the run, matching `claude_toml_hooks`'s convention below.
+            };
+            v
+        }
     };
     // Keep a copy for the steady-state short-circuit below (strip/merge consume `existing`).
     let before = existing.clone();
@@ -172,15 +189,21 @@ pub(crate) fn claude_json_hooks(
     };
 
     if print_only {
-        match serde_json::to_string_pretty(&merged) {
-            Ok(s) => {
-                println!("// {}\n{s}", cfg.display());
+        match capture {
+            Some(slot) => {
+                *slot = Some(PreviewDoc::Json(merged));
                 0
             }
-            Err(e) => {
-                eprintln!("wire: serialize failed: {e}");
-                1
-            }
+            None => match serde_json::to_string_pretty(&merged) {
+                Ok(s) => {
+                    println!("// {}\n{s}", cfg.display());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("wire: serialize failed: {e}");
+                    1
+                }
+            },
         }
     } else {
         // Steady state (already wired / nothing to strip): write NOTHING and create NO `.bak`.
@@ -214,15 +237,24 @@ fn hook_action(remove: bool) -> &'static str {
 /// / engine session re-discovery, and the narration spec) and `Stop`→`notify` (speak the
 /// reply). Format-preserving (toml_edit). Returns 0 on
 /// success, 1 on a hard error; a malformed config is reported and left UNCHANGED (it's the
-/// user's file), which is non-fatal — same convention as `claude_json_hooks`.
+/// user's file), which is non-fatal — same convention as `claude_json_hooks`. `seed`/`capture`:
+/// see `claude_json_hooks`'s doc (same print-only grouping contract, `PreviewDoc::Toml` side).
 pub(crate) fn claude_toml_hooks(
     cfg: &std::path::Path,
     client: ClientSource,
     remove: bool,
     print_only: bool,
     paths: &Paths,
+    seed: Option<PreviewDoc>,
+    capture: Option<&mut Option<PreviewDoc>>,
 ) -> i32 {
-    let existing = std::fs::read_to_string(cfg).unwrap_or_default();
+    let existing = match seed {
+        Some(PreviewDoc::Toml(s)) => s,
+        Some(PreviewDoc::Json(_)) => {
+            panic!("claude_toml_hooks: seed must be PreviewDoc::Toml for a TOML mechanism")
+        }
+        None => std::fs::read_to_string(cfg).unwrap_or_default(),
+    };
     let result = if remove {
         ds_config::strip_codex_hooks(&existing)
     } else {
@@ -233,10 +265,16 @@ pub(crate) fn claude_toml_hooks(
         ds_config::merge_codex_hooks(&existing, &bin, client)
     };
     match result {
-        Ok(merged) if print_only => {
-            println!("\n# {}\n{merged}", cfg.display());
-            0
-        }
+        Ok(merged) if print_only => match capture {
+            Some(slot) => {
+                *slot = Some(PreviewDoc::Toml(merged));
+                0
+            }
+            None => {
+                println!("\n# {}\n{merged}", cfg.display());
+                0
+            }
+        },
         Ok(merged) if merged != existing => io::backup_then_write(
             "wire",
             cfg,
@@ -393,7 +431,9 @@ mod tests {
                 ClientSource::ClaudeCode,
                 false,
                 false,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             0
         );
@@ -409,7 +449,9 @@ mod tests {
                 ClientSource::ClaudeCode,
                 false,
                 false,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             0
         );
@@ -431,7 +473,9 @@ mod tests {
                 ClientSource::ClaudeCode,
                 false,
                 false,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             0
         );
@@ -443,7 +487,9 @@ mod tests {
                 ClientSource::ClaudeCode,
                 true,
                 false,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             0
         );
@@ -472,7 +518,9 @@ mod tests {
                 ClientSource::ClaudeCode,
                 false,
                 false,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             0
         );
@@ -498,7 +546,9 @@ mod tests {
                 ClientSource::ClaudeCode,
                 false,
                 false,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             0
         ); // non-fatal
@@ -519,7 +569,9 @@ mod tests {
                 ClientSource::ClaudeCode,
                 false,
                 true,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             0
         );
@@ -544,7 +596,9 @@ mod tests {
                 ClientSource::ClaudeCode,
                 false,
                 false,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             1
         );
@@ -569,7 +623,9 @@ mod tests {
                 ClientSource::QwenCode,
                 false,
                 false,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             0
         );
@@ -600,7 +656,9 @@ mod tests {
                 ClientSource::QwenCode,
                 false,
                 false,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             0
         );
@@ -613,7 +671,9 @@ mod tests {
                 ClientSource::QwenCode,
                 true,
                 false,
-                &paths
+                &paths,
+                None,
+                None,
             ),
             0
         );
@@ -627,7 +687,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths),
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
             0
         );
         let first = std::fs::read_to_string(&cfg).unwrap();
@@ -647,7 +707,7 @@ mod tests {
 
         // Re-run: an unchanged command is a true byte-for-byte no-op (see `codex_group_matches`).
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths),
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
             0
         );
         let second = std::fs::read_to_string(&cfg).unwrap();
@@ -661,11 +721,11 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths),
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
             0
         );
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, true, false, &paths),
+            claude_toml_hooks(&cfg, ClientSource::Codex, true, false, &paths, None, None),
             0
         );
 
@@ -683,7 +743,7 @@ mod tests {
         // `strip_codex_hooks("")` short-circuits `Ok("")` before ever calling
         // `resolve_dontspeak_bin` (that call is skipped entirely on the `remove` path anyway).
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, true, false, &paths),
+            claude_toml_hooks(&cfg, ClientSource::Codex, true, false, &paths, None, None),
             0
         );
         assert!(!cfg.exists());
@@ -700,7 +760,7 @@ mod tests {
         // `CodexMergeError::Parse` → the final `Err(e)` arm: reported, non-fatal, unchanged —
         // same convention `claude_json_hooks` now matches.
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths),
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
             0
         );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
@@ -713,7 +773,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, true, &paths),
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, true, &paths, None, None),
             0
         );
         assert!(!cfg.exists());
@@ -729,7 +789,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths),
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
             1
         );
     }

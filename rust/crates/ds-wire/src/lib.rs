@@ -20,12 +20,33 @@
 //! automatic reconcile drive the IDENTICAL code (they can't drift). Additive + idempotent +
 //! backed-up; a client that isn't installed is a clean skip (exit 0). `wire --list` prints
 //! the registry.
+//!
+//! `--print-only` (preview, no write) has its own threading concern (issue #30): when two
+//! surfaces of one client share a config file (today Codex's `[ClaudeTomlHooks, TomlMcp]` and
+//! Qwen's `[ClaudeJsonHooks, JsonMcp]`, both onto one file), each writer's real disk-read
+//! becomes stale for the second surface, since print-only never writes surface 1's result
+//! before surface 2 reads. [`wire_surfaces_print_only`] is the ONE place that decision is
+//! made: it groups surfaces by resolved config file and threads each surface's merged
+//! [`PreviewDoc`] into the next instead of letting it re-read disk. See its doc for the shape.
 
 pub(crate) mod hooks;
 mod io;
 pub(crate) mod mcp;
 
-use ds_config::{ClientKind, ClientSource, Paths, WireMechanism};
+use std::path::{Path, PathBuf};
+
+use ds_config::{ClientKind, ClientSource, ClientSpec, Paths, Surface, WireMechanism};
+
+/// One surface's merged document in whichever format its mechanism uses — the ONLY two shapes
+/// that exist today (`serde_json::Value` for `ClaudeJsonHooks`/`JsonMcp`, the format-preserving
+/// TOML `String` for `ClaudeTomlHooks`/`TomlMcp`). The currency [`wire_surfaces_print_only`]
+/// threads between surfaces of one client that share a config file, standing in for the disk
+/// read a real (non-preview) write would see once the prior surface's write had landed.
+#[derive(Debug)]
+pub(crate) enum PreviewDoc {
+    Json(serde_json::Value),
+    Toml(String),
+}
 
 /// Our MCP server key — the `mcpServers.DontSpeak` / `mcp_servers.DontSpeak` registry name
 /// (and the `serverInfo.name` the stdio server reports). MUST stay equal to
@@ -193,45 +214,22 @@ fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bo
         }
     }
 
-    let code = spec
-        .surfaces
-        .iter()
-        .map(|s| match s.mechanism {
-            // Every hook writer takes `spec.target` — the client it is wiring — and stamps it
-            // into the wired command as `--client <token>`. Uniform across mechanisms: no
-            // writer hardcodes its own client.
-            WireMechanism::ClaudeJsonHooks => hooks::claude_json_hooks(
-                (s.config_file)(paths),
-                s.hook_streaming,
-                s.hook_command_style,
-                spec.target,
-                remove,
-                print_only,
-                paths,
-            ),
-            WireMechanism::ClaudeTomlHooks => hooks::claude_toml_hooks(
-                (s.config_file)(paths),
-                spec.target,
-                remove,
-                print_only,
-                paths,
-            ),
-            WireMechanism::GrokJsonHooks => hooks::grok_json_hooks(
-                (s.config_file)(paths),
-                spec.target,
-                remove,
-                print_only,
-                paths,
-            ),
-            WireMechanism::JsonMcp => {
-                mcp::apply(&mcp::target_for(spec, s, paths), remove, print_only, paths)
-            }
-            WireMechanism::TomlMcp => {
-                mcp::apply_toml(&mcp::target_for(spec, s, paths), remove, print_only, paths)
-            }
-        })
-        .max()
-        .unwrap_or(0);
+    let code = if print_only {
+        // Grouping/threading so two surfaces sharing a file preview the true union — see
+        // `wire_surfaces_print_only`'s doc (issue #30). The real-write branch below is
+        // untouched: `dispatch_surface` there always gets `seed`/`capture` = `None`.
+        wire_surfaces_print_only(spec, paths, remove)
+            .into_iter()
+            .map(|(_file, code, _doc)| code)
+            .max()
+            .unwrap_or(0)
+    } else {
+        spec.surfaces
+            .iter()
+            .map(|s| dispatch_surface(s, spec, paths, remove, false, None, None))
+            .max()
+            .unwrap_or(0)
+    };
     // Codex-only user hint: hooks alone give Stop-narration; MID-TURN narration needs the
     // session hosted on the shared app-server so the engine can subscribe (see
     // docs/STREAMING-NARRATION.md). CLI literal by precedent (this file's other eprintln!s);
@@ -242,6 +240,177 @@ fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bo
         );
     }
     code
+}
+
+/// Dispatch ONE surface to its mechanism's writer. The ONLY caller-visible knobs beyond
+/// `remove`/`print_only` are `seed` (stand in for this surface's disk read — `None` reads disk
+/// as normal) and `capture` (when `Some`, suppress this call's own preview print and stash the
+/// merged document there instead) — both are for `--print-only` grouping
+/// ([`wire_surfaces_print_only`]) and are always `None` on the real-write path below.
+/// `GrokJsonHooks` ignores both: its two surfaces never share a file with anything (see the
+/// registry's own comment for `ClientSource::Grok`), so it needs no threading.
+#[allow(clippy::too_many_arguments)] // one dispatch across the registry's 5 mechanisms plus the
+// print-only preview-threading pair (seed/capture) — splitting further just moves the same
+// pieces into a struct without reducing what a caller must supply.
+fn dispatch_surface(
+    s: &'static Surface,
+    spec: &'static ClientSpec,
+    paths: &Paths,
+    remove: bool,
+    print_only: bool,
+    seed: Option<PreviewDoc>,
+    capture: Option<&mut Option<PreviewDoc>>,
+) -> i32 {
+    match s.mechanism {
+        // Every hook writer takes `spec.target` — the client it is wiring — and stamps it
+        // into the wired command as `--client <token>`. Uniform across mechanisms: no
+        // writer hardcodes its own client.
+        WireMechanism::ClaudeJsonHooks => hooks::claude_json_hooks(
+            (s.config_file)(paths),
+            s.hook_streaming,
+            s.hook_command_style,
+            spec.target,
+            remove,
+            print_only,
+            paths,
+            seed,
+            capture,
+        ),
+        WireMechanism::ClaudeTomlHooks => hooks::claude_toml_hooks(
+            (s.config_file)(paths),
+            spec.target,
+            remove,
+            print_only,
+            paths,
+            seed,
+            capture,
+        ),
+        WireMechanism::GrokJsonHooks => hooks::grok_json_hooks(
+            (s.config_file)(paths),
+            spec.target,
+            remove,
+            print_only,
+            paths,
+        ),
+        WireMechanism::JsonMcp => mcp::apply(
+            &mcp::target_for(spec, s, paths),
+            remove,
+            print_only,
+            paths,
+            seed,
+            capture,
+        ),
+        WireMechanism::TomlMcp => mcp::apply_toml(
+            &mcp::target_for(spec, s, paths),
+            remove,
+            print_only,
+            paths,
+            seed,
+            capture,
+        ),
+    }
+}
+
+/// Group `spec.surfaces` by resolved config file (order preserved; today at most 2 per group —
+/// Codex's `[ClaudeTomlHooks, TomlMcp]`, Qwen's `[ClaudeJsonHooks, JsonMcp]` — written for N so
+/// a future registry entry stacking a 3rd surface onto one file just works). Within a group,
+/// every surface but the last is dispatched with `capture` set (suppresses its own print,
+/// stashes its merged doc) and that doc is `seed`ed into the next surface sharing the file —
+/// the print-only analogue of the real write path's disk round-trip (issue #30: without this,
+/// the second surface's stale "read(disk)" never sees the first surface's merge, since
+/// print-only never writes it). THE place this grouping decision is made — `hooks::*`/
+/// `mcp::apply*` only know "read this seed or disk, print or capture"; they never decide
+/// grouping.
+///
+/// The LAST surface of a group is also dispatched with `capture` set (not printed by the
+/// writer itself) so its merged doc — the true union — is available here to both print (via
+/// [`print_captured_doc`], replicating each mechanism's own preview format so the user-visible
+/// output for a solo surface is unchanged) and hand back to the caller: this fn returns one
+/// `(file, worst exit code, merged doc)` entry per distinct file the client's surfaces touch,
+/// so callers other than `wire_client` (i.e. tests) can assert on the union directly with no
+/// stdout capture. The doc is `None` only for a `GrokJsonHooks`-only file — that mechanism
+/// never participates in seed/capture and prints itself, unchanged.
+pub(crate) fn wire_surfaces_print_only(
+    spec: &'static ClientSpec,
+    paths: &Paths,
+    remove: bool,
+) -> Vec<(PathBuf, i32, Option<PreviewDoc>)> {
+    let mut groups: Vec<(PathBuf, Vec<&'static Surface>)> = Vec::new();
+    for s in spec.surfaces {
+        let file = (s.config_file)(paths).to_path_buf();
+        match groups.iter_mut().find(|(f, _)| f == &file) {
+            Some(group) => group.1.push(s),
+            None => groups.push((file, vec![s])),
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(file, surfaces)| {
+            let n = surfaces.len();
+            let mut carried: Option<PreviewDoc> = None;
+            let mut worst = 0;
+            let mut final_doc: Option<PreviewDoc> = None;
+            for (i, s) in surfaces.into_iter().enumerate() {
+                let mut slot: Option<PreviewDoc> = None;
+                worst = worst.max(dispatch_surface(
+                    s,
+                    spec,
+                    paths,
+                    remove,
+                    true,
+                    carried.take(),
+                    Some(&mut slot),
+                ));
+                if i + 1 == n {
+                    if let Some(doc) = &slot {
+                        worst = worst.max(print_captured_doc(s.mechanism, &file, doc));
+                    }
+                    final_doc = slot;
+                } else {
+                    carried = slot;
+                }
+            }
+            (file, worst, final_doc)
+        })
+        .collect()
+}
+
+/// Print a captured [`PreviewDoc`] exactly as its mechanism's own writer would have — used only
+/// for the LAST surface of a [`wire_surfaces_print_only`] group, which is captured (not
+/// self-printed) so its doc can also be returned to the caller. Deliberately reproduces each
+/// mechanism's existing (and, between the two TOML writers, inconsistent — see issue #33, not
+/// fixed here) header format rather than unifying it, so a solo surface's printed output is
+/// byte-identical to before this refactor.
+fn print_captured_doc(mechanism: WireMechanism, cfg: &Path, doc: &PreviewDoc) -> i32 {
+    match (mechanism, doc) {
+        (WireMechanism::ClaudeJsonHooks | WireMechanism::JsonMcp, PreviewDoc::Json(v)) => {
+            match serde_json::to_string_pretty(v) {
+                Ok(s) => {
+                    println!("// {}\n{s}", cfg.display());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("wire: serialize failed: {e}");
+                    1
+                }
+            }
+        }
+        (WireMechanism::ClaudeTomlHooks, PreviewDoc::Toml(s)) => {
+            println!("\n# {}\n{s}", cfg.display());
+            0
+        }
+        (WireMechanism::TomlMcp, PreviewDoc::Toml(s)) => {
+            println!("// {}\n{s}", cfg.display());
+            0
+        }
+        (WireMechanism::GrokJsonHooks, _) => {
+            unreachable!("GrokJsonHooks never populates a capture slot")
+        }
+        (mechanism, doc) => unreachable!(
+            "PreviewDoc variant {doc:?} does not match its surface's mechanism {mechanism:?}"
+        ),
+    }
 }
 
 /// `wire --list` — print the client registry: who, where (per-OS resolved paths + live presence),
@@ -469,6 +638,81 @@ mod tests {
             !text2.contains("mcp_servers"),
             "mcp entry stripped: {text2}"
         );
+    }
+
+    /// Regression for issue #30: `--print-only` against Codex used to print the SECOND surface
+    /// (`TomlMcp`) from a stale read of the (never-written, in preview) disk copy — missing the
+    /// first surface's (`ClaudeTomlHooks`) merge, since print-only never actually writes it to
+    /// disk between the two surfaces. `wire_surfaces_print_only` threads the first surface's
+    /// merged doc into the second instead, so the single returned entry for `codex_config` shows
+    /// the TRUE union of both.
+    #[test]
+    fn wire_surfaces_print_only_codex_shows_the_union_of_both_surfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.codex_dir).unwrap(); // satisfy Codex's presence gate
+
+        let spec = ds_config::client_spec(ClientSource::Codex).unwrap();
+        let results = wire_surfaces_print_only(spec, &paths, false);
+        assert_eq!(
+            results.len(),
+            1,
+            "Codex's two surfaces share one file: {results:?}"
+        );
+        let (file, code, doc) = &results[0];
+        assert_eq!(*file, paths.codex_config);
+        assert_eq!(*code, 0);
+        let Some(PreviewDoc::Toml(text)) = doc else {
+            panic!("expected a captured PreviewDoc::Toml, got {doc:?}");
+        };
+        assert!(
+            text.contains("[[hooks.Stop]]"),
+            "hooks block present: {text}"
+        );
+        assert!(
+            text.contains("[mcp_servers.DontSpeak]"),
+            "mcp block present alongside hooks: {text}"
+        );
+        assert!(!paths.codex_config.exists(), "print-only never writes");
+
+        // The production entry point wires through correctly too.
+        assert_eq!(wire_client(ClientSource::Codex, &paths, false, true), 0);
+        assert!(
+            !paths.codex_config.exists(),
+            "print-only via wire_client still never writes"
+        );
+    }
+
+    /// Qwen analog of the Codex test above, JSON side: the single returned entry for
+    /// `qwen_settings` carries a `PreviewDoc::Json` with BOTH the hooks and MCP surfaces' merges.
+    #[test]
+    fn wire_surfaces_print_only_qwen_shows_the_union_of_both_surfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.qwen_dir).unwrap(); // satisfy Qwen's presence gate
+
+        let spec = ds_config::client_spec(ClientSource::QwenCode).unwrap();
+        let results = wire_surfaces_print_only(spec, &paths, false);
+        assert_eq!(
+            results.len(),
+            1,
+            "Qwen's two surfaces share one file: {results:?}"
+        );
+        let (file, code, doc) = &results[0];
+        assert_eq!(*file, paths.qwen_settings);
+        assert_eq!(*code, 0);
+        let Some(PreviewDoc::Json(v)) = doc else {
+            panic!("expected a captured PreviewDoc::Json, got {doc:?}");
+        };
+        assert!(
+            v["hooks"]["Stop"].as_array().is_some(),
+            "hooks present: {v}"
+        );
+        assert!(
+            v["mcpServers"]["DontSpeak"]["command"].as_str().is_some(),
+            "mcp entry present alongside hooks: {v}"
+        );
+        assert!(!paths.qwen_settings.exists(), "print-only never writes");
     }
 
     /// Grok wires TWO surfaces like Codex/Qwen — but its `GrokJsonHooks` + `TomlMcp` surfaces
