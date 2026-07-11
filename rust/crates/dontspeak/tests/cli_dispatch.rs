@@ -14,16 +14,15 @@ use std::time::{Duration, Instant};
 /// This is a REAL subprocess running the production `main()`, which unconditionally calls
 /// `ds_log::init()` and logs the "unknown subcommand" error — unlike in-process unit tests,
 /// there is no seam to hand it a tempdir `log_file`, so it falls through to `log_cached`'s
-/// real per-OS path (see issue #26). Point `HOME`/`XDG_STATE_HOME`/`LOCALAPPDATA` at a tempdir
-/// for the child so `directories::BaseDirs` resolves an isolated path instead of leaking into
-/// the real `$HOME` log file that CI's "verify tests didn't leak" gate checks.
+/// real per-OS path (see issue #26). `DONTSPEAK_LOG_FILE` redirects that path straight into a
+/// tempdir for the child; a `HOME`/`LOCALAPPDATA` env override doesn't work cross-platform —
+/// Windows resolves `%LOCALAPPDATA%` via the native known-folder API, which ignores an
+/// overridden env var for a child process.
 fn run_bounded(args: &[&str], timeout: Duration) -> i32 {
     let home = tempfile::tempdir().expect("tempdir");
     let mut child = Command::new(env!("CARGO_BIN_EXE_dontspeak"))
         .args(args)
-        .env("HOME", home.path())
-        .env("XDG_STATE_HOME", home.path().join("state"))
-        .env("LOCALAPPDATA", home.path())
+        .env("DONTSPEAK_LOG_FILE", home.path().join("dontspeak.log"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

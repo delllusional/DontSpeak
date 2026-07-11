@@ -188,7 +188,19 @@ pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: ClientSo
 ///   macOS:   `~/Library/Logs/DontSpeak/dontspeak.log`
 ///   Windows: `%LOCALAPPDATA%\DontSpeak\logs\dontspeak.log`
 ///   Linux:   `$XDG_STATE_HOME`/`~/.local/state/dontspeak/logs/dontspeak.log`
+///
+/// `DONTSPEAK_LOG_FILE`, if set, overrides the path outright — the ONLY way an
+/// integration test that spawns the real `dontspeak`/`ds-helper` binary (so it runs the
+/// real `ds_log::init()`, with no in-process seam to hand it a tempdir path) can stay
+/// isolated from the real per-OS log file cross-platform. `HOME`/`XDG_STATE_HOME` env
+/// overrides work for `directories::BaseDirs` on macOS/Linux, but Windows resolves
+/// `%LOCALAPPDATA%` via the native known-folder API (`SHGetKnownFolderPath`), which
+/// ignores a child process's overridden `LOCALAPPDATA` env var — this override is a
+/// deliberate escape hatch that isn't OS-API dependent.
 fn default_log_file() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("DONTSPEAK_LOG_FILE") {
+        return Some(PathBuf::from(p));
+    }
     let base = directories::BaseDirs::new()?;
 
     #[cfg(not(target_os = "linux"))]
