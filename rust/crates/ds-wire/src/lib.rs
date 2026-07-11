@@ -439,9 +439,9 @@ mod tests {
     /// and `~/.grok/config.toml` for MCP). Prove wire creates both and `--remove` deletes our
     /// hooks file AND strips the MCP entry from the config, against a tempdir-rooted `Paths`.
     ///
-    /// NOTE: like the Codex/Qwen two-surface tests above, this exercises the already-documented,
-    /// benign, read-only leak in `mcp::apply_toml`'s merge path (`io::resolve_dontspeak_bin()`
-    /// checks for a real `$HOME/.local/bin/dontspeak` — see the comment block in `wire/mcp.rs`).
+    /// Hermetic like the Codex/Qwen two-surface tests above: `mcp::apply_toml` resolves the bin
+    /// via the injected tempdir-rooted `Paths`, so nothing reads the real `$HOME` (see the
+    /// comment block in `wire/mcp.rs`).
     #[test]
     fn wire_client_grok_wires_both_surfaces_then_removes_both() {
         let dir = tempfile::tempdir().unwrap();
