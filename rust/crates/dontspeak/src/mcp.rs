@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
+use crate::engine_launch::ensure_engine;
 use crate::tools;
 
 /// MCP protocol revision we implement (date-based). We echo the client's version
@@ -15,16 +16,43 @@ pub(crate) const PROTOCOL_VERSION: &str = "2025-11-25";
 pub(crate) const SERVER_NAME: &str = "DontSpeak";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Run the stdio MCP server loop: read newline-delimited JSON-RPC from stdin, route
-/// each line through [`dispatch`], and write each response (one per line) to stdout.
-/// Per the spec, stdout carries ONLY JSON-RPC messages; logging goes to stderr.
+/// Run the stdio MCP server loop. A real MCP client (Claude Code, the WinUI/GTK/macOS
+/// host, …) always sends at least one JSON-RPC message before EOF. If stdin hits EOF
+/// having handled zero, this wasn't a real client — most likely `dontspeak`/
+/// `dontspeak.exe` invoked directly by a human (e.g. double-clicked) rather than
+/// spawned by an MCP client — so fall back to launching the resident host app, same as
+/// a real `tools/call` would (see [`ensure_engine`]). Without this, a stray direct
+/// launch silently exits 0 with no host app started and no log line — GH issue #20.
 pub(crate) fn serve() {
     let sock = ds_config::Paths::resolve().map(|p| p.engine_sock);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    serve_on(stdin.lock(), stdout.lock(), sock.as_ref(), || {
+        match sock.as_ref() {
+            Some(sock) => {
+                log(
+                    "no MCP client sent a request before EOF; launching the resident host \
+                     app as a standalone-run fallback",
+                );
+                ensure_engine(sock);
+            }
+            None => log("cannot resolve engine socket path; skipping standalone-run fallback"),
+        }
+    });
+}
 
-    for line in stdin.lock().lines() {
+/// The stdio loop's actual logic, generic over reader/writer so it's unit-testable
+/// without real stdio. Calls `on_no_requests` once, after EOF, if the reader never
+/// produced a single parseable JSON-RPC message (blank lines and unparseable lines
+/// don't count; a bare no-id notification DOES count — it's still real client traffic).
+fn serve_on<R: BufRead, W: Write>(
+    reader: R,
+    mut out: W,
+    sock: Option<&PathBuf>,
+    on_no_requests: impl FnOnce(),
+) {
+    let mut handled_any = false;
+    for line in reader.lines() {
         let Ok(line) = line else { break };
         let line = line.trim();
         if line.is_empty() {
@@ -34,13 +62,17 @@ pub(crate) fn serve() {
             log("ignoring non-JSON line");
             continue;
         };
-        if let Some(resp) = dispatch(&msg, sock.as_ref()) {
+        handled_any = true;
+        if let Some(resp) = dispatch(&msg, sock) {
             let mut s = resp.to_string();
             s.push('\n');
             if out.write_all(s.as_bytes()).is_err() || out.flush().is_err() {
                 break; // client went away
             }
         }
+    }
+    if !handled_any {
+        on_no_requests();
     }
 }
 
@@ -118,6 +150,54 @@ pub(crate) fn log(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── serve_on ─────────────────────────────────────────────────────────────
+    // Pure `io::Cursor` fixtures only — no real stdio, socket, or process spawn, so
+    // these never touch the real engine socket or launch a real host app (GH #20's
+    // fallback logic, in isolation from `ensure_engine`'s own real-world side effects).
+
+    #[test]
+    fn serve_on_falls_back_when_no_request_ever_arrives() {
+        let reader = std::io::Cursor::new(&b""[..]); // immediate EOF — no console/pipe attached
+        let mut out = Vec::new();
+        let mut fell_back = false;
+        serve_on(reader, &mut out, None, || fell_back = true);
+        assert!(fell_back, "empty stdin must trigger the fallback");
+    }
+
+    #[test]
+    fn serve_on_falls_back_when_only_blank_or_unparseable_lines_arrive() {
+        let reader = std::io::Cursor::new(&b"\n   \nnot json\n"[..]);
+        let mut out = Vec::new();
+        let mut fell_back = false;
+        serve_on(reader, &mut out, None, || fell_back = true);
+        assert!(
+            fell_back,
+            "blank/unparseable-only input is not real client traffic"
+        );
+    }
+
+    #[test]
+    fn serve_on_skips_fallback_once_a_real_request_arrives() {
+        let reader = std::io::Cursor::new(&br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#[..]);
+        let mut out = Vec::new();
+        let mut fell_back = false;
+        serve_on(reader, &mut out, None, || fell_back = true);
+        assert!(!fell_back, "a real request must suppress the fallback");
+        assert!(!out.is_empty(), "the ping response was actually written");
+    }
+
+    #[test]
+    fn serve_on_skips_fallback_for_a_bare_notification() {
+        // notifications/initialized has no id and gets no reply, but it IS real
+        // traffic from a real client — must not trigger the standalone fallback.
+        let reader =
+            std::io::Cursor::new(&br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#[..]);
+        let mut out = Vec::new();
+        let mut fell_back = false;
+        serve_on(reader, &mut out, None, || fell_back = true);
+        assert!(!fell_back, "a notification is still real client traffic");
+    }
 
     // ── dispatch ─────────────────────────────────────────────────────────────
 
