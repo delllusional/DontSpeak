@@ -542,7 +542,7 @@ pub const KNOWN_TERMINALS: &[KnownTerminal] = &[
 // input device. Windows: a WASAPI capture-session probe. Linux has no probe yet →
 // `false` (no gate), which degrades to always-play.
 
-/// Returns true if the system's default microphone is currently capturing.
+/// Whether the default microphone is currently capturing (per-OS probe).
 ///
 /// Thin dispatch to the per-OS probe (CoreAudio on macOS, WASAPI on Windows, a
 /// no-gate fallback elsewhere); the implementation for each target lives in that
@@ -552,7 +552,7 @@ pub fn is_mic_active() -> bool {
     macos::is_mic_active()
 }
 
-/// Returns true if the system's default microphone is currently capturing.
+/// Whether the default microphone is currently capturing (per-OS probe).
 #[cfg(windows)]
 pub fn is_mic_active() -> bool {
     windows::is_mic_active()

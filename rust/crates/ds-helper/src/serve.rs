@@ -213,12 +213,10 @@ pub(crate) fn serve() -> ! {
         &stt_provider,
         parakeet_dir,
     )));
-    // NOTE: this `transcriber` cache is what preload / `load stt` / `unload stt` manage.
-    // Real listen falls back to it ONLY for non-streaming (system, or unloadable backend).
-    // For streaming providers (`cpu`/`cuda`, `ane`) the actual work uses a SEPARATE
-    // `backend_cell` cache in listen.rs (preloaded/unloaded in parallel). `unload stt`
-    // drives both. `STTLOADED` still only reflects the transcriber cache; full unification
-    // is future work. See `SttResidencySlot` for the claim state machine.
+    // The `transcriber` cache is managed by preload/load/unload stt. Real listen falls back to it
+    // only for non-streaming backends. Streaming providers use a separate `backend_cell` (in listen.rs)
+    // that is also preloaded/unloaded. `unload stt` drives both. `STTLOADED` reflects only the
+    // transcriber cache. See `SttResidencySlot`.
     // Claimed the MOMENT the STT load starts — by the parallel preload below OR a later
     // `load stt` request — so the two can't BOTH load the model concurrently. See
     // `SttResidencySlot`: `Idle -> Loading -> Loaded`, with `Loading`/`Loaded` only ever

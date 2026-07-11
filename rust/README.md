@@ -101,6 +101,8 @@ cargo build --release            # all binaries, lto + codegen-units=1
 cargo test                       # whole workspace
 ```
 
+See the "Code Comments" section in `../AGENTS.md` for guidelines on keeping Rust comments valuable and concise. The audit that produced those rules is in recent git history.
+
 On macOS the engine runs in-process inside `DontSpeak.app`
 (`../apps/macos/bundle.sh`); Caps-Lock dictation needs the Accessibility grant. See
 [../README.md](../README.md) for install + the smoke test, and

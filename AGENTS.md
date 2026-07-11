@@ -149,3 +149,27 @@ unchanged `Cargo.lock` has no commit — and, now, no imminent release — to at
 check to. Use `.claude/skills/prepush` to run the exact per-commit gates locally before
 pushing (cargo-deny is no longer one of them — see the skill for the release-only
 caveat).
+
+## Code Comments
+
+Comments must be **valuable and concise**. They exist to record what the code + names do not make obvious to a careful reader.
+
+**Keep (high value):**
+- `//!` module docs that capture design rationale, historical bugs fixed, invariants, "why this shape", and non-obvious decisions.
+- `///` docs on public APIs that pin exact contracts (wire tokens, error modes, version-skew fallbacks with `#[serde(default)]`, session scoping, "HANDLE-FREE").
+- SAFETY comments that justify the precise preconditions making an `unsafe` block sound (lifetimes of data, app-signed ABI, Once serialization, intentional leaks for in-flight callbacks, etc.).
+- Notes on "single source of truth", drift/parity guards, cross-crate sharing, "LOAD-BEARING" behavior, and gotchas/races/ordering.
+- Test comments that explain *why the test exists* (the regression or invariant it pins).
+
+**Strip or shorten (low or no value):**
+- Restatements of the obvious ("Returns the X", "increments the counter", "The foo pidfile", repeating the function signature).
+- Duplicated boilerplate across files or sites (centralize once + cross-reference).
+- Verbose re-explanations of the same concept when one canonical location + links suffices.
+- Pure "what" docs on leaf accessors, simple consts, or data variants when the name + surrounding context is clear.
+
+**Practical rules:**
+- One canonical explanation per concept. Use "see X" or cross-refs liberally.
+- Module `//!` for big picture + evolution. Public `///` for contracts.
+- Explicitly document non-obvious choices and the bugs they prevent.
+- Update or delete notes when the underlying behavior or rationale changes.
+- These rules were produced by a full-crate comment audit (see commit history).

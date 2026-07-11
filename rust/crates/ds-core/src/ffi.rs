@@ -79,9 +79,8 @@ pub extern "C" fn ds_set_muted(on: u8) -> u8 {
     })
 }
 
-/// Open the OS's system-voice settings page — Spoken Content (macOS) / Time & language ▸
-/// Speech (Windows) / TODO (Linux). Cross-platform seam for the UI "Manage voices" button.
-/// Returns 1 if launched, 0 if unsupported/failed. HANDLE-FREE.
+/// Open the OS's system-voice settings page (macOS Spoken Content / Windows Speech / TODO Linux).
+/// Cross-platform seam for the UI "Manage voices" button. Returns 1 if launched, 0 otherwise. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_open_voice_settings() -> u8 {
     guard_val(0, || ds_tts::system::open_voice_settings() as u8)
@@ -135,7 +134,7 @@ fn cstr_or(p: *const c_char, default: &str) -> String {
         .to_string()
 }
 
-/// Is the Kokoro (TTS) model set present + valid? Probes disk only. HANDLE-FREE.
+/// Kokoro (TTS) model set present + valid? (disk probe only). HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_kokoro_present_global() -> u8 {
     guard_val(0, || models::is_kokoro_present() as u8)
@@ -147,8 +146,7 @@ pub extern "C" fn ds_parakeet_onnx_present_global() -> u8 {
     guard_val(0, || models::is_parakeet_onnx_present() as u8)
 }
 
-/// Is the engine running? HANDLE-FREE (pidfile probe), safe off the
-/// main thread.
+/// Engine running? (pidfile probe). HANDLE-FREE, safe off main thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_running_global() -> u8 {
     guard_val(0, || engine::is_running() as u8)

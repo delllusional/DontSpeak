@@ -4,7 +4,7 @@
 
 Claude Code– and Claude-agent–specific material only. See [AGENTS.md](AGENTS.md)
 (imported above) for the product description, workspace layout, commands,
-invariants, and CI gates — that file is the source of truth; don't duplicate it
+invariants, CI gates, and **Code Comments** guidelines — that file is the source of truth; don't duplicate it
 here.
 
 ## Editing AGENTS.md or this file
