@@ -556,7 +556,7 @@ fn run_attached<S: Read + Write>(
                     resolve.remove(&r.session);
                     log::info!(
                         target: "engine",
-                        "codex-stream: evicted idle session {} (ttl)",
+                        "codex-stream: evicted idle session {} (ttl) client=codex",
                         r.session
                     );
                 }
@@ -629,7 +629,7 @@ fn run_attached<S: Read + Write>(
                                     coalescer.drop_session(&r.session);
                                     log::info!(
                                         target: "engine",
-                                        "codex-stream: session {} unloaded from the app-server — evicted",
+                                        "codex-stream: session {} unloaded from the app-server — evicted client=codex",
                                         r.session
                                     );
                                 }
@@ -682,7 +682,7 @@ fn run_attached<S: Read + Write>(
                             {
                                 log::info!(
                                     target: "engine",
-                                    "codex-stream: thread {thread_id} reports sessionId {sid} != {session} — narrating under the hook session id"
+                                    "codex-stream: thread {thread_id} reports sessionId {sid} != {session} — narrating under the hook session id client=codex"
                                 );
                             }
                             // The witness, IMMEDIATELY on resume — closes the short-turn
@@ -691,7 +691,7 @@ fn run_attached<S: Read + Write>(
                             resolve.remove(&session);
                             log::info!(
                                 target: "engine",
-                                "codex-stream: attached to session {session} (thread {thread_id})"
+                                "codex-stream: attached to session {session} (thread {thread_id}) client=codex"
                             );
                             resumed.insert(
                                 thread_id,
@@ -892,7 +892,7 @@ fn supervise(
                             warned_bin_unresolvable = true;
                             log::info!(
                                 target: "engine",
-                                "codex-stream: daemon start is enabled but `{}` was not found on PATH or the known install dirs — set codex_bin to the binary's full path",
+                                "codex-stream: daemon start is enabled but `{}` was not found on PATH or the known install dirs — set codex_bin to the binary's full path client=codex",
                                 cfg.codex_bin
                             );
                         }

@@ -16,7 +16,7 @@
 //! merged-as-empty. `print_only` emits the merged document without touching disk.
 
 use super::io::{self, WriteBody};
-use ds_config::{HookCommandStyle, HookSpec, INSTALLED_BINS, Paths};
+use ds_config::{ClientSource, HookCommandStyle, HookSpec, INSTALLED_BINS, Paths};
 
 /// Binary names this app has shipped and later dropped or renamed. The single-binary
 /// consolidation replaced `ds-mcp`/`ds-speak`/`ds-narrate`; the standalone `dontspeakd` engine
@@ -116,14 +116,18 @@ pub(crate) fn seed_and_prune(paths: &Paths) {
 /// `MessageDisplay` for per-batch narration; `false` (Qwen Code) omits it, so the reply is
 /// voiced whole from `Stop`. `command_style` selects the command DIALECT: `ArgsArray`
 /// (Claude Code — bin + `args`, timeout in seconds) or `InlineShell` (Qwen Code — verbs
-/// inlined into the one command string its shell runner executes, timeout in ms). Returns 0
+/// inlined into the one command string its shell runner executes, timeout in ms). `client` is
+/// the client whose file this is — stamped into every wired verb slice as `--client <token>`,
+/// so the `dontspeak` binary the hook spawns knows who invoked it. Returns 0
 /// on success — including a malformed or unmergeable existing file, which is left
 /// byte-identical and reported, not treated as fatal (matching `claude_toml_hooks`) — or 1
 /// on a hard error (bin-resolution failure, write failure).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn claude_json_hooks(
     cfg: &std::path::Path,
     streaming: bool,
     command_style: HookCommandStyle,
+    client: ClientSource,
     remove: bool,
     print_only: bool,
     paths: &Paths,
@@ -152,6 +156,7 @@ pub(crate) fn claude_json_hooks(
             notif_channel,
             streaming,
             command_style,
+            client,
         };
         ds_config::merge_hooks(existing, &spec)
     };
@@ -212,6 +217,7 @@ fn hook_action(remove: bool) -> &'static str {
 /// user's file), which is non-fatal — same convention as `claude_json_hooks`.
 pub(crate) fn claude_toml_hooks(
     cfg: &std::path::Path,
+    client: ClientSource,
     remove: bool,
     print_only: bool,
     paths: &Paths,
@@ -224,7 +230,7 @@ pub(crate) fn claude_toml_hooks(
             eprintln!("wire: could not resolve the dontspeak binary path");
             return 1;
         };
-        ds_config::merge_codex_hooks(&existing, &bin)
+        ds_config::merge_codex_hooks(&existing, &bin, client)
     };
     match result {
         Ok(merged) if print_only => {
@@ -257,6 +263,7 @@ pub(crate) fn claude_toml_hooks(
 /// was never created — or 1 on a hard error (bin-resolution failure, write/remove failure).
 pub(crate) fn grok_json_hooks(
     cfg: &std::path::Path,
+    client: ClientSource,
     remove: bool,
     print_only: bool,
     paths: &Paths,
@@ -289,7 +296,7 @@ pub(crate) fn grok_json_hooks(
         eprintln!("wire: could not resolve the dontspeak binary path");
         return 1;
     };
-    let v = ds_config::grok_hooks_value(&bin);
+    let v = ds_config::grok_hooks_value(&bin, client);
 
     if print_only {
         println!(
@@ -383,6 +390,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
+                ClientSource::ClaudeCode,
                 false,
                 false,
                 &paths
@@ -398,6 +406,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
+                ClientSource::ClaudeCode,
                 false,
                 false,
                 &paths
@@ -419,6 +428,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
+                ClientSource::ClaudeCode,
                 false,
                 false,
                 &paths
@@ -426,7 +436,15 @@ mod tests {
             0
         );
         assert_eq!(
-            claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, true, false, &paths),
+            claude_json_hooks(
+                &cfg,
+                true,
+                HookCommandStyle::ArgsArray,
+                ClientSource::ClaudeCode,
+                true,
+                false,
+                &paths
+            ),
             0
         );
 
@@ -451,6 +469,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
+                ClientSource::ClaudeCode,
                 false,
                 false,
                 &paths
@@ -476,6 +495,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
+                ClientSource::ClaudeCode,
                 false,
                 false,
                 &paths
@@ -492,7 +512,15 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            claude_json_hooks(&cfg, true, HookCommandStyle::ArgsArray, false, true, &paths),
+            claude_json_hooks(
+                &cfg,
+                true,
+                HookCommandStyle::ArgsArray,
+                ClientSource::ClaudeCode,
+                false,
+                true,
+                &paths
+            ),
             0
         );
         assert!(!cfg.exists());
@@ -513,6 +541,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
+                ClientSource::ClaudeCode,
                 false,
                 false,
                 &paths
@@ -533,7 +562,15 @@ mod tests {
         let qwen = HookCommandStyle::InlineShell;
 
         assert_eq!(
-            claude_json_hooks(&cfg, false, qwen, false, false, &paths),
+            claude_json_hooks(
+                &cfg,
+                false,
+                qwen,
+                ClientSource::QwenCode,
+                false,
+                false,
+                &paths
+            ),
             0
         );
         let v = read_json(&cfg);
@@ -556,11 +593,30 @@ mod tests {
         }
         // Idempotent.
         assert_eq!(
-            claude_json_hooks(&cfg, false, qwen, false, false, &paths),
+            claude_json_hooks(
+                &cfg,
+                false,
+                qwen,
+                ClientSource::QwenCode,
+                false,
+                false,
+                &paths
+            ),
             0
         );
         // Strips cleanly (remove removes every DontSpeak group regardless of dialect).
-        assert_eq!(claude_json_hooks(&cfg, false, qwen, true, false, &paths), 0);
+        assert_eq!(
+            claude_json_hooks(
+                &cfg,
+                false,
+                qwen,
+                ClientSource::QwenCode,
+                true,
+                false,
+                &paths
+            ),
+            0
+        );
         assert!(read_json(&cfg).get("hooks").is_none());
     }
 
@@ -570,22 +626,30 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);
+        assert_eq!(
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths),
+            0
+        );
         let first = std::fs::read_to_string(&cfg).unwrap();
 
         // SessionStart is wired as a greet-only group: the greeting speaks, but the
         // streaming-witness seed is skipped (Codex is non-streaming — a seed would silence
-        // its Stop narration). The trailing quote pins the flag as the END of the command;
-        // toml_edit renders the command as a basic (`"`) or literal (`'`) string depending
-        // on what the resolved binary path contains (backslashes on Windows ⇒ literal).
+        // its Stop narration). The command now ENDS with the uniform `--client codex` tail, so
+        // the trailing quote pins THAT as the end of the command; toml_edit renders the command
+        // as a basic (`"`) or literal (`'`) string depending on what the resolved binary path
+        // contains (backslashes on Windows ⇒ literal).
         assert!(first.contains("[[hooks.SessionStart]]"), "got {first}");
         assert!(
-            first.contains(" notify --greet-only\"") || first.contains(" notify --greet-only'"),
+            first.contains(" notify --greet-only --client codex\"")
+                || first.contains(" notify --greet-only --client codex'"),
             "got {first}"
         );
 
         // Re-run: an unchanged command is a true byte-for-byte no-op (see `codex_group_matches`).
-        assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);
+        assert_eq!(
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths),
+            0
+        );
         let second = std::fs::read_to_string(&cfg).unwrap();
         assert_eq!(first, second);
     }
@@ -596,8 +660,14 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);
-        assert_eq!(claude_toml_hooks(&cfg, true, false, &paths), 0);
+        assert_eq!(
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths),
+            0
+        );
+        assert_eq!(
+            claude_toml_hooks(&cfg, ClientSource::Codex, true, false, &paths),
+            0
+        );
 
         let text = std::fs::read_to_string(&cfg).unwrap();
         assert!(!text.contains("dontspeak"));
@@ -612,7 +682,10 @@ mod tests {
         // `existing` is `unwrap_or_default()` on the missing-file read → "", and
         // `strip_codex_hooks("")` short-circuits `Ok("")` before ever calling
         // `resolve_dontspeak_bin` (that call is skipped entirely on the `remove` path anyway).
-        assert_eq!(claude_toml_hooks(&cfg, true, false, &paths), 0);
+        assert_eq!(
+            claude_toml_hooks(&cfg, ClientSource::Codex, true, false, &paths),
+            0
+        );
         assert!(!cfg.exists());
     }
 
@@ -626,7 +699,10 @@ mod tests {
 
         // `CodexMergeError::Parse` → the final `Err(e)` arm: reported, non-fatal, unchanged —
         // same convention `claude_json_hooks` now matches.
-        assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 0);
+        assert_eq!(
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths),
+            0
+        );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
     }
 
@@ -636,7 +712,10 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_toml_hooks(&cfg, false, true, &paths), 0);
+        assert_eq!(
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, true, &paths),
+            0
+        );
         assert!(!cfg.exists());
     }
 
@@ -649,7 +728,10 @@ mod tests {
         let cfg = dir.path().join("blocked").join("config.toml");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(claude_toml_hooks(&cfg, false, false, &paths), 1);
+        assert_eq!(
+            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths),
+            1
+        );
     }
 
     #[test]
@@ -706,7 +788,10 @@ mod tests {
         let cfg = dir.path().join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
+        assert_eq!(
+            grok_json_hooks(&cfg, ClientSource::Grok, false, false, &paths),
+            0
+        );
         let v = read_json(&cfg);
         let hooks = v["hooks"].as_object().unwrap();
         let mut keys: Vec<&str> = hooks.keys().map(String::as_str).collect();
@@ -745,11 +830,17 @@ mod tests {
         let cfg = dir.path().join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
+        assert_eq!(
+            grok_json_hooks(&cfg, ClientSource::Grok, false, false, &paths),
+            0
+        );
         let first = std::fs::read(&cfg).unwrap();
         // Own-the-file overwrite: a second wire re-renders the SAME content (same resolved bin),
         // so the file is byte-for-byte identical.
-        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
+        assert_eq!(
+            grok_json_hooks(&cfg, ClientSource::Grok, false, false, &paths),
+            0
+        );
         let second = std::fs::read(&cfg).unwrap();
         assert_eq!(first, second, "re-wire writes byte-identical contents");
     }
@@ -760,9 +851,15 @@ mod tests {
         let cfg = dir.path().join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
+        assert_eq!(
+            grok_json_hooks(&cfg, ClientSource::Grok, false, false, &paths),
+            0
+        );
         assert!(cfg.exists());
-        assert_eq!(grok_json_hooks(&cfg, true, false, &paths), 0);
+        assert_eq!(
+            grok_json_hooks(&cfg, ClientSource::Grok, true, false, &paths),
+            0
+        );
         assert!(!cfg.exists(), "unwire deletes the dedicated file");
     }
 
@@ -772,7 +869,10 @@ mod tests {
         let cfg = dir.path().join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(grok_json_hooks(&cfg, true, false, &paths), 0);
+        assert_eq!(
+            grok_json_hooks(&cfg, ClientSource::Grok, true, false, &paths),
+            0
+        );
         assert!(!cfg.exists());
     }
 
@@ -782,7 +882,10 @@ mod tests {
         let cfg = dir.path().join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(grok_json_hooks(&cfg, false, true, &paths), 0);
+        assert_eq!(
+            grok_json_hooks(&cfg, ClientSource::Grok, false, true, &paths),
+            0
+        );
         assert!(!cfg.exists());
     }
 
@@ -795,6 +898,9 @@ mod tests {
         let cfg = dir.path().join("blocked").join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 1);
+        assert_eq!(
+            grok_json_hooks(&cfg, ClientSource::Grok, false, false, &paths),
+            1
+        );
     }
 }

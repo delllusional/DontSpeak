@@ -53,9 +53,14 @@ mod wire;
 // ── Flat public re-export facade — preserves every `ds_config::X` path ──────────
 pub use brand::{DISPLAY_NAME, VERSION, name_version};
 pub use claude_code::{ClaudeCodeVoice, read_claude_code_voice};
+/// The client IDENTITY enum, re-exported from the `ds-client` leaf crate (it used to be this
+/// crate's own `WireTarget`). It lives BELOW `ds-log`/`ds-ipc` so both can take a client
+/// without a dependency cycle on `ds-config`; re-exporting it here keeps every downstream
+/// `ds_config::ClientSource` path working with no Cargo.toml edit.
+pub use ds_client::ClientSource;
 pub use enums::{
     CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Provider, RealizedProvider,
-    SttEngine, TrayKind, TtsEngine, WireTarget, de_opt_pref_stt_engine, de_opt_pref_tts_engine,
+    SttEngine, TrayKind, TtsEngine, de_opt_pref_stt_engine, de_opt_pref_tts_engine,
     default_provider, intel_mac_builtin_ort_available, normalize_tray_indicator,
     provider_pref_wants_gpu,
 };
@@ -72,7 +77,7 @@ pub use wire::hooks::{HookSpec, HooksMergeError, INSTALLED_BINS, merge_hooks, st
 pub use wire::json_mcp::{merge_mcp_server, strip_mcp_server};
 pub use wire::registry::{
     CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, HookCommandStyle, Surface, WireMechanism,
-    client_spec,
+    client_from_mcp_name, client_spec,
 };
 pub use wire::settings::{
     atomic_write_json, atomic_write_str, backup_before_write, merge_settings, voice_from_value,

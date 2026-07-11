@@ -253,6 +253,23 @@ mod tests {
             );
             assert!(!cmd.contains('"'), "no quote may reach cmd.exe: {cmd}");
             assert_eq!(shell, None);
+
+            // The SAME holds for the real wired verb slice, which now carries the uniform
+            // `--client <token>` tail: the token is snake_case with no spaces, so space-joining
+            // it can't reintroduce a quote. This is the invariant that keeps the whole
+            // client-identity change quote-free on Windows BY CONSTRUCTION.
+            let (cmd, shell) = inline_command(
+                InlineFlavor::Windows,
+                bin,
+                &["notify", "--client", "codex"],
+                style,
+            );
+            assert_eq!(
+                cmd,
+                "C:/Users/usr/AppData/Local/Programs/DontSpeak/dontspeak.exe notify --client codex"
+            );
+            assert!(!cmd.contains('"'), "no quote may reach cmd.exe: {cmd}");
+            assert_eq!(shell, None);
         }
     }
 
@@ -327,6 +344,15 @@ mod tests {
         // The 8.3 form a spaced-path Codex/Grok wiring now emits.
         assert!(command_is_ours(
             "C:/Users/ALEXSM~1/AppData/Local/Programs/DontSpeak/dontspeak.exe notify"
+        ));
+        // The client-token dialect every wired command carries today — recognition still keys
+        // on the LEADING path token alone, so the trailing verbs never affect it (which is also
+        // why a group wired BEFORE the token existed is still seen as ours and gets healed).
+        assert!(command_is_ours(
+            "\"/opt/x y/dontspeak\" notify --greet-only --client qwen_code"
+        ));
+        assert!(command_is_ours(
+            "C:/Users/usr/AppData/Local/Programs/DontSpeak/dontspeak.exe provide --client codex"
         ));
         // Not ours: a different binary, or merely a `dontspeak` PATH COMPONENT.
         assert!(!command_is_ours("/usr/bin/true"));

@@ -3,12 +3,30 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ds_config::{CancelSpeechScope, Paths, VoiceConfig};
+use ds_config::{CancelSpeechScope, ClientSource, Paths, VoiceConfig};
 
 use crate::downloads::{DownloadProg, start_download};
 use crate::status::{EngineShared, model_status_json};
 use crate::stt_test::TestSession;
 use crate::ttsq::TtsQueue;
+
+/// Log one CLIENT-ORIGINATED request at INFO, attributed to the client that sent it — the
+/// activity-log line then ends in ` client=<token>` (`client=dontspeak` renders nothing; a
+/// client-originated request never carries that value in practice).
+///
+/// Always `ds_log::log_from` against `paths.log_file`, NEVER `ds_log::log_cached*`: the cached
+/// logger resolves the REAL per-OS `$HOME` log path, so a single call from engine code would
+/// write into the dev's / CI runner's actual log dir the moment any test reached it (see
+/// `ds_log::log_cached`'s doc; issue #26 tracks mechanising that rule).
+fn log_client(paths: &Paths, client: ClientSource, msg: &str) {
+    ds_log::log_from(
+        &paths.log_file,
+        ds_log::LogLevel::Info,
+        "engine",
+        client,
+        msg,
+    );
+}
 
 /// Whether a `MarkActive` (UserPromptSubmit fires for EVERY submit, typed or dictated)
 /// should cancel speech per the user's `input_clears` preference. `was_voice` is true
@@ -101,6 +119,29 @@ pub(crate) fn spawn_ipc_server(
 ) {
     let sock = paths.engine_sock.clone();
     std::thread::spawn(move || {
+        // The bad-request sink (see `ds_ipc::serve`). A line that fails to decode never
+        // reaches the handler below, and every hook call site DISCARDS the `bad request: …`
+        // reply it gets back — so without this, a rejection is invisible everywhere. The one
+        // way it happens in practice is a deploy skew: a stale `dontspeak` CLI (no `--client`
+        // verb ⇒ no `source` on the wire) against a rebuilt engine, which silently drops the
+        // whole voice loop. This WARN is the only diagnostic that says so, hence the pointer
+        // to the doc that explains the lockstep. `log_from` against `paths.log_file`, never
+        // `log_cached*` — see `log_client` above.
+        let log_paths = paths.clone();
+        let on_bad_request = move |detail: &str| {
+            ds_log::log_from(
+                &log_paths.log_file,
+                ds_log::LogLevel::Warn,
+                "engine",
+                // Not attributable: the line that would have named the client is the very
+                // line that failed to decode.
+                ClientSource::Unknown,
+                &format!(
+                    "{detail} — caller and engine are out of sync; \
+                     reinstall the CLI and restart the app (docs/BUILD-DEPLOY.md)"
+                ),
+            );
+        };
         let handler = move |req: ds_ipc::Request, emit: &mut dyn FnMut(&ds_ipc::Response)| {
             match req {
                 ds_ipc::Request::Ping => emit(&ds_ipc::Response::Pong),
@@ -125,19 +166,45 @@ pub(crate) fn spawn_ipc_server(
                     }
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::GreetSession { session } => {
+                ds_ipc::Request::GreetSession { session, source } => {
                     // New terminal opened → greet in its assigned pool voice (no-op unless
                     // `greet_on_open` is set). Claims the session's voice at open time.
                     // Also the codex_stream supervisor's session DISCOVERY: a session id
                     // the hooks vouch for may map to a codex app-server thread (CC/Qwen
                     // ids simply never match one).
+                    //
+                    // Every client-originated arm below logs at INFO through `log_from`, which
+                    // renders the trailing `client=<token>` — so the activity log always names
+                    // WHICH client caused the line. `paths` is in scope here (a tempdir-rooted
+                    // one under test), which is exactly why these are `log_from` calls and never
+                    // `ds_log::log_cached*` (that resolves the REAL per-OS `$HOME` path).
+                    log_client(
+                        &paths,
+                        source,
+                        &format!(
+                            "greet_session session={}",
+                            session.as_deref().unwrap_or("-")
+                        ),
+                    );
                     if let Some(s) = &session {
                         codex_sessions.nudge(s);
                     }
                     ttsq.greet_session(session);
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::MarkActive { session, synthetic } => {
+                ds_ipc::Request::MarkActive {
+                    session,
+                    synthetic,
+                    source,
+                } => {
+                    log_client(
+                        &paths,
+                        source,
+                        &format!(
+                            "mark_active session={} synthetic={synthetic}",
+                            session.as_deref().unwrap_or("-")
+                        ),
+                    );
                     handle_mark_active(&ttsq, &codex_sessions, &paths, session, synthetic);
                     emit(&ds_ipc::Response::Done);
                 }
@@ -146,17 +213,35 @@ pub(crate) fn spawn_ipc_server(
                     voice,
                     rate,
                     session,
+                    source,
                 } => {
                     // Explicit (MCP `speak` tool) reply → enqueue on the TTS queue (the
                     // single serializer onto the warm child). The queue worker picks the
                     // engine from live config (or this session's override) and gates on
                     // the mic.
+                    log_client(
+                        &paths,
+                        source,
+                        &format!(
+                            "speak session={} chars={}",
+                            session.as_deref().unwrap_or("-"),
+                            text.chars().count()
+                        ),
+                    );
                     ttsq.enqueue(text, voice, rate, session);
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::SpeakNarration { text, session } => {
+                ds_ipc::Request::SpeakNarration {
+                    text,
+                    session,
+                    source: _,
+                } => {
                     // Mid-turn narration → enqueue onto the same FIFO as everything else
                     // (no kind, no cap). Warm path: no per-block model reload.
+                    //
+                    // Deliberately NOT logged: this fires once per blockquote and would spam
+                    // the activity log. It still CARRIES its `source` on the wire (a required
+                    // field), so nothing is lost — we simply choose not to write a line.
                     ttsq.enqueue(text, None, None, session);
                     emit(&ds_ipc::Response::Done);
                 }
@@ -165,21 +250,31 @@ pub(crate) fn spawn_ipc_server(
                     ttsq.set_muted(on);
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::StopSpeech { session } => {
+                ds_ipc::Request::StopSpeech { session, source } => {
                     // None = global hard barge (drop the whole queue + cancel the
                     // current item). Some(s) = per-window: prune only that session's
                     // items and cancel playback only if it's that session's, so one
                     // terminal's preempt/close never silences another's.
+                    log_client(
+                        &paths,
+                        source,
+                        &format!("stop_speech session={}", session.as_deref().unwrap_or("-")),
+                    );
                     match session {
                         None => ttsq.clear(),
                         Some(_) => ttsq.clear_session(session),
                     }
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::SessionEnd { session } => {
+                ds_ipc::Request::SessionEnd { session, source } => {
                     // Window closed for good: per-window barge AND forget this session's
                     // transient pool-voice assignment so it doesn't grow one entry per session forever.
                     // None (no session id) → global hard barge, nothing session-scoped to forget.
+                    log_client(
+                        &paths,
+                        source,
+                        &format!("session_end session={}", session.as_deref().unwrap_or("-")),
+                    );
                     match session {
                         None => ttsq.clear(),
                         Some(_) => ttsq.end_session(session),
@@ -225,11 +320,12 @@ pub(crate) fn spawn_ipc_server(
                     reload_requested.store(true, Ordering::Relaxed);
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::Earcon { event } => {
+                ds_ipc::Request::Earcon { event, source } => {
                     // Turn-end "ding" (Stop hook) / needs-input cue (Notification hook). Resolve
                     // the configured-or-introspected sound and play it on the warm child's audio
                     // path — OUTSIDE the TTS queue, so it never waits behind queued narration.
                     // Skipped when earcons are off or muted, or the sound can't be resolved.
+                    log_client(&paths, source, &format!("earcon event={event}"));
                     if let Some(ev) = ds_earcon::EarconEvent::parse(&event) {
                         // The configured sound IS the on/off: `resolve_cue` returns None when
                         // this event's sound is empty or unresolvable, so an unset cue is simply
@@ -323,7 +419,7 @@ pub(crate) fn spawn_ipc_server(
                 }
             }
         };
-        if let Err(e) = ds_ipc::serve(&sock, handler) {
+        if let Err(e) = ds_ipc::serve(&sock, handler, on_bad_request) {
             log::warn!(target: "engine", "IPC server exited: {e}");
         }
     });

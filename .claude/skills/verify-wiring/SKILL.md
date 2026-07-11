@@ -34,6 +34,14 @@ description: Re-verify the client-wiring registry against the CURRENT client ver
      `ds-config/src/wire/hooks.rs` for Claude/Qwen, or `ds-config/src/wire/codex.rs` for Codex).
    - *MCP clients:* the `mcpServers.<name>` entry shape (stdio: `command`, optional `args`)
      and WHICH file (`~/.claude.json` user scope for Claude Code; `~/.qwen/settings.json` for Qwen Code).
+   - *`mcp_client_names` (the entry's `clientInfo.name` aliases):* the name this client sends in
+     its MCP `initialize` handshake, which is how a TOOL call is attributed to it (the hooks'
+     half is the `--client <token>` verb). **Qwen Code's and Grok's are marked UNVERIFIED in the
+     registry** — neither publishes it. The authority is the field, not the docs: run the client
+     against the MCP server once and read the activity log's
+     `mcp initialize clientInfo.name=… client=…` line, then correct the alias list to what it
+     actually reported (an exact-match table — never add a prefix rule, which would
+     mis-attribute a foreign client) and drop the UNVERIFIED comment.
 
 3. **Verify the merge shape locally** (no client needed):
    `./rust/target/debug/dontspeak wire <client> --print-only` — the emitted document must

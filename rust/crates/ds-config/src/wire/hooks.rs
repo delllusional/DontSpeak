@@ -12,6 +12,7 @@
 
 use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
 use super::registry::HookCommandStyle;
+use ds_client::ClientSource;
 use serde_json::{Map, Value, json};
 
 /// The base names (no extension) of every executable DontSpeak installs into a binary
@@ -43,6 +44,13 @@ pub struct HookSpec<'a> {
     /// `command` + `args` directly (timeout in seconds); Qwen Code hands ONLY the
     /// `command` string to a shell (no `args` field; timeout in milliseconds).
     pub command_style: HookCommandStyle,
+    /// WHICH client these hooks are being wired for. Stamped onto EVERY verb slice as a
+    /// trailing `--client <token>` ([`hook_entry`]), so the `dontspeak` binary the hook
+    /// spawns knows who invoked it and can put that client on its `ds-ipc` requests and its
+    /// activity-log lines. Uniform across every client and every event — no shaper hardcodes
+    /// its own client, so a future client reusing this mechanism stays "a registry entry, not
+    /// a new writer".
+    pub client: ClientSource,
 }
 
 /// A hook group is "ours" if any of its commands is our `dontspeak` binary — used for
@@ -74,7 +82,15 @@ fn hook_group_is_ours(group: &Value) -> bool {
 /// verbs inlined into `command` (see [`inline_command`]), `timeout` scaled to MILLISECONDS
 /// (Qwen SIGTERMs the hook at `timeout` ms — an unscaled `5` would be 5 ms). A zero
 /// `timeout_secs` omits the field (Claude Code default; Qwen falls to its 60 s default).
+///
+/// EVERY entry, in either dialect, carries a trailing `--client <token>` ([`HookSpec::client`])
+/// — two more `args` elements for `ArgsArray`, two more space-joined tokens for `InlineShell`.
+/// The token is snake_case with no spaces and no quotes, so the Windows quote-free command
+/// invariant holds by construction (`inline_command` just space-joins the slice).
 fn hook_entry(spec: &HookSpec, verbs: &[&str], timeout_secs: u64, is_async: bool) -> Value {
+    let mut verbs = verbs.to_vec();
+    verbs.extend_from_slice(&["--client", spec.client.as_str()]);
+    let verbs = verbs.as_slice();
     let mut h = match spec.command_style {
         HookCommandStyle::ArgsArray => {
             json!({ "type": "command", "command": spec.bin, "args": verbs })
@@ -285,12 +301,14 @@ pub fn strip_hooks(mut root: Value) -> Value {
 mod tests {
     use super::*;
 
+    /// The Claude Code combination: args-array commands, `MessageDisplay` stream.
     fn spec() -> HookSpec<'static> {
         HookSpec {
             bin: "/bin/dontspeak",
             notif_channel: None,
             streaming: true,
             command_style: HookCommandStyle::ArgsArray,
+            client: ClientSource::ClaudeCode,
         }
     }
 
@@ -301,6 +319,7 @@ mod tests {
             notif_channel: None,
             streaming: false,
             command_style: HookCommandStyle::InlineShell,
+            client: ClientSource::QwenCode,
         }
     }
 
@@ -308,6 +327,21 @@ mod tests {
     /// the dedicated error tests exercises.
     fn merged(root: Value) -> Value {
         merge_hooks(root, &spec()).expect("merge ok")
+    }
+
+    /// The `args` array a wired ArgsArray entry carries for `verbs`: the verbs PLUS the uniform
+    /// `--client <token>` tail `hook_entry` stamps on EVERY entry. Every exact-equality
+    /// assertion below goes through this, so the tail can't be asserted away by accident.
+    fn args(client: ClientSource, verbs: &[&str]) -> Value {
+        let mut v = verbs.to_vec();
+        v.extend_from_slice(&["--client", client.as_str()]);
+        json!(v)
+    }
+
+    /// The tail an inlined (InlineShell) command string ends with for `verbs` — same idea as
+    /// [`args`], for the dialect where the verbs are space-joined into the command.
+    fn tail(client: ClientSource, verbs: &str) -> String {
+        format!(" {verbs} --client {}", client.as_str())
     }
 
     #[test]
@@ -358,6 +392,17 @@ mod tests {
             ours[0]["hooks"][0]["command"],
             json!("/bin/dontspeak"),
             "stale bin path healed to the resolved one"
+        );
+        // The stale group's verbs also predate the `--client` token (`args: ["notify"]`), and
+        // the SAME replace-ours heals that: exactly one group of ours, now carrying the token.
+        // `command_is_ours` only inspects the LEADING path token, which is why a client-less
+        // group is still recognised as ours instead of being duplicated beside a fresh one
+        // (two greets, two narrations). Self-healing, not backward compatibility — the engine
+        // re-wires every client at boot, so an existing install converges with no user action.
+        assert_eq!(
+            ours[0]["hooks"][0]["args"],
+            args(ClientSource::ClaudeCode, &["notify"]),
+            "client-less verbs healed to the token-carrying shape"
         );
     }
 
@@ -432,7 +477,10 @@ mod tests {
                 .unwrap()
                 .contains("dontspeak")
         );
-        assert_eq!(ss[0]["hooks"][0]["args"], json!(["notify"]));
+        assert_eq!(
+            ss[0]["hooks"][0]["args"],
+            args(ClientSource::ClaudeCode, &["notify"])
+        );
         // Re-running is idempotent (no duplicate group).
         let twice = merged(out.clone());
         assert_eq!(
@@ -466,12 +514,12 @@ mod tests {
             .clone();
         let notify = ups
             .iter()
-            .find(|h| h["args"] == json!(["notify"]))
+            .find(|h| h["args"] == args(ClientSource::ClaudeCode, &["notify"]))
             .expect("notify sink wired on UserPromptSubmit");
         assert_eq!(notify["async"], json!(true), "notify is fire-and-forget");
         let provide = ups
             .iter()
-            .find(|h| h["args"] == json!(["provide"]))
+            .find(|h| h["args"] == args(ClientSource::ClaudeCode, &["provide"]))
             .expect("provide query wired on UserPromptSubmit");
         assert!(
             provide.get("async").is_none(),
@@ -494,6 +542,7 @@ mod tests {
             notif_channel: None,
             streaming: false,
             command_style: HookCommandStyle::ArgsArray,
+            client: ClientSource::QwenCode,
         };
         let out = merge_hooks(json!({}), &spec_ns).expect("merge ok");
         assert!(
@@ -516,14 +565,17 @@ mod tests {
         // Stop is where the reply gets voiced for a non-streaming client.
         assert_eq!(
             out["hooks"]["Stop"][0]["hooks"][0]["args"],
-            json!(["notify"]),
+            args(ClientSource::QwenCode, &["notify"]),
             "Stop notify sink present"
         );
         // UserPromptSubmit still carries the synchronous `provide` query.
         let ups = out["hooks"]["UserPromptSubmit"][0]["hooks"]
             .as_array()
             .unwrap();
-        assert!(ups.iter().any(|h| h["args"] == json!(["provide"])));
+        assert!(
+            ups.iter()
+                .any(|h| h["args"] == args(ClientSource::QwenCode, &["provide"]))
+        );
     }
 
     #[test]
@@ -538,7 +590,7 @@ mod tests {
             assert_eq!(g.len(), 1, "{evt} is a single notify group");
             assert_eq!(
                 g[0]["hooks"][0]["args"],
-                json!(["notify"]),
+                args(ClientSource::ClaudeCode, &["notify"]),
                 "{evt} is notify-only"
             );
             assert_eq!(
@@ -571,6 +623,7 @@ mod tests {
             notif_channel: Some("iterm2_with_bell"),
             streaming: true,
             command_style: HookCommandStyle::ArgsArray,
+            client: ClientSource::ClaudeCode,
         };
         let once = merge_hooks(json!({}), &spec_a).expect("merge ok");
         assert_eq!(once["preferredNotifChannel"], json!("iterm2_with_bell"));
@@ -580,6 +633,7 @@ mod tests {
             notif_channel: Some("other_channel"),
             streaming: true,
             command_style: HookCommandStyle::ArgsArray,
+            client: ClientSource::ClaudeCode,
         };
         let twice = merge_hooks(once, &spec_b).expect("merge ok");
         assert_eq!(
@@ -600,6 +654,7 @@ mod tests {
             notif_channel: Some("iterm2_with_bell"),
             streaming: true,
             command_style: HookCommandStyle::ArgsArray,
+            client: ClientSource::ClaudeCode,
         };
         let wired = merge_hooks(json!({ "model": "opus" }), &spec_with_channel).expect("merge ok");
         assert!(wired.get("preferredNotifChannel").is_some());
@@ -692,8 +747,8 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(
-            ss.ends_with(" notify --greet-only"),
-            "non-streaming SessionStart is greet-only, got {ss}"
+            ss.ends_with(&tail(ClientSource::QwenCode, "notify --greet-only")),
+            "non-streaming SessionStart is greet-only (and carries the client token), got {ss}"
         );
         // Zero-timeout events omit the field entirely.
         for evt in ["SessionStart", "SessionEnd", "Stop", "Notification"] {
@@ -707,13 +762,23 @@ mod tests {
             .unwrap();
         let notify = ups
             .iter()
-            .find(|h| h["command"].as_str().unwrap().ends_with(" notify"))
+            .find(|h| {
+                h["command"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(&tail(ClientSource::QwenCode, "notify"))
+            })
             .expect("notify entry");
         assert_eq!(notify["timeout"], json!(5000), "seconds scaled to ms");
         assert_eq!(notify["async"], json!(true));
         let provide = ups
             .iter()
-            .find(|h| h["command"].as_str().unwrap().ends_with(" provide"))
+            .find(|h| {
+                h["command"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(&tail(ClientSource::QwenCode, "provide"))
+            })
             .expect("provide entry");
         assert_eq!(provide["timeout"], json!(5000), "seconds scaled to ms");
         assert!(
@@ -733,7 +798,7 @@ mod tests {
         for verb in ["notify", "provide"] {
             let h = ups
                 .iter()
-                .find(|h| h["args"] == json!([verb]))
+                .find(|h| h["args"] == args(ClientSource::ClaudeCode, &[verb]))
                 .expect("entry for verb");
             assert_eq!(
                 h["timeout"],
@@ -751,7 +816,7 @@ mod tests {
         let streaming = merged(json!({}));
         assert_eq!(
             streaming["hooks"]["SessionStart"][0]["hooks"][0]["args"],
-            json!(["notify"]),
+            args(ClientSource::ClaudeCode, &["notify"]),
             "streaming SessionStart seeds the witness with plain notify"
         );
         let spec_ns = HookSpec {
@@ -759,11 +824,12 @@ mod tests {
             notif_channel: None,
             streaming: false,
             command_style: HookCommandStyle::ArgsArray,
+            client: ClientSource::QwenCode,
         };
         let non_streaming = merge_hooks(json!({}), &spec_ns).expect("merge ok");
         assert_eq!(
             non_streaming["hooks"]["SessionStart"][0]["hooks"][0]["args"],
-            json!(["notify", "--greet-only"]),
+            args(ClientSource::QwenCode, &["notify", "--greet-only"]),
             "non-streaming SessionStart must skip the witness seed"
         );
     }
@@ -783,12 +849,16 @@ mod tests {
             notif_channel: None,
             streaming: true,
             command_style: HookCommandStyle::InlineShell,
+            client: ClientSource::QwenCode,
         };
         let out = merge_hooks(json!({}), &spec_streaming).expect("merge ok");
         let md = &out["hooks"]["MessageDisplay"][0]["hooks"][0];
         assert!(
-            md["command"].as_str().unwrap().ends_with(" notify"),
-            "MessageDisplay carries the inlined notify verb, got {md}"
+            md["command"]
+                .as_str()
+                .unwrap()
+                .ends_with(&tail(ClientSource::QwenCode, "notify")),
+            "MessageDisplay carries the inlined notify verb + client token, got {md}"
         );
         assert!(
             md.get("args").is_none(),
@@ -800,7 +870,7 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(
-            ss.ends_with(" notify") && !ss.contains("--greet-only"),
+            ss.ends_with(&tail(ClientSource::QwenCode, "notify")) && !ss.contains("--greet-only"),
             "streaming SessionStart seeds the witness with plain notify, got {ss}"
         );
     }
@@ -845,8 +915,11 @@ mod tests {
             "healed to the inlined shape (no args), got {healed}"
         );
         assert!(
-            healed["command"].as_str().unwrap().ends_with(" notify"),
-            "verb now inlined in the command string"
+            healed["command"]
+                .as_str()
+                .unwrap()
+                .ends_with(&tail(ClientSource::QwenCode, "notify")),
+            "verb now inlined in the command string, carrying the client token"
         );
     }
 }

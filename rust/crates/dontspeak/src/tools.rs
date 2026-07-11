@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ds_config::{Paths, TtsEngine, VoiceConfig};
+use ds_config::{ClientSource, Paths, TtsEngine, VoiceConfig};
 use ds_ipc::{Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,7 +16,16 @@ use crate::engine_launch::ensure_engine;
 use crate::mcp::{ok, tool_result};
 use crate::voices::voice_groups;
 
-pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>) -> Value {
+/// `client` is WHO is calling — learned once from the MCP `initialize` handshake's
+/// `clientInfo.name` (see `mcp::client_from_initialize`) and stamped onto every engine request
+/// a tool sends, so the engine's activity log attributes a tool-driven `speak`/`stop_speech`
+/// to the right client. `Unknown` for a client whose name isn't in the registry's alias table.
+pub(crate) fn tools_call(
+    id: Option<Value>,
+    msg: &Value,
+    sock: Option<&PathBuf>,
+    client: ClientSource,
+) -> Value {
     let params = msg.get("params");
     let name = params
         .and_then(|p| p.get("name"))
@@ -56,8 +65,8 @@ pub(crate) fn tools_call(id: Option<Value>, msg: &Value, sock: Option<&PathBuf>)
             // Make sure the engine is up (MCP clients may invoke us with none yet).
             ensure_engine(sock);
             match name {
-                "speak" => call_speak(sock, &args),
-                "stop_speech" => call_stop(sock),
+                "speak" => call_speak(sock, &args, client),
+                "stop_speech" => call_stop(sock, client),
                 "mute" => call_mute(sock, &args),
                 "diarize" => call_diarize(sock, &args),
                 "manage_speakers" => call_speakers(sock, &args),
@@ -302,7 +311,7 @@ fn session_id() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn call_speak(sock: &Path, args: &Value) -> Result<String, String> {
+fn call_speak(sock: &Path, args: &Value, client: ClientSource) -> Result<String, String> {
     let a: SpeakArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid speak arguments: {e}"))?;
     let text = a.text.unwrap_or_default();
@@ -316,6 +325,7 @@ fn call_speak(sock: &Path, args: &Value) -> Result<String, String> {
             voice: a.voice,
             rate: a.rate,
             session: session_id(),
+            source: client,
         },
     ) {
         Ok(Response::Done) => Ok("Spoken.".into()),
@@ -325,7 +335,7 @@ fn call_speak(sock: &Path, args: &Value) -> Result<String, String> {
     }
 }
 
-fn call_stop(sock: &Path) -> Result<String, String> {
+fn call_stop(sock: &Path, client: ClientSource) -> Result<String, String> {
     // Scope the barge to the CALLING window (ambient session) so an agent in one
     // terminal stops only its own voice, not another window's. A non-session caller
     // (session_id() == None, e.g. the bare CLI) falls back to the global hard barge.
@@ -333,6 +343,7 @@ fn call_stop(sock: &Path) -> Result<String, String> {
         sock,
         &Request::StopSpeech {
             session: session_id(),
+            source: client,
         },
     ) {
         Ok(_) => Ok("Stopped.".into()),
@@ -584,7 +595,7 @@ mod drift {
         let bogus = json!({ "__not_a_real_field__": true });
         for name in ds_tools::tool_names() {
             let msg = json!({ "params": { "name": name, "arguments": bogus.clone() } });
-            let resp = tools_call(None, &msg, None);
+            let resp = tools_call(None, &msg, None, ClientSource::Unknown);
             let text = resp["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap_or_default();
@@ -809,11 +820,16 @@ mod arg_validation {
 
     #[test]
     fn speak_requires_nonempty_text() {
-        let err = call_speak(&dead_sock(), &json!({})).unwrap_err();
+        let err = call_speak(&dead_sock(), &json!({}), ClientSource::ClaudeCode).unwrap_err();
         assert_eq!(err, "`text` is required");
 
         // Whitespace-only text is treated the same as absent.
-        let err = call_speak(&dead_sock(), &json!({ "text": "   " })).unwrap_err();
+        let err = call_speak(
+            &dead_sock(),
+            &json!({ "text": "   " }),
+            ClientSource::ClaudeCode,
+        )
+        .unwrap_err();
         assert_eq!(err, "`text` is required");
     }
 
@@ -879,14 +895,15 @@ mod engine_unavailable {
     #[test]
     fn speak_reports_engine_unavailable() {
         let (_dir, sock) = no_such_socket();
-        let err = call_speak(&sock, &json!({ "text": "hello" })).unwrap_err();
+        let err =
+            call_speak(&sock, &json!({ "text": "hello" }), ClientSource::ClaudeCode).unwrap_err();
         assert!(err.starts_with("engine unavailable: "), "got: {err}");
     }
 
     #[test]
     fn stop_reports_engine_unavailable() {
         let (_dir, sock) = no_such_socket();
-        let err = call_stop(&sock).unwrap_err();
+        let err = call_stop(&sock, ClientSource::ClaudeCode).unwrap_err();
         assert!(err.starts_with("engine unavailable: "), "got: {err}");
     }
 

@@ -13,6 +13,15 @@ ONE of two subcommands split by CONTRACT, not by event:
 - `dontspeak provide` — a QUERY: the client asks us for input and WAITS for our stdout
   JSON (`hookSpecificOutput`). The only hook the client blocks on.
 
+Every wired verb also carries a trailing **`--client <token>`** (`claude_code` | `codex` |
+`qwen_code` | `grok`) — so the entries below are really `notify --client claude_code`,
+`provide --client claude_code`, `notify --greet-only --client codex`, and so on. The token is
+what the binary puts on every `ds-ipc` request it sends, so the engine and its activity log
+always know WHICH client caused a line (a log line from a client ends in `client=<token>`).
+It is stamped uniformly by the wiring for every client and every event; a missing or
+unrecognised token degrades to `unknown` and never fails the hook. The MCP half of the same
+identity comes from the `initialize` handshake's `clientInfo.name`, not from a flag.
+
 The shipped stack (in-process native Kokoro, no Python/`uv`) is described in the
 repo [README](../../README.md).
 

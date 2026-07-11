@@ -49,7 +49,8 @@ Use the `build-linux` skill (flow 2: `scripts/install.sh` then
   the installed `dontspeak`/`dontspeak.exe` fresh each time, so it's live
   immediately (re-run `wire claude_code` only if the hook set changed). macOS:
   `install-daemon.sh`. Windows: extract step of `build-portable.ps1`. Linux:
-  `scripts/install.sh`.
+  `scripts/install.sh`. **Unless the change touches the IPC wire protocol** — see the
+  lockstep rule below.
 - **Engine or helper change** (`dontspeakd`, `ds-tts`/`ds-stt`, the TTS
   queue/synth/chunking, IPC handlers): rebuild the OS host app, then relaunch it.
   The CLI-only rebuild does not update the bundled helper or the in-process engine.
@@ -62,6 +63,36 @@ Use the `build-linux` skill (flow 2: `scripts/install.sh` then
   change) — a stale host app rewrites the OLD wiring at its next launch and silently
   reverts the fix. Rebuild the host app too (same route as an engine change, above),
   not just the CLI.
+
+### The CLI and the engine deploy TOGETHER — the wire protocol is not versioned
+
+`ds-ipc`'s `Request` schema is **strict in both directions**: an unknown field is an
+error, and a *missing* required field is an error. There is no negotiated version, no
+`#[serde(default)]` escape hatch, and backward compatibility across a skew is
+explicitly not a goal. So the CLI (`~/.local/bin/dontspeak`, which is what every hook
+and the MCP server execute) and the engine (linked into the running host app) are ONE
+deployable, even though they reach the machine by two different routes above.
+
+The live example: every client-originated request carries a **required
+`source: ClientSource`** naming which client sent it (the hook's `--client <token>`
+verb; the MCP `initialize` handshake's `clientInfo`). Reinstall only the CLI and the
+old app keeps running an engine that has never heard of `source` — or, the way it
+actually bites, rebuild only the app and the stale CLI keeps sending lines without one.
+The engine then rejects **every** greet / mark_active / session_end / stop_speech /
+speak / narration / earcon with ``bad request: missing field `source` ``.
+
+**How you'd notice** — and the reason this section exists: you mostly *wouldn't*. The
+hooks discard the engine's reply and exit 0, so nothing appears at the terminal; the
+voice loop just goes quiet with no error anywhere the user looks. The one diagnostic is
+engine-side, in the activity log (the app's Logs tab):
+
+```
+WARN engine rejected request (cmd=greet_session): missing field `source` … — caller and engine are out of sync; reinstall the CLI and restart the app (docs/BUILD-DEPLOY.md)
+```
+
+Seeing that line means exactly one thing: **rebuild and redeploy both pieces** (the
+per-OS `build-*` skill does both), then relaunch the app. Treat "voice silently stopped
+working after I reinstalled one piece" as this until the log says otherwise.
 
 For fast iteration, a manual copy-and-relaunch can stand in for a full host rebuild:
 
@@ -93,6 +124,10 @@ apps/linux/install-gui.sh
 ```
 
 ### Symptom → diagnosis
+
+Voice gone *entirely* quiet (no greet, no speech, no earcons) right after a partial
+reinstall is the CLI/engine skew above — check the activity log for a `rejected request`
+WARN before debugging anything else.
 
 A source fix that "has no effect" on synthesis/queue/IPC while the binary and tests
 are clearly updated means the app is running its stale bundled helper or engine.

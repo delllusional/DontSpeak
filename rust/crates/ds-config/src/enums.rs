@@ -6,6 +6,7 @@
 //! everything that follows. The macros are kept private to the crate (textual scope
 //! via `#[macro_use]` on the `mod enums;` declaration).
 
+use ds_client::ClientSource;
 use serde::{Deserialize, Deserializer};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -600,63 +601,28 @@ impl NarrateKind {
     }
 }
 
-/// One of the AI-client integrations DontSpeak can register/remove (the SAME wiring the
-/// installer performs). A CLIENT-only enum — there is no "narration spec" member; the
-/// narration spec is seeded/edited elsewhere, not through this type. It DOUBLES as the
-/// element type of the `exclude_clients` config value (see `VoiceConfig::exclude_clients`,
-/// deserialized via `de_exclude_clients`) — so the single canonical token set is shared by
-/// the config schema, the `wire` orchestrator, and the engine's boot-time reconcile, which
-/// can't then drift.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WireTarget {
-    /// Claude Code's voice hooks in `~/.claude/settings.json`.
-    ClaudeCode,
-    /// OpenAI Codex's narration hooks in `~/.codex/config.toml`.
-    Codex,
-    /// Qwen Code's voice hooks + MCP server in `~/.qwen/settings.json`.
-    QwenCode,
-    /// Grok (Grok Build) CLI's MCP server in `~/.grok/config.toml`.
-    Grok,
-}
-
-impl WireTarget {
-    /// Every wire-able client, in canonical-token order (matching the client registry). The
-    /// SINGLE source for `wire --all`, the engine's boot-time `ds_wire::reconcile`, and the
-    /// per-platform installers, which used to hand-copy this list in three different shells.
-    pub const CLIENTS: &'static [WireTarget] = &[
-        WireTarget::ClaudeCode,
-        WireTarget::Codex,
-        WireTarget::QwenCode,
-        WireTarget::Grok,
-    ];
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "claude_code" => Some(WireTarget::ClaudeCode),
-            "codex" => Some(WireTarget::Codex),
-            "qwen_code" => Some(WireTarget::QwenCode),
-            "grok" => Some(WireTarget::Grok),
-            _ => None,
-        }
-    }
-
-    /// The canonical token this target serializes to (round-trips through `parse()`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            WireTarget::ClaudeCode => "claude_code",
-            WireTarget::Codex => "codex",
-            WireTarget::QwenCode => "qwen_code",
-            WireTarget::Grok => "grok",
-        }
-    }
-}
+// The client IDENTITY enum (`ClientSource`) that used to live here as `WireTarget` now lives
+// in the `ds-client` leaf crate — `ds-log` and `ds-ipc` both need it, and neither may depend
+// on `ds-config` (ds-config depends on ds-log ⇒ a cycle). `ds-config` re-exports it from
+// `lib.rs`, so `ds_config::ClientSource` keeps working for every downstream crate.
+//
+// It is no longer a CLIENT-only enum: `ClientSource::CLIENTS` is the wire-able subset (the
+// four clients the registry pins), and `DontSpeak` / `Unknown` are members too. Any path that
+// means "a client we wire" must therefore gate on `is_client()` — see `de_exclude_clients`
+// below, and `ds_wire::run`'s registry-lookup guard.
 
 /// Fail-open deserialize for `exclude_clients` (config-file). A present ARRAY ⇒
-/// `Some(known client tokens, in order, deduped; unknown/non-client tokens dropped)`.
+/// `Some(known CLIENT tokens, in order, deduped; unknown/non-client tokens dropped)`.
 /// A present NON-array value ⇒ `None` (defer to all-supported). ABSENT ⇒ `None` via the
 /// field's serde default. Modeled on [`de_narrate`], wrapped in `Option` to preserve the
 /// tri-state (`None` = all supported vs `Some([])` = none).
-pub(crate) fn de_exclude_clients<'de, D>(d: D) -> Result<Option<Vec<WireTarget>>, D::Error>
+///
+/// The `is_client()` filter is LOAD-BEARING, not decoration: `ClientSource::parse` now accepts
+/// `dontspeak` and `unknown` (where the old `WireTarget::parse` returned `None` for both), so
+/// without it `exclude_clients = ["dontspeak"]` would put DontSpeak itself into a set that is
+/// only ever consulted to decide which CLIENT to unwire. Pinned by
+/// `exclude_clients_drops_non_client_tokens`.
+pub(crate) fn de_exclude_clients<'de, D>(d: D) -> Result<Option<Vec<ClientSource>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -664,9 +630,12 @@ where
     let toml::Value::Array(items) = v else {
         return Ok(None);
     };
-    let mut out: Vec<WireTarget> = Vec::new();
+    let mut out: Vec<ClientSource> = Vec::new();
     for it in items {
-        if let Some(t) = it.as_str().and_then(WireTarget::parse)
+        if let Some(t) = it
+            .as_str()
+            .and_then(ClientSource::parse)
+            .filter(|c| c.is_client())
             && !out.contains(&t)
         {
             out.push(t);
@@ -751,7 +720,8 @@ serialize_as_str!(TrayKind);
 serialize_as_str!(CancelSpeechScope);
 serialize_as_str!(DiarizerProvider);
 serialize_as_str!(NarrateKind);
-serialize_as_str!(WireTarget);
+// NOTE: `ClientSource` (the old `WireTarget`) is NOT in this list — it owns its Serialize in
+// `ds-client` (same as-the-token behaviour, hand-written so that leaf crate needs no macro).
 
 /// STRICT `Deserialize` for a token enum: an unrecognized value ERRORS (listing the
 /// valid tokens) instead of failing open to the default. This is the opposite of the

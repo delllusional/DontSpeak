@@ -22,8 +22,8 @@ use crate::enums::{
 use ds_log::{LogLevel, log};
 
 use crate::{
-    CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Paths, Provider, SttEngine,
-    TrayKind, TtsEngine, WireTarget,
+    CancelSpeechScope, ClientSource, DiarizerProvider, ListenMode, NarrateKind, Paths, Provider,
+    SttEngine, TrayKind, TtsEngine,
 };
 
 /// Spoken wake phrases for the hands-free (always-listening) mode: the word that opens
@@ -362,7 +362,7 @@ pub struct VoiceConfig {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "de_exclude_clients"
     )]
-    pub exclude_clients: Option<Vec<WireTarget>>,
+    pub exclude_clients: Option<Vec<ClientSource>>,
 }
 
 /// Which warm subsystems a `set_config` delta touches — computed by
@@ -786,7 +786,7 @@ impl VoiceConfig {
 
     /// The clients EXCLUDED from wiring: the configured [`Self::exclude_clients`] set, or EMPTY
     /// (exclude nothing) when unset. The engine wires every client NOT in this set.
-    pub fn excluded_clients(&self) -> Vec<WireTarget> {
+    pub fn excluded_clients(&self) -> Vec<ClientSource> {
         self.exclude_clients.clone().unwrap_or_default()
     }
 }
@@ -931,7 +931,7 @@ pub(crate) mod tests {
         // single client ⇒ exactly that one excluded.
         assert_eq!(
             VoiceConfig::default().excluded_clients(),
-            Vec::<WireTarget>::new()
+            Vec::<ClientSource>::new()
         );
         assert_eq!(
             VoiceConfig {
@@ -939,15 +939,15 @@ pub(crate) mod tests {
                 ..VoiceConfig::default()
             }
             .excluded_clients(),
-            Vec::<WireTarget>::new()
+            Vec::<ClientSource>::new()
         );
         assert_eq!(
             VoiceConfig {
-                exclude_clients: Some(vec![WireTarget::ClaudeCode]),
+                exclude_clients: Some(vec![ClientSource::ClaudeCode]),
                 ..VoiceConfig::default()
             }
             .excluded_clients(),
-            vec![WireTarget::ClaudeCode]
+            vec![ClientSource::ClaudeCode]
         );
 
         // `de_exclude_clients` (via the config-file deserialize): a present ARRAY keeps known client
@@ -959,7 +959,7 @@ pub(crate) mod tests {
         };
         assert_eq!(
             wc(r#"{"exclude_clients":["claude_code","narration_spec","bogus","claude_code"]}"#),
-            Some(vec![WireTarget::ClaudeCode])
+            Some(vec![ClientSource::ClaudeCode])
         );
         // A non-array value (or a bare string / number) degrades to None = exclude nothing.
         assert_eq!(wc(r#"{"exclude_clients":"claude_code"}"#), None);
@@ -972,11 +972,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn exclude_clients_drops_non_client_tokens() {
+        // GUARD on the `is_client()` filter in `de_exclude_clients`. `ClientSource::parse` now
+        // accepts `dontspeak` and `unknown` (the old `WireTarget::parse` returned `None` for
+        // both), so WITHOUT that filter these tokens would enter a set whose ONLY use is
+        // "which client do I unwire" — letting DontSpeak mark ITSELF excluded, and letting
+        // `unknown` sit in a list of clients. Both must be dropped exactly like `bogus` is.
+        let wc = |j: &str| {
+            serde_json::from_str::<VoiceConfig>(j)
+                .unwrap()
+                .exclude_clients
+        };
+        assert_eq!(
+            wc(r#"{"exclude_clients":["dontspeak","unknown"]}"#),
+            Some(vec![]),
+            "neither `dontspeak` nor `unknown` may enter the excluded-CLIENT set"
+        );
+        // …and they're dropped from a mixed list without disturbing the real clients' order.
+        assert_eq!(
+            wc(r#"{"exclude_clients":["codex","dontspeak","claude_code","unknown"]}"#),
+            Some(vec![ClientSource::Codex, ClientSource::ClaudeCode])
+        );
+    }
+
+    #[test]
     fn exclude_clients_round_trips_through_write_and_load() {
         // Each of the tri-state values reproduces through write_settings → VoiceConfig::load,
         // rooted at a tempdir (never the real config path). None must serialize to ABSENT (the
         // skip_serializing_if) and reload as None — distinct from Some([]) (explicit none).
-        for state in [None, Some(vec![]), Some(vec![WireTarget::ClaudeCode])] {
+        for state in [None, Some(vec![]), Some(vec![ClientSource::ClaudeCode])] {
             let dir = tempfile::tempdir().unwrap();
             let paths = Paths::rooted_at(dir.path());
             let cfg = VoiceConfig {
@@ -1596,7 +1620,7 @@ pub(crate) mod tests {
             codex_bin: "/opt/codex/bin/codex".into(), // non-default (default is "codex")
             extra_terminals: vec!["myterm".into()], // non-default (default is [])
             extra_custom_text_editors: vec!["myeditor.exe".into()], // non-default (default is [])
-            exclude_clients: Some(vec![WireTarget::ClaudeCode]), // non-default (default is None)
+            exclude_clients: Some(vec![ClientSource::ClaudeCode]), // non-default (default is None)
         }
     }
 

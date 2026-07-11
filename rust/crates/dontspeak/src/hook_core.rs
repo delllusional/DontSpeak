@@ -64,21 +64,30 @@ pub fn session_id_from_payload(payload: &str) -> Option<String> {
 /// ignored (forward-compatible — a newly-wired event we don't handle yet is a no-op).
 /// `greet_only` is the `dontspeak notify --greet-only` flag, wired on SessionStart for
 /// NON-streaming clients (Qwen Code, OpenAI Codex): greet, but skip the streaming-witness seed — see
-/// [`notify_at`]. Resolves the real `Paths` and delegates to the injectable core.
-pub fn notify(event: &str, payload: &str, greet_only: bool) {
+/// [`notify_at`]. `client` is the `--client <token>` the wiring stamped (see
+/// `client_from_argv`): it rides onto every `ds-ipc` request this dispatch sends, so the engine
+/// and its activity log know WHICH client caused the event. Resolves the real `Paths` and
+/// delegates to the injectable core.
+pub fn notify(event: &str, payload: &str, greet_only: bool, client: ds_config::ClientSource) {
     let Some(paths) = ds_config::Paths::resolve() else {
         return;
     };
-    notify_at(&paths, event, payload, greet_only);
+    notify_at(&paths, event, payload, greet_only, client);
 }
 
 /// Injectable core of [`notify`] — takes `paths` so tests drive it against a
 /// tempdir-rooted `Paths` (never the real `$HOME`; the engine pings are best-effort
 /// no-ops against the tempdir's nonexistent socket).
-pub(crate) fn notify_at(paths: &ds_config::Paths, event: &str, payload: &str, greet_only: bool) {
+pub(crate) fn notify_at(
+    paths: &ds_config::Paths,
+    event: &str,
+    payload: &str,
+    greet_only: bool,
+    client: ds_config::ClientSource,
+) {
     match event {
         "SessionStart" => {
-            hook_speak::engine_ping(paths, hook_speak::Ping::Greet, payload);
+            hook_speak::engine_ping(paths, hook_speak::Ping::Greet, payload, client);
             // Seed this session's streaming witness so the Stop handler reliably knows Claude
             // Code narrates via MessageDisplay (closing the only timing gap in the double-
             // narration guard). ONLY for streaming clients: `--greet-only` (Qwen Code and
@@ -90,9 +99,11 @@ pub(crate) fn notify_at(paths: &ds_config::Paths, event: &str, payload: &str, gr
             }
             // Greeting is voice-only (the engine greet above); no visible banner — see module docs.
         }
-        "UserPromptSubmit" => hook_speak::engine_ping(paths, hook_speak::Ping::MarkActive, payload),
-        "SessionEnd" => hook_narrate::barge_session(paths, payload),
-        "MessageDisplay" => hook_narrate::message_display(paths, payload),
+        "UserPromptSubmit" => {
+            hook_speak::engine_ping(paths, hook_speak::Ping::MarkActive, payload, client)
+        }
+        "SessionEnd" => hook_narrate::barge_session(paths, payload, client),
+        "MessageDisplay" => hook_narrate::message_display(paths, payload, client),
         // Multiple clients send Stop, handled by ONE arm:
         //  • Codex / Qwen Code (no MessageDisplay stream) → speak_reply voices
         //    `last_assistant_message`.
@@ -102,12 +113,12 @@ pub(crate) fn notify_at(paths: &ds_config::Paths, event: &str, payload: &str, gr
         // The reply-done earcon then rings for both (engine self-gates on `earcon_enabled` +
         // mute), so a finished turn is signalled whether or not the reply was just voiced.
         "Stop" => {
-            hook_narrate::speak_reply(paths, payload);
-            hook_speak::engine_earcon(paths, "reply_done");
+            hook_narrate::speak_reply(paths, payload, client);
+            hook_speak::engine_earcon(paths, "reply_done", client);
         }
         // A permission prompt / idle notification → the needs-input earcon (the handler filters
         // to just the "waiting on you" notification types).
-        "Notification" => hook_speak::notification_earcon(paths, payload),
+        "Notification" => hook_speak::notification_earcon(paths, payload, client),
         _ => {}
     }
 }
@@ -148,7 +159,13 @@ mod tests {
         let session = "qwen-session-aaaa";
         let payload = format!(r#"{{"hook_event_name":"SessionStart","session_id":"{session}"}}"#);
 
-        notify_at(&paths, "SessionStart", &payload, /*greet_only*/ true);
+        notify_at(
+            &paths,
+            "SessionStart",
+            &payload,
+            /*greet_only*/ true,
+            ds_config::ClientSource::QwenCode,
+        );
         let streamed = hook_narrate::streamed_via_message_display(&paths, session);
         assert!(
             !streamed,
@@ -170,7 +187,13 @@ mod tests {
         let session = "cc-session-bbbb";
         let payload = format!(r#"{{"hook_event_name":"SessionStart","session_id":"{session}"}}"#);
 
-        notify_at(&paths, "SessionStart", &payload, /*greet_only*/ false);
+        notify_at(
+            &paths,
+            "SessionStart",
+            &payload,
+            /*greet_only*/ false,
+            ds_config::ClientSource::ClaudeCode,
+        );
         let streamed = hook_narrate::streamed_via_message_display(&paths, session);
         assert!(streamed, "streaming SessionStart seeds the witness");
         assert!(
@@ -195,7 +218,13 @@ mod tests {
         let session = "grok-session-zzzz";
         let payload = format!(r#"{{"hookEventName":"SessionStart","sessionId":"{session}"}}"#);
 
-        notify_at(&paths, "SessionStart", &payload, /*greet_only*/ false);
+        notify_at(
+            &paths,
+            "SessionStart",
+            &payload,
+            /*greet_only*/ false,
+            ds_config::ClientSource::ClaudeCode,
+        );
         assert!(
             hook_narrate::streamed_via_message_display(&paths, session),
             "camelCase sessionId must scope the streaming-witness seed"

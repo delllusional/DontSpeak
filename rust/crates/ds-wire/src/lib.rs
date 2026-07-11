@@ -10,8 +10,9 @@
 //!   • `ClaudeTomlHooks` → `hooks::claude_toml_hooks` (same contract, TOML file)
 //!   • `JsonMcp`         → `mcp::apply` (stdio `mcpServers.DontSpeak` entry)
 //!   • `TomlMcp`         → `mcp::apply_toml` (stdio `mcp_servers.DontSpeak` in TOML)
-//! Adding a client (Qwen Code, Gemini CLI, …) = a `WireTarget` variant + `Paths` fields + a
-//! registry entry; a new MECHANISM (a different hook contract) = one new writer + enum arm.
+//! Adding a client (Qwen Code, Gemini CLI, …) = a `ClientSource::CLIENTS` member + `Paths`
+//! fields + a registry entry; a new MECHANISM (a different hook contract) = one new writer +
+//! enum arm.
 //!
 //! Every surface REUSES the shared cores — the `ds-config` hook/MCP shapers, the
 //! `mcp::apply` read→merge→backup→atomic-write flow, and the `hooks` writers — so
@@ -24,7 +25,7 @@ pub(crate) mod hooks;
 mod io;
 pub(crate) mod mcp;
 
-use ds_config::{ClientKind, Paths, WireMechanism, WireTarget};
+use ds_config::{ClientKind, ClientSource, Paths, WireMechanism};
 
 /// Our MCP server key — the `mcpServers.DontSpeak` / `mcp_servers.DontSpeak` registry name
 /// (and the `serverInfo.name` the stdio server reports). MUST stay equal to
@@ -33,11 +34,15 @@ pub const SERVER_NAME: &str = "DontSpeak";
 
 /// Parse `<client> [--remove] [--print-only]` (or `--all` / `--reconcile` / `--list`) and wire
 /// (or unwire) that client's whole integration. Returns a process exit code (0 ok / skipped,
-/// 1 hard error). `client` is a [`WireTarget`] token (`claude_code`/`codex`/`qwen_code`/`grok`).
+/// 1 hard error). `client` is a WIRE-ABLE [`ClientSource`] token
+/// (`claude_code`/`codex`/`qwen_code`/`grok`) — `ClientSource::parse` also accepts `dontspeak`
+/// and `unknown`, so the parse arm gates on `client_spec(t).is_some()`, which is `None` for
+/// both of those and lands them in the "unknown client" error (pinned by
+/// `wire_dontspeak_token_is_a_hard_error` / `wire_unknown_token_is_a_hard_error`).
 /// `--reconcile` converges every client to `config.toml`'s declared `exclude_clients` (the same
 /// core the engine runs at boot, via [`reconcile`]); `--all` wires every client unconditionally.
 pub fn run(args: &[String]) -> i32 {
-    let mut client: Option<WireTarget> = None;
+    let mut client: Option<ClientSource> = None;
     let mut remove = false;
     let mut print_only = false;
     let mut all = false;
@@ -68,7 +73,7 @@ pub fn run(args: &[String]) -> i32 {
                 return 0;
             }
             other if other.starts_with('-') => eprintln!("wire: ignoring unknown flag {other:?}"),
-            other => match WireTarget::parse(other) {
+            other => match ClientSource::parse(other) {
                 Some(t) if ds_config::client_spec(t).is_some() => {
                     // A second positional client token (e.g. `dontspeak wire codex
                     // claude_code`) must NOT silently overwrite the first and report
@@ -121,7 +126,7 @@ pub fn run(args: &[String]) -> i32 {
     // installers used to hand-copy. Each self-skips when its client is absent; return the WORST
     // exit code so one client's hard error still surfaces.
     if all {
-        return WireTarget::CLIENTS
+        return ClientSource::CLIENTS
             .iter()
             .map(|&c| wire_client(c, &paths, remove, print_only))
             .max()
@@ -140,7 +145,7 @@ pub fn run(args: &[String]) -> i32 {
 /// Returns the WORST per-client exit code (0 ok).
 pub fn reconcile(paths: &Paths) -> i32 {
     let excluded = ds_config::VoiceConfig::load(paths).excluded_clients();
-    WireTarget::CLIENTS
+    ClientSource::CLIENTS
         .iter()
         .map(|&c| {
             wire_client(
@@ -160,9 +165,12 @@ pub fn reconcile(paths: &Paths) -> i32 {
 /// the others, or `--remove` would leave a dangling entry (e.g. an MCP `command` pointing at a
 /// deleted binary). Order matters for `claude_code`: the hooks write creates `~/.claude`, which
 /// the MCP surface's presence probe then sees.
-fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool) -> i32 {
-    let spec = ds_config::client_spec(client)
-        .expect("WireTarget is client-only; every variant has a registry entry");
+fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bool) -> i32 {
+    let spec = ds_config::client_spec(client).expect(
+        "wire_client is only ever called with a ClientSource::CLIENTS member (run's parse arm \
+         gates on client_spec(t).is_some(); --all / reconcile iterate CLIENTS), and every one \
+         of those has a registry entry",
+    );
 
     if !print_only && spec.gate_on_presence {
         if remove {
@@ -189,20 +197,32 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
         .surfaces
         .iter()
         .map(|s| match s.mechanism {
+            // Every hook writer takes `spec.target` — the client it is wiring — and stamps it
+            // into the wired command as `--client <token>`. Uniform across mechanisms: no
+            // writer hardcodes its own client.
             WireMechanism::ClaudeJsonHooks => hooks::claude_json_hooks(
                 (s.config_file)(paths),
                 s.hook_streaming,
                 s.hook_command_style,
+                spec.target,
                 remove,
                 print_only,
                 paths,
             ),
-            WireMechanism::ClaudeTomlHooks => {
-                hooks::claude_toml_hooks((s.config_file)(paths), remove, print_only, paths)
-            }
-            WireMechanism::GrokJsonHooks => {
-                hooks::grok_json_hooks((s.config_file)(paths), remove, print_only, paths)
-            }
+            WireMechanism::ClaudeTomlHooks => hooks::claude_toml_hooks(
+                (s.config_file)(paths),
+                spec.target,
+                remove,
+                print_only,
+                paths,
+            ),
+            WireMechanism::GrokJsonHooks => hooks::grok_json_hooks(
+                (s.config_file)(paths),
+                spec.target,
+                remove,
+                print_only,
+                paths,
+            ),
             WireMechanism::JsonMcp => {
                 mcp::apply(&mcp::target_for(spec, s, paths), remove, print_only, paths)
             }
@@ -216,7 +236,7 @@ fn wire_client(client: WireTarget, paths: &Paths, remove: bool, print_only: bool
     // session hosted on the shared app-server so the engine can subscribe (see
     // docs/STREAMING-NARRATION.md). CLI literal by precedent (this file's other eprintln!s);
     // the ds-i18n catalog covers Swift/C#/XAML, none of which are involved here.
-    if client == WireTarget::Codex && !remove && !print_only && code == 0 {
+    if client == ClientSource::Codex && !remove && !print_only && code == 0 {
         eprintln!(
             "wire: for mid-turn narration, run Codex on the shared app-server: `codex app-server daemon start` once, then `codex --remote unix://` — otherwise replies are voiced at end of turn as before"
         );
@@ -290,6 +310,23 @@ mod tests {
         assert_eq!(run(&args(&["not_a_real_client"])), 1);
     }
 
+    /// `ClientSource::parse("dontspeak")` SUCCEEDS (where the old `WireTarget::parse` returned
+    /// `None`), so the "is it a token at all?" check is no longer the guard — `client_spec(t)`
+    /// is. `client_spec(DontSpeak)` is `None` (DontSpeak is not a client we wire), so the parse
+    /// arm's `Some(t) if client_spec(t).is_some()` fails and control lands in the `_ =>` arm:
+    /// "unknown client", exit 1 — BEFORE `Paths::resolve()`, and never reaching `wire_client`'s
+    /// `.expect`. Pins that guard, which is the whole reason the enum's widening is safe here.
+    #[test]
+    fn wire_dontspeak_token_is_a_hard_error() {
+        assert_eq!(run(&args(&["dontspeak"])), 1);
+    }
+
+    /// Same guard, for the other non-client member: `unknown` parses but has no registry entry.
+    #[test]
+    fn wire_unknown_token_is_a_hard_error() {
+        assert_eq!(run(&args(&["unknown"])), 1);
+    }
+
     /// A second positional client token must NOT silently overwrite the first; `run` rejects
     /// with the "multiple clients given" guard, still before `Paths::resolve()`.
     #[test]
@@ -331,7 +368,7 @@ mod tests {
     fn wire_client_skips_absent_gated_client() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        assert_eq!(wire_client(WireTarget::Codex, &paths, false, false), 0);
+        assert_eq!(wire_client(ClientSource::Codex, &paths, false, false), 0);
         assert!(!paths.codex_dir.exists());
     }
 
@@ -341,7 +378,7 @@ mod tests {
     fn wire_client_remove_with_no_existing_config_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        assert_eq!(wire_client(WireTarget::Codex, &paths, true, false), 0);
+        assert_eq!(wire_client(ClientSource::Codex, &paths, true, false), 0);
         assert!(!paths.codex_config.exists());
     }
 
@@ -359,7 +396,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
         std::fs::create_dir_all(&paths.qwen_dir).unwrap(); // satisfy Qwen's presence gate
 
-        assert_eq!(wire_client(WireTarget::QwenCode, &paths, false, false), 0);
+        assert_eq!(wire_client(ClientSource::QwenCode, &paths, false, false), 0);
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
         // Hooks group present (non-streaming: MessageDisplay omitted, Stop/UserPromptSubmit/etc. present)…
@@ -390,7 +427,7 @@ mod tests {
         );
 
         // `--remove` cleanly strips BOTH back out.
-        assert_eq!(wire_client(WireTarget::QwenCode, &paths, true, false), 0);
+        assert_eq!(wire_client(ClientSource::QwenCode, &paths, true, false), 0);
         let v2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
         assert!(v2.get("hooks").is_none(), "hooks stripped");
@@ -410,7 +447,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
         std::fs::create_dir_all(&paths.codex_dir).unwrap(); // satisfy Codex's presence gate
 
-        assert_eq!(wire_client(WireTarget::Codex, &paths, false, false), 0);
+        assert_eq!(wire_client(ClientSource::Codex, &paths, false, false), 0);
         let text = std::fs::read_to_string(&paths.codex_config).unwrap();
         // Hooks present (Codex's own event set, greet-only SessionStart)…
         assert!(text.contains("[[hooks.Stop]]"), "hooks wired: {text}");
@@ -425,7 +462,7 @@ mod tests {
         );
 
         // `--remove` cleanly strips BOTH back out.
-        assert_eq!(wire_client(WireTarget::Codex, &paths, true, false), 0);
+        assert_eq!(wire_client(ClientSource::Codex, &paths, true, false), 0);
         let text2 = std::fs::read_to_string(&paths.codex_config).unwrap();
         assert!(!text2.contains("hooks"), "hooks stripped: {text2}");
         assert!(
@@ -448,7 +485,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
         std::fs::create_dir_all(&paths.grok_dir).unwrap(); // satisfy Grok's presence gate
 
-        assert_eq!(wire_client(WireTarget::Grok, &paths, false, false), 0);
+        assert_eq!(wire_client(ClientSource::Grok, &paths, false, false), 0);
         // MCP entry in the TOML config…
         let text = std::fs::read_to_string(&paths.grok_config).unwrap();
         assert!(
@@ -481,7 +518,7 @@ mod tests {
         );
 
         // `--remove` deletes our dedicated hooks file AND strips the MCP entry from the config.
-        assert_eq!(wire_client(WireTarget::Grok, &paths, true, false), 0);
+        assert_eq!(wire_client(ClientSource::Grok, &paths, true, false), 0);
         assert!(
             !paths.grok_hooks_json.exists(),
             "dedicated hooks file deleted on unwire"
@@ -575,7 +612,7 @@ mod tests {
         std::fs::create_dir_all(&paths.qwen_dir).unwrap();
 
         // Pre-wire Qwen (as a prior reconcile / installer would have).
-        assert_eq!(wire_client(WireTarget::QwenCode, &paths, false, false), 0);
+        assert_eq!(wire_client(ClientSource::QwenCode, &paths, false, false), 0);
         let before: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
         assert!(
@@ -585,7 +622,7 @@ mod tests {
 
         // Exclude Qwen (the wired client), then reconcile → it must be stripped.
         let cfg = ds_config::VoiceConfig {
-            exclude_clients: Some(vec![WireTarget::QwenCode]),
+            exclude_clients: Some(vec![ClientSource::QwenCode]),
             ..ds_config::VoiceConfig::default()
         };
         ds_config::write_settings(&paths, &cfg).unwrap();

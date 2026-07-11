@@ -14,7 +14,23 @@
 //!
 //! Wire format: `[<epoch_seconds>] <LEVEL> <source> <message>\n`
 //!   e.g. `[1781700000] INFO engine started build=ab12cd`
-//! `source` is one token: engine, tts, stt, caps, hook, mcp, helper.
+//! `source` is one token: engine, tts, stt, caps, hook, mcp, helper — the SUBSYSTEM that
+//! emitted the line (it is `log::Record::target()` from the facade, and every UI's Logs tab
+//! derives its filter set from it).
+//!
+//! WHICH CLIENT caused a line is a DIFFERENT axis, and it rides as a trailing `client=<token>`
+//! key INSIDE the message (the log's existing k=v idiom, cf. `started build=ab12cd`), never as
+//! a fourth positional field:
+//!
+//! ```text
+//! [<epoch>] <LEVEL> <source> <message>                 # client == DontSpeak (us)
+//! [<epoch>] <LEVEL> <source> <message> client=codex    # any other client, incl. `unknown`
+//! ```
+//!
+//! So `parse_unified_line`'s `splitn(3, ' ')` and `combined_log_json`'s `{source, level, text}`
+//! shape are unchanged — no UI, FFI or Logs-tab work — and `client=` present is the greppable
+//! "an external client caused this" signal, while the engine's own high-volume lines don't grow
+//! a redundant `client=dontspeak` suffix. See [`log_from`].
 //!
 //! `log()`'s single `write_all` is atomic on more than just POSIX: Rust's
 //! `OpenOptions::append(true)` maps to a `FILE_APPEND_DATA`-only handle on Windows, which gives
@@ -24,6 +40,7 @@
 //! appending concurrently — so concurrent cross-process appends are safe on all three OSes, not
 //! just POSIX ones.
 
+use ds_client::ClientSource;
 use std::path::{Path, PathBuf};
 
 /// Rotate when the active log file reaches this size (~5 MiB).
@@ -109,17 +126,44 @@ pub fn open_aux_log(log_file: &Path, file_name: &str) -> Option<std::fs::File> {
         .ok()
 }
 
-/// Append one line to the unified activity log. `source` is the subsystem token
+/// Append one line to the unified activity log. `source` is the SUBSYSTEM token
 /// (engine, tts, stt, caps, hook, mcp, helper). Fail-quiet: any IO error is a no-op —
 /// logging must never take down a hook or the engine.
+///
+/// Attributed to DontSpeak itself — i.e. `log_from(.., ClientSource::DontSpeak, ..)`, which
+/// renders no `client=` suffix. Use [`log_from`] when a CLIENT (Claude Code, Codex, …) caused
+/// the line.
 pub fn log(log_file: &Path, level: LogLevel, source: &str, msg: &str) {
+    log_from(log_file, level, source, ClientSource::DontSpeak, msg);
+}
+
+/// [`log`], attributed to the CLIENT that caused the line. Any client other than
+/// [`ClientSource::DontSpeak`] appends a trailing ` client=<token>` k=v to the MESSAGE (see the
+/// module docs) — the positional `[ts] LEVEL source …` fields are untouched, so the parsed log
+/// shape every UI's Logs tab reads is byte-compatible and a `DontSpeak` line is byte-identical
+/// to what plain `log()` has always written.
+///
+/// This is the ONLY client-attributed logger, and it takes the log-file PATH: every caller
+/// therefore has a `Paths` in scope (a tempdir-rooted one under test). There is deliberately
+/// no `log_cached_from` — see [`log_cached`]'s doc for why a client-typed cached logger would
+/// be a real-`$HOME` write from any unit test that touched it.
+pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: ClientSource, msg: &str) {
     use std::io::Write;
     if let Some(dir) = log_file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     rotate_if_large(log_file);
+    // The client rides as a trailing k=v inside the message; US ⇒ no suffix at all.
+    let suffix = match client {
+        ClientSource::DontSpeak => String::new(),
+        c => format!(" client={}", c.as_str()),
+    };
     // One formatted line, one write_all → atomic append (no interleave).
-    let line = format!("[{}] {} {source} {msg}\n", epoch_secs(), level.as_str());
+    let line = format!(
+        "[{}] {} {source} {msg}{suffix}\n",
+        epoch_secs(),
+        level.as_str()
+    );
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -192,6 +236,14 @@ static CACHED_LOG_FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLo
 /// always resolves the REAL per-OS path via `default_log_file()` and ignores any caller-local
 /// path, so using it from a path that's supposed to stay test-isolated would silently leak
 /// writes into the real `$HOME`-based log directory.
+///
+/// THE RULE (issue #26 tracks mechanising it): `log_cached` must stay unreachable from any
+/// unit test. Today it is, because its ONLY caller is the `log::Log` sink in `facade.rs`, and
+/// that sink is installed only by `ds_log::init()` — which no test calls, so `log::info!` is a
+/// silent no-op under `cargo test`. There is deliberately NO `log_cached_from`: a
+/// client-attributed cached logger would be a brand-new, tempting call site that writes to the
+/// dev's/CI runner's REAL `$HOME` log. Client-attributed logging goes through [`log_from`],
+/// which takes the path — see its doc.
 pub fn log_cached(level: LogLevel, source: &str, msg: &str) {
     match CACHED_LOG_FILE.get_or_init(default_log_file) {
         Some(log_file) => log(log_file, level, source, msg),
@@ -363,6 +415,62 @@ mod tests {
         assert_eq!(source, "engine");
         assert_eq!(msg, "started build=ab12cd");
         assert!(parse_unified_line("not a log line").is_none());
+    }
+
+    /// The `(level, source, message)` of the ONE line in a freshly written log — i.e. the wire
+    /// format WITHOUT its `[<epoch>] ` prefix. Comparing whole raw bytes across two `log_from`
+    /// calls would flake whenever the pair straddles a second boundary (the timestamp differs),
+    /// so every client-suffix assertion below goes through the parser instead.
+    fn only_line(path: &Path) -> (String, String, String) {
+        let raw = std::fs::read_to_string(path).expect("log written");
+        let line = raw.lines().next().expect("one line");
+        let (_ts, level, source, msg) = parse_unified_line(line).expect("parses as our format");
+        (level, source, msg)
+    }
+
+    #[test]
+    fn log_from_appends_the_client_as_a_trailing_kv() {
+        // Every non-DontSpeak client renders ` client=<token>` at the END of the MESSAGE — the
+        // positional fields (level, source) are untouched, which is exactly why no UI/FFI work
+        // is needed. `unknown` is a real client value here, not an "omit it" signal.
+        let dir = tempfile::tempdir().unwrap();
+        for (client, want) in [
+            (
+                ClientSource::ClaudeCode,
+                "greet session=s1 client=claude_code",
+            ),
+            (ClientSource::Codex, "greet session=s1 client=codex"),
+            (ClientSource::QwenCode, "greet session=s1 client=qwen_code"),
+            (ClientSource::Grok, "greet session=s1 client=grok"),
+            (ClientSource::Unknown, "greet session=s1 client=unknown"),
+        ] {
+            let p = dir.path().join(format!("{}.log", client.as_str()));
+            log_from(&p, LogLevel::Info, "engine", client, "greet session=s1");
+            let (level, source, msg) = only_line(&p);
+            assert_eq!((level.as_str(), source.as_str()), ("INFO", "engine"));
+            assert_eq!(msg, want, "{client:?}");
+        }
+    }
+
+    #[test]
+    fn dontspeak_client_renders_no_suffix_and_matches_plain_log() {
+        // OUR OWN lines stay byte-compatible with what `log()` has always written — no
+        // redundant `client=dontspeak` on the engine's high-volume lines. Asserted on the
+        // PARSED (level, source, message) rather than raw bytes: the two calls carry their own
+        // `[<epoch>]` prefixes and would differ across a second boundary.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.log");
+        let b = dir.path().join("b.log");
+        log(&a, LogLevel::Warn, "config", "bad value key=rate");
+        log_from(
+            &b,
+            LogLevel::Warn,
+            "config",
+            ClientSource::DontSpeak,
+            "bad value key=rate",
+        );
+        assert_eq!(only_line(&a), only_line(&b));
+        assert_eq!(only_line(&a).2, "bad value key=rate", "no client= suffix");
     }
 
     #[test]

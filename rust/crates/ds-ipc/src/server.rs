@@ -3,7 +3,14 @@
 //! [`Request`] per line, and invokes the handler with an `emit` callback the
 //! handler uses to write one-or-more [`Response`] lines back (supporting
 //! streaming).
+//!
+//! A line that does NOT decode as a [`Request`] never reaches the handler, so
+//! [`serve`] takes a second callback, `on_bad_request`, purely so the rejection is
+//! OBSERVABLE: the engine passes a closure that writes a WARN to the activity log.
+//! It is a callback rather than a log call here because `ds-ipc` deliberately has no
+//! logger dependency (serde, serde_json, ds-client, uds_windows — that's the lot).
 
+use serde::Deserialize;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -43,6 +50,16 @@ const MAX_CONNECTIONS: usize = 64;
 /// still comfortably KB-scale.
 const MAX_LINE_LEN: usize = 1024 * 1024; // 1 MiB
 
+/// Cap on the `cmd` token echoed into a bad-request report. A well-formed `cmd` is a
+/// short snake_case tag; a hostile/garbled client could put a megabyte of prose there.
+const MAX_CMD_LEN: usize = 32;
+
+/// Cap on the whole bad-request report. Belt-and-braces on top of [`MAX_CMD_LEN`]:
+/// serde_json's own `invalid type: string "…"` messages can quote a field's VALUE, and
+/// a `Speak` line's value is user/agent prose. Bounding what leaves this module bounds
+/// what a log line can ever carry.
+const MAX_DETAIL_LEN: usize = 200;
+
 /// Handler signature: given a parsed request, emit zero-or-more responses via the
 /// callback. Must be thread-safe — one connection per thread runs it concurrently.
 pub trait Handler: Send + Sync + 'static {
@@ -61,9 +78,23 @@ where
 /// Bind `sock_path` and accept forever, dispatching each line to `handler`.
 /// Removes a stale socket file first (a previous run that didn't clean up), so a
 /// restart never fails with `EADDRINUSE`. Blocks; run on its own thread.
-pub fn serve<H: Handler>(sock_path: &Path, handler: H) -> io::Result<()> {
+///
+/// `on_bad_request` is invoked — on the connection's thread, so keep it cheap — for every
+/// line that fails to decode as a [`Request`], with a bounded, value-redacted report of the
+/// form `rejected request (cmd=…): <serde error>` (see `bad_request_detail`). The client
+/// still gets its `bad request: …` [`Response::error`] on the socket, but every real client
+/// (the hooks especially) DISCARDS the reply, so without this callback a rejection is
+/// invisible — which is exactly how a stale `dontspeak` CLI against a rebuilt engine (its
+/// lines missing the now-required `source`) would silently drop the entire voice loop.
+/// It's a parameter rather than an `Option`/default no-op on purpose: a caller has to
+/// decide, in writing, what to do with a rejection instead of getting silence for free.
+pub fn serve<H: Handler, B>(sock_path: &Path, handler: H, on_bad_request: B) -> io::Result<()>
+where
+    B: Fn(&str) + Send + Sync + 'static,
+{
     let listener = transport::bind(sock_path)?;
     let handler = Arc::new(handler);
+    let on_bad_request = Arc::new(on_bad_request);
     let active_conns = Arc::new(AtomicUsize::new(0));
 
     for stream in listener.incoming() {
@@ -80,11 +111,12 @@ pub fn serve<H: Handler>(sock_path: &Path, handler: H) -> io::Result<()> {
                     continue;
                 }
                 let h = Arc::clone(&handler);
+                let bad = Arc::clone(&on_bad_request);
                 let active_conns = Arc::clone(&active_conns);
                 // One thread per connection; cheap (clients are the app + hooks),
                 // bounded by MAX_CONNECTIONS above.
                 thread::spawn(move || {
-                    if let Err(e) = handle_conn(stream, h.as_ref()) {
+                    if let Err(e) = handle_conn(stream, h.as_ref(), bad.as_ref()) {
                         // A client hanging up mid-write is normal; don't spam.
                         let _ = e;
                     }
@@ -97,7 +129,11 @@ pub fn serve<H: Handler>(sock_path: &Path, handler: H) -> io::Result<()> {
     Ok(())
 }
 
-fn handle_conn<H: Handler>(stream: Stream, handler: &H) -> io::Result<()> {
+fn handle_conn<H: Handler, B: Fn(&str) + ?Sized>(
+    stream: Stream,
+    handler: &H,
+    on_bad_request: &B,
+) -> io::Result<()> {
     // Bound a stuck/partial-line client so its thread can't leak (see the const
     // docs). Best-effort: a platform that rejects the option still serves.
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
@@ -112,6 +148,10 @@ fn handle_conn<H: Handler>(stream: Stream, handler: &H) -> io::Result<()> {
         let req: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
+                // Tell the caller AND tell whoever is watching the engine: the socket
+                // reply below is discarded by every hook call site, so the callback is
+                // the only path by which a rejected line becomes visible anywhere.
+                on_bad_request(&bad_request_detail(&line, &e));
                 write_line(&mut writer, &Response::error(format!("bad request: {e}")))?;
                 continue;
             }
@@ -123,6 +163,55 @@ fn handle_conn<H: Handler>(stream: Stream, handler: &H) -> io::Result<()> {
         handler.handle(req, &mut emit);
     }
     Ok(())
+}
+
+/// Just the `cmd` tag, for naming a request that failed to decode as a full [`Request`].
+/// Every other field is ignored, so this still parses a line whose payload is wrong,
+/// incomplete, or (the case that matters) missing its `source`.
+#[derive(Deserialize)]
+struct CmdOnly {
+    cmd: String,
+}
+
+/// A log-safe description of a line that failed to decode: the serde error, prefixed with
+/// WHICH command was rejected when the line is at least well-formed JSON with a `cmd`
+/// (`?` when it isn't).
+///
+/// Never the raw line, and never unbounded. A `Speak`/`SpeakNarration` payload is user or
+/// agent prose, and the whole point of this report is that it lands in the activity log —
+/// so the only thing taken from the line itself is its `cmd` tag, sanitized to the
+/// `[A-Za-z0-9_]` a real tag is made of and capped at [`MAX_CMD_LEN`]. serde_json's own
+/// message can quote a field value too (`unknown variant \`…\``, `invalid type: string
+/// "…"`), so the FINISHED string is also stripped of control characters (a newline here
+/// would forge a second activity-log line) and capped at [`MAX_DETAIL_LEN`].
+/// Costs one extra parse, on the error path only.
+fn bad_request_detail(line: &str, err: &serde_json::Error) -> String {
+    let cmd = serde_json::from_str::<CmdOnly>(line)
+        .map(|c| {
+            sanitize(&c.cmd, MAX_CMD_LEN, |ch| {
+                ch.is_ascii_alphanumeric() || ch == '_'
+            })
+        })
+        .unwrap_or_else(|_| "?".to_string());
+    sanitize(
+        &format!("rejected request (cmd={cmd}): {err}"),
+        MAX_DETAIL_LEN,
+        |ch| !ch.is_control(),
+    )
+}
+
+/// `s` capped at `max` chars, with every char `keep` rejects replaced by `?`, and an
+/// ellipsis appended if anything was cut.
+fn sanitize(s: &str, max: usize, keep: impl Fn(char) -> bool) -> String {
+    let mut out: String = s
+        .chars()
+        .take(max)
+        .map(|ch| if keep(ch) { ch } else { '?' })
+        .collect();
+    if s.chars().count() > max {
+        out.push('…');
+    }
+    out
 }
 
 /// Read one newline-terminated line from `reader`, bounded to `MAX_LINE_LEN`
@@ -204,6 +293,21 @@ mod tests {
         }
     }
 
+    /// The `on_bad_request` sink a test hands to `handle_conn`: records each report so a
+    /// test can assert BOTH that the rejection was announced and what it did (not) carry.
+    /// Stands in for the engine's real sink, which is a `ds_log::log_from` WARN — no test
+    /// here (or anywhere) may reach a logger that resolves the developer's real log file.
+    fn reports() -> (
+        Arc<Mutex<Vec<String>>>,
+        impl Fn(&str) + Send + Sync + 'static,
+    ) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        (seen, move |detail: &str| {
+            sink.lock().unwrap().push(detail.to_string())
+        })
+    }
+
     /// Finding: "no test proves malformed-JSON-then-resume behavior". A
     /// malformed line must produce an error response but NOT end the
     /// connection — the next, well-formed line must still be parsed and
@@ -213,8 +317,9 @@ mod tests {
         let (mut client, server) = socket_pair();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let handler = Recorder(Arc::clone(&seen));
+        let (_reports, on_bad) = reports();
 
-        let server_thread = thread::spawn(move || handle_conn(server, &handler));
+        let server_thread = thread::spawn(move || handle_conn(server, &handler, &on_bad));
 
         client.write_all(b"this is not json\n").unwrap();
         client.write_all(b"{\"cmd\":\"ping\"}\n").unwrap();
@@ -270,7 +375,8 @@ mod tests {
             fn handle(&self, _req: Request, _emit: &mut dyn FnMut(&Response)) {}
         }
 
-        let server_thread = thread::spawn(move || handle_conn(server, &NoOp));
+        let (_reports, on_bad) = reports();
+        let server_thread = thread::spawn(move || handle_conn(server, &NoOp, &on_bad));
 
         client.write_all(&[0xFF, 0xFE, b'\n']).unwrap();
         drop(client); // EOF after the bad bytes so handle_conn doesn't block forever
@@ -298,6 +404,87 @@ mod tests {
         let err = read_line_bounded(&mut reader, &mut buf)
             .expect_err("an over-limit line must error, not buffer without bound");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// THE STALE-CLI SCENARIO, pinned. A `dontspeak` CLI built before `source` became
+    /// required sends `{"cmd":"greet_session","session":"…"}`; the engine rejects it, and the
+    /// hook — like every hook call site — throws the reply away and exits 0. If the rejection
+    /// isn't announced through `on_bad_request`, the entire voice loop dies with zero
+    /// diagnostics anywhere. So: a bad line MUST invoke the callback, and the report MUST name
+    /// both the rejected `cmd` and the missing field.
+    #[test]
+    fn handle_conn_reports_a_rejected_line_through_on_bad_request() {
+        let (mut client, server) = socket_pair();
+        let (seen, on_bad) = reports();
+        struct NoOp;
+        impl Handler for NoOp {
+            fn handle(&self, _req: Request, _emit: &mut dyn FnMut(&Response)) {
+                panic!("a line that fails to decode must never reach the handler");
+            }
+        }
+
+        let server_thread = thread::spawn(move || handle_conn(server, &NoOp, &on_bad));
+        client
+            .write_all(br#"{"cmd":"greet_session","session":"sess-1"}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+
+        // Drain the error reply BEFORE hanging up (as the real client does, even though it
+        // then throws it away): closing on unread data resets the connection on Windows, and
+        // the server would see that reset rather than the clean EOF this test is asserting.
+        let mut reader = BufReader::new(client);
+        let mut reply = String::new();
+        reader.read_line(&mut reply).expect("error response");
+        assert!(reply.contains("bad request"), "got: {reply}");
+
+        drop(reader); // EOF ⇒ handle_conn's loop ends
+        server_thread.join().unwrap().expect("clean disconnect");
+        let reports = seen.lock().unwrap();
+        assert_eq!(reports.len(), 1, "the one bad line must be reported once");
+        let detail = &reports[0];
+        assert!(
+            detail.contains("cmd=greet_session"),
+            "the report must name WHICH command was rejected, got: {detail}"
+        );
+        assert!(
+            detail.contains("source"),
+            "the report must name the missing field, got: {detail}"
+        );
+    }
+
+    /// The report goes into the activity log, so it must never carry the request's payload —
+    /// a `speak` line's `text` is user/agent prose. Only the `cmd` tag and the serde error
+    /// leave this module, and the whole thing is length-capped.
+    #[test]
+    fn bad_request_detail_carries_the_cmd_but_never_the_payload() {
+        let line = r#"{"cmd":"speak","text":"my private prompt text"}"#; // no `source` ⇒ rejected
+        let err = serde_json::from_str::<Request>(line).expect_err("must not decode");
+        let detail = bad_request_detail(line, &err);
+        assert!(detail.contains("cmd=speak"), "got: {detail}");
+        assert!(detail.contains("source"), "got: {detail}");
+        assert!(
+            !detail.contains("my private prompt text"),
+            "the payload must never reach the log, got: {detail}"
+        );
+        assert!(detail.chars().count() <= MAX_DETAIL_LEN + 1); // +1 for the '…'
+    }
+
+    /// A line that isn't even JSON has no `cmd` to name, and a hostile one could put a
+    /// megabyte of prose (or a newline-forged fake log line) where the tag belongs. Neither
+    /// may escape into the report.
+    #[test]
+    fn bad_request_detail_bounds_and_sanitizes_a_hostile_cmd() {
+        let err = serde_json::from_str::<Request>("this is not json").expect_err("must not decode");
+        assert!(
+            bad_request_detail("this is not json", &err).contains("cmd=?"),
+            "a non-JSON line has no cmd to report"
+        );
+
+        let hostile = format!(r#"{{"cmd":"{}"}}"#, "a\nb".repeat(200));
+        let err = serde_json::from_str::<Request>(&hostile).expect_err("must not decode");
+        let detail = bad_request_detail(&hostile, &err);
+        assert!(!detail.contains('\n'), "no newline forging, got: {detail}");
+        assert!(detail.chars().count() <= MAX_DETAIL_LEN + 1);
     }
 
     /// A line at or under the limit is unaffected by the bound.

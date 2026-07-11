@@ -11,6 +11,11 @@ description = "Workspace-wide unified activity log for DontSpeak (one leveled, s
 
 [dependencies]
 serde_json = { workspace = true }
+# The client-identity enum: `log_from` takes a `ClientSource` and renders it as the line's
+# trailing `client=<token>` k=v. ds-client is a leaf (serde only) that sits BELOW this crate
+# precisely so ds-log can take a client without depending on ds-config (which depends on
+# ds-log — that edge would be a cycle).
+ds-client = { workspace = true }
 # Facade macros (log::info!/warn!/error!/debug!) — this crate implements `log::Log` as a
 # sink over log_cached, so callers use the macros instead of ds_log::log_cached directly.
 log = { workspace = true }

@@ -44,6 +44,8 @@ mod mcp;
 mod tools;
 mod voices;
 
+use ds_config::ClientSource;
+
 /// The four things argv\[1\] can select us into, plus the fallback for an unrecognized
 /// token. Pure decision extracted from `main` so it's testable without touching stdio.
 #[derive(Debug, PartialEq, Eq)]
@@ -58,6 +60,23 @@ enum Subcommand<'a> {
     Server,
     /// An explicit but unrecognized argv\[1\].
     Unknown(String),
+}
+
+/// WHICH client invoked this hook — the `--client <token>` verb the wiring stamps into every
+/// hook command (`ds_config::wire::cmdline`). Rides at argv\[2+\], like `--greet-only`, so
+/// `resolve_subcommand` (which matches argv\[1\] only) is undisturbed.
+///
+/// Unrecognised, missing, or NON-CLIENT (`dontspeak`, `unknown`) ⇒ [`ClientSource::Unknown`] —
+/// never a hard error: a hook must degrade, never fail the client's turn. That is NOT a legacy
+/// path (every wired hook carries the token, and the engine re-wires every client at boot): it
+/// is the honest answer when the binary is invoked by hand, or by something we don't recognise.
+fn client_from_argv(argv: &[String]) -> ClientSource {
+    argv.iter()
+        .position(|a| a == "--client")
+        .and_then(|i| argv.get(i + 1))
+        .and_then(|t| ClientSource::parse(t))
+        .filter(|c| c.is_client())
+        .unwrap_or(ClientSource::Unknown)
 }
 
 /// Decide which of the four subcommand roles (or the no-args MCP server default, or the
@@ -100,7 +119,14 @@ fn main() {
             // stream the seed would mark every session "already narrated" and silence each
             // Stop reply. Rides at argv[2+]; `resolve_subcommand` matches argv[1] only.
             let greet_only = argv.iter().any(|a| a == "--greet-only");
-            hook_core::notify(&hook_core::event_name(&payload), &payload, greet_only);
+            // `--client <token>`: WHO invoked us (see `client_from_argv`). Rides to the engine
+            // on every ds-ipc request this hook sends, and onto the activity log.
+            hook_core::notify(
+                &hook_core::event_name(&payload),
+                &payload,
+                greet_only,
+                client_from_argv(&argv),
+            );
             std::process::exit(0);
         }
         Subcommand::Provide => {
@@ -208,5 +234,60 @@ mod tests {
         // Defensive: even with no argv[0] at all, argv.get(1) is still None.
         let argv: Vec<String> = Vec::new();
         assert_eq!(resolve_subcommand(&argv), Subcommand::Server);
+    }
+
+    #[test]
+    fn client_token_is_parsed_from_argv() {
+        for (tok, want) in [
+            ("claude_code", ClientSource::ClaudeCode),
+            ("codex", ClientSource::Codex),
+            ("qwen_code", ClientSource::QwenCode),
+            ("grok", ClientSource::Grok),
+        ] {
+            let argv = argv(&["dontspeak", "notify", "--client", tok]);
+            assert_eq!(client_from_argv(&argv), want, "{tok}");
+        }
+        // The flag rides alongside the other verbs, in any order.
+        assert_eq!(
+            client_from_argv(&argv(&[
+                "dontspeak",
+                "notify",
+                "--greet-only",
+                "--client",
+                "qwen_code"
+            ])),
+            ClientSource::QwenCode
+        );
+    }
+
+    #[test]
+    fn a_missing_malformed_or_non_client_token_degrades_to_unknown() {
+        // A hook must DEGRADE, never fail the client's turn — every one of these is `Unknown`,
+        // not a hard error. `dontspeak`/`unknown` are real `ClientSource::parse` tokens now, so
+        // the `is_client()` filter is what keeps them out (a hook can never claim to be US).
+        for argv_ in [
+            vec!["dontspeak", "notify"],             // no flag at all (hand-invoked)
+            vec!["dontspeak", "notify", "--client"], // flag with no value
+            vec!["dontspeak", "notify", "--client", "gemini"], // a client we haven't wired
+            vec!["dontspeak", "notify", "--client", "dontspeak"], // us — never a client
+            vec!["dontspeak", "notify", "--client", "unknown"], // the literal token
+            vec!["dontspeak", "notify", "--client", ""], // empty
+        ] {
+            assert_eq!(
+                client_from_argv(&argv(&argv_)),
+                ClientSource::Unknown,
+                "{argv_:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_flag_does_not_disturb_subcommand_dispatch() {
+        // `resolve_subcommand` matches argv[1] ONLY, so the token (like `--greet-only`) rides
+        // at argv[2+] without touching dispatch.
+        let notify = argv(&["dontspeak", "notify", "--client", "codex"]);
+        assert_eq!(resolve_subcommand(&notify), Subcommand::Notify);
+        let provide = argv(&["dontspeak", "provide", "--client", "codex"]);
+        assert_eq!(resolve_subcommand(&provide), Subcommand::Provide);
     }
 }

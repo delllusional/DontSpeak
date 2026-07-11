@@ -921,10 +921,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds-client"
+version = "0.2.6-dev"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ds-config"
 version = "0.2.6-dev"
 dependencies = [
  "directories",
+ "ds-client",
  "ds-log",
  "ds-proc",
  "serde",
@@ -1008,6 +1017,7 @@ dependencies = [
 name = "ds-ipc"
 version = "0.2.6-dev"
 dependencies = [
+ "ds-client",
  "serde",
  "serde_json",
  "tempfile",
@@ -1020,6 +1030,7 @@ name = "ds-log"
 version = "0.2.6-dev"
 dependencies = [
  "directories",
+ "ds-client",
  "log",
  "notify",
  "serde_json",

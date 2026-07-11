@@ -25,6 +25,11 @@ rust/
   crates/
     ds-config/    # paths (data dir, pidfile, socket) + config.toml + the Claude Code
                   #   settings.json hooks/voice merge + config enums + changes_since diff
+    ds-client/    # the ONE client-identity enum (ClientSource: claude_code | codex |
+                  #   qwen_code | grok | dontspeak | unknown), shared by the wiring, the
+                  #   hook `--client` verb, the ds-ipc `source` field, the MCP
+                  #   `clientInfo` mapping and the log's `client=` suffix. A leaf (serde
+                  #   only) so it can sit BELOW ds-log and ds-ipc without a cycle
     ds-log/       # the workspace-wide unified activity log (engine/hooks/mcp/helper
                   #   share one file) — split out of ds-config (issue #6)
     ds-earcon/    # audible earcons (OS bundled-sound introspection + cue resolution)

@@ -29,19 +29,21 @@
 //!
 //! Settings (ds-config VoiceConfig): `narrate` is a SET of "digests"/"shorts".
 
-use ds_config::{NarrateKind, Paths, VoiceConfig};
+use ds_config::{ClientSource, NarrateKind, Paths, VoiceConfig};
 use ds_narrate::{BatchPayload, StreamBatch};
 use serde::Deserialize;
 
 /// SessionEnd notify: barge ONLY this session's engine playback (so closing one window
 /// never silences another's reply). The `payload` is the hook JSON; no payload / no
-/// session id → `None` → the global barge.
-pub fn barge_session(paths: &Paths, payload: &str) {
+/// session id → `None` → the global barge. `client` is the `--client` token the wiring
+/// stamped, carried onto the request so the engine's log names who closed the window.
+pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
     let session = crate::hook_core::session_id_from_payload(payload);
     let _ = ds_ipc::request(
         &paths.engine_sock,
         &ds_ipc::Request::SessionEnd {
             session: session.clone(),
+            source: client,
         },
     );
     // SessionEnd is terminal for this session (this path fires ONLY on SessionEnd — a
@@ -125,7 +127,7 @@ pub(crate) use ds_narrate::stop_utterances;
 /// — a session with a streaming state file already narrated ⇒ stay silent. Pure decision
 /// in [`stop_utterances`]; this is the IO wrapper (config load, mic probe, witness,
 /// engine send).
-pub fn speak_reply(paths: &Paths, payload: &str) {
+pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests);
     let short_on = cfg.narrates(NarrateKind::Shorts);
@@ -151,6 +153,7 @@ pub fn speak_reply(paths: &Paths, payload: &str) {
             &ds_ipc::Request::SpeakNarration {
                 text: line,
                 session: session.clone(),
+                source: client,
             },
         );
     }
@@ -237,7 +240,7 @@ fn batch_from_hook(hook: &MessageDisplayHook) -> StreamBatch {
 /// forwarded TAGGED BY SESSION regardless of which app is frontmost; the ENGINE WORKER holds
 /// an inactive/backgrounded terminal's items (never dropped here) and plays them when that
 /// terminal is active + frontmost. Fast + fire-and-forget so it never delays the display.
-pub fn message_display(paths: &Paths, payload: &str) {
+pub fn message_display(paths: &Paths, payload: &str, client: ClientSource) {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests); // voice the blockquotes Claude writes
     let short_on = cfg.narrates(NarrateKind::Shorts); // voice a short blockquote-less reply whole
@@ -272,6 +275,7 @@ pub fn message_display(paths: &Paths, payload: &str) {
             &ds_ipc::Request::SpeakNarration {
                 text,
                 session: session.clone(),
+                source: client,
             },
         );
     }
@@ -748,7 +752,11 @@ mod tests {
         std::fs::write(path.with_extension("lock"), "").unwrap();
         std::fs::write(path.with_extension("tmp"), "").unwrap();
 
-        barge_session(&paths, &format!(r#"{{"session_id":"{session}"}}"#));
+        barge_session(
+            &paths,
+            &format!(r#"{{"session_id":"{session}"}}"#),
+            ClientSource::ClaudeCode,
+        );
         assert!(!path.exists(), "state file removed");
         assert!(!path.with_extension("lock").exists(), "lock removed");
         assert!(!path.with_extension("tmp").exists(), "tmp removed");

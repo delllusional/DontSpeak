@@ -1,0 +1,22 @@
+[package]
+name = "ds-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "The ONE client-identity enum (ClientSource) shared by the wiring, the hook command line, the ds-ipc protocol, the MCP tool-call path, and the activity log."
+
+[dependencies]
+# The only dependency: the token is (de)serialized on the ds-ipc wire and in our
+# config.toml's `exclude_clients`. Hand-written Serialize/Deserialize (no derive on the
+# enum itself) so the crate stays a leaf with nothing else in it.
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

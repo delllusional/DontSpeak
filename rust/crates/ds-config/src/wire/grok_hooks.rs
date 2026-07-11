@@ -37,6 +37,7 @@
 //!                                         "timeout": 1800 } ] } ] } }
 
 use super::cmdline::{ShellOverride, host_inline_flavor, inline_command};
+use ds_client::ClientSource;
 use serde_json::{Map, Value, json};
 
 /// The `(event, [(verb, timeout_secs)])` hooks DontSpeak owns for Grok — ONE group per event,
@@ -59,8 +60,11 @@ const GROK_HOOKS: &[(&str, &[(&str, i64)])] = &[
 /// `dontspeak` binary; each command is rendered by the SHARED [`super::cmdline::inline_command`]
 /// (with a seconds `timeout`, and no `async`/`matcher`/`args` keys) — the same string Codex
 /// gets, because Grok's hook entry likewise carries a bare command string with NO `shell`
-/// field to pin it to a quote-tolerant shell.
-pub fn grok_hooks_value(bin: &str) -> Value {
+/// field to pin it to a quote-tolerant shell. Each command carries the uniform trailing
+/// `--client <token>` ([`ClientSource`]) every hook mechanism stamps, so the spawned binary
+/// knows who invoked it; `client` is passed in (always `Grok` today) rather than hardcoded, so
+/// this shaper stays client-agnostic.
+pub fn grok_hooks_value(bin: &str, client: ClientSource) -> Value {
     let mut events = Map::new();
     for (event, verbs) in GROK_HOOKS {
         let inner: Vec<Value> = verbs
@@ -69,7 +73,7 @@ pub fn grok_hooks_value(bin: &str) -> Value {
                 let (command, _shell) = inline_command(
                     host_inline_flavor(),
                     bin,
-                    &[verb],
+                    &[verb, "--client", client.as_str()],
                     ShellOverride::Unsupported,
                 );
                 json!({
@@ -115,24 +119,29 @@ mod tests {
             .collect()
     }
 
-    /// The command string Grok should carry for `verb` on THIS host. The DIALECT itself (the
-    /// quote-free Windows form, the quoted POSIX form, the 8.3 spaced-path fallback) is pinned
-    /// per-flavor by `wire::cmdline`'s own tests; these tests pin Grok's STRUCTURE — which
-    /// events, which verbs, which timeouts, one group each — without hardcoding a dialect that
-    /// would make them pass on Linux CI and fail on a Windows host.
+    /// The command string Grok should carry for `verb` on THIS host — INCLUDING the uniform
+    /// `--client grok` tail every wired verb now carries. The DIALECT itself (the quote-free
+    /// Windows form, the quoted POSIX form, the 8.3 spaced-path fallback) is pinned per-flavor
+    /// by `wire::cmdline`'s own tests; these tests pin Grok's STRUCTURE — which events, which
+    /// verbs, which timeouts, one group each — without hardcoding a dialect that would make
+    /// them pass on Linux CI and fail on a Windows host.
     fn grok_command(verb: &str) -> String {
         inline_command(
             host_inline_flavor(),
             BIN,
-            &[verb],
+            &[verb, "--client", "grok"],
             ShellOverride::Unsupported,
         )
         .0
     }
 
+    fn value() -> Value {
+        grok_hooks_value(BIN, ClientSource::Grok)
+    }
+
     #[test]
     fn value_round_trips_through_serde_json() {
-        let v = grok_hooks_value(BIN);
+        let v = value();
         let s = serde_json::to_string(&v).unwrap();
         let back: Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v, back);
@@ -140,7 +149,7 @@ mod tests {
 
     #[test]
     fn exactly_the_five_expected_events_present() {
-        let v = grok_hooks_value(BIN);
+        let v = value();
         let hooks = v["hooks"].as_object().unwrap();
         let mut keys: Vec<&str> = hooks.keys().map(String::as_str).collect();
         keys.sort_unstable();
@@ -158,7 +167,7 @@ mod tests {
 
     #[test]
     fn exact_per_event_command_strings_and_seconds_timeouts() {
-        let v = grok_hooks_value(BIN);
+        let v = value();
         assert_eq!(
             event_entries(&v, "SessionStart"),
             vec![(grok_command("notify --greet-only"), 30)]
@@ -185,7 +194,7 @@ mod tests {
 
     #[test]
     fn every_entry_carries_a_timeout_and_no_async_key() {
-        let v = grok_hooks_value(BIN);
+        let v = value();
         let hooks = v["hooks"].as_object().unwrap();
         for (event, groups) in hooks {
             for group in groups.as_array().unwrap() {

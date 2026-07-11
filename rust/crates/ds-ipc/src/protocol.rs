@@ -6,11 +6,31 @@
 //! shape `settings.json` uses (`ds_config::voice_to_value` / `voice_from_value`),
 //! so neither side needs a parallel serializable mirror of `VoiceConfig`.
 
+use ds_client::ClientSource;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A client → engine request. `#[serde(tag = "cmd")]` so each line is a small
 /// self-describing object, e.g. `{"cmd":"ping"}` or `{"cmd":"speak","text":"hi"}`.
+///
+/// ## The `source` field
+///
+/// Every CLIENT-ORIGINATED request — one the `dontspeak` binary sends on a client's behalf and
+/// the engine routes per-session or logs — carries a REQUIRED `source: ClientSource` naming
+/// WHICH client it came from: the hook's `--client <token>` verb, or the MCP `initialize`
+/// handshake's `clientInfo`. Those seven are [`Request::GreetSession`], [`Request::MarkActive`],
+/// [`Request::SessionEnd`], [`Request::StopSpeech`], [`Request::Speak`],
+/// [`Request::SpeakNarration`] and [`Request::Earcon`].
+///
+/// The rest DELIBERATELY do NOT carry it, and that is a decision, not an oversight:
+/// [`Request::SetMuted`] is also sent by the app's own tray via `ds-core` (there is no client
+/// there at all); the STT/diarization requests (`TestRecognitionStart`/`Stop`, `Diarize`,
+/// `Enroll`, `ForgetSpeaker`, `ListSpeakers`) and every app/engine control request
+/// (`SetProvider`, `Reload`, `ModelStatus`, `WaitModelStatus`, `EnsureKokoroVoices`,
+/// `AuthorizeSystemStt`, `Shutdown`, `Ping`, `Status`) are the APP or the ENGINE talking to
+/// itself, not a client. Keeping `source` off them is also what lets `ds-core/src/ffi.rs`
+/// compile untouched — it constructs `SetMuted`/`ModelStatus`/`WaitModelStatus`/`SetProvider`
+/// and none of the seven.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
@@ -32,6 +52,23 @@ pub enum Request {
     GreetSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// WHICH client this request came from ([`ds_client::ClientSource`]) — the hook's
+        /// `--client` verb, or the MCP `initialize` handshake's `clientInfo`.
+        ///
+        /// REQUIRED: every client-originated request names its source. No `#[serde(default)]`,
+        /// no `Option`, no `skip_serializing_if`. Backward compatibility with a hook binary
+        /// that predates the verb is explicitly OUT OF SCOPE — the CLI, the engine and the
+        /// wiring ship together and the engine re-wires every client at boot, so there is no
+        /// supported skew; a stale hook's line is REJECTED (`bad request: missing field
+        /// `source``) rather than silently mis-attributed, which is the point.
+        ///
+        /// An UNRECOGNISED token still decodes to `ClientSource::Unknown` (fail-open
+        /// `Deserialize`, mirroring [`Response::Unknown`]'s `#[serde(other)]`) — that is
+        /// FORWARD robustness against a client we have not wired YET, not legacy support. An
+        /// ABSENT `source` is a hard decode error, deliberately: see
+        /// `request_without_source_is_a_hard_decode_error`, which exists to fail loudly if
+        /// anyone ever reaches for `#[serde(default)]` here to make another test go green.
+        source: ClientSource,
     },
     /// Mark this session as the ACTIVE terminal — the one you just submitted a prompt
     /// to (UserPromptSubmit hook). The TTS queue then speaks only this session's items
@@ -47,13 +84,20 @@ pub enum Request {
         /// `<task-notification>` block after a background task finishes (issue #11).
         /// No human expressed "I've moved on" here, so a synthetic ping registers
         /// session-liveness bookkeeping ONLY: it must NOT claim active-terminal status
-        /// and must NOT apply `input_clears`. `#[serde(default)]` so an older hook
-        /// build that predates this field round-trips as `false` — today's (pre-fix)
-        /// behavior — never silently softening a genuine submit from a client that
-        /// hasn't been rebuilt yet. See `dontspeak::hook_speak::is_synthetic_continuation`
-        /// for the classifier that sets this on the wire.
+        /// and must NOT apply `input_clears`. See
+        /// `dontspeak::hook_speak::is_synthetic_continuation` for the classifier that sets
+        /// this on the wire.
+        ///
+        /// `#[serde(default)]` is a WIRE-COMPACTNESS affordance, nothing more: the hook omits
+        /// the key when it's `false` (the common case), keeping the line short, and an omitted
+        /// key decodes as `false` — the conservative default, since a synthetic ping must never
+        /// be *assumed*. It is NOT a backward-compat shim for an old hook build: since `source`
+        /// became required, such a build's line is rejected for the missing `source` before
+        /// `synthetic` is ever considered, so this default can never fire for a stale client.
         #[serde(default)]
         synthetic: bool,
+        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED.
+        source: ClientSource,
     },
     /// Speak `text` as a Reply on the engine's TTS queue (survives a record-barge when
     /// the resume policy is set). Used by the MCP `speak` tool for explicit, model-driven
@@ -70,6 +114,9 @@ pub enum Request {
         /// window, pool voice) resolves correctly.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED. For the
+        /// MCP `speak` tool this is the `initialize` handshake's mapped `clientInfo.name`.
+        source: ClientSource,
     },
     /// Enqueue `text` as mid-turn NARRATION on the engine's TTS queue (dropped
     /// first on a record-barge / skip-ahead). The engine splits it into
@@ -79,6 +126,10 @@ pub enum Request {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED — it
+        /// rides the wire even though the engine does not LOG this variant (it fires per
+        /// blockquote and would spam the activity log).
+        source: ClientSource,
     },
     /// Barge-in: stop in-flight speech. `session` scopes it to ONE window (Claude
     /// session): only that session's queued items are dropped, and the playing item
@@ -89,6 +140,8 @@ pub enum Request {
     StopSpeech {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED.
+        source: ClientSource,
     },
     /// A window/terminal closed for good (Claude Code `SessionEnd`). Like a per-window
     /// [`StopSpeech`](Request::StopSpeech) (drop this session's queued + in-flight speech),
@@ -99,6 +152,8 @@ pub enum Request {
     SessionEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED.
+        source: ClientSource,
     },
     /// Start a live Parakeet "test recognition" session. The engine streams
     /// [`Response::Listening`], ending with [`Response::Transcript`] (terminal)
@@ -155,7 +210,11 @@ pub enum Request {
     /// permission prompt / idle). The engine resolves the configured-or-introspected sound
     /// and plays it on the warm helper's audio output, honoring the `earcon_enabled` config
     /// and global mute. Unknown/disabled ⇒ silent no-op. → [`Response::Done`].
-    Earcon { event: String },
+    Earcon {
+        event: String,
+        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED.
+        source: ClientSource,
+    },
     /// Verify (and, if needed, REQUEST) authorization for the System STT engine
     /// (macOS on-device `SFSpeechRecognizer`). The engine prompts on first use — so the
     /// TCC prompt is attributed to DontSpeak.app — then re-checks on-device capability.
@@ -273,22 +332,40 @@ mod tests {
                 voice: Some("af_sarah".into()),
                 rate: Some(1.5),
                 session: Some("sess-1".into()),
+                source: ClientSource::ClaudeCode,
             },
             Request::SpeakNarration {
                 text: "working on it".into(),
                 session: None,
+                source: ClientSource::QwenCode,
             },
-            Request::StopSpeech { session: None },
+            Request::StopSpeech {
+                session: None,
+                source: ClientSource::Unknown,
+            },
             Request::StopSpeech {
                 session: Some("sess-1".into()),
+                source: ClientSource::ClaudeCode,
             },
             Request::MarkActive {
                 session: Some("sess-1".into()),
                 synthetic: false,
+                source: ClientSource::Codex,
             },
             Request::MarkActive {
                 session: None,
                 synthetic: true,
+                source: ClientSource::ClaudeCode,
+            },
+            // The two client-originated variants the case list never covered before; all seven
+            // that gained a required `source` are now here.
+            Request::GreetSession {
+                session: Some("sess-1".into()),
+                source: ClientSource::Grok,
+            },
+            Request::SessionEnd {
+                session: Some("sess-1".into()),
+                source: ClientSource::QwenCode,
             },
             Request::TestRecognitionStart,
             Request::ModelStatus,
@@ -298,6 +375,7 @@ mod tests {
             Request::AuthorizeSystemStt,
             Request::Earcon {
                 event: "reply_done".into(),
+                source: ClientSource::Grok,
             },
             Request::Shutdown,
         ];
@@ -346,20 +424,94 @@ mod tests {
         assert!(!Response::Partial { text: "x".into() }.is_terminal());
     }
 
-    /// Backward-compat regression guard (issue #11): an older hook build's wire line
-    /// predates the `synthetic` field entirely. `#[serde(default)]` must decode the
-    /// absent key as `false` — today's (pre-fix) behavior — never silently softening
-    /// a genuine submit from a client that hasn't been rebuilt yet.
+    /// Conservative-default guard (issue #11): the hook OMITS `synthetic` when it's false (the
+    /// common case, keeping the line short), so an absent key must decode as `false` — a
+    /// synthetic ping is never *assumed*. This is about wire compactness, NOT about an old hook
+    /// build: since `source` became required, a stale hook's line is rejected for the missing
+    /// `source` long before `synthetic` is considered (see
+    /// `request_without_source_is_a_hard_decode_error`), which is why the line below carries one.
     #[test]
     fn mark_active_synthetic_defaults_to_false_when_absent_on_the_wire() {
-        let old_client_line = r#"{"cmd":"mark_active","session":"sess-1"}"#;
-        let req: Request = serde_json::from_str(old_client_line).unwrap();
+        let line = r#"{"cmd":"mark_active","session":"sess-1","source":"claude_code"}"#;
+        let req: Request = serde_json::from_str(line).unwrap();
         assert!(matches!(
             req,
             Request::MarkActive {
                 session: Some(ref s),
                 synthetic: false,
+                source: ClientSource::ClaudeCode,
             } if s == "sess-1"
+        ));
+    }
+
+    /// GUARD AGAINST A `#[serde(default)]` REGRESSION. `source` is REQUIRED on every
+    /// client-originated request: a line that omits it must be a HARD DECODE ERROR, not a
+    /// silent fallback to `Unknown`/`ClaudeCode` — the engine rejects the request outright
+    /// rather than mis-attributing it. If someone adds `#[serde(default)]` to `source` to make
+    /// some other test go green, THIS test is what fails and tells them not to.
+    ///
+    /// What that rejection is (and is NOT) visible as, since the whole "the three pieces
+    /// deploy together" story leans on it: the engine replies `bad request: missing field
+    /// `source`` on the socket AND writes a WARN to the activity log naming the rejected `cmd`
+    /// (`ds_ipc::serve`'s `on_bad_request` sink, wired in `dontspeakd::ipc`). It is NOT visible
+    /// at the terminal: every hook call site discards the reply and exits 0, so a stale CLI
+    /// against a rebuilt engine drops the voice loop with nothing on screen — the activity-log
+    /// WARN is the only place it surfaces. Deploy the CLI and the engine together
+    /// (docs/BUILD-DEPLOY.md).
+    ///
+    /// Note the asymmetry, and it is deliberate: an unrecognised TOKEN fails OPEN to `Unknown`
+    /// (forward robustness — see `unknown_client_token_decodes_to_unknown`), but an ABSENT
+    /// FIELD fails CLOSED.
+    #[test]
+    fn request_without_source_is_a_hard_decode_error() {
+        // Every one of the seven client-originated variants, each with a valid line for its
+        // OTHER fields and `source` omitted.
+        let cases = [
+            r#"{"cmd":"greet_session"}"#,
+            r#"{"cmd":"mark_active","session":"sess-1"}"#,
+            r#"{"cmd":"session_end","session":"sess-1"}"#,
+            r#"{"cmd":"stop_speech"}"#,
+            r#"{"cmd":"speak","text":"hi"}"#,
+            r#"{"cmd":"speak_narration","text":"hi"}"#,
+            r#"{"cmd":"earcon","event":"reply_done"}"#,
+        ];
+        for line in cases {
+            let err = serde_json::from_str::<Request>(line)
+                .expect_err("a client-originated request with no `source` must NOT decode");
+            assert!(
+                err.to_string().contains("source"),
+                "the error must name the missing field for {line}, got: {err}"
+            );
+        }
+    }
+
+    /// FORWARD-SKEW robustness (NOT backward compat): a client we have not wired YET sends a
+    /// `source` token this build doesn't know. It must decode to `ClientSource::Unknown` rather
+    /// than hard-erroring the whole line — the same idiom as `Response::Unknown`'s
+    /// `#[serde(other)]`. Read this together with
+    /// `request_without_source_is_a_hard_decode_error`: an unrecognised TOKEN fails open, an
+    /// ABSENT FIELD does not.
+    #[test]
+    fn unknown_client_token_decodes_to_unknown() {
+        let req: Request = serde_json::from_str(r#"{"cmd":"greet_session","source":"gemini_cli"}"#)
+            .expect("an unrecognised client token must decode to Unknown, not error out");
+        assert!(matches!(
+            req,
+            Request::GreetSession {
+                source: ClientSource::Unknown,
+                ..
+            }
+        ));
+        // …and a KNOWN token still lands on its client (the positive half of the same decode).
+        let req: Request =
+            serde_json::from_str(r#"{"cmd":"earcon","event":"reply_done","source":"codex"}"#)
+                .unwrap();
+        assert!(matches!(
+            req,
+            Request::Earcon {
+                source: ClientSource::Codex,
+                ..
+            }
         ));
     }
 

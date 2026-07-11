@@ -40,6 +40,7 @@
 //! uses (`command_is_ours` there), NOT a substring match on the rendered command string.
 
 use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
+use ds_client::ClientSource;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item as TomlItem, Table as TomlTable, value};
 
 /// Render one Codex hook command. Codex's command-hook schema is `command` /
@@ -53,11 +54,15 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, Item as TomlItem, Table as To
 /// `command_windows.unwrap_or(command)` — so a second, non-host form would be dead weight
 /// carrying a path that doesn't exist on the other OS anyway. This matches what the Claude
 /// Code / Qwen JSON writers already do.
-fn codex_command(bin: &str, verb: &str) -> String {
+///
+/// `client` is stamped on as a trailing `--client <token>` — the same uniform tail every other
+/// hook mechanism appends (see [`super::hooks::HookSpec::client`]), so the binary knows who
+/// invoked it. Quote-free by construction: the token is snake_case with no spaces.
+fn codex_command(bin: &str, verb: &str, client: ClientSource) -> String {
     inline_command(
         host_inline_flavor(),
         bin,
-        &[verb],
+        &[verb, "--client", client.as_str()],
         ShellOverride::Unsupported,
     )
     .0
@@ -323,8 +328,14 @@ fn group_to_inline(group: &TomlTable) -> toml_edit::Value {
 /// and REPLACE-OURS (not keep-if-present, see `append_to_event`): a re-wire after the
 /// resolved `dontspeak` path changes — or after the per-event verb set changes — updates
 /// the existing group instead of leaving a stale, dead one in place. `bin` is the absolute
-/// path to the `dontspeak` binary; each command Codex runs is `"<bin>" <verb>`.
-pub fn merge_codex_hooks(existing: &str, bin: &str) -> Result<String, CodexMergeError> {
+/// path to the `dontspeak` binary; each command Codex runs is `"<bin>" <verb> --client <client>`.
+/// `client` is the [`ClientSource`] whose config this is (always `Codex` today — passed in
+/// rather than hardcoded, so this shaper stays client-agnostic like every other one).
+pub fn merge_codex_hooks(
+    existing: &str,
+    bin: &str,
+    client: ClientSource,
+) -> Result<String, CodexMergeError> {
     let mut doc: DocumentMut = if existing.trim().is_empty() {
         DocumentMut::new()
     } else {
@@ -335,7 +346,7 @@ pub fn merge_codex_hooks(existing: &str, bin: &str) -> Result<String, CodexMerge
         for (event, verbs) in CODEX_HOOKS {
             let commands: Vec<(String, i64)> = verbs
                 .iter()
-                .map(|(verb, timeout)| (codex_command(bin, verb), *timeout))
+                .map(|(verb, timeout)| (codex_command(bin, verb, client), *timeout))
                 .collect();
             let cmd_strings: Vec<String> = commands.iter().map(|(c, _)| c.clone()).collect();
             append_to_event(htbl, event, codex_our_group(&commands), &cmd_strings)?;
@@ -390,7 +401,14 @@ mod tests {
     const BIN: &str = "/home/u/.local/bin/dontspeak";
 
     fn merged(existing: &str) -> String {
-        merge_codex_hooks(existing, BIN).expect("merge ok")
+        merge_codex_hooks(existing, BIN, ClientSource::Codex).expect("merge ok")
+    }
+
+    /// The command string Codex should carry for `verb` on THIS host — including the uniform
+    /// `--client codex` tail every wired verb now carries. (The dialect itself is pinned
+    /// per-flavor by `wire::cmdline`'s tests; these pin Codex's structure.)
+    fn cmd(verb: &str) -> String {
+        codex_command(BIN, verb, ClientSource::Codex)
     }
 
     /// EVERY inner command string wired on `event` in a parsed doc, in order — asserting
@@ -435,13 +453,13 @@ mod tests {
         // re-discovery `notify` plus the narration-spec `provide`.
         assert_eq!(
             event_command(&doc, "SessionStart"),
-            codex_command(BIN, "notify --greet-only")
+            cmd("notify --greet-only")
         );
         assert_eq!(
             event_commands(&doc, "UserPromptSubmit"),
-            vec![codex_command(BIN, "notify"), codex_command(BIN, "provide")]
+            vec![cmd("notify"), cmd("provide")]
         );
-        assert_eq!(event_command(&doc, "Stop"), codex_command(BIN, "notify"));
+        assert_eq!(event_command(&doc, "Stop"), cmd("notify"));
     }
 
     #[test]
@@ -461,13 +479,13 @@ mod tests {
         let doc: DocumentMut = twice.parse().unwrap();
         assert_eq!(
             event_command(&doc, "SessionStart"),
-            codex_command(BIN, "notify --greet-only")
+            cmd("notify --greet-only")
         );
         assert_eq!(
             event_commands(&doc, "UserPromptSubmit"),
-            vec![codex_command(BIN, "notify"), codex_command(BIN, "provide")]
+            vec![cmd("notify"), cmd("provide")]
         );
-        assert_eq!(event_command(&doc, "Stop"), codex_command(BIN, "notify"));
+        assert_eq!(event_command(&doc, "Stop"), cmd("notify"));
     }
 
     #[test]
@@ -494,7 +512,7 @@ mod tests {
         let doc: DocumentMut = merged(&legacy).parse().expect("merge round-trips");
         assert_eq!(
             event_commands(&doc, "Stop"),
-            vec![codex_command(BIN, "notify")],
+            vec![cmd("notify")],
             "the legacy quoted entry is healed to this host's dialect, not duplicated"
         );
     }
@@ -510,7 +528,7 @@ mod tests {
         // which pins exactly one, doesn't apply.)
         let doc: DocumentMut = out.parse().unwrap();
         assert!(
-            stop_has_command(&doc, &codex_command(BIN, "notify")),
+            stop_has_command(&doc, &cmd("notify")),
             "ours added alongside"
         );
     }
@@ -553,7 +571,7 @@ mod tests {
             "user's look-alike group + ours, not merged/skipped into one"
         );
         assert!(
-            stop_has_command(&doc, &codex_command(BIN, "notify")),
+            stop_has_command(&doc, &cmd("notify")),
             "our real hook IS wired alongside — not skipped as already-present"
         );
 
@@ -564,10 +582,7 @@ mod tests {
             stripped.contains("/home/u/bin/my-dontspeak-checker"),
             "user's look-alike hook survives strip"
         );
-        assert!(
-            !stripped.contains(&codex_command(BIN, "notify")),
-            "ours removed"
-        );
+        assert!(!stripped.contains(&cmd("notify")), "ours removed");
     }
 
     #[test]
@@ -578,7 +593,7 @@ mod tests {
         // upgrade) produced byte-identical output, leaving every hook pointed at a dead path.
         let first = merged("");
         let new_bin = "/opt/dontspeak/bin/dontspeak";
-        let second = merge_codex_hooks(&first, new_bin).expect("merge ok");
+        let second = merge_codex_hooks(&first, new_bin, ClientSource::Codex).expect("merge ok");
         assert!(
             !second.contains(BIN),
             "stale bin path healed away, not left stale"
@@ -605,16 +620,18 @@ mod tests {
         // a plain `notify` at SessionStart would seed the streaming witness and suppress ALL
         // Stop narration — the Qwen bug. So Codex's SessionStart must carry `--greet-only`,
         // while Stop must stay a flag-free plain `notify` (it's Codex's only narration path).
+        // Every command now ENDS with the uniform `--client codex` tail, so these assert on
+        // the greet-only flag's presence/absence rather than on the string's tail.
         let doc: DocumentMut = merged("").parse().unwrap();
         let ss = event_command(&doc, "SessionStart");
         assert!(
-            ss.ends_with(" notify --greet-only"),
+            ss.ends_with(" notify --greet-only --client codex"),
             "SessionStart is greet-only, got {ss}"
         );
         let stop = event_command(&doc, "Stop");
         assert!(
-            stop.ends_with(" notify") && !stop.contains("--greet-only"),
-            "Stop is plain notify with NO flag, got {stop}"
+            stop.ends_with(" notify --client codex") && !stop.contains("--greet-only"),
+            "Stop is plain notify with NO greet-only flag, got {stop}"
         );
     }
 
@@ -635,14 +652,8 @@ mod tests {
             .unwrap();
         let hooks: Vec<_> = inner.iter().collect();
         assert_eq!(hooks.len(), 2, "notify + provide in the ONE group");
-        assert_eq!(
-            hooks[0]["command"].as_str().unwrap(),
-            codex_command(BIN, "notify")
-        );
-        assert_eq!(
-            hooks[1]["command"].as_str().unwrap(),
-            codex_command(BIN, "provide")
-        );
+        assert_eq!(hooks[0]["command"].as_str().unwrap(), cmd("notify"));
+        assert_eq!(hooks[1]["command"].as_str().unwrap(), cmd("provide"));
         for h in &hooks {
             assert_eq!(h["type"].as_str(), Some("command"));
             assert_eq!(h["timeout"].as_integer(), Some(5));
@@ -667,8 +678,31 @@ mod tests {
         let doc: DocumentMut = out.parse().unwrap();
         assert_eq!(
             event_commands(&doc, "UserPromptSubmit"),
-            vec![codex_command(BIN, "notify"), codex_command(BIN, "provide")],
+            vec![cmd("notify"), cmd("provide")],
             "stale one-verb group healed to the two-verb shape, not duplicated"
+        );
+    }
+
+    #[test]
+    fn rewire_heals_a_group_wired_without_the_client_token() {
+        // SELF-HEALING (not backward compat): a config wired by the build immediately before
+        // the `--client` token existed holds client-less commands. `codex_group_matches` is an
+        // exact-command-list comparison, so that group correctly reads "differs" and is
+        // REPLACED — one group, now carrying the token — rather than duplicated beside a fresh
+        // one (which would greet twice and narrate twice). The engine re-wires every client at
+        // boot, so this converges without the user doing anything.
+        let old = format!(
+            "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"\\\"{BIN}\\\" notify\"\ntimeout = 1800\n"
+        );
+        let doc: DocumentMut = merged(&old).parse().expect("merge round-trips");
+        assert_eq!(
+            event_commands(&doc, "Stop"),
+            vec![cmd("notify")],
+            "the client-less group is healed to the token-carrying command, not duplicated"
+        );
+        assert!(
+            cmd("notify").ends_with(" notify --client codex"),
+            "…and the healed command really carries the token"
         );
     }
 
@@ -741,7 +775,7 @@ mod tests {
     fn unmergeable_scalar_hooks_errors() {
         let bad = "hooks = \"oops\"\n";
         assert!(matches!(
-            merge_codex_hooks(bad, BIN),
+            merge_codex_hooks(bad, BIN, ClientSource::Codex),
             Err(CodexMergeError::UnmergeableShape(_))
         ));
     }
@@ -750,7 +784,7 @@ mod tests {
     fn parse_error_surfaces() {
         let bad = "this is = = not toml\n";
         assert!(matches!(
-            merge_codex_hooks(bad, BIN),
+            merge_codex_hooks(bad, BIN, ClientSource::Codex),
             Err(CodexMergeError::Parse(_))
         ));
     }

@@ -5,6 +5,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+use ds_config::{ClientSource, client_from_mcp_name};
 use serde_json::{Value, json};
 
 use crate::engine_launch::ensure_engine;
@@ -52,6 +53,12 @@ fn serve_on<R: BufRead, W: Write>(
     on_no_requests: impl FnOnce(),
 ) {
     let mut handled_any = false;
+    // WHO is calling us. stdio MCP is ONE server process per client, so a single value for the
+    // whole loop is exactly right: the `initialize` handshake sets it (from `clientInfo.name`),
+    // and every tool call afterwards stamps it onto the engine requests it sends. `Unknown`
+    // until the handshake lands — and it STAYS `Unknown` for a client whose name we don't
+    // recognise, which is the honest answer, not a bug.
+    let mut client = ClientSource::Unknown;
     for line in reader.lines() {
         let Ok(line) = line else { break };
         let line = line.trim();
@@ -63,7 +70,7 @@ fn serve_on<R: BufRead, W: Write>(
             continue;
         };
         handled_any = true;
-        if let Some(resp) = dispatch(&msg, sock) {
+        if let Some(resp) = dispatch(&msg, sock, &mut client) {
             let mut s = resp.to_string();
             s.push('\n');
             if out.write_all(s.as_bytes()).is_err() || out.flush().is_err() {
@@ -78,17 +85,41 @@ fn serve_on<R: BufRead, W: Write>(
 
 /// Route one JSON-RPC message to its handler, returning the response envelope (or
 /// `None` for a notification, which gets no reply). The stdio loop calls this with
-/// the `sock` to the engine.
-pub(crate) fn dispatch(msg: &Value, sock: Option<&PathBuf>) -> Option<Value> {
+/// the `sock` to the engine and the process-wide `client` (see [`serve`]): the `initialize`
+/// arm SETS it from the handshake's `clientInfo`, and `tools/call` READS it to attribute every
+/// engine request the tool sends.
+pub(crate) fn dispatch(
+    msg: &Value,
+    sock: Option<&PathBuf>,
+    client: &mut ClientSource,
+) -> Option<Value> {
     // A message with no "id" is a notification — never respond.
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     match method {
-        "initialize" => Some(ok(id, initialize(msg))),
+        "initialize" => {
+            // Learn WHO is calling, and log the RAW `clientInfo.name` we saw. That capture line
+            // is the mechanism that turns an UNVERIFIED `mcp_client_names` alias (Qwen, Grok)
+            // into a verified one from the field — a one-line registry edit.
+            //
+            // Deliberately on the `log` FACADE (see `log`), not `ds_log::log_from`: the facade
+            // is a no-op under `cargo test` (no sink is installed without `ds_log::init()`), so
+            // the pure `initialize` tests below can never create or append the REAL per-OS
+            // unified log on a dev machine / CI runner. In production the sink is installed and
+            // the line lands with `source = mcp`, ending in the same trailing `client=<token>`
+            // k=v the engine's lines carry.
+            let (c, raw) = client_from_initialize(msg);
+            *client = c;
+            log(&format!(
+                "initialize clientInfo.name={raw:?} client={}",
+                c.as_str()
+            ));
+            Some(ok(id, initialize(msg)))
+        }
         "notifications/initialized" => None, // notification: no reply
         "ping" => Some(ok(id, json!({}))),
         "tools/list" => Some(ok(id, json!({ "tools": tools() }))),
-        "tools/call" => Some(tools::tools_call(id, msg, sock)),
+        "tools/call" => Some(tools::tools_call(id, msg, sock, *client)),
         // Unknown method: respond with an error only if it had an id.
         _ => id
             .as_ref()
@@ -114,6 +145,25 @@ pub(crate) fn tool_result(text: String, is_error: bool) -> Value {
 }
 
 // ── MCP methods ──────────────────────────────────────────────────────────────
+
+/// WHO is calling, from the `initialize` handshake's `params.clientInfo.name` (the MCP
+/// lifecycle spec's standard, already-existing mechanism — we invent nothing and add no flag to
+/// the MCP surface). Returns `(mapped client, the RAW name verbatim)`; the raw half is what the
+/// capture line logs, so an unrecognised client can be identified and its alias added to the
+/// registry. An absent/empty/foreign name maps to [`ClientSource::Unknown`].
+///
+/// PURE (no IO), and a SIBLING of [`initialize`] rather than a change to it — `initialize` stays
+/// exactly as it was, tests and all.
+fn client_from_initialize(msg: &Value) -> (ClientSource, String) {
+    let raw = msg
+        .get("params")
+        .and_then(|p| p.get("clientInfo"))
+        .and_then(|c| c.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+    (client_from_mcp_name(&raw), raw)
+}
 
 fn initialize(msg: &Value) -> Value {
     // Echo the client's protocolVersion if we support it; else advertise ours.
@@ -209,7 +259,8 @@ mod tests {
             "method": "initialize",
             "params": { "protocolVersion": PROTOCOL_VERSION },
         });
-        let resp = dispatch(&msg, None).expect("initialize gets a reply");
+        let resp =
+            dispatch(&msg, None, &mut ClientSource::Unknown).expect("initialize gets a reply");
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["protocolVersion"], PROTOCOL_VERSION);
@@ -221,13 +272,13 @@ mod tests {
         // Per spec this is a notification and gets no reply — even if the (malformed)
         // request happens to carry an "id".
         let msg = json!({ "jsonrpc": "2.0", "id": 7, "method": "notifications/initialized" });
-        assert!(dispatch(&msg, None).is_none());
+        assert!(dispatch(&msg, None, &mut ClientSource::Unknown).is_none());
     }
 
     #[test]
     fn dispatch_ping_replies_with_empty_result() {
         let msg = json!({ "jsonrpc": "2.0", "id": "abc", "method": "ping" });
-        let resp = dispatch(&msg, None).expect("ping gets a reply");
+        let resp = dispatch(&msg, None, &mut ClientSource::Unknown).expect("ping gets a reply");
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], "abc");
         assert_eq!(resp["result"], json!({}));
@@ -236,7 +287,8 @@ mod tests {
     #[test]
     fn dispatch_tools_list_matches_catalog() {
         let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
-        let resp = dispatch(&msg, None).expect("tools/list gets a reply");
+        let resp =
+            dispatch(&msg, None, &mut ClientSource::Unknown).expect("tools/list gets a reply");
         let tools = resp["result"]["tools"]
             .as_array()
             .expect("result.tools is an array");
@@ -258,7 +310,8 @@ mod tests {
             "method": "tools/call",
             "params": { "name": "definitely_not_a_real_tool", "arguments": {} },
         });
-        let resp = dispatch(&msg, None).expect("tools/call gets a reply");
+        let resp =
+            dispatch(&msg, None, &mut ClientSource::Unknown).expect("tools/call gets a reply");
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["isError"], true);
@@ -271,7 +324,8 @@ mod tests {
     #[test]
     fn dispatch_unknown_method_with_id_is_method_not_found_error() {
         let msg = json!({ "jsonrpc": "2.0", "id": 42, "method": "bogus/method" });
-        let resp = dispatch(&msg, None).expect("unknown method with an id gets a reply");
+        let resp = dispatch(&msg, None, &mut ClientSource::Unknown)
+            .expect("unknown method with an id gets a reply");
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], 42);
         assert_eq!(resp["error"]["code"], -32601);
@@ -287,7 +341,7 @@ mod tests {
     fn dispatch_unknown_method_without_id_returns_none() {
         // Mirrors a notification: no id means no reply, even for an unrecognized method.
         let msg = json!({ "jsonrpc": "2.0", "method": "bogus/method" });
-        assert!(dispatch(&msg, None).is_none());
+        assert!(dispatch(&msg, None, &mut ClientSource::Unknown).is_none());
     }
 
     // ── initialize ───────────────────────────────────────────────────────────
@@ -317,6 +371,77 @@ mod tests {
         let msg_no_params = json!({});
         let result = initialize(&msg_no_params);
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    // ── client identity (the MCP half of ClientSource) ────────────────────────
+
+    #[test]
+    fn client_from_initialize_maps_the_handshake_name_and_returns_it_raw() {
+        // PURE — no socket, no disk. The raw name comes back VERBATIM (it's what the capture
+        // line logs, and what turns an UNVERIFIED registry alias into a verified one).
+        let msg =
+            json!({ "params": { "clientInfo": { "name": "claude-code", "version": "2.1.0" } } });
+        assert_eq!(
+            client_from_initialize(&msg),
+            (ClientSource::ClaudeCode, "claude-code".to_string())
+        );
+
+        let msg = json!({ "params": { "clientInfo": { "name": "codex-mcp-client" } } });
+        assert_eq!(
+            client_from_initialize(&msg),
+            (ClientSource::Codex, "codex-mcp-client".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_or_absent_clientinfo_is_unknown_but_still_reports_the_raw_name() {
+        // A foreign client we haven't wired: `Unknown` (the honest answer), with its raw name
+        // preserved so the capture line names it and we can add an alias.
+        let msg = json!({ "params": { "clientInfo": { "name": "gemini-cli" } } });
+        assert_eq!(
+            client_from_initialize(&msg),
+            (ClientSource::Unknown, "gemini-cli".to_string())
+        );
+        // No clientInfo / no params / a non-string name: `Unknown`, empty raw — never a panic.
+        for msg in [
+            json!({ "params": {} }),
+            json!({}),
+            json!({ "params": { "clientInfo": {} } }),
+            json!({ "params": { "clientInfo": { "name": 42 } } }),
+        ] {
+            assert_eq!(
+                client_from_initialize(&msg),
+                (ClientSource::Unknown, String::new()),
+                "{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_initialize_sets_the_process_client() {
+        // The handshake is what teaches the stdio loop who it's serving; every later tool call
+        // stamps that client onto its engine requests.
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "clientInfo": { "name": "claude-code", "version": "2.1.0" },
+            },
+        });
+        let mut client = ClientSource::Unknown;
+        dispatch(&msg, None, &mut client).expect("initialize gets a reply");
+        assert_eq!(client, ClientSource::ClaudeCode);
+
+        // …and a client we don't recognise leaves it `Unknown` rather than guessing.
+        let msg = json!({
+            "jsonrpc": "2.0", "id": 2, "method": "initialize",
+            "params": { "clientInfo": { "name": "some-other-agent" } },
+        });
+        let mut client = ClientSource::ClaudeCode;
+        dispatch(&msg, None, &mut client).expect("initialize gets a reply");
+        assert_eq!(client, ClientSource::Unknown);
     }
 
     // ── envelope helpers ─────────────────────────────────────────────────────

@@ -21,7 +21,7 @@
 //! pipeline — the final reply is just another streamed message. Non-streaming clients (Codex)
 //! get their final reply voiced from the Stop handler in `hook_core`.
 
-use ds_config::Paths;
+use ds_config::{ClientSource, Paths};
 use serde::Deserialize;
 
 /// Which best-effort engine ping a notify event maps to.
@@ -78,25 +78,29 @@ fn prompt_from_payload(payload: &str) -> String {
 }
 
 /// Build the `MarkActive` request for a `UserPromptSubmit` `payload`: the ambient
-/// session id plus the synthetic classification of the prompt body. Split out from
-/// [`engine_ping`] so payload → wire-request shape is unit-testable without a socket.
-fn mark_active_request(payload: &str) -> ds_ipc::Request {
+/// session id, the synthetic classification of the prompt body, and the CLIENT that invoked
+/// the hook. Split out from [`engine_ping`] so payload → wire-request shape is unit-testable
+/// without a socket.
+fn mark_active_request(payload: &str, client: ClientSource) -> ds_ipc::Request {
     ds_ipc::Request::MarkActive {
         session: crate::hook_core::session_id_from_payload(payload),
         synthetic: is_synthetic_continuation(&prompt_from_payload(payload)),
+        source: client,
     }
 }
 
 /// Fire ONE best-effort ping to the warm engine from a hook `payload` (the Claude Code hook
 /// JSON, already read from stdin by the `notify` dispatch — NOT re-read here). Pulls the
-/// ambient `session_id` so the engine scopes the greet / active-mark to the right session.
-/// Engine down ⇒ no-op; never blocks or fails the hook.
-pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str) {
+/// ambient `session_id` so the engine scopes the greet / active-mark to the right session, and
+/// stamps `client` (the `--client` token the wiring embedded) so the engine + its activity log
+/// know WHICH client is talking. Engine down ⇒ no-op; never blocks or fails the hook.
+pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str, client: ClientSource) {
     let req = match ping {
         Ping::Greet => ds_ipc::Request::GreetSession {
             session: crate::hook_core::session_id_from_payload(payload),
+            source: client,
         },
-        Ping::MarkActive => mark_active_request(payload),
+        Ping::MarkActive => mark_active_request(payload, client),
     };
     if let Ok(mut c) = ds_ipc::connect(&paths.engine_sock)
         && c.send(&req).is_ok()
@@ -108,11 +112,12 @@ pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str) {
 /// Ask the warm engine to play an audible earcon (`event` = `"reply_done"` / `"needs_input"`).
 /// Best-effort fire-and-forget: the engine self-gates on `earcon_enabled` + mute and resolves
 /// the sound, so this just forwards the event. Engine down ⇒ no-op; never blocks the hook.
-pub fn engine_earcon(paths: &Paths, event: &str) {
+pub fn engine_earcon(paths: &Paths, event: &str, client: ClientSource) {
     let _ = ds_ipc::request(
         &paths.engine_sock,
         &ds_ipc::Request::Earcon {
             event: event.to_string(),
+            source: client,
         },
     );
 }
@@ -140,9 +145,9 @@ fn wants_needs_input_earcon(payload: &str) -> bool {
 /// `Notification` notify: ring the needs-input earcon — but ONLY for the "waiting on you"
 /// notifications (a permission prompt or an idle prompt). Other types (auth success, MCP
 /// elicitation chatter) are ignored so the cue stays meaningful. `payload` is the hook JSON.
-pub fn notification_earcon(paths: &Paths, payload: &str) {
+pub fn notification_earcon(paths: &Paths, payload: &str, client: ClientSource) {
     if wants_needs_input_earcon(payload) {
-        engine_earcon(paths, "needs_input");
+        engine_earcon(paths, "needs_input", client);
     }
 }
 
@@ -199,15 +204,16 @@ mod tests {
     fn engine_ping_with_no_socket_returns_promptly() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        engine_ping(&paths, Ping::Greet, r#"{"session_id":"s1"}"#);
-        engine_ping(&paths, Ping::MarkActive, r#"{"session_id":"s1"}"#);
+        let c = ClientSource::ClaudeCode;
+        engine_ping(&paths, Ping::Greet, r#"{"session_id":"s1"}"#, c);
+        engine_ping(&paths, Ping::MarkActive, r#"{"session_id":"s1"}"#, c);
     }
 
     #[test]
     fn engine_earcon_with_no_socket_returns_promptly() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        engine_earcon(&paths, "needs_input");
+        engine_earcon(&paths, "needs_input", ClientSource::Grok);
     }
 
     #[test]
@@ -258,19 +264,33 @@ mod tests {
     fn mark_active_request_carries_synthetic_flag_from_payload_shape() {
         let synthetic_payload =
             r#"{"session_id":"s1","prompt":"<task-notification>\nfoo\n</task-notification>"}"#;
-        match mark_active_request(synthetic_payload) {
-            ds_ipc::Request::MarkActive { session, synthetic } => {
+        match mark_active_request(synthetic_payload, ClientSource::ClaudeCode) {
+            ds_ipc::Request::MarkActive {
+                session,
+                synthetic,
+                source,
+            } => {
                 assert_eq!(session, Some("s1".to_string()));
                 assert!(synthetic);
+                assert_eq!(source, ClientSource::ClaudeCode);
             }
             other => panic!("expected MarkActive, got {other:?}"),
         }
 
         let ordinary_payload = r#"{"session_id":"s2","prompt":"fix the bug in foo.rs"}"#;
-        match mark_active_request(ordinary_payload) {
-            ds_ipc::Request::MarkActive { session, synthetic } => {
+        match mark_active_request(ordinary_payload, ClientSource::Codex) {
+            ds_ipc::Request::MarkActive {
+                session,
+                synthetic,
+                source,
+            } => {
                 assert_eq!(session, Some("s2".to_string()));
                 assert!(!synthetic);
+                assert_eq!(
+                    source,
+                    ClientSource::Codex,
+                    "the request carries the CLIENT that invoked the hook, verbatim"
+                );
             }
             other => panic!("expected MarkActive, got {other:?}"),
         }
