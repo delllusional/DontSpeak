@@ -959,7 +959,7 @@ private func legacyJoin(_ committed: String, _ current: String) -> String {
 /// decrease) is what tells the two apart; `< 0.5` was chosen because the empirical reset
 /// cases measured ~0–5% shared prefix vs. ~70%+ for ordinary revisions — comfortably clear
 /// of both.
-private func legacySegmentDidReset(previous: String, new: String, gapSeconds: TimeInterval?) -> Bool {
+func legacySegmentDidReset(previous: String, new: String, gapSeconds: TimeInterval?) -> Bool {
     guard !previous.isEmpty else { return false }
     let commonPrefixLen = zip(previous, new).prefix { $0 == $1 }.count
     let ratio = Double(commonPrefixLen) / Double(previous.count)

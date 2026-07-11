@@ -3529,8 +3529,16 @@ mod tests {
         );
 
         // Provider preference only — same engine selection, so this isolates
-        // `change.stt_changed` as the one thing that differs from the first reload.
-        cfg.provider = vec![ds_config::Provider::OrtCuda];
+        // `change.stt_changed` as the one thing that differs from the first reload. `OrtCuda`
+        // is a no-op ladder switch on macOS (`Provider::stt_usable_on` gates it to
+        // windows/linux, so it silently re-resolves to `OrtCpu` there — caught on real macOS
+        // hardware, see #31); `Ane` is the macOS-genuine transition instead (gated to
+        // macOS+aarch64, which is this crate's macOS CI/dev floor).
+        #[cfg(target_os = "macos")]
+        let (new_provider, want_token) = (ds_config::Provider::Ane, "ane");
+        #[cfg(not(target_os = "macos"))]
+        let (new_provider, want_token) = (ds_config::Provider::OrtCuda, "cuda");
+        cfg.provider = vec![new_provider];
         assert_ne!(
             cfg.resolved_stt_provider(),
             d.cfg.resolved_stt_provider(),
@@ -3543,7 +3551,7 @@ mod tests {
         );
         assert_eq!(
             d.listener.as_ref().unwrap().provider(),
-            "cuda",
+            want_token,
             "a live provider switch while Always-listening is running must rebuild the \
              listener, not keep serving the stale provider"
         );
