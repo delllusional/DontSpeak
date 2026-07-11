@@ -49,9 +49,11 @@ pub enum WireMechanism {
     /// `merge_codex_hooks`/`strip_codex_hooks`.
     ClaudeTomlHooks,
     /// DontSpeak's voice hooks written to a DEDICATED JSON file we own outright (Grok's
-    /// `~/.grok/hooks/dontspeak.json`). The Claude hooks-contract shape, but with an inline
-    /// quoted-path command (`"<bin>" <verb>`, no `args` array), seconds timeouts, no `async`
-    /// key, and camelCase (`hookEventName`) payloads handled by the runtime serde aliases.
+    /// `~/.grok/hooks/dontspeak.json`). The Claude hooks-contract shape, but with the verb
+    /// INLINED into a single `command` string (no `args` array) — rendered by the shared
+    /// `wire::cmdline`, so it is quoted on POSIX and QUOTE-FREE on Windows (an embedded `"`
+    /// cannot survive cmd.exe; see that module) — plus seconds timeouts, no `async` key, and
+    /// camelCase (`hookEventName`) payloads handled by the runtime serde aliases.
     /// Because the file is exclusively ours, there is nothing to merge: wire OVERWRITES it
     /// (a backup is taken first) and unwire DELETES it. Shaper: `grok_hooks_value`.
     GrokJsonHooks,

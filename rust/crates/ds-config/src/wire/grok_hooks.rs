@@ -12,8 +12,9 @@
 //!
 //! Two things differ from the Claude Code JSON wiring the [`hooks`](super::hooks) module
 //! emits:
-//!   * the command is INLINE-quoted — `command` is `"<bin>" <verb>` (a double-quoted absolute
-//!     path + verb), with NO `args` array;
+//!   * the verb is INLINED into `command` (a single shell string, NO `args` array), rendered
+//!     by the shared [`cmdline`](super::cmdline) — quoted on POSIX, but QUOTE-FREE on Windows,
+//!     where an embedded `"` cannot survive cmd.exe (see that module);
 //!   * every entry runs SYNCHRONOUSLY: there is NO `async` key and NO `matcher` key, and the
 //!     `timeout` is in SECONDS.
 //!
@@ -29,11 +30,13 @@
 //!   * `Stop` → `notify` — speak the final reply (end-of-turn narration).
 //!   * `Notification` → `notify` — the needs-input earcon.
 //!
-//! Rendered as (per event, one group holding that event's inner hooks):
+//! Rendered as (per event, one group holding that event's inner hooks) — POSIX `command`
+//! shown; on Windows it is the quote-free `C:/…/dontspeak.exe notify`:
 //!   { "hooks": { "Stop": [ { "hooks": [ { "type": "command",
 //!                                         "command": "\"…/dontspeak\" notify",
 //!                                         "timeout": 1800 } ] } ] } }
 
+use super::cmdline::{ShellOverride, host_inline_flavor, inline_command};
 use serde_json::{Map, Value, json};
 
 /// The `(event, [(verb, timeout_secs)])` hooks DontSpeak owns for Grok — ONE group per event,
@@ -53,17 +56,25 @@ const GROK_HOOKS: &[(&str, &[(&str, i64)])] = &[
 
 /// Render the dedicated Grok hooks file body — the WHOLE `dontspeak.json` (DontSpeak owns the
 /// file outright, so this is not merged into anything). `bin` is the absolute path to the
-/// `dontspeak` binary; each command Grok runs is the inline-quoted `"<bin>" <verb>`, with a
-/// seconds `timeout`, and NO `async`/`matcher`/`args` keys.
+/// `dontspeak` binary; each command is rendered by the SHARED [`super::cmdline::inline_command`]
+/// (with a seconds `timeout`, and no `async`/`matcher`/`args` keys) — the same string Codex
+/// gets, because Grok's hook entry likewise carries a bare command string with NO `shell`
+/// field to pin it to a quote-tolerant shell.
 pub fn grok_hooks_value(bin: &str) -> Value {
     let mut events = Map::new();
     for (event, verbs) in GROK_HOOKS {
         let inner: Vec<Value> = verbs
             .iter()
             .map(|(verb, timeout)| {
+                let (command, _shell) = inline_command(
+                    host_inline_flavor(),
+                    bin,
+                    &[verb],
+                    ShellOverride::Unsupported,
+                );
                 json!({
                     "type": "command",
-                    "command": format!("\"{bin}\" {verb}"),
+                    "command": command,
                     "timeout": timeout,
                 })
             })
@@ -104,6 +115,21 @@ mod tests {
             .collect()
     }
 
+    /// The command string Grok should carry for `verb` on THIS host. The DIALECT itself (the
+    /// quote-free Windows form, the quoted POSIX form, the 8.3 spaced-path fallback) is pinned
+    /// per-flavor by `wire::cmdline`'s own tests; these tests pin Grok's STRUCTURE — which
+    /// events, which verbs, which timeouts, one group each — without hardcoding a dialect that
+    /// would make them pass on Linux CI and fail on a Windows host.
+    fn grok_command(verb: &str) -> String {
+        inline_command(
+            host_inline_flavor(),
+            BIN,
+            &[verb],
+            ShellOverride::Unsupported,
+        )
+        .0
+    }
+
     #[test]
     fn value_round_trips_through_serde_json() {
         let v = grok_hooks_value(BIN);
@@ -135,28 +161,25 @@ mod tests {
         let v = grok_hooks_value(BIN);
         assert_eq!(
             event_entries(&v, "SessionStart"),
-            vec![(format!("\"{BIN}\" notify --greet-only"), 30)]
+            vec![(grok_command("notify --greet-only"), 30)]
         );
         assert_eq!(
             event_entries(&v, "SessionEnd"),
-            vec![(format!("\"{BIN}\" notify"), 30)]
+            vec![(grok_command("notify"), 30)]
         );
         // UserPromptSubmit is ONE group with TWO inner hooks: notify (mark-active) then provide.
         assert_eq!(
             event_entries(&v, "UserPromptSubmit"),
-            vec![
-                (format!("\"{BIN}\" notify"), 5),
-                (format!("\"{BIN}\" provide"), 5),
-            ]
+            vec![(grok_command("notify"), 5), (grok_command("provide"), 5),]
         );
         // Stop's 1800 s is the tell that timeouts are SECONDS (not ms).
         assert_eq!(
             event_entries(&v, "Stop"),
-            vec![(format!("\"{BIN}\" notify"), 1800)]
+            vec![(grok_command("notify"), 1800)]
         );
         assert_eq!(
             event_entries(&v, "Notification"),
-            vec![(format!("\"{BIN}\" notify"), 30)]
+            vec![(grok_command("notify"), 30)]
         );
     }
 

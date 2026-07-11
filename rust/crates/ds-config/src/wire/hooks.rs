@@ -10,6 +10,7 @@
 //! discipline so unrelated keys (the client's own hooks, permissions, model) are never
 //! clobbered.
 
+use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
 use super::registry::HookCommandStyle;
 use serde_json::{Map, Value, json};
 
@@ -44,31 +45,6 @@ pub struct HookSpec<'a> {
     pub command_style: HookCommandStyle,
 }
 
-/// Is this wired `command` string OURS — the single `dontspeak` binary, in ANY dialect we
-/// have ever written? Accepts the bare binary path (args-array style, and the pre-inline
-/// Qwen shape a re-wire self-heals) AND the inlined shell forms (`"<bin>" notify`,
-/// `C:/…/dontspeak.exe notify --greet-only`, `& "C:\…\dontspeak.exe" provide`). A manual,
-/// OS-separator-INDEPENDENT parse — `std::path::Path` won't split `\` on Linux, and Linux
-/// CI runs the Windows-flavor tests — so: trim → strip an optional leading `&` (the
-/// PowerShell call operator) → take the path token (a quoted span if it opens with `"`,
-/// else up to the first whitespace) → basename after the last `/` or `\` → stem (one final
-/// `.ext` stripped) → `== "dontspeak"`.
-fn command_is_ours(cmd: &str) -> bool {
-    let s = cmd.trim();
-    let s = s.strip_prefix('&').map(str::trim_start).unwrap_or(s);
-    let path = match s.strip_prefix('"') {
-        // Quoted span; an unterminated quote takes the rest (defensive — we never write one).
-        Some(rest) => rest.split('"').next().unwrap_or(rest),
-        None => s.split_whitespace().next().unwrap_or(""),
-    };
-    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    let stem = match base.rfind('.') {
-        Some(i) if i > 0 => &base[..i],
-        _ => base, // no extension, or a leading-dot name — the whole base is the stem
-    };
-    stem == "dontspeak"
-}
-
 /// A hook group is "ours" if any of its commands is our `dontspeak` binary — used for
 /// idempotent merge + clean removal.
 fn hook_group_is_ours(group: &Value) -> bool {
@@ -84,65 +60,13 @@ fn hook_group_is_ours(group: &Value) -> bool {
         })
 }
 
-/// The OS command-line dialect an [`HookCommandStyle::InlineShell`] command string is
-/// formatted for. A parameter (not `cfg!` inside the formatter) so BOTH forms are
-/// unit-tested on Linux CI; production selects via [`host_inline_flavor`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InlineFlavor {
-    /// Qwen's Unix hook shell is `bash -c`.
-    Unix,
-    /// Qwen's Windows hook shell is `%ComSpec%` (`cmd /d /s /c`) by default, Git Bash `-c`
-    /// under MSYS/MinGW, or `powershell -NoProfile -Command` if ComSpec is repointed —
-    /// plus a per-hook `"shell": "powershell"` override we set for spaced paths.
-    Windows,
-}
-
-/// The inline dialect for THIS host OS — production callers use this; tests drive
-/// [`inline_command`] with both flavors explicitly so Linux CI covers the Windows form too.
-fn host_inline_flavor() -> InlineFlavor {
-    if cfg!(windows) {
-        InlineFlavor::Windows
-    } else {
-        InlineFlavor::Unix
-    }
-}
-
-/// Inline the hook verbs into ONE shell command string — the [`HookCommandStyle::InlineShell`]
-/// dialect (Qwen Code, whose hook runner passes only `command` to a shell; there is no `args`
-/// field). Returns `(command, per-hook shell override)`. Every form below was verified
-/// empirically through Qwen's exact spawn chain (`spawn(shell, [...prefix, command],
-/// {shell:false})`, no `windowsVerbatimArguments`):
-///
-///   * Unix (`bash -c`): `"<bin>" <verbs>` — path always double-quoted. Fine for spaced
-///     paths; backslash/`$`-in-path edge cases don't occur in real install paths.
-///   * Windows, spaceless bin path (the normal `%LOCALAPPDATA%\Programs\DontSpeak` case):
-///     forward-slash-normalized, UNQUOTED, no shell override — runs under all three possible
-///     global shells (cmd `/d /s /c`, `powershell -NoProfile -Command`, Git Bash `-c`),
-///     keeping the common case shell-agnostic and free of PowerShell's startup tax on the
-///     synchronous per-prompt `provide`.
-///   * Windows, spaced bin path (e.g. a username with a space): `& "<bin>" <verbs>` PLUS
-///     `"shell": "powershell"`. The only deterministic option: no single string survives
-///     both cmd (which chokes on Node's `\"` re-escaping of embedded quotes) and Git Bash
-///     (which needs the quotes), and Qwen's `shell: "bash"` maps to a bare `bash` executable
-///     that isn't guaranteed on Windows.
-///
-/// Note: Qwen's `expandCommand` rewrites literal `$GEMINI_PROJECT_DIR`/`$CLAUDE_PROJECT_DIR`
-/// in the command string before spawning — our inlined commands contain neither, so that
-/// pass is a no-op.
-fn inline_command(
-    flavor: InlineFlavor,
-    bin: &str,
-    verbs: &[&str],
-) -> (String, Option<&'static str>) {
-    let verbs = verbs.join(" ");
-    match flavor {
-        InlineFlavor::Unix => (format!("\"{bin}\" {verbs}"), None),
-        InlineFlavor::Windows if bin.contains(char::is_whitespace) => {
-            (format!("& \"{bin}\" {verbs}"), Some("powershell"))
-        }
-        InlineFlavor::Windows => (format!("{} {verbs}", bin.replace('\\', "/")), None),
-    }
-}
+// The command-string dialect (`InlineFlavor`), the renderer (`inline_command`) and the
+// "is this entry ours?" parse (`command_is_ours`) all live in the shared `wire::cmdline`
+// module — Codex and Grok render the SAME string and must not drift from it.
+//
+// Qwen's `expandCommand` rewrites literal `$GEMINI_PROJECT_DIR`/`$CLAUDE_PROJECT_DIR` in the
+// command string before spawning; our inlined commands contain neither, so that pass is a
+// no-op.
 
 /// Build ONE hook command entry in the dialect `spec.command_style` selects:
 /// [`HookCommandStyle::ArgsArray`] (Claude Code) → `command` = bin, verbs in `args`,
@@ -156,7 +80,14 @@ fn hook_entry(spec: &HookSpec, verbs: &[&str], timeout_secs: u64, is_async: bool
             json!({ "type": "command", "command": spec.bin, "args": verbs })
         }
         HookCommandStyle::InlineShell => {
-            let (cmd, shell) = inline_command(host_inline_flavor(), spec.bin, verbs);
+            // Qwen's CommandHookConfig HAS a `shell` field, so a spaced bin path can be pinned
+            // to PowerShell rather than needing the 8.3 short name Codex/Grok fall back to.
+            let (cmd, shell) = inline_command(
+                host_inline_flavor(),
+                spec.bin,
+                verbs,
+                ShellOverride::Supported,
+            );
             let mut v = json!({ "type": "command", "command": cmd });
             if let Some(sh) = shell {
                 v["shell"] = json!(sh);
@@ -702,67 +633,11 @@ mod tests {
     // ── InlineShell (Qwen Code) — verbs inlined into the command string ─────────────
     //
     // Qwen's hook runner passes ONLY `command` to a shell; its CommandHookConfig has NO
-    // `args` field (silently dropped), and `timeout` is MILLISECONDS. These pin the whole
-    // dialect: no `args` key anywhere, inlined verbs, scaled timeouts, and the per-OS
-    // command forms — BOTH flavors driven on any OS so Linux CI covers the Windows form too.
-
-    #[test]
-    fn inline_command_unix_always_quotes_the_path() {
-        // bash -c: the path is double-quoted (spaced or not), verbs follow unquoted.
-        assert_eq!(
-            inline_command(InlineFlavor::Unix, "/bin/dontspeak", &["notify"]),
-            ("\"/bin/dontspeak\" notify".to_string(), None)
-        );
-        assert_eq!(
-            inline_command(InlineFlavor::Unix, "/opt/x y/dontspeak", &["provide"]),
-            ("\"/opt/x y/dontspeak\" provide".to_string(), None)
-        );
-        assert_eq!(
-            inline_command(
-                InlineFlavor::Unix,
-                "/bin/dontspeak",
-                &["notify", "--greet-only"]
-            ),
-            ("\"/bin/dontspeak\" notify --greet-only".to_string(), None)
-        );
-    }
-
-    #[test]
-    fn inline_command_windows_spaceless_path_is_forward_slashed_unquoted_shell_agnostic() {
-        // The normal %LOCALAPPDATA%\Programs\DontSpeak case: forward slashes, NO quotes, no
-        // shell override — the one form that runs under all three possible global shells
-        // (cmd /d /s /c, powershell -NoProfile -Command, Git Bash -c).
-        assert_eq!(
-            inline_command(
-                InlineFlavor::Windows,
-                r"C:\Users\u\AppData\Local\Programs\DontSpeak\dontspeak.exe",
-                &["notify"]
-            ),
-            (
-                "C:/Users/u/AppData/Local/Programs/DontSpeak/dontspeak.exe notify".to_string(),
-                None
-            )
-        );
-    }
-
-    #[test]
-    fn inline_command_windows_spaced_path_uses_powershell_call_operator() {
-        // A spaced install path: `& "..."` + a per-hook powershell pin — the only
-        // deterministic form (cmd chokes on Node's \" re-escaping; Git Bash needs the
-        // quotes; Qwen's shell:"bash" is a bare `bash` not guaranteed on Windows).
-        assert_eq!(
-            inline_command(
-                InlineFlavor::Windows,
-                r"C:\Users\Jo Smith\AppData\Local\Programs\DontSpeak\dontspeak.exe",
-                &["notify", "--greet-only"]
-            ),
-            (
-                r#"& "C:\Users\Jo Smith\AppData\Local\Programs\DontSpeak\dontspeak.exe" notify --greet-only"#
-                    .to_string(),
-                Some("powershell")
-            )
-        );
-    }
+    // `args` field (silently dropped), and `timeout` is MILLISECONDS. These pin the dialect
+    // AS QWEN SEES IT: no `args` key anywhere, inlined verbs, scaled timeouts, the
+    // `shell: "powershell"` pin on a spaced path. The command STRING itself (per-flavor,
+    // both driven on any OS so Linux CI covers the Windows form) is pinned by
+    // `wire::cmdline`'s own tests, which is also where Codex and Grok get it from.
 
     #[test]
     fn command_is_ours_accepts_every_dialect_we_write_and_rejects_the_rest() {

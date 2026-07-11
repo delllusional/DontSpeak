@@ -25,7 +25,9 @@
 //!   * `Stop` → `dontspeak notify` — speak the final reply for sessions NOT streamed via the
 //!     app-server (plain-TUI); a streamed session's witness keeps this silent.
 //!
-//! Written as:
+//! Written as (POSIX shown; on Windows `command` is the QUOTE-FREE form — Codex hands the
+//! whole string to `cmd.exe /C` as one argv element, where an embedded `"` cannot survive.
+//! See [`cmdline`](super::cmdline)):
 //!   [[hooks.Stop]]
 //!   [[hooks.Stop.hooks]]
 //!   type = "command"
@@ -37,7 +39,29 @@
 //! binary basename (see `command_is_ours`), the same discipline the Claude Code JSON path
 //! uses (`command_is_ours` there), NOT a substring match on the rendered command string.
 
+use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item as TomlItem, Table as TomlTable, value};
+
+/// Render one Codex hook command. Codex's command-hook schema is `command` /
+/// `command_windows` / `timeout` / `async` / `statusMessage` — there is NO `shell` field, so
+/// a spaced bin path cannot be pinned to a shell that tolerates quotes and must instead be
+/// made space-free (the 8.3 short name); see [`super::cmdline`].
+///
+/// We write the host's dialect into plain `command` rather than splitting it across
+/// `command`/`command_windows`: `dontspeak wire` runs ON the machine it is wiring, the bin
+/// path it embeds is that machine's absolute install path, and Codex resolves
+/// `command_windows.unwrap_or(command)` — so a second, non-host form would be dead weight
+/// carrying a path that doesn't exist on the other OS anyway. This matches what the Claude
+/// Code / Qwen JSON writers already do.
+fn codex_command(bin: &str, verb: &str) -> String {
+    inline_command(
+        host_inline_flavor(),
+        bin,
+        &[verb],
+        ShellOverride::Unsupported,
+    )
+    .0
+}
 
 /// The `(event, [(verb, timeout)])` hooks we wire into Codex — ONE group per event, holding
 /// that event's inner hooks. Codex has no MessageDisplay hook stream, so the reply is voiced
@@ -102,20 +126,14 @@ impl From<toml_edit::TomlError> for CodexMergeError {
 /// event as "already ours") AND make `strip_codex_hooks` delete the user's entire hook group
 /// on unwire.
 ///
-/// Our own commands are always rendered as `"<bin>" <verb>` (see `merge_codex_hooks`): a
-/// double-quoted absolute path followed by a space and verb. We parse out that leading
-/// quoted token and check its file stem, exactly like the JSON path checks the literal
-/// `command` field (there it's the whole field; here it's shell-quoted with a verb tacked
-/// on, so we extract the path first). Any command not shaped like ours (no leading `"`, or
-/// a path whose basename isn't exactly `dontspeak`) is never ours.
-fn command_is_ours(cmd: &str) -> bool {
-    cmd.strip_prefix('"')
-        .and_then(|rest| rest.split('"').next())
-        .and_then(|path| std::path::Path::new(path).file_stem())
-        .and_then(|s| s.to_str())
-        .is_some_and(|stem| stem == "dontspeak")
-}
-
+/// Recognition is the SHARED [`super::cmdline::command_is_ours`] — deliberately NOT a local
+/// copy. It accepts every dialect we have ever written, which is what makes a re-wire
+/// self-heal: entries left by the old always-quoted Windows form are still seen as ours, so
+/// merge replaces them rather than appending a duplicate, and unwire still removes them.
+/// (The previous local copy required a LEADING QUOTE and used `std::path::Path`, so it
+/// recognised neither the quote-free Windows command we now emit nor a `\`-separated path on
+/// a non-Windows host.)
+///
 /// Does this inner hooks `Item` (the `[[hooks.<event>.hooks]]` array-of-tables OR an inline
 /// `hooks = [{…}]` array) hold a `command` referencing our `dontspeak` binary?
 fn inner_hooks_are_ours(item: &TomlItem) -> bool {
@@ -317,7 +335,7 @@ pub fn merge_codex_hooks(existing: &str, bin: &str) -> Result<String, CodexMerge
         for (event, verbs) in CODEX_HOOKS {
             let commands: Vec<(String, i64)> = verbs
                 .iter()
-                .map(|(verb, timeout)| (format!("\"{bin}\" {verb}"), *timeout))
+                .map(|(verb, timeout)| (codex_command(bin, verb), *timeout))
                 .collect();
             let cmd_strings: Vec<String> = commands.iter().map(|(c, _)| c.clone()).collect();
             append_to_event(htbl, event, codex_our_group(&commands), &cmd_strings)?;
@@ -417,13 +435,13 @@ mod tests {
         // re-discovery `notify` plus the narration-spec `provide`.
         assert_eq!(
             event_command(&doc, "SessionStart"),
-            format!("\"{BIN}\" notify --greet-only")
+            codex_command(BIN, "notify --greet-only")
         );
         assert_eq!(
             event_commands(&doc, "UserPromptSubmit"),
-            vec![format!("\"{BIN}\" notify"), format!("\"{BIN}\" provide")]
+            vec![codex_command(BIN, "notify"), codex_command(BIN, "provide")]
         );
-        assert_eq!(event_command(&doc, "Stop"), format!("\"{BIN}\" notify"));
+        assert_eq!(event_command(&doc, "Stop"), codex_command(BIN, "notify"));
     }
 
     #[test]
@@ -443,13 +461,42 @@ mod tests {
         let doc: DocumentMut = twice.parse().unwrap();
         assert_eq!(
             event_command(&doc, "SessionStart"),
-            format!("\"{BIN}\" notify --greet-only")
+            codex_command(BIN, "notify --greet-only")
         );
         assert_eq!(
             event_commands(&doc, "UserPromptSubmit"),
-            vec![format!("\"{BIN}\" notify"), format!("\"{BIN}\" provide")]
+            vec![codex_command(BIN, "notify"), codex_command(BIN, "provide")]
         );
-        assert_eq!(event_command(&doc, "Stop"), format!("\"{BIN}\" notify"));
+        assert_eq!(event_command(&doc, "Stop"), codex_command(BIN, "notify"));
+    }
+
+    #[test]
+    fn legacy_quoted_group_is_still_ours_so_strip_removes_it_and_merge_heals_it() {
+        // THE RECOGNISER-MIGRATION REGRESSION TEST. Every Codex config in the field was
+        // written by an older DontSpeak in the always-quoted dialect. The shared
+        // `command_is_ours` must still see those entries as OURS — if it didn't, unwire would
+        // strand them in the user's config forever, and a re-wire would append a second group
+        // beside them (two SessionStart greets, two Stop narrations) instead of healing them
+        // to the new quote-free Windows form.
+        let legacy = format!(
+            "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"\\\"{BIN}\\\" notify\"\ntimeout = 1800\n"
+        );
+
+        // Unwire: the legacy group is recognised and removed, not stranded.
+        let stripped = strip_codex_hooks(&legacy).expect("strip ok");
+        assert!(
+            !stripped.contains("dontspeak"),
+            "legacy quoted group must be removed on unwire, got: {stripped}"
+        );
+
+        // Re-wire: REPLACED in place, not duplicated — `event_commands` pins exactly one group
+        // and exactly one inner hook on Stop.
+        let doc: DocumentMut = merged(&legacy).parse().expect("merge round-trips");
+        assert_eq!(
+            event_commands(&doc, "Stop"),
+            vec![codex_command(BIN, "notify")],
+            "the legacy quoted entry is healed to this host's dialect, not duplicated"
+        );
     }
 
     #[test]
@@ -457,10 +504,29 @@ mod tests {
         let existing = "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"/usr/bin/true\"\n";
         let out = merged(existing);
         assert!(out.contains("/usr/bin/true"), "user's Stop hook survives");
+        // Assert on the PARSED doc, not the raw text: the rendered command is host-dependent
+        // (quote-free on Windows), so a hardcoded quoted substring would pass on Linux CI and
+        // fail on a Windows host. (Two groups here — the user's and ours — so `event_commands`,
+        // which pins exactly one, doesn't apply.)
+        let doc: DocumentMut = out.parse().unwrap();
         assert!(
-            out.contains("\"/home/u/.local/bin/dontspeak\" notify"),
+            stop_has_command(&doc, &codex_command(BIN, "notify")),
             "ours added alongside"
         );
+    }
+
+    /// Does ANY group on `Stop` hold an inner hook with exactly this command? Used where the
+    /// event legitimately holds more than one group (the user's + ours).
+    fn stop_has_command(doc: &DocumentMut, command: &str) -> bool {
+        doc["hooks"]["Stop"]
+            .as_array_of_tables()
+            .is_some_and(|groups| {
+                groups.iter().any(|g| {
+                    g["hooks"].as_array_of_tables().is_some_and(|inner| {
+                        inner.iter().any(|t| t["command"].as_str() == Some(command))
+                    })
+                })
+            })
     }
 
     #[test]
@@ -478,16 +544,17 @@ mod tests {
             out.contains("/home/u/bin/my-dontspeak-checker"),
             "user's look-alike hook survives merge, untouched"
         );
-        assert!(
-            out.contains("\"/home/u/.local/bin/dontspeak\" notify"),
-            "our real hook IS wired alongside — not skipped as already-present"
-        );
+        // Host-dependent command string ⇒ assert on the parsed doc, never a quoted substring.
         let doc: DocumentMut = out.parse().unwrap();
         let stop = doc["hooks"]["Stop"].as_array_of_tables().unwrap();
         assert_eq!(
             stop.len(),
             2,
             "user's look-alike group + ours, not merged/skipped into one"
+        );
+        assert!(
+            stop_has_command(&doc, &codex_command(BIN, "notify")),
+            "our real hook IS wired alongside — not skipped as already-present"
         );
 
         // Stripping must remove ONLY ours, leaving the user's look-alike hook intact — not
@@ -498,7 +565,7 @@ mod tests {
             "user's look-alike hook survives strip"
         );
         assert!(
-            !stripped.contains("\"/home/u/.local/bin/dontspeak\" notify"),
+            !stripped.contains(&codex_command(BIN, "notify")),
             "ours removed"
         );
     }
@@ -570,11 +637,11 @@ mod tests {
         assert_eq!(hooks.len(), 2, "notify + provide in the ONE group");
         assert_eq!(
             hooks[0]["command"].as_str().unwrap(),
-            format!("\"{BIN}\" notify")
+            codex_command(BIN, "notify")
         );
         assert_eq!(
             hooks[1]["command"].as_str().unwrap(),
-            format!("\"{BIN}\" provide")
+            codex_command(BIN, "provide")
         );
         for h in &hooks {
             assert_eq!(h["type"].as_str(), Some("command"));
@@ -600,7 +667,7 @@ mod tests {
         let doc: DocumentMut = out.parse().unwrap();
         assert_eq!(
             event_commands(&doc, "UserPromptSubmit"),
-            vec![format!("\"{BIN}\" notify"), format!("\"{BIN}\" provide")],
+            vec![codex_command(BIN, "notify"), codex_command(BIN, "provide")],
             "stale one-verb group healed to the two-verb shape, not duplicated"
         );
     }
