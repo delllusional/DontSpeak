@@ -18,7 +18,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
@@ -58,7 +58,7 @@ fn helper_stderr() -> Stdio {
 /// can NEVER leak into the child and override the config-resolved intent. The two provider
 /// tokens are always `Some` (always overwritten), so a new conditional flag can't reintroduce
 /// the leak — it just joins the table and inherits the clear-when-absent behaviour.
-fn child_env(prefs: &SpawnPrefs) -> [(&'static str, Option<String>); 4] {
+fn child_env(prefs: &SpawnPrefs) -> [(&'static str, Option<String>); 5] {
     [
         ("DONTSPEAK_PROVIDER", Some(prefs.provider.clone())),
         ("DONTSPEAK_STT_PROVIDER", Some(prefs.stt_provider.clone())),
@@ -69,6 +69,10 @@ fn child_env(prefs: &SpawnPrefs) -> [(&'static str, Option<String>); 4] {
         (
             "DONTSPEAK_STT_PRELOAD",
             prefs.stt_preload.then(|| "1".to_string()),
+        ),
+        (
+            "DONTSPEAK_TTS_PRELOAD",
+            prefs.tts_preload.then(|| "1".to_string()),
         ),
     ]
 }
@@ -98,6 +102,9 @@ struct SpawnPrefs {
     /// resolves to "cpu" even for Off/ClaudeCode), so this is tracked separately and
     /// drives `DONTSPEAK_STT_PRELOAD`, which gates the helper's parallel STT-preload thread.
     stt_preload: bool,
+    /// Whether Kokoro TTS should be loaded and an output device opened. An STT-only
+    /// helper must not depend on either resource.
+    tts_preload: bool,
 }
 
 pub struct TtsManager {
@@ -137,6 +144,16 @@ pub struct TtsManager {
     /// events here. Cleared at the start of each `listen()`. Demuxing the one
     /// stdout into separate slots is what lets a speak and a listen coexist.
     listen_slot: Arc<(Mutex<ListenSlot>, Condvar)>,
+    /// Exactly one logical caller may own the helper's untagged listen event stream. A test
+    /// recognition request now fails busy instead of clearing/stealing Caps dictation events.
+    listen_lease: Mutex<()>,
+    /// Monotonic helper listen generation. Stop is expressed as "cancel through generation N"
+    /// so an early stop can never be erased by delayed start processing.
+    next_listen_generation: AtomicU64,
+    active_listen_generation: AtomicU64,
+    listen_stopped_through: AtomicU64,
+    /// When a stop was sent for the active generation. Used to bound a wedged native finalizer.
+    listen_stop_started: Mutex<Option<(u64, std::time::Instant)>>,
     /// Filled by the reader: a one-shot `diarize` waits here for its DIAR/DIARERR +
     /// terminal DDONE. Cleared at the start of each `diarize()`. Its own slot (not
     /// `listen_slot`) so a diarize and a speak demux independently.
@@ -181,6 +198,8 @@ pub struct TtsManager {
     /// The STT engine the CURRENTLY running child was started with, so a changed
     /// `spawn_prefs.stt_provider` triggers exactly one restart (mirrors `full_duplex_active`).
     stt_provider_active: Mutex<String>,
+    /// Whether the running child was started with Kokoro/output enabled.
+    tts_wanted_active: Mutex<bool>,
     /// Which models are CURRENTLY resident in the warm helper. Kokoro is eager (true
     /// once the child is READY); Parakeet is lazy (true after the first `listen`). An
     /// `unload` clears the matching flag; the helper stopping clears both. Surfaced in
@@ -233,6 +252,11 @@ impl TtsManager {
             reader: Mutex::new(None),
             speak_slot: Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new())),
             listen_slot: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
+            listen_lease: Mutex::new(()),
+            next_listen_generation: AtomicU64::new(1),
+            active_listen_generation: AtomicU64::new(0),
+            listen_stopped_through: AtomicU64::new(0),
+            listen_stop_started: Mutex::new(None),
             diarize_slot: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
             enroll_slot: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
             say_child: Mutex::new(None),
@@ -247,9 +271,11 @@ impl TtsManager {
                 stt_provider: "ane".to_string(),
                 full_duplex: false,
                 stt_preload: false,
+                tts_preload: false,
             }),
             full_duplex_active: Mutex::new(false),
             stt_provider_active: Mutex::new(String::new()),
+            tts_wanted_active: Mutex::new(false),
             tts_model: Arc::new(ModelSlot::new()),
             stt_model: Arc::new(ModelSlot::new()),
             muted: AtomicBool::new(false),
@@ -485,6 +511,11 @@ impl TtsManager {
         self.spawn_prefs.lock().unwrap().stt_preload = wanted;
     }
 
+    /// Set whether the next helper should load Kokoro and open playback output.
+    pub fn set_tts_wanted(&self, wanted: bool) {
+        self.spawn_prefs.lock().unwrap().tts_preload = wanted;
+    }
+
     /// Restart the warm child iff it is running with a mode that no longer matches the
     /// preference — either the full-duplex flag (toggled, or STT moved to/from a local
     /// engine) or the local STT engine itself (cpu ↔ ane, so the child picks
@@ -500,7 +531,8 @@ impl TtsManager {
         let prefs = self.spawn_prefs.lock().unwrap().clone();
         let fd_stale = prefs.full_duplex != *self.full_duplex_active.lock().unwrap();
         let stt_stale = prefs.stt_provider != *self.stt_provider_active.lock().unwrap();
-        if !fd_stale && !stt_stale {
+        let tts_stale = prefs.tts_preload != *self.tts_wanted_active.lock().unwrap();
+        if !fd_stale && !stt_stale && !tts_stale {
             return;
         }
         self.restart_child();
@@ -632,13 +664,12 @@ impl TtsManager {
         // ("kokoro model not downloaded" / "smk_init failed") — `reload_models` (unchanged)
         // performs the sole, successful start once the background fetch lands.
         //
-        // Kokoro is gated UNCONDITIONALLY (not role-gated on whether TTS is even selected):
-        // `ds-helper --serve` calls `load_backend()` (Kokoro) unconditionally whenever it runs at
-        // all (oneshot::load_backend — no DONTSPEAK_TTS_PRELOAD-style role gate exists there, a
-        // separate pre-existing gap, not fixed here), and a missing/mismatched Kokoro asset set
-        // is FATAL to the WHOLE child (serve.rs's `_exit(1)`), mirroring `status.rs`'s own
-        // `kokoro_present` computation, which is ALSO computed unconditionally. Parakeet is
-        // deliberately NOT gated here: its preload is genuinely conditional
+        // Kokoro presence is checked here whenever `prefs.tts_preload` is set (mirrors
+        // serve.rs's own `tts_wanted` gate on `load_backend()`/the output device — an
+        // STT-only helper never touches either). When TTS IS wanted, a missing/mismatched
+        // Kokoro asset set is FATAL to the WHOLE child (serve.rs's `_exit(1)`), mirroring
+        // `status.rs`'s own `kokoro_present` computation. Parakeet is deliberately NOT gated
+        // here: its preload is genuinely conditional
         // (DONTSPEAK_STT_PRELOAD) and a failed preload is non-fatal (STTLOADERR, no `_exit`) —
         // the child boots fine either way, and the existing per-model
         // `stt_load_error`/ModelSlot machinery already reports it correctly. Gating on Parakeet
@@ -651,7 +682,7 @@ impl TtsManager {
         } else {
             crate::config_gate::kokoro_onnx_files_present()
         };
-        if !kokoro_ready {
+        if prefs.tts_preload && !kokoro_ready {
             // Mirrors every OTHER early-return below (spawn error, missing stdio, ERR line):
             // set_error() so `warm_child_heal_action` sees error=true and resolves to
             // `HealAction::Nothing` — a Caps-Lock-triggered `restart_if_crashed` must NOT retry
@@ -862,12 +893,18 @@ impl TtsManager {
         // Record what this child was started with, so a later pref change restarts.
         *self.full_duplex_active.lock().unwrap() = prefs.full_duplex;
         *self.stt_provider_active.lock().unwrap() = prefs.stt_provider;
+        *self.tts_wanted_active.lock().unwrap() = prefs.tts_preload;
         // Kokoro is eager-loaded by the helper before READY. STT (Parakeet) now preloads in
         // PARALLEL and reports its own STTLOADED (possibly BEFORE this READY), so we must NOT
         // reset stt_model here — it's initialized before the wait loop and set by the STT
         // signal handlers.
-        self.tts_model
-            .transition(ModelState::Loaded, self.gate.get().map(|g| g.as_ref()));
+        if prefs.tts_preload {
+            self.tts_model
+                .transition(ModelState::Loaded, self.gate.get().map(|g| g.as_ref()));
+        } else {
+            self.tts_model
+                .transition(ModelState::Idle, self.gate.get().map(|g| g.as_ref()));
+        }
         // Re-apply the CURRENT global-mute state to this freshly (re)spawned child. Every
         // start (provider switch, post-download restart, crash-heal via `restart_if_crashed`)
         // installs a brand-new child that inits UNMUTED — without this push, speech would
@@ -1204,10 +1241,69 @@ impl TtsManager {
     /// re-transcribes periodically; end it with `stop()` (from a second caller).
     /// Starts the helper if it isn't running. Holds the stdout reader for the
     /// session (speak/listen are mutually exclusive). Err ⇒ the helper is gone.
-    pub fn listen(&self, on_partial: &mut dyn FnMut(&str)) -> std::io::Result<String> {
+    ///
+    /// Both production callers (`HelperStt`, `TestSession`) run this call on a background
+    /// thread while their OWN stop can arrive on a DIFFERENT thread (`HelperStt::start`/
+    /// `stop`, `TestSession::run`/`stop`): `cancelled_early` is the caller's own flag, set by
+    /// its `stop()` before this call is even guaranteed to have started running. Without it,
+    /// `active_listen_generation`/`listen_stopped_through` — the mechanism that closes finding
+    /// #3's "stop races the queued start" race at the ds-helper/serve.rs layer — isn't
+    /// published until THIS function actually runs on its thread, so a stop that fires between
+    /// the caller spawning/dispatching the work and this function starting would otherwise be
+    /// silently lost (the caller's `stop_listen()` sees `active_listen_generation == 0` and
+    /// no-ops). Checked both before the helper is started (so an already-cancelled session
+    /// never spins one up) and again at the same point the generation-based cancellation
+    /// already is, right before the request is sent.
+    pub fn listen_cancellable(
+        &self,
+        cancelled_early: &AtomicBool,
+        on_partial: &mut dyn FnMut(&str),
+    ) -> std::io::Result<String> {
+        let _lease = self.listen_lease.try_lock().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "another speech-recognition session is already active",
+            )
+        })?;
+        let generation = self.next_listen_generation.fetch_add(1, Ordering::SeqCst);
+        self.active_listen_generation
+            .store(generation, Ordering::SeqCst);
+        struct ActiveGeneration<'a> {
+            mgr: &'a TtsManager,
+            generation: u64,
+        }
+        impl Drop for ActiveGeneration<'_> {
+            fn drop(&mut self) {
+                let _ = self.mgr.active_listen_generation.compare_exchange(
+                    self.generation,
+                    0,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+                let mut stopped = self.mgr.listen_stop_started.lock().unwrap();
+                if stopped.is_some_and(|(g, _)| g == self.generation) {
+                    *stopped = None;
+                }
+            }
+        }
+        let _active = ActiveGeneration {
+            mgr: self,
+            generation,
+        };
+        // Checked BEFORE starting the helper too: a caller whose stop already fired before
+        // this function got scheduled shouldn't pay for spinning up (or waking) the child at
+        // all, and — usefully for tests — this path needs no real helper process to exercise.
+        if cancelled_early.load(Ordering::SeqCst) {
+            return Ok(String::new());
+        }
         self.ensure_started();
         if !self.is_running() {
             return Err(std::io::Error::other("STT helper not running"));
+        }
+        if cancelled_early.load(Ordering::SeqCst)
+            || self.listen_stopped_through.load(Ordering::SeqCst) >= generation
+        {
+            return Ok(String::new());
         }
         // Fresh session: drop any stale events / dead flag from a prior listen.
         {
@@ -1216,7 +1312,8 @@ impl TtsManager {
             s.events.clear();
             s.dead = false;
         }
-        if let Err(e) = self.write_request(r#"{"op":"listen"}"#) {
+        let request = serde_json::json!({ "op": "listen", "session": generation }).to_string();
+        if let Err(e) = self.write_request(&request) {
             self.mark_dead();
             return Err(e);
         }
@@ -1232,16 +1329,40 @@ impl TtsManager {
         loop {
             // Pop one event under a brief lock; drop it BEFORE calling on_partial so
             // the single reader thread is never blocked by the partial callback.
-            let evt = {
+            enum WaitResult {
+                Event(Option<ListenEvt>),
+                FinalizeTimeout,
+            }
+            let waited = {
                 let mut s = m.lock().unwrap();
                 loop {
                     if let Some(e) = s.events.pop_front() {
-                        break Some(e);
+                        break WaitResult::Event(Some(e));
                     }
                     if s.dead {
-                        break None;
+                        break WaitResult::Event(None);
                     }
-                    s = cv.wait(s).unwrap();
+                    let (next, timeout) = cv
+                        .wait_timeout(s, std::time::Duration::from_secs(1))
+                        .unwrap();
+                    s = next;
+                    if timeout.timed_out() && self.listen_finalize_timed_out(generation) {
+                        break WaitResult::FinalizeTimeout;
+                    }
+                }
+            };
+            let evt = match waited {
+                WaitResult::Event(evt) => evt,
+                WaitResult::FinalizeTimeout => {
+                    log::warn!(
+                        target: "engine",
+                        "STT helper generation {generation} did not finalize after stop; restarting helper"
+                    );
+                    self.mark_dead();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "STT helper finalization timed out",
+                    ));
                 }
             };
             match evt {
@@ -1323,7 +1444,47 @@ impl TtsManager {
     /// the STT path must end its listen alone; in half-duplex `lstop` ends the
     /// serve-loop listen just like `stop`. Fire-and-forget over stdin.
     pub fn stop_listen(&self) {
-        let _ = self.write_request(r#"{"op":"lstop"}"#);
+        let generation = self.active_listen_generation.load(Ordering::SeqCst);
+        if generation == 0 {
+            return;
+        }
+        self.listen_stopped_through
+            .fetch_max(generation, Ordering::SeqCst);
+        // Only START the wedge-recovery clock the FIRST time this generation is stopped — a
+        // duplicate/late second `stop_listen()` call (e.g. `HelperStt::stop()` racing its own
+        // detached joiner, or a caller retrying) must not push the finalize-timeout deadline
+        // back out, which would delay `listen_finalize_timed_out`'s recovery kill instead of
+        // just being a harmless no-op.
+        let mut stop_started = self.listen_stop_started.lock().unwrap();
+        if !matches!(*stop_started, Some((g, _)) if g == generation) {
+            *stop_started = Some((generation, std::time::Instant::now()));
+        }
+        drop(stop_started);
+        let request = serde_json::json!({ "op": "lstop", "session": generation }).to_string();
+        let _ = self.write_request(&request);
+    }
+
+    fn listen_finalize_timed_out(&self, generation: u64) -> bool {
+        let started = self.listen_stop_started.lock().unwrap();
+        let Some((stopped_generation, at)) = *started else {
+            return false;
+        };
+        if stopped_generation != generation {
+            return false;
+        }
+        // Apple's System recognizer intentionally has a 30 s OS-level finalization bound;
+        // native Parakeet should settle much sooner. Both remain finite and recoverable.
+        let system = self
+            .stt_provider_active
+            .lock()
+            .unwrap()
+            .eq_ignore_ascii_case("system");
+        let limit = if system {
+            std::time::Duration::from_secs(35)
+        } else {
+            std::time::Duration::from_secs(10)
+        };
+        at.elapsed() >= limit
     }
 
     /// One-shot diarization on the warm helper: record `seconds` of mic, then return
@@ -1430,6 +1591,8 @@ mod coexist_it {
                 std::env::temp_dir().join("ds-stats-coexist-test.json"),
             )),
         ));
+        mgr.set_tts_wanted(true);
+        mgr.set_stt_wanted(true);
         mgr.set_full_duplex_pref(true);
         mgr.ensure_started();
         assert!(
@@ -1440,7 +1603,9 @@ mod coexist_it {
 
         // A listen on a background thread drains the listen slot while we speak.
         let lmgr = mgr.clone();
-        let listen = std::thread::spawn(move || lmgr.listen(&mut |p| eprintln!("[partial] {p}")));
+        let listen = std::thread::spawn(move || {
+            lmgr.listen_cancellable(&AtomicBool::new(false), &mut |p| eprintln!("[partial] {p}"))
+        });
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         // Speak WHILE the listen runs — the whole point of coexist. If the demux is
@@ -1480,22 +1645,26 @@ mod child_env_tests {
             stt_provider: "ane".into(),
             full_duplex: true,
             stt_preload: true,
+            tts_preload: true,
         });
         assert_eq!(on[0], ("DONTSPEAK_PROVIDER", Some("cuda".into())));
         assert_eq!(on[1], ("DONTSPEAK_STT_PROVIDER", Some("ane".into())));
         assert_eq!(on[2], ("DONTSPEAK_FULL_DUPLEX", Some("1".into())));
         assert_eq!(on[3], ("DONTSPEAK_STT_PRELOAD", Some("1".into())));
+        assert_eq!(on[4], ("DONTSPEAK_TTS_PRELOAD", Some("1".into())));
 
         let off = child_env(&SpawnPrefs {
             provider: "cpu".into(),
             stt_provider: "cpu".into(),
             full_duplex: false,
             stt_preload: false,
+            tts_preload: false,
         });
         assert_eq!(off[0], ("DONTSPEAK_PROVIDER", Some("cpu".into())));
         assert_eq!(off[1], ("DONTSPEAK_STT_PROVIDER", Some("cpu".into())));
         assert_eq!(off[2], ("DONTSPEAK_FULL_DUPLEX", None));
         assert_eq!(off[3], ("DONTSPEAK_STT_PRELOAD", None));
+        assert_eq!(off[4], ("DONTSPEAK_TTS_PRELOAD", None));
     }
 }
 
@@ -1741,10 +1910,73 @@ mod status_gate_tests {
         tts.set_stt_wanted(false);
         assert!(!tts.spawn_prefs.lock().unwrap().stt_preload);
 
+        tts.set_tts_wanted(true);
+        assert!(tts.spawn_prefs.lock().unwrap().tts_preload);
+        tts.set_tts_wanted(false);
+        assert!(!tts.spawn_prefs.lock().unwrap().tts_preload);
+
         // set_provider's own persisted-value half of its contract (the early-return
         // is covered elsewhere; this confirms the write happens before that check).
         assert!(!tts.set_provider("cpu"));
         assert_eq!(tts.spawn_prefs.lock().unwrap().provider, "cpu");
+    }
+
+    #[test]
+    fn listen_lease_rejects_a_second_untagged_event_consumer() {
+        let (tts, _gate) = mk();
+        let _owner = tts.listen_lease.lock().unwrap();
+        assert!(tts.listen_lease.try_lock().is_err());
+    }
+
+    #[test]
+    fn stop_listen_records_the_active_generation_even_without_a_live_helper() {
+        let (tts, _gate) = mk();
+        tts.active_listen_generation.store(7, Ordering::SeqCst);
+        tts.stop_listen();
+        assert_eq!(tts.listen_stopped_through.load(Ordering::SeqCst), 7);
+        assert!(tts.listen_stop_started.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn stop_listen_does_not_restart_the_finalize_clock_on_a_duplicate_call() {
+        // A second `stop_listen()` for the SAME generation (e.g. `HelperStt::stop()` racing
+        // its own detached joiner) must not push `listen_finalize_timed_out`'s deadline back
+        // out — that would delay wedge-recovery instead of being the harmless no-op it should
+        // be for an already-recorded stop.
+        let (tts, _gate) = mk();
+        tts.active_listen_generation.store(3, Ordering::SeqCst);
+        tts.stop_listen();
+        let first = tts.listen_stop_started.lock().unwrap().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tts.stop_listen();
+        let second = tts.listen_stop_started.lock().unwrap().unwrap();
+
+        assert_eq!(first.0, second.0, "same generation both times");
+        assert_eq!(
+            first.1, second.1,
+            "the recorded Instant must not move on a duplicate stop"
+        );
+    }
+
+    /// The race `listen_cancellable` closes for `HelperStt`/`TestSession`: a caller's own
+    /// `stop()` sets its flag on ANOTHER thread before the spawned `listen` call is even
+    /// guaranteed to have started — before this fix, `stop_listen()` alone would see
+    /// `active_listen_generation == 0` (nothing published yet) and silently no-op, reproducing
+    /// finding #3's "stop received before the queued start begins" bug one layer above
+    /// ds-helper. Drives the real production function end-to-end (not just field state) with
+    /// the flag already set, and never starts a helper process to do it.
+    #[test]
+    fn listen_cancellable_honors_a_stop_that_raced_the_call_itself() {
+        let (tts, _gate) = mk();
+        let cancelled_early = AtomicBool::new(true); // stop() already fired before we got here
+        let result = tts.listen_cancellable(&cancelled_early, &mut |_| {
+            panic!("a session cancelled before it started must never deliver a partial");
+        });
+        assert_eq!(result.unwrap(), "");
+        // The Drop guard released the generation — a later, unrelated listen must not
+        // inherit a stale "already cancelled" state from this one.
+        assert_eq!(tts.active_listen_generation.load(Ordering::SeqCst), 0);
     }
 
     /// Points `DONTSPEAK_MODEL_DIR` at a fresh EMPTY tempdir and clears
@@ -1805,6 +2037,7 @@ mod status_gate_tests {
         let (_tmp, prev_model_dir, prev_ort, prev_smk) = clear_kokoro_env();
 
         let (tts, gate) = mk();
+        tts.set_tts_wanted(true);
         let seq0 = gate.seq();
 
         tts.start();
@@ -1850,6 +2083,7 @@ mod status_gate_tests {
         }
 
         let (tts, gate) = mk();
+        tts.set_tts_wanted(true);
         assert_eq!(tts.last_error(), None);
         let seq0 = gate.seq();
 

@@ -33,10 +33,13 @@
 //! `!Send` on macOS — a `Capture` is therefore created and consumed on one thread.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::Sample as _;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::{HeapCons, HeapProd, HeapRb};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Async, FixedAsync, Indexing, PolynomialDegree, Resampler};
 
@@ -48,6 +51,9 @@ const TARGET_RATE: u32 = 16_000;
 /// rubato fixed input-chunk size (frames per `process` call). 1024 keeps the
 /// resampler's internal buffers small while still amortizing the per-call cost.
 const RESAMPLE_CHUNK: usize = 1024;
+/// Bound callback-to-consumer capture buffering. Normal drains happen every ~50 ms; five
+/// seconds leaves generous room for scheduler/model hiccups without unbounded growth.
+const CAPTURE_BUFFER_SECS: usize = 5;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Capture — a live mic stream accumulating mono PCM, drained to 16 kHz on stop.
@@ -61,9 +67,10 @@ const RESAMPLE_CHUNK: usize = 1024;
 pub struct Capture {
     /// Held so the stream keeps running; dropping it stops capture.
     _stream: cpal::Stream,
-    /// Mono f32 PCM accumulated by the cpal data callback (downmixed from however
-    /// many channels the device delivers).
-    buffer: Arc<Mutex<Vec<f32>>>,
+    /// Consumer side of the lock-free callback ring. The mutex is consumer-only interior
+    /// mutability (`drain_new(&self)`); the realtime producer never touches it.
+    buffer: Mutex<HeapCons<f32>>,
+    dropped: Arc<AtomicU64>,
     input_rate: u32,
 }
 
@@ -84,19 +91,23 @@ impl Capture {
         let channels = config.channels() as usize;
         let stream_config: cpal::StreamConfig = config.into();
 
-        let buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let capacity = input_rate as usize * CAPTURE_BUFFER_SECS;
+        let (producer, consumer) = HeapRb::<f32>::new(capacity.max(1)).split();
+        let dropped = Arc::new(AtomicU64::new(0));
         let stream = build_input_stream(
             &device,
             &stream_config,
             sample_format,
             channels,
-            buffer.clone(),
+            producer,
+            dropped.clone(),
         )?;
         stream.play().map_err(|e| format!("stream.play: {e}"))?;
 
         Ok(Capture {
             _stream: stream,
-            buffer,
+            buffer: Mutex::new(consumer),
+            dropped,
             input_rate,
         })
     }
@@ -106,9 +117,16 @@ impl Capture {
     /// always-listening loop calls this each poll tick to feed the energy-VAD and
     /// accumulate the current utterance, instead of the one-shot `into_pcm_16k`.
     pub fn drain_new(&self) -> Vec<f32> {
+        let dropped = self.dropped.swap(0, Ordering::Relaxed);
+        if dropped > 0 {
+            warn(&format!("capture ring overflow: dropped {dropped} samples"));
+        }
         match self.buffer.lock() {
-            Ok(mut b) => std::mem::take(&mut *b),
-            Err(_) => Vec::new(),
+            Ok(mut b) => b.pop_iter().collect::<Vec<f32>>(),
+            Err(e) => {
+                warn(&format!("capture ring poisoned: {e}"));
+                Vec::new()
+            }
         }
     }
 
@@ -124,11 +142,12 @@ impl Capture {
         let Capture {
             _stream,
             buffer,
+            dropped: _,
             input_rate,
         } = self;
         drop(_stream);
         let samples = match buffer.lock() {
-            Ok(b) => b.clone(),
+            Ok(mut b) => b.pop_iter().collect::<Vec<f32>>(),
             Err(e) => {
                 warn(&format!("buffer poisoned: {e}"));
                 return Vec::new();
@@ -153,6 +172,8 @@ pub struct ParakeetTranscriber {
     /// The flat `model_dir()` holding `encoder.int8.onnx` / `decoder.int8.onnx` /
     /// `joiner.int8.onnx` / `tokens.txt`.
     model_dir: PathBuf,
+    /// Explicit provider for in-process users; `None` keeps the helper env contract.
+    provider: Option<String>,
     /// Lazily loaded on first use; cached for subsequent calls.
     model: Option<StreamingModel>,
 }
@@ -164,6 +185,16 @@ impl ParakeetTranscriber {
     pub fn new(model_dir: PathBuf) -> Self {
         Self {
             model_dir,
+            provider: None,
+            model: None,
+        }
+    }
+
+    /// Build a transcriber pinned to a config-resolved provider token.
+    pub fn for_provider(model_dir: PathBuf, provider: &str) -> Self {
+        Self {
+            model_dir,
+            provider: Some(provider.to_string()),
             model: None,
         }
     }
@@ -173,7 +204,12 @@ impl ParakeetTranscriber {
     /// `ort` (load-dynamic) at the dylib first.
     fn model(&mut self) -> Result<&mut StreamingModel, String> {
         if self.model.is_none() {
-            self.model = Some(StreamingModel::load(&self.model_dir, true)?);
+            self.model = Some(match &self.provider {
+                Some(provider) => {
+                    StreamingModel::load_for_provider(&self.model_dir, true, provider)?
+                }
+                None => StreamingModel::load(&self.model_dir, true)?,
+            });
         }
         Ok(self.model.as_mut().expect("model just loaded"))
     }
@@ -223,16 +259,17 @@ fn build_input_stream(
     config: &cpal::StreamConfig,
     sample_format: cpal::SampleFormat,
     channels: usize,
-    buffer: Arc<Mutex<Vec<f32>>>,
+    producer: HeapProd<f32>,
+    dropped: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, String> {
     use cpal::SampleFormat as F;
     let r = match sample_format {
-        F::F32 => build_typed::<f32>(device, config, channels, buffer),
-        F::I16 => build_typed::<i16>(device, config, channels, buffer),
-        F::U16 => build_typed::<u16>(device, config, channels, buffer),
-        F::I32 => build_typed::<i32>(device, config, channels, buffer),
-        F::I8 => build_typed::<i8>(device, config, channels, buffer),
-        F::U8 => build_typed::<u8>(device, config, channels, buffer),
+        F::F32 => build_typed::<f32>(device, config, channels, producer, dropped),
+        F::I16 => build_typed::<i16>(device, config, channels, producer, dropped),
+        F::U16 => build_typed::<u16>(device, config, channels, producer, dropped),
+        F::I32 => build_typed::<i32>(device, config, channels, producer, dropped),
+        F::I8 => build_typed::<i8>(device, config, channels, producer, dropped),
+        F::U8 => build_typed::<u8>(device, config, channels, producer, dropped),
         other => return Err(format!("unsupported sample format {other:?}")),
     };
     r.map_err(|e| format!("build_input_stream: {e}"))
@@ -244,7 +281,8 @@ fn build_typed<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     channels: usize,
-    buffer: Arc<Mutex<Vec<f32>>>,
+    mut producer: HeapProd<f32>,
+    dropped: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample,
@@ -255,14 +293,13 @@ where
     device.build_input_stream(
         *config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.reserve(data.len() / chans + 1);
-                for frame in data.chunks(chans) {
-                    let mut acc = 0.0f32;
-                    for &s in frame {
-                        acc += f32::from_sample(s);
-                    }
-                    buf.push(acc / chans as f32);
+            for frame in data.chunks(chans) {
+                let mut acc = 0.0f32;
+                for &s in frame {
+                    acc += f32::from_sample(s);
+                }
+                if producer.try_push(acc / chans as f32).is_err() {
+                    dropped.fetch_add(1, Ordering::Relaxed);
                 }
             }
         },

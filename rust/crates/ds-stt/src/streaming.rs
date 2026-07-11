@@ -20,6 +20,8 @@ use kaldi_native_fbank::fbank::{FbankComputer, FbankOptions};
 use kaldi_native_fbank::online::{FeatureComputer, OnlineFeature};
 use ort::session::Session;
 use ort::value::Tensor;
+use rubato::audioadapter_buffers::direct::InterleavedSlice;
+use rubato::{Async, FixedAsync, Indexing, PolynomialDegree, Resampler};
 
 /// One decoder step's result: (decoder_out column, next LSTM `h`, next LSTM `c`).
 type DecoderStep = (Vec<f32>, Vec<f32>, Vec<f32>);
@@ -103,6 +105,16 @@ impl StreamingModel {
         let want_gpu = ds_config::provider_pref_wants_gpu(
             &std::env::var("DONTSPEAK_STT_PROVIDER").unwrap_or_default(),
         );
+        Self::load_with_gpu_preference(dir, int8, want_gpu)
+    }
+
+    /// Load using an explicit resolved provider token. In-process users cannot rely on
+    /// the helper child's environment contract.
+    pub fn load_for_provider(dir: &Path, int8: bool, provider: &str) -> Result<Self, String> {
+        Self::load_with_gpu_preference(dir, int8, ds_config::provider_pref_wants_gpu(provider))
+    }
+
+    fn load_with_gpu_preference(dir: &Path, int8: bool, want_gpu: bool) -> Result<Self, String> {
         match Self::load_on(dir, int8, want_gpu) {
             Ok(m) => Ok(m),
             Err(e) if want_gpu => {
@@ -442,11 +454,6 @@ fn parse_tokens(text: &str) -> Vec<String> {
 // + STTSTATS schema are common.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 16 kHz samples withheld at the tail of each `accept` (the one-shot resampler's edge samples
-/// shift as more audio arrives, so the freshest ~30 ms are held back until they become interior
-/// or until `finalize`).
-const TAIL_MARGIN_16K: usize = 480;
-
 /// A streaming speech-to-text backend: fed 16 kHz mono PCM incrementally, yields a growing
 /// hypothesis, and flushes a final transcript. The ONE backend-specific surface — everything
 /// around it (resampling, cadence, partial/STTSTATS emission) is shared.
@@ -461,6 +468,10 @@ pub trait StreamingStt: Send {
     /// Cumulative model-inference time (ms), for the STTSTATS `transcribe_ms` field.
     fn transcribe_ms(&self) -> f64 {
         0.0
+    }
+    /// The execution provider this concrete streaming backend actually loaded on.
+    fn provider(&self) -> ds_config::RealizedProvider {
+        ds_config::RealizedProvider::Cpu
     }
 }
 
@@ -507,49 +518,211 @@ impl StreamingStt for OnnxStreamer {
     fn transcribe_ms(&self) -> f64 {
         self.state.transcribe_ms
     }
+    fn provider(&self) -> ds_config::RealizedProvider {
+        self.model.provider()
+    }
 }
 
-/// SHARED capture-to-backend plumbing: owns a [`StreamingStt`] backend plus the device-rate →
-/// 16 kHz resampling (one-shot over the whole buffer, withholding the unstable tail) and the
-/// `audio_ms` accounting. Both the ONNX and the macOS Core ML backends run behind this, so the
-/// only thing that ever differs between them is the trait impl.
+/// Persistent device-rate -> 16 kHz converter for one utterance. Unlike the old
+/// `StreamSession` implementation, this never re-runs the resampler over samples it already
+/// consumed: each input frame enters Rubato exactly once, full chunks are emitted immediately,
+/// and `finish` pads only the final short chunk and drains the resampler delay.
+struct IncrementalResampler {
+    input_rate: u32,
+    resampler: Option<Async<f32>>,
+    pending: Vec<f32>,
+    delay_left: usize,
+    total_input: usize,
+    total_output: usize,
+    #[cfg(test)]
+    processed_input: usize,
+}
+
+impl IncrementalResampler {
+    fn new(input_rate: u32) -> Result<Self, String> {
+        let input_rate = input_rate.max(1);
+        let resampler = if input_rate == 16_000 {
+            None
+        } else {
+            Some(
+                Async::<f32>::new_poly(
+                    16_000.0 / input_rate as f64,
+                    1.1,
+                    PolynomialDegree::Septic,
+                    1024,
+                    1,
+                    FixedAsync::Input,
+                )
+                .map_err(|e| format!("stream resampler init: {e}"))?,
+            )
+        };
+        let delay_left = resampler.as_ref().map_or(0, Resampler::output_delay);
+        Ok(Self {
+            input_rate,
+            resampler,
+            pending: Vec::with_capacity(2048),
+            delay_left,
+            total_input: 0,
+            total_output: 0,
+            #[cfg(test)]
+            processed_input: 0,
+        })
+    }
+
+    fn expected_output(&self) -> usize {
+        ((self.total_input as u128 * 16_000).div_ceil(self.input_rate as u128)) as usize
+    }
+
+    fn accept(&mut self, input: &[f32]) -> Result<Vec<f32>, String> {
+        self.total_input = self.total_input.saturating_add(input.len());
+        if self.resampler.is_none() {
+            self.total_output = self.total_output.saturating_add(input.len());
+            #[cfg(test)]
+            {
+                self.processed_input = self.processed_input.saturating_add(input.len());
+            }
+            return Ok(input.to_vec());
+        }
+        self.pending.extend_from_slice(input);
+        let mut out = Vec::new();
+        loop {
+            let need = self
+                .resampler
+                .as_ref()
+                .expect("non-passthrough resampler")
+                .input_frames_next();
+            if self.pending.len() < need {
+                break;
+            }
+            self.process_one(need, None, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    fn finish(&mut self) -> Result<Vec<f32>, String> {
+        if self.resampler.is_none() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        while !self.pending.is_empty() {
+            let need = self
+                .resampler
+                .as_ref()
+                .expect("non-passthrough resampler")
+                .input_frames_next();
+            if self.pending.len() >= need {
+                self.process_one(need, None, &mut out)?;
+            } else {
+                let available = self.pending.len();
+                self.process_one(need, Some(available), &mut out)?;
+            }
+        }
+
+        // Rubato's delay is real state, not input: pump zero-length partials until the exact
+        // duration implied by the captured input has emerged. The small fixed cap is only a
+        // corruption guard; normal polynomial resamplers need at most a couple of calls.
+        let expected = self.expected_output();
+        for _ in 0..8 {
+            if self.total_output >= expected {
+                break;
+            }
+            let need = self
+                .resampler
+                .as_ref()
+                .expect("non-passthrough resampler")
+                .input_frames_next();
+            self.process_one(need, Some(0), &mut out)?;
+        }
+        if self.total_output < expected {
+            return Err(format!(
+                "stream resampler drained {} of {expected} expected samples",
+                self.total_output
+            ));
+        }
+        Ok(out)
+    }
+
+    fn process_one(
+        &mut self,
+        required_input: usize,
+        partial_len: Option<usize>,
+        dst: &mut Vec<f32>,
+    ) -> Result<(), String> {
+        let available = partial_len.unwrap_or(required_input);
+        let mut input = vec![0.0f32; required_input.max(1)];
+        if available > 0 {
+            input[..available].copy_from_slice(&self.pending[..available]);
+        }
+        let input_adapter = InterleavedSlice::new(&input, 1, input.len())
+            .map_err(|e| format!("stream resampler input: {e}"))?;
+        let output_cap = self
+            .resampler
+            .as_ref()
+            .expect("non-passthrough resampler")
+            .output_frames_max()
+            .max(1);
+        let mut output = vec![0.0f32; output_cap];
+        let mut output_adapter = InterleavedSlice::new_mut(&mut output, 1, output_cap)
+            .map_err(|e| format!("stream resampler output: {e}"))?;
+        let indexing = Indexing {
+            input_offset: 0,
+            output_offset: 0,
+            active_channels_mask: None,
+            partial_len,
+        };
+        let (consumed, produced) = self
+            .resampler
+            .as_mut()
+            .expect("non-passthrough resampler")
+            .process_into_buffer(&input_adapter, &mut output_adapter, Some(&indexing))
+            .map_err(|e| format!("stream resampler process: {e}"))?;
+
+        let consumed_real = consumed.min(available);
+        if consumed_real > 0 {
+            self.pending.drain(..consumed_real);
+        }
+        #[cfg(test)]
+        {
+            self.processed_input = self.processed_input.saturating_add(consumed_real);
+        }
+        let skip = self.delay_left.min(produced);
+        self.delay_left -= skip;
+        let remaining = self.expected_output().saturating_sub(self.total_output);
+        let keep = (produced - skip).min(remaining);
+        dst.extend_from_slice(&output[skip..skip + keep]);
+        self.total_output = self.total_output.saturating_add(keep);
+        Ok(())
+    }
+}
+
+/// SHARED capture-to-backend plumbing: owns a [`StreamingStt`] backend plus a persistent
+/// device-rate -> 16 kHz resampler and `audio_ms` accounting. Both the ONNX and macOS
+/// Core ML/System backends run behind this, so only inference differs.
 pub struct StreamSession {
     backend: Box<dyn StreamingStt>,
-    in_rate: u32,
-    dev_buf: Vec<f32>, // all device-rate mono samples captured so far
-    fed_16k: usize,    // count of 16 kHz samples already handed to the backend
+    resampler: IncrementalResampler,
     audio_ms: f64,
 }
 
 impl StreamSession {
     /// Wrap `backend`, feeding it audio captured at `in_rate` (resampled to 16 kHz internally;
     /// passthrough when already 16 kHz).
-    pub fn new(backend: Box<dyn StreamingStt>, in_rate: u32) -> Self {
-        Self {
+    pub fn new(backend: Box<dyn StreamingStt>, in_rate: u32) -> Result<Self, String> {
+        Ok(Self {
             backend,
-            in_rate,
-            dev_buf: Vec::new(),
-            fed_16k: 0,
+            resampler: IncrementalResampler::new(in_rate)?,
             audio_ms: 0.0,
-        }
+        })
     }
 
     /// Accept a chunk of device-rate mono audio; resample, hand the new stable 16 kHz frames to
     /// the backend, and return the hypothesis so far.
     pub fn accept(&mut self, pcm_device: &[f32]) -> Result<String, String> {
-        self.dev_buf.extend_from_slice(pcm_device);
-        let full = crate::resample(&self.dev_buf, self.in_rate, 16_000);
-        let stable = full.len().saturating_sub(TAIL_MARGIN_16K);
-        let new: &[f32] = if stable > self.fed_16k {
-            &full[self.fed_16k..stable]
-        } else {
-            &[]
-        };
+        let new = self.resampler.accept(pcm_device)?;
         if !new.is_empty() {
             self.audio_ms += new.len() as f64 / 16.0;
-            self.fed_16k = stable;
         }
-        self.backend.accept_16k(new)
+        self.backend.accept_16k(&new)
     }
 
     /// Flush the withheld tail + the backend, returning the final transcript.
@@ -563,13 +736,18 @@ impl StreamSession {
     /// has no such side effect (purely local model state), so calling it unconditionally here
     /// doesn't change its behavior either.
     pub fn finalize(&mut self) -> Result<String, String> {
-        let full = crate::resample(&self.dev_buf, self.in_rate, 16_000);
-        if full.len() > self.fed_16k {
-            let new = &full[self.fed_16k..];
-            self.audio_ms += new.len() as f64 / 16.0;
-            self.fed_16k = full.len();
-            if let Err(e) = self.backend.accept_16k(new) {
-                eprintln!("StreamSession::finalize: tail flush failed, finalizing anyway: {e}");
+        match self.resampler.finish() {
+            Ok(new) if !new.is_empty() => {
+                self.audio_ms += new.len() as f64 / 16.0;
+                if let Err(e) = self.backend.accept_16k(&new) {
+                    eprintln!("StreamSession::finalize: tail flush failed, finalizing anyway: {e}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "StreamSession::finalize: resampler flush failed, finalizing anyway: {e}"
+                );
             }
         }
         self.backend.finalize()
@@ -655,5 +833,34 @@ mod tests {
         let (result, ms) = timed(|| -> Result<i32, String> { Err("boom".to_string()) });
         assert_eq!(result, Err("boom".to_string()));
         assert!(ms >= 0.0);
+    }
+
+    #[test]
+    fn incremental_resampler_processes_each_input_sample_once() {
+        let mut rs = IncrementalResampler::new(48_000).unwrap();
+        let block = vec![0.1f32; 2_400]; // 50 ms at 48 kHz
+        let mut output = Vec::new();
+        for _ in 0..1_200 {
+            output.extend(rs.accept(&block).unwrap()); // one minute, delivered live
+            assert!(
+                rs.pending.len() < 1_024,
+                "only one incomplete Rubato chunk may be retained"
+            );
+        }
+        output.extend(rs.finish().unwrap());
+        assert_eq!(rs.processed_input, block.len() * 1_200);
+        assert_eq!(output.len(), 16_000 * 60);
+    }
+
+    #[test]
+    fn incremental_resampler_passthrough_is_exact_and_has_no_history() {
+        let mut rs = IncrementalResampler::new(16_000).unwrap();
+        let a = vec![0.25f32; 800];
+        let b = vec![-0.5f32; 320];
+        assert_eq!(rs.accept(&a).unwrap(), a);
+        assert_eq!(rs.accept(&b).unwrap(), b);
+        assert!(rs.pending.is_empty());
+        assert!(rs.finish().unwrap().is_empty());
+        assert_eq!(rs.processed_input, 1_120);
     }
 }

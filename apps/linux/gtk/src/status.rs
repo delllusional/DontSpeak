@@ -34,16 +34,31 @@ pub fn spawn_push(tx: async_channel::Sender<Snapshot>) {
         .name("ds-status-push".into())
         .spawn(move || {
             let mut since = 0u64;
+            let mut last_up: Option<bool> = None;
+            let mut delivered = false;
             loop {
+                if tx.is_closed() {
+                    break;
+                }
                 let json = crate::ffi::model_status_wait(since, 1000);
                 let snap = parse(&json);
+                let unchanged = delivered
+                    && snap
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.seq == since);
                 match &snap.status {
                     Some(s) => since = s.seq,
                     None => since = 0,
                 }
                 let down = !snap.up;
-                if tx.send_blocking(snap).is_err() {
+                let duplicate_down = down && last_up == Some(false);
+                last_up = Some(snap.up);
+                if !unchanged && !duplicate_down && tx.force_send(snap).is_err() {
                     break; // receiver gone → app closing
+                }
+                if !unchanged && !duplicate_down {
+                    delivered = true;
                 }
                 if down {
                     // A down engine returns `{}` immediately; don't hammer the wait.

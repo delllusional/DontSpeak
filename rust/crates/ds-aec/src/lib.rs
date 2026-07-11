@@ -25,7 +25,7 @@
 //! thread). Its render/input callbacks run on the CoreAudio realtime thread and
 //! talk to that thread through lock-free SPSC rings.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod resample;
 
 #[cfg(target_os = "macos")]

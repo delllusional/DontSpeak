@@ -23,6 +23,9 @@ ds-model = { workspace = true }
 transcribe-rs = { version = "0.3.11", default-features = false }
 cpal = { workspace = true }
 rubato = { workspace = true }
+# Bounded lock-free SPSC capture ring: the CPAL realtime callback is the sole producer and
+# the helper/listener thread is the sole consumer. No allocation or mutex on the audio thread.
+ringbuf = "0.5"
 
 # Direct `ort` for the streaming STT runner and the speaker-SEPARATION session (SepFormer
 # int8 ONNX). Same shared load-dynamic runtime Kokoro uses — no separate onnxruntime linked.

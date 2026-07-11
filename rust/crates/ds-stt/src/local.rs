@@ -53,7 +53,10 @@ impl LocalTranscriber {
             return LocalTranscriber::Coreml(crate::coreml::CoremlTranscriber::new());
         }
         let _ = provider;
-        LocalTranscriber::ParakeetOnnx(Box::new(ParakeetTranscriber::new(parakeet_dir)))
+        LocalTranscriber::ParakeetOnnx(Box::new(ParakeetTranscriber::for_provider(
+            parakeet_dir,
+            provider,
+        )))
     }
 
     /// The realized runtime this backend loaded on, in the SAME token vocabulary Kokoro TTS reports

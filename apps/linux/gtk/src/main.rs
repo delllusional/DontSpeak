@@ -91,7 +91,7 @@ fn on_activate(app: &adw::Application) {
     let overlay = overlay::Overlay::new(app);
 
     // Status push → health panel + tray icon + overlay.
-    let (tx, rx) = async_channel::unbounded::<status::Snapshot>();
+    let (tx, rx) = async_channel::bounded::<status::Snapshot>(1);
     status::spawn_push(tx);
     {
         let w = widgets.clone();

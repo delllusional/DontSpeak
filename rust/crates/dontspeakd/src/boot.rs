@@ -12,8 +12,9 @@ use ds_platform::Platform;
 use crate::barge::spawn_mic_barge_watcher;
 use crate::config_gate::{
     build_stt, config_mtime, debug_enabled, full_duplex_wanted, helper_needed, helper_stt_provider,
-    helper_uses_stt, local_stt_available, normalize_long_press, reconcile_helper_models,
-    reload_watermark, should_reload_on_mtime, system_stt_needs_authorization,
+    helper_uses_stt, helper_uses_tts, local_stt_available, normalize_long_press,
+    reconcile_helper_models, reload_watermark, should_reload_on_mtime,
+    system_stt_needs_authorization,
 };
 use crate::downloads::{
     DownloadFlags, DownloadState, apply_provider_and_autofetch, auto_download_missing, wire,
@@ -312,6 +313,7 @@ pub fn engine_run(
     // engine — `helper_stt_provider` resolves to "cpu" even for Off/ClaudeCode, so it
     // can't gate this.
     tts.set_stt_wanted(helper_uses_stt(&cfg));
+    tts.set_tts_wanted(helper_uses_tts(&cfg));
     // Seed the TTS provider preference BEFORE the boot start below: the new model-presence
     // gate in `start_locked` resolves ANE-vs-ONNX from `spawn_prefs.provider`, and without this
     // the FIRST start would gate on `TtsManager::new`'s hardcoded "auto" default instead of the

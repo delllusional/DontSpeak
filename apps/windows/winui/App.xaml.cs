@@ -35,6 +35,9 @@ public partial class App : Application
     private DispatcherQueueTimer? _testTimer;
     private Thread? _pushThread;          // dedicated thread blocking in WaitModelStatus (overlay push)
     private volatile bool _pushStop;
+    private readonly object _statusDispatchLock = new();
+    private HealthSnapshot? _pendingStatus;
+    private bool _statusDispatchQueued;
     private static Mutex? _instanceMutex;
     private static EventWaitHandle? _activate;
     private const string ActivateEvent = "DontSpeak.WinUI.Activate";
@@ -319,6 +322,51 @@ public partial class App : Application
         _tray?.Update(state, s.Activity.Muted);
     }
 
+    /// <summary>Keep at most one UI callback queued for status updates. Fast PARTIAL pushes
+    /// replace the pending snapshot, so a busy UI renders the newest transcript instead of
+    /// replaying an ever-growing dispatcher backlog.</summary>
+    private void QueueLatestStatus(DispatcherQueue queue, HealthSnapshot snapshot)
+    {
+        lock (_statusDispatchLock)
+        {
+            _pendingStatus = snapshot;
+            if (_statusDispatchQueued) return;
+            _statusDispatchQueued = true;
+        }
+        if (!queue.TryEnqueue(DrainLatestStatus))
+        {
+            lock (_statusDispatchLock)
+            {
+                _statusDispatchQueued = false;
+                _pendingStatus = null;
+            }
+        }
+    }
+
+    private void DrainLatestStatus()
+    {
+        while (true)
+        {
+            HealthSnapshot? s;
+            lock (_statusDispatchLock)
+            {
+                s = _pendingStatus;
+                _pendingStatus = null;
+                if (s == null)
+                {
+                    _statusDispatchQueued = false;
+                    return;
+                }
+            }
+            bool showPanel = s.Activity.EngineRunning && s.Dictation.ShowPanel(s.Activity.Recording);
+            bool hasTarget = s.Dictation.DictHasTarget && !s.Dictation.DictRefused;
+            ApplyStatus(s);
+            _window?.ApplyPushed(s);
+            if (!_testOverlay)
+                _panel?.Update(showPanel, s.Dictation.DictText, hasTarget, s.Dictation.DictPromptGlow);
+        }
+    }
+
     /// <summary>Spin the dedicated status-push thread: block in the engine's WaitModelStatus,
     /// then marshal each fresh snapshot onto the UI thread (TryEnqueue) to repaint the tray,
     /// stats, and dictation overlay together. The engine bumps its status sequence on EVERY
@@ -326,6 +374,7 @@ public partial class App : Application
     /// ~0-jitter push, and the SOLE driver of the UI.</summary>
     private void StartDictationPush()
     {
+        var uiQueue = DispatcherQueue.GetForCurrentThread();
         _pushThread = new Thread(() =>
         {
             ulong since = 0;   // 0 ⇒ the first call returns the current state immediately
@@ -364,19 +413,7 @@ public partial class App : Application
                 // + the canonical `dictation.state` token, decided ONCE in the engine so every
                 // platform's panel shows identically. Absent/unknown token (older engine DLL)
                 // ⇒ ShowPanel falls back to the legacy boolean derivation.
-                bool showPanel = s.Activity.EngineRunning && s.Dictation.ShowPanel(s.Activity.Recording);
-                // A refused start REUSES the no-target warning wash verbatim (fold it into
-                // hasTarget here, so DictationPanel stays single-cue — mirrors the macOS fold).
-                bool hasTarget = s.Dictation.DictHasTarget && !s.Dictation.DictRefused;
-                // Render the WHOLE status on the UI thread off this one pushed snapshot — the tray
-                // tooltip/icon AND the dictation overlay. Both the tray update and DictationPanel's
-                // layered-window update must run on the dispatcher thread.
-                _window?.DispatcherQueue.TryEnqueue(() =>
-                {
-                    ApplyStatus(s);                 // tray icon + tooltip
-                    _window?.ApplyPushed(s);        // the status window (no-op while hidden)
-                    if (!_testOverlay) _panel?.Update(showPanel, s.Dictation.DictText, hasTarget, s.Dictation.DictPromptGlow);
-                });
+                QueueLatestStatus(uiQueue, s);
             }
         })
         { IsBackground = true, Name = "dictation-push" };

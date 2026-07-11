@@ -225,4 +225,8 @@ impl StreamingStt for CoremlStreamer {
     fn transcribe_ms(&self) -> f64 {
         self.transcribe_ms
     }
+
+    fn provider(&self) -> ds_config::RealizedProvider {
+        ds_config::RealizedProvider::CoreMlAne
+    }
 }

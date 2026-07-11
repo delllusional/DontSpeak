@@ -14,6 +14,7 @@
 //! platform handle anymore (the engine performs the gated paste).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use ds_stt::Stt;
@@ -57,6 +58,13 @@ pub struct HelperStt {
     /// so a slow final pass can't land in a buffer a later `start`/`abort`/teardown/
     /// cancel has already advanced past (see `PasteBuf::epoch`).
     epoch: u64,
+    /// This session's early-stop flag, fresh per `start()` and passed into
+    /// `TtsManager::listen_cancellable`: `stop`/`abort` set it BEFORE the spawned thread
+    /// is guaranteed to have reached the helper's `listen()` call, so a Caps tap-then-
+    /// release faster than thread scheduling can't lose the stop the way plain
+    /// `stop_listen()` alone would (it has nothing to cancel until a generation is
+    /// published, which only happens once that thread actually runs).
+    stop_requested: Arc<AtomicBool>,
 }
 
 impl HelperStt {
@@ -66,6 +74,7 @@ impl HelperStt {
             paste,
             handle: None,
             epoch: 0,
+            stop_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -87,11 +96,14 @@ impl Stt for HelperStt {
         }
         let tts = self.tts.clone();
         let paste = self.paste.clone();
+        // Fresh per session — see the field doc on `stop_requested`.
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        self.stop_requested = stop_requested.clone();
         // The listen blocks until stop()/the helper finishes; run it off the poll
         // thread. Each PARTIAL is mirrored into the shared buffer so the confirm
         // panel shows the running transcript live.
         self.handle = Some(std::thread::spawn(move || {
-            tts.listen(&mut |partial| {
+            tts.listen_cancellable(&stop_requested, &mut |partial| {
                 if let Ok(mut p) = paste.lock() {
                     p.partial = partial.to_string();
                 }
@@ -108,6 +120,7 @@ impl Stt for HelperStt {
         // background joiner waits for it and deposits the result, while the poll loop
         // stays responsive (pill keeps updating, the deferred submit fires once the
         // deposited `final_state` reads `Ready`/`Empty`).
+        self.stop_requested.store(true, Ordering::SeqCst);
         self.tts.stop_listen();
         let Some(handle) = self.handle.take() else {
             return;
@@ -127,6 +140,7 @@ impl Stt for HelperStt {
 
     fn abort(&mut self) {
         // §F long-press reset: end the listen and DISCARD (no paste, no pending).
+        self.stop_requested.store(true, Ordering::SeqCst);
         self.tts.stop_listen();
         if let Some(handle) = self.handle.take() {
             // Bounded wait, NOT an untimed `join()`: this runs on the daemon's single

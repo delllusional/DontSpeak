@@ -1,23 +1,24 @@
 //! Always-listening (hands-free) runtime glue — the I/O layer over the pure
 //! [`crate::listen`] state machines. See docs/ALWAYS-LISTENING.md.
 //!
-//! Driven once per engine poll tick. Owns the mic capture, the Parakeet
-//! transcriber, and the platform key-injection; feeds the pure Endpointer +
-//! TurnLogic and executes their `Paste`/`Submit` actions into the focused prompt.
+//! Driven once per engine poll tick, but capture, endpointing, and model inference run on
+//! dedicated workers. The poll thread only drains ordered text/control events, feeds the pure
+//! TurnLogic, and executes `Paste`/`Submit` actions into the focused prompt.
 //!
 //! Half-duplex play-gate: while the TTS queue is busy (speaking or pending) the
-//! mic is CLOSED; when it goes idle the mic reopens. `!Send` (holds the cpal
-//! stream + an `Rc` to the platform) — lives on the engine's single poll thread.
+//! mic is CLOSED; when it goes idle the mic reopens. The platform `Rc` remains on the engine
+//! thread; no native recognizer or audio operation can stall that thread.
 
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::time::{Duration, Instant};
 
 use ds_config::VoiceConfig;
 use ds_platform::{FrontmostWindow, KeyInjector};
-use ds_stt::{Capture, ParakeetTranscriber, resample_to_16k};
+use ds_stt::{Capture, LocalTranscriber, resample_to_16k};
 
 use crate::PasteState;
 use crate::listen::{
@@ -29,6 +30,212 @@ use crate::ttsq::TtsQueue;
 /// Fallback frame duration (ms) for a tick that drained no new audio — matches
 /// the engine poll interval so the confirm-window timer still advances.
 const FALLBACK_DT_MS: u64 = 30;
+
+enum RawListenerEvent {
+    Tick {
+        epoch: u64,
+        dt_ms: u64,
+    },
+    SpeechOnset {
+        epoch: u64,
+    },
+    Segment {
+        epoch: u64,
+        pcm: Vec<f32>,
+        rate: u32,
+    },
+}
+
+enum ListenerEvent {
+    Tick { epoch: u64, dt_ms: u64 },
+    SpeechOnset { epoch: u64 },
+    Segment { epoch: u64, text: String },
+}
+
+struct ListenerWorker {
+    enabled: Arc<AtomicBool>,
+    epoch: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    rx: Receiver<ListenerEvent>,
+}
+
+impl ListenerWorker {
+    fn spawn(provider: &str, model_dir: PathBuf, endpoint_silence_ms: u64) -> Self {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let epoch = Arc::new(AtomicU64::new(1));
+        let stop = Arc::new(AtomicBool::new(false));
+        // Bounded so a wedged recognizer cannot grow memory forever, but deep enough to keep
+        // capture draining through ordinary multi-second inference spikes.
+        let (raw_tx, raw_rx) = sync_channel::<RawListenerEvent>(256);
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<ListenerEvent>();
+
+        let capture_enabled = enabled.clone();
+        let capture_epoch = epoch.clone();
+        let capture_stop = stop.clone();
+        std::thread::Builder::new()
+            .name("ds-always-capture".into())
+            .spawn(move || {
+                capture_worker(
+                    capture_enabled,
+                    capture_epoch,
+                    capture_stop,
+                    raw_tx,
+                    endpoint_silence_ms,
+                )
+            })
+            .ok();
+
+        let provider = provider.to_string();
+        let infer_stop = stop.clone();
+        let infer_epoch = epoch.clone();
+        std::thread::Builder::new()
+            .name("ds-always-infer".into())
+            .spawn(move || {
+                inference_worker(
+                    provider,
+                    model_dir,
+                    infer_stop,
+                    infer_epoch,
+                    raw_rx,
+                    event_tx,
+                )
+            })
+            .ok();
+
+        Self {
+            enabled,
+            epoch,
+            stop,
+            rx: event_rx,
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        if self.enabled.swap(enabled, Ordering::SeqCst) != enabled {
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for ListenerWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.enabled.store(false, Ordering::SeqCst);
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        // Native recognizer finalization can block in an OS framework. Do not join here:
+        // dropping/reloading always-listening must never freeze the engine poll thread.
+    }
+}
+
+fn send_raw(tx: &SyncSender<RawListenerEvent>, event: RawListenerEvent) -> bool {
+    tx.send(event).is_ok()
+}
+
+fn capture_worker(
+    enabled: Arc<AtomicBool>,
+    epoch: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    tx: SyncSender<RawListenerEvent>,
+    endpoint_silence_ms: u64,
+) {
+    let mut capture: Option<Capture> = None;
+    let mut endpointer = Endpointer::new(DEFAULT_ENERGY_THRESHOLD, endpoint_silence_ms);
+    let mut segment = Vec::new();
+    let mut active_epoch = epoch.load(Ordering::SeqCst);
+    while !stop.load(Ordering::SeqCst) {
+        let current_epoch = epoch.load(Ordering::SeqCst);
+        if current_epoch != active_epoch || !enabled.load(Ordering::SeqCst) {
+            capture = None;
+            segment.clear();
+            endpointer.reset();
+            active_epoch = current_epoch;
+            std::thread::sleep(Duration::from_millis(FALLBACK_DT_MS));
+            continue;
+        }
+        if capture.is_none() {
+            match Capture::open() {
+                Ok(c) => capture = Some(c),
+                Err(e) => {
+                    log::warn!(target: "engine", "always-listen mic open: {e}");
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(FALLBACK_DT_MS));
+        let capture_ref = capture.as_ref().expect("capture open");
+        let rate = capture_ref.input_rate().max(1);
+        let chunk = capture_ref.drain_new();
+        if chunk.is_empty() {
+            if !send_raw(
+                &tx,
+                RawListenerEvent::Tick {
+                    epoch: active_epoch,
+                    dt_ms: FALLBACK_DT_MS,
+                },
+            ) {
+                return;
+            }
+            continue;
+        }
+        let energy = frame_rms(&chunk);
+        let dt_ms = ((chunk.len() as u64 * 1000) / rate as u64).max(1);
+        segment.extend_from_slice(&chunk);
+        let event = match endpointer.step(energy, dt_ms) {
+            Some(EndpointEvent::SpeechOnset) => RawListenerEvent::SpeechOnset {
+                epoch: active_epoch,
+            },
+            Some(EndpointEvent::SegmentClosed) => RawListenerEvent::Segment {
+                epoch: active_epoch,
+                pcm: std::mem::take(&mut segment),
+                rate,
+            },
+            None => RawListenerEvent::Tick {
+                epoch: active_epoch,
+                dt_ms,
+            },
+        };
+        if !send_raw(&tx, event) {
+            return;
+        }
+    }
+}
+
+fn inference_worker(
+    provider: String,
+    model_dir: PathBuf,
+    stop: Arc<AtomicBool>,
+    current_epoch: Arc<AtomicU64>,
+    rx: Receiver<RawListenerEvent>,
+    tx: std::sync::mpsc::Sender<ListenerEvent>,
+) {
+    let mut transcriber = LocalTranscriber::for_provider(&provider, model_dir);
+    while !stop.load(Ordering::SeqCst) {
+        let Ok(event) = rx.recv_timeout(Duration::from_millis(200)) else {
+            continue;
+        };
+        let event_epoch = match &event {
+            RawListenerEvent::Tick { epoch, .. }
+            | RawListenerEvent::SpeechOnset { epoch }
+            | RawListenerEvent::Segment { epoch, .. } => *epoch,
+        };
+        if event_epoch != current_epoch.load(Ordering::SeqCst) {
+            continue;
+        }
+        let event = match event {
+            RawListenerEvent::Tick { epoch, dt_ms } => ListenerEvent::Tick { epoch, dt_ms },
+            RawListenerEvent::SpeechOnset { epoch } => ListenerEvent::SpeechOnset { epoch },
+            RawListenerEvent::Segment { epoch, pcm, rate } => {
+                let pcm16 = resample_to_16k(&pcm, rate);
+                let text = transcriber.transcribe_pcm_16k(&pcm16).unwrap_or_default();
+                ListenerEvent::Segment { epoch, text }
+            }
+        };
+        if tx.send(event).is_err() {
+            return;
+        }
+    }
+}
 
 /// The cross-thread engine state a [`Listener`] needs, bundled into one struct so
 /// [`Listener::new`] takes a single value instead of re-flattening the SAME four
@@ -48,23 +255,16 @@ pub struct ListenerShared {
     pub gate: Option<Arc<StatusGate>>,
 }
 
-/// The hands-free listener. Generic over the platform so it can share the
-/// engine-owned `Rc<P>` (the macOS paste/Enter path is `!Send`).
+/// The hands-free listener. Generic over the platform so it can share the engine-owned
+/// `Rc<P>` while its provider-aware audio/inference worker remains off-thread.
 pub struct Listener<P: KeyInjector + FrontmostWindow> {
     plat: Rc<P>,
-    transcriber: ParakeetTranscriber,
-    /// `Some` while the mic is open (idle TTS); `None` while gated off (TTS busy).
-    capture: Option<Capture>,
-    endpointer: Endpointer,
+    worker: Option<ListenerWorker>,
     turn: TurnLogic,
     /// Shared dictation buffer + the recording flag — driven so the SAME confirm pill
     /// shows the live hands-free transcript (start word → pill → submit/cancel).
     paste: PasteState,
     stt_active: Arc<AtomicBool>,
-    /// The current utterance's PCM at the device's native rate, resampled to
-    /// 16 kHz only when the segment closes.
-    segment: Vec<f32>,
-    input_rate: u32,
     /// Parakeet model present at construction — false ⇒ the loop no-ops (logged).
     available: bool,
     /// Delay (ms) between the clipboard paste and the Enter keypress on submit, so
@@ -83,6 +283,13 @@ pub struct Listener<P: KeyInjector + FrontmostWindow> {
     /// blocked `WaitModelStatus` sees `stt_active` flip immediately (the confirm pill
     /// follows the same signal the engine's PTT path publishes). `None` in tests.
     gate: Option<Arc<StatusGate>>,
+    /// The resolved STT provider token this listener was built with (see
+    /// `config_gate::helper_stt_provider`) — retained ONLY so `Engine::reload`'s
+    /// rebuild-on-`stt_changed` trigger is observable/testable even when `available` is
+    /// false (no live model on the test host); production code never reads it back
+    /// (`ListenerWorker::spawn` already took its own copy at construction).
+    #[cfg(test)]
+    provider: String,
 }
 
 impl<P: KeyInjector + FrontmostWindow> Listener<P> {
@@ -95,13 +302,14 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
             ttsq,
             gate,
         } = shared;
-        let available = crate::config_gate::parakeet_present_for(cfg);
+        let available = crate::config_gate::local_stt_available(cfg);
+        let provider = crate::config_gate::helper_stt_provider(cfg);
         let hf = &cfg.hands_free;
         if !available {
             log::warn!(
                 target: "engine",
-                "always-listening needs the Parakeet STT model — \
-                 download it in Settings › Models; the loop is idle until then"
+                "always-listening needs the selected local STT backend to be ready; \
+                 the loop is idle until it becomes available"
             );
         } else {
             log::info!(
@@ -113,19 +321,18 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
         }
         Self {
             plat,
-            transcriber: ParakeetTranscriber::new(model_dir),
-            capture: None,
-            endpointer: Endpointer::new(DEFAULT_ENERGY_THRESHOLD, cfg.endpoint_silence_ms),
+            worker: available
+                .then(|| ListenerWorker::spawn(provider, model_dir, cfg.endpoint_silence_ms)),
             turn: TurnLogic::new(hf, cfg.submit_confirm_ms),
             paste,
             stt_active,
-            segment: Vec::new(),
-            input_rate: 16_000,
             available,
             paste_submit_delay_ms: cfg.paste_submit_delay_ms,
             pending_enter_at: None,
             ttsq,
             gate,
+            #[cfg(test)]
+            provider: provider.to_string(),
         }
     }
 
@@ -133,6 +340,13 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
     /// field's doc) — called from `Engine::reload` on every config apply.
     pub(crate) fn set_paste_submit_delay_ms(&mut self, ms: u64) {
         self.paste_submit_delay_ms = ms;
+    }
+
+    /// The resolved STT provider token this listener instance was built with — see the
+    /// field's doc.
+    #[cfg(test)]
+    pub(crate) fn provider(&self) -> &str {
+        &self.provider
     }
 
     /// Test-only constructor: skips the Parakeet-availability probe and starts with no
@@ -144,19 +358,16 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
     fn for_test(plat: Rc<P>, turn: TurnLogic, gate: Option<Arc<StatusGate>>) -> Self {
         Self {
             plat,
-            transcriber: ParakeetTranscriber::new(PathBuf::new()),
-            capture: None,
-            endpointer: Endpointer::new(DEFAULT_ENERGY_THRESHOLD, 700),
+            worker: None,
             turn,
             paste: Arc::new(std::sync::Mutex::new(crate::PasteBuf::default())),
             stt_active: Arc::new(AtomicBool::new(false)),
-            segment: Vec::new(),
-            input_rate: 16_000,
             available: true,
             paste_submit_delay_ms: 0,
             pending_enter_at: None,
             ttsq: None,
             gate,
+            provider: String::new(),
         }
     }
 
@@ -175,50 +386,28 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
         if !self.available {
             return;
         }
-        // Ensure the mic is open; the first opening tick just primes the stream.
-        if self.capture.is_none() {
-            match Capture::open() {
-                Ok(c) => {
-                    self.input_rate = c.input_rate().max(1);
-                    self.capture = Some(c);
-                }
-                Err(e) => log::warn!(target: "engine", "always-listen mic open: {e}"),
+        let Some(worker) = &self.worker else { return };
+        worker.set_enabled(true);
+        let epoch = worker.epoch.load(Ordering::SeqCst);
+        let events: Vec<_> = worker.rx.try_iter().collect();
+        for event in events {
+            let event_epoch = match &event {
+                ListenerEvent::Tick { epoch, .. }
+                | ListenerEvent::SpeechOnset { epoch }
+                | ListenerEvent::Segment { epoch, .. } => *epoch,
+            };
+            if event_epoch != epoch {
+                continue;
             }
-            return;
-        }
-
-        let chunk = self.capture.as_ref().expect("capture open").drain_new();
-        let (event, dt_ms) = if chunk.is_empty() {
-            (None, FALLBACK_DT_MS)
-        } else {
-            let energy = frame_rms(&chunk);
-            let dt = ((chunk.len() as u64 * 1000) / self.input_rate as u64).max(1);
-            self.segment.extend_from_slice(&chunk);
-            (self.endpointer.step(energy, dt), dt)
-        };
-
-        let actions = match event {
-            // Speech resumed → cancel a pending submit (the stopword was content).
-            Some(EndpointEvent::SpeechOnset) => self.turn.on_speech_onset(),
-            // Utterance over → transcribe the buffered segment and feed the turn.
-            Some(EndpointEvent::SegmentClosed) => {
-                let pcm16 = resample_to_16k(&self.segment, self.input_rate);
-                self.segment.clear();
-                let text = self
-                    .transcriber
-                    .transcribe_pcm_16k(&pcm16)
-                    .unwrap_or_default();
-                self.turn.on_segment(&text)
+            let actions = match event {
+                ListenerEvent::Tick { dt_ms, .. } => self.turn.on_tick(dt_ms),
+                ListenerEvent::SpeechOnset { .. } => self.turn.on_speech_onset(),
+                ListenerEvent::Segment { text, .. } => self.turn.on_segment(&text),
+            };
+            self.sync_pill();
+            for action in actions {
+                self.exec(action, cancel_current, cancel_other);
             }
-            // Steady silence → advance the stopword confirmation window.
-            None => self.turn.on_tick(dt_ms),
-        };
-
-        // Mirror the turn state into the dictation pill (live buffer while capturing,
-        // hidden otherwise), then execute any submit/cancel.
-        self.sync_pill();
-        for a in actions {
-            self.exec(a, cancel_current, cancel_other);
         }
     }
 
@@ -255,9 +444,9 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
     /// play-gate, or stopping the loop). Leaves the turn state intact — after a
     /// submit the turn is already reset, and TTS only plays post-submit.
     fn gate_off(&mut self) {
-        if self.capture.take().is_some() {
-            self.segment.clear();
-            self.endpointer.reset();
+        if let Some(worker) = &self.worker {
+            worker.set_enabled(false);
+            while worker.rx.try_recv().is_ok() {}
         }
     }
 
@@ -419,12 +608,7 @@ mod tests {
         let plat = Rc::new(MockPlatform::default());
         let mut l = Listener::for_test(plat, turn(), None);
 
-        l.segment.push(0.5);
-        l.gate_off(); // capture is already None → nothing to close
-        assert_eq!(
-            l.segment,
-            vec![0.5],
-            "no open capture ⇒ segment/endpointer are left untouched"
-        );
+        l.gate_off(); // no worker in tests: safe no-op
+        assert!(l.worker.is_none());
     }
 }

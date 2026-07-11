@@ -272,4 +272,8 @@ impl StreamingStt for SystemStreamer {
     fn transcribe_ms(&self) -> f64 {
         self.transcribe_ms
     }
+
+    fn provider(&self) -> ds_config::RealizedProvider {
+        ds_config::RealizedProvider::System
+    }
 }

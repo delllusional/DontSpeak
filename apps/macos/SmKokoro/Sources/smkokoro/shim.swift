@@ -506,6 +506,7 @@ private final class LegacyRun: @unchecked Sendable {
     private let textLock = NSLock()
     private var committedText: String = ""
     private var latestPartial: String = ""
+    private var lastPartialAt: TimeInterval?
 
     func finish(text: String?, error: Error?) {
         lock.lock()
@@ -532,10 +533,13 @@ private final class LegacyRun: @unchecked Sendable {
     func recordPartial(_ newText: String) {
         textLock.lock()
         defer { textLock.unlock() }
-        if legacySegmentDidReset(previous: latestPartial, new: newText), !latestPartial.isEmpty {
+        let now = ProcessInfo.processInfo.systemUptime
+        let gap = lastPartialAt.map { now - $0 }
+        if legacySegmentDidReset(previous: latestPartial, new: newText, gapSeconds: gap), !latestPartial.isEmpty {
             committedText = legacyJoin(committedText, latestPartial)
         }
         latestPartial = newText
+        lastPartialAt = now
     }
 
     /// `committedText + " " + finalSegment` — the shape `isFinal`'s callback hands to
@@ -947,19 +951,20 @@ private func legacyJoin(_ committed: String, _ current: String) -> String {
 /// NO explicit signal for this (confirmed empirically — see the streaming section's doc
 /// comment): after a pause, `bestTranscription` just silently starts over on the next
 /// non-final callback, with the task still `.running` and `isFinal` never firing early. So
-/// a reset is inferred from the text itself: a genuine reset produces a hypothesis that is
-/// BOTH shorter than the previous one AND shares almost none of its leading characters —
+/// a reset is inferred from the text itself: a genuine reset shares almost none of the
+/// previous leading characters and either shrinks OR arrives after a phrase-sized callback gap —
 /// vs. an ordinary in-flight revision (e.g. digit re-grouping: `"Testing one"` →
 /// `"Testing 12"`, observed empirically), which may shrink by a character or two but keeps
 /// most of the previous text's prefix intact. Requiring both conditions (not just a length
 /// decrease) is what tells the two apart; `< 0.5` was chosen because the empirical reset
 /// cases measured ~0–5% shared prefix vs. ~70%+ for ordinary revisions — comfortably clear
 /// of both.
-private func legacySegmentDidReset(previous: String, new: String) -> Bool {
-    guard !previous.isEmpty, new.count < previous.count else { return false }
+private func legacySegmentDidReset(previous: String, new: String, gapSeconds: TimeInterval?) -> Bool {
+    guard !previous.isEmpty else { return false }
     let commonPrefixLen = zip(previous, new).prefix { $0 == $1 }.count
     let ratio = Double(commonPrefixLen) / Double(previous.count)
-    return ratio < 0.5
+    let phraseGap = gapSeconds.map { $0 >= 0.65 } ?? false
+    return ratio < 0.5 && (new.count < previous.count || phraseGap)
 }
 
 /// Begin a new system-STT utterance (per-tier). Returns 0 on success.

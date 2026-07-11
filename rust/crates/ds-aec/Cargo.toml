@@ -56,6 +56,8 @@ windows = { workspace = true, features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 libpulse-binding = "2.28"
 libpulse-simple-binding = "2.25"
+# Logging facade macros (log::info!/warn!) for the capture-thread reconnect path below.
+log = { workspace = true }
 
 [[bin]]
 # M1 smoke test: open the VPIO unit, render a tone, print captured RMS — proves

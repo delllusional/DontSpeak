@@ -31,6 +31,10 @@ struct ServeReq {
     /// For `op:"diarize"` / `op:"enroll"` — how many seconds of mic to record first.
     #[serde(default)]
     seconds: Option<u64>,
+    /// Monotonic daemon-owned identity for `listen`/`lstop`. A stop cancels this
+    /// generation even when it reaches the helper before the queued start runs.
+    #[serde(default)]
+    session: Option<u64>,
 }
 fn default_rate() -> f32 {
     1.0
@@ -193,8 +197,10 @@ fn leading_silence_pcm(srate_hz: u32) -> Vec<f32> {
 
 pub(crate) fn serve() -> ! {
     use std::io::{BufRead, Write};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
+
+    let tts_wanted = std::env::var_os("DONTSPEAK_TTS_PRELOAD").is_some();
 
     // ── STT (Parakeet) preloads in PARALLEL with the TTS load below ──────────────────────
     // Construct the transcriber first (cheap — no model load yet) and, when STT is wanted
@@ -213,10 +219,11 @@ pub(crate) fn serve() -> ! {
         &stt_provider,
         parakeet_dir,
     )));
-    // The `transcriber` cache is managed by preload/load/unload stt. Real listen falls back to it
-    // only for non-streaming backends. Streaming providers use a separate `backend_cell` (in listen.rs)
-    // that is also preloaded/unloaded. `unload stt` drives both. `STTLOADED` reflects only the
-    // transcriber cache. See `SttResidencySlot`.
+    // The `transcriber` cache is managed by preload/load/unload stt. Real listen falls back to
+    // it only for non-streaming backends. Streaming providers use a separate `backend_cell` (in
+    // listen.rs) that is also preloaded/unloaded — every call site below tries it FIRST. `unload
+    // stt` drives both. `STTLOADED`/`STT_PROVIDER` are reported from whichever cache actually
+    // loaded (`loaded`, a few lines down), not hardcoded to `transcriber`. See `SttResidencySlot`.
     // Claimed the MOMENT the STT load starts — by the parallel preload below OR a later
     // `load stt` request — so the two can't BOTH load the model concurrently. See
     // `SttResidencySlot`: `Idle -> Loading -> Loaded`, with `Loading`/`Loaded` only ever
@@ -236,19 +243,17 @@ pub(crate) fn serve() -> ! {
             // honestly means resident + warm).
             println!("{}stt", proto::WARMING_PREFIX);
             let _ = std::io::stdout().flush();
-            let mut t = transcriber.lock().unwrap();
             log::info!(target: "helper", "load stt attempting (provider={stt_provider})");
-            match t.preload() {
-                Ok(()) => {
-                    // Also warm the SEPARATE streaming-backend cache a real listen actually
-                    // hits for streaming-capable providers (no-op / returns false for a
-                    // non-streaming provider) — otherwise `transcriber` here stays warm while
-                    // the first real listen still pays a cold `build_backend` load.
-                    crate::listen::preload_streaming(&stt_provider);
-                    // STT_PROVIDER mirrors the TTS `PROVIDER` line: the REALIZED ort EP the STT
-                    // sessions loaded on, so the engine reports the same realized runtime for both.
+            let loaded = if let Some(provider) = crate::listen::preload_streaming(&stt_provider) {
+                Ok(provider)
+            } else {
+                let mut t = transcriber.lock().unwrap();
+                t.preload().map(|()| t.provider())
+            };
+            match loaded {
+                Ok(provider) => {
                     println!("{}", proto::STTLOADED);
-                    println!("{}{}", proto::STT_PROVIDER_PREFIX, t.provider().as_str());
+                    println!("{}{}", proto::STT_PROVIDER_PREFIX, provider.as_str());
                     let _ = std::io::stdout().flush();
                     stt_claimed.resolve_ok();
                 }
@@ -273,28 +278,34 @@ pub(crate) fn serve() -> ! {
     // ENGINE's download manager; load_backend only loads them offline). Tell the engine so
     // the dot reads "Starting…" through the load + warmup (which can be slow on the first
     // ANE compile), instead of a premature green, until READY below.
-    println!("{}tts", proto::WARMING_PREFIX);
-    let _ = std::io::stdout().flush();
+    if tts_wanted {
+        println!("{}tts", proto::WARMING_PREFIX);
+        let _ = std::io::stdout().flush();
+    }
     // Load once. READY/ERR let the UI know the model is warm.
     // Held as Option so a `unload tts` can free the Kokoro model while the helper
     // stays warm for STT; the next speak lazily reloads it (below).
-    let mut synth = match load_backend() {
-        Ok(s) => {
-            // PROVIDER (before READY) lets the engine report the active execution provider.
-            // READY is emitted LATER — only after the audio OUTPUT is opened + primed below —
-            // so green honestly means "warm AND able to make sound", not just "model loaded".
-            println!("{}{}", proto::PROVIDER_PREFIX, s.provider().as_str());
-            let _ = std::io::stdout().flush();
-            Some(s)
+    let mut synth = if tts_wanted {
+        match load_backend() {
+            Ok(s) => {
+                // PROVIDER (before READY) lets the engine report the active execution provider.
+                // READY is emitted LATER — only after the audio OUTPUT is opened + primed below —
+                // so green honestly means "warm AND able to make sound", not just "model loaded".
+                println!("{}{}", proto::PROVIDER_PREFIX, s.provider().as_str());
+                let _ = std::io::stdout().flush();
+                Some(s)
+            }
+            Err(e) => {
+                println!("{} {e}", proto::ERR);
+                let _ = std::io::stdout().flush();
+                // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
+                // destructors is this crate's teardown convention (see main.rs's top
+                // comment — ort/cpal abort on teardown).
+                unsafe { _exit(1) };
+            }
         }
-        Err(e) => {
-            println!("{} {e}", proto::ERR);
-            let _ = std::io::stdout().flush();
-            // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
-            // destructors is this crate's teardown convention (see main.rs's top
-            // comment — ort/cpal abort on teardown).
-            unsafe { _exit(1) };
-        }
+    } else {
+        None
     };
 
     /// A playback request the loop will synth + play.
@@ -307,7 +318,7 @@ pub(crate) fn serve() -> ! {
         req: Option<PlayReq>,
         /// A `listen` (STT) job was requested. Mutually exclusive with TTS playback
         /// (the engine never speaks and listens at once — the mic-barge gates them).
-        listen: bool,
+        listen: Option<u64>,
         quit: bool,
         /// `unload` requests: free the cached Kokoro (tts) / Parakeet (stt) model
         /// when the engine no longer needs it but the helper stays warm for the other.
@@ -327,7 +338,7 @@ pub(crate) fn serve() -> ! {
     let shared = Arc::new((
         Mutex::new(State {
             req: None,
-            listen: false,
+            listen: None,
             quit: false,
             unload_tts: false,
             unload_stt: false,
@@ -373,7 +384,7 @@ pub(crate) fn serve() -> ! {
     // CoreAudio teardown abort. Per-request `Player`s are created on its mixer.
     // Skipped only when the duplex backend owns render (macOS VPIO); a capture-only
     // duplex keeps rodio for output.
-    let device = if render_via_duplex {
+    let device = if render_via_duplex || !tts_wanted {
         None
     } else {
         match rodio::DeviceSinkBuilder::open_default_sink() {
@@ -405,6 +416,10 @@ pub(crate) fn serve() -> ! {
     // A `Send` handle so the stdin reader can barge the VPIO render from its thread
     // (the unit itself is !Send and lives here on the playback thread).
     let duplex_barge: Option<std::sync::Arc<AtomicBool>> = duplex.as_ref().map(|d| d.barge_flag());
+    let full_duplex_listening = Arc::new(AtomicBool::new(false));
+    let capturing_diarize = Arc::new(AtomicBool::new(false));
+    let listen_stopped_through = Arc::new(AtomicU64::new(0));
+    let listen_latest_generation = Arc::new(AtomicU64::new(0));
     // Full-duplex COEXIST: spawn the concurrent listen thread (drains the
     // echo-cancelled mic + transcribes while this thread renders TTS). `listen_sig`
     // is the reader→thread control (Some only in full-duplex).
@@ -413,9 +428,12 @@ pub(crate) fn serve() -> ! {
         let capture = dx.capture_handle();
         let tr = transcriber.clone();
         let sig2 = sig.clone();
+        let stopped = listen_stopped_through.clone();
+        let capturing = capturing_diarize.clone();
+        let listening = full_duplex_listening.clone();
         std::thread::Builder::new()
             .name("ds-listen".into())
-            .spawn(move || concurrent_listen_loop(capture, tr, sig2))
+            .spawn(move || concurrent_listen_loop(capture, tr, sig2, stopped, capturing, listening))
             .ok();
         sig
     });
@@ -438,8 +456,6 @@ pub(crate) fn serve() -> ! {
     // finishing/tearing down — but this closes the "whole session" overlap the audit
     // flagged. No-ops in half-duplex (`listen_sig` is `None`, so
     // `full_duplex_listening` is never set).
-    let full_duplex_listening = Arc::new(AtomicBool::new(false));
-    let capturing_diarize = Arc::new(AtomicBool::new(false));
     // The CURRENT request's player, shared with the reader thread for INSTANT barge
     // (`stop()` is a non-blocking flag; the player is discarded after each request).
     let cur_player: Arc<Mutex<Option<Arc<rodio::Player>>>> = Arc::new(Mutex::new(None));
@@ -459,7 +475,6 @@ pub(crate) fn serve() -> ! {
     // arriving mid-listen (narration) must QUEUE behind the dictation, not abort it (which
     // truncated the capture). It trips on the INTENDED stops only: `stop` / `lstop` (the
     // seconds-timer + Caps release) and shutdown (stdin EOF).
-    let listen_cancel = Arc::new(AtomicBool::new(false));
     // MUTE: silence output WITHOUT stopping — the queue/playback still drains (timing
     // preserved), only the audio is zeroed. Toggled by the `mute` op (Caps-tap when dictation
     // is off, or the tray checkbox). Read by the playback `append` below (zeroes the PCM) and
@@ -473,13 +488,13 @@ pub(crate) fn serve() -> ! {
         let cur_player = cur_player.clone();
         let cancel = cancel.clone();
         let capture_cancel = capture_cancel.clone();
-        let listen_cancel = listen_cancel.clone();
+        let listen_stopped_through = listen_stopped_through.clone();
+        let listen_latest_generation = listen_latest_generation.clone();
         let duplex_barge = duplex_barge.clone();
         let listen_sig = listen_sig.clone();
         let muted = muted.clone();
         let cue_mixer = cue_mixer.clone();
         let full_duplex_listening = full_duplex_listening.clone();
-        let capturing_diarize = capturing_diarize.clone();
         std::thread::spawn(move || {
             let stdin = std::io::stdin();
             for line in stdin.lock().lines() {
@@ -540,7 +555,11 @@ pub(crate) fn serve() -> ! {
                 match req.op.as_str() {
                     "stop" => {
                         cancel_current(); // silent: no enqueue, no DONE
-                        listen_cancel.store(true, Ordering::SeqCst); // also ends a half-duplex listen
+                        let generation = listen_latest_generation.load(Ordering::SeqCst);
+                        listen_stopped_through.fetch_max(generation, Ordering::SeqCst);
+                        if let Some(sig) = &listen_sig {
+                            sig.1.notify_one();
+                        }
                     }
                     "mute" => {
                         // Toggle global mute (text "on"/"off"). Does NOT cancel — playback keeps
@@ -600,6 +619,8 @@ pub(crate) fn serve() -> ! {
                         cancel_current(); // newest request wins
                     }
                     "listen" => {
+                        let generation = req.session.unwrap_or(1);
+                        listen_latest_generation.fetch_max(generation, Ordering::SeqCst);
                         if let Some(sig) = &listen_sig {
                             // Full-duplex COEXIST: wake the concurrent listen thread;
                             // do NOT cancel an in-flight speak. Claim the mic for
@@ -611,40 +632,25 @@ pub(crate) fn serve() -> ! {
                             // concurrent listen thread, so the two capture streams
                             // never run concurrently on the same mic.
                             full_duplex_listening.store(true, Ordering::SeqCst);
-                            let sig = sig.clone();
-                            let capturing_diarize = capturing_diarize.clone();
-                            std::thread::spawn(move || {
-                                while capturing_diarize.load(Ordering::SeqCst) {
-                                    std::thread::sleep(std::time::Duration::from_millis(30));
-                                }
-                                let (m, cv) = &*sig;
-                                let mut s = m.lock().unwrap();
-                                s.start = true;
-                                s.stop = false;
-                                cv.notify_one();
-                            });
+                            let (m, cv) = &**sig;
+                            m.lock().unwrap().start = Some(generation);
+                            cv.notify_one();
                         } else {
                             // Half-duplex: serve-loop listen, mutually exclusive w/ speak.
                             let (m, cv) = &*shared;
-                            m.lock().unwrap().listen = true;
+                            m.lock().unwrap().listen = Some(generation);
                             cv.notify_one();
                             cancel_current();
                         }
                     }
                     "lstop" => {
+                        let generation = req.session.unwrap_or(u64::MAX);
+                        listen_stopped_through.fetch_max(generation, Ordering::SeqCst);
                         // End the listen WITHOUT touching the speak (coexist). In
                         // half-duplex it's the serve-loop listen, ended via listen_cancel
                         // (NOT the TTS `cancel`, so a queued speak isn't disturbed).
                         if let Some(sig) = &listen_sig {
-                            let (m, cv) = &**sig;
-                            m.lock().unwrap().stop = true;
-                            cv.notify_one();
-                            // Release the mic claim so a diarize/enroll job queued
-                            // behind this dictation can proceed (see
-                            // `full_duplex_listening` above).
-                            full_duplex_listening.store(false, Ordering::SeqCst);
-                        } else {
-                            listen_cancel.store(true, Ordering::SeqCst);
+                            sig.1.notify_one();
                         }
                     }
                     "diarize" => {
@@ -704,12 +710,11 @@ pub(crate) fn serve() -> ! {
             // End an in-flight diarize/enroll capture AND a half-duplex listen too (both
             // ignore the TTS `cancel`).
             capture_cancel.store(true, Ordering::SeqCst);
-            listen_cancel.store(true, Ordering::SeqCst);
+            listen_stopped_through.store(u64::MAX, Ordering::SeqCst);
             // Release the full-duplex mic claim too, so anything still waiting on
             // `full_duplex_listening` (see above) unblocks via `capture_cancel` rather
             // than hanging — the wait loops also check `capture_cancel` directly, this
             // is just belt-and-suspenders.
-            full_duplex_listening.store(false, Ordering::SeqCst);
             if let Some(p) = cur_player.lock().unwrap().as_ref() {
                 p.stop();
             }
@@ -720,13 +725,12 @@ pub(crate) fn serve() -> ! {
                 let (m, cv) = &**sig;
                 let mut ls = m.lock().unwrap();
                 ls.quit = true;
-                ls.stop = true;
                 cv.notify_one();
             }
             let (m, cv) = &*shared;
             let mut s = m.lock().unwrap();
             s.req = None; // do NOT drain a pending request on quit
-            s.listen = false;
+            s.listen = None;
             // Also drop every OTHER pending job kind — previously only `req`/`listen`
             // were cleared here, so a diarize/enroll/(un)load queued at the same moment
             // as EOF would still run AFTER quit was signaled: diarize/enroll would open
@@ -770,7 +774,7 @@ pub(crate) fn serve() -> ! {
         // !Send, and the engine never speaks + listens at once).
         enum Job {
             Speak(PlayReq),
-            Listen,
+            Listen(u64),
             Diarize(u64),
             Enroll(u64),
             UnloadTts,
@@ -782,7 +786,7 @@ pub(crate) fn serve() -> ! {
             let (m, cv) = &*shared;
             let mut s = m.lock().unwrap();
             while s.req.is_none()
-                && !s.listen
+                && s.listen.is_none()
                 && s.diarize.is_none()
                 && s.enroll.is_none()
                 && !s.quit
@@ -796,9 +800,8 @@ pub(crate) fn serve() -> ! {
             // Drain a pending job even if `quit` also arrived; exit only when idle+quit.
             if let Some(r) = s.req.take() {
                 Job::Speak(r)
-            } else if s.listen {
-                s.listen = false;
-                Job::Listen
+            } else if let Some(generation) = s.listen.take() {
+                Job::Listen(generation)
             } else if let Some(secs) = s.diarize.take() {
                 Job::Diarize(secs)
             } else if let Some(secs) = s.enroll.take() {
@@ -823,21 +826,24 @@ pub(crate) fn serve() -> ! {
                 unsafe { _exit(0) };
             }
         };
-        // Fresh job: clear any cancel left by the request that triggered it (both the TTS
-        // barge `cancel` and the dictation `listen_cancel`, so a stale stop can't end the
-        // listen we're about to start).
+        // A fresh playback job clears playback barge state. Listen cancellation is
+        // generation-based and deliberately never reset here: an early lstop must survive
+        // queueing and prevent the matching capture from opening.
         cancel.store(false, Ordering::SeqCst);
-        listen_cancel.store(false, Ordering::SeqCst);
 
         // STT job: capture + stream partials + final, then back to waiting.
         let PlayReq { voice, rate, text } = match job {
             Job::Speak(r) => r,
-            Job::Listen => {
+            Job::Listen(generation) => {
                 // Half-duplex only (full-duplex routes to the concurrent thread, so
                 // `duplex` is always None here — its old VPIO capture path is gone).
                 // Uses `listen_cancel` so a TTS speak barge can't truncate the dictation;
                 // only stop/lstop (the seconds-timer / Caps release) and EOF end it.
-                run_listen(&mut transcriber.lock().unwrap(), &listen_cancel);
+                run_listen(
+                    &mut transcriber.lock().unwrap(),
+                    &listen_stopped_through,
+                    generation,
+                );
                 continue;
             }
             Job::Diarize(secs) => {
@@ -963,16 +969,18 @@ pub(crate) fn serve() -> ! {
                     log::info!(target: "helper", "load stt skipped — a load is already claimed/in flight");
                     continue;
                 }
-                let mut t = transcriber.lock().unwrap();
                 log::info!(target: "helper", "load stt attempting (provider={stt_provider})");
-                match t.preload() {
-                    Ok(()) => {
-                        // Same streaming-cache warm as the startup preload (see there) — an
-                        // `unload stt` + `load stt` cycle must re-warm BOTH caches, not just
-                        // `transcriber`.
-                        crate::listen::preload_streaming(&stt_provider);
+                let loaded = if let Some(provider) = crate::listen::preload_streaming(&stt_provider)
+                {
+                    Ok(provider)
+                } else {
+                    let mut t = transcriber.lock().unwrap();
+                    t.preload().map(|()| t.provider())
+                };
+                match loaded {
+                    Ok(provider) => {
                         println!("{}", proto::STTLOADED);
-                        println!("{}{}", proto::STT_PROVIDER_PREFIX, t.provider().as_str());
+                        println!("{}{}", proto::STT_PROVIDER_PREFIX, provider.as_str());
                         let _ = std::io::stdout().flush();
                         stt_claimed.resolve_ok();
                     }

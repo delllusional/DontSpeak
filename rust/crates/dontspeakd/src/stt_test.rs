@@ -10,6 +10,7 @@
 //! final [`Response::Transcript`].
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ds_ipc::Response;
 
@@ -18,11 +19,22 @@ use crate::tts::TtsManager;
 pub struct TestSession {
     /// The warm helper that hosts both engines (Kokoro + Parakeet). STT runs there.
     tts: Arc<TtsManager>,
+    /// This session's early-stop flag — see `HelperStt::stop_requested` (same race,
+    /// same fix): `run()` and `stop()` are driven by two DIFFERENT connections/threads,
+    /// so a `stop` arriving before `run()` has reached `TtsManager::listen_cancellable`
+    /// must still be observed instead of finding nothing to cancel yet. Reset at the top
+    /// of each `run()` (this `TestSession` is a single long-lived instance reused across
+    /// sessions, not recreated per session — see `boot.rs`), rather than replaced, since
+    /// `run`/`stop` only ever get `&self`.
+    stop_requested: Arc<AtomicBool>,
 }
 
 impl TestSession {
     pub fn new(tts: Arc<TtsManager>) -> Self {
-        Self { tts }
+        Self {
+            tts,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Run a recognition session, streaming responses via `emit`. Blocks on the
@@ -39,6 +51,7 @@ impl TestSession {
             ));
             return;
         }
+        self.stop_requested.store(false, Ordering::SeqCst);
         emit(&Response::Listening);
         // The partial callback borrows `emit` only for the listen call; `emit` is
         // free again for the terminal response below.
@@ -48,7 +61,8 @@ impl TestSession {
                     text: t.to_string(),
                 })
             };
-            self.tts.listen(&mut on_partial)
+            self.tts
+                .listen_cancellable(&self.stop_requested, &mut on_partial)
         };
         match result {
             Ok(text) => emit(&Response::Transcript { text }),
@@ -61,6 +75,7 @@ impl TestSession {
     /// so it ends the listen in BOTH modes — in full-duplex a plain `stop` cancels
     /// a speak but leaves the concurrent listen running.
     pub fn stop(&self) {
+        self.stop_requested.store(true, Ordering::SeqCst);
         self.tts.stop_listen();
     }
 }

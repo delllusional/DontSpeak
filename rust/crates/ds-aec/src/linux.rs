@@ -55,6 +55,26 @@ fn candidate_sources() -> Vec<String> {
     v
 }
 
+fn connect_capture(spec: &Spec) -> Result<(String, Simple), String> {
+    let mut last_err = String::from("no echo-cancel source name to try");
+    for name in candidate_sources() {
+        match Simple::new(
+            None,
+            "DontSpeak",
+            Direction::Record,
+            Some(&name),
+            "aec-capture",
+            spec,
+            None,
+            None,
+        ) {
+            Ok(simple) => return Ok((name, simple)),
+            Err(e) => last_err = format!("connect '{name}': {e}"),
+        }
+    }
+    Err(last_err)
+}
+
 /// Live echo-cancelled capture from the server's cancelled source. The `Simple` stream
 /// lives entirely on the capture thread; this struct holds only cross-thread handles.
 pub struct DuplexAudio {
@@ -85,27 +105,7 @@ impl DuplexAudio {
 
         // Connect on THIS thread so a failure (no cancelled source) returns synchronously and
         // the caller degrades immediately — no thread left spinning. Try each candidate name.
-        let mut last_err = String::from("no echo-cancel source name to try");
-        let mut connected: Option<(String, Simple)> = None;
-        for name in candidate_sources() {
-            match Simple::new(
-                None,        // default server
-                "DontSpeak", // app name
-                Direction::Record,
-                Some(&name),   // the cancelled source
-                "aec-capture", // stream description
-                &spec,
-                None, // default channel map
-                None, // default buffering
-            ) {
-                Ok(s) => {
-                    connected = Some((name, s));
-                    break;
-                }
-                Err(e) => last_err = format!("connect '{name}': {e}"),
-            }
-        }
-        let (_name, simple) = connected.ok_or_else(|| {
+        let (_name, simple) = connect_capture(&spec).map_err(|last_err| {
             format!(
                 "no PulseAudio/PipeWire echo-cancel source reachable ({last_err}) — load \
                  module-echo-cancel (see apps/linux/aec/) for full-duplex; using half-duplex"
@@ -193,18 +193,40 @@ impl Drop for DuplexAudio {
 /// into the shared buffer until `stop`. A server-side read error ends the loop quietly (the
 /// next listen re-opens or degrades to half-duplex).
 fn capture_thread(
-    simple: Simple,
+    mut simple: Simple,
     cap: Arc<Mutex<VecDeque<f32>>>,
     stop: Arc<AtomicBool>,
     ready: mpsc::Sender<()>,
 ) {
     let _ = ready.send(()); // stream already open; unblock open()
     let cap_limit = CAPTURE_RATE as usize * CAPTURE_SECS;
+    let spec = Spec {
+        format: Format::F32le,
+        channels: 1,
+        rate: CAPTURE_RATE,
+    };
     let mut bytes = vec![0u8; CHUNK_FRAMES * std::mem::size_of::<f32>()];
     let mut samples: Vec<f32> = Vec::with_capacity(CHUNK_FRAMES);
     while !stop.load(Ordering::Acquire) {
-        if simple.read(&mut bytes).is_err() {
-            break; // server gone / stream error — end capture
+        if let Err(e) = simple.read(&mut bytes) {
+            log::warn!(target: "aec", "PulseAudio/PipeWire AEC read failed ({e}); reconnecting");
+            loop {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                match connect_capture(&spec) {
+                    Ok((name, reopened)) => {
+                        log::info!(target: "aec", "PulseAudio/PipeWire AEC reconnected to {name}");
+                        simple = reopened;
+                        break;
+                    }
+                    Err(retry) => {
+                        log::warn!(target: "aec", "PulseAudio/PipeWire AEC reconnect failed ({retry})");
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                }
+            }
+            continue;
         }
         samples.clear();
         for f in bytes.chunks_exact(4) {

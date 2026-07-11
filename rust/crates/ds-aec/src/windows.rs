@@ -220,9 +220,17 @@ fn capture_thread(
                 return;
             }
         };
+        let published_rate = opened.rate;
+        let mut rate_converter = None;
 
         while !stop.load(Ordering::Acquire) {
-            match run_capture_loop(&opened, &cap, &stop) {
+            match run_capture_loop(
+                &opened,
+                &cap,
+                &stop,
+                published_rate,
+                rate_converter.as_mut(),
+            ) {
                 Ok(()) => break, // `stop` was set — clean shutdown
                 Err(e) => {
                     eprintln!(
@@ -230,7 +238,6 @@ fn capture_thread(
                          reconnecting to the default communications endpoint"
                     );
                     *last_error.lock().unwrap() = Some(e);
-                    let original_rate = opened.rate;
                     // Drop the failed COM objects (Stop + CloseHandle) before
                     // reopening.
                     drop(opened);
@@ -258,20 +265,17 @@ fn capture_thread(
                                  ({} Hz)",
                                 o.rate
                             );
-                            if o.rate != original_rate {
-                                // `capture_rate()` on the `DuplexAudio` handle is fixed at
-                                // the rate negotiated on the FIRST open; a reconnect that
-                                // renegotiates a different rate would silently mis-resample
-                                // downstream. Surface it loudly rather than let audio quietly
-                                // degrade — this is a known limitation of the reconnect path.
+                            if o.rate != published_rate {
                                 eprintln!(
                                     "dontspeak: WASAPI echo-cancel reconnect renegotiated \
-                                     {original_rate} Hz -> {} Hz; downstream resampling still \
-                                     assumes {original_rate} Hz for this session (restart the \
-                                     helper to pick up the new rate cleanly)",
+                                     {published_rate} Hz -> {} Hz; converting continuously back \
+                                     to {published_rate} Hz",
                                     o.rate
                                 );
                             }
+                            rate_converter = (o.rate != published_rate).then(|| {
+                                crate::resample::LinearResampler::new(o.rate, published_rate)
+                            });
                             *last_error.lock().unwrap() = None;
                             opened = o;
                         }
@@ -415,6 +419,8 @@ unsafe fn run_capture_loop(
     opened: &OpenedCapture,
     cap: &Arc<Mutex<VecDeque<f32>>>,
     stop: &Arc<AtomicBool>,
+    published_rate: u32,
+    mut rate_converter: Option<&mut crate::resample::LinearResampler>,
 ) -> Result<(), String> {
     let map = |ctx: &'static str| move |e: windows::core::Error| format!("{ctx}: {e}");
     // SAFETY: WASAPI FFI against the live session in `opened` (COM initialized on this
@@ -423,8 +429,9 @@ unsafe fn run_capture_loop(
     // is dereferenced (in downmix) only when non-null, for exactly the `nframes` the
     // driver reported.
     unsafe {
-        let cap_limit = opened.rate as usize * CAPTURE_SECS;
+        let cap_limit = published_rate as usize * CAPTURE_SECS;
         let mut acc: Vec<f32> = Vec::new();
+        let mut converted: Vec<f32> = Vec::new();
         while !stop.load(Ordering::Acquire) {
             // Wake on the period event (200 ms guard so we re-check `stop`).
             if WaitForSingleObject(opened.event, 200) != WAIT_OBJECT_0 {
@@ -460,7 +467,13 @@ unsafe fn run_capture_loop(
                     .map_err(map("release buffer"))?;
 
                 // Push to the shared buffer, dropping oldest if a listen stalls.
-                enqueue_bounded(cap, &acc, cap_limit);
+                if let Some(converter) = rate_converter.as_deref_mut() {
+                    converted.clear();
+                    converter.process(&acc, &mut converted);
+                    enqueue_bounded(cap, &converted, cap_limit);
+                } else {
+                    enqueue_bounded(cap, &acc, cap_limit);
+                }
             }
         }
         Ok(())

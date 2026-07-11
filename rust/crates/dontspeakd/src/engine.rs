@@ -15,7 +15,8 @@ use ds_stt::Stt;
 
 use crate::config_gate::{
     build_stt, caps_loop_enabled, full_duplex_wanted, helper_needed, helper_stt_provider,
-    helper_uses_stt, local_stt_available, normalize_long_press, reconcile_helper_models,
+    helper_uses_stt, helper_uses_tts, local_stt_available, normalize_long_press,
+    reconcile_helper_models,
 };
 use crate::listener;
 use crate::status::{CAPS_LOG_MAX, CapsEvent, CapsLog, StatusGate, now_ms};
@@ -971,6 +972,7 @@ impl<P: Platform + 'static> Engine<P> {
             tts.set_full_duplex_pref(full_duplex_wanted(cfg));
             tts.set_stt_provider_pref(helper_stt_provider(cfg));
             tts.set_stt_wanted(helper_uses_stt(cfg));
+            tts.set_tts_wanted(helper_uses_tts(cfg));
             // See the identical seeding + rationale in `boot::engine_run`: without this the
             // model-presence gate in `start_locked` would resolve ANE-vs-ONNX from a stale
             // provider preference on the FIRST `set_enabled` below whenever this reload flips
@@ -1024,7 +1026,18 @@ impl<P: Platform + 'static> Engine<P> {
             // the fresh-install model download must REBUILD it too — the hands-free twin
             // of the `build_stt` self-heal above; without it always-listen stays inert
             // until an app restart even though the model arrived and the dot went green.
-            if self.listener.is_none() || listen_changed || local_avail_flipped {
+            // `change.stt_changed`: the listener also resolves its provider ONCE at
+            // construction (`Listener::new` → `helper_stt_provider`), same as `build_stt`
+            // does for tap-to-talk above (line ~946) — without mirroring that same trigger
+            // here, switching STT engine/provider (e.g. ANE → CPU, or BuiltIn → System)
+            // while Always-listening is already running leaves the background listener on
+            // the STALE provider indefinitely, since `local_avail_flipped` alone stays
+            // false whenever both the old and new provider are already locally available.
+            if self.listener.is_none()
+                || listen_changed
+                || local_avail_flipped
+                || change.stt_changed
+            {
                 // Entering (or re-parameterizing) hands-free bypasses the Caps PTT in
                 // `tick`, so an in-flight dictation or a still-armed deferred submit
                 // would sit in stasis and paste a STALE transcript when the mode flips
@@ -3486,6 +3499,53 @@ mod tests {
         assert!(
             !d.is_recording(),
             "leaving Always tears down any in-flight hold"
+        );
+    }
+
+    #[test]
+    fn reload_always_mode_rebuilds_the_listener_on_a_live_stt_provider_switch() {
+        // Finding #5's acceptance criterion — "the selected STT provider is honored... in
+        // always-listening mode" — only held at CONSTRUCTION: `Listener::new` resolves its
+        // provider once (`helper_stt_provider`), and nothing rebuilt it on a LATER provider
+        // switch while Always mode stayed running. `local_avail_flipped` doesn't catch this
+        // case: Parakeet presence stays false→false on both sides in this test host (no real
+        // model files), same as it would stay true→true on a real host where both the old
+        // and new provider are already locally usable. Only `change.stt_changed` sees the
+        // switch, so `reload`'s rebuild condition must include it too.
+        let mut d = mk(600);
+        let mut cfg = VoiceConfig {
+            listen_mode: ds_config::ListenMode::Always,
+            stt_engine: Some(vec![ds_config::SttEngine::BuiltIn]),
+            provider: vec![ds_config::Provider::OrtCpu],
+            ..Default::default()
+        };
+        d.reload(&cfg);
+        assert_eq!(
+            d.listener
+                .as_ref()
+                .expect("Always mode builds a listener")
+                .provider(),
+            "cpu"
+        );
+
+        // Provider preference only — same engine selection, so this isolates
+        // `change.stt_changed` as the one thing that differs from the first reload.
+        cfg.provider = vec![ds_config::Provider::OrtCuda];
+        assert_ne!(
+            cfg.resolved_stt_provider(),
+            d.cfg.resolved_stt_provider(),
+            "test setup must force a real provider transition"
+        );
+        d.reload(&cfg);
+        assert!(
+            d.listener.is_some(),
+            "Always mode stays on across the reload"
+        );
+        assert_eq!(
+            d.listener.as_ref().unwrap().provider(),
+            "cuda",
+            "a live provider switch while Always-listening is running must rebuild the \
+             listener, not keep serving the stale provider"
         );
     }
 

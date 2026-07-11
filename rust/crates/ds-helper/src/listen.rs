@@ -15,13 +15,17 @@ use ds_aec::CaptureHandle;
 use ds_helper_proto as proto;
 use ds_stt::{OnnxStreamer, StreamSession, StreamingStt};
 
+fn generation_stopped(stopped_through: &std::sync::atomic::AtomicU64, generation: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    stopped_through.load(Ordering::SeqCst) >= generation
+}
+
 /// Control flags for the full-duplex concurrent listen thread (set by the stdin
 /// reader, polled by the thread). `start` opens a listen, `stop` (the `lstop` op)
 /// ends it, `quit` tears the thread down.
 #[derive(Default)]
 pub(crate) struct ListenSig {
-    pub(crate) start: bool,
-    pub(crate) stop: bool,
+    pub(crate) start: Option<u64>,
     pub(crate) quit: bool,
 }
 
@@ -35,23 +39,45 @@ pub(crate) fn concurrent_listen_loop(
     capture: CaptureHandle,
     transcriber: std::sync::Arc<std::sync::Mutex<ds_stt::LocalTranscriber>>,
     sig: std::sync::Arc<(std::sync::Mutex<ListenSig>, std::sync::Condvar)>,
+    stopped_through: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    capturing_diarize: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    listening: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
+    use std::sync::atomic::Ordering;
+
     crate::priority::elevate_current_thread();
     loop {
-        {
+        let generation = {
             let (m, cv) = &*sig;
             let mut s = m.lock().unwrap();
-            while !s.start && !s.quit {
+            while s.start.is_none() && !s.quit {
                 s = cv.wait(s).unwrap();
             }
             if s.quit {
                 return;
             }
-            s.start = false;
-            s.stop = false;
+            s.start.take().expect("listen generation set")
+        };
+        listening.store(true, Ordering::SeqCst);
+        while capturing_diarize.load(Ordering::SeqCst)
+            && !generation_stopped(&stopped_through, generation)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(30));
         }
-        run_concurrent_listen(&capture, &transcriber, &sig);
+        if generation_stopped(&stopped_through, generation) {
+            emit_empty_final();
+        } else {
+            run_concurrent_listen(&capture, &transcriber, &sig, &stopped_through, generation);
+        }
+        listening.store(false, Ordering::SeqCst);
     }
+}
+
+fn emit_empty_final() {
+    use std::io::Write as _;
+    println!("{}", proto::FINAL_PREFIX);
+    println!("{}", proto::LDONE);
+    let _ = std::io::stdout().flush();
 }
 
 /// Auto make-up gain for one captured utterance (`capture_gain = "auto"`): peak-
@@ -95,6 +121,51 @@ fn tail_preview_budget_samples(rate: u32) -> usize {
 /// for this tick's live preview: non-empty and within [`tail_preview_budget_samples`].
 fn tail_previewable(tail_len: usize, rate: u32) -> bool {
     tail_len > 0 && tail_len <= tail_preview_budget_samples(rate)
+}
+
+/// Low-cost online capture conditioning for the true streaming path. Manual gain is exact.
+/// Auto gain follows a slowly-decaying speech peak and moves quickly away from clipping but
+/// gradually toward more amplification, avoiding per-block pumping. Silence is never amplified.
+struct StreamingGain {
+    mode: ds_config::CaptureGain,
+    peak: f32,
+    gain: f32,
+}
+
+impl StreamingGain {
+    fn from_config() -> Self {
+        let mode = ds_config::Paths::resolve()
+            .map(|p| ds_config::VoiceConfig::load(&p).capture_gain)
+            .unwrap_or(ds_config::CaptureGain::Auto);
+        Self {
+            mode,
+            peak: 0.0,
+            gain: 1.0,
+        }
+    }
+
+    fn apply(&mut self, input: &[f32]) -> Vec<f32> {
+        let block_peak = input.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        let gain = if let Some(manual) = self.mode.manual() {
+            manual
+        } else {
+            const NOISE_FLOOR: f32 = 0.02;
+            const TARGET_PEAK: f32 = 0.9;
+            if block_peak < NOISE_FLOOR {
+                return input.to_vec();
+            }
+            self.peak = (self.peak * 0.995).max(block_peak);
+            let wanted = (TARGET_PEAK / self.peak).clamp(0.5, 15.0);
+            // Reduce hot input promptly; raise quiet input gradually so room noise does not pump.
+            let blend = if wanted < self.gain { 0.65 } else { 0.15 };
+            self.gain += (wanted - self.gain) * blend;
+            self.gain
+        };
+        if (gain - 1.0).abs() <= f32::EPSILON {
+            return input.to_vec();
+        }
+        input.iter().map(|s| (s * gain).clamp(-1.0, 1.0)).collect()
+    }
 }
 
 /// Build the live `PARTIAL` overlay line from the already-committed segment texts plus an
@@ -349,10 +420,12 @@ fn run_concurrent_listen(
     capture: &CaptureHandle,
     transcriber: &std::sync::Mutex<ds_stt::LocalTranscriber>,
     sig: &(std::sync::Mutex<ListenSig>, std::sync::Condvar),
+    stopped_through: &std::sync::atomic::AtomicU64,
+    generation: u64,
 ) {
     let stopped = || {
         let s = sig.0.lock().unwrap();
-        s.stop || s.quit
+        s.quit || generation_stopped(stopped_through, generation)
     };
     // Streaming path first; falls through to the offline loop when unavailable.
     if try_streaming(
@@ -417,9 +490,13 @@ fn trim_silence_16k(pcm: &[f32]) -> &[f32] {
 /// stream. (Full-duplex listens go through the concurrent thread, not here.)
 pub(crate) fn run_listen(
     transcriber: &mut ds_stt::LocalTranscriber,
-    cancel: &std::sync::atomic::AtomicBool,
+    stopped_through: &std::sync::atomic::AtomicU64,
+    generation: u64,
 ) {
-    use std::sync::atomic::Ordering;
+    if generation_stopped(stopped_through, generation) {
+        emit_empty_final();
+        return;
+    }
     // Fresh cpal mic. On open failure there's nothing to listen to — report and end.
     let capture = match ds_stt::Capture::open() {
         Ok(c) => c,
@@ -430,7 +507,7 @@ pub(crate) fn run_listen(
             return;
         }
     };
-    let stopped = || cancel.load(Ordering::SeqCst);
+    let stopped = || generation_stopped(stopped_through, generation);
     // Streaming path first; falls through to the offline loop when unavailable.
     if try_streaming(
         capture.input_rate(),
@@ -465,50 +542,54 @@ pub(crate) fn run_listen(
 /// (`cpu`/`cuda` → ONNX, `ane` → Core ML). One mic / one listen at a time, so a single
 /// cached instance is fine; the heavy model stays resident and each listen just `reset`s it.
 ///
-/// Concurrency invariant, precisely: "no `listen` op reaches the helper before any in-flight
-/// preload of this cache has finished" holds ONLY for the primary Caps-tap dictation path —
-/// `dontspeakd` sends `"listen"` there only after `config_gate::stt_can_start` (via
-/// `TtsQueue::stt_loaded()`/`engine.rs`'s `stt_ready_to_dictate`) observes `is_stt_loaded() ==
-/// true`, which is only set after `serve.rs` prints `STTLOADED`, which is only printed after
-/// [`preload_streaming`] has already completed in that same success arm.
-///
-/// It does NOT hold for Settings' "Test Recognition" path: `dontspeakd/src/stt_test.rs`'s
-/// `TestSession::run` (reached ungated from `dontspeakd/src/ipc.rs`'s `TestRecognitionStart`
-/// handler) calls `tts.listen(...)` gated only on `config_gate::parakeet_present_for`
-/// (file/shim presence) — NOT `is_stt_loaded()`. A user who enables Parakeet STT and
-/// immediately opens Settings → Test Recognition can send a `listen` op while a preload is
-/// still in flight, reaching [`try_streaming`] concurrently with [`preload_streaming`] against
-/// this cell. The `Mutex` rules out a data race, but there IS a real logical race: the preload
-/// builds a backend into the cell while `try_streaming` independently takes/overwrites it.
-///
-/// This is a PRE-EXISTING condition, not introduced or worsened by the `ModelSlot`/
-/// `SttResidencySlot` refactor (neither `stt_test.rs`, `ipc.rs`, nor `parakeet_present_for` was
-/// touched by it, and `TtsManager::listen()`'s only change was its internal-representation swap
-/// from a raw `AtomicBool` store to `ModelSlot::mark_loaded_optimistic()` — no timing/gating
-/// change to when the wire `listen` write happens). Not fixed here — that's a separate
-/// product/UX decision (should Test Recognition block/refuse while warming?). TODO: consider
-/// gating `TestSession::run` the same way `stt_can_start` gates dictation.
+/// `TtsManager` holds an exclusive listen lease for the helper's untagged output stream, while
+/// this mutex serializes preload/use/unload inside the child. `active` records a backend that a
+/// full-duplex listen temporarily owns; an unload received during that interval is remembered
+/// and completed as soon as the session returns it, rather than silently leaving the model warm.
 type CachedBackend = (String, Box<dyn StreamingStt>);
-fn backend_cell() -> &'static Mutex<Option<CachedBackend>> {
-    static CELL: OnceLock<Mutex<Option<CachedBackend>>> = OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(None))
+#[derive(Default)]
+struct BackendCache {
+    backend: Option<CachedBackend>,
+    active: Option<(String, ds_config::RealizedProvider)>,
+    unload_requested: bool,
+}
+
+fn backend_cell() -> &'static Mutex<BackendCache> {
+    static CELL: OnceLock<Mutex<BackendCache>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(BackendCache::default()))
 }
 
 /// Build + cache the streaming backend for `provider` right now instead of waiting for the
 /// first real listen to build it lazily — so `serve.rs`'s STT preload / `load stt` can warm the
 /// SAME cache a real listen actually uses for the streaming-capable providers (`cpu`/`cuda`
 /// ONNX, macOS `ane`), not just the separate offline `LocalTranscriber` cache it also warms.
-/// Returns `true` if the cache now holds a resident instance for `provider` (already did, or
-/// just built one); `false` if this provider doesn't stream or its assets are missing
+/// Returns the realized provider if the cache now holds a resident instance for `provider`
+/// (already did, or just built one); `None` if this provider doesn't stream or its assets are missing
 /// ([`build_backend`] returned `None`).
-pub(crate) fn preload_streaming(provider: &str) -> bool {
+pub(crate) fn preload_streaming(provider: &str) -> Option<ds_config::RealizedProvider> {
     let cell = backend_cell();
     let mut guard = cell.lock().unwrap();
-    if guard.as_ref().is_some_and(|(p, _)| p == provider) {
-        return true; // already resident for this provider
+    if guard.backend.as_ref().is_some_and(|(p, _)| p == provider) {
+        guard.unload_requested = false;
+        return guard
+            .backend
+            .as_ref()
+            .map(|(_, backend)| backend.provider());
     }
-    *guard = build_backend(provider).map(|b| (provider.to_string(), b));
-    guard.is_some()
+    if let Some((active_provider, realized)) = &guard.active {
+        if active_provider == provider {
+            let realized = *realized;
+            guard.unload_requested = false;
+            return Some(realized);
+        }
+        return None;
+    }
+    guard.backend = build_backend(provider).map(|b| (provider.to_string(), b));
+    guard.unload_requested = false;
+    guard
+        .backend
+        .as_ref()
+        .map(|(_, backend)| backend.provider())
 }
 
 /// Drop the cached streaming backend, freeing its resident model memory. Returns `true` if
@@ -516,7 +597,11 @@ pub(crate) fn preload_streaming(provider: &str) -> bool {
 /// `unload stt` free the SAME cache a real listen uses, not just the separate offline
 /// `LocalTranscriber` cache (which roughly doubles STT memory if left resident).
 pub(crate) fn unload_streaming() -> bool {
-    backend_cell().lock().unwrap().take().is_some()
+    let mut guard = backend_cell().lock().unwrap();
+    let freed = guard.backend.take().is_some();
+    let active = guard.active.is_some();
+    guard.unload_requested = active;
+    freed || active
 }
 
 /// Build the streaming backend for `provider`, or `None` when this provider doesn't stream / its
@@ -573,23 +658,54 @@ fn try_streaming(
 ) -> bool {
     use std::io::Write;
     use std::time::{Duration, Instant};
+    // Speaker-lock currently needs the complete final mixture for separation + embedding.
+    // Until that filter has a streaming form, route an explicitly-enabled lock through the
+    // existing segment/final fallback instead of silently bypassing the safety control.
+    let speaker_lock = ds_config::Paths::resolve()
+        .map(|p| {
+            let cfg = ds_config::VoiceConfig::load(&p);
+            cfg.stt_speaker_lock && cfg.is_diarization_on()
+        })
+        .unwrap_or(false);
+    if speaker_lock {
+        return false;
+    }
     let provider = std::env::var("DONTSPEAK_STT_PROVIDER").unwrap_or_default();
     let cell = backend_cell();
     let mut guard = cell.lock().unwrap();
+    if guard.active.is_some() {
+        log::warn!(target: "helper", "{label}: a streaming backend is already active");
+        return false;
+    }
     // (Re)build when absent or the provider changed since last listen.
-    if guard.as_ref().map(|(p, _)| p != &provider).unwrap_or(true) {
-        *guard = build_backend(&provider).map(|b| (provider.clone(), b));
+    if guard
+        .backend
+        .as_ref()
+        .map(|(p, _)| p != &provider)
+        .unwrap_or(true)
+    {
+        guard.backend = build_backend(&provider).map(|b| (provider.clone(), b));
     }
     // Take ownership for this session (restored to the cache at the end).
-    let Some((p, mut backend)) = guard.take() else {
+    let Some((p, mut backend)) = guard.backend.take() else {
         return false;
     };
+    guard.active = Some((p.clone(), backend.provider()));
     drop(guard);
     if let Err(e) = backend.reset() {
         log::warn!(target: "helper", "{label}: streaming reset failed, using offline: {e}");
+        cell.lock().unwrap().active = None;
         return false; // broken backend dropped, not re-cached
     }
-    let mut session = StreamSession::new(backend, rate);
+    let mut session = match StreamSession::new(backend, rate) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(target: "helper", "{label}: streaming resampler init failed, using offline: {e}");
+            cell.lock().unwrap().active = None;
+            return false;
+        }
+    };
+    let mut gain = StreamingGain::from_config();
     let flush = || {
         let _ = std::io::stdout().flush();
     };
@@ -605,6 +721,7 @@ fn try_streaming(
         if block.is_empty() {
             continue;
         }
+        let block = gain.apply(&block);
         match session.accept(&block) {
             Ok(text) => {
                 if text != last_text && !text.trim().is_empty() {
@@ -618,6 +735,15 @@ fn try_streaming(
         }
     }
     let final_start = Instant::now();
+    // Capture can advance between the loop's last drain and the stop flag becoming visible.
+    // Feed that tail before flushing so the final syllable is never dropped.
+    let tail = drain();
+    if !tail.is_empty() {
+        let tail = gain.apply(&tail);
+        if let Err(e) = session.accept(&tail) {
+            log::warn!(target: "helper", "{label}: streaming final drain: {e}");
+        }
+    }
     let text = session.finalize().unwrap_or_else(|e| {
         log::warn!(target: "helper", "{label}: streaming finalize: {e}");
         String::new()
@@ -636,8 +762,16 @@ fn try_streaming(
     println!("{}{}", proto::FINAL_PREFIX, text.replace('\n', " "));
     println!("{}", proto::LDONE);
     flush();
-    // Restore the backend (model stays resident) for the next listen.
-    *cell.lock().unwrap() = Some((p, session.into_backend()));
+    // Restore the backend for the next listen unless an unload arrived while this
+    // full-duplex session owned it. In that case dropping it here completes the unload.
+    let backend = session.into_backend();
+    let mut guard = cell.lock().unwrap();
+    guard.active = None;
+    if guard.unload_requested {
+        guard.unload_requested = false;
+    } else {
+        guard.backend = Some((p, backend));
+    }
     true
 }
 
@@ -866,5 +1000,48 @@ mod tests {
     fn overlay_skips_when_empty() {
         assert_eq!(next_overlay(&[], None, ""), None);
         assert_eq!(next_overlay(&owned(&["", "  "]), None, ""), None);
+    }
+
+    #[test]
+    fn streaming_manual_gain_is_exact_and_clamped() {
+        let mut gain = StreamingGain {
+            mode: ds_config::CaptureGain::Manual(2.0),
+            peak: 0.0,
+            gain: 1.0,
+        };
+        assert_eq!(gain.apply(&[0.25, -0.75]), vec![0.5, -1.0]);
+    }
+
+    #[test]
+    fn streaming_auto_gain_never_amplifies_silence() {
+        let mut gain = StreamingGain {
+            mode: ds_config::CaptureGain::Auto,
+            peak: 0.0,
+            gain: 1.0,
+        };
+        let silence = vec![0.005f32; 128];
+        assert_eq!(gain.apply(&silence), silence);
+        let quiet_speech = vec![0.05f32; 128];
+        let conditioned = gain.apply(&quiet_speech);
+        assert!(conditioned[0] > quiet_speech[0]);
+        assert!(conditioned.iter().all(|s| s.abs() <= 1.0));
+    }
+
+    #[test]
+    fn listen_stop_is_monotonic_and_cancels_only_through_its_generation() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let stopped = AtomicU64::new(0);
+        assert!(!generation_stopped(&stopped, 4));
+        stopped.fetch_max(4, Ordering::SeqCst);
+        assert!(generation_stopped(&stopped, 3));
+        assert!(generation_stopped(&stopped, 4));
+        assert!(!generation_stopped(&stopped, 5));
+        stopped.fetch_max(2, Ordering::SeqCst);
+        assert_eq!(
+            stopped.load(Ordering::SeqCst),
+            4,
+            "an older stop cannot roll cancellation back"
+        );
     }
 }
