@@ -10,9 +10,20 @@ use std::time::{Duration, Instant};
 /// Returns its exit code, or PANICS if it does not exit in time — that panic IS the hang
 /// regression (the server never returns). stdin is `null` so a regressed build that falls
 /// into `mcp::serve()` reads EOF and exits (code != 2), which the assertions still catch.
+///
+/// This is a REAL subprocess running the production `main()`, which unconditionally calls
+/// `ds_log::init()` and logs the "unknown subcommand" error — unlike in-process unit tests,
+/// there is no seam to hand it a tempdir `log_file`, so it falls through to `log_cached`'s
+/// real per-OS path (see issue #26). Point `HOME`/`XDG_STATE_HOME`/`LOCALAPPDATA` at a tempdir
+/// for the child so `directories::BaseDirs` resolves an isolated path instead of leaking into
+/// the real `$HOME` log file that CI's "verify tests didn't leak" gate checks.
 fn run_bounded(args: &[&str], timeout: Duration) -> i32 {
+    let home = tempfile::tempdir().expect("tempdir");
     let mut child = Command::new(env!("CARGO_BIN_EXE_dontspeak"))
         .args(args)
+        .env("HOME", home.path())
+        .env("XDG_STATE_HOME", home.path().join("state"))
+        .env("LOCALAPPDATA", home.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

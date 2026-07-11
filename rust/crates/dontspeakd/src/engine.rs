@@ -3513,6 +3513,11 @@ mod tests {
         // and new provider are already locally usable. Only `change.stt_changed` sees the
         // switch, so `reload`'s rebuild condition must include it too.
         let mut d = mk(600);
+        // Only mutated in the provider-switch block below, which is skipped on Intel macOS.
+        #[cfg_attr(
+            all(target_os = "macos", not(target_arch = "aarch64")),
+            allow(unused_mut)
+        )]
         let mut cfg = VoiceConfig {
             listen_mode: ds_config::ListenMode::Always,
             stt_engine: Some(vec![ds_config::SttEngine::BuiltIn]),
@@ -3533,28 +3538,35 @@ mod tests {
         // is a no-op ladder switch on macOS (`Provider::stt_usable_on` gates it to
         // windows/linux, so it silently re-resolves to `OrtCpu` there — caught on real macOS
         // hardware, see #31); `Ane` is the macOS-genuine transition instead (gated to
-        // macOS+aarch64, which is this crate's macOS CI/dev floor).
-        #[cfg(target_os = "macos")]
-        let (new_provider, want_token) = (ds_config::Provider::Ane, "ane");
-        #[cfg(not(target_os = "macos"))]
-        let (new_provider, want_token) = (ds_config::Provider::OrtCuda, "cuda");
-        cfg.provider = vec![new_provider];
-        assert_ne!(
-            cfg.resolved_stt_provider(),
-            d.cfg.resolved_stt_provider(),
-            "test setup must force a real provider transition"
-        );
-        d.reload(&cfg);
-        assert!(
-            d.listener.is_some(),
-            "Always mode stays on across the reload"
-        );
-        assert_eq!(
-            d.listener.as_ref().unwrap().provider(),
-            want_token,
-            "a live provider switch while Always-listening is running must rebuild the \
-             listener, not keep serving the stale provider"
-        );
+        // macOS+aarch64, which is this crate's macOS CI/dev floor). On Intel macOS neither
+        // rung is STT-usable (`ane_usable_on` is arm64-only, see ds-config), so there is no
+        // other provider to switch to — skip there rather than assert a transition that can't
+        // happen, matching how ds-config's own `provider_resolution_walks_the_ladder_per_platform`
+        // test gates its Apple-Silicon-only assertions.
+        #[cfg(any(not(target_os = "macos"), target_arch = "aarch64"))]
+        {
+            #[cfg(target_os = "macos")]
+            let (new_provider, want_token) = (ds_config::Provider::Ane, "ane");
+            #[cfg(not(target_os = "macos"))]
+            let (new_provider, want_token) = (ds_config::Provider::OrtCuda, "cuda");
+            cfg.provider = vec![new_provider];
+            assert_ne!(
+                cfg.resolved_stt_provider(),
+                d.cfg.resolved_stt_provider(),
+                "test setup must force a real provider transition"
+            );
+            d.reload(&cfg);
+            assert!(
+                d.listener.is_some(),
+                "Always mode stays on across the reload"
+            );
+            assert_eq!(
+                d.listener.as_ref().unwrap().provider(),
+                want_token,
+                "a live provider switch while Always-listening is running must rebuild the \
+                 listener, not keep serving the stale provider"
+            );
+        }
     }
 
     #[test]

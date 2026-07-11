@@ -1360,24 +1360,23 @@ pub(crate) mod tests {
                 tts_engine_ladder: vec![TtsEngine::Kokoro],
                 ..VoiceConfig::default()
             };
+            // `system` (Apple's on-device recognizer) is unconditionally macOS-usable and sits
+            // FIRST in `default_stt_engine_ladder`, so it wins regardless of ORT availability —
+            // `built_in` (Parakeet) is never even reached for the default config on macOS.
+            assert_eq!(
+                VoiceConfig::default().resolved_stt(),
+                Some(SttEngine::System)
+            );
             if crate::enums::intel_mac_builtin_ort_available() {
                 assert_eq!(
                     VoiceConfig::default().resolved_tts(),
                     Some(TtsEngine::Kokoro)
-                );
-                assert_eq!(
-                    VoiceConfig::default().resolved_stt(),
-                    Some(SttEngine::BuiltIn)
                 );
                 assert_eq!(only_builtin.resolved_tts(), Some(TtsEngine::Kokoro));
             } else {
                 assert_eq!(
                     VoiceConfig::default().resolved_tts(),
                     Some(TtsEngine::System)
-                );
-                assert_eq!(
-                    VoiceConfig::default().resolved_stt(),
-                    Some(SttEngine::ClaudeCode)
                 );
                 // A ladder with no usable rung resolves to None (= off), not a forced fallback.
                 assert!(only_builtin.resolved_tts().is_none());
