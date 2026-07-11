@@ -18,7 +18,11 @@ fn map_record(record: &log::Record) -> (LogLevel, String, String) {
         log::Level::Info => LogLevel::Info,
         log::Level::Debug | log::Level::Trace => LogLevel::Debug,
     };
-    (level, record.target().to_string(), record.args().to_string())
+    (
+        level,
+        record.target().to_string(),
+        record.args().to_string(),
+    )
 }
 
 struct DsLogLogger;

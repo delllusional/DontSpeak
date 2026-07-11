@@ -69,7 +69,11 @@ pub fn engine_run(
 ) -> Result<(), EngineError> {
     let debug = debug_enabled();
     ds_log::init();
-    log::set_max_level(if debug { log::LevelFilter::Debug } else { log::LevelFilter::Info });
+    log::set_max_level(if debug {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    });
 
     // FATAL startup failures RETURN an error instead of process::exit(): this fn
     // runs on a background thread INSIDE the host app (the in-process FFI host),

@@ -84,8 +84,14 @@ fn coalescer_drop_session_clears_partial_buffers() {
     let mut c = Coalescer::new();
     let t0 = Instant::now();
     // Two sessions with partial buffers (no newline, no completion).
-    assert!(c.on_delta("s1", "i1", "> Evicted session line", t0).is_none());
-    assert!(c.on_delta("s2", "i2", "> Surviving session line", t0).is_none());
+    assert!(
+        c.on_delta("s1", "i1", "> Evicted session line", t0)
+            .is_none()
+    );
+    assert!(
+        c.on_delta("s2", "i2", "> Surviving session line", t0)
+            .is_none()
+    );
     // Evict s1.
     c.drop_session("s1");
     // s1's buffers are gone: a turn-flush for s1 produces nothing.

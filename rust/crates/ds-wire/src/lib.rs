@@ -142,7 +142,14 @@ pub fn reconcile(paths: &Paths) -> i32 {
     let excluded = ds_config::VoiceConfig::load(paths).excluded_clients();
     WireTarget::CLIENTS
         .iter()
-        .map(|&c| wire_client(c, paths, /*remove=*/ excluded.contains(&c), /*print_only=*/ false))
+        .map(|&c| {
+            wire_client(
+                c,
+                paths,
+                /*remove=*/ excluded.contains(&c),
+                /*print_only=*/ false,
+            )
+        })
         .max()
         .unwrap_or(0)
 }
@@ -531,8 +538,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         assert_eq!(reconcile(&paths), 0);
-        assert!(!paths.codex_config.exists(), "codex not installed → skipped");
-        assert!(!paths.qwen_settings.exists(), "qwen not installed → skipped");
+        assert!(
+            !paths.codex_config.exists(),
+            "codex not installed → skipped"
+        );
+        assert!(
+            !paths.qwen_settings.exists(),
+            "qwen not installed → skipped"
+        );
         assert!(!paths.grok_config.exists(), "grok not installed → skipped");
     }
 
@@ -565,7 +578,10 @@ mod tests {
         assert_eq!(wire_client(WireTarget::QwenCode, &paths, false, false), 0);
         let before: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
-        assert!(before["hooks"]["Stop"].as_array().is_some(), "qwen wired first");
+        assert!(
+            before["hooks"]["Stop"].as_array().is_some(),
+            "qwen wired first"
+        );
 
         // Exclude Qwen (the wired client), then reconcile → it must be stripped.
         let cfg = ds_config::VoiceConfig {

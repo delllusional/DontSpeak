@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_KOKORO_VOICE: &str = "af_sarah";
 
 use crate::enums::{
-    de_diarizer_provider, de_input_clears, de_listen_mode, de_narrate, de_provider,
-    de_stt_engine_ladder, de_stt_engine_pref, de_tray_indicator, de_tts_engine_ladder,
-    de_tts_engine_pref, de_exclude_clients, default_diarizer_provider, default_input_clears,
-    default_narrate, default_provider, default_stt_engine_ladder, default_tray_indicator,
-    default_tts_engine_ladder, se_stt_engine_pref, se_tts_engine_pref,
+    de_diarizer_provider, de_exclude_clients, de_input_clears, de_listen_mode, de_narrate,
+    de_provider, de_stt_engine_ladder, de_stt_engine_pref, de_tray_indicator, de_tts_engine_ladder,
+    de_tts_engine_pref, default_diarizer_provider, default_input_clears, default_narrate,
+    default_provider, default_stt_engine_ladder, default_tray_indicator, default_tts_engine_ladder,
+    se_stt_engine_pref, se_tts_engine_pref,
 };
 use ds_log::{LogLevel, log};
 
@@ -952,7 +952,11 @@ pub(crate) mod tests {
 
         // `de_exclude_clients` (via the config-file deserialize): a present ARRAY keeps known client
         // tokens in order, deduped, dropping unknown / non-client tokens.
-        let wc = |j: &str| serde_json::from_str::<VoiceConfig>(j).unwrap().exclude_clients;
+        let wc = |j: &str| {
+            serde_json::from_str::<VoiceConfig>(j)
+                .unwrap()
+                .exclude_clients
+        };
         assert_eq!(
             wc(r#"{"exclude_clients":["claude_code","narration_spec","bogus","claude_code"]}"#),
             Some(vec![WireTarget::ClaudeCode])
@@ -981,7 +985,10 @@ pub(crate) mod tests {
             };
             write_settings(&paths, &cfg).unwrap();
             let loaded = VoiceConfig::load(&paths);
-            assert_eq!(loaded.exclude_clients, state, "exclude_clients round-trip: {state:?}");
+            assert_eq!(
+                loaded.exclude_clients, state,
+                "exclude_clients round-trip: {state:?}"
+            );
         }
     }
 

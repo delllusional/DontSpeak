@@ -328,7 +328,9 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             }
         };
         match &result {
-            Ok(()) => log::info!(target: "engine", "{}", download_event_msg(which, "finished", None)),
+            Ok(()) => {
+                log::info!(target: "engine", "{}", download_event_msg(which, "finished", None))
+            }
             Err(e) => log::warn!(
                 target: "engine",
                 "{}",
