@@ -213,19 +213,12 @@ pub(crate) fn serve() -> ! {
         &stt_provider,
         parakeet_dir,
     )));
-    // NOTE (audit-tracked, partially addressed): this `transcriber` cache is what preload /
-    // `load stt` / `unload stt` below manage directly, and what a real listen falls back to
-    // ONLY when the streaming path is unavailable (the offline `system` engine, or a
-    // missing/unloadable streaming backend). For the common streaming-capable providers
-    // (`cpu`/`cuda` ONNX, macOS `ane`), a real listen instead runs on a SEPARATE,
-    // independently-cached streaming backend (`backend_cell` in `listen.rs`, otherwise
-    // populated lazily by `try_streaming` on first use). `listen.rs` now exposes
-    // `preload_streaming`/`unload_streaming` over that cache, and every preload/load/unload
-    // call site below also drives it — so first-listen latency is genuinely eliminated for
-    // streaming-capable providers, and `unload stt` frees BOTH caches (no more doubled STT
-    // memory after the first listen). `STTLOADED`'s truthiness still reflects `transcriber`
-    // specifically (not whichever cache a given listen would actually hit); unifying that
-    // status signal is a separate, larger change left alone here.
+    // NOTE: this `transcriber` cache is what preload / `load stt` / `unload stt` manage.
+    // Real listen falls back to it ONLY for non-streaming (system, or unloadable backend).
+    // For streaming providers (`cpu`/`cuda`, `ane`) the actual work uses a SEPARATE
+    // `backend_cell` cache in listen.rs (preloaded/unloaded in parallel). `unload stt`
+    // drives both. `STTLOADED` still only reflects the transcriber cache; full unification
+    // is future work. See `SttResidencySlot` for the claim state machine.
     // Claimed the MOMENT the STT load starts — by the parallel preload below OR a later
     // `load stt` request — so the two can't BOTH load the model concurrently. See
     // `SttResidencySlot`: `Idle -> Loading -> Loaded`, with `Loading`/`Loaded` only ever
