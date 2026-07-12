@@ -132,7 +132,7 @@ pub(crate) fn engine_stop() -> bool {
         Some(mut h) => {
             h.running.store(false, Ordering::SeqCst);
             if let Some(t) = h.thread.take() {
-                let _ = t.join();
+                join_stale(t, STALE_JOIN_TIMEOUT);
             }
             true
         }

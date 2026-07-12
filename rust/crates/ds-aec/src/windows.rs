@@ -371,7 +371,7 @@ unsafe fn open_capture() -> Result<OpenedCapture, String> {
             }
             _ => bits == 32, // best guess
         };
-        if channels == 0 || (bits != 16 && bits != 32) {
+        if channels == 0 || (is_float && bits != 32) || (!is_float && bits != 16) {
             CoTaskMemFree(Some(pwfx as *const _));
             return Err(format!(
                 "unsupported mix format ({bits} bit, {channels} ch)"
@@ -480,7 +480,7 @@ unsafe fn run_capture_loop(
     }
 }
 
-/// Downmix an interleaved WASAPI packet (`frames` × `channels`, float or i16) to
+/// Downmix an interleaved WASAPI packet (`frames` × `channels`, f32 or i16) to
 /// mono f32, appending to `out`.
 unsafe fn downmix(
     pdata: *mut u8,

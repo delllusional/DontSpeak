@@ -151,9 +151,10 @@ pub fn stats_count(count: u64, audio_secs: f64) -> String {
 /// `size_bytes` from `ds_libraries_json`. The `.`-decimal separator matches `stats_range`.
 pub fn human_size(bytes: u64) -> String {
     let b = bytes as f64;
-    if b >= 1_000_000_000.0 {
+    // Roll over before rounding would display the lower unit as "1000".
+    if b >= 999_950_000.0 {
         format!("{:.1} GB", b / 1_000_000_000.0)
-    } else if b >= 1_000_000.0 {
+    } else if b >= 999_950.0 {
         format!("{:.1} MB", b / 1_000_000.0)
     } else if b >= 1_000.0 {
         format!("{:.0} KB", b / 1_000.0)
@@ -244,6 +245,8 @@ mod tests {
         assert_eq!(human_size(1_400_000_000), "1.4 GB");
         // Boundary: exactly 1000 rolls over to KB (not "1000 B").
         assert_eq!(human_size(1_000), "1 KB");
+        assert_eq!(human_size(999_999), "1.0 MB");
+        assert_eq!(human_size(999_999_999), "1.0 GB");
     }
 
     #[test]

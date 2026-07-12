@@ -21,17 +21,32 @@ pub struct LinearResampler {
     prev: f32,
     /// False until the first input sample seeds `prev`.
     have_prev: bool,
+    /// One-pole anti-alias filter state, active only while downsampling.
+    filtered: f32,
+    have_filtered: bool,
+    filter_alpha: f32,
 }
 
 impl LinearResampler {
     pub fn new(in_rate: u32, out_rate: u32) -> Self {
         let in_rate = in_rate.max(1);
         let out_rate = out_rate.max(1);
+        let step = in_rate as f64 / out_rate as f64;
+        // Put the one-pole cutoff just below the destination Nyquist. This is a modest,
+        // streaming-safe anti-alias stage; upsampling needs no prefilter.
+        let filter_alpha = if step > 1.0 {
+            (1.0 - (-std::f64::consts::PI * 0.9 / step).exp()) as f32
+        } else {
+            1.0
+        };
         Self {
-            step: in_rate as f64 / out_rate as f64,
+            step,
             pos: 0.0,
             prev: 0.0,
             have_prev: false,
+            filtered: 0.0,
+            have_filtered: false,
+            filter_alpha,
         }
     }
 
@@ -39,7 +54,18 @@ impl LinearResampler {
     /// `out`. Emits every output sample whose position falls in a consumed input
     /// interval, interpolating linearly between the bracketing input samples.
     pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
-        for &cur in input {
+        for &raw in input {
+            let cur = if self.filter_alpha < 1.0 {
+                if !self.have_filtered {
+                    self.filtered = raw;
+                    self.have_filtered = true;
+                } else {
+                    self.filtered += self.filter_alpha * (raw - self.filtered);
+                }
+                self.filtered
+            } else {
+                raw
+            };
             if !self.have_prev {
                 self.prev = cur;
                 self.have_prev = true;

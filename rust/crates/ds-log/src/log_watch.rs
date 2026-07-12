@@ -34,7 +34,10 @@ pub fn wait_logs_changed(log_file: &Path, timeout: Duration) {
 }
 
 fn wait_logs_changed_at(dir: Option<&Path>, timeout: Duration) {
-    let Some(dir) = dir else { return };
+    let Some(dir) = dir else {
+        std::thread::sleep(timeout);
+        return;
+    };
     // First run may predate the logs dir (mirrors config_watch::spawn).
     let _ = std::fs::create_dir_all(dir);
 

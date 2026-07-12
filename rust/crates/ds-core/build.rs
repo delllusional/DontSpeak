@@ -14,6 +14,7 @@ fn main() {
     // Always rebuild if the FFI surface changes (so a `--features cbindgen`
     // build picks up edits).
     println!("cargo:rerun-if-changed=src/ffi.rs");
+    println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 
     #[cfg(feature = "cbindgen")]

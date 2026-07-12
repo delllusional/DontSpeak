@@ -38,7 +38,7 @@ impl CaptureHandle {
 pub fn enqueue_bounded(cap: &Arc<Mutex<VecDeque<f32>>>, samples: &[f32], cap_limit: usize) {
     let mut q = cap.lock().unwrap();
     q.extend(samples.iter().copied());
-    while q.len() > cap_limit {
+    if q.len() > cap_limit {
         let drop = q.len() - cap_limit;
         q.drain(..drop);
     }

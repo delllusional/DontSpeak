@@ -40,6 +40,15 @@ fn main() -> glib::ExitCode {
 }
 
 fn on_activate(app: &adw::Application) {
+    // GTK/libadwaita re-fires `activate` on a relaunch of an already-running instance; the
+    // window built below is only ever hidden (never destroyed) on close, so a live one here
+    // means this is a re-activation, not first launch. Re-present it instead of building a
+    // second window/tray/update-check thread on top of the first.
+    if let Some(existing) = app.windows().first() {
+        existing.present();
+        return;
+    }
+
     let widgets = ui::build_window(app);
     // No synchronous prime here: `model_status_json` is a blocking engine-IPC round-trip
     // (up to 120s if the engine is slow to answer) and this runs on the GTK main thread.

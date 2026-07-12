@@ -73,8 +73,8 @@ pub extern "C" fn ds_set_muted(on: u8) -> u8 {
             &paths.engine_sock,
             &ds_ipc::Request::SetMuted { on: on != 0 },
         ) {
-            Ok(_) => 1,
-            Err(_) => 0,
+            Ok(ds_ipc::Response::Done) => 1,
+            _ => 0,
         }
     })
 }

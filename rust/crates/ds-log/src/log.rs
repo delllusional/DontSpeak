@@ -43,6 +43,23 @@
 use ds_client::ClientSource;
 use std::path::{Path, PathBuf};
 
+fn open_append_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
 /// Rotate when the active log file reaches this size (~5 MiB).
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// How many rotated files to keep (`dontspeak.log.1` .. `.LOG_KEEP_OLD`).
@@ -119,11 +136,7 @@ pub fn open_aux_log(log_file: &Path, file_name: &str) -> Option<std::fs::File> {
         let _ = std::fs::create_dir_all(dir);
     }
     rotate_if_large(&path);
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .ok()
+    open_append_private(&path).ok()
 }
 
 /// Append one line to the unified activity log. `source` is the SUBSYSTEM token
@@ -153,6 +166,8 @@ pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: ClientSo
         let _ = std::fs::create_dir_all(dir);
     }
     rotate_if_large(log_file);
+    let source = source.replace(['\n', '\r'], " ");
+    let msg = msg.replace(['\n', '\r'], " ");
     // The client rides as a trailing k=v inside the message; US ⇒ no suffix at all.
     let suffix = match client {
         ClientSource::DontSpeak => String::new(),
@@ -164,11 +179,7 @@ pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: ClientSo
         epoch_secs(),
         level.as_str()
     );
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file)
-    {
+    if let Ok(mut f) = open_append_private(log_file) {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -263,7 +274,10 @@ static CACHED_LOG_FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLo
 pub fn log_cached(level: LogLevel, source: &str, msg: &str) {
     match CACHED_LOG_FILE.get_or_init(default_log_file) {
         Some(log_file) => log(log_file, level, source, msg),
-        None => eprintln!("[{source}] {msg}"),
+        None => {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "[{source}] {msg}");
+        }
     }
 }
 
@@ -273,6 +287,9 @@ pub fn log_cached(level: LogLevel, source: &str, msg: &str) {
 /// the file is absent/unreadable. Cross-platform — every UI's Logs tab reads through this.
 pub fn log_tail(path: &Path, max_bytes: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
+    if is_symlink(path) {
+        return String::new();
+    }
     let Ok(mut f) = std::fs::File::open(path) else {
         return String::new();
     };
@@ -381,6 +398,7 @@ fn combined_log_json_at(unified_log: &Path, max_bytes: u64) -> String {
                 .flatten()
                 .map(|e| e.path())
                 .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("log"))
+                .filter(|p| !is_symlink(p))
                 .filter(|p| {
                     p.file_name()
                         .and_then(|s| s.to_str())

@@ -110,7 +110,39 @@ fn main() {
     println!("done");
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+fn main() {
+    use std::time::Duration;
+
+    let dx = match ds_aec::DuplexAudio::open() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("ds-aec-probe: open failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "opened Linux capture; capture_rate = {} Hz",
+        dx.capture_rate()
+    );
+    for tick in 0..50 {
+        std::thread::sleep(Duration::from_millis(100));
+        let cap = dx.capture_drain();
+        let rms = if cap.is_empty() {
+            0.0
+        } else {
+            (cap.iter().map(|x| x * x).sum::<f32>() / cap.len() as f32).sqrt()
+        };
+        println!(
+            "t={:>4}ms  cap_n={:>5}  rms={:.4}",
+            tick * 100,
+            cap.len(),
+            rms
+        );
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn main() {
     eprintln!(
         "ds-aec-probe: native duplex AEC not implemented on this platform (see docs/AEC.md's per-platform sections)"
