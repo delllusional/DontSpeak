@@ -53,7 +53,15 @@ impl Accum {
         self.seen_final |= is_final;
 
         let cumulative = match displayed_text {
-            Some(dt) if !dt.trim().is_empty() => dt.to_string(),
+            Some(dt) if !dt.trim().is_empty() => {
+                // Codex legitimately ends a delta stream with one authoritative final snapshot.
+                // Any earlier switch would leave `parts` stale if another delta followed.
+                debug_assert!(
+                    self.parts.is_empty() || is_final,
+                    "a non-final cumulative payload must not follow delta payloads"
+                );
+                dt.to_string()
+            }
             _ => {
                 self.parts.insert(index, delta.to_string());
                 self.parts.values().map(String::as_str).collect::<String>()
@@ -383,6 +391,15 @@ mod tests {
             a.feed(1, "", Some("> Spoken.\n\nBody."), false, true, false),
             vec!["Spoken."]
         );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a non-final cumulative payload must not follow delta payloads")]
+    fn non_final_cumulative_payload_after_deltas_violates_debug_invariant() {
+        let mut a = Accum::default();
+        assert!(a.feed(0, "> Partial", None, false, true, false).is_empty());
+        let _ = a.feed(0, "", Some("> Partial\n\nBody."), false, true, false);
     }
 
     #[test]

@@ -62,7 +62,8 @@ pub fn target_for<'a>(
 /// Register (or, with `remove`, un-register) our stdio `mcpServers.DontSpeak` entry in
 /// `target.config`, or PREVIEW the result with `print_only`. The ONE flow every `JsonMcp`
 /// surface shares (the orchestrator builds the [`Target`] via [`target_for`]):
-///   presence-gate → parse (a malformed file is left UNTOUCHED) → merge/strip via `ds-config`
+///   presence-gate → parse (a malformed file is left UNTOUCHED and is non-fatal) →
+///   merge/strip via `ds-config`
 ///   → either print, or back-up-then-atomic-write.
 /// Additive + idempotent (our entry is overwritten so a reinstall re-points `command`; every
 /// other server and top-level key is preserved). Returns a process exit code (0 ok, 1 hard error).
@@ -100,7 +101,9 @@ pub fn apply(
         }
         None => {
             let Ok(v) = io::read_json_or_bail(tool, cfg) else {
-                return 1;
+                // The malformed file is the user's own; match the hooks surface so clients
+                // sharing one file do not report contradictory outcomes.
+                return 0;
             };
             v
         }
@@ -347,14 +350,14 @@ mod tests {
     }
 
     #[test]
-    fn malformed_file_is_left_untouched_and_errors() {
+    fn malformed_file_is_left_untouched_and_is_non_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
         std::fs::write(&cfg, "{ this is not json").unwrap();
         assert_eq!(
             apply(&target(&cfg, true), false, false, &paths, None, None),
-            1
+            0
         );
         // The user's file is preserved byte-for-byte (recoverable), not clobbered.
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "{ this is not json");
