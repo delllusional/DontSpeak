@@ -79,6 +79,12 @@ Claude Code's own automatic `Co-Authored-By` trailer is disabled repo-wide via
 and Qwen Code don't read that file, so if either tool's own auto-attribution can't be
 suppressed from here, drop it manually before finishing the commit message.
 
+**Squashing.** When combining several commits into one (interactive rebase,
+squash-merge), carry forward every distinct `AI: <model-id> <effort-level>` pair
+from the commits being combined — one line per distinct pair, inherited into the
+result. Don't drop a contributor's line just because its commit wasn't the last one
+before the squash; don't repeat a pair that already appears.
+
 ## Commands
 
 All Rust commands run from `rust/` (the workspace root — not the repo root).
