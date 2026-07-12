@@ -14,6 +14,12 @@ pub fn spawn_push(tx: async_channel::Sender<String>) -> Arc<AtomicBool> {
     std::thread::Builder::new()
         .name("ds-logs-push".into())
         .spawn(move || {
+            // Prime on this worker before waiting for the next change. The old caller-side
+            // prime performed file I/O synchronously in the tab-selection callback.
+            let initial = crate::ffi::log_tail(64 * 1024);
+            if stop2.load(Ordering::Relaxed) || tx.send_blocking(initial).is_err() {
+                return;
+            }
             while !stop2.load(Ordering::Relaxed) {
                 let text = crate::ffi::log_wait(64 * 1024, 2000);
                 if stop2.load(Ordering::Relaxed) {

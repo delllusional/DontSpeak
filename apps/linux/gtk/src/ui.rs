@@ -228,7 +228,6 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         let log_push_stop = log_push_stop.clone();
         stack.connect_visible_child_name_notify(move |s| {
             if s.visible_child_name().as_deref() == Some("log") {
-                load_logs(&lv);
                 if log_push_stop.borrow().is_none() {
                     let (tx, rx) = async_channel::unbounded::<String>();
                     *log_push_stop.borrow_mut() = Some(crate::log_push::spawn_push(tx));
@@ -246,7 +245,6 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     }
     {
         let window = window.clone();
-        let lv = log_view.clone();
         log_clear_button.connect_clicked(move |_| {
             // Title-only (no separate body) — one line, no redundant restatement.
             let dialog = adw::AlertDialog::builder()
@@ -257,12 +255,14 @@ pub fn build_window(app: &adw::Application) -> Widgets {
             dialog.add_response("cancel", &t("common.cancel"));
             dialog.add_response("clear", &t("logs.clear_confirm_action"));
             dialog.set_response_appearance("clear", adw::ResponseAppearance::Destructive);
-            let lv = lv.clone();
             // AdwAlertDialog closes itself automatically once a response is activated.
             dialog.connect_response(None, move |_dialog, response| {
                 if response == "clear" {
-                    crate::ffi::logs_clear();
-                    load_logs(&lv);
+                    // File removal can block on a busy log handle. Keep it off GTK's main loop;
+                    // the active log-push watcher publishes the resulting empty tail.
+                    let _ = std::thread::Builder::new()
+                        .name("ds-logs-clear".into())
+                        .spawn(crate::ffi::logs_clear);
                 }
             });
             dialog.present(Some(&window));
@@ -858,13 +858,8 @@ fn build_log_page() -> (gtk::ScrolledWindow, gtk::TextView) {
     (scroll, view)
 }
 
-/// Fill the Logs view from the shared `log_tail` and scroll to the newest line.
-fn load_logs(view: &gtk::TextView) {
-    set_log_text(view, crate::ffi::log_tail(64 * 1024));
-}
-
-/// Render `tail` into the Logs view and scroll to the newest line — shared by the initial
-/// `load_logs` and every live push update, so the two can't render differently.
+/// Render `tail` into the Logs view and scroll to the newest line. Both the initial read and
+/// every live update arrive from `log_push`'s worker, so tab selection never touches disk.
 fn set_log_text(view: &gtk::TextView, tail: String) {
     let text = if tail.trim().is_empty() {
         t("logs.empty")

@@ -163,14 +163,16 @@ public sealed partial class MainWindow : Window
         if (Nav.MenuItems.Count > i) Nav.SelectedItem = Nav.MenuItems[i];
     }
 
-    private void Nav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+    private async void Nav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         var tag = (args.SelectedItem as NavigationViewItem)?.Tag as string;
+        int loadGeneration = ++_logLoadGeneration;
+        ++_logRenderGeneration;
         if (StatusScroll != null) StatusScroll.Visibility = tag == "status" ? Visibility.Visible : Visibility.Collapsed;
         if (ToolsScroll != null) ToolsScroll.Visibility = tag == "tools" ? Visibility.Visible : Visibility.Collapsed;
         if (CreditsScroll != null) CreditsScroll.Visibility = tag == "credits" ? Visibility.Visible : Visibility.Collapsed;
         if (LogTab != null) LogTab.Visibility = tag == "log" ? Visibility.Visible : Visibility.Collapsed;
-        if (tag == "log") LoadLogs(); // reload each time the tab is shown (no poll timer)
+        if (tag == "log") await LoadLogsAsync(loadGeneration); // reload each time the tab is shown (no poll timer)
     }
 
     // ── Logs tab: the COMBINED activity log with a top text-filter bar ───────────────────────
@@ -179,27 +181,41 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<string, SolidColorBrush> _sourceBrush = new();
     private readonly Dictionary<string, SolidColorBrush> _levelBrushCache = new();
     private string _logFilter = "";                                    // free-text filter (case-insensitive substring)
+    private int _logLoadGeneration;
+    private int _logRenderGeneration;
     // The per-source palette + ERROR/WARN colors come from the SHARED Rust source via Brand
     // (Brand.LogSourcePalette / Brand.LogLevelColor) — centralized beside the brand colors.
 
     /// <summary>Load the COMBINED activity log (unified + aux logs, via <c>ds_logs_json</c>)
-    /// and render. Called on every Logs tab-select, so it's fresh without a poll timer. Lines stay
-    /// color-coded (per source + ERROR/WARN) and are narrowed live by the top filter bar.</summary>
-    private void LoadLogs()
+    /// and render. File I/O + JSON parsing run off the UI thread; rendering resumes on the UI
+    /// dispatcher in small batches so a large log cannot hold up tab input. Called on every Logs
+    /// tab-select, so it's fresh without a poll timer. Lines stay color-coded (per source +
+    /// ERROR/WARN) and are narrowed live by the top filter bar.</summary>
+    private async System.Threading.Tasks.Task LoadLogsAsync(int loadGeneration)
     {
         if (LogText == null) return;
-        _logLines = LogParser.ParseLogs(Native.LogsJson(64 * 1024));
+        List<LogLine> lines;
+        try
+        {
+            lines = await System.Threading.Tasks.Task.Run(
+                () => LogParser.ParseLogs(Native.LogsJson(64 * 1024)));
+        }
+        catch { return; }
+        // The user may have left and re-entered Logs while the read was in flight. Only the
+        // newest selection owns the view; an older result must not replace its fresher data.
+        if (loadGeneration != _logLoadGeneration || LogTab.Visibility != Visibility.Visible) return;
+        _logLines = lines;
         // Distinct sources in first-appearance order → stable per-source colors.
         _logSources = new List<string>();
         foreach (var l in _logLines)
             if (l.Source.Length > 0 && !_logSources.Contains(l.Source)) _logSources.Add(l.Source);
-        RenderLogLines();
+        await RenderLogLinesAsync(++_logRenderGeneration);
     }
 
-    private void LogFilter_TextChanged(object sender, TextChangedEventArgs e)
+    private async void LogFilter_TextChanged(object sender, TextChangedEventArgs e)
     {
         _logFilter = LogFilter.Text ?? "";
-        RenderLogLines();
+        await RenderLogLinesAsync(++_logRenderGeneration);
     }
 
     /// <summary>Clear-log trash button: confirms via a Fluent <see cref="ContentDialog"/> (the
@@ -229,8 +245,11 @@ public sealed partial class MainWindow : Window
         dialog.Resources["AccentButtonBackgroundPressed"] = danger;
         if (await dialog.ShowAsync() == ContentDialogResult.Primary)
         {
-            Native.LogsClear();
-            LoadLogs();
+            int loadGeneration = ++_logLoadGeneration;
+            ++_logRenderGeneration;
+            await System.Threading.Tasks.Task.Run(Native.LogsClear);
+            if (loadGeneration == _logLoadGeneration && LogTab.Visibility == Visibility.Visible)
+                await LoadLogsAsync(loadGeneration);
         }
     }
 
@@ -238,7 +257,7 @@ public sealed partial class MainWindow : Window
     /// tag, the level token when it's not the ordinary INFO, and the message (red/amber for
     /// ERROR/WARN). The filter is a case-insensitive substring over source/level/message.
     /// Auto-scrolls to the newest line.</summary>
-    private void RenderLogLines()
+    private async System.Threading.Tasks.Task RenderLogLinesAsync(int renderGeneration)
     {
         LogText.Blocks.Clear();
         var q = _logFilter.Trim();
@@ -253,8 +272,10 @@ public sealed partial class MainWindow : Window
             LogText.Blocks.Add(empty);
             return;
         }
+        int rendered = 0;
         foreach (var l in shown)
         {
+            if (renderGeneration != _logRenderGeneration || LogTab.Visibility != Visibility.Visible) return;
             var para = new Paragraph { Margin = new Thickness(0) };
             para.Inlines.Add(new Run { Text = l.Source, Foreground = SourceBrush(l.Source), FontWeight = FontWeights.SemiBold });
             para.Inlines.Add(new Run { Text = "  " });
@@ -265,7 +286,12 @@ public sealed partial class MainWindow : Window
             if (msgBrush != null) msg.Foreground = msgBrush; // ERROR/WARN tint the message; INFO stays default
             para.Inlines.Add(msg);
             LogText.Blocks.Add(para);
+            // Paragraph layout is UI-thread-affine, but yielding between modest batches lets
+            // pointer/keyboard/navigation work run instead of freezing the window for the whole
+            // tail. A newer filter or tab selection invalidates this render at the next batch.
+            if (++rendered % 64 == 0) await System.Threading.Tasks.Task.Yield();
         }
+        if (renderGeneration != _logRenderGeneration || LogTab.Visibility != Visibility.Visible) return;
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
             () => LogScroll?.ChangeView(null, LogScroll.ScrollableHeight, null, true));
     }

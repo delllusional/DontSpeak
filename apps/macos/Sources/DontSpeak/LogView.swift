@@ -14,7 +14,6 @@
 //  wires the FFI read to that logic and renders it.
 
 import AppKit
-import CDontSpeak
 import DontSpeakLogic
 import SwiftUI
 
@@ -53,8 +52,7 @@ struct LogView: View {
                 titleVisibility: .visible
             ) {
                 Button(L.t("logs.clear_confirm_action"), role: .destructive) {
-                    ds_logs_clear()
-                    feed.reloadNow()
+                    feed.clear()
                 }
                 Button(L.t("common.cancel"), role: .cancel) {}
             }
@@ -85,7 +83,7 @@ struct LogView: View {
             Text(L.t(feed.lines.isEmpty ? "logs.empty" : "logs.no_match"))
                 .glassCaption()
         } else {
-            VStack(alignment: .leading, spacing: 2) {
+            LazyVStack(alignment: .leading, spacing: 2) {
                 // id = the line's index in the UNFILTERED load (stable while typing in the
                 // filter box), not its offset in the filtered slice.
                 ForEach(result, id: \.index) { row in

@@ -27,10 +27,9 @@ final class LogFeed {
     private static let maxBytes: UInt32 = 64 * 1024
     private static let timeoutMs: UInt32 = 2000
 
-    /// Prime synchronously (mirrors `Core.init()`'s non-blocking prime before starting its
-    /// producer thread), then start the blocking-wait loop.
+    /// Start with an immediate read on the producer thread, then enter the blocking-wait loop.
+    /// Both FFI calls touch disk, so neither belongs on the main actor that handles tab input.
     func start() {
-        reloadNow()
         let (stream, cont) = AsyncStream<[LogLine]>.makeStream(bufferingPolicy: .bufferingNewest(1))
         continuation = cont
         consumeTask = Task { [weak self] in
@@ -42,6 +41,14 @@ final class LogFeed {
         let maxBytes = Self.maxBytes
         let timeoutMs = Self.timeoutMs
         let t = Thread {
+            let initial = ffiDecode([LogLine].self) {
+                ds_logs_json(maxBytes)
+            } ?? []
+            if Thread.current.isCancelled {
+                cont.finish()
+                return
+            }
+            cont.yield(initial)
             while !Thread.current.isCancelled {
                 let decoded = ffiDecode([LogLine].self) {
                     ds_logs_wait(maxBytes, timeoutMs)
@@ -65,11 +72,19 @@ final class LogFeed {
         continuation = nil
     }
 
-    /// One-shot synchronous re-read (the initial prime in `start()`, and the Clear button's
-    /// re-prime after `ds_logs_clear()`) — the SAME `ds_logs_json` call `start()` uses, kept
-    /// in one place so the two paths can't drift.
-    func reloadNow() {
-        apply(ffiDecode([LogLine].self) { ds_logs_json(Self.maxBytes) } ?? [])
+    /// Clear and re-prime on a one-shot worker so the destructive file operation cannot block
+    /// the main actor. The live watcher will normally publish the same result too; the stream's
+    /// newest-one buffer makes that harmless while guaranteeing an immediate empty refresh.
+    func clear() {
+        guard let continuation else { return }
+        let maxBytes = Self.maxBytes
+        let t = Thread {
+            ds_logs_clear()
+            let decoded = ffiDecode([LogLine].self) { ds_logs_json(maxBytes) } ?? []
+            continuation.yield(decoded)
+        }
+        t.name = "logs-clear"
+        t.start()
     }
 
     private func apply(_ decoded: [LogLine]) {
