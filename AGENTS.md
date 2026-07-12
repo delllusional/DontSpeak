@@ -100,9 +100,11 @@ and no other attribution beyond this one line. Format:
 Agent: <model-id> <effort-level>
 ```
 
-e.g. `Agent: claude-sonnet-5 xhigh`. State your own model id and the current
-session's reasoning-effort level (Claude Code: read `$CLAUDE_EFFORT`) — don't omit
-the field if the effort level is unclear, give your best description instead.
+Use the full active model slug for every provider, not a family shorthand or generic
+product name. Examples: `Agent: claude-sonnet-5 xhigh` and
+`Agent: gpt-5.6-sol xhigh`. State your own model id and the current session's
+reasoning-effort level (Claude Code: read `$CLAUDE_EFFORT`) — don't omit the field if
+the effort level is unclear, give your best description instead.
 Claude Code's own automatic `Co-Authored-By` trailer is disabled repo-wide via
 `.claude/settings.json`'s `attribution` key so it can't duplicate this line; Codex
 and Qwen Code don't read that file, so if either tool's own auto-attribution can't be
