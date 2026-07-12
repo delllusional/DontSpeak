@@ -100,7 +100,7 @@ impl SetConfigArgs {
             // gate for the persistent voice pool (`list_voices` only ever surfaces English).
             if let Some(bad) = vs
                 .iter()
-                .find(|s| !matches!(s.as_bytes().first(), Some(b'a') | Some(b'b')))
+                .find(|s| !matches!(s.chars().next(), Some('a') | Some('b')))
             {
                 return Err(format!(
                     "`{bad}` is not an English Kokoro voice. This version supports English only (ids starting `a`/`b`); see list_voices."
@@ -231,6 +231,10 @@ impl SetConfigArgs {
             cfg.tray_indicator = norm;
         }
         if let Some(g) = capture_gain {
+            let g = match g {
+                CaptureGain::Auto => CaptureGain::Auto,
+                CaptureGain::Manual(v) => CaptureGain::Manual(v.clamp(0.5, 20.0)),
+            };
             cfg.capture_gain = g;
             changes.push(match g {
                 CaptureGain::Auto => "capture_gain=auto".to_string(),

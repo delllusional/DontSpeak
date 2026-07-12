@@ -446,8 +446,9 @@ fn param_ui(param: &Param) -> Value {
             o.insert("enum".into(), json!(vals));
         }
         PType::Gain => {
-            // "auto" or a 0.5–20 multiplier — show the numeric range as the detail.
-            o.insert("type".into(), json!("number"));
+            // "auto" or a 0.5–20 multiplier.
+            o.insert("type".into(), json!("number_or_enum"));
+            o.insert("enum".into(), json!(["auto"]));
             o.insert("minimum".into(), json!(0.5));
             o.insert("maximum".into(), json!(20.0));
         }

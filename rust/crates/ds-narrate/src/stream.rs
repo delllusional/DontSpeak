@@ -8,6 +8,7 @@
 //! reconnect/restart dedup-safe (already-spoken runs never re-emit).
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -77,6 +78,10 @@ pub struct DisplayState {
     pub gate_msg: String,
     #[serde(default)]
     pub gate_on: bool,
+    /// Distinguishes an actual cached decision for an empty message key from the
+    /// all-empty serde/default state.
+    #[serde(default)]
+    pub gate_set: bool,
 }
 
 /// One batch's effect, decided PURELY (no IO) so it is unit-testable — the seam the
@@ -113,7 +118,7 @@ pub fn step(
     // speaks only the ACTIVE terminal's items, holding the rest until they become active
     // (see docs/PER-TERMINAL-QUEUES.md). We still suppress narration sent WHILE the user is
     // recording — no reason to stream fresh chatter into a dictation.
-    let gate_on = if !batch.key.is_empty() && prev.gate_msg == batch.key {
+    let gate_on = if prev.gate_set && prev.gate_msg == batch.key && !prev.seen_final {
         prev.gate_on
     } else {
         !mic_active
@@ -130,6 +135,7 @@ pub fn step(
                 short_done: false,
                 gate_msg: batch.key.clone(),
                 gate_on: false,
+                gate_set: true,
             }),
             speak: Vec::new(),
         };
@@ -175,6 +181,7 @@ pub fn step(
         short_done: accum.short_done,
         gate_msg: batch.key.clone(),
         gate_on: true,
+        gate_set: true,
     };
     DisplayStep {
         write: Some(next),
@@ -206,10 +213,26 @@ pub fn narrate_batch(
         let _ = std::fs::create_dir_all(parent);
     }
     with_state_lock(&state_path, || {
-        let prev: DisplayState = std::fs::read_to_string(&state_path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
+        let prev: DisplayState = match std::fs::read_to_string(&state_path) {
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(state) => state,
+                Err(e) => {
+                    eprintln!(
+                        "dontspeak: ignoring corrupt narration state {}: {e}",
+                        state_path.display()
+                    );
+                    DisplayState::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => DisplayState::default(),
+            Err(e) => {
+                eprintln!(
+                    "dontspeak: could not read narration state {}: {e}",
+                    state_path.display()
+                );
+                DisplayState::default()
+            }
+        };
         let decided = step(&prev, batch, mic_active, digests_on, shorts_on);
         if let Some(next) = decided.write {
             atomic_write(
@@ -232,16 +255,22 @@ pub fn narrate_batch(
 /// successful `thread/resume`.
 pub fn seed_witness(paths: &Paths, session: &str) {
     let path = display_state_path(paths, session);
-    if path.exists() {
-        return; // don't overwrite real state from a prior turn / resumed session
-    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    atomic_write(
-        &path,
-        &serde_json::to_string(&DisplayState::default()).unwrap_or_default(),
-    );
+    // create_new is the atomic existence check: two concurrent seeders cannot both
+    // observe a missing file and then overwrite a real batch written between those steps.
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        let _ = file.write_all(
+            serde_json::to_string(&DisplayState::default())
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+    }
 }
 
 /// Witness that a streaming pass ran (or was seeded) for this session: its per-session
@@ -377,9 +406,11 @@ fn with_state_lock<T>(state_path: &Path, f: impl FnOnce() -> T) -> T {
 /// target (atomic on the same filesystem), so a concurrent reader never observes a torn or
 /// empty file — only the previous or the new complete contents.
 fn atomic_write(path: &Path, contents: &str) {
-    let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, contents).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
+    if let Err(e) = ds_config::atomic_write_str(path, contents) {
+        eprintln!(
+            "dontspeak: could not write narration state {}: {e}",
+            path.display()
+        );
     }
 }
 

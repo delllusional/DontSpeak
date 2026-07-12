@@ -253,7 +253,14 @@ pub(crate) fn claude_toml_hooks(
         Some(PreviewDoc::Json(_)) => {
             panic!("claude_toml_hooks: seed must be PreviewDoc::Toml for a TOML mechanism")
         }
-        None => std::fs::read_to_string(cfg).unwrap_or_default(),
+        None => match std::fs::read_to_string(cfg) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                eprintln!("wire: could not read {} ({e})", cfg.display());
+                return 1;
+            }
+        },
     };
     let result = if remove {
         ds_config::strip_codex_hooks(&existing)
