@@ -47,7 +47,7 @@ widening — see `rust/deny.toml`'s existing entries for the expected rigor.
 
 - Confirm there's something to push (`git status`, `git log origin/main..HEAD`); stage
   and commit per the user's intent first if there are uncommitted changes (end commit
-  messages with the `Co-Authored-By` trailer).
+  messages with the `AI:` trailer — see AGENTS.md § Commit attribution).
 - `git push origin <branch>` (default `main`). `origin` is `delllusional/DontSpeak`.
 
 ## Caveats

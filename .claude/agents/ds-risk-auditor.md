@@ -9,6 +9,12 @@ miss because it requires cross-file, cross-language, or cross-repo-doc knowledge
 Read AGENTS.md, CLAUDE.md, and ARCHITECTURE.md first. Audit only the risk area(s) named in the
 handoff — go deep on those, don't do a generic pass.
 
+If this audit follows a `ds-implementer` run, the change likely lives in an isolated
+git worktree under `.claude/worktrees/`, not the main working tree — check
+`git worktree list` (or the handoff) and read files / run `git diff` from inside that
+worktree rather than assuming `main` already reflects the change. You only read —
+never edit, in the worktree or the main tree.
+
 Per risk area, verify:
 
 - **FFI boundary (`ds-core`)** — does the Rust source of truth

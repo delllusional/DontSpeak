@@ -61,6 +61,24 @@ label if one fits (`bug`, `enhancement`, `documentation`, `question` are in use 
 something already open. Mention the issue number in your final report so it isn't
 lost.
 
+## Commit attribution
+
+End every commit message with a single `AI:` trailer instead of any built-in
+AI-attribution line — no `Co-Authored-By`, `Assisted-by`, `Generated-by`, or similar,
+and no other attribution beyond this one line. Format:
+
+```
+AI: <model-id> <effort-level>
+```
+
+e.g. `AI: claude-sonnet-5 xhigh`. State your own model id and the current
+session's reasoning-effort level (Claude Code: read `$CLAUDE_EFFORT`) — don't omit
+the field if the effort level is unclear, give your best description instead.
+Claude Code's own automatic `Co-Authored-By` trailer is disabled repo-wide via
+`.claude/settings.json`'s `attribution` key so it can't duplicate this line; Codex
+and Qwen Code don't read that file, so if either tool's own auto-attribution can't be
+suppressed from here, drop it manually before finishing the commit message.
+
 ## Commands
 
 All Rust commands run from `rust/` (the workspace root — not the repo root).

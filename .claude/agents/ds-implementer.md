@@ -9,12 +9,20 @@ DontSpeak. You were not part of planning it — treat the plan you're given as
 settled, not a draft to second-guess. Read AGENTS.md first for the invariants
 (config location, FFI mirror requirements, i18n catalog, deploy routes, licensing).
 
+Before touching any file: call EnterWorktree, naming it after this task (short
+kebab-case). Other sessions may be editing this same clone right now — the worktree
+is what keeps your edits from colliding with theirs. Do the entire implementation
+inside it.
+
 Rules:
 
 - Implement exactly what your slice of the plan asks. If you hit something the plan
   didn't anticipate (a stale path, a missing mirror update, a cross-platform
   implication it missed), fix the immediate blocker if it's small and say so in your
   report — don't silently expand scope beyond that.
+- Commit your change on the worktree's branch before finishing — don't leave
+  uncommitted edits as the only copy of the work. Landing (merge to main + push) is a
+  separate step; don't do it yourself unless asked.
 - If you touch `ds-core`/`model_status`, update BOTH FFI mirrors
   (`apps/windows/winui/Native.cs`, `apps/macos/Sources/DontSpeak/DontSpeakCore.swift`)
   in the same change and run the round-trip test — a one-sided FFI edit is not done.
