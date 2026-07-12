@@ -28,16 +28,38 @@ use crate::{hook_narrate, hook_prompt, hook_speak};
 /// The one field every Claude Code hook payload carries that we route on.
 #[derive(Deserialize, Default)]
 struct EventEnvelope {
-    // Grok sends camelCase (`hookEventName`); the alias accepts it alongside Claude's snake_case.
+    // Grok sends the camelCase key; Claude-compatible clients send the snake_case key.
     #[serde(default, alias = "hookEventName")]
     hook_event_name: String,
 }
 
-/// Pull the `hook_event_name` out of a raw hook payload (empty string if absent/unparseable).
+/// Convert Grok's lowercase-snake event values to the Claude-compatible PascalCase dialect.
+/// Applying it to an already-PascalCase value is an identity operation, and doing this
+/// mechanically keeps new upstream event names from requiring a hand-maintained match table.
+fn normalize_event_name(raw: &str) -> String {
+    let mut normalized = String::with_capacity(raw.len());
+    let mut capitalize = true;
+    for ch in raw.chars() {
+        if ch == '_' {
+            capitalize = true;
+        } else if capitalize {
+            normalized.extend(ch.to_uppercase());
+            capitalize = false;
+        } else {
+            normalized.push(ch);
+        }
+    }
+    normalized
+}
+
+/// Pull the event name out of a raw hook payload, returning an empty string when absent or
+/// malformed. Grok's live-verified lowercase-snake values are normalized to the PascalCase
+/// contract used by the dispatch arms; Claude-compatible values pass through unchanged.
 pub fn event_name(payload: &str) -> String {
-    serde_json::from_str::<EventEnvelope>(payload.trim())
+    let raw = serde_json::from_str::<EventEnvelope>(payload.trim())
         .map(|e| e.hook_event_name)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    normalize_event_name(&raw)
 }
 
 /// The `session_id` every Claude Code hook payload carries. Parsed ambiently so callers
@@ -46,7 +68,7 @@ pub fn event_name(payload: &str) -> String {
 /// streaming-witness to the right Claude session.
 #[derive(Deserialize, Default)]
 struct SessionEnvelope {
-    // Grok sends camelCase (`sessionId`); the alias accepts it alongside Claude's snake_case.
+    // Grok sends camelCase `sessionId` (live-verified); Claude-compatible clients use snake_case.
     #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
 }
@@ -110,7 +132,9 @@ pub(crate) fn notify_at(
         //  • Claude Code streams via MessageDisplay but ALSO delivers `last_assistant_message`
         //    on Stop, so speak_reply self-gates on this session's MessageDisplay state file
         //    (present ⇒ already narrated ⇒ silent); CC wires Stop for the turn-done ding.
-        // The reply-done earcon then rings for both (engine self-gates on `earcon_enabled` +
+        //  • Grok's live-verified Stop payload is metadata-only, so speak_reply is silent and
+        //    the event contributes only the turn-done ding.
+        // The reply-done earcon then rings for every client (engine self-gates on `earcon_enabled` +
         // mute), so a finished turn is signalled whether or not the reply was just voiced.
         "Stop" => {
             hook_narrate::speak_reply(paths, payload, client);
@@ -136,6 +160,21 @@ pub fn provide(event: &str, _payload: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_name_normalizes_the_grok_dialect_without_an_event_table() {
+        for (wire, canonical) in [
+            ("stop", "Stop"),
+            ("session_start", "SessionStart"),
+            ("user_prompt_submit", "UserPromptSubmit"),
+            ("post_tool_use_failure", "PostToolUseFailure"),
+            ("UserPromptSubmit", "UserPromptSubmit"),
+        ] {
+            let payload = format!(r#"{{"hookEventName":"{wire}"}}"#);
+            assert_eq!(event_name(&payload), canonical, "{wire}");
+        }
+        assert_eq!(event_name("not json"), "");
+    }
 
     #[test]
     fn session_start_owes_no_provide_reply() {
@@ -204,30 +243,10 @@ mod tests {
     }
 
     #[test]
-    fn grok_camelcase_session_start_seeds_witness_via_sessionid_alias() {
-        // Grok delivers camelCase payloads (`hookEventName`, `sessionId`). `notify_at` must
-        // extract the session from `sessionId` (the serde alias on `SessionEnvelope`) and scope
-        // the streaming-witness seed to THAT session — proving camelCase routing at the notify
-        // seam. NOTE: Grok itself wires SessionStart greet-only (which SKIPS the seed); we pass
-        // plain `notify` (greet_only=false) here purely so the parsed `sessionId` has an
-        // OBSERVABLE effect (the seed) to assert on. This arm reaches only the greet engine_ping
-        // (a best-effort no-op on the tempdir's nonexistent socket) and the witness seed — no
-        // mic probe.
-        let dir = tempfile::tempdir().unwrap();
-        let paths = ds_config::Paths::rooted_at(dir.path());
+    fn grok_session_start_live_shape_parses_both_dialects() {
         let session = "grok-session-zzzz";
-        let payload = format!(r#"{{"hookEventName":"SessionStart","sessionId":"{session}"}}"#);
-
-        notify_at(
-            &paths,
-            "SessionStart",
-            &payload,
-            /*greet_only*/ false,
-            ds_config::ClientSource::ClaudeCode,
-        );
-        assert!(
-            hook_narrate::streamed_via_message_display(&paths, session),
-            "camelCase sessionId must scope the streaming-witness seed"
-        );
+        let payload = format!(r#"{{"hookEventName":"session_start","sessionId":"{session}"}}"#);
+        assert_eq!(event_name(&payload), "SessionStart");
+        assert_eq!(session_id_from_payload(&payload).as_deref(), Some(session));
     }
 }

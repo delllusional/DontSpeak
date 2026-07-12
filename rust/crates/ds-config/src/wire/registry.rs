@@ -333,9 +333,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         target: ClientSource::Grok,
         display_name: "Grok",
         kind: ClientKind::TerminalCli,
-        // UNVERIFIED — same as Qwen: Grok CLI's own `clientInfo.name` is not published. The
-        // `initialize` capture line settles it.
-        mcp_client_names: &["grok", "grok-cli"],
+        // Live verified (2026-07-13): Grok sends clientInfo.name="grok-shell-DontSpeak",
+        // normalized to "grok-shell-dontspeak". Keep the older aliases for version skew.
+        mcp_client_names: &["grok", "grok-cli", "grok-shell-dontspeak"],
         present: |p| p.grok_dir.exists(),
         detect_dir: |p| &p.grok_dir,
         gate_on_presence: true,
@@ -343,24 +343,17 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         // `~/.grok/config.toml` (and project `.grok/config.toml`), so the MCP surface reuses
         // the same `TomlMcp` mechanism/shaper Codex uses, pointed at Grok's config file.
         //
-        // Grok ALSO reads native hook definitions from `~/.grok/hooks/*.json` (or project
-        // `.grok/hooks/*.json`) using a Claude-COMPATIBLE event contract. So DontSpeak wires
-        // its OWN dedicated `~/.grok/hooks/dontspeak.json` — a file it owns outright (wire
-        // overwrites, backing up first; unwire deletes it) — via the `GrokJsonHooks`
-        // mechanism. That makes Grok narration FIRST-CLASS and native: it does not depend on
-        // `wire claude_code` compat being present. When Claude hooks are also present, Grok's
-        // adapter drops their `args`; our native entries use that exact bare target, so Grok
-        // deduplicates both sources. The no-argument binary sees Grok's reserved hook marker
-        // and performs the event's notify plus any provide response in one process. The hook
-        // set is the full non-streaming shape (five events): `SessionStart` (greet-only),
-        // `SessionEnd`, `UserPromptSubmit` (notify + provide), `Stop`, `Notification`. Grok has
-        // NO `MessageDisplay` streaming
-        // hook, so end-of-turn narration rides `Stop` (like Codex, voicing the whole final
-        // message). Grok's hook payloads are camelCase (`hookEventName`, `sessionId`,
-        // `lastAssistantMessage`, `notificationType`) — handled by the runtime serde aliases
-        // on the hook payload structs, so the same bare `dontspeak` binary serves them. Hooks
-        // live in a SEPARATE file from MCP, so the two surfaces edit different
-        // files (unlike Codex/Qwen, which share one).
+        // Grok reads native hooks from `~/.grok/hooks/*.json`; DontSpeak owns and replaces its
+        // dedicated file. The five lifecycle hooks provide greeting, session routing, and
+        // earcons independently of Claude compatibility. Grok deduplicates an imported Claude
+        // entry with the identical bare command, and `GROK_HOOK_EVENT` distinguishes that hook
+        // launch from DontSpeak's no-argument MCP mode.
+        //
+        // Live 0.2.93 captures on 2026-07-13 showed camelCase data keys and lowercase-snake
+        // `hookEventName` values, which the runtime normalizes mechanically. Stop is
+        // metadata-only and carries no final assistant text, so it signals completion but
+        // cannot drive full-reply narration. The MCP handshake identified itself as
+        // `grok-shell-DontSpeak`, normalized to the alias above.
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::GrokJsonHooks,
@@ -388,7 +381,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             },
         ],
         verified_client_version: "0.2.93",
-        verified_on: "2026-07-12",
+        verified_on: "2026-07-13",
     },
 ];
 
@@ -548,6 +541,10 @@ mod tests {
         assert_eq!(
             client_from_mcp_name("codex-mcp-client"),
             ClientSource::Codex
+        );
+        assert_eq!(
+            client_from_mcp_name("grok-shell-DontSpeak"),
+            ClientSource::Grok
         );
     }
 

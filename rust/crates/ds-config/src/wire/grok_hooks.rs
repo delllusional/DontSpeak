@@ -1,9 +1,10 @@
 //! Grok CLI native voice hooks (`~/.grok/hooks/dontspeak.json`).
 //!
 //! Grok reads per-file hook definitions out of `~/.grok/hooks/*.json` (and project
-//! `.grok/hooks/*.json`) using a Claude-COMPATIBLE event contract — events routed by
-//! `hookEventName`, one JSON object on stdin, `Stop` carrying the final assistant message —
-//! so the SAME `dontspeak` binary serves them. Unlike the
+//! `.grok/hooks/*.json`) using Claude-compatible configuration event names. Runtime payloads
+//! use camelCase keys and lowercase-snake event values; live Grok 0.2.93 Stop captures carry
+//! end-turn metadata but no final assistant text. The same `dontspeak` binary still serves
+//! the lifecycle hooks. Unlike the
 //! Codex/Qwen hook surfaces, we do NOT merge into a file the client also owns: DontSpeak
 //! writes its OWN dedicated file (`dontspeak.json`) that it owns outright, so wiring is a
 //! whole-file overwrite (a backup is taken first) and unwiring simply DELETES the file. No
@@ -16,19 +17,19 @@
 //! Grok deduplicates identical command targets across sources, so native + compatibility
 //! wiring becomes one process per event instead of two registrations. The hook runner's
 //! reserved `GROK_HOOK_EVENT` environment variable lets the no-argument binary distinguish
-//! this launch from its normal no-argument MCP-server role and dispatch both the command
-//! side effect and (for `UserPromptSubmit`) the query response itself.
+//! this launch from its normal no-argument MCP-server role and dispatch the command side
+//! effect plus compatibility output for `UserPromptSubmit`.
 //!
-//! The per-event set is the full non-streaming shape (Grok has no `MessageDisplay` stream, so
-//! the reply is voiced whole from `Stop`):
+//! The per-event set covers the five useful lifecycle signals. Grok has no `MessageDisplay`
+//! stream, and its Stop payload has no final text, so these native hooks currently provide
+//! lifecycle side effects rather than assistant-reply narration:
 //!
 //!   * `SessionStart` → notify, greet-only — the spoken greeting without seeding the
-//!     streaming witness, which on a hook-only client would mark every session "already
-//!     narrated" and silence the `Stop` reply.
+//!     streaming witness, which would incorrectly mark a non-streaming session narrated.
 //!   * `SessionEnd` → `notify` — barge this session's playback on close.
-//!   * `UserPromptSubmit` → notify + provide in one process — mark-active routing, and inject the
-//!     narration spec so Grok WRITES the spoken-line blockquotes.
-//!   * `Stop` → `notify` — speak the final reply (end-of-turn narration).
+//!   * `UserPromptSubmit` → notify + compatibility provide output in one process. Native
+//!     passive-hook stdout is ignored by Grok, but imported Claude-hook compatibility may use it.
+//!   * `Stop` → `notify` — the reply-done earcon; `speak_reply` is a no-op without text.
 //!   * `Notification` → `notify` — the needs-input earcon.
 //!
 //! Rendered as one group and one handler per event:

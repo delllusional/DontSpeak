@@ -103,9 +103,10 @@ fn is_grok_hook_launch(marker: Option<&std::ffi::OsStr>) -> bool {
 
 /// Grok's compatibility adapter drops Claude Code's `args`, and Grok deduplicates handlers
 /// by their resulting bare command target. One no-argument process must therefore perform
-/// both halves of DontSpeak's hook contract: the event side effect and any synchronous query
-/// response. `greet_only=true` matters only for SessionStart and keeps this non-streaming
-/// client from seeding Claude's MessageDisplay witness.
+/// the event side effect and compatibility query output in one process. Grok's native passive
+/// hooks ignore stdout; its imported Claude-hook compatibility path may still consume it.
+/// `greet_only=true` matters only for SessionStart and keeps this non-streaming client from
+/// seeding Claude's MessageDisplay witness.
 fn run_grok_hook() {
     let payload = read_stdin();
     let event = hook_core::event_name(&payload);

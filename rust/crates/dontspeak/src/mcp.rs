@@ -99,8 +99,8 @@ pub(crate) fn dispatch(
     match method {
         "initialize" => {
             // Learn WHO is calling, and log the RAW `clientInfo.name` we saw. That capture line
-            // is the mechanism that turns an UNVERIFIED `mcp_client_names` alias (Qwen, Grok)
-            // into a verified one from the field — a one-line registry edit.
+            // is the mechanism that turns an UNVERIFIED `mcp_client_names` alias (currently
+            // Qwen) into a verified one from the field — a one-line registry edit.
             //
             // Deliberately on the `log` FACADE (see `log`), not `ds_log::log_from`: the facade
             // is a no-op under `cargo test` (no sink is installed without `ds_log::init()`), so

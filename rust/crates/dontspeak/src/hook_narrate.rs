@@ -80,15 +80,15 @@ pub fn mark_streaming_session(paths: &Paths, payload: &str) {
 
 // ── Stop hook (speak the FINAL reply — non-streaming clients) ───────────────────
 
-/// Stop hook payload (subset): the final assistant text + the session id. ALL clients that
-/// wire `Stop` (Claude Code, OpenAI Codex, Qwen Code) deliver `last_assistant_message` (this
-/// was once assumed CC-empty — it is NOT), so the field alone can't tell the clients apart;
-/// the streaming witness in [`speak_reply`] does that instead.
+/// Stop hook payload subset. Claude Code, Codex, and Qwen Code supply
+/// `last_assistant_message`, which supports full-reply voicing for non-streaming clients.
+///
+/// A live Grok 0.2.93 capture on 2026-07-13 instead contained `sessionId`, `reason`, and
+/// `transcriptPath`, but no final text. Grok's Stop therefore reaches the reply-done earcon
+/// but contributes no narration; the camelCase text alias remains forward-compatible.
 #[derive(Debug, Deserialize, Default)]
 struct StopHook {
-    // Grok sends camelCase (`lastAssistantMessage` / `sessionId`); the aliases accept them
-    // alongside Claude's snake_case. NOTE: `lastAssistantMessage` is a best-guess field name
-    // pending a live-grok verification pass.
+    // Alias accepts camelCase alongside snake_case for clients that supply it.
     #[serde(default, alias = "lastAssistantMessage")]
     last_assistant_message: Option<String>,
     #[serde(default, alias = "sessionId")]
@@ -762,36 +762,41 @@ mod tests {
         assert!(!path.with_extension("tmp").exists(), "tmp removed");
     }
 
-    // ── Grok camelCase Stop payload (runtime serde aliases) ──────────────────────────
-    //
-    // Grok delivers camelCase hook payloads (`hookEventName`, `sessionId`,
-    // `lastAssistantMessage`). The serde aliases on `StopHook` + `EventEnvelope` must route
-    // them through the SAME path as Claude's snake_case. Asserted at the PURE seam — parse →
-    // event_name → `stop_utterances` with an EXPLICIT `mic_active` — deliberately NOT through
-    // `speak_reply`, which would fall through to the live, nondeterministic
-    // `ds_platform::is_mic_active()` OS audio probe (a test-isolation violation).
+    // ── Grok Stop payload (live-verified field names + event casing) ─────────────────
+    #[test]
+    fn camelcase_stop_aliases_remain_forward_compatible() {
+        let payload = r#"{"hookEventName":"stop","sessionId":"g1","lastAssistantMessage":"> Hi.\n\nDetail."}"#;
+        assert_eq!(crate::hook_core::event_name(payload), "Stop");
+        let hook: StopHook =
+            serde_json::from_str(payload).expect("Stop payload parses (aliases + normalization)");
+        assert_eq!(hook.session_id.as_deref(), Some("g1"));
+        assert_eq!(
+            hook.last_assistant_message.as_deref(),
+            Some("> Hi.\n\nDetail.")
+        );
+    }
 
     #[test]
-    fn grok_camelcase_stop_payload_parses_and_voices() {
-        let payload = r#"{"hookEventName":"Stop","sessionId":"g1","lastAssistantMessage":"> Hi.\n\nDetail."}"#;
-        // The event router reads the camelCase `hookEventName` via its alias.
+    fn real_grok_stop_is_metadata_only() {
+        // Sanitized from a live Grok 0.2.93 capture on 2026-07-13.
+        let payload = r#"{"hookEventName":"stop","sessionId":"g-real","cwd":"C:\\Users\\usr","transcriptPath":"...","promptId":"p1","reason":"end_turn"}"#;
         assert_eq!(crate::hook_core::event_name(payload), "Stop");
-        // The Stop payload parses via the `sessionId` / `lastAssistantMessage` aliases.
-        let hook: StopHook =
-            serde_json::from_str(payload).expect("camelCase Stop parses through the serde aliases");
-        assert_eq!(hook.session_id.as_deref(), Some("g1"));
-        // The parsed message voices its blockquote — feeding an EXPLICIT `mic_active`/`streamed`
-        // rather than reaching the live OS probe.
-        assert_eq!(
+        let hook: StopHook = serde_json::from_str(payload).expect("real Grok Stop parses");
+        assert_eq!(hook.session_id.as_deref(), Some("g-real"));
+        assert!(
+            hook.last_assistant_message.is_none(),
+            "Grok Stop carries no last* text"
+        );
+        // Consequently Stop contributes no narration text (earcon may still ring via the arm).
+        assert!(
             stop_utterances(
                 hook.last_assistant_message.as_deref(),
-                /*messages_on*/ true,
-                /*short_on*/ false,
-                /*mic_active*/ false,
-                /*streamed*/ false,
-            ),
-            vec!["Hi.".to_string()],
-            "camelCase lastAssistantMessage voices the blockquote"
+                true,
+                false,
+                false,
+                false
+            )
+            .is_empty()
         );
     }
 }
