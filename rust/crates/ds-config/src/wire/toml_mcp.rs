@@ -10,6 +10,8 @@
 //! merge and strip) rather than silently left alone or reported as changed — the
 //! caller (`wire::mcp::apply_toml`) turns that into a hard error, matching the
 //! JSON MCP path's `read_json_or_bail` convention.
+//! The public boundary deliberately remains `Result<String, String>`: its sole caller handles
+//! every failure identically, so there is no failure-kind branch for a typed error to serve.
 //!
 //! Uses `toml_edit` for format-preserving edits (comments, ordering).
 

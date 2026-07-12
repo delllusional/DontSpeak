@@ -62,7 +62,7 @@ fn codex_command(bin: &str, verb: &str, client: ClientSource) -> String {
     inline_command(
         host_inline_flavor(),
         bin,
-        &[verb, "--client", client.as_str()],
+        [verb, "--client", client.as_str()],
         ShellOverride::Unsupported,
     )
     .0

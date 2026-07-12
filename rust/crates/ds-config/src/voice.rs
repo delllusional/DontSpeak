@@ -1,7 +1,7 @@
 //! DontSpeak's own speech config (`VoiceConfig`) — the typed struct read from
 //! `our config.toml`, its defaults, clamping, load, and the warm-subsystem delta.
 
-use std::io;
+use std::{collections::HashSet, io};
 
 use serde::{Deserialize, Serialize};
 
@@ -625,6 +625,46 @@ pub(crate) fn write_config_table(paths: &Paths, table: &toml::Table) -> io::Resu
     crate::atomic_write_str(&paths.config_toml, &text)
 }
 
+/// A deserializer that captures the field names emitted by Serde's `Deserialize` derive.
+/// It intentionally stops before visiting values: only `deserialize_struct`'s static field
+/// list is needed, and that list includes fields omitted by `skip_serializing_if`.
+struct StructFieldNames<'a>(&'a mut HashSet<String>);
+
+impl<'de> serde::Deserializer<'de> for StructFieldNames<'_> {
+    type Error = serde::de::value::Error;
+
+    fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        Err(<Self::Error as serde::de::Error>::custom(
+            "expected a derived struct",
+        ))
+    }
+
+    fn deserialize_struct<V>(
+        self,
+        _name: &'static str,
+        fields: &'static [&'static str],
+        _visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        self.0
+            .extend(fields.iter().map(|field| (*field).to_string()));
+        Err(<Self::Error as serde::de::Error>::custom(
+            "field names captured",
+        ))
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+        byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map enum
+        identifier ignored_any
+    }
+}
+
 impl VoiceConfig {
     /// Read `our config.toml` straight into the typed struct; fall back to
     /// defaults on any error (missing file, bad TOML). Unknown keys (typos, or keys
@@ -662,22 +702,13 @@ impl VoiceConfig {
         cfg
     }
 
-    /// Every key OUR config legitimately contains: the serialized `VoiceConfig` fields.
-    /// Used to flag typos on load. `tts_engine`/`stt_engine` (the preference fields) default
-    /// to `None` and are `skip_serializing_if`'d, so they never appear in the DEFAULT config's
-    /// serialized table — inserted explicitly here so a hand-set `tts_engine = "built_in"`
-    /// doesn't spuriously warn as an unknown key.
-    fn known_keys() -> std::collections::HashSet<String> {
-        let mut keys = std::collections::HashSet::new();
-        if let Ok(toml::Value::Table(t)) = toml::Value::try_from(VoiceConfig::default()) {
-            keys.extend(t.keys().cloned());
-        }
-        keys.insert("tts_engine".to_string());
-        keys.insert("stt_engine".to_string());
-        // `exclude_clients` is `skip_serializing_if = "Option::is_none"`, so (like the engine
-        // preference fields above) it's absent from the DEFAULT serialized table — insert it
-        // so a hand-set `exclude_clients = [...]` never warns as an unknown key.
-        keys.insert("exclude_clients".to_string());
+    /// Every key OUR config legitimately contains, taken directly from the field list generated
+    /// by Serde. Unlike serializing `default()`, this includes fields currently omitted by
+    /// `skip_serializing_if`, so adding another optional field cannot create a false warning.
+    fn known_keys() -> HashSet<String> {
+        let mut keys = HashSet::new();
+        let _ = VoiceConfig::deserialize(StructFieldNames(&mut keys));
+        debug_assert!(!keys.is_empty(), "VoiceConfig must deserialize as a struct");
         keys
     }
 

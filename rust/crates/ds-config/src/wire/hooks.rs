@@ -88,12 +88,18 @@ fn hook_group_is_ours(group: &Value) -> bool {
 /// The token is snake_case with no spaces and no quotes, so the Windows quote-free command
 /// invariant holds by construction (`inline_command` just space-joins the slice).
 fn hook_entry(spec: &HookSpec, verbs: &[&str], timeout_secs: u64, is_async: bool) -> Value {
-    let mut verbs = verbs.to_vec();
-    verbs.extend_from_slice(&["--client", spec.client.as_str()]);
-    let verbs = verbs.as_slice();
     let mut h = match spec.command_style {
         HookCommandStyle::ArgsArray => {
-            json!({ "type": "command", "command": spec.bin, "args": verbs })
+            let mut entry = json!({ "type": "command", "command": spec.bin });
+            entry["args"] = Value::Array(
+                verbs
+                    .iter()
+                    .copied()
+                    .chain(["--client", spec.client.as_str()])
+                    .map(Value::from)
+                    .collect(),
+            );
+            entry
         }
         HookCommandStyle::InlineShell => {
             // Qwen's CommandHookConfig HAS a `shell` field, so a spaced bin path can be pinned
@@ -101,7 +107,10 @@ fn hook_entry(spec: &HookSpec, verbs: &[&str], timeout_secs: u64, is_async: bool
             let (cmd, shell) = inline_command(
                 host_inline_flavor(),
                 spec.bin,
-                verbs,
+                verbs
+                    .iter()
+                    .copied()
+                    .chain(["--client", spec.client.as_str()]),
                 ShellOverride::Supported,
             );
             let mut v = json!({ "type": "command", "command": cmd });

@@ -611,6 +611,28 @@ impl NarrateKind {
 // means "a client we wire" must therefore gate on `is_client()` — see `de_exclude_clients`
 // below, and `ds_wire::run`'s registry-lookup guard.
 
+/// Parse an array of enum tokens in order, dropping unknowns and duplicates. `None` preserves
+/// the distinction between a non-array value (use the field's fail-open fallback) and an empty
+/// or all-unknown array (whose meaning differs by field).
+macro_rules! fail_open_vec {
+    ($value:expr, $ty:ty, $parse:expr) => {{
+        match $value {
+            toml::Value::Array(items) => {
+                let mut out = Vec::<$ty>::new();
+                for item in items {
+                    if let Some(value) = item.as_str().and_then($parse)
+                        && !out.contains(&value)
+                    {
+                        out.push(value);
+                    }
+                }
+                Some(out)
+            }
+            _ => None,
+        }
+    }};
+}
+
 /// Fail-open deserialize for `exclude_clients` (config-file). A present ARRAY ⇒
 /// `Some(known CLIENT tokens, in order, deduped; unknown/non-client tokens dropped)`.
 /// A present NON-array value ⇒ `None` (defer to all-supported). ABSENT ⇒ `None` via the
@@ -627,21 +649,9 @@ where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(false));
-    let toml::Value::Array(items) = v else {
-        return Ok(None);
-    };
-    let mut out: Vec<ClientSource> = Vec::new();
-    for it in items {
-        if let Some(t) = it
-            .as_str()
-            .and_then(ClientSource::parse)
-            .filter(|c| c.is_client())
-            && !out.contains(&t)
-        {
-            out.push(t);
-        }
-    }
-    Ok(Some(out))
+    Ok(fail_open_vec!(&v, ClientSource, |token| {
+        ClientSource::parse(token).filter(|client| client.is_client())
+    }))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -685,18 +695,10 @@ where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(true));
-    let toml::Value::Array(items) = v else {
-        return Ok(default_input_clears());
-    };
-    let mut out: Vec<CancelSpeechScope> = Vec::new();
-    for it in items {
-        if let Some(k) = it.as_str().and_then(CancelSpeechScope::parse)
-            && !out.contains(&k)
-        {
-            out.push(k);
-        }
-    }
-    Ok(out)
+    Ok(
+        fail_open_vec!(&v, CancelSpeechScope, CancelSpeechScope::parse)
+            .unwrap_or_else(default_input_clears),
+    )
 }
 
 /// Serialize an enum as its canonical `as_str()` token — the inverse of the
@@ -768,18 +770,7 @@ where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(true));
-    let toml::Value::Array(items) = v else {
-        return Ok(default_narrate());
-    };
-    let mut out: Vec<NarrateKind> = Vec::new();
-    for it in items {
-        if let Some(k) = it.as_str().and_then(NarrateKind::parse)
-            && !out.contains(&k)
-        {
-            out.push(k);
-        }
-    }
-    Ok(out)
+    Ok(fail_open_vec!(&v, NarrateKind, NarrateKind::parse).unwrap_or_else(default_narrate))
 }
 
 /// The default tray-indicator set: the mic (`stt`) colors STATICALLY and the voice (`tts`)
@@ -799,13 +790,8 @@ where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(true));
-    let toml::Value::Array(items) = v else {
-        return Ok(default_tray_indicator());
-    };
-    let parsed: Vec<TrayKind> = items
-        .iter()
-        .filter_map(|it| it.as_str().and_then(TrayKind::parse))
-        .collect();
+    let parsed =
+        fail_open_vec!(&v, TrayKind, TrayKind::parse).unwrap_or_else(default_tray_indicator);
     Ok(normalize_tray_indicator(parsed))
 }
 
@@ -828,22 +814,9 @@ where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(true));
-    let toml::Value::Array(items) = v else {
-        return Ok(default_provider());
-    };
-    let mut out: Vec<Provider> = Vec::new();
-    for it in items {
-        if let Some(p) = it.as_str().and_then(Provider::parse)
-            && !out.contains(&p)
-        {
-            out.push(p);
-        }
-    }
-    Ok(if out.is_empty() {
-        default_provider()
-    } else {
-        out
-    })
+    Ok(fail_open_vec!(&v, Provider, Provider::parse)
+        .filter(|providers| !providers.is_empty())
+        .unwrap_or_else(default_provider))
 }
 
 /// The default diarizer ladder: EMPTY = diarization OFF. Diarization is opt-in (it powers the
@@ -864,18 +837,7 @@ where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(true));
-    let toml::Value::Array(items) = v else {
-        return Ok(Vec::new());
-    };
-    let mut out: Vec<DiarizerProvider> = Vec::new();
-    for it in items {
-        if let Some(p) = it.as_str().and_then(DiarizerProvider::parse)
-            && !out.contains(&p)
-        {
-            out.push(p);
-        }
-    }
-    Ok(out)
+    Ok(fail_open_vec!(&v, DiarizerProvider, DiarizerProvider::parse).unwrap_or_default())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -973,37 +935,11 @@ where
 }
 
 pub(crate) fn parse_tts_ladder(v: &toml::Value) -> Vec<TtsEngine> {
-    match v {
-        toml::Value::Array(items) => {
-            let mut out: Vec<TtsEngine> = Vec::new();
-            for it in items {
-                if let Some(e) = it.as_str().and_then(TtsEngine::parse)
-                    && !out.contains(&e)
-                {
-                    out.push(e);
-                }
-            }
-            out
-        }
-        _ => default_tts_engine_ladder(),
-    }
+    fail_open_vec!(v, TtsEngine, TtsEngine::parse).unwrap_or_else(default_tts_engine_ladder)
 }
 
 pub(crate) fn parse_stt_ladder(v: &toml::Value) -> Vec<SttEngine> {
-    match v {
-        toml::Value::Array(items) => {
-            let mut out: Vec<SttEngine> = Vec::new();
-            for it in items {
-                if let Some(e) = it.as_str().and_then(SttEngine::parse)
-                    && !out.contains(&e)
-                {
-                    out.push(e);
-                }
-            }
-            out
-        }
-        _ => default_stt_engine_ladder(),
-    }
+    fail_open_vec!(v, SttEngine, SttEngine::parse).unwrap_or_else(default_stt_engine_ladder)
 }
 
 /// Fail-open TOML deserialize for the `tts_engine` PREFERENCE (config-file path, distinct from

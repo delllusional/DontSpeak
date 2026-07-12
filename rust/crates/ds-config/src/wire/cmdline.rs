@@ -85,25 +85,40 @@ pub(crate) fn host_inline_flavor() -> InlineFlavor {
 /// path is broken under every shell, a quoted one is broken under cmd specifically. We emit
 /// the QUOTED form there — correct for a Git Bash / PowerShell-hosted runner, and never the
 /// unquoted-spaced string that is broken everywhere.
-pub(crate) fn inline_command(
+pub(crate) fn inline_command<I, S>(
     flavor: InlineFlavor,
     bin: &str,
-    verbs: &[&str],
+    verbs: I,
     shell_override: ShellOverride,
-) -> (String, Option<&'static str>) {
+) -> (String, Option<&'static str>)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     inline_command_with(flavor, bin, verbs, shell_override, host_short_path)
 }
 
 /// Injectable core of [`inline_command`] — `shorten` is the 8.3 lookup, so the Windows
 /// spaced-path branches are exercised on Linux CI (where no Win32 call exists) via a stub.
-fn inline_command_with(
+fn inline_command_with<I, S>(
     flavor: InlineFlavor,
     bin: &str,
-    verbs: &[&str],
+    verbs: I,
     shell_override: ShellOverride,
     shorten: impl Fn(&str) -> Option<String>,
-) -> (String, Option<&'static str>) {
-    let verbs = verbs.join(" ");
+) -> (String, Option<&'static str>)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut verbs_text = String::new();
+    for verb in verbs {
+        if !verbs_text.is_empty() {
+            verbs_text.push(' ');
+        }
+        verbs_text.push_str(verb.as_ref());
+    }
+    let verbs = verbs_text;
     let unquoted = |p: &str| (format!("{} {verbs}", p.replace('\\', "/")), None);
     let quoted = || (format!("\"{bin}\" {verbs}"), None);
 
@@ -220,14 +235,14 @@ mod tests {
     fn unix_always_quotes_the_path() {
         for style in [ShellOverride::Supported, ShellOverride::Unsupported] {
             assert_eq!(
-                inline_command(InlineFlavor::Unix, "/bin/dontspeak", &["notify"], style),
+                inline_command(InlineFlavor::Unix, "/bin/dontspeak", ["notify"], style),
                 ("\"/bin/dontspeak\" notify".to_string(), None)
             );
             assert_eq!(
                 inline_command(
                     InlineFlavor::Unix,
                     "/opt/x y/dontspeak",
-                    &["notify", "--greet-only"],
+                    ["notify", "--greet-only"],
                     style
                 ),
                 (
@@ -246,7 +261,7 @@ mod tests {
         // Windows user gets — identical for all three string-runner clients.
         let bin = r"C:\Users\usr\AppData\Local\Programs\DontSpeak\dontspeak.exe";
         for style in [ShellOverride::Supported, ShellOverride::Unsupported] {
-            let (cmd, shell) = inline_command(InlineFlavor::Windows, bin, &["notify"], style);
+            let (cmd, shell) = inline_command(InlineFlavor::Windows, bin, ["notify"], style);
             assert_eq!(
                 cmd,
                 "C:/Users/usr/AppData/Local/Programs/DontSpeak/dontspeak.exe notify"
@@ -261,7 +276,7 @@ mod tests {
             let (cmd, shell) = inline_command(
                 InlineFlavor::Windows,
                 bin,
-                &["notify", "--client", "codex"],
+                ["notify", "--client", "codex"],
                 style,
             );
             assert_eq!(
@@ -282,7 +297,7 @@ mod tests {
             inline_command(
                 InlineFlavor::Windows,
                 bin,
-                &["provide"],
+                ["provide"],
                 ShellOverride::Supported
             ),
             (format!("& \"{bin}\" provide"), Some("powershell"))
@@ -297,7 +312,7 @@ mod tests {
         let (cmd, shell) = inline_command_with(
             InlineFlavor::Windows,
             bin,
-            &["notify"],
+            ["notify"],
             ShellOverride::Unsupported,
             fake_shorten,
         );
@@ -319,7 +334,7 @@ mod tests {
         let (cmd, shell) = inline_command_with(
             InlineFlavor::Windows,
             bin,
-            &["notify"],
+            ["notify"],
             ShellOverride::Unsupported,
             no_shorten,
         );
