@@ -32,11 +32,14 @@ files are one line. Edit AGENTS.md itself, never the wrappers, and don't restate
 its content (the invariants below, especially) inside a tool-specific file — point
 at this file instead, so there's one place to update.
 
-Skills live physically under `.agents/skills/` — the location Codex CLI and Gemini
-CLI/Qwen Code scan natively. `.claude/skills/` holds a same-named symlink per skill
-so Claude Code and Grok Build resolve the identical file with no copy. See
-CONTRIBUTING.md's Windows prereqs for the one-time `git config core.symlinks true`
-this needs on Windows.
+Skills live under `.agents/skills/` — the location Codex CLI and Gemini CLI/Qwen Code
+scan natively — and are duplicated file-for-file under `.claude/skills/` so Claude
+Code and Grok Build find the same content. This is a plain copy, not a symlink
+(symlinks need `git config core.symlinks true` plus Developer Mode/admin rights to
+actually work on Windows, and silently degrade to placeholder text files without
+that). `.claude/skills/prepush`'s gate diffs the two trees and fails on drift — when
+you edit a skill, edit `.agents/skills/<name>/` and re-copy into `.claude/skills/<name>/`
+before committing.
 
 `.claude/agents/*.md` (the `ds-planner` / `ds-plan-reviewer` / `ds-implementer` /
 `ds-risk-auditor` / `ds-lander` pipeline, `.claude/workflows/plan-review-implement.js`)
@@ -84,15 +87,15 @@ lost.
 
 ## Commit attribution
 
-End every commit message with a single `AI:` trailer instead of any built-in
+End every commit message with a single `Agent:` trailer instead of any built-in
 AI-attribution line — no `Co-Authored-By`, `Assisted-by`, `Generated-by`, or similar,
 and no other attribution beyond this one line. Format:
 
 ```
-AI: <model-id> <effort-level>
+Agent: <model-id> <effort-level>
 ```
 
-e.g. `AI: claude-sonnet-5 xhigh`. State your own model id and the current
+e.g. `Agent: claude-sonnet-5 xhigh`. State your own model id and the current
 session's reasoning-effort level (Claude Code: read `$CLAUDE_EFFORT`) — don't omit
 the field if the effort level is unclear, give your best description instead.
 Claude Code's own automatic `Co-Authored-By` trailer is disabled repo-wide via
@@ -101,7 +104,7 @@ and Qwen Code don't read that file, so if either tool's own auto-attribution can
 suppressed from here, drop it manually before finishing the commit message.
 
 **Squashing.** When combining several commits into one (interactive rebase,
-squash-merge), carry forward every distinct `AI: <model-id> <effort-level>` pair
+squash-merge), carry forward every distinct `Agent: <model-id> <effort-level>` pair
 from the commits being combined — one line per distinct pair, inherited into the
 result. Don't drop a contributor's line just because its commit wasn't the last one
 before the squash; don't repeat a pair that already appears.

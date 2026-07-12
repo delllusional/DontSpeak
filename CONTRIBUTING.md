@@ -45,10 +45,6 @@ WinUI app targets .NET 10:
 - NASM (`choco install nasm`) and LLVM on `PATH`
 - .NET 10 SDK
 - `dotnet build apps/windows/winui/DontSpeak.WinUI.csproj -c Release -p:Platform=x64`
-- `git config core.symlinks true` **before** cloning (or re-clone after setting it) —
-  `.claude/skills/*` are symlinks into `.agents/skills/*` (see AGENTS.md), and without
-  this they check out as plain text files instead of working links, so Claude Code
-  and Grok Build silently stop finding skill content.
 
 ## Tests
 

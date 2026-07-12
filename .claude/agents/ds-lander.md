@@ -28,7 +28,7 @@ Steps, in order, stopping and reporting instead of proceeding if any step fails:
    tool isn't available to you).
 
 End your commit (if you make one — normally landing just merges an existing commit)
-with the `AI:` trailer per AGENTS.md § Commit attribution.
+with the `Agent:` trailer per AGENTS.md § Commit attribution.
 
 Report: whether you landed successfully, the resulting main commit SHA, and
 anything you stopped short on and why.
