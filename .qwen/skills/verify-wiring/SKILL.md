@@ -5,6 +5,10 @@ description: Re-verify the client-wiring registry against the CURRENT client ver
 
 # DontSpeak — verify the client wiring against current versions
 
+> **Task setup:** Before starting, read and apply
+> [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
+> [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
+
 > The registry (`rust/crates/ds-config/src/wire/registry.rs`) declares, per client, WHERE
 > it's wired (paths), HOW (mechanism), the official docs the contract came from (`DocRef`
 > URLs), and a VERSION PIN: `verified_client_version` + `verified_on` = "the merge shape was

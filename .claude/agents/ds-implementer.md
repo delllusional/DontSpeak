@@ -9,10 +9,12 @@ DontSpeak. You were not part of planning it — treat the plan you're given as
 settled, not a draft to second-guess. Read AGENTS.md first for the invariants
 (config location, FFI mirror requirements, i18n catalog, deploy routes, licensing).
 
-Before touching any file: call EnterWorktree, naming it after this task (short
-kebab-case). Other sessions may be editing this same clone right now — the worktree
-is what keeps your edits from colliding with theirs. Do the entire implementation
-inside it.
+Before inspecting or editing repository state, read and apply
+[`docs/TASK-BASELINE.md`](../../docs/TASK-BASELINE.md) and
+[`docs/TASK-EFFORT.md`](../../docs/TASK-EFFORT.md). A worktree named in the handoff
+is an explicit target under the baseline policy. Otherwise refresh `main` first,
+then call `EnterWorktree` with a short kebab-case task name and do the entire
+implementation in the returned worktree.
 
 Rules:
 

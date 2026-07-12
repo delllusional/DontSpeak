@@ -10,6 +10,12 @@ first, then
 verify the plan against the current code (paths, function names, crate boundaries
 named in the plan may be stale or wrong).
 
+Before inspecting repository state, read and apply
+[`docs/TASK-BASELINE.md`](../../docs/TASK-BASELINE.md) and
+[`docs/TASK-EFFORT.md`](../../docs/TASK-EFFORT.md). A plan that explicitly targets
+a branch, commit, pull request, worktree, or uncommitted change uses the
+explicit-target exception in the baseline policy.
+
 Check, in order, and report a concrete finding for anything that fails:
 
 1. **Invariant violations** — does the plan put settings in

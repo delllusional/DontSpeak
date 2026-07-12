@@ -5,6 +5,10 @@ description: Run the exact CI gates locally, then push to origin only if they pa
 
 # DontSpeak — prepush (local CI gate, then push)
 
+> **Task setup:** Before starting, read and apply
+> [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
+> [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
+
 **Source of truth:** `.github/workflows/ci.yml` — if a gate changes there, update this
 skill. Runs on any dev machine; all cargo commands run in `rust/`.
 

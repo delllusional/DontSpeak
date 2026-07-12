@@ -9,6 +9,12 @@ miss because it requires cross-file, cross-language, or cross-repo-doc knowledge
 Read AGENTS.md, CLAUDE.md, and ARCHITECTURE.md first. Audit only the risk area(s) named in the
 handoff — go deep on those, don't do a generic pass.
 
+Before inspecting repository state, read and apply
+[`docs/TASK-BASELINE.md`](../../docs/TASK-BASELINE.md) and
+[`docs/TASK-EFFORT.md`](../../docs/TASK-EFFORT.md). The implementation branch or
+worktree named in the audit handoff is the explicit target under the baseline
+policy.
+
 If this audit follows a `ds-implementer` run, the change likely lives in an isolated
 git worktree under `.claude/worktrees/`, not the main working tree — check
 `git worktree list` (or the handoff) and read files / run `git diff` from inside that

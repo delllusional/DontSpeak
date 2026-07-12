@@ -5,6 +5,10 @@ description: Uninstall / build+install / package DontSpeak on macOS. Three flows
 
 # DontSpeak — macOS (uninstall / install / package)
 
+> **Task setup:** Before starting, read and apply
+> [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
+> [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
+
 > **Runs on:** macOS only (bash + Xcode + `codesign`/`notarytool`; Apple Silicon for the arm64 slice). **Working dir:** repo root. Same three flows as `build-windows` / `build-linux`.
 
 The app **hosts the engine in-process** (`ds-core` C ABI) — no separate daemon. TCC grants (Accessibility / Mic / Speech Recognition) attach to `DontSpeak.app`. Scripts live under `apps/macos/` + `scripts/`, factored via `apps/macos/bundle-lib.sh` + `scripts/lib/common.sh` — **don't duplicate build logic; edit the scripts**.

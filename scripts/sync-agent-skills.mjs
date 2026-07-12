@@ -15,6 +15,10 @@ if (args.some((arg) => arg !== "--check")) {
   process.exit(2);
 }
 const checkOnly = args.includes("--check");
+const requiredSkillReferences = [
+  "../../../docs/TASK-BASELINE.md",
+  "../../../docs/TASK-EFFORT.md",
+];
 
 async function snapshot(dir, prefix = "") {
   const files = new Map();
@@ -51,6 +55,22 @@ async function differences(expected, actualDir) {
   return drift;
 }
 
+const expected = await snapshot(source);
+const missingTaskSetup = [...expected]
+  .flatMap(([name, contents]) => {
+    if (!name.endsWith("SKILL.md")) return [];
+    const text = contents.toString("utf8");
+    return requiredSkillReferences
+      .filter((reference) => !text.includes(reference))
+      .map((reference) => `${name}: ${reference}`);
+  })
+  .sort();
+if (missingTaskSetup.length > 0) {
+  console.error("canonical skills missing required task-setup references:");
+  for (const item of missingTaskSetup) console.error(`  ${item}`);
+  process.exit(1);
+}
+
 if (!checkOnly) {
   for (const mirror of mirrors) {
     await rm(mirror, { recursive: true, force: true });
@@ -59,7 +79,6 @@ if (!checkOnly) {
   }
 }
 
-const expected = await snapshot(source);
 let failed = false;
 for (const mirror of mirrors) {
   const drift = await differences(expected, mirror);

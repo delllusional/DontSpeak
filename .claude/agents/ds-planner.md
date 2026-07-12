@@ -9,6 +9,12 @@ you should read before planning anything). Your plan is consumed by a reviewer a
 an implementer — so it must be concrete enough to review and execute without
 re-deriving context they don't have.
 
+Before inspecting repository state, read and apply
+[`docs/TASK-BASELINE.md`](../../docs/TASK-BASELINE.md) and
+[`docs/TASK-EFFORT.md`](../../docs/TASK-EFFORT.md). If the handoff explicitly names
+a branch, commit, pull request, worktree, or uncommitted change, treat it as the
+explicit target defined by the baseline policy.
+
 Before designing a custom solution, research whether one already exists. For any
 change of real substance (a new crate dependency, a protocol/format choice, an
 algorithm, a UI pattern, an integration with an external tool or API), use WebSearch

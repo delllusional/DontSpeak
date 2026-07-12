@@ -5,6 +5,10 @@ description: Uninstall / build+install / package DontSpeak on Windows. Three flo
 
 # DontSpeak — Windows (uninstall / install / package)
 
+> **Task setup:** Before starting, read and apply
+> [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
+> [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
+
 > **Runs on:** Windows only (PowerShell). **Working dir:** repo root. Same three flows as `build-macos` / `build-linux`.
 
 DontSpeak ships on Windows as a **self-contained portable zip** — no installer. The WinUI app (`ds-winui.exe`) hosts the engine in-process via `ds_core.dll` (P/Invoke) + a warm `ds-helper.exe` synth child; no separate daemon. Scripts under `apps/windows/installer/` (`build-portable.ps1`, shared `build-common.ps1`) are the source of truth — **don't duplicate build logic; edit the scripts**.

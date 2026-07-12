@@ -5,6 +5,10 @@ description: Cut a DontSpeak release — tag the single-source version, push the
 
 # DontSpeak — make a release
 
+> **Task setup:** Before starting, read and apply
+> [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
+> [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
+
 > A release is **tag-triggered CI**: pushing `v<version>` runs `.github/workflows/release.yml`,
 > which gates, builds all platforms, and publishes the GitHub Release with binaries. Nothing
 > builds locally. The run takes **~25-30 minutes even on a warm cache**. A same-

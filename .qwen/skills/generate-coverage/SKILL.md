@@ -5,6 +5,10 @@ description: Generate an LLVM-based Rust test coverage report for the whole work
 
 # DontSpeak — Rust test coverage
 
+> **Task setup:** Before starting, read and apply
+> [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
+> [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
+
 Uses `cargo-llvm-cov` (LLVM source-based instrumentation) — the current standard
 Rust coverage tool, and the only mainstream one with real Windows support (unlike
 `tarpaulin`, which is Linux-only by default). All commands run from `rust/`.

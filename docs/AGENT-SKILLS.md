@@ -49,13 +49,23 @@ node scripts/sync-agent-skills.mjs --check
 Claude-specific subagents and workflows remain under `.claude/agents/` and
 `.claude/workflows/`; there is no verified portable discovery path for those files.
 
+Any skill or specialist agent that plans, checks, reviews, builds, tests, implements,
+audits, releases, or lands repository work must link to and apply
+[`TASK-BASELINE.md`](TASK-BASELINE.md) and [`TASK-EFFORT.md`](TASK-EFFORT.md). Keep
+the workflows in those shared files rather than copying them into each skill.
+
 ## Compatibility references
 
 - [Codex skills](https://learn.chatgpt.com/docs/build-skills)
+- [Codex reasoning-effort configuration](https://developers.openai.com/codex/config-reference)
 - [Claude Code skills](https://code.claude.com/docs/en/skills) and
   [instruction imports](https://code.claude.com/docs/en/memory#import-additional-files)
+- [Claude Code effort levels](https://code.claude.com/docs/en/model-config#adjust-effort-level)
 - [Gemini CLI skill discovery](https://geminicli.com/docs/cli/using-agent-skills/) and
   [instruction imports](https://geminicli.com/docs/cli/gemini-md/#modularize-context-with-imports)
+- [Gemini CLI model thinking configuration](https://geminicli.com/docs/get-started/configuration-v1/)
 - [Qwen Code skills](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/) and
   [repository instructions](https://qwenlm.github.io/qwen-code-docs/en/users/features/memory/)
+- [Qwen Code unified reasoning effort](https://qwenlm.github.io/qwen-code-docs/en/design/2026-06-30-unified-reasoning-effort-cli/)
 - [Grok Build skills and compatibility](https://docs.x.ai/build/features/skills-plugins-marketplaces)
+- [Grok Build effort controls](https://docs.x.ai/build/modes-and-commands)

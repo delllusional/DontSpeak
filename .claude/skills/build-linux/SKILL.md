@@ -5,6 +5,10 @@ description: Uninstall / build+install / package DontSpeak on Linux (GTK4 deskto
 
 # DontSpeak — Linux (uninstall / install / package)
 
+> **Task setup:** Before starting, read and apply
+> [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
+> [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
+
 > **Runs on:** Linux only (native, WSL, or a VM — bash + GTK4/libadwaita). **Working dir:** repo root. Same three flows as `build-macos` / `build-windows`.
 
 The host is the **GTK4 + libadwaita desktop app** (`ds-gtk`) — tray, health panel, dictation overlay; it hosts the engine in-process. No separate daemon. Scripts: `scripts/install.sh` + `apps/linux/*.sh`, factored via `scripts/lib/common.sh` — **don't duplicate build logic; edit the scripts**.

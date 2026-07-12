@@ -30,33 +30,21 @@ instruction wrappers, cross-CLI skill discovery, and skill mirror maintenance. R
 it before changing any of those surfaces. Shared repository rules belong here;
 vendor-specific files must reference them rather than restate them.
 
-## Concurrent sessions: work in a worktree
+## Fresh main and task worktrees
 
-More than one Claude Code session (yours, a background workflow's implement stage,
-someone else's terminal) can be active in this same clone at once. To keep one
-session's edits from clobbering another's uncommitted changes in the shared working
-tree, **every session must call `EnterWorktree` before its first file edit** in this
-repo — no matter how small the change is. Read-only sessions (answering a question,
-looking something up) don't need one.
+[`docs/TASK-BASELINE.md`](docs/TASK-BASELINE.md) is the canonical policy for
+repository baselines and task worktrees. Before the default repository workflow,
+fast-forward local `main` from `origin/main`, then create or reuse the appropriate
+isolated task worktree. Every edit session must enter that worktree before modifying
+files. Read the canonical policy for explicit-target exceptions and the required
+refresh before final verification and landing.
 
-- Before starting, check `.claude/worktrees/` and `git worktree list` — an existing
-  worktree already named after your task means another session already started it;
-  don't open a second one for the same work.
-- Name the worktree after the task/issue (short kebab-case, e.g. the GitHub issue
-  slug), so it's identifiable in `git worktree list`.
-- Commit your change on the worktree's branch before finishing — don't leave
-  uncommitted edits as the only copy of the work.
-- Don't open a GitHub pull request unless the user asks for one. When the change is
-  done (and, for risky changes, audited clear) and there's no PR: squash the branch
-  to a single commit if it has more than one (preserving attribution per the canonical
-  policy), rebase onto `main` if it's moved, then fast-forward it in — no merge commit
-  — and push to `origin` (the public repo; never `wip`). A branch that does go through
-  a PR merges normally instead, whatever strategy that PR used.
-- After landing, `ExitWorktree` with `action: remove` so `.claude/worktrees/`
-  doesn't accumulate stale directories.
+## Task effort
 
-The `plan-review-implement` workflow (see CLAUDE.md) already does this for its
-Implement/Land stages — you don't need to wrap it yourself when using that pipeline.
+[`docs/TASK-EFFORT.md`](docs/TASK-EFFORT.md) is the canonical cross-agent policy for
+matching reasoning effort to a task. Apply it before starting a task or materially
+different phase. Honor explicit effort choices, never silently lower them, and do
+not substitute effort for required verification.
 
 ## Out-of-scope findings: file a GitHub issue
 
