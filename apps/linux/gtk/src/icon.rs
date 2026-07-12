@@ -10,11 +10,31 @@
 //! This replaces the old freedesktop-symbolic-name approach (`icon_name`): a custom pixmap is
 //! the only way to match the brand glyph + colored tint + slash the other two platforms use.
 
+use std::sync::OnceLock;
+
 use resvg::tiny_skia;
 use resvg::usvg;
 
 /// The ONE canonical glyph, embedded at build time — reused, never duplicated per platform.
 const TRAY_SVG: &str = include_str!("../../../../assets/tray-icon.svg");
+
+/// The parsed SVG tree, built once and reused across every `render()` call.
+/// `tray.rs`'s `icon_pixmap()` calls render ~4× per status push (~1 s cadence),
+/// so parsing per call wasted CPU continuously.
+static TRAY_TREE: OnceLock<usvg::Tree> = OnceLock::new();
+
+fn tray_tree() -> &'static usvg::Tree {
+    TRAY_TREE.get_or_init(|| {
+        usvg::Tree::from_str(TRAY_SVG, &usvg::Options::default()).unwrap_or_else(|_| {
+            // An empty tree yields zero coverage — render() produces a blank icon.
+            usvg::Tree::from_str(
+                "<svg xmlns='http://www.w3.org/2000/svg'/>",
+                &usvg::Options::default(),
+            )
+            .expect("fallback SVG is valid")
+        })
+    })
+}
 
 #[derive(Clone, Copy)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -60,7 +80,8 @@ pub fn render(size: u32, ink: Rgb, muted: bool) -> ksni::Icon {
     let mut pm = tiny_skia::Pixmap::new(size, size).expect("size is non-zero");
 
     // 1. Rasterize the SVG; we keep only its coverage (alpha) — the source color is irrelevant.
-    if let Ok(tree) = usvg::Tree::from_str(TRAY_SVG, &usvg::Options::default()) {
+    {
+        let tree = tray_tree();
         let svg = tree.size();
         let margin = size as f32 * 0.05;
         let avail = size as f32 - 2.0 * margin;
@@ -68,7 +89,7 @@ pub fn render(size: u32, ink: Rgb, muted: bool) -> ksni::Icon {
         let tx = (size as f32 - svg.width() * scale) / 2.0;
         let ty = (size as f32 - svg.height() * scale) / 2.0;
         let transform = tiny_skia::Transform::from_translate(tx, ty).pre_scale(scale, scale);
-        resvg::render(&tree, transform, &mut pm.as_mut());
+        resvg::render(tree, transform, &mut pm.as_mut());
     }
 
     // 2. Recolor: each pixel becomes `ink` premultiplied by the rendered coverage.

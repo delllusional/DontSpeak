@@ -5,7 +5,7 @@
 //! `engine_stop` on quit) and renders the engine's pushed status as a tray icon, a health
 //! panel, and (in a later increment) a focus-safe dictation overlay. Control lives in the MCP.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -24,6 +24,11 @@ pub(crate) const APP_ID: &str = "org.dontspeak.DontSpeak";
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
 
+    // Shared slot for the status thread handle, so `connect_shutdown` can join it
+    // before calling `engine_stop()` — preventing a race where the thread is mid-IPC
+    // (`model_status_wait`) exactly when the engine is being stopped.
+    let status_thread: Rc<RefCell<Option<status::StatusThread>>> = Rc::new(RefCell::new(None));
+
     app.connect_startup(|_| {
         ffi::set_locale(&sys_locale::get_locale().unwrap_or_else(|| "en".to_string()));
         overlay::load_css();
@@ -31,15 +36,22 @@ fn main() -> glib::ExitCode {
         // Host the engine in-process (idempotent; returns true if running now).
         ffi::engine_start();
     });
-    app.connect_activate(on_activate);
-    app.connect_shutdown(|_| {
+    app.connect_activate({
+        let st = status_thread.clone();
+        move |app| on_activate(app, st.clone())
+    });
+    app.connect_shutdown(move |_| {
+        // Join the status thread first so it isn't mid-IPC when the engine stops.
+        if let Some(st) = status_thread.borrow_mut().take() {
+            st.join();
+        }
         ffi::engine_stop();
     });
 
     app.run()
 }
 
-fn on_activate(app: &adw::Application) {
+fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::StatusThread>>>) {
     // GTK/libadwaita re-fires `activate` on a relaunch of an already-running instance; the
     // window built below is only ever hidden (never destroyed) on close, so a live one here
     // means this is a re-activation, not first launch. Re-present it instead of building a
@@ -101,7 +113,8 @@ fn on_activate(app: &adw::Application) {
 
     // Status push → health panel + tray icon + overlay.
     let (tx, rx) = async_channel::bounded::<status::Snapshot>(1);
-    status::spawn_push(tx);
+    let st = status::spawn_push(tx);
+    *status_thread.borrow_mut() = Some(st);
     {
         let w = widgets.clone();
         let th = tray_handle.clone();

@@ -87,6 +87,13 @@ impl Overlay {
             // the ceiling is enforced when the width is saved/restored (GTK toplevels
             // have no max-size). Matches macOS's clamp.
             window.set_size_request(MIN_WIDTH, -1);
+            // CSS `background: transparent` relies on a compositor for alpha blending.
+            // On X11 without a compositing manager the window renders as opaque black
+            // instead of see-through. GTK4 removed `is_composited()`, so we key off
+            // the display backend: Wayland always composites; X11 may not.
+            if !on_wayland {
+                window.add_css_class("ds-overlay-solid");
+            }
         }
 
         let card = gtk::Box::builder()
@@ -278,6 +285,7 @@ fn save_width(w: i32) {
 pub fn load_css() {
     let css = "
         .ds-overlay { background: transparent; }
+        .ds-overlay.ds-overlay-solid { background-color: @window_bg_color; }
         .ds-overlay box.card {
             background-color: alpha(@window_bg_color, 0.92);
             border: 1px solid alpha(@borders, 0.7);

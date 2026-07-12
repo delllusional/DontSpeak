@@ -3,6 +3,8 @@
 //! the GTK main loop drains (mirrors the macOS AsyncStream / Windows push-thread design).
 
 use ds_status::ModelStatus;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// One parsed status push. `up == false` means the engine is down (empty `{}` payload).
 #[derive(Clone)]
@@ -26,18 +28,38 @@ pub fn parse(json: &str) -> Snapshot {
     }
 }
 
+/// A handle to signal the status thread to stop and wait for it to exit, so
+/// `engine_stop()` doesn't race an in-flight `model_status_wait` IPC call.
+pub struct StatusThread {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StatusThread {
+    /// Signal the thread to stop and block until it has exited.
+    pub fn join(mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 /// Spawn the push thread. It blocks in `model_status_wait` (1 s guard) and sends a
 /// [`Snapshot`] on every change. When the engine is down (immediate `{}`), it throttles so
-/// it never busy-spins. Ends when the receiver is dropped (the app is closing).
-pub fn spawn_push(tx: async_channel::Sender<Snapshot>) {
-    std::thread::Builder::new()
+/// it never busy-spins. Returns a [`StatusThread`] so the caller can signal stop and join
+/// before `engine_stop()`, ensuring the thread isn't mid-IPC at shutdown.
+pub fn spawn_push(tx: async_channel::Sender<Snapshot>) -> StatusThread {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_t = stop.clone();
+    let handle = std::thread::Builder::new()
         .name("ds-status-push".into())
         .spawn(move || {
             let mut since = 0u64;
             let mut last_up: Option<bool> = None;
             let mut delivered = false;
             loop {
-                if tx.is_closed() {
+                if tx.is_closed() || stop_t.load(Ordering::Acquire) {
                     break;
                 }
                 let json = crate::ffi::model_status_wait(since, 1000);
@@ -67,4 +89,5 @@ pub fn spawn_push(tx: async_channel::Sender<Snapshot>) {
             }
         })
         .ok();
+    StatusThread { stop, handle }
 }

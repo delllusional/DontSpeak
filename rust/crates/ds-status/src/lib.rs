@@ -17,6 +17,23 @@ mod state;
 pub use dictation_state::DictationState;
 pub use state::EngineState;
 
+/// Serialize an f64, replacing NaN/Infinity with 0.0 — serde_json's default f64
+/// serializer emits `NaN`/`Infinity` which are not valid JSON and cause a panic or
+/// error at the IPC/FFI boundary. RTF fields computed as ratios can divide by zero
+/// (e.g. `audio_secs == 0`), so the production structs need this guard even though
+/// the proptest domain avoids non-finite values.
+mod finite_f64 {
+    pub fn serialize<S: serde::Serializer>(value: &f64, ser: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&sanitize(*value), ser)
+    }
+
+    /// Replace non-finite values with 0.0 — the safest "no data" sentinel for
+    /// downstream consumers (health panels read 0.0 as "idle", never as garbage).
+    fn sanitize(v: f64) -> f64 {
+        if v.is_finite() { v } else { 0.0 }
+    }
+}
+
 /// One engine row (Kokoro / Parakeet / diarization / system / claude_code /
 /// tts_system). `state` is the lifecycle token the app maps 1:1 to a status dot; its
 /// canonical vocabulary is [`EngineState`] (the producer stores `EngineState::as_str`
@@ -28,6 +45,7 @@ pub struct EngineObj {
     pub state: String,
     /// Overall download fraction 0..1 — byte-weighted across the WHOLE model set (a single
     /// global percent, NOT per-file). `0.0` unless the row is `downloading`.
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub progress: f64,
     /// `null` when there is no error.
     pub error: Option<String>,
@@ -90,20 +108,29 @@ pub struct DiarStats {
     pub present: bool,
     pub runtime: String,
     pub speakers: Vec<String>,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub clustering_threshold: f64,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub speaker_threshold: f64,
 }
 
 /// Live TTS realtime-factor / time-to-first-audio stats (`stats.tts`).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TtsSnapshot {
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub rtf_avg: f64,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub rtf_min: f64,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub rtf_max: f64,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub first_avg_ms: f64,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub first_min_ms: f64,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub first_max_ms: f64,
     pub utterances: u64,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub audio_secs: f64,
     pub failures: u64,
 }
@@ -111,10 +138,14 @@ pub struct TtsSnapshot {
 /// Live Parakeet STT realtime-factor stats (`stats.stt`).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SttSnapshot {
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub rtf_avg: f64,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub rtf_min: f64,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub rtf_max: f64,
     pub transcriptions: u64,
+    #[serde(serialize_with = "finite_f64::serialize")]
     pub audio_secs: f64,
     pub failures: u64,
 }
@@ -313,6 +344,23 @@ mod tests {
         assert_eq!(back.stt_engine, "built_in");
         assert!(back.stt_provider.is_none());
         assert_eq!(back.caps_events.len(), 1);
+    }
+
+    #[test]
+    fn nan_and_infinity_serialize_as_zero() {
+        let mut s = sample();
+        s.stats.tts.rtf_avg = f64::NAN;
+        s.stats.tts.rtf_min = f64::NEG_INFINITY;
+        s.stats.tts.audio_secs = f64::INFINITY;
+        s.stats.stt.rtf_max = f64::NAN;
+        s.kokoro.progress = f64::INFINITY;
+        // Must not panic (serde_json panics on NaN/Infinity by default).
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["stats"]["tts"]["rtf_avg"].as_f64().unwrap(), 0.0);
+        assert_eq!(v["stats"]["tts"]["rtf_min"].as_f64().unwrap(), 0.0);
+        assert_eq!(v["stats"]["tts"]["audio_secs"].as_f64().unwrap(), 0.0);
+        assert_eq!(v["stats"]["stt"]["rtf_max"].as_f64().unwrap(), 0.0);
+        assert_eq!(v["kokoro"]["progress"].as_f64().unwrap(), 0.0);
     }
 
     // ── Property-based round-trip over the generated domain ─────────────────────

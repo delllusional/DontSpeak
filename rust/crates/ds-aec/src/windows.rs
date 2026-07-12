@@ -273,8 +273,19 @@ fn capture_thread(
                                     o.rate
                                 );
                             }
+                            let prev_sample =
+                                rate_converter.as_ref().and_then(|rs| rs.last_sample());
                             rate_converter = (o.rate != published_rate).then(|| {
-                                crate::resample::LinearResampler::new(o.rate, published_rate)
+                                let mut rs =
+                                    crate::resample::LinearResampler::new(o.rate, published_rate);
+                                // Seed from the old resampler's last sample so the
+                                // interpolation interval continues smoothly — a fresh
+                                // resampler starts at zero and produces an audible click
+                                // at the exact moment new audio resumes.
+                                if let Some(prev) = prev_sample {
+                                    rs.seed_prev(prev);
+                                }
+                                rs
                             });
                             *last_error.lock().unwrap() = None;
                             opened = o;

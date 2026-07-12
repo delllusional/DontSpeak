@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use coreaudio::audio_unit::audio_format::LinearPcmFlags;
@@ -62,6 +62,11 @@ pub struct DuplexAudio {
     /// Set by `render_clear()`; the render callback drains the ring on its next
     /// tick. An atomic (not a lock) so the RT thread reads it without blocking.
     flush: Arc<AtomicBool>,
+    /// Incremented on every `render_clear()`. `render_push` reads the generation
+    /// before and after acquiring `play` — if it changed, a clear overtook us in
+    /// the gap, so the pushed samples would be drained by the pending flush.
+    /// Rather than push and let the callback sweep them, skip the push entirely.
+    render_gen: AtomicU64,
 }
 
 impl DuplexAudio {
@@ -178,6 +183,7 @@ impl DuplexAudio {
             play: Mutex::new((play_prod, LinearResampler::new(SYNTH_RATE, UNIT_RATE))),
             cap: Arc::new(Mutex::new(cap_cons)),
             flush,
+            render_gen: AtomicU64::new(0),
         })
     }
 
@@ -226,7 +232,16 @@ impl DuplexAudio {
         while self.flush.load(Ordering::Acquire) && Instant::now() < deadline {
             std::thread::yield_now();
         }
+        // Generation guard: if `render_clear` increments the generation during the
+        // window between the busy-wait above and the lock acquisition below, a
+        // flush is now pending that will drain everything in the ring — including
+        // what we're about to push. Detect that and skip the push so the first
+        // syllable of the new utterance isn't clipped.
+        let gen_before = self.render_gen.load(Ordering::Acquire);
         let mut g = self.play.lock().unwrap();
+        if gen_before != self.render_gen.load(Ordering::Acquire) {
+            return;
+        }
         let (prod, rs) = &mut *g;
         let mut scratch = Vec::with_capacity(pcm_24k.len() * 2 + 8);
         rs.process(pcm_24k, &mut scratch);
@@ -255,6 +270,7 @@ impl DuplexAudio {
     /// Drop queued render audio on the next callback tick (barge-in / stop).
     pub fn render_clear(&self) {
         self.flush.store(true, Ordering::Release);
+        self.render_gen.fetch_add(1, Ordering::AcqRel);
         // The persistent `LinearResampler` still holds interpolation state (the
         // last sample of the abandoned utterance + fractional phase) from before
         // this barge. Left alone, the next `render_push()` would linearly blend

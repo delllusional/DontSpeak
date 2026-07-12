@@ -50,6 +50,20 @@ impl LinearResampler {
         }
     }
 
+    /// The last input sample consumed, if any — for seeding a replacement
+    /// resampler so it continues smoothly without a discontinuity.
+    pub fn last_sample(&self) -> Option<f32> {
+        self.have_prev.then_some(self.prev)
+    }
+
+    /// Seed the interpolation interval's left endpoint from a prior resampler's
+    /// last sample, so a replacement (e.g. after a WASAPI reconnect at a new
+    /// rate) continues smoothly instead of resetting and producing an audible click.
+    pub fn seed_prev(&mut self, prev: f32) {
+        self.prev = prev;
+        self.have_prev = true;
+    }
+
     /// Resample `input` (at `in_rate`) and append the result (at `out_rate`) to
     /// `out`. Emits every output sample whose position falls in a consumed input
     /// interval, interpolating linearly between the bracketing input samples.
