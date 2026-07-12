@@ -63,10 +63,15 @@ looking something up) don't need one.
   slug), so it's identifiable in `git worktree list`.
 - Commit your change on the worktree's branch before finishing — don't leave
   uncommitted edits as the only copy of the work.
-- When the change is done (and, for risky changes, audited clear): merge the
-  branch into `main`, push to `origin` (the public repo; never `wip`), then
-  `ExitWorktree` with `action: remove` so `.claude/worktrees/` doesn't accumulate
-  stale directories.
+- Don't open a GitHub pull request unless the user asks for one. When the change is
+  done (and, for risky changes, audited clear) and there's no PR: squash the branch
+  to a single commit if it has more than one (carry forward every distinct `Agent:`
+  trailer pair per § Commit attribution's squashing rule), rebase onto `main` if
+  it's moved, then fast-forward it in — no merge commit — and push to `origin` (the
+  public repo; never `wip`). A branch that does go through a PR merges normally
+  instead, whatever strategy that PR used.
+- After landing, `ExitWorktree` with `action: remove` so `.claude/worktrees/`
+  doesn't accumulate stale directories.
 
 The `plan-review-implement` workflow (see CLAUDE.md) already does this for its
 Implement/Land stages — you don't need to wrap it yourself when using that pipeline.

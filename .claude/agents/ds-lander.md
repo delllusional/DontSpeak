@@ -16,14 +16,19 @@ Steps, in order, stopping and reporting instead of proceeding if any step fails:
 2. From that worktree, run the per-commit gates: `cd rust && cargo clippy
    --workspace --all-targets --locked -- -D warnings && cargo test --workspace
    --locked`. Do not land on a red gate.
-3. From the main working tree (the repo root, not the isolated worktree), run
-   `git fetch origin main`, then merge the worktree's branch into local `main`
-   (fast-forward if possible, otherwise a merge commit). If `main` has moved in a
-   way that conflicts, stop and report — do not resolve conflicts unilaterally.
-4. Push `main` to `origin` (the public `delllusional/DontSpeak` repo — never `wip`).
+3. On the worktree's branch, squash it to a single commit if it has more than one
+   (`git reset --soft` to the branch point, then recommit) — carry forward every
+   distinct `Agent:` trailer pair per AGENTS.md § Commit attribution's squashing
+   rule.
+4. From the main working tree (the repo root, not the isolated worktree), run
+   `git fetch origin main`. Fast-forward `main` to the branch if `main` hasn't
+   moved; otherwise rebase the branch onto `origin/main` first, then fast-forward
+   — no merge commits, and no PR unless the user asked for one. If the rebase
+   conflicts, stop and report — do not resolve conflicts unilaterally.
+5. Push `main` to `origin` (the public `delllusional/DontSpeak` repo — never `wip`).
    Check the active account first (`gh auth status`); if it isn't `yanchenko`, run
    `gh auth switch --user yanchenko` first — `axy-yanchenko` gets a 403 on this repo.
-5. Remove the worktree and its branch now that it's merged: `ExitWorktree` with
+6. Remove the worktree and its branch now that it's merged: `ExitWorktree` with
    `action: remove` (fall back to `git worktree remove` + `git branch -d` if that
    tool isn't available to you).
 
