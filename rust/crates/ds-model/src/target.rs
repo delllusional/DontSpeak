@@ -17,9 +17,9 @@
 //! lives in ONE predicate, [`is_supported_on_this_host`](DownloadTarget::is_supported_on_this_host),
 //! which every dispatcher's `cfg`-gated fetch arms must mirror.
 
-/// A single download / prefetch target: a model, a shared runtime, or a Windows
-/// installer prerequisite. The [`as_str`](DownloadTarget::as_str) token is the stable
-/// wire form passed across the IPC / CLI / installer boundary.
+/// A single download / prefetch target, plus retained legacy installer tokens. The
+/// [`as_str`](DownloadTarget::as_str) token is the stable wire form passed across the
+/// IPC / CLI / installer boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DownloadTarget {
     /// The shared onnxruntime dylib — the base ORT runtime every ONNX model runs on.
@@ -61,11 +61,11 @@ pub enum DownloadTarget {
     DiarizationCoreml,
     /// Both ONNX models (Kokoro + Parakeet) — the installer's "models" component group.
     Models,
-    /// The Windows .NET Desktop Runtime installer prerequisite (URL only; the installer
-    /// runs it itself).
+    /// Legacy Windows .NET Desktop Runtime wire token. The self-contained package no
+    /// longer fetches this mutable prerequisite; retained only for wire compatibility.
     Dotnet,
-    /// The Windows App Runtime installer prerequisite (URL only; the installer runs it
-    /// itself).
+    /// Legacy Windows App Runtime wire token. The self-contained package no longer
+    /// fetches this mutable prerequisite; retained only for wire compatibility.
     Winapp,
 }
 
@@ -118,7 +118,7 @@ impl DownloadTarget {
     /// * `sepformer_model` is macOS-only too (the speaker-lock is macOS code), though it
     ///   is plain ONNX, not Core ML;
     /// * `cuda` (the ONNX CUDA EP wheels) exists only on x86_64 Windows/Linux;
-    /// * `dotnet` / `winapp` are Windows installer prerequisites;
+    /// * legacy `dotnet` / `winapp` tokens are not fetchable on any host;
     /// * everything else (the onnxruntime dylib and the ONNX model sets) is universal.
     pub fn is_supported_on_this_host(self) -> bool {
         match self {
@@ -130,7 +130,7 @@ impl DownloadTarget {
                 any(target_os = "windows", target_os = "linux"),
                 target_arch = "x86_64"
             )),
-            DownloadTarget::Dotnet | DownloadTarget::Winapp => cfg!(target_os = "windows"),
+            DownloadTarget::Dotnet | DownloadTarget::Winapp => false,
             DownloadTarget::Onnxruntime
             | DownloadTarget::KokoroModel
             | DownloadTarget::KokoroVoices
@@ -233,8 +233,8 @@ mod tests {
             for t in mac_only {
                 assert!(!t.is_supported_on_this_host(), "{t:?} is macOS-only");
             }
-            assert!(Dotnet.is_supported_on_this_host());
-            assert!(Winapp.is_supported_on_this_host());
+            assert!(!Dotnet.is_supported_on_this_host());
+            assert!(!Winapp.is_supported_on_this_host());
             assert_eq!(
                 Cuda.is_supported_on_this_host(),
                 cfg!(target_arch = "x86_64")

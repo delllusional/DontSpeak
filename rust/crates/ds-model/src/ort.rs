@@ -129,14 +129,26 @@ pub fn onnxruntime_dylib_path() -> Option<PathBuf> {
 /// Defined in the download registry (`urls.rs`); re-exported here for the historical path.
 pub use crate::urls::ONNXRUNTIME_VERSION;
 
+#[cfg(any(target_os = "macos", test))]
+fn has_supported_macos_dylib_id(mut reader: impl std::io::Read) -> bool {
+    const MAX_MACHO_HEADER_BYTES: usize = 256 * 1024;
+    const NEEDLE: &[u8] = b"libonnxruntime.1.dylib";
+
+    let mut buf = vec![0u8; MAX_MACHO_HEADER_BYTES];
+    let n = reader.read(&mut buf).unwrap_or(0);
+    buf[..n]
+        .windows(NEEDLE.len())
+        .any(|window| window == NEEDLE)
+}
+
 /// CHEAP check that the on-disk onnxruntime dylib is the version `ort` needs.
 ///
 /// A WRONG-version dylib (e.g. a stale 1.22) `dlopen`s fine, but `GetApi(24)` then
 /// returns NULL and `ort` rc.12 RE-ENTERS its `api()` OnceLock while building the
 /// error → a self-deadlock (the engine's warm child hangs before READY, in a
 /// respawn loop). So we reject a mismatched dylib BEFORE handing it to `ort`. We
-/// read only the Mach-O header region (load commands, where `LC_ID_DYLIB` lives —
-/// the first few KB), cheap enough for the status-poll path.
+/// scan a bounded Mach-O header region (load commands, where `LC_ID_DYLIB` lives),
+/// cheap enough for the status-poll path while allowing unusually large headers.
 ///
 /// NAMING NOTE: onnxruntime ≥ 1.25 ships a MAJOR-ONLY `LC_ID_DYLIB`
 /// (`libonnxruntime.1.dylib`) — the full `1.27.0` string lives deep in the binary, not the
@@ -150,16 +162,10 @@ pub fn is_onnxruntime_dylib_version_ok() -> bool {
     };
     #[cfg(target_os = "macos")]
     {
-        use std::io::Read;
-        let Ok(mut f) = std::fs::File::open(&path) else {
+        let Ok(f) = std::fs::File::open(&path) else {
             return false;
         };
-        let mut buf = [0u8; 65536];
-        let n = f.read(&mut buf).unwrap_or(0);
-        // Major-only id (new convention). Bounded by `.dylib` so it can't also match the
-        // prefix of a full-version id like `libonnxruntime.1.24.2.dylib`.
-        let needle = b"libonnxruntime.1.dylib";
-        buf[..n].windows(needle.len()).any(|w| w == needle)
+        has_supported_macos_dylib_id(f)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -794,6 +800,13 @@ mod tests {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(name, "libonnxruntime.so");
         assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn macos_dylib_id_scan_reaches_beyond_the_old_64k_limit() {
+        let mut header = vec![0u8; 96 * 1024];
+        header.extend_from_slice(b"libonnxruntime.1.dylib");
+        assert!(has_supported_macos_dylib_id(std::io::Cursor::new(header)));
     }
 
     /// A minimal valid runtime archive holding one dylib member, in THIS platform's real

@@ -128,7 +128,10 @@ pub(crate) fn extract_dylib_member(tgz_path: &Path, dest: &Path) -> std::io::Res
             .and_then(|n| n.to_str())
             .map(|n| {
                 n.starts_with("libonnxruntime.")
-                    && (n.ends_with(".dylib") || n.ends_with(".dll") || n.contains(".so"))
+                    && (n.ends_with(".dylib")
+                        || n.ends_with(".dll")
+                        || n.ends_with(".so")
+                        || n.contains(".so."))
             })
             .unwrap_or(false);
         let in_debug_bundle = path.to_string_lossy().contains(".dSYM");
@@ -255,7 +258,8 @@ mod tests {
         use flate2::write::GzEncoder;
 
         let payload = b"FAKE-ONNXRUNTIME-DYLIB-BYTES";
-        // Build a tar with two members: a readme (ignored) and the dylib.
+        // Put a misleading `.source.txt` member before the dylib. A substring match for
+        // `.so` would extract it instead of the shared library.
         let mut tar_buf = Vec::new();
         {
             let mut builder = tar::Builder::new(&mut tar_buf);
@@ -265,6 +269,18 @@ mod tests {
             readme.set_cksum();
             builder
                 .append_data(&mut readme, "onnxruntime-1.22.0/README", &b"hello"[..])
+                .unwrap();
+            let decoy_payload = b"NOT-A-SHARED-LIBRARY";
+            let mut decoy = tar::Header::new_gnu();
+            decoy.set_size(decoy_payload.len() as u64);
+            decoy.set_mode(0o644);
+            decoy.set_cksum();
+            builder
+                .append_data(
+                    &mut decoy,
+                    "onnxruntime-1.22.0/lib/libonnxruntime.source.txt",
+                    &decoy_payload[..],
+                )
                 .unwrap();
             let mut dylib = tar::Header::new_gnu();
             dylib.set_size(payload.len() as u64);

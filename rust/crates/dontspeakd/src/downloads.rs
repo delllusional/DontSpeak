@@ -320,12 +320,10 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 DownloadTarget::SepformerModel => {
                     ds_model::run_setup_sepformer_with_progress(&prog).map(|_| ())
                 }
-                // The remaining targets (Onnxruntime / Models / Dotnet / Winapp) are INSTALLER
-                // prefetch tokens — no engine caller ever passes them here (auto-download picks
-                // per-model targets; the IPC/provider paths pass KokoroVoices/Cuda). Off-platform
-                // variants were already rejected by the guard above, so this arm errors instead
-                // of guessing a fetch — a future misrouted target surfaces as a red dot + log
-                // line rather than silently downloading the wrong thing.
+                // Onnxruntime / Models are installer-prefetch tokens; Dotnet / Winapp are
+                // retained no-op wire tokens from before the Windows package became
+                // self-contained. No engine caller passes any of them here. Error instead of
+                // guessing a fetch so a future misroute surfaces as a red dot + log line.
                 _ => Err(std::io::Error::other(format!(
                     "'{}' is not an engine download target",
                     which.as_str()

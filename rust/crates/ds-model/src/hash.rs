@@ -1,7 +1,7 @@
 //! SHA-256 hashing + checksum verification (pure, network-free, unit-tested).
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -40,6 +40,72 @@ pub fn verify_sha256(path: &Path, expected: &str) -> bool {
         Some(got) => got.eq_ignore_ascii_case(expected.trim()),
         None => false,
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    len: u64,
+    modified: std::time::SystemTime,
+}
+
+#[derive(Debug)]
+struct CachedVerification {
+    identity: FileIdentity,
+    expected: String,
+    valid: bool,
+}
+
+type VerificationCache = std::collections::HashMap<PathBuf, CachedVerification>;
+
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let metadata = path.metadata().ok()?;
+    metadata.is_file().then_some(FileIdentity {
+        len: metadata.len(),
+        modified: metadata.modified().ok()?,
+    })
+}
+
+fn verification_cache() -> &'static std::sync::Mutex<VerificationCache> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<VerificationCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Verify a model file once per `(path, size, mtime, expected digest)` state.
+/// Presence probes call this frequently; hashing the same multi-hundred-megabyte
+/// model on every status poll provides no additional integrity signal while the
+/// file metadata is unchanged.
+pub(crate) fn verify_sha256_cached(path: &Path, expected: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+    let Some(before) = file_identity(path) else {
+        return false;
+    };
+    let normalized_expected = expected.trim().to_ascii_lowercase();
+    if let Some(cached) = verification_cache().lock().unwrap().get(path)
+        && cached.identity == before
+        && cached.expected == normalized_expected
+    {
+        return cached.valid;
+    }
+
+    let valid = verify_sha256(path, &normalized_expected);
+    let Some(after) = file_identity(path) else {
+        return false;
+    };
+    if before != after {
+        return false;
+    }
+    verification_cache().lock().unwrap().insert(
+        path.to_path_buf(),
+        CachedVerification {
+            identity: after,
+            expected: normalized_expected,
+            valid,
+        },
+    );
+    valid
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -82,5 +148,23 @@ mod tests {
         assert!(!verify_sha256(&dir.path().join("nope.bin"), good));
         assert!(!verify_sha256(&p, ""));
         assert!(!verify_sha256(&dir.path().join("nope.bin"), ""));
+    }
+
+    #[test]
+    fn cached_verification_invalidates_when_file_metadata_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let digest = sha256_hex(b"abc");
+
+        assert!(verify_sha256_cached(&path, &digest));
+        let cached_identity = file_identity(&path).unwrap();
+        let cache = verification_cache().lock().unwrap();
+        assert_eq!(cache.get(&path).unwrap().identity, cached_identity);
+        drop(cache);
+
+        std::fs::write(&path, b"different length").unwrap();
+        assert!(!verify_sha256_cached(&path, &digest));
+        assert_ne!(file_identity(&path).unwrap(), cached_identity);
     }
 }

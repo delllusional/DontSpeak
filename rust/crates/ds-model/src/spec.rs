@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use crate::download::url_basename;
-use crate::hash::verify_sha256;
+use crate::hash::verify_sha256_cached;
 use crate::model_path;
 use crate::ort::{onnxruntime_dist, onnxruntime_dylib_file, onnxruntime_dylib_path};
 use crate::target::DownloadTarget;
@@ -60,10 +60,10 @@ pub fn is_kokoro_present() -> bool {
     let onnx = kokoro_onnx_spec();
     let voices = kokoro_voices_spec();
     let model_ok = model_path(&onnx.file_name)
-        .map(|p| verify_sha256(&p, &onnx.sha256))
+        .map(|p| verify_sha256_cached(&p, &onnx.sha256))
         .unwrap_or(false);
     let voices_ok = model_path(&voices.file_name)
-        .map(|p| verify_sha256(&p, &voices.sha256))
+        .map(|p| verify_sha256_cached(&p, &voices.sha256))
         .unwrap_or(false);
     // Dylib must be present AND the version `ort` needs — a wrong version would
     // deadlock `ort` at session build (see `is_onnxruntime_dylib_version_ok`), so a
@@ -119,7 +119,7 @@ pub fn is_parakeet_present() -> bool {
     ];
     let models_ok = specs.iter().all(|spec| {
         model_path(&spec.file_name)
-            .map(|p| verify_sha256(&p, &spec.sha256))
+            .map(|p| verify_sha256_cached(&p, &spec.sha256))
             .unwrap_or(false)
     });
     let dylib_ok = onnxruntime_dylib_path()
@@ -146,7 +146,7 @@ pub fn sepformer_spec() -> ModelSpec {
 pub fn is_sepformer_present() -> bool {
     let spec = sepformer_spec();
     let model_ok = model_path(&spec.file_name)
-        .map(|p| verify_sha256(&p, &spec.sha256))
+        .map(|p| verify_sha256_cached(&p, &spec.sha256))
         .unwrap_or(false);
     let dylib_ok = onnxruntime_dylib_path()
         .map(|p| p.is_file())
@@ -243,7 +243,7 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
     };
     let spec_item = |spec: &ModelSpec| -> Option<PrefetchItem> {
         let present = model_path(&spec.file_name)
-            .map(|p| verify_sha256(&p, &spec.sha256))
+            .map(|p| verify_sha256_cached(&p, &spec.sha256))
             .unwrap_or(false);
         (!present).then(|| item(&spec.url, &spec.sha256))
     };

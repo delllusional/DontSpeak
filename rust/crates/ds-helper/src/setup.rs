@@ -53,10 +53,9 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         }
         Some(DownloadTarget::Models) => models(),
         Some(DownloadTarget::Cuda) => cuda(),
-        // Windows installer prerequisites (.NET / Windows App Runtime): the installer
-        // downloads + runs these itself via the URLs from ds-model's manifest — ds-model
-        // never installs them — so prefetch is a no-op here (guards against a stray
-        // --install-prefetched falling through to the model fetch).
+        // Legacy Windows prerequisite tokens: the package is now self-contained, and the
+        // old aka.ms URLs were intentionally removed because their bytes were not pinned.
+        // Keep these as no-ops for compatibility with older installer invocations.
         Some(DownloadTarget::Dotnet) | Some(DownloadTarget::Winapp) => Ok(()),
         // Any other/unknown token — including the CLI's no-arg "all" default, which is no
         // longer a DownloadTarget (the engine sequences per-model fetches) — ⇒ both ONNX

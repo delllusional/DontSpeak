@@ -3,9 +3,9 @@
 //! socket-level per-read inactivity timeout aborts a stalled CDN.
 //!
 //! Retry classification rides on `io::ErrorKind`, not a custom error enum:
-//! `InvalidData` = checksum mismatch and `NotFound` = HTTP 4xx (permanent, fail
-//! fast); `TimedOut` = transport/5xx/truncation (transient, retried) — see
-//! `is_permanent_error`.
+//! `InvalidData` = checksum mismatch and `NotFound` = HTTP 4xx or definitive DNS
+//! name failure (permanent, fail fast); `TimedOut` = other transport/5xx/truncation
+//! failures (transient, retried) — see `is_permanent_error`.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -236,10 +236,35 @@ fn classify_http_status(code: u16) -> std::io::Error {
     }
 }
 
-/// All `attohttpc` transport failures (connect refused, read-timeout, reset, TLS,
-/// DNS) are TRANSIENT — surface them as `TimedOut` so the retry loop re-attempts.
+fn is_permanent_dns_error(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        return true;
+    }
+
+    // `ToSocketAddrs` preserves resolver error codes that `io::ErrorKind` does not
+    // categorize. Limit this to the supported OSes' definitive "name does not exist"
+    // results; temporary resolver failures (EAI_AGAIN / WSATRY_AGAIN) remain retryable.
+    match e.raw_os_error() {
+        #[cfg(target_os = "windows")]
+        Some(11001 | 11003 | 11004) => true,
+        #[cfg(target_os = "linux")]
+        Some(-2 | -5) => true,
+        #[cfg(target_os = "macos")]
+        Some(7 | 8) => true,
+        _ => false,
+    }
+}
+
+/// Transport failures are transient except for a definitive DNS "name not found"
+/// result, which cannot recover across this download's short retry window.
 fn transport_err(e: attohttpc::Error) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::TimedOut, e.to_string())
+    let kind = match e.kind() {
+        attohttpc::ErrorKind::Io(source) if is_permanent_dns_error(source) => {
+            std::io::ErrorKind::NotFound
+        }
+        _ => std::io::ErrorKind::TimedOut,
+    };
+    std::io::Error::new(kind, e.to_string())
 }
 
 /// Open a GET body stream: returns the body reader + the `Content-Length` (0 if
@@ -611,6 +636,38 @@ mod tests {
         assert!(!is_permanent_error(&std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "reset"
+        )));
+    }
+
+    #[test]
+    fn definitive_dns_failure_is_permanent_but_temporary_failure_is_not() {
+        let missing = attohttpc::Error::from(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "host not found",
+        ));
+        let missing = transport_err(missing);
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        assert!(is_permanent_error(&missing));
+
+        let temporary = attohttpc::Error::from(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "temporary resolver failure",
+        ));
+        let temporary = transport_err(temporary);
+        assert_eq!(temporary.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!is_permanent_error(&temporary));
+
+        #[cfg(target_os = "windows")]
+        assert!(is_permanent_dns_error(&std::io::Error::from_raw_os_error(
+            11001
+        )));
+        #[cfg(target_os = "linux")]
+        assert!(is_permanent_dns_error(&std::io::Error::from_raw_os_error(
+            -2
+        )));
+        #[cfg(target_os = "macos")]
+        assert!(is_permanent_dns_error(&std::io::Error::from_raw_os_error(
+            8
         )));
     }
 

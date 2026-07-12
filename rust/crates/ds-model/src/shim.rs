@@ -11,6 +11,7 @@
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
+use std::path::{Path, PathBuf};
 
 use libloading::Library;
 
@@ -121,12 +122,50 @@ pub fn eou_model_dir_arg() -> CString {
     CString::new("").unwrap()
 }
 
-/// `dlopen` the shim dylib pointed to by `SMKOKORO_DYLIB_PATH` (set by the macOS
-/// app, mirroring `ORT_DYLIB_PATH`). Errors if the env var is unset or the load
-/// fails — the caller fails-quiet / falls back from there.
+fn validated_bundled_shim(path: &Path) -> Result<PathBuf, String> {
+    let dylib = path
+        .canonicalize()
+        .map_err(|e| format!("resolve SMKOKORO_DYLIB_PATH: {e}"))?;
+    let executable = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|e| format!("resolve current executable: {e}"))?;
+    let macos_dir = executable
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "MacOS"))
+        .ok_or("current executable is not inside an app bundle")?;
+    let contents_dir = macos_dir
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "Contents"))
+        .ok_or("current executable is not inside an app bundle")?;
+    let frameworks_dir = contents_dir
+        .join("Frameworks")
+        .canonicalize()
+        .map_err(|e| format!("resolve app Frameworks directory: {e}"))?;
+    let expected = frameworks_dir.join("libsmkokoro.dylib");
+    if dylib != expected {
+        return Err("SMKOKORO_DYLIB_PATH is not the bundled libsmkokoro.dylib".to_string());
+    }
+    let app_bundle = contents_dir
+        .parent()
+        .ok_or("current executable has no app bundle root")?;
+    let verified = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(app_bundle)
+        .status()
+        .map_err(|e| format!("verify app signature: {e}"))?;
+    if !verified.success() {
+        return Err("app signature verification failed".to_string());
+    }
+    Ok(dylib)
+}
+
+/// `dlopen` the app-bundled, signature-verified shim dylib selected by
+/// `SMKOKORO_DYLIB_PATH`. The caller fails quiet or falls back on rejection.
 pub fn open() -> Result<Library, String> {
     let path = std::env::var("SMKOKORO_DYLIB_PATH")
         .map_err(|_| "SMKOKORO_DYLIB_PATH not set".to_string())?;
-    // SAFETY: a trusted, app-signed dylib whose C ABI matches smkokoro.h.
-    unsafe { Library::new(&path) }.map_err(|e| format!("dlopen {path}: {e}"))
+    let path = validated_bundled_shim(Path::new(&path))?;
+    // SAFETY: `validated_bundled_shim` restricts this to the canonical Frameworks
+    // member sealed by the verified DontSpeak app signature; its ABI is smkokoro.h.
+    unsafe { Library::new(&path) }.map_err(|e| format!("dlopen {}: {e}", path.display()))
 }

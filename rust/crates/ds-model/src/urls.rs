@@ -285,40 +285,6 @@ pub const CUDA_WHEEL_SIZES: &[u64] = &[
     39_748_338,  // nvidia_nvjitlink_cu12-12.9.86-...-manylinux2010_x86_64...whl
 ];
 
-// ── Windows prerequisite runtimes ────────────────────────────────────────────
-// The two Microsoft FRAMEWORK runtimes the unpackaged WinUI app needs at launch: the
-// .NET Desktop Runtime (the app is framework-dependent `net10.0-windows`) and the Windows
-// App Runtime (WinUI/WinAppSDK), from Microsoft's stable aka.ms permalinks. The shipping
-// Windows package is now the SELF-CONTAINED portable zip, which bundles both runtimes, so
-// they are not downloaded at install time. They stay HERE so urls.rs remains the ONE registry
-// of everything the app can fetch, and `ds-helper --print-manifest dotnet|winapp` still
-// exposes them (e.g. for a framework-dependent build or a runtime repair). These are
-// permalinks to the LATEST servicing build, so unlike the model blobs they are NOT sha-pinned
-// (the bytes roll forward).
-//
-// WINDOWS_APP_RUNTIME_VERSION must match the `Microsoft.WindowsAppSDK` <PackageReference>
-// in apps/windows/winui/DontSpeak.WinUI.csproj (what the app links against). The aka.ms URL
-// shape is .../windowsappsdk/{major.minor}/{full}/windowsappruntimeinstall-{arch}.exe.
-
-/// Windows App Runtime version the app links against — keep in sync with the csproj
-/// `Microsoft.WindowsAppSDK` PackageReference.
-#[cfg(target_os = "windows")]
-pub const WINDOWS_APP_RUNTIME_VERSION: &str = "2.2.0";
-
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const DOTNET_DESKTOP_RUNTIME_URL: &str =
-    "https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.exe";
-#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const DOTNET_DESKTOP_RUNTIME_URL: &str =
-    "https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-arm64.exe";
-
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const WINDOWS_APP_RUNTIME_URL: &str =
-    "https://aka.ms/windowsappsdk/2.2/2.2.0/windowsappruntimeinstall-x64.exe";
-#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const WINDOWS_APP_RUNTIME_URL: &str =
-    "https://aka.ms/windowsappsdk/2.2/2.2.0/windowsappruntimeinstall-arm64.exe";
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Library profiles — each downloaded project's LICENSE kept HERE, next to the very
 // URLs/digests/sizes it covers, so a file can't drift away from its license. The
