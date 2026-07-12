@@ -1,5 +1,5 @@
 ---
-name: coverage
+name: generate-coverage
 description: Generate an LLVM-based Rust test coverage report for the whole workspace or one crate, open it locally, and optionally publish a self-contained crate report as an Artifact. Use when asked for test coverage, a coverage report, or "how much of X is tested".
 ---
 
@@ -72,7 +72,7 @@ native report is a directory of linked pages, so it can't be published as-is. Fo
 flatten it with the bundled script, then publish via the Artifact tool:
 
 ```bash
-node .claude/skills/coverage/scripts/merge-crate-coverage.js \
+node .claude/skills/generate-coverage/scripts/merge-crate-coverage.js \
   "$TEMP/ds-cov-html/html" <crate-name>[,<crate-name2>,...] <scratchpad>/coverage.html
 ```
 
