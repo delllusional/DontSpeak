@@ -56,12 +56,18 @@ struct DiarizationJson {
 /// Parse the shim's diarization JSON into the full output (segments + per-speaker
 /// embeddings). Shared by every backend returning the same JSON contract.
 pub fn parse_output(json: &str) -> Result<DiarizationOutput, String> {
-    serde_json::from_str::<DiarizationJson>(json)
-        .map(|d| DiarizationOutput {
-            segments: d.segments,
-            speakers: d.speakers,
-        })
-        .map_err(|e| format!("diarization JSON parse: {e}"))
+    let d = serde_json::from_str::<DiarizationJson>(json)
+        .map_err(|e| format!("diarization JSON parse: {e}"))?;
+    if d.segments
+        .iter()
+        .any(|s| !s.start.is_finite() || !s.end.is_finite() || s.start < 0.0 || s.end < s.start)
+    {
+        return Err("diarization JSON contains invalid segment times".to_string());
+    }
+    Ok(DiarizationOutput {
+        segments: d.segments,
+        speakers: d.speakers,
+    })
 }
 
 /// Cosine similarity of two equal-length embedding vectors (0.0 for mismatched/empty
@@ -202,7 +208,11 @@ mod coreml_impl {
             CoremlDiarizer {
                 lib: None,
                 loaded: false,
-                threshold,
+                threshold: if threshold.is_finite() {
+                    threshold.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
             }
         }
 

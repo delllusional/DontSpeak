@@ -49,6 +49,8 @@ pub struct StreamingModel {
     joiner: Session,
     /// Decoder output names (index 2/3 are the next LSTM states; index-3's name is unstable).
     dec_out_names: Vec<String>,
+    /// Decoder input names in semantic export order: targets, length, h, c.
+    dec_in_names: Vec<String>,
     meta: Meta,
     tokens: Vec<String>,
     /// The REALIZED ort execution provider — what the sessions ACTUALLY loaded on, CPU fallback
@@ -136,10 +138,24 @@ impl StreamingModel {
         let (decoder, _) = build(&dir.join(format!("decoder{sfx}.onnx")), want_gpu)?;
         let (joiner, _) = build(&dir.join(format!("joiner{sfx}.onnx")), want_gpu)?;
 
+        if encoder.outputs().len() < 5 {
+            return Err(format!(
+                "encoder has {} outputs, need >= 5",
+                encoder.outputs().len()
+            ));
+        }
+
         let vocab = meta_usize(&encoder, "vocab_size", 1024);
+        let window_size = meta_usize(&encoder, "window_size", 65);
+        let chunk_shift = meta_usize(&encoder, "chunk_shift", 56);
+        if chunk_shift == 0 || window_size == 0 {
+            return Err(format!(
+                "invalid streaming meta: window={window_size}, shift={chunk_shift} (must be > 0)"
+            ));
+        }
         let meta = Meta {
-            window_size: meta_usize(&encoder, "window_size", 65),
-            chunk_shift: meta_usize(&encoder, "chunk_shift", 56),
+            window_size,
+            chunk_shift,
             blank_id: vocab as i32,
             pred_hidden: meta_usize(&encoder, "pred_hidden", 640),
             pred_layers: meta_usize(&encoder, "pred_rnn_layers", 1),
@@ -156,14 +172,31 @@ impl StreamingModel {
                 meta_usize(&encoder, "cache_last_time_dim3", 8) as i64,
             ],
         };
-        let dec_out_names = decoder
+        let dec_out_names: Vec<String> = decoder
             .outputs()
             .iter()
             .map(|o| o.name().to_string())
             .collect();
+        if dec_out_names.len() < 4 {
+            return Err(format!(
+                "decoder has {} outputs, need >= 4",
+                dec_out_names.len()
+            ));
+        }
+        let dec_in_names: Vec<String> = decoder
+            .inputs()
+            .iter()
+            .map(|i| i.name().to_string())
+            .collect();
+        if dec_in_names.len() < 4 {
+            return Err(format!(
+                "decoder has {} inputs, need >= 4",
+                dec_in_names.len()
+            ));
+        }
 
         let tokens_path = dir.join(ds_model::PARAKEET_TOKENS_FILE);
-        let tokens = parse_tokens(&ds_model::read_model_file_to_string(&tokens_path)?);
+        let tokens = parse_tokens(&ds_model::read_model_file_to_string(&tokens_path)?)?;
         if tokens.len() <= vocab {
             return Err(format!(
                 "tokens.txt has {} entries, need > vocab_size {vocab}",
@@ -175,6 +208,7 @@ impl StreamingModel {
             decoder,
             joiner,
             dec_out_names,
+            dec_in_names,
             meta,
             tokens,
             provider,
@@ -337,8 +371,8 @@ impl StreamingModel {
         drop(outputs);
 
         // Greedy transducer decode over each encoder output column (channel-major: enc[ch*T'+t]).
+        let mut col = vec![0.0f32; d];
         for t in 0..t_out {
-            let mut col = vec![0.0f32; d];
             for (ch, slot) in col.iter_mut().enumerate() {
                 *slot = enc[ch * t_out + t];
             }
@@ -377,10 +411,10 @@ impl StreamingModel {
         let outputs = self
             .decoder
             .run(ort::inputs! {
-                "targets" => targets,
-                "target_length" => tlen,
-                "states.1" => h_t,
-                "onnx::LSTM_3" => c_t,
+                self.dec_in_names[0].as_str() => targets,
+                self.dec_in_names[1].as_str() => tlen,
+                self.dec_in_names[2].as_str() => h_t,
+                self.dec_in_names[3].as_str() => c_t,
             })
             .map_err(|e| format!("decoder run: {e}"))?;
         // outputs[0]=decoder_out [1,640,1], [2]=h_next, [3]=c_next (index-3 name is unstable).
@@ -432,6 +466,8 @@ impl StreamingModel {
         for &t in &state.hyp {
             if let Some(tok) = self.tokens.get(t as usize) {
                 s.push_str(tok);
+            } else {
+                eprintln!("dontspeak/helper: STT emitted out-of-range token id {t}");
             }
         }
         s.replace('\u{2581}', " ").trim().to_string()
@@ -439,11 +475,30 @@ impl StreamingModel {
 }
 
 /// Parse `tokens.txt`: each line `token<space>id`; index = id (line order is id order here).
-fn parse_tokens(text: &str) -> Vec<String> {
-    text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.rsplit_once(' ').map(|(t, _)| t).unwrap_or(l).to_string())
-        .collect()
+fn parse_tokens(text: &str) -> Result<Vec<String>, String> {
+    let mut parsed = Vec::new();
+    let mut max_id = 0usize;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let (token, id) = line
+            .rsplit_once(' ')
+            .ok_or_else(|| format!("tokens.txt line has no id: {line:?}"))?;
+        let id: usize = id
+            .parse()
+            .map_err(|_| format!("tokens.txt has invalid id in line: {line:?}"))?;
+        max_id = max_id.max(id);
+        parsed.push((id, token.to_string()));
+    }
+    let mut tokens = vec![None; max_id.saturating_add(1)];
+    for (id, token) in parsed {
+        if tokens[id].is_some() {
+            return Err(format!("tokens.txt has duplicate id {id}"));
+        }
+        tokens[id] = Some(token);
+    }
+    Ok(tokens
+        .into_iter()
+        .map(|token| token.unwrap_or_default())
+        .collect())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -788,9 +843,9 @@ mod tests {
 
     #[test]
     fn parse_tokens_splits_on_last_space() {
-        let v = parse_tokens("\u{2581}the 5\n<blk> 1024\n");
-        assert_eq!(v[0], "\u{2581}the");
-        assert_eq!(v[1], "<blk>");
+        let v = parse_tokens("\u{2581}the 5\n<blk> 1024\n").unwrap();
+        assert_eq!(v[5], "\u{2581}the");
+        assert_eq!(v[1024], "<blk>");
     }
 
     /// End-to-end oracle: gated on a real model dir via DONTSPEAK_STREAMING_MODEL_DIR (containing

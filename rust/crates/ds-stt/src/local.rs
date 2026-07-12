@@ -92,7 +92,7 @@ impl LocalTranscriber {
             _ => false,
         };
         if !skip_warmup {
-            let _ = self.transcribe_pcm_16k(&warmup_audio());
+            self.transcribe_pcm_16k(&warmup_audio())?;
         }
         Ok(())
     }

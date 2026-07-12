@@ -298,7 +298,7 @@ where
                 for &s in frame {
                     acc += f32::from_sample(s);
                 }
-                if producer.try_push(acc / chans as f32).is_err() {
+                if producer.try_push(acc / frame.len() as f32).is_err() {
                     dropped.fetch_add(1, Ordering::Relaxed);
                 }
             }

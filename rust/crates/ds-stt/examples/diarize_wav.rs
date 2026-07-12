@@ -27,6 +27,13 @@ fn main() {
     // Read the WAV → mono f32, then resample to the 16 kHz mono the diarizer expects.
     let reader = hound::WavReader::open(&path).expect("open wav");
     let spec = reader.spec();
+    if spec.sample_format == hound::SampleFormat::Int && !(8..=32).contains(&spec.bits_per_sample) {
+        eprintln!(
+            "unsupported integer WAV bit depth: {}",
+            spec.bits_per_sample
+        );
+        std::process::exit(2);
+    }
     let mono = read_mono_f32(reader, spec);
     let pcm16k = if spec.sample_rate == 16_000 {
         mono

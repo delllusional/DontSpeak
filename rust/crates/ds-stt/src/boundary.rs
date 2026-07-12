@@ -94,8 +94,7 @@ impl VadBoundaryDetector {
 
     fn max_segment_samples(&self) -> usize {
         // frame · frames-per-second · seconds == rate · seconds, frame-aligned.
-        let fps = 1000 / FRAME_MS;
-        self.frame * fps * MAX_SEGMENT_SECS
+        self.frame * MAX_SEGMENT_SECS * 1000 / FRAME_MS
     }
 
     /// Classify the newly captured `samples` and return the absolute sample offsets
@@ -193,10 +192,11 @@ mod tests {
         let fps = 1000 / FRAME_MS;
         let frame = RATE as usize * FRAME_MS / 1000;
         let b = d.feed(&speech((MAX_SEGMENT_SECS + 2) * fps));
-        let max = frame * fps * MAX_SEGMENT_SECS;
+        let exact = RATE as usize * MAX_SEGMENT_SECS;
+        let max = exact.div_ceil(frame) * frame;
         assert_eq!(
             b[0], max,
-            "first force-split must be exactly at MAX_SEGMENT_SECS"
+            "first force-split must be the first frame at or after MAX_SEGMENT_SECS"
         );
         // Compile-time invariant (not a runtime check on a constant): force-split must stay
         // within the helper's live-partial tail budget (~8 s) or the dictation overlay goes

@@ -19,6 +19,7 @@ const SEP_RATE: u32 = 8_000;
 /// A loaded speaker-separation model. One `ort` session; `separate_16k` is the whole API.
 pub struct Separator {
     session: Session,
+    input_name: String,
     /// The model's single output name (resolved at load), so `run` extraction indexes it
     /// directly instead of borrowing through a temporary output iterator.
     output_name: String,
@@ -76,8 +77,14 @@ impl Separator {
             .first()
             .map(|o| o.name().to_string())
             .ok_or_else(|| "separator model has no outputs".to_string())?;
+        let input_name = session
+            .inputs()
+            .first()
+            .map(|i| i.name().to_string())
+            .ok_or_else(|| "separator model has no inputs".to_string())?;
         Ok(Self {
             session,
+            input_name,
             output_name,
             provider,
         })
@@ -102,7 +109,7 @@ impl Separator {
             .map_err(|e| format!("separator input tensor: {e}"))?;
         let outputs = self
             .session
-            .run(ort::inputs! { "mix" => input })
+            .run(ort::inputs! { self.input_name.as_str() => input })
             .map_err(|e| format!("separator run: {e}"))?;
         // Single output: [1, T, n_src] interleaved by source along the last axis.
         let (shape, data) = outputs[self.output_name.as_str()]
@@ -113,7 +120,15 @@ impl Separator {
             [1, t, src] => (*t, *src),
             other => return Err(format!("unexpected separator output shape {other:?}")),
         };
-        if src == 0 || t == 0 || data.len() < t * src {
+        if src == 0 || t == 0 {
+            return Err(format!(
+                "separator output has zero dimension: shape {dims:?}"
+            ));
+        }
+        let expected = t
+            .checked_mul(src)
+            .ok_or_else(|| format!("separator output dims overflow: t={t}, src={src}"))?;
+        if data.len() < expected {
             return Err(format!(
                 "separator output too small: shape {dims:?} vs {} samples",
                 data.len()
