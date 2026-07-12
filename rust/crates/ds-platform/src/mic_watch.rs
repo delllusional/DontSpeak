@@ -336,6 +336,8 @@ mod macos {
                 if rc_run != 0 {
                     // The system listener was registered, so detach it before freeing the
                     // context and falling back to polling.
+                    // SAFETY: `SYS`, `dev_addr`, callback, and context exactly match the
+                    // successful registration above; removal completes before `ctx` is freed.
                     unsafe {
                         AudioObjectRemovePropertyListener(
                             SYS,

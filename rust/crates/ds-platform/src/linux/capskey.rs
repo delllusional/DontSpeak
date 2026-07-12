@@ -12,9 +12,10 @@
 //!
 //! ALL desktop detection and per-desktop plumbing lives in this file — one bucket, one
 //! applier, nothing scattered:
-//!   * GNOME (X11 or Wayland): `gsettings` read-merge-write of
-//!     `org.gnome.desktop.input-sources xkb-options` (mutter applies it live).
-//!   * KDE Plasma (X11 or Wayland): `kwriteconfig6/5` read-merge-write of
+//!   * GNOME (X11 or Wayland): generation-checked `gsettings` edits of
+//!     `org.gnome.desktop.input-sources xkb-options` (committed over the session
+//!     D-Bus; mutter applies it live).
+//!   * KDE Plasma (X11 or Wayland): generation-checked `kwriteconfig6/5` edits of
 //!     `kxkbrc [Layout] Options` + the `org.kde.keyboard.reloadConfig` D-Bus signal.
 //!   * Generic X11 (XFCE, MATE, Cinnamon, i3, …): `setxkbmap -option caps:none`
 //!     (volatile, per-X-server; some DE settings daemons may reapply their own keymap —
@@ -43,6 +44,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
 
 /// The XKB option that removes the caps-lock action from the Caps key while the evdev
 /// device keeps reporting the physical press.
@@ -285,6 +287,87 @@ fn set_options_for(desktop: Desktop, opts: &[String]) -> bool {
     }
 }
 
+#[derive(Clone, Copy)]
+enum OptionsEdit {
+    AddCapsNone,
+    RemoveCapsNone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditOutcome {
+    Changed,
+    Unchanged,
+    Failed,
+}
+
+impl OptionsEdit {
+    fn apply(self, mut options: Vec<String>) -> Vec<String> {
+        match self {
+            Self::AddCapsNone if !options.iter().any(|option| option == CAPS_NONE) => {
+                options.push(CAPS_NONE.to_string());
+            }
+            Self::RemoveCapsNone => options.retain(|option| option != CAPS_NONE),
+            Self::AddCapsNone => {}
+        }
+        options
+    }
+}
+
+/// Serialize our own writers and retry a read-modify-write whenever the desktop's
+/// setting generation changes around it. GSettings/dconf and KConfig expose atomic
+/// replacement of one key but no list-element compare-and-swap, so the confirm-read
+/// and post-write read are necessary to avoid blindly overwriting an observable
+/// concurrent keyboard-option edit.
+fn edit_options_with(
+    edit: OptionsEdit,
+    mut read: impl FnMut() -> Option<Vec<String>>,
+    mut write: impl FnMut(&[String]) -> bool,
+) -> EditOutcome {
+    const MAX_GENERATION_RETRIES: usize = 8;
+    let mut wrote = false;
+
+    for _ in 0..MAX_GENERATION_RETRIES {
+        let Some(before) = read() else {
+            return EditOutcome::Failed;
+        };
+        let desired = edit.apply(before.clone());
+        if desired == before {
+            return if wrote {
+                EditOutcome::Changed
+            } else {
+                EditOutcome::Unchanged
+            };
+        }
+        // A concurrent settings client changed the list after our first read. Merge
+        // against its new generation instead of replacing it with stale data.
+        if read().as_ref() != Some(&before) {
+            continue;
+        }
+        wrote = true;
+        if !write(&desired) {
+            return EditOutcome::Failed;
+        }
+        // A change racing the write is either already represented by this read or
+        // will make the value differ and force another merge pass.
+        if read().as_ref() == Some(&desired) {
+            return EditOutcome::Changed;
+        }
+    }
+    EditOutcome::Failed
+}
+
+fn edit_options_for(desktop: Desktop, edit: OptionsEdit) -> EditOutcome {
+    static EDIT_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = EDIT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    edit_options_with(
+        edit,
+        || options_for(desktop),
+        |options| set_options_for(desktop, options),
+    )
+}
+
 // ── public API (macOS capskey.rs parity) ─────────────────────────────────────
 
 /// Take ownership of the Caps key: add `caps:none` to the session keymap so a press
@@ -324,7 +407,7 @@ pub fn own_caps_key() {
 
     match desktop {
         Desktop::Gnome | Desktop::Kde | Desktop::X11Generic => {
-            let Some(mut opts) = options_for(desktop) else {
+            let Some(opts) = options_for(desktop) else {
                 eprintln!(
                     "[dontspeak] could not read the {} keymap options; Caps will still toggle capitals",
                     desktop.token()
@@ -336,7 +419,6 @@ pub fn own_caps_key() {
                 // user's own config. Either way the key no longer toggles; change nothing.
                 return;
             }
-            opts.push(CAPS_NONE.to_string());
             // Marker FIRST, then the option: a marker with no option is a safe no-op on
             // release, but an option with no marker is a permanent orphan. If the marker
             // can't be persisted, leave the key as normal caps-lock rather than risk it.
@@ -346,19 +428,24 @@ pub fn own_caps_key() {
                 );
                 return;
             }
-            if set_options_for(desktop, &opts) {
-                eprintln!(
+            match edit_options_for(desktop, OptionsEdit::AddCapsNone) {
+                EditOutcome::Changed => eprintln!(
                     "[dontspeak] owning Caps key ({}: added {CAPS_NONE}; no caps toggle)",
                     desktop.token()
-                );
-            } else {
-                // The option didn't land — drop the marker we just wrote so release
-                // doesn't chase a non-existent option and a later own retries cleanly.
-                marker_clear();
-                eprintln!(
-                    "[dontspeak] could not set {CAPS_NONE} on {}; Caps will still toggle capitals",
-                    desktop.token()
-                );
+                ),
+                EditOutcome::Unchanged => {
+                    // Another client added caps:none after our initial pre-marker read.
+                    // It is not ours to remove later.
+                    marker_clear();
+                }
+                EditOutcome::Failed => {
+                    // Keep the marker: a write may have landed before a later generation
+                    // check failed. Release can safely reconcile either state next time.
+                    eprintln!(
+                        "[dontspeak] could not confirm {CAPS_NONE} on {}; Caps may still toggle capitals",
+                        desktop.token()
+                    );
+                }
             }
         }
         Desktop::WaylandOther => {
@@ -386,8 +473,7 @@ pub fn release_caps_key() {
         // the user's own, and never reclaims or releases it). Keeping the marker lets
         // the next clean run — or `uninstall.sh` — retry the strip.
         Some(opts) if opts.iter().any(|o| o == CAPS_NONE) => {
-            let kept: Vec<String> = opts.into_iter().filter(|o| o != CAPS_NONE).collect();
-            if set_options_for(desktop, &kept) {
+            if edit_options_for(desktop, OptionsEdit::RemoveCapsNone) != EditOutcome::Failed {
                 marker_clear();
             }
         }
@@ -437,5 +523,111 @@ mod tests {
         // Non-applier buckets never reconstruct from a marker.
         assert_eq!(Desktop::from_token("wayland-other"), None);
         assert_eq!(Desktop::from_token("headless"), None);
+    }
+
+    #[test]
+    fn option_edits_preserve_unrelated_values() {
+        let original = vec![
+            "compose:ralt".to_string(),
+            "grp:win_space_toggle".to_string(),
+        ];
+        let added = OptionsEdit::AddCapsNone.apply(original.clone());
+        assert_eq!(
+            added,
+            vec![
+                "compose:ralt".to_string(),
+                "grp:win_space_toggle".to_string(),
+                CAPS_NONE.to_string()
+            ]
+        );
+        assert_eq!(OptionsEdit::RemoveCapsNone.apply(added), original);
+    }
+
+    #[test]
+    fn generation_change_is_merged_before_the_write() {
+        use std::cell::{Cell, RefCell};
+
+        let options = RefCell::new(vec!["compose:ralt".to_string()]);
+        let reads = Cell::new(0usize);
+        let writes = RefCell::new(Vec::<Vec<String>>::new());
+        let ok = edit_options_with(
+            OptionsEdit::AddCapsNone,
+            || {
+                let snapshot = options.borrow().clone();
+                let read_number = reads.get();
+                reads.set(read_number + 1);
+                if read_number == 0 {
+                    options
+                        .borrow_mut()
+                        .push("grp:win_space_toggle".to_string());
+                }
+                Some(snapshot)
+            },
+            |desired| {
+                *options.borrow_mut() = desired.to_vec();
+                writes.borrow_mut().push(desired.to_vec());
+                true
+            },
+        );
+
+        assert_eq!(ok, EditOutcome::Changed);
+        assert_eq!(writes.borrow().len(), 1);
+        assert_eq!(
+            options.into_inner(),
+            vec![
+                "compose:ralt".to_string(),
+                "grp:win_space_toggle".to_string(),
+                CAPS_NONE.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn concurrent_caps_add_is_not_claimed_as_ours() {
+        use std::cell::{Cell, RefCell};
+
+        let options = RefCell::new(vec!["compose:ralt".to_string()]);
+        let first_read = Cell::new(true);
+        let outcome = edit_options_with(
+            OptionsEdit::AddCapsNone,
+            || {
+                let snapshot = options.borrow().clone();
+                if first_read.replace(false) {
+                    options.borrow_mut().push(CAPS_NONE.to_string());
+                }
+                Some(snapshot)
+            },
+            |_| panic!("a concurrent caps:none must not be overwritten or claimed"),
+        );
+
+        assert_eq!(outcome, EditOutcome::Unchanged);
+    }
+
+    #[test]
+    fn post_write_generation_change_is_preserved() {
+        use std::cell::RefCell;
+
+        let options = RefCell::new(vec!["compose:ralt".to_string()]);
+        let outcome = edit_options_with(
+            OptionsEdit::AddCapsNone,
+            || Some(options.borrow().clone()),
+            |desired| {
+                *options.borrow_mut() = desired.to_vec();
+                options
+                    .borrow_mut()
+                    .push("grp:win_space_toggle".to_string());
+                true
+            },
+        );
+
+        assert_eq!(outcome, EditOutcome::Changed);
+        assert_eq!(
+            options.into_inner(),
+            vec![
+                "compose:ralt".to_string(),
+                CAPS_NONE.to_string(),
+                "grp:win_space_toggle".to_string()
+            ]
+        );
     }
 }

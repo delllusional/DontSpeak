@@ -13,5 +13,8 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=ApplicationServices");
         // CoreFoundation: CFString build/release for the AX attribute names.
         println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        // Carbon supplies Text Input Source Services + UCKeyTranslate for resolving
+        // dictation letters through the user's active keyboard layout.
+        println!("cargo:rustc-link-lib=framework=Carbon");
     }
 }

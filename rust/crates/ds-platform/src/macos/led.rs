@@ -24,6 +24,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_uint};
 use std::ptr;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use super::stuck_grant::StuckGrantLatch;
@@ -85,13 +86,20 @@ unsafe extern "C" {
     fn CFSetGetValues(set: CFSetRef, values: *mut *const c_void);
     fn CFArrayGetCount(array: CFArrayRef) -> CFIndex;
     fn CFArrayGetValueAtIndex(array: CFArrayRef, index: CFIndex) -> *const c_void;
+    fn CFRetain(cf: *const c_void) -> *const c_void;
     fn CFRelease(cf: *const c_void);
+}
+
+struct LedTarget {
+    device: IoHidDeviceRef,
+    element: IoHidElementRef,
 }
 
 /// Owns an open HID Manager (matching all devices) used to drive the physical
 /// Caps-Lock LED on every keyboard.
 pub struct CapsLed {
     manager: IoHidManagerRef,
+    targets: OnceLock<Vec<LedTarget>>,
 }
 
 // SAFETY: `CapsLed` wraps only the IOHIDManagerRef it owns, and HID Manager calls are not
@@ -127,87 +135,92 @@ impl CapsLed {
                 CFRelease(manager);
                 return Err(OpenFailure::Denied);
             }
-            Ok(CapsLed { manager })
+            Ok(CapsLed {
+                manager,
+                targets: OnceLock::new(),
+            })
         }
     }
 
     /// Drive the Caps-Lock LED on every keyboard to `on`, WITHOUT changing the
-    /// logical caps state. Best-effort: re-enumerates devices each call (so a
-    /// hot-plugged keyboard is covered) and ignores per-device failures.
+    /// logical caps state. The manager's keyboard/element pairs are resolved and
+    /// retained once on the first call; later edges only create and set HID values.
+    /// A keyboard hot-plugged later is discovered after the next engine lifecycle
+    /// reopens the manager.
     pub fn set(&self, on: bool) {
-        // SAFETY: `self.manager` is the manager `try_open` created and opened, owned until
-        // `Drop`. IOHIDManagerCopyDevices returns a +1 CFSet (null-checked, released
-        // exactly once below); CFSetGetValues fills a Vec sized to CFSetGetCount, and the
-        // device refs it yields are borrowed from that set (never released individually)
-        // and null-checked before use.
-        unsafe {
-            let devices = IOHIDManagerCopyDevices(self.manager);
-            if devices.is_null() {
-                return;
-            }
-            let count = CFSetGetCount(devices);
-            if count > 0 {
-                let mut refs: Vec<*const c_void> = vec![ptr::null(); count as usize];
-                CFSetGetValues(devices, refs.as_mut_ptr());
-                for &d in &refs {
-                    let device = d as IoHidDeviceRef;
-                    if device.is_null()
-                        || IOHIDDeviceConformsTo(
-                            device,
-                            K_HID_PAGE_GENERIC_DESKTOP,
-                            K_HID_USAGE_GD_KEYBOARD,
-                        ) == 0
-                    {
-                        continue;
-                    }
-                    set_caps_led_on_device(device, on);
-                }
-            }
-            // `IOHIDManagerCopyDevices` returns a +1 CFSet; the device refs inside are
-            // borrowed (do NOT release them individually).
-            CFRelease(devices);
+        let targets = self.targets.get_or_init(|| {
+            // SAFETY: `self.manager` stays open and owned by `self` for the full lifetime
+            // of the targets retained by this OnceLock.
+            unsafe { discover_targets(self.manager) }
+        });
+        for target in targets {
+            // SAFETY: discovery retains both refs until `CapsLed::drop`, the manager is
+            // still open, and SetValue consumes neither ref.
+            unsafe { set_caps_led(target, on) };
         }
     }
 }
 
-/// Find the device's Caps-Lock LED element and set it. `device` is borrowed.
-unsafe fn set_caps_led_on_device(device: IoHidDeviceRef, on: bool) {
-    // SAFETY: `device` is a live, manager-opened device for the duration of the call
-    // (caller contract — `set` borrows it from a CFSet it still holds, and
-    // IOHIDManagerOpen opened every device the manager owns, as IOHIDDeviceSetValue
-    // requires). IOHIDDeviceCopyMatchingElements returns a +1 CFArray (null-checked,
-    // released exactly once below) whose elements are borrowed and null-checked; index
-    // reads stay within CFArrayGetCount; the created IOHIDValue is a +1 ref released right
-    // after the synchronous SetValue.
+/// Resolve and retain every keyboard's Caps-Lock LED element once for this open manager.
+unsafe fn discover_targets(manager: IoHidManagerRef) -> Vec<LedTarget> {
+    // SAFETY: `manager` is open for this call. CopyDevices/CopyMatchingElements return
+    // owned collections released below; the selected borrowed device/element refs are
+    // explicitly retained so the returned targets outlive those collections.
     unsafe {
-        // NULL matching = all elements; filter to the Caps LED by usage page/usage.
-        let elements =
-            IOHIDDeviceCopyMatchingElements(device, ptr::null(), KIO_HID_OPTIONS_TYPE_NONE);
-        if elements.is_null() {
-            return;
+        let mut targets = Vec::new();
+        let devices = IOHIDManagerCopyDevices(manager);
+        if devices.is_null() {
+            return targets;
         }
-        let n = CFArrayGetCount(elements);
-        for i in 0..n {
-            let element = CFArrayGetValueAtIndex(elements, i) as IoHidElementRef;
-            if element.is_null() {
-                continue;
-            }
-            if IOHIDElementGetUsagePage(element) == K_HID_PAGE_LEDS
-                && IOHIDElementGetUsage(element) == K_HID_USAGE_LED_CAPSLOCK
-            {
-                // +1 value; release after the set.
-                let value =
-                    IOHIDValueCreateWithIntegerValue(ptr::null(), element, 0, on as CFIndex);
-                if !value.is_null() {
-                    let _ = IOHIDDeviceSetValue(device, element, value);
-                    CFRelease(value);
+        let count = CFSetGetCount(devices);
+        if count > 0 {
+            let mut refs: Vec<*const c_void> = vec![ptr::null(); count as usize];
+            CFSetGetValues(devices, refs.as_mut_ptr());
+            for &raw_device in &refs {
+                let device = raw_device as IoHidDeviceRef;
+                if device.is_null()
+                    || IOHIDDeviceConformsTo(
+                        device,
+                        K_HID_PAGE_GENERIC_DESKTOP,
+                        K_HID_USAGE_GD_KEYBOARD,
+                    ) == 0
+                {
+                    continue;
                 }
-                // One Caps-LED element per keyboard — stop after the first.
-                break;
+                let elements =
+                    IOHIDDeviceCopyMatchingElements(device, ptr::null(), KIO_HID_OPTIONS_TYPE_NONE);
+                if elements.is_null() {
+                    continue;
+                }
+                let element_count = CFArrayGetCount(elements);
+                for index in 0..element_count {
+                    let element = CFArrayGetValueAtIndex(elements, index) as IoHidElementRef;
+                    if !element.is_null()
+                        && IOHIDElementGetUsagePage(element) == K_HID_PAGE_LEDS
+                        && IOHIDElementGetUsage(element) == K_HID_USAGE_LED_CAPSLOCK
+                    {
+                        CFRetain(device);
+                        CFRetain(element);
+                        targets.push(LedTarget { device, element });
+                        break;
+                    }
+                }
+                CFRelease(elements);
             }
         }
-        // `IOHIDDeviceCopyMatchingElements` returns a +1 CFArray; elements borrowed.
-        CFRelease(elements);
+        CFRelease(devices);
+        targets
+    }
+}
+
+unsafe fn set_caps_led(target: &LedTarget, on: bool) {
+    // SAFETY: caller guarantees both retained refs are live and the owning manager is open.
+    unsafe {
+        let value = IOHIDValueCreateWithIntegerValue(ptr::null(), target.element, 0, on as CFIndex);
+        if !value.is_null() {
+            let _ = IOHIDDeviceSetValue(target.device, target.element, value);
+            CFRelease(value);
+        }
     }
 }
 
@@ -217,6 +230,12 @@ impl Drop for CapsLed {
         // closed and released at most once (nulled right after), pairing
         // IOHIDManagerCreate/IOHIDManagerOpen.
         unsafe {
+            if let Some(targets) = self.targets.get_mut() {
+                for target in targets.drain(..) {
+                    CFRelease(target.element);
+                    CFRelease(target.device);
+                }
+            }
             if !self.manager.is_null() {
                 IOHIDManagerClose(self.manager, KIO_HID_OPTIONS_TYPE_NONE);
                 CFRelease(self.manager);

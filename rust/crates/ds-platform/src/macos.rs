@@ -18,6 +18,7 @@ mod led;
 mod stuck_grant;
 
 use std::cell::{Cell, RefCell};
+use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -36,43 +37,109 @@ const KEY_V: u16 = 9;
 /// kVK_Return — the Enter key the always-listening loop presses to submit.
 const KEY_RETURN: u16 = 36;
 
-/// Map a [`KeyBase`] to its macOS kVK virtual keycode. Letters use the US-ANSI layout
-/// (non-sequential keycodes). `None` for `Unsupported` — the caller logs + skips.
+type TisInputSourceRef = *const c_void;
+type CFStringRef = *const c_void;
+type CFTypeRef = *const c_void;
+type CFDataRef = *const c_void;
+
+#[repr(C)]
+struct UCKeyboardLayout {
+    _private: [u8; 0],
+}
+
+unsafe extern "C" {
+    fn TISCopyCurrentKeyboardLayoutInputSource() -> TisInputSourceRef;
+    fn TISGetInputSourceProperty(
+        input_source: TisInputSourceRef,
+        property_key: CFStringRef,
+    ) -> CFTypeRef;
+    static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
+    fn CFDataGetBytePtr(data: CFDataRef) -> *const u8;
+    fn CFRelease(cf: CFTypeRef);
+    fn LMGetKbdType() -> u8;
+    fn UCKeyTranslate(
+        layout: *const UCKeyboardLayout,
+        virtual_key_code: u16,
+        key_action: u16,
+        modifier_key_state: u32,
+        keyboard_type: u32,
+        options: u32,
+        dead_key_state: *mut u32,
+        max_string_length: usize,
+        actual_string_length: *mut usize,
+        unicode_string: *mut u16,
+    ) -> i32;
+}
+
+const K_UC_KEY_ACTION_DOWN: u16 = 0;
+const K_UC_KEY_TRANSLATE_NO_DEAD_KEYS_MASK: u32 = 1;
+
+fn find_keycode_for_letter(
+    letter: char,
+    mut translated_character: impl FnMut(u16) -> Option<char>,
+) -> Option<u16> {
+    (0..=127).find(|&keycode| {
+        translated_character(keycode).is_some_and(|output| output.eq_ignore_ascii_case(&letter))
+    })
+}
+
+fn active_layout_keycode(letter: char) -> Option<u16> {
+    // SAFETY: TISCopy returns a +1 input-source ref released exactly once. Its layout-data
+    // property is borrowed and remains live while the source is retained. UCKeyTranslate
+    // receives the CFData byte buffer, bounded output slots, and initialized out-params.
+    unsafe {
+        let input_source = TISCopyCurrentKeyboardLayoutInputSource();
+        if input_source.is_null() {
+            return None;
+        }
+        let result = (|| {
+            let data = TISGetInputSourceProperty(input_source, kTISPropertyUnicodeKeyLayoutData)
+                as CFDataRef;
+            if data.is_null() {
+                return None;
+            }
+            let layout = CFDataGetBytePtr(data) as *const UCKeyboardLayout;
+            if layout.is_null() {
+                return None;
+            }
+            let keyboard_type = LMGetKbdType() as u32;
+            find_keycode_for_letter(letter, |keycode| {
+                let mut dead_key_state = 0u32;
+                let mut actual_length = 0usize;
+                let mut output = [0u16; 4];
+                let status = UCKeyTranslate(
+                    layout,
+                    keycode,
+                    K_UC_KEY_ACTION_DOWN,
+                    0,
+                    keyboard_type,
+                    K_UC_KEY_TRANSLATE_NO_DEAD_KEYS_MASK,
+                    &mut dead_key_state,
+                    output.len(),
+                    &mut actual_length,
+                    output.as_mut_ptr(),
+                );
+                if status == 0 && actual_length == 1 {
+                    char::from_u32(output[0] as u32)
+                } else {
+                    None
+                }
+            })
+        })();
+        CFRelease(input_source);
+        result
+    }
+}
+
+/// Map a [`KeyBase`] to its macOS virtual keycode. Letter positions are reverse-looked-up
+/// through the active Unicode keyboard layout; fixed control keys are layout-independent.
 fn mac_keycode(base: &KeyBase) -> Option<u16> {
     Some(match base {
         KeyBase::Space => 49,
         KeyBase::Enter => 36,
         KeyBase::Tab => 48,
         KeyBase::Escape => 53,
-        KeyBase::Letter(c) => match c.to_ascii_lowercase() {
-            'a' => 0,
-            'b' => 11,
-            'c' => 8,
-            'd' => 2,
-            'e' => 14,
-            'f' => 3,
-            'g' => 5,
-            'h' => 4,
-            'i' => 34,
-            'j' => 38,
-            'k' => 40,
-            'l' => 37,
-            'm' => 46,
-            'n' => 45,
-            'o' => 31,
-            'p' => 35,
-            'q' => 12,
-            'r' => 15,
-            's' => 1,
-            't' => 17,
-            'u' => 32,
-            'v' => 9,
-            'w' => 13,
-            'x' => 7,
-            'y' => 16,
-            'z' => 6,
-            _ => return None,
-        },
+        KeyBase::Letter(c) => return active_layout_keycode(*c),
         KeyBase::Unsupported(_) => return None,
     })
 }
@@ -83,16 +150,29 @@ fn mac_keycode(base: &KeyBase) -> Option<u16> {
 #[allow(clippy::items_after_test_module)]
 mod keycode_parity {
     use super::*;
-    use crate::chord::all_supported_bases;
+    #[test]
+    fn reverse_lookup_uses_the_layouts_character_positions() {
+        let mapping = [(4, 'z'), (17, 'g'), (42, 'a')];
+        assert_eq!(
+            find_keycode_for_letter('a', |keycode| mapping
+                .iter()
+                .find_map(|&(code, output)| (code == keycode).then_some(output))),
+            Some(42)
+        );
+        assert_eq!(
+            find_keycode_for_letter('G', |keycode| mapping
+                .iter()
+                .find_map(|&(code, output)| (code == keycode).then_some(output))),
+            Some(17)
+        );
+    }
 
     #[test]
-    fn every_supported_base_maps_to_a_keycode() {
-        for b in all_supported_bases() {
-            assert!(
-                mac_keycode(&b).is_some(),
-                "macOS mac_keycode has no kVK for {b:?}"
-            );
-        }
+    fn fixed_control_keys_remain_layout_independent() {
+        assert_eq!(mac_keycode(&KeyBase::Space), Some(49));
+        assert_eq!(mac_keycode(&KeyBase::Enter), Some(36));
+        assert_eq!(mac_keycode(&KeyBase::Tab), Some(48));
+        assert_eq!(mac_keycode(&KeyBase::Escape), Some(53));
     }
 
     #[test]

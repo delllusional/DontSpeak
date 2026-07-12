@@ -15,6 +15,7 @@
 
 use std::ffi::c_void;
 use std::os::raw::{c_char, c_int, c_uint};
+use std::sync::OnceLock;
 
 // IOKit opaque/scalar typedefs (all are mach port-ish u32 on Darwin).
 type KernReturn = c_int;
@@ -115,27 +116,12 @@ unsafe extern "C" {
 /// test (Apple Accessibility): native text inputs report `AXTextField` / `AXTextArea`
 /// (search/secure/combo are variants). Precise where the settable-`AXValue` heuristic
 /// over-matches (e.g. sliders/steppers also report a settable value).
-unsafe fn role_is_text_input(role: CFTypeRef) -> bool {
-    const TEXT_ROLES: [&[u8]; 5] = [
-        b"AXTextField\0",
-        b"AXTextArea\0",
-        b"AXComboBox\0",
-        b"AXSearchField\0",
-        b"AXSecureTextField\0",
-    ];
-    // SAFETY: `role` is a live CFTypeRef for the duration of this call (caller contract —
-    // `focused_element_accepts_paste` holds its +1 ref across it); each `cf` is an owned
-    // (+1) CFString from `cfstr` (skipped when null) that is compared with CFEqual and
-    // then released exactly once, per the CF Create/Release rule.
+unsafe fn role_is_text_input(role: CFTypeRef, text_roles: &[CFStringRef; 5]) -> bool {
+    // SAFETY: `role` is live for this call, and every cached text-role CFString is an
+    // immutable process-lifetime ref. CFEqual consumes neither argument.
     unsafe {
-        for r in TEXT_ROLES {
-            let cf = cfstr(r);
-            if cf.is_null() {
-                continue;
-            }
-            let eq = CFEqual(role, cf) != 0;
-            CFRelease(cf);
-            if eq {
+        for &text_role in text_roles {
+            if CFEqual(role, text_role) != 0 {
                 return true;
             }
         }
@@ -170,6 +156,55 @@ unsafe fn cfstr(name: &[u8]) -> CFStringRef {
     }
 }
 
+struct AxStrings {
+    focused: CFStringRef,
+    role: CFStringRef,
+    value: CFStringRef,
+    text_roles: [CFStringRef; 5],
+}
+
+// SAFETY: these are immutable, process-lifetime CoreFoundation objects. Every caller only
+// passes them to synchronous CF/AX APIs and never releases or mutates them.
+unsafe impl Send for AxStrings {}
+// SAFETY: same immutable process-lifetime contract as the `Send` implementation above.
+unsafe impl Sync for AxStrings {}
+
+fn ax_strings() -> Option<&'static AxStrings> {
+    static STRINGS: OnceLock<Option<AxStrings>> = OnceLock::new();
+    STRINGS
+        .get_or_init(|| {
+            let names: [&[u8]; 8] = [
+                b"AXFocusedUIElement\0",
+                b"AXRole\0",
+                b"AXValue\0",
+                b"AXTextField\0",
+                b"AXTextArea\0",
+                b"AXComboBox\0",
+                b"AXSearchField\0",
+                b"AXSecureTextField\0",
+            ];
+            // SAFETY: every entry is a NUL-terminated byte literal. The successful +1
+            // refs intentionally live for the process lifetime in `STRINGS`; on partial
+            // construction failure, every non-null ref is released before returning.
+            let refs = names.map(|name| unsafe { cfstr(name) });
+            if refs.iter().any(|cf| cf.is_null()) {
+                for cf in refs.into_iter().filter(|cf| !cf.is_null()) {
+                    // SAFETY: every non-null entry is a +1 ref created immediately above
+                    // and has not been stored or released yet.
+                    unsafe { CFRelease(cf) };
+                }
+                return None;
+            }
+            Some(AxStrings {
+                focused: refs[0],
+                role: refs[1],
+                value: refs[2],
+                text_roles: [refs[3], refs[4], refs[5], refs[6], refs[7]],
+            })
+        })
+        .as_ref()
+}
+
 /// Whether the system-wide FOCUSED accessibility element is an editable field that
 /// would accept a paste right now — the macOS `has_paste_target` probe.
 ///
@@ -190,59 +225,40 @@ unsafe fn cfstr(name: &[u8]) -> CFStringRef {
 /// The caller (`MacOsPlatform::has_paste_target`) additionally short-circuits frontmost
 /// `CUSTOM_TEXT_BUNDLES`/`extra_custom_text_editors` editors before this probe runs.
 pub fn focused_element_accepts_paste() -> bool {
-    // SAFETY: every AX/CF call follows the CoreFoundation ownership rules: `sys`, the
-    // attribute CFStrings, and the Copy results are owned (+1) refs, each null-checked
-    // before use and CFReleased exactly once; the out-params (`focused`, `role`,
-    // `settable`) are live stack slots the callee writes during its call. The AX queries
-    // are synchronous, in-process, and have no main-thread affinity (see the caller,
-    // `MacOsPlatform::has_paste_target`).
+    let Some(strings) = ax_strings() else {
+        return false;
+    };
+    // SAFETY: every AX/CF call follows the CoreFoundation ownership rules: `sys` and
+    // Copy results are owned (+1) refs, each null-checked before use and CFReleased
+    // exactly once; the cached attribute strings are immutable process-lifetime refs;
+    // out-params are live stack slots. AX queries are synchronous and thread-safe here.
     unsafe {
         let sys = AXUIElementCreateSystemWide();
         if sys.is_null() {
             return false;
         }
-        let focused_attr = cfstr(b"AXFocusedUIElement\0");
         let mut focused: CFTypeRef = std::ptr::null();
-        let err = if focused_attr.is_null() {
-            -1
-        } else {
-            AXUIElementCopyAttributeValue(sys, focused_attr, &mut focused)
-        };
+        let err = AXUIElementCopyAttributeValue(sys, strings.focused, &mut focused);
         CFRelease(sys);
-        if !focused_attr.is_null() {
-            CFRelease(focused_attr);
-        }
         if err != KAX_ERROR_SUCCESS || focused.is_null() {
             return false;
         }
 
         // Primary: the focused element's role is a text-input role.
-        let role_attr = cfstr(b"AXRole\0");
         let mut role_match = false;
-        if !role_attr.is_null() {
-            let mut role: CFTypeRef = std::ptr::null();
-            let rerr = AXUIElementCopyAttributeValue(focused, role_attr, &mut role);
-            CFRelease(role_attr);
-            if rerr == KAX_ERROR_SUCCESS && !role.is_null() {
-                role_match = role_is_text_input(role);
-                CFRelease(role);
-            }
+        let mut role: CFTypeRef = std::ptr::null();
+        let rerr = AXUIElementCopyAttributeValue(focused, strings.role, &mut role);
+        if rerr == KAX_ERROR_SUCCESS && !role.is_null() {
+            role_match = role_is_text_input(role, &strings.text_roles);
+            CFRelease(role);
         }
 
         // Fallback: a settable AXValue (editable contents) widens coverage.
         let settable_match = if role_match {
             true
         } else {
-            let value_attr = cfstr(b"AXValue\0");
             let mut settable: Boolean = 0;
-            let serr = if value_attr.is_null() {
-                -1
-            } else {
-                AXUIElementIsAttributeSettable(focused, value_attr, &mut settable)
-            };
-            if !value_attr.is_null() {
-                CFRelease(value_attr);
-            }
+            let serr = AXUIElementIsAttributeSettable(focused, strings.value, &mut settable);
             serr == KAX_ERROR_SUCCESS && settable != 0
         };
 
