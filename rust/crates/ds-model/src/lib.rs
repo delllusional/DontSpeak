@@ -44,7 +44,7 @@
 //! - [`update_check`] — startup check for a newer GitHub release (unrelated to model assets,
 //!   but lives here since it reuses the same HTTP GET plumbing as the rest of the crate).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod archive;
 /// Self-managed FluidAudio (Core ML / ANE) downloads at pinned revisions (see module docs).
@@ -108,5 +108,12 @@ pub use ort::{
 /// Resolve a file name to its full path under [`ds_config::model_dir`].
 /// `None` only if the per-OS data dir cannot be resolved.
 pub fn model_path(file_name: &str) -> Option<PathBuf> {
-    Some(ds_config::model_dir()?.join(file_name))
+    let path = Path::new(file_name);
+    let mut components = path.components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return None;
+    }
+    Some(ds_config::model_dir()?.join(path))
 }

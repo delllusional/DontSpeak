@@ -537,7 +537,9 @@ fn download_one_at(
                 tmp.persist(dest).map_err(|e| e.error)?;
                 return Ok(());
             }
-            Err(e) if is_permanent_error(&e) || attempt >= DEFAULT_RETRIES => return Err(e),
+            Err(e) if is_permanent_error(&e) || attempt + 1 >= DEFAULT_RETRIES.max(1) => {
+                return Err(e);
+            }
             Err(_) => {
                 attempt += 1;
                 std::thread::sleep(std::time::Duration::from_millis(500 * attempt as u64));
@@ -591,7 +593,17 @@ pub fn ensure_coreml_repos(
     let mut done_bytes: u64 = 0;
     for (r, target, files) in &plan {
         for f in files {
-            let dest = target.join(&f.path);
+            let relative = Path::new(&f.path);
+            if relative
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unsafe path in Core ML tree response: {}", f.path),
+                ));
+            }
+            let dest = target.join(relative);
             let size = f.size.max(1);
             let base = done_bytes;
             if already_have(&dest, f) {

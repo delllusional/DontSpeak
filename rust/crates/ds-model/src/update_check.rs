@@ -92,6 +92,7 @@ pub fn check_for_update_at(api_base: &str, current_version: &str) -> std::io::Re
     let html_url = json
         .get("html_url")
         .and_then(|u| u.as_str())
+        .filter(|u| u.starts_with("https://github.com/"))
         .unwrap_or_default()
         .to_string();
 

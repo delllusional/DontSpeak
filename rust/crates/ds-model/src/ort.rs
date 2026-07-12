@@ -212,17 +212,24 @@ pub fn ensure_ort_dylib_gpu(want_gpu: bool) -> Result<PathBuf, String> {
         && let Some(gpu_dll) = cuda_onnxruntime_path()
     {
         if let Some(dir) = cuda_runtime_dir() {
-            // Prepend the CUDA dir to PATH EXACTLY ONCE, before ort dlopens the GPU
-            // onnxruntime (Windows LoadLibrary reads PATH live to find the CUDA/cuDNN
-            // DLLs). The Once is what makes this safe even though TTS/STT now warm up on
-            // parallel threads: the write happens at most once and is the only PATH writer.
-            static PATH_ONCE: std::sync::Once = std::sync::Once::new();
-            PATH_ONCE.call_once(|| {
-                let old = std::env::var("PATH").unwrap_or_default();
-                // SAFETY: the Once serializes this to a single execution and there is no other
-                // concurrent PATH writer in-process.
-                unsafe { std::env::set_var("PATH", format!("{};{old}", dir.display())) };
-            });
+            use std::os::windows::ffi::OsStrExt;
+            use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
+            use windows::core::PCWSTR;
+
+            static DLL_DIR: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+            DLL_DIR
+                .get_or_init(|| {
+                    let wide: Vec<u16> = dir
+                        .as_os_str()
+                        .encode_wide()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    // SAFETY: `wide` is NUL-terminated and remains live for the duration of
+                    // the call. The Win32 loader copies the directory into process state.
+                    unsafe { SetDllDirectoryW(PCWSTR(wide.as_ptr())) }
+                        .map_err(|e| format!("set CUDA DLL directory: {e}"))
+                })
+                .clone()?;
         }
         set_ort_dylib_path(&gpu_dll);
         return Ok(gpu_dll);
@@ -548,6 +555,26 @@ pub fn cuda_runtime_dir() -> Option<PathBuf> {
     model_path("cuda")
 }
 
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
+fn cuda_version_marker(dir: &Path) -> PathBuf {
+    dir.join(".dontspeak-cuda-runtime")
+}
+
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
+fn cuda_version_fingerprint() -> String {
+    CUDA_WHEELS
+        .iter()
+        .map(|(url, sha)| format!("{url} {sha}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The GPU onnxruntime path (set `ORT_DYLIB_PATH` to this for CUDA). Windows: a fixed
 /// `onnxruntime.dll`. Linux: the versioned `libonnxruntime.so.<ver>` the wheel ships, found by
 /// scanning the runtime dir for the core lib (excluding the `_providers_*` plugins).
@@ -596,6 +623,11 @@ pub fn is_cuda_runtime_present() -> bool {
     let Some(dir) = cuda_runtime_dir() else {
         return false;
     };
+    if !std::fs::read_to_string(cuda_version_marker(&dir))
+        .is_ok_and(|s| s == cuda_version_fingerprint())
+    {
+        return false;
+    }
     #[cfg(target_os = "windows")]
     {
         dir.join("onnxruntime.dll").is_file()
@@ -746,6 +778,7 @@ pub fn ensure_cuda_runtime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io
         })
         .collect();
     crate::setup::run_download_set(progress, total, steps)?;
+    std::fs::write(cuda_version_marker(&dir), cuda_version_fingerprint())?;
     Ok(dir)
 }
 

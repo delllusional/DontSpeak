@@ -29,11 +29,12 @@ pub fn sha256_file(path: &Path) -> Option<String> {
 }
 
 /// True iff `path` exists and its streamed SHA-256 equals `expected`
-/// (case-insensitive hex compare). An empty `expected` means "skip verification"
-/// and only checks existence (fixture/test convenience).
+/// (case-insensitive hex compare). An empty `expected` is never accepted: production
+/// downloads must opt into a different, explicit trust mechanism instead of silently
+/// bypassing integrity verification.
 pub fn verify_sha256(path: &Path, expected: &str) -> bool {
     if expected.is_empty() {
-        return path.is_file();
+        return false;
     }
     match sha256_file(path) {
         Some(got) => got.eq_ignore_ascii_case(expected.trim()),
@@ -77,10 +78,9 @@ mod tests {
         assert!(!verify_sha256(&p, "deadbeef"));
         // Case-insensitive hex compare.
         assert!(verify_sha256(&p, &good.to_uppercase()));
-        // Missing file is never valid (unless expected is empty == existence).
+        // Missing files and empty expected digests are never valid.
         assert!(!verify_sha256(&dir.path().join("nope.bin"), good));
-        // Empty expected == existence-only.
-        assert!(verify_sha256(&p, ""));
+        assert!(!verify_sha256(&p, ""));
         assert!(!verify_sha256(&dir.path().join("nope.bin"), ""));
     }
 }

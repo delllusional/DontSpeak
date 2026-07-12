@@ -28,6 +28,7 @@ pub(crate) const DEFAULT_RETRIES: u32 = 3;
 // on a briefly-slow DNS/TLS handshake.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// The OS trust store, loaded ONCE, as attohttpc root certs. attohttpc's
 /// `tls-rustls-webpki-roots-ring` feature pulls the webpki-roots crate but NOT the feature
@@ -71,7 +72,8 @@ pub fn set_prefetch_source(dir: Option<PathBuf>) {
 /// file is expected under, and the name the installer saves each download as.
 pub fn url_basename(url: &str) -> &str {
     let no_query = url.split(['?', '#']).next().unwrap_or(url);
-    no_query.rsplit('/').next().unwrap_or(no_query)
+    let trimmed = no_query.trim_end_matches('/');
+    trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
 
 /// If a prefetch dir is set and holds `url`'s file, return its path (else `None`).
@@ -109,6 +111,12 @@ pub(crate) fn file_flight(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
 /// caller's progress UI jumps to 100% for an instant local copy). Shared by the two
 /// download fns' installer fast-paths.
 fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
+    if local.metadata()?.len() > MAX_DOWNLOAD_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "prefetched file exceeds download size limit",
+        ));
+    }
     std::fs::copy(local, dest)?;
     let len = dest.metadata().map(|m| m.len()).unwrap_or(0);
     progress(len, len);
@@ -293,6 +301,12 @@ fn download_once(
     // Per-read inactivity + connect timeouts (see CONNECT_TIMEOUT / READ_TIMEOUT):
     // a stalled CDN aborts instead of hanging the caller indefinitely.
     let (mut reader, total) = http_get_stream(url)?;
+    if total > MAX_DOWNLOAD_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "download Content-Length exceeds size limit",
+        ));
+    }
     let mut buf = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
     let mut next_emit: u64 = 0;
@@ -303,6 +317,12 @@ fn download_once(
         }
         tmp.write_all(&buf[..n])?;
         downloaded += n as u64;
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "download exceeds size limit",
+            ));
+        }
         // Throttle progress to ~1 MB steps to bound UI callbacks.
         if downloaded >= next_emit {
             progress(downloaded, total);
@@ -354,6 +374,12 @@ pub(crate) fn download_to(
         return copy_prefetched(&local, dest, progress);
     }
     let (mut reader, total) = http_get_stream(url)?;
+    if total > MAX_DOWNLOAD_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "download Content-Length exceeds size limit",
+        ));
+    }
     let mut f = std::fs::File::create(dest)?;
     let mut buf = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
@@ -365,6 +391,12 @@ pub(crate) fn download_to(
         }
         f.write_all(&buf[..n])?;
         downloaded += n as u64;
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "download exceeds size limit",
+            ));
+        }
         if downloaded >= next_emit {
             progress(downloaded, total);
             next_emit = downloaded + 1_048_576;

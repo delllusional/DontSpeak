@@ -18,8 +18,7 @@ use crate::target::DownloadTarget;
 pub struct ModelSpec {
     pub file_name: String,
     pub url: String,
-    /// Pinned lowercase-hex SHA-256. Empty == "do not verify" (used only by the
-    /// localhost fixture test; real specs always pin a digest).
+    /// Pinned lowercase-hex SHA-256. Real model specs always pin a digest.
     pub sha256: String,
 }
 
@@ -233,8 +232,7 @@ pub struct PrefetchItem {
 /// CLI edge (`ds-helper --print-manifest`), never inside the library. Only
 /// [`Onnxruntime`](DownloadTarget::Onnxruntime) | [`KokoroModel`](DownloadTarget::KokoroModel) |
 /// [`KokoroVoices`](DownloadTarget::KokoroVoices) | [`ParakeetModel`](DownloadTarget::ParakeetModel) |
-/// [`Cuda`](DownloadTarget::Cuda) | [`Dotnet`](DownloadTarget::Dotnet) |
-/// [`Winapp`](DownloadTarget::Winapp) produce items; every other target yields `vec![]`.
+/// [`Cuda`](DownloadTarget::Cuda) produce items; every other target yields `vec![]`.
 /// This is the SINGLE source of the installer's download list; the URLs/SHAs never
 /// leave ds-model.
 pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
@@ -301,17 +299,10 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
                 .map(|(u, s)| item(u, s))
                 .collect()
         }
-        // Windows prerequisite runtimes (.NET Desktop + Windows App Runtime). The shipping
-        // portable zip bundles both self-contained, so these are only for a framework-dependent
-        // build or a runtime repair; `ds-helper --print-manifest` exposes them. Returned
-        // UNCONDITIONALLY and carry no sha (aka.ms permalinks are not sha-pinnable — see urls.rs).
-        #[cfg(target_os = "windows")]
-        DownloadTarget::Dotnet => vec![item(crate::urls::DOTNET_DESKTOP_RUNTIME_URL, "")],
-        #[cfg(target_os = "windows")]
-        DownloadTarget::Winapp => vec![item(crate::urls::WINDOWS_APP_RUNTIME_URL, "")],
-        // Models / DiarizationCoreml / the other Core ML sets (and, off-Windows,
-        // Dotnet/Winapp; off-x86_64, Cuda) have no dedicated arm and return vec![] via
-        // the `_` default — matching `DownloadTarget::is_supported_on_this_host`.
+        // The portable Windows bundle is self-contained. Dotnet/Winapp deliberately have no
+        // prefetch manifest because their aka.ms redirects are mutable and cannot be pinned to
+        // the SHA required by the downloader. Models / Core ML sets (and off-x86_64 Cuda) also
+        // have no dedicated arm and return vec![] via the `_` default.
         _ => vec![],
     }
 }

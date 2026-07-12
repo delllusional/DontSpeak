@@ -2,8 +2,54 @@
 //! `.tgz` (macOS/Linux) / `.zip` (Windows), and flatten the CUDA wheels' DLLs.
 //! Atomic temp + rename so a partial extract never lands.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
+
+const MAX_EXTRACTED_MEMBER_BYTES: u64 = 1024 * 1024 * 1024;
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
+const MAX_EXTRACTED_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
+const MAX_EXTRACTED_MEMBERS: u32 = 512;
+
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
+fn add_extracted_bytes(total: &mut u64, copied: u64) -> std::io::Result<()> {
+    *total = total.checked_add(copied).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "archive extraction size overflow",
+        )
+    })?;
+    if *total > MAX_EXTRACTED_TOTAL_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "archive exceeds total extraction size limit",
+        ));
+    }
+    Ok(())
+}
+
+fn copy_bounded(mut src: impl Read, mut dest: impl Write) -> std::io::Result<u64> {
+    let copied = std::io::copy(
+        &mut src.by_ref().take(MAX_EXTRACTED_MEMBER_BYTES + 1),
+        &mut dest,
+    )?;
+    if copied > MAX_EXTRACTED_MEMBER_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "archive member exceeds extraction size limit",
+        ));
+    }
+    Ok(copied)
+}
 
 /// Extract the onnxruntime shared library from the downloaded archive onto
 /// `dest`. Per-platform because Microsoft ships a `.tgz` on macOS and a `.zip`
@@ -30,7 +76,7 @@ pub(crate) fn extract_runtime_member(zip_path: &Path, dest: &Path) -> std::io::R
             .unwrap_or(false);
         if is_runtime {
             let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-            std::io::copy(&mut entry, &mut tmp)?;
+            copy_bounded(&mut entry, &mut tmp)?;
             tmp.flush()?;
             tmp.persist(dest).map_err(|e| e.error)?;
             return Ok(());
@@ -88,7 +134,7 @@ pub(crate) fn extract_dylib_member(tgz_path: &Path, dest: &Path) -> std::io::Res
         let in_debug_bundle = path.to_string_lossy().contains(".dSYM");
         if is_regular && name_matches && !in_debug_bundle {
             let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-            std::io::copy(&mut entry, &mut tmp)?;
+            copy_bounded(&mut entry, &mut tmp)?;
             tmp.flush()?;
             tmp.persist(dest).map_err(|e| e.error)?;
             return Ok(());
@@ -109,6 +155,7 @@ pub(crate) fn extract_all_dlls(zip_path: &Path, dir: &Path) -> std::io::Result<(
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(std::io::Error::other)?;
     let mut count = 0u32;
+    let mut extracted_bytes = 0u64;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(std::io::Error::other)?;
         if !entry.is_file() {
@@ -125,7 +172,14 @@ pub(crate) fn extract_all_dlls(zip_path: &Path, dir: &Path) -> std::io::Result<(
             continue;
         }
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-        std::io::copy(&mut entry, &mut tmp)?;
+        if count >= MAX_EXTRACTED_MEMBERS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "archive contains too many DLL members",
+            ));
+        }
+        let copied = copy_bounded(&mut entry, &mut tmp)?;
+        add_extracted_bytes(&mut extracted_bytes, copied)?;
         tmp.flush()?;
         tmp.persist(dir.join(&base)).map_err(|e| e.error)?;
         count += 1;
@@ -149,6 +203,7 @@ pub(crate) fn extract_all_sos(zip_path: &Path, dir: &Path) -> std::io::Result<()
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(std::io::Error::other)?;
     let mut count = 0u32;
+    let mut extracted_bytes = 0u64;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(std::io::Error::other)?;
         if !entry.is_file() {
@@ -166,7 +221,14 @@ pub(crate) fn extract_all_sos(zip_path: &Path, dir: &Path) -> std::io::Result<()
             continue;
         }
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-        std::io::copy(&mut entry, &mut tmp)?;
+        if count >= MAX_EXTRACTED_MEMBERS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "archive contains too many shared-object members",
+            ));
+        }
+        let copied = copy_bounded(&mut entry, &mut tmp)?;
+        add_extracted_bytes(&mut extracted_bytes, copied)?;
         tmp.flush()?;
         tmp.persist(dir.join(&base)).map_err(|e| e.error)?;
         count += 1;
