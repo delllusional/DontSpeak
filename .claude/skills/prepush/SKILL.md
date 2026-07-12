@@ -13,6 +13,21 @@ once both are green. (rustfmt + rustdoc + cargo-deny are release-only — `ci.ym
 full-matrix `hygiene` and `cargo-deny` jobs, cleaned up / cleared by `make-release`
 before tagging. swift-format is not enforced anywhere.)
 
+## Commit attribution gate (run first and again immediately before push)
+
+Read `AGENTS.md` § **Commit attribution** in full before creating or rewriting a
+commit. It is the single source of truth; this is a required pre-push gate, not a
+commit-style reminder.
+
+After the final squash, rebase, cherry-pick, or amend, inspect every outgoing commit:
+```bash
+git log --format=full origin/main..HEAD
+```
+Do not push unless every message follows that section exactly: the final trailer uses
+the full active model slug plus effort level, prohibited built-in attribution is absent,
+and a squash preserves every distinct inherited `Agent:` pair. Re-run this inspection
+after any operation that rewrites commit messages.
+
 ## The two gates
 
 1. **Clippy (deny warnings)**
@@ -58,8 +73,8 @@ re-run the diff clean before continuing.
 ## Push
 
 - Confirm there's something to push (`git status`, `git log origin/main..HEAD`); stage
-  and commit per the user's intent first if there are uncommitted changes (end commit
-  messages with the `Agent:` trailer — see AGENTS.md § Commit attribution).
+  and commit per the user's intent first if there are uncommitted changes. The required
+  attribution inspection above must be clean before continuing.
 - `git push origin <branch>` (default `main`). `origin` is `delllusional/DontSpeak`.
 
 ## Caveats
@@ -76,7 +91,8 @@ re-run the diff clean before continuing.
 ## One-liner
 
 ```bash
+git log --format=full origin/main..HEAD
 cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings && cargo test --workspace --locked && cargo deny check
 cd .. && diff -rq .agents/skills .claude/skills
 ```
-Green ⇒ safe to push.
+Green gates plus a conforming attribution inspection ⇒ safe to push.
