@@ -62,11 +62,10 @@ pub struct DuplexAudio {
     /// Set by `render_clear()`; the render callback drains the ring on its next
     /// tick. An atomic (not a lock) so the RT thread reads it without blocking.
     flush: Arc<AtomicBool>,
-    /// Incremented on every `render_clear()`. `render_push` reads the generation
-    /// before and after acquiring `play` — if it changed, a clear overtook us in
-    /// the gap, so the pushed samples would be drained by the pending flush.
-    /// Rather than push and let the callback sweep them, skip the push entirely.
-    render_gen: AtomicU64,
+    /// Even while idle, odd while the render callback is draining the ring. The
+    /// callback advances it once before clearing `flush` and once after the drain,
+    /// so `render_push` cannot mistake "flush claimed" for "flush completed".
+    render_gen: Arc<AtomicU64>,
 }
 
 impl DuplexAudio {
@@ -125,15 +124,25 @@ impl DuplexAudio {
         let (play_prod, mut play_cons) = HeapRb::<f32>::new(RENDER_CAP).split();
         let (mut cap_prod, cap_cons) = HeapRb::<f32>::new(CAPTURE_CAP).split();
         let flush = Arc::new(AtomicBool::new(false));
+        let render_gen = Arc::new(AtomicU64::new(0));
 
         // Render callback (RT thread): drain the play ring into the speaker; fill
         // any shortfall with silence. Honour a pending `render_clear` first.
         let render_flush = flush.clone();
+        let callback_render_gen = render_gen.clone();
         unit.set_render_callback(move |args: Args<data::NonInterleaved<f32>>| {
             let Args { mut data, .. } = args;
-            if render_flush.swap(false, Ordering::AcqRel) {
+            if render_flush.load(Ordering::Acquire) {
+                // Mark the generation odd BEFORE clearing `flush`. A producer that
+                // observes the clear therefore also observes that the drain is still
+                // active and waits for the matching even generation below.
+                callback_render_gen.fetch_add(1, Ordering::AcqRel);
+                let should_drain = render_flush.swap(false, Ordering::AcqRel);
                 let mut sink = [0.0f32; 1024];
-                while play_cons.pop_slice(&mut sink) > 0 {}
+                if should_drain {
+                    while play_cons.pop_slice(&mut sink) > 0 {}
+                }
+                callback_render_gen.fetch_add(1, Ordering::Release);
             }
             for channel in data.channels_mut() {
                 let got = play_cons.pop_slice(channel);
@@ -183,7 +192,7 @@ impl DuplexAudio {
             play: Mutex::new((play_prod, LinearResampler::new(SYNTH_RATE, UNIT_RATE))),
             cap: Arc::new(Mutex::new(cap_cons)),
             flush,
-            render_gen: AtomicU64::new(0),
+            render_gen,
         })
     }
 
@@ -229,19 +238,25 @@ impl DuplexAudio {
         // so this is a short, bounded wait, not a real block; a generous timeout
         // guards against ever hanging this (non-RT) thread if the unit stalls.
         let deadline = Instant::now() + Duration::from_millis(200);
-        while self.flush.load(Ordering::Acquire) && Instant::now() < deadline {
+        let mut g = loop {
+            let generation = self.render_gen.load(Ordering::Acquire);
+            if generation & 1 == 0 && !self.flush.load(Ordering::Acquire) {
+                let g = self.play.lock().unwrap();
+                // Recheck after acquiring the producer lock. If the callback claimed
+                // a pending flush in the gap, its odd generation keeps us out until
+                // the drain is complete; if a new clear arrived, `flush` keeps us out.
+                if self.render_gen.load(Ordering::Acquire) == generation
+                    && !self.flush.load(Ordering::Acquire)
+                {
+                    break g;
+                }
+                drop(g);
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
             std::thread::yield_now();
-        }
-        // Generation guard: if `render_clear` increments the generation during the
-        // window between the busy-wait above and the lock acquisition below, a
-        // flush is now pending that will drain everything in the ring — including
-        // what we're about to push. Detect that and skip the push so the first
-        // syllable of the new utterance isn't clipped.
-        let gen_before = self.render_gen.load(Ordering::Acquire);
-        let mut g = self.play.lock().unwrap();
-        if gen_before != self.render_gen.load(Ordering::Acquire) {
-            return;
-        }
+        };
         let (prod, rs) = &mut *g;
         let mut scratch = Vec::with_capacity(pcm_24k.len() * 2 + 8);
         rs.process(pcm_24k, &mut scratch);
@@ -270,7 +285,6 @@ impl DuplexAudio {
     /// Drop queued render audio on the next callback tick (barge-in / stop).
     pub fn render_clear(&self) {
         self.flush.store(true, Ordering::Release);
-        self.render_gen.fetch_add(1, Ordering::AcqRel);
         // The persistent `LinearResampler` still holds interpolation state (the
         // last sample of the abandoned utterance + fractional phase) from before
         // this barge. Left alone, the next `render_push()` would linearly blend

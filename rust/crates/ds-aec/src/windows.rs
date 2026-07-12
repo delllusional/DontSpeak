@@ -222,6 +222,10 @@ fn capture_thread(
         };
         let published_rate = opened.rate;
         let mut rate_converter = None;
+        // The latest sample handed to the published-rate stream. Keep it even when
+        // no converter is active so the FIRST rate-changing reconnect can seed its
+        // new converter instead of starting with a discontinuity.
+        let mut stream_tail = None;
 
         while !stop.load(Ordering::Acquire) {
             match run_capture_loop(
@@ -230,6 +234,7 @@ fn capture_thread(
                 &stop,
                 published_rate,
                 rate_converter.as_mut(),
+                &mut stream_tail,
             ) {
                 Ok(()) => break, // `stop` was set — clean shutdown
                 Err(e) => {
@@ -273,8 +278,6 @@ fn capture_thread(
                                     o.rate
                                 );
                             }
-                            let prev_sample =
-                                rate_converter.as_ref().and_then(|rs| rs.last_sample());
                             rate_converter = (o.rate != published_rate).then(|| {
                                 let mut rs =
                                     crate::resample::LinearResampler::new(o.rate, published_rate);
@@ -282,7 +285,7 @@ fn capture_thread(
                                 // interpolation interval continues smoothly — a fresh
                                 // resampler starts at zero and produces an audible click
                                 // at the exact moment new audio resumes.
-                                if let Some(prev) = prev_sample {
+                                if let Some(prev) = stream_tail {
                                     rs.seed_prev(prev);
                                 }
                                 rs
@@ -432,6 +435,7 @@ unsafe fn run_capture_loop(
     stop: &Arc<AtomicBool>,
     published_rate: u32,
     mut rate_converter: Option<&mut crate::resample::LinearResampler>,
+    stream_tail: &mut Option<f32>,
 ) -> Result<(), String> {
     let map = |ctx: &'static str| move |e: windows::core::Error| format!("{ctx}: {e}");
     // SAFETY: WASAPI FFI against the live session in `opened` (COM initialized on this
@@ -481,8 +485,12 @@ unsafe fn run_capture_loop(
                 if let Some(converter) = rate_converter.as_deref_mut() {
                     converted.clear();
                     converter.process(&acc, &mut converted);
+                    *stream_tail = converter.last_sample();
                     enqueue_bounded(cap, &converted, cap_limit);
                 } else {
+                    if let Some(&last) = acc.last() {
+                        *stream_tail = Some(last);
+                    }
                     enqueue_bounded(cap, &acc, cap_limit);
                 }
             }

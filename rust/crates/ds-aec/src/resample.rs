@@ -153,4 +153,15 @@ mod tests {
         // 1:1 ratio: ~one output per input (minus the single priming sample).
         assert!((out.len() as i64 - 100).abs() <= 2);
     }
+
+    #[test]
+    fn seeded_replacement_continues_from_prior_tail() {
+        let mut rs = LinearResampler::new(24_000, 48_000);
+        rs.seed_prev(0.25);
+        let mut out = Vec::new();
+        rs.process(&[0.75], &mut out);
+
+        assert_eq!(out, vec![0.25, 0.5]);
+        assert_eq!(rs.last_sample(), Some(0.75));
+    }
 }
