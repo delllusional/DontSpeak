@@ -21,15 +21,15 @@
 //! effect plus compatibility output for `UserPromptSubmit`.
 //!
 //! The per-event set covers the five useful lifecycle signals. Grok has no `MessageDisplay`
-//! stream, and its Stop payload has no final text, so these native hooks currently provide
-//! lifecycle side effects rather than assistant-reply narration:
+//! stream and its Stop payload has no direct final text, so Stop narration reads the final
+//! assistant entry from the payload's `transcriptPath` JSONL file:
 //!
 //!   * `SessionStart` → notify, greet-only — the spoken greeting without seeding the
 //!     streaming witness, which would incorrectly mark a non-streaming session narrated.
 //!   * `SessionEnd` → `notify` — barge this session's playback on close.
 //!   * `UserPromptSubmit` → notify + compatibility provide output in one process. Native
 //!     passive-hook stdout is ignored by Grok, but imported Claude-hook compatibility may use it.
-//!   * `Stop` → `notify` — the reply-done earcon; `speak_reply` is a no-op without text.
+//!   * `Stop` → `notify` — narrate from `transcriptPath`, then play the reply-done earcon.
 //!   * `Notification` → `notify` — the needs-input earcon.
 //!
 //! Rendered as one group and one handler per event:

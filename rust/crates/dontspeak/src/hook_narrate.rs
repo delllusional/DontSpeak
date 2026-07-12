@@ -32,6 +32,7 @@
 use ds_config::{ClientSource, NarrateKind, Paths, VoiceConfig};
 use ds_narrate::{BatchPayload, StreamBatch};
 use serde::Deserialize;
+use std::borrow::Cow;
 
 /// SessionEnd notify: barge ONLY this session's engine playback (so closing one window
 /// never silences another's reply). The `payload` is the hook JSON; no payload / no
@@ -83,9 +84,10 @@ pub fn mark_streaming_session(paths: &Paths, payload: &str) {
 /// Stop hook payload subset. Claude Code, Codex, and Qwen Code supply
 /// `last_assistant_message`, which supports full-reply voicing for non-streaming clients.
 ///
-/// A live Grok 0.2.93 capture on 2026-07-13 instead contained `sessionId`, `reason`, and
-/// `transcriptPath`, but no final text. Grok's Stop therefore reaches the reply-done earcon
-/// but contributes no narration; the camelCase text alias remains forward-compatible.
+/// Grok's Stop (live-verified) is metadata-only (`sessionId`, `reason`, `transcriptPath`,
+/// etc.) with no `lastAssistantMessage`. We fall back to reading the final assistant turn
+/// from the file named in `transcriptPath` (typically the session's chat_history.jsonl).
+/// The camelCase alias remains for forward-compat with any client that does supply direct text.
 #[derive(Debug, Deserialize, Default)]
 struct StopHook {
     // Alias accepts camelCase alongside snake_case for clients that supply it.
@@ -93,6 +95,76 @@ struct StopHook {
     last_assistant_message: Option<String>,
     #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
+    #[serde(default, alias = "transcriptPath")]
+    transcript_path: Option<String>,
+}
+
+/// Lightweight transcript entry for extracting the last assistant turn from a Grok
+/// chat_history.jsonl (or similar JSONL pointed at by transcriptPath).
+#[derive(Debug, Deserialize, Default)]
+struct TranscriptEntry {
+    #[serde(default, rename = "type")]
+    r#type: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+impl StopHook {
+    /// Return the best available final assistant text: direct field if present,
+    /// otherwise Grok's last non-empty assistant content from `transcriptPath` (if any).
+    fn last_assistant_text(&self, client: ClientSource) -> Option<Cow<'_, str>> {
+        if let Some(t) = self
+            .last_assistant_message
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            return Some(Cow::Borrowed(t));
+        }
+        if client == ClientSource::Grok {
+            return self
+                .transcript_path
+                .as_deref()
+                .and_then(read_last_assistant_from_transcript)
+                .map(Cow::Owned);
+        }
+        None
+    }
+}
+
+/// Tail the transcript file (JSONL) and return the content of the last "assistant" entry
+/// that has non-empty text. This lets Grok's Stop hook narrate without the direct text
+/// field. Only the last complete JSONL entries within a bounded tail are considered, and
+/// they are scanned newest-first so unrelated conversation history is neither parsed nor
+/// returned. The partial first line is discarded byte-wise because the seek may split a
+/// UTF-8 code point.
+fn read_last_assistant_from_transcript(path: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    const TAIL_BYTES: u64 = 256 * 1024;
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+
+    let mut tail = Vec::with_capacity((len - start) as usize);
+    file.take(TAIL_BYTES).read_to_end(&mut tail).ok()?;
+    let complete_lines = if start == 0 {
+        tail.as_slice()
+    } else {
+        let first_newline = tail.iter().position(|byte| *byte == b'\n')?;
+        &tail[first_newline + 1..]
+    };
+
+    complete_lines
+        .split(|byte| *byte == b'\n')
+        .rev()
+        .filter_map(|line| serde_json::from_slice::<TranscriptEntry>(line).ok())
+        .find_map(|entry| {
+            (entry.r#type.as_deref() == Some("assistant"))
+                .then_some(entry.content)
+                .flatten()
+                .filter(|content| !content.trim().is_empty())
+        })
 }
 
 /// Witness that a streaming pass ran for this session: its per-session state file exists
@@ -141,7 +213,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) {
     let streamed = streamed_via_message_display(paths, session.as_deref().unwrap_or_default());
 
     let speak = stop_utterances(
-        hook.last_assistant_message.as_deref(),
+        hook.last_assistant_text(client).as_deref(),
         messages_on,
         short_on,
         ds_platform::is_mic_active(),
@@ -774,6 +846,10 @@ mod tests {
             hook.last_assistant_message.as_deref(),
             Some("> Hi.\n\nDetail.")
         );
+        assert_eq!(
+            hook.last_assistant_text(ClientSource::Grok).as_deref(),
+            Some("> Hi.\n\nDetail.")
+        );
     }
 
     #[test]
@@ -787,16 +863,89 @@ mod tests {
             hook.last_assistant_message.is_none(),
             "Grok Stop carries no last* text"
         );
+        // transcriptPath "..." does not exist → no text extracted
+        assert!(hook.last_assistant_text(ClientSource::Grok).is_none());
         // Consequently Stop contributes no narration text (earcon may still ring via the arm).
         assert!(
             stop_utterances(
-                hook.last_assistant_message.as_deref(),
+                hook.last_assistant_text(ClientSource::Grok).as_deref(),
                 true,
                 false,
                 false,
                 false
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn grok_transcript_path_fallback_extracts_last_assistant() {
+        // Fixture: sanitized live-style transcript (JSONL) as requested in #49.
+        // We only need a realistic tail with a final assistant turn containing a digest.
+        let dir = tempfile::tempdir().unwrap();
+        let tx_path = dir.path().join("chat_history.jsonl");
+        let transcript = r#"{"type":"user","content":"do the thing"}
+{"type":"assistant","content":"> Point one.\n\nDetails about point one.\n\n> And the question?","model_id":"grok-build"}
+{"type":"tool_result","content":"ok"}
+"#;
+        std::fs::write(&tx_path, transcript).unwrap();
+
+        let payload = format!(
+            r#"{{"hookEventName":"stop","sessionId":"g-tx","transcriptPath":"{}"}}"#,
+            tx_path.to_string_lossy().replace('\\', "\\\\")
+        );
+        let hook: StopHook = serde_json::from_str(&payload).expect("parses with transcriptPath");
+        let text = hook
+            .last_assistant_text(ClientSource::Grok)
+            .expect("extracted from transcript");
+        assert!(text.contains("> Point one."));
+        assert!(text.contains("> And the question?"));
+
+        // Feeding the extracted text through stop_utterances should yield the spoken lines.
+        let spoken = stop_utterances(Some(&text), true, false, false, false);
+        assert_eq!(
+            spoken,
+            vec!["Point one.".to_string(), "And the question?".to_string()]
+        );
+    }
+
+    #[test]
+    fn transcript_path_fallback_is_grok_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let tx_path = dir.path().join("chat_history.jsonl");
+        std::fs::write(
+            &tx_path,
+            r#"{"type":"assistant","content":"> Private file content."}"#,
+        )
+        .unwrap();
+        let hook = StopHook {
+            transcript_path: Some(tx_path.to_string_lossy().into_owned()),
+            ..StopHook::default()
+        };
+
+        assert!(
+            hook.last_assistant_text(ClientSource::ClaudeCode).is_none(),
+            "non-Grok hook payloads must not cause arbitrary transcript reads"
+        );
+    }
+
+    #[test]
+    fn transcript_tail_handles_a_seek_inside_utf8() {
+        const TAIL_BYTES: usize = 256 * 1024;
+        let assistant = b"\n{\"type\":\"assistant\",\"content\":\"> Final digest.\"}\n";
+        let start = assistant.len();
+        let mut transcript = vec![b'x'; TAIL_BYTES];
+        transcript[start - 1] = 0xc3;
+        transcript[start] = 0xa9;
+        transcript.extend_from_slice(assistant);
+
+        let dir = tempfile::tempdir().unwrap();
+        let tx_path = dir.path().join("chat_history.jsonl");
+        std::fs::write(&tx_path, transcript).unwrap();
+
+        assert_eq!(
+            read_last_assistant_from_transcript(tx_path.to_str().unwrap()).as_deref(),
+            Some("> Final digest.")
         );
     }
 }

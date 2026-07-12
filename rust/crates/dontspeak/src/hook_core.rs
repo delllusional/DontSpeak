@@ -132,8 +132,8 @@ pub(crate) fn notify_at(
         //  • Claude Code streams via MessageDisplay but ALSO delivers `last_assistant_message`
         //    on Stop, so speak_reply self-gates on this session's MessageDisplay state file
         //    (present ⇒ already narrated ⇒ silent); CC wires Stop for the turn-done ding.
-        //  • Grok's live-verified Stop payload is metadata-only, so speak_reply is silent and
-        //    the event contributes only the turn-done ding.
+        //  • Grok Stop is metadata-only; speak_reply now falls back to the `transcriptPath`
+        //    file (chat_history.jsonl etc.) to obtain the final assistant text (#49).
         // The reply-done earcon then rings for every client (engine self-gates on `earcon_enabled` +
         // mute), so a finished turn is signalled whether or not the reply was just voiced.
         "Stop" => {
