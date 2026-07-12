@@ -233,7 +233,7 @@ mod macos {
         // `Ctx` registered at start; its fields are Sync, so this shared borrow is sound.
         let ctx_ref = unsafe { &*(ctx as *const Ctx) };
         let new_dev = default_input_device();
-        let old_dev = ctx_ref.dev.swap(new_dev, Ordering::Relaxed);
+        let old_dev = ctx_ref.dev.load(Ordering::Relaxed);
         if new_dev != old_dev {
             let run = prop_addr(kAudioDevicePropertyDeviceIsRunningSomewhere);
             // SAFETY: Add/RemovePropertyListener are called with a live device id, a live
@@ -250,12 +250,19 @@ mod macos {
                         ctx,
                     );
                 }
-                if new_dev != 0 {
-                    AudioObjectAddPropertyListener(
+                let registered = new_dev != 0
+                    && AudioObjectAddPropertyListener(
                         new_dev,
                         NonNull::from(&run),
                         Some(running_cb),
                         ctx,
+                    ) == 0;
+                ctx_ref
+                    .dev
+                    .store(if registered { new_dev } else { 0 }, Ordering::Relaxed);
+                if new_dev != 0 && !registered {
+                    eprintln!(
+                        "dontspeak: failed to watch the new default input device; waiting for another device change"
                     );
                 }
             }
@@ -318,13 +325,29 @@ mod macos {
                 // device id, live stack property address, our callback, and the same
                 // heap-stable `ctx`, which now lives until process end (see the
                 // intentional leak in `Listener`'s drop).
-                unsafe {
+                let rc_run = unsafe {
                     AudioObjectAddPropertyListener(
                         dev,
                         NonNull::from(&run_addr),
                         Some(running_cb),
                         ctx_void,
-                    );
+                    )
+                };
+                if rc_run != 0 {
+                    // The system listener was registered, so detach it before freeing the
+                    // context and falling back to polling.
+                    unsafe {
+                        AudioObjectRemovePropertyListener(
+                            SYS,
+                            NonNull::from(&dev_addr),
+                            Some(device_cb),
+                            ctx_void,
+                        );
+                    }
+                    // SAFETY: both attempted registrations are now absent, so no callback
+                    // can retain or observe the uniquely owned allocation.
+                    drop(unsafe { Box::from_raw(ctx) });
+                    return Err(());
                 }
             }
             // Seed the cached state from a live read now that the listeners are armed.

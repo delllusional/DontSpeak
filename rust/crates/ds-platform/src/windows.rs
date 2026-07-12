@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::time::Instant;
 
 use windows::Win32::Foundation::{CloseHandle, LPARAM, LRESULT, WPARAM};
@@ -27,8 +27,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-    KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostThreadMessageW, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 use windows::core::PWSTR;
 
@@ -116,7 +117,10 @@ fn frontmost_process_basename() -> Option<String> {
         };
         // QueryFullProcessImageNameW writes a full path into the buffer and updates `size`
         // to the length actually written.
-        let mut buf = [0u16; 260]; // MAX_PATH
+        // QueryFullProcessImageNameW supports extended-length paths. A MAX_PATH-sized
+        // buffer incorrectly rejects otherwise valid foreground processes installed
+        // under a long path.
+        let mut buf = vec![0u16; 32_768];
         let mut size = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(
             handle,
@@ -166,6 +170,10 @@ static HOOK_STARTED: AtomicBool = AtomicBool::new(false);
 /// loop so it can unhook and exit. 0 = no pump thread currently installed (never started,
 /// spawn/`SetWindowsHookExW` failed, or already shut down).
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+/// Installed hook handle, published independently of its pump thread so shutdown can
+/// forcibly uninstall it if that thread fails to process WM_QUIT before the deadline.
+/// Stored as an integer because the generated `HHOOK` raw pointer is not `Sync`.
+static HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
 /// The pump thread's `JoinHandle`, so [`shutdown_caps_hook`] can WAIT for the unhook to
 /// actually finish (confirms `UnhookWindowsHookEx` ran) instead of firing `WM_QUIT` and
 /// hoping. `None` until [`ensure_caps_hook`] spawns the thread.
@@ -241,12 +249,15 @@ fn ensure_caps_hook() {
                 eprintln!(
                     "dontspeak: SetWindowsHookExW(WH_KEYBOARD_LL) failed — Caps dictation disabled"
                 );
+                HOOK_STARTED.store(false, Ordering::SeqCst);
                 return;
             };
             // Publish this thread's id so `shutdown_caps_hook` — called from the engine's
             // teardown path, on a DIFFERENT thread — can post it WM_QUIT to unblock the
             // pump below and tear the hook down.
-            HOOK_THREAD_ID.store(GetCurrentThreadId(), Ordering::SeqCst);
+            let tid = GetCurrentThreadId();
+            HOOK_HANDLE.store(hook.0 as isize, Ordering::SeqCst);
+            HOOK_THREAD_ID.store(tid, Ordering::SeqCst);
             // A low-level hook is delivered to THIS thread; keep a live message pump or
             // the callback is never invoked. No key messages dispatch here — the pump
             // only services the hook delivery and the WM_QUIT `shutdown_caps_hook` posts
@@ -259,8 +270,13 @@ fn ensure_caps_hook() {
             // WM_QUIT received — unhook on THIS thread (the one that installed it, per
             // the documented UnhookWindowsHookEx/SetWindowsHookExW pairing), then clear
             // the published id so a stale value is never posted to after we're gone.
-            let _ = UnhookWindowsHookEx(hook);
-            HOOK_THREAD_ID.store(0, Ordering::SeqCst);
+            if HOOK_HANDLE
+                .compare_exchange(hook.0 as isize, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+            let _ = HOOK_THREAD_ID.compare_exchange(tid, 0, Ordering::SeqCst, Ordering::SeqCst);
         });
     match spawned {
         Ok(handle) => {
@@ -322,9 +338,19 @@ fn shutdown_caps_hook() {
             std::thread::sleep(POLL_INTERVAL);
         }
         if !joined {
+            let raw = HOOK_HANDLE.swap(0, Ordering::SeqCst);
+            if raw != 0 {
+                // SAFETY: `raw` is the live handle published immediately after a
+                // successful SetWindowsHookExW call. Atomic swap transfers responsibility
+                // for the one unhook to this thread; the pump's compare_exchange then
+                // prevents it from unhooking the same handle again.
+                unsafe {
+                    let _ = UnhookWindowsHookEx(HHOOK(raw as *mut std::ffi::c_void));
+                }
+            }
             eprintln!(
                 "dontspeak: shutdown_caps_hook gave up waiting {JOIN_TIMEOUT:?} for the hook \
-                 pump thread to unhook; detaching it instead of blocking"
+                 pump thread; forcibly unhooked and detached it instead of blocking"
             );
         }
     }
@@ -404,8 +430,12 @@ impl WindowsPlatform {
     fn send(inputs: &[INPUT]) {
         // SAFETY: `inputs` is a live, fully initialized slice for the duration of the
         // call, and cbSize is the true size of INPUT, as SendInput requires.
-        unsafe {
-            SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
+        let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+        if sent as usize != inputs.len() {
+            eprintln!(
+                "dontspeak: SendInput inserted {sent} of {} keyboard events",
+                inputs.len()
+            );
         }
     }
 }
@@ -482,7 +512,7 @@ impl KeyInjector for WindowsPlatform {
             Self::key(0x11, true),
         ]);
         // Restore the user's clipboard off-thread once the async paste has read ours.
-        crate::restore_clipboard_after_paste(prev);
+        crate::restore_clipboard_after_paste(prev, text.to_owned());
     }
 
     fn press_enter(&self) {
@@ -615,6 +645,7 @@ mod caps_led {
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, DDD_RAW_TARGET_PATH, DDD_REMOVE_DEFINITION, DefineDosDeviceW,
         FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        QueryDosDeviceW,
     };
     use windows::Win32::System::IO::DeviceIoControl;
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_NUMLOCK, VK_SCROLL};
@@ -630,6 +661,7 @@ mod caps_led {
     // Class-driver instances to fan out to (KeyboardClass0..). One per physical
     // keyboard; we light the Caps LED on each so the right board responds.
     const MAX_KEYBOARDS: u32 = 8;
+    static CLEAN_STALE_LINKS: std::sync::Once = std::sync::Once::new();
 
     /// `KEYBOARD_INDICATOR_PARAMETERS` (ntddkbd.h): which unit + the absolute LED set.
     #[repr(C)]
@@ -667,11 +699,44 @@ mod caps_led {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    fn cleanup_stale_links() {
+        CLEAN_STALE_LINKS.call_once(|| {
+            let mut names = vec![0u16; 64 * 1024];
+            // SAFETY: a null device name requests the NUL-separated device-name list;
+            // `names` is a live writable slice for the duration of the call.
+            let written = unsafe { QueryDosDeviceW(PCWSTR::null(), Some(&mut names)) } as usize;
+            if written == 0 || written > names.len() {
+                return;
+            }
+            for raw in names[..written]
+                .split(|&c| c == 0)
+                .filter(|s| !s.is_empty())
+            {
+                let name = String::from_utf16_lossy(raw);
+                if !name.starts_with("DontSpeakKbd") {
+                    continue;
+                }
+                let name_w = wide(&name);
+                // SAFETY: name_w is NUL-terminated and alive across the call. Removing
+                // all definitions for this private prefix cleans links left by a process
+                // crash; the engine's single-instance guard prevents a live peer.
+                unsafe {
+                    let _ = DefineDosDeviceW(
+                        DDD_REMOVE_DEFINITION,
+                        PCWSTR(name_w.as_ptr()),
+                        PCWSTR::null(),
+                    );
+                }
+            }
+        });
+    }
+
     /// Light/clear the Caps-Lock LED as the dictation indicator, preserving the
     /// Num/Scroll LEDs and the logical Caps toggle. Best-effort: every Win32 call is
     /// fallible (no keyboard, access denied) and silently skipped — the indicator is
     /// cosmetic and must never break dictation.
     pub fn drive_caps(caps_on: bool) {
+        cleanup_stale_links();
         let flags = led_flags(caps_on, lock_on(VK_NUMLOCK.0), lock_on(VK_SCROLL.0));
         let kip = KeyboardIndicatorParameters {
             unit_id: 0,

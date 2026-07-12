@@ -74,14 +74,18 @@ pub fn warn_unsupported_dictation_key(base: &KeyBase) {
 
 /// Restore the user's clipboard after a transcript paste ([`KeyInjector::type_text`]), OFF
 /// the caller's thread. Every port's clipboard-paste delivery (Windows Ctrl+V / macOS Cmd+V
-/// / Linux Ctrl+Shift+V) ends identically: spawn a thread, wait ~200 ms for the async paste
-/// to read what we set, then put back the snapshot (`Some`) or clear what we left (`None`).
-/// The 200 ms margin and the restore-vs-clear rule live here once, not in all three ports.
+/// / Linux Ctrl+Shift+V) ends identically: spawn a thread, wait for the async paste to read
+/// what we set, then put back the snapshot (`Some`) or clear what we left (`None`). Before
+/// restoring, verify that the clipboard still contains our transcript: if the user or
+/// another app copied something newer during the delay, that newer value wins.
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-pub fn restore_clipboard_after_paste(prev: Option<String>) {
+pub fn restore_clipboard_after_paste(prev: Option<String>, pasted: String) {
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(500));
         if let Ok(mut cb) = arboard::Clipboard::new() {
+            if cb.get_text().ok().as_deref() != Some(pasted.as_str()) {
+                return;
+            }
             match prev {
                 Some(p) => {
                     let _ = cb.set_text(p);

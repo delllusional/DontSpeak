@@ -266,7 +266,10 @@ impl LinuxPlatform {
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(_) => break, // transient read error — keep the cached state
+                Err(_) => {
+                    self.caps_down.set(false);
+                    break;
+                }
             }
         }
     }
@@ -353,7 +356,7 @@ impl KeyInjector for LinuxPlatform {
         self.emit(KeyCode::KEY_LEFTSHIFT, false);
         self.emit(KeyCode::KEY_LEFTCTRL, false);
         // Restore the user's clipboard off-thread once the async paste has read ours.
-        crate::restore_clipboard_after_paste(prev);
+        crate::restore_clipboard_after_paste(prev, text.to_owned());
     }
 
     fn press_enter(&self) {
@@ -365,10 +368,11 @@ impl KeyInjector for LinuxPlatform {
 impl FrontmostWindow for LinuxPlatform {
     fn is_terminal_frontmost(&self) -> bool {
         if self.wayland {
-            // Wayland: no portable active-window query. The architecture (§C.3) accepts
-            // fail-OPEN here because Wayland compositors already isolate input per surface,
-            // so a synthetic paste can only reach the surface the user themselves focused.
-            return true;
+            // Wayland has no portable active-window query. Synthetic uinput events are
+            // system-wide rather than surface-scoped, so failing open could paste a
+            // transcript into any focused application. Preserve the focus gate's contract
+            // and fail closed until a compositor-specific probe is available.
+            return false;
         }
         // X11: read _NET_ACTIVE_WINDOW + WM_CLASS, match the terminal allowlist. FAIL-CLOSED
         // (return false) on any failure so a transcript never leaks into a non-terminal app.

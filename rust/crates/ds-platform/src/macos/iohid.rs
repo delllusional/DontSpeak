@@ -300,6 +300,12 @@ pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
             // always find this thread's run loop to `CFRunLoopStop`.
             CFRetain(run_loop as *const c_void);
             let prev = MONITOR_RUN_LOOP.swap(run_loop as usize, Ordering::SeqCst);
+            if prev != 0 {
+                // The replaced slot owned one retain. Even though overlapping monitors
+                // violate the serialized host lifecycle below, release that ownership in
+                // production builds instead of leaking it when the debug assertion is off.
+                CFRelease(prev as *const c_void);
+            }
             // Hosts must serialize stop→start (stop JOINS the old monitor via
             // `MacOsPlatform`'s Drop; today macOS calls ds_engine_start once per
             // process and stops only at quit), so no prior monitor's retained ref

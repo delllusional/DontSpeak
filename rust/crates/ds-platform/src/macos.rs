@@ -272,7 +272,7 @@ impl KeyInjector for MacOsPlatform {
             up.post(CGEventTapLocation::Session);
         }
         // Restore the user's clipboard off-thread once the async Cmd+V has read ours.
-        crate::restore_clipboard_after_paste(prev);
+        crate::restore_clipboard_after_paste(prev, text.to_owned());
     }
 
     /// Tap Return once (no modifiers) — the always-listening loop's auto-submit. Same
