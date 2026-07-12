@@ -47,29 +47,11 @@ reason (license conflict, missing feature, unmaintained, wrong fit, etc.) — do
 silently skip the check. Skip this research step only for trivial/mechanical changes
 where there's no design choice to inform.
 
-Before writing the plan, always check the change against these repo-specific
-invariants and call out any that apply:
-
-- Config boundary — new settings go in 'config.toml' (via 'ds-config'), never in
-  '~/.claude/settings.json'.
-- FFI boundary ('ds-core') — no codegen (uniffi was rejected). If the change
-  touches 'model_status' or adds/changes an FFI function, the plan must include:
-  editing the Rust source of truth, hand-updating BOTH mirrors
-  ('apps/windows/winui/Native.cs', 'apps/macos/Sources/DontSpeak/DontSpeakCore.swift'),
-  regenerating 'dontspeak.h' (cbindgen), and running the round-trip test.
-- Three deploy routes — check 'docs/BUILD-DEPLOY.md'. A plan that changes the
-  engine, the CLI, or a host app must say which of the three rebuild routes applies,
-  so the implementer doesn't leave the running app on stale code.
-- Licensing — no new linked GPL/LGPL dependency (see 'NOTICE.md'); external GPL
-  tools (like espeak-ng) may only be shelled out to, never linked.
-- i18n — any new user-facing string goes in 'rust/crates/ds-i18n/locales/en.yml',
-  rendered through the FFI. Never a literal string in Swift/C#/XAML.
-- Cross-platform parity — if the change touches shared engine code or
-  'ds-platform', the plan must enumerate the per-OS work needed on macOS, Windows,
-  and Linux, even if one host is done first.
-- Gates — per-commit CI is clippy + test + 'cargo deny check'; 'cargo fmt' /
-  'cargo doc' are release-only. Don't plan formatting fixes as a blocking step unless
-  near a release.
+Before writing the plan, always check the change against AGENTS.md's "Invariants
+worth knowing before you touch things" section (config boundary, FFI codegen
+rejection + mirror requirement, deploy routes, licensing, i18n, cross-platform
+parity, gates) and call out any that apply. That section (read via CLAUDE.md's
+import) is the source of truth — don't restate it here.
 
 End the plan with an explicit Risk: yes/no line (put it in the 'risk'/'riskAreas'
 fields of your structured output, not just prose). Answer yes if the change touches

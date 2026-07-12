@@ -23,6 +23,27 @@ Build prerequisites per OS: [CONTRIBUTING.md](CONTRIBUTING.md).
 - `web/` — the dontspeak.org site (deployed locally via the `deploy-site` skill, not
   CI — see git log for `site deploys run locally`).
 
+## Reading these instructions with a different coding agent
+
+This file is the single source of truth for repo/product knowledge. Codex CLI,
+Gemini CLI, and Grok Build read it natively; Claude Code gets it via `CLAUDE.md`'s
+`@AGENTS.md` import and Qwen Code via `QWEN.md`'s identical import — both wrapper
+files are one line. Edit AGENTS.md itself, never the wrappers, and don't restate
+its content (the invariants below, especially) inside a tool-specific file — point
+at this file instead, so there's one place to update.
+
+Skills live physically under `.agents/skills/` — the location Codex CLI and Gemini
+CLI/Qwen Code scan natively. `.claude/skills/` holds a same-named symlink per skill
+so Claude Code and Grok Build resolve the identical file with no copy. See
+CONTRIBUTING.md's Windows prereqs for the one-time `git config core.symlinks true`
+this needs on Windows.
+
+`.claude/agents/*.md` (the `ds-planner` / `ds-plan-reviewer` / `ds-implementer` /
+`ds-risk-auditor` / `ds-lander` pipeline, `.claude/workflows/plan-review-implement.js`)
+is a Claude-Code-specific subagent mechanism with no confirmed equivalent discovery
+path across tools yet. Those files reference this file's invariants rather than
+restating them — keep it that way when editing either side.
+
 ## Concurrent sessions: work in a worktree
 
 More than one Claude Code session (yours, a background workflow's implement stage,
