@@ -220,10 +220,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         // engine's codex_stream supervisor, not a hook. MID-TURN narration doesn't ride
         // hooks at all: the engine subscribes to the shared app-server (`codex
         // app-server daemon start` + `codex --remote`) — see the "app-server" DocRef and
-        // docs/STREAMING-NARRATION.md. OPEN FINDING for the live-capture pass (§9
-        // there): whether hooks still fire for `--remote`-hosted sessions is
-        // undocumented — if they do NOT, streaming narration still works and Stop
-        // simply never fires, but greet/`provide` would be lost for those sessions.
+        // docs/STREAMING-NARRATION.md. Verified live with Codex 0.144.1 on 2026-07-12:
+        // `--remote` sessions still fire SessionStart, UserPromptSubmit, and Stop, and
+        // the hook session id equals the app-server thread id used by the subscriber.
         //
         // Codex ALSO registers external MCP servers via `[mcp_servers.<name>]` in the
         // SAME `~/.codex/config.toml` (confirmed against the mcp doc + `codex mcp
@@ -267,8 +266,8 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 url: "https://developers.openai.com/codex/mcp",
             },
         ],
-        verified_client_version: "0.142.5",
-        verified_on: "2026-07-10",
+        verified_client_version: "0.144.1",
+        verified_on: "2026-07-12",
     },
     ClientSpec {
         target: ClientSource::QwenCode,

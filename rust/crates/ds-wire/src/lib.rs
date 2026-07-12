@@ -235,6 +235,11 @@ fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bo
     // docs/STREAMING-NARRATION.md). CLI literal by precedent (this file's other eprintln!s);
     // the ds-i18n catalog covers Swift/C#/XAML, none of which are involved here.
     if client == ClientSource::Codex && !remove && !print_only && code == 0 {
+        #[cfg(windows)]
+        eprintln!(
+            "wire: for mid-turn narration on Windows, set `codex_app_server_url = \"ws://127.0.0.1:4500\"`; either run `codex app-server --listen ws://127.0.0.1:4500` or set `codex_stream_daemon_start = true`, then use `codex --remote ws://127.0.0.1:4500`"
+        );
+        #[cfg(not(windows))]
         eprintln!(
             "wire: for mid-turn narration, run Codex on the shared app-server: `codex app-server daemon start` once, then `codex --remote unix://` — otherwise replies are voiced at end of turn as before"
         );

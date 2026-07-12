@@ -79,7 +79,7 @@ the whole reply is voiced at `Stop`. `dontspeak wire codex` prints this hint.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `codex_stream` | `true` | Master switch for the subscriber (attach + narrate). Observation-only against the user's own socket; inert without `~/.codex` + a running app-server. Note: after an upgrade the engine will start attaching to your daemon socket unprompted — set `false` to opt out. |
-| `codex_stream_daemon_start` | `false` | Opt-in: run the idempotent `codex app-server daemon start` when the socket is absent. |
+| `codex_stream_daemon_start` | `false` | Opt-in app-server lifecycle, started proactively so a remote TUI can connect before its first hook: run the idempotent managed daemon on Unix; on Windows own `codex app-server --listen <codex_app_server_url>` for the engine's lifetime. |
 | `codex_app_server_url` | `""` | Empty = the default unix control socket; `ws://IP:PORT` attaches over TCP (the Windows/custom path). |
 | `codex_bin` | `"codex"` | Binary for the lazy daemon start; bare names resolve via PATH + common install dirs. |
 
@@ -92,29 +92,40 @@ the whole reply is voiced at `Stop`. `dontspeak wire codex` prints this hint.
   if the connection drops mid-turn; the next `item/completed` after reconnect covers the
   missed deltas (cumulative text wins in the accumulator).
 
-### Correlation note (§9 live capture — REQUIRED before shipping)
+### Correlation verification
 
-`session_for_thread` assumes `hook session_id == app-server thread id` (a root thread's
-id is its rollout session id; the resume response's `thread.sessionId` is cross-checked
-and divergence logged). This is *expected* but *not yet pinned against a live capture* —
-codex was not installed on the implementation machine. Before release:
+`session_for_thread` uses `hook session_id == app-server thread id` (a root thread's id
+is its rollout session id; the resume response's `thread.sessionId` is cross-checked and
+divergence logged). This was verified live on 2026-07-12 with Codex 0.144.1 on Windows,
+using `codex app-server --listen ws://127.0.0.1:4500` and two `codex --remote` clients:
 
-1. `codex app-server daemon start`; `codex --remote unix://`;
-2. temporarily log raw SessionStart/Stop hook payloads at the `notify` front door (the
-   BUILD-DEPLOY.md debugging pattern) and the `thread/loaded/list` reply;
-3. confirm the ids match, confirm hooks still fire for `--remote`-hosted sessions
-   (undocumented — if they do NOT: streaming narration still works and `Stop` simply
-   never fires, but greet/`provide` would be lost; record either way in the registry
-   comment), and confirm the UDS handshake needs no `--ws-auth` token (expected:
-   filesystem perms are the auth on the unix socket).
+* remote sessions fired `SessionStart`, `UserPromptSubmit`, and `Stop` hooks;
+* the hook session id exactly matched the id returned by `thread/loaded/list`;
+* `thread/resume` succeeded for that same id, with no authentication token on the
+  loopback WebSocket endpoint;
+* a live ephemeral `thread/fork` returned a fresh `thread.id` equal to its fresh
+  `thread.sessionId` (the root appears separately as `forkedFromId`), preserving the
+  subscriber's id-passthrough correlation for forks;
+* the streaming witness was created and the Stop hook remained the deduplicated
+  end-of-turn path.
+
+The Unix-domain-socket authentication expectation remains platform-derived rather than
+live-verified on this Windows capture.
+
+The scripted app-server integration suite now runs over loopback TCP on every platform,
+including Windows. It pins streaming order, exactly-once Stop suppression, reconnect
+deduplication, foreign-thread isolation, cleanup, and recovery when either
+`thread/loaded/list` or `thread/resume` drops a response without closing the socket.
 
 ## Cross-platform status
 
 * **macOS / Linux** — full support over the unix control socket (`cfg(unix)`).
-* **Windows** — the upstream codex daemon is Unix-only today and `std` has no
-  `UnixStream`; the `ws://` override path compiles and works for a user who runs
-  `codex app-server --listen ws://…` themselves. Otherwise Codex on Windows keeps
-  Stop-only narration, unchanged. **Follow-up:** re-check when upstream ships Windows
+* **Windows** — verified live with Codex 0.144.1 over a loopback `ws://` override.
+  Codex's managed daemon lifecycle still reports Unix-only; with
+  `codex_stream_daemon_start = true`, DontSpeak starts and owns the direct listener
+  instead. The child runs in a kill-on-close Job Object, so normal exit, host crash, and
+  force-termination all tear down the listener. With auto-start off and no externally
+  running listener, Codex keeps Stop-only narration. Re-check when upstream ships Windows
   daemon support (then evaluate `uds_windows` if it binds AF_UNIX).
 * The Stop fallback is untouched on all three OSes for any unwired/unstreamed session.
 

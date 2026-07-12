@@ -1,9 +1,96 @@
 //! codex_stream tests — no real codex, no real `$HOME`, no network: `Paths::rooted_at`
-//! tempdirs, a scripted `tungstenite` SERVER on a tempdir `UnixListener` playing
-//! app-server (unix-gated), and the pure pieces (coalescer, endpoint resolution, the
+//! tempdirs, a scripted `tungstenite` SERVER on a loopback `TcpListener` playing
+//! app-server on every platform, and the pure pieces (coalescer, endpoint resolution, the
 //! daemon-start decision, the orphan sweep) driven directly.
 
 use super::*;
+
+#[test]
+fn pending_resume_suppresses_duplicate_resolution_work() {
+    let now = Instant::now();
+    let mut resolve = HashMap::new();
+    resolve.insert(
+        "session-1".to_string(),
+        ResolveState {
+            tries: 0,
+            next_try: now,
+            negative: false,
+        },
+    );
+    let mut pending: HashMap<i64, Pending> = HashMap::new();
+    let resumed = HashMap::new();
+    assert!(resolution_due(
+        "session-1",
+        &resolve["session-1"],
+        &pending,
+        now
+    ));
+    assert!(resume_wanted(
+        "session-1",
+        "session-1",
+        &resolve,
+        &resumed,
+        &pending
+    ));
+
+    pending.insert(
+        1,
+        Pending::Resume {
+            thread_id: "session-1".to_string(),
+            session: "session-1".to_string(),
+            sent_at: now,
+        },
+    );
+
+    assert!(
+        !resolution_due("session-1", &resolve["session-1"], &pending, now),
+        "a pending resume must not trigger relisting"
+    );
+    assert!(
+        !resume_wanted("session-1", "session-1", &resolve, &resumed, &pending),
+        "a pending resume must not be enqueued again from a loaded-list reply"
+    );
+
+    // The `request_timeout` sweep in `run_attached` is what actually removes a stale
+    // `Pending::Resume` entry (there is no separate in-flight set to fall out of sync) —
+    // once it's gone from `pending`, resolution is due again.
+    pending.remove(&1);
+    assert!(resolution_due(
+        "session-1",
+        &resolve["session-1"],
+        &pending,
+        now
+    ));
+    assert!(resume_wanted(
+        "session-1",
+        "session-1",
+        &resolve,
+        &resumed,
+        &pending
+    ));
+}
+
+#[test]
+fn resume_in_flight_is_keyed_by_session_not_request_id() {
+    let pending: HashMap<i64, Pending> = HashMap::from([
+        (
+            1,
+            Pending::Resume {
+                thread_id: "t1".to_string(),
+                session: "session-a".to_string(),
+                sent_at: Instant::now(),
+            },
+        ),
+        (
+            2,
+            Pending::LoadedList {
+                sent_at: Instant::now(),
+            },
+        ),
+    ]);
+    assert!(resume_in_flight("session-a", &pending));
+    assert!(!resume_in_flight("session-b", &pending));
+}
 
 // ── Pure pieces ───────────────────────────────────────────────────────────────────
 
@@ -166,6 +253,15 @@ fn ws_url_parses_and_endpoint_resolution_prefers_the_override() {
     assert!(resolve_endpoint("http://nope", None, &paths).is_none());
 }
 
+#[test]
+fn tcp_auto_start_is_loopback_only() {
+    assert!(can_auto_start_tcp("127.0.0.1:4500"));
+    assert!(can_auto_start_tcp("[::1]:4500"));
+    assert!(!can_auto_start_tcp("0.0.0.0:4500"));
+    assert!(!can_auto_start_tcp("192.168.1.10:4500"));
+    assert!(!can_auto_start_tcp("example.com:4500"));
+}
+
 #[cfg(unix)]
 #[test]
 fn should_start_daemon_decision_table() {
@@ -191,7 +287,17 @@ fn next_backoff_paces_every_failure_path() {
     assert_eq!(next_backoff(true, b), BACKOFF_FLOOR);
 }
 
-#[cfg(unix)]
+#[test]
+fn auto_start_bypasses_the_no_session_bootstrap_park() {
+    assert!(should_park_supervisor(true, true, false, false));
+    assert!(
+        !should_park_supervisor(true, true, false, true),
+        "auto-start must create the server before a remote session can fire its first hook"
+    );
+    assert!(should_park_supervisor(false, true, true, true));
+    assert!(should_park_supervisor(true, false, true, true));
+}
+
 #[test]
 fn resolve_codex_bin_managed_install_honors_codex_home() {
     // The managed-install fallback lives under the CODEX HOME (the same
@@ -199,18 +305,68 @@ fn resolve_codex_bin_managed_install_honors_codex_home() {
     let home = tempfile::tempdir().unwrap();
     let codex_home = tempfile::tempdir().unwrap();
     // A name that exists neither on PATH nor in the system fallback dirs.
-    let name = "ds-test-codex-b1n";
+    let name = if cfg!(windows) {
+        "ds-test-codex-b1n.exe"
+    } else {
+        "ds-test-codex-b1n"
+    };
     let managed = codex_home.path().join("packages/standalone/current");
     std::fs::create_dir_all(&managed).unwrap();
     std::fs::write(managed.join(name), "x").unwrap();
     assert_eq!(
-        resolve_codex_bin(name, home.path(), codex_home.path()),
+        resolve_codex_bin(name, home.path(), codex_home.path(), None),
         Some(managed.join(name))
     );
     // Not found anywhere → None (the caller warns; nothing is spawned).
     assert_eq!(
-        resolve_codex_bin("ds-test-n0t-there", home.path(), codex_home.path()),
+        resolve_codex_bin(
+            if cfg!(windows) {
+                "ds-test-n0t-there.exe"
+            } else {
+                "ds-test-n0t-there"
+            },
+            home.path(),
+            codex_home.path(),
+            None
+        ),
         None
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn resolve_codex_bin_finds_the_native_npm_payload_on_windows() {
+    let home = tempfile::tempdir().unwrap();
+    let codex_home = tempfile::tempdir().unwrap();
+    let roaming = tempfile::tempdir().unwrap();
+    let package = if cfg!(target_arch = "aarch64") {
+        "@openai/codex-win32-arm64"
+    } else {
+        "@openai/codex-win32-x64"
+    };
+    let target = if cfg!(target_arch = "aarch64") {
+        "aarch64-pc-windows-msvc"
+    } else {
+        "x86_64-pc-windows-msvc"
+    };
+    let bin = roaming
+        .path()
+        .join("npm/node_modules/@openai/codex/node_modules")
+        .join(package)
+        .join("vendor")
+        .join(target)
+        .join("bin/codex.exe");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, b"test").unwrap();
+
+    assert_eq!(
+        resolve_codex_bin(
+            "codex",
+            home.path(),
+            codex_home.path(),
+            Some(roaming.path())
+        ),
+        Some(bin)
     );
 }
 
@@ -265,13 +421,45 @@ fn registry_nudges_wake_snapshot_and_prune() {
     reg.remove("s1");
 }
 
-// ── The scripted app-server (unix: WS over UDS, exactly like the control socket) ──
-
 #[cfg(unix)]
+#[test]
+fn unix_socket_websocket_transport_still_initializes() {
+    use serde_json::{Value, json};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use tungstenite::Message;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("transport.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut ws = tungstenite::accept(stream).unwrap();
+        loop {
+            if let Message::Text(text) = ws.read().unwrap() {
+                let request: Value = serde_json::from_str(text.as_str()).unwrap();
+                if request["method"] == "initialize" {
+                    ws.send(Message::text(
+                        json!({ "id": request["id"], "result": {} }).to_string(),
+                    ))
+                    .unwrap();
+                } else if request["method"] == "initialized" {
+                    break;
+                }
+            }
+        }
+    });
+    let stream = UnixStream::connect(&socket).unwrap();
+    let mut client = WsClient::handshake(stream).unwrap();
+    client.initialize(Duration::from_secs(2)).unwrap();
+    server.join().unwrap();
+}
+
+// ── The scripted app-server (cross-platform loopback WebSocket) ─────────────────────────────────
+
 mod attached {
     use super::*;
     use serde_json::{Value, json};
-    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
     use tungstenite::{Message, WebSocket};
 
     /// Reply text the scripted server streams. Digest: two spoken lines.
@@ -285,12 +473,13 @@ mod attached {
             relist: Duration::from_millis(250),
             idle_ttl: Duration::from_secs(3600),
             flush_age: Duration::from_millis(50),
+            request_timeout: Duration::from_millis(100),
         }
     }
 
     /// Read frames until the next JSON TEXT frame, skipping the client's `initialized`
     /// notification (and anything else without an id/method of interest).
-    fn next_request(ws: &mut WebSocket<UnixStream>) -> Value {
+    fn next_request(ws: &mut WebSocket<TcpStream>) -> Value {
         loop {
             match ws.read().expect("server read") {
                 Message::Text(t) => {
@@ -305,12 +494,12 @@ mod attached {
         }
     }
 
-    fn send(ws: &mut WebSocket<UnixStream>, v: Value) {
+    fn send(ws: &mut WebSocket<TcpStream>, v: Value) {
         ws.send(Message::text(v.to_string())).expect("server send");
     }
 
     /// Handle the opening `initialize` request (asserting the opt-out list rides along).
-    fn serve_initialize(ws: &mut WebSocket<UnixStream>) {
+    fn serve_initialize(ws: &mut WebSocket<TcpStream>) {
         let req = next_request(ws);
         assert_eq!(req["method"], "initialize", "first request is initialize");
         assert!(
@@ -324,7 +513,7 @@ mod attached {
 
     /// Serve one loaded-list request with `threads`, then a resume request per expected
     /// thread (responding OK).
-    fn serve_list_and_resumes(ws: &mut WebSocket<UnixStream>, threads: &[&str], resumes: usize) {
+    fn serve_list_and_resumes(ws: &mut WebSocket<TcpStream>, threads: &[&str], resumes: usize) {
         let req = next_request(ws);
         assert_eq!(req["method"], "thread/loaded/list");
         send(
@@ -355,12 +544,22 @@ mod attached {
 
     /// Run `run_attached` against a freshly-connected client, collecting utterances.
     fn attach_once(
-        sock: &std::path::Path,
+        addr: SocketAddr,
         paths: &Paths,
         registry: &SessionRegistry,
         spoken: &std::sync::Arc<Mutex<Vec<(String, String)>>>,
     ) -> Result<Detach, String> {
-        let stream = UnixStream::connect(sock).expect("client connect");
+        attach_once_with_endpoint(addr, paths, registry, spoken, None)
+    }
+
+    fn attach_once_with_endpoint(
+        addr: SocketAddr,
+        paths: &Paths,
+        registry: &SessionRegistry,
+        spoken: &std::sync::Arc<Mutex<Vec<(String, String)>>>,
+        connected_endpoint: Option<&str>,
+    ) -> Result<Detach, String> {
+        let stream = TcpStream::connect(addr).expect("client connect");
         let mut ws = WsClient::handshake(stream).expect("client handshake");
         ws.initialize(Duration::from_secs(5)).expect("initialize");
         let running = AtomicBool::new(true);
@@ -376,6 +575,7 @@ mod attached {
             &|| false,
             &mut speak,
             &short_tunables(),
+            connected_endpoint,
         )
     }
 
@@ -384,8 +584,8 @@ mod attached {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         std::fs::create_dir_all(&paths.codex_dir).unwrap(); // gate: codex present
-        let sock = dir.path().join("cx.sock");
-        let listener = UnixListener::bind(&sock).expect("bind (tempdir path under the UDS cap)");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
 
         let registry = SessionRegistry::new();
         registry.nudge("sess-1");
@@ -407,7 +607,7 @@ mod attached {
                 std::thread::sleep(Duration::from_millis(400));
             }
         });
-        let detach = attach_once(&sock, &paths, &registry, &spoken);
+        let detach = attach_once(addr, &paths, &registry, &spoken);
         server.join().unwrap();
         assert!(detach.is_err(), "server hangup surfaces as a disconnect");
         assert_eq!(
@@ -439,7 +639,7 @@ mod attached {
                 std::thread::sleep(Duration::from_millis(400));
             }
         });
-        let detach = attach_once(&sock, &paths, &registry, &spoken);
+        let detach = attach_once(addr, &paths, &registry, &spoken);
         server.join().unwrap();
         assert!(detach.is_err());
         assert_eq!(
@@ -450,14 +650,119 @@ mod attached {
     }
 
     #[test]
+    fn loaded_list_timeout_retries_on_the_same_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.codex_dir).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let registry = SessionRegistry::new();
+        registry.nudge("sess-1");
+        let spoken = std::sync::Arc::new(Mutex::new(Vec::new()));
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            serve_initialize(&mut ws);
+            let first = next_request(&mut ws);
+            assert_eq!(first["method"], "thread/loaded/list");
+            // Drop only this response while leaving the WebSocket open.
+            let retry = next_request(&mut ws);
+            assert_eq!(retry["method"], "thread/loaded/list");
+            send(
+                &mut ws,
+                json!({ "id": retry["id"], "result": { "data": ["sess-1"] } }),
+            );
+            let resume = next_request(&mut ws);
+            assert_eq!(resume["method"], "thread/resume");
+            send(
+                &mut ws,
+                json!({ "id": resume["id"], "result": { "thread": {
+                    "id": "sess-1", "sessionId": "sess-1" } } }),
+            );
+            send(
+                &mut ws,
+                completed("sess-1", "item-1", "> Recovered.\n\nBody."),
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        let detach = attach_once(addr, &paths, &registry, &spoken);
+        server.join().unwrap();
+        assert!(detach.is_err());
+        assert_eq!(
+            *spoken.lock().unwrap(),
+            vec![("sess-1".to_string(), "Recovered.".to_string())]
+        );
+    }
+
+    #[test]
+    fn resume_timeout_retries_on_the_same_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.codex_dir).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let registry = SessionRegistry::new();
+        registry.nudge("sess-1");
+        let spoken = std::sync::Arc::new(Mutex::new(Vec::new()));
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            serve_initialize(&mut ws);
+            let list = next_request(&mut ws);
+            assert_eq!(list["method"], "thread/loaded/list");
+            send(
+                &mut ws,
+                json!({ "id": list["id"], "result": { "data": ["sess-1"] } }),
+            );
+            let first_resume = next_request(&mut ws);
+            assert_eq!(first_resume["method"], "thread/resume");
+            // Drop only this response. The client must clear its in-flight witness,
+            // relist, and issue one fresh resume without reconnecting.
+            let retry_list = next_request(&mut ws);
+            assert_eq!(retry_list["method"], "thread/loaded/list");
+            send(
+                &mut ws,
+                json!({ "id": retry_list["id"], "result": { "data": ["sess-1"] } }),
+            );
+            let retry_resume = next_request(&mut ws);
+            assert_eq!(retry_resume["method"], "thread/resume");
+            send(
+                &mut ws,
+                json!({ "id": retry_resume["id"], "result": { "thread": {
+                    "id": "sess-1", "sessionId": "sess-1" } } }),
+            );
+            send(
+                &mut ws,
+                completed("sess-1", "item-1", "> Recovered.\n\nBody."),
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        let detach = attach_once(addr, &paths, &registry, &spoken);
+        server.join().unwrap();
+        assert!(detach.is_err());
+        assert_eq!(
+            *spoken.lock().unwrap(),
+            vec![("sess-1".to_string(), "Recovered.".to_string())]
+        );
+    }
+
+    #[test]
     fn foreign_threads_are_never_resumed_or_narrated() {
         // A thread on the daemon whose id matches NO registered session (Codex Desktop /
         // another tool) is never resumed; its notifications are ignored.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         std::fs::create_dir_all(&paths.codex_dir).unwrap();
-        let sock = dir.path().join("cx.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
 
         let registry = SessionRegistry::new();
         registry.nudge("sess-mine");
@@ -492,7 +797,7 @@ mod attached {
             );
             std::thread::sleep(Duration::from_millis(200));
         });
-        let detach = attach_once(&sock, &paths, &registry, &spoken);
+        let detach = attach_once(addr, &paths, &registry, &spoken);
         server.join().unwrap();
         assert!(detach.is_err());
         assert!(
@@ -513,8 +818,8 @@ mod attached {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         std::fs::create_dir_all(&paths.codex_dir).unwrap();
-        let sock = dir.path().join("cx.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
 
         let registry = SessionRegistry::new();
         registry.nudge("sess-1");
@@ -535,7 +840,7 @@ mod attached {
             );
             std::thread::sleep(Duration::from_millis(300));
         });
-        let detach = attach_once(&sock, &paths, &registry, &spoken);
+        let detach = attach_once(addr, &paths, &registry, &spoken);
         server.join().unwrap();
         assert!(detach.is_err());
         assert_eq!(
@@ -562,8 +867,8 @@ mod attached {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         std::fs::create_dir_all(&paths.codex_dir).unwrap();
-        let sock = dir.path().join("cx.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
 
         let registry = SessionRegistry::new();
         registry.nudge("sess-1");
@@ -587,7 +892,7 @@ mod attached {
             }
             std::thread::sleep(Duration::from_millis(300));
         });
-        let detach = attach_once(&sock, &paths, &registry, &spoken);
+        let detach = attach_once(addr, &paths, &registry, &spoken);
         server.join().unwrap();
         assert!(detach.is_err());
         assert_eq!(
@@ -612,8 +917,8 @@ mod attached {
         // mid-session `~/.codex` removal (or codex_stream=false) parks the supervisor.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path()); // note: no codex_dir created
-        let sock = dir.path().join("cx.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
 
         let registry = SessionRegistry::new();
         registry.nudge("sess-1");
@@ -629,9 +934,38 @@ mod attached {
                 while ws.read().is_ok() {}
             }
         });
-        let detach = attach_once(&sock, &paths, &registry, &spoken);
+        let detach = attach_once(addr, &paths, &registry, &spoken);
         assert_eq!(detach, Ok(Detach::Disabled));
         drop(listener);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn endpoint_config_change_detaches_for_immediate_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.codex_dir).unwrap();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            &paths.config_toml,
+            "codex_app_server_url = \"ws://127.0.0.1:4999\"\n",
+        )
+        .unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let registry = SessionRegistry::new();
+        registry.nudge("sess-1");
+        let spoken = std::sync::Arc::new(Mutex::new(Vec::new()));
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            serve_initialize(&mut ws);
+            while ws.read().is_ok() {}
+        });
+        let detach =
+            attach_once_with_endpoint(addr, &paths, &registry, &spoken, Some("tcp:127.0.0.1:4888"));
+        assert_eq!(detach, Ok(Detach::Reconfigure));
         server.join().unwrap();
     }
 }

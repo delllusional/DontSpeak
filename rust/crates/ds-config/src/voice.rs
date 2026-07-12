@@ -306,9 +306,10 @@ pub struct VoiceConfig {
     /// app-server keep today's Stop-only narration either way.
     #[serde(default = "default_enabled")]
     pub codex_stream: bool,
-    /// Permission to run `codex app-server daemon start` (idempotent, Unix-only upstream)
-    /// when the control socket is absent. Default OFF — no surprise process spawns; turn it
-    /// on to have the engine bring the daemon up lazily.
+    /// Permission to bring up the configured Codex app-server lazily. On Unix this runs
+    /// the upstream idempotent `codex app-server daemon start`; on Windows (where managed
+    /// daemon lifecycle is unavailable) it owns `codex app-server --listen <ws URL>` for
+    /// the engine's lifetime. Default OFF — no surprise process spawns.
     #[serde(default)]
     pub codex_stream_daemon_start: bool,
     /// Override the app-server endpoint: empty (default) = the default unix control socket

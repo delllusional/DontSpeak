@@ -25,16 +25,15 @@
 //!     list, or a long idle TTL) and sweeps crash-orphaned state files at start.
 //!
 //! Config (`config.toml`, re-read per loop pass — no restart needed): `codex_stream`
-//! (master switch, default on), `codex_stream_daemon_start` (opt-in lazy
-//! `codex app-server daemon start`), `codex_app_server_url` (`ws://` TCP override — the
-//! Windows path; the upstream daemon is Unix-only today), `codex_bin`.
+//! (master switch, default on), `codex_stream_daemon_start` (opt-in lazy app-server
+//! lifecycle: managed daemon on Unix, engine-owned loopback listener on Windows),
+//! `codex_app_server_url` (`ws://` TCP override — the Windows path), `codex_bin`.
 
 mod client;
 mod proto;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -258,6 +257,16 @@ pub(crate) enum Endpoint {
     Tcp(String),
 }
 
+impl Endpoint {
+    fn key(&self) -> String {
+        match self {
+            #[cfg(unix)]
+            Endpoint::Unix(path) => format!("unix:{}", path.display()),
+            Endpoint::Tcp(host) => format!("tcp:{host}"),
+        }
+    }
+}
+
 /// The default codex control socket: `$CODEX_HOME/app-server-control/app-server-control.sock`
 /// (verified against openai/codex `app-server-transport`). `codex_home_env` is passed in —
 /// NOT read from `std::env` here — so tests never mutate process-global env.
@@ -280,6 +289,15 @@ pub(crate) fn parse_ws_url(url: &str) -> Option<String> {
         .strip_prefix("ws://")
         .map(|rest| rest.split('/').next().unwrap_or(rest).to_string())
         .filter(|host| !host.is_empty())
+}
+
+/// Engine-owned Windows listeners are deliberately loopback-only. Non-loopback Codex
+/// app-servers require an explicit auth mode/token, which this observation client does not
+/// own and must never weaken by starting an unauthenticated listener itself.
+#[cfg(any(windows, test))]
+fn can_auto_start_tcp(host: &str) -> bool {
+    host.parse::<std::net::SocketAddr>()
+        .is_ok_and(|addr| addr.ip().is_loopback())
 }
 
 /// Resolve the endpoint from config: a non-empty `codex_app_server_url` wins (TCP);
@@ -319,29 +337,78 @@ pub(crate) fn should_start_daemon(
 /// searched on PATH, then the common install dirs (a GUI-launched app has a minimal
 /// PATH), including the standalone managed install under the codex home — the SAME
 /// `$CODEX_HOME`-or-`paths.codex_dir` resolution [`control_socket_path`] uses, so the
-/// binary lookup and the socket can't disagree about where codex lives. Unix-only like
-/// the daemon start itself (the upstream daemon has no Windows lifecycle management).
-#[cfg(unix)]
-fn resolve_codex_bin(cfg_bin: &str, home: &Path, codex_home: &Path) -> Option<PathBuf> {
+/// binary lookup and the socket can't disagree about where codex lives. On Windows it
+/// additionally resolves npm's nested native payload, never a shell shim.
+fn resolve_codex_bin(
+    cfg_bin: &str,
+    home: &Path,
+    codex_home: &Path,
+    roaming_app_data: Option<&Path>,
+) -> Option<PathBuf> {
+    #[cfg(not(windows))]
+    let _ = roaming_app_data;
     let p = Path::new(cfg_bin);
     if p.is_absolute() {
         return p.is_file().then(|| p.to_path_buf());
     }
     if let Some(path_var) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_var) {
+            #[cfg(windows)]
+            if p.extension().is_none() {
+                let candidate = dir.join(format!("{cfg_bin}.exe"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+                // npm installs extensionless / cmd / PowerShell shims beside the native
+                // payload. `Command` needs the real executable for a hidden GUI launch.
+                continue;
+            }
             let candidate = dir.join(cfg_bin);
             if candidate.is_file() {
                 return Some(candidate);
             }
         }
     }
-    let fallbacks = [
+    let fallbacks = vec![
         PathBuf::from("/usr/local/bin"),
         PathBuf::from("/opt/homebrew/bin"),
         home.join(".local/bin"),
         codex_home.join("packages/standalone/current"),
     ];
+    #[cfg(windows)]
+    let fallbacks = {
+        let mut fallbacks = fallbacks;
+        let target = if cfg!(target_arch = "aarch64") {
+            "aarch64-pc-windows-msvc"
+        } else {
+            "x86_64-pc-windows-msvc"
+        };
+        let roaming = roaming_app_data
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join("AppData/Roaming"));
+        fallbacks.push(
+            roaming
+                .join("npm/node_modules/@openai/codex/node_modules")
+                .join(if cfg!(target_arch = "aarch64") {
+                    "@openai/codex-win32-arm64"
+                } else {
+                    "@openai/codex-win32-x64"
+                })
+                .join("vendor")
+                .join(target)
+                .join("bin"),
+        );
+        fallbacks
+    };
     for dir in fallbacks {
+        #[cfg(windows)]
+        if p.extension().is_none() {
+            let candidate = dir.join(format!("{cfg_bin}.exe"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            continue;
+        }
         let candidate = dir.join(cfg_bin);
         if candidate.is_file() {
             return Some(candidate);
@@ -444,6 +511,9 @@ pub(crate) struct Tunables {
     idle_ttl: Duration,
     /// Flush a quiet delta buffer after this long.
     flush_age: Duration,
+    /// Bound every attached JSON-RPC request. A peer can keep the WebSocket alive while
+    /// dropping one response; without this, list/resume state stays wedged forever.
+    request_timeout: Duration,
 }
 
 impl Default for Tunables {
@@ -455,6 +525,7 @@ impl Default for Tunables {
             relist: Duration::from_secs(60),
             idle_ttl: Duration::from_secs(12 * 3600),
             flush_age: Duration::from_millis(150),
+            request_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -466,6 +537,8 @@ enum Detach {
     Shutdown,
     /// `codex_stream` was turned off (or `~/.codex` vanished) — the outer loop parks.
     Disabled,
+    /// The configured endpoint changed while attached — reconnect immediately to the new one.
+    Reconfigure,
 }
 
 struct ResolveState {
@@ -479,9 +552,152 @@ struct ResumedSession {
     last_activity: Instant,
 }
 
+/// Whether a `thread/resume` request for `session` is still outstanding — derived from
+/// `pending` rather than tracked in a separate set, so the `request_timeout` expiry sweep
+/// (which removes stale entries from `pending`) and this check can never disagree.
+fn resume_in_flight(session: &str, pending: &HashMap<i64, Pending>) -> bool {
+    pending
+        .values()
+        .any(|p| matches!(p, Pending::Resume { session: s, .. } if s == session))
+}
+
+fn resolution_due(
+    session: &str,
+    state: &ResolveState,
+    pending: &HashMap<i64, Pending>,
+    now: Instant,
+) -> bool {
+    !state.negative && state.next_try <= now && !resume_in_flight(session, pending)
+}
+
+fn resume_wanted(
+    session: &str,
+    thread_id: &str,
+    resolve: &HashMap<String, ResolveState>,
+    resumed: &HashMap<String, ResumedSession>,
+    pending: &HashMap<i64, Pending>,
+) -> bool {
+    resolve.contains_key(session)
+        && !resumed.contains_key(thread_id)
+        && !resume_in_flight(session, pending)
+}
+
 enum Pending {
-    LoadedList,
-    Resume { thread_id: String, session: String },
+    LoadedList {
+        sent_at: Instant,
+    },
+    Resume {
+        thread_id: String,
+        session: String,
+        sent_at: Instant,
+    },
+}
+
+/// A Windows `codex app-server --listen ws://...` process started by this engine.
+/// The managed daemon command is Unix-only upstream, so on Windows the opt-in start
+/// owns the direct listener and tears it down with the engine.
+#[cfg(windows)]
+struct OwnedTcpAppServer {
+    child: std::process::Child,
+    host: String,
+    job: windows::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for OwnedTcpAppServer {
+    fn drop(&mut self) {
+        // SAFETY: `job` is the live handle returned by CreateJobObjectW and is owned solely
+        // by this value, so this is its exactly-once close. Closing the kill-on-close job
+        // terminates the whole Codex process tree. Unlike
+        // Child::kill in this destructor, the kernel also closes this handle when the host
+        // crashes or is force-terminated.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.job);
+        }
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(windows)]
+fn assign_kill_on_close_job(
+    child: &mut std::process::Child,
+) -> Result<windows::Win32::Foundation::HANDLE, String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+
+    // SAFETY: every handle comes from the corresponding Win32 constructor and is closed
+    // exactly once on every error/success path. `info` is the exact structure required by
+    // JobObjectExtendedLimitInformation and its byte length is passed verbatim. The process
+    // id belongs to the live child we just spawned.
+    unsafe {
+        let job = CreateJobObjectW(None, windows::core::PCWSTR::null())
+            .map_err(|e| format!("create kill-on-close job: {e}"))?;
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Err(e) = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&info).cast(),
+            std::mem::size_of_val(&info) as u32,
+        ) {
+            let _ = CloseHandle(job);
+            return Err(format!("configure kill-on-close job: {e}"));
+        }
+        let process = match OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, child.id()) {
+            Ok(process) => process,
+            Err(e) => {
+                let _ = CloseHandle(job);
+                return Err(format!("open Codex child for job assignment: {e}"));
+            }
+        };
+        let assigned = AssignProcessToJobObject(job, process);
+        let _ = CloseHandle(process);
+        if let Err(e) = assigned {
+            let _ = CloseHandle(job);
+            return Err(format!("assign Codex child to kill-on-close job: {e}"));
+        }
+        Ok(job)
+    }
+}
+
+#[cfg(windows)]
+fn start_tcp_app_server(bin: &Path, host: &str) -> Result<OwnedTcpAppServer, String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut child = std::process::Command::new(bin)
+        .args(["app-server", "--listen", &format!("ws://{host}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| format!("start `{}` on ws://{host}: {e}", bin.display()))?;
+    match assign_kill_on_close_job(&mut child) {
+        Ok(job) => Ok(OwnedTcpAppServer {
+            child,
+            host: host.to_string(),
+            job,
+        }),
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(e)
+        }
+    }
+}
+
+impl Pending {
+    fn sent_at(&self) -> Instant {
+        match self {
+            Pending::LoadedList { sent_at } | Pending::Resume { sent_at, .. } => *sent_at,
+        }
+    }
 }
 
 /// Drive one attached connection to completion: resolve registered sessions to loaded
@@ -498,6 +714,7 @@ fn run_attached<S: Read + Write>(
     mic_active: &dyn Fn() -> bool,
     speak: &mut dyn FnMut(&str, String),
     tun: &Tunables,
+    connected_endpoint: Option<&str>,
 ) -> Result<Detach, String> {
     let mut pending: HashMap<i64, Pending> = HashMap::new();
     let mut resumed: HashMap<String, ResumedSession> = HashMap::new(); // thread → session
@@ -528,6 +745,36 @@ fn run_attached<S: Read + Write>(
         }
         let now = Instant::now();
 
+        // A read timeout only proves that no frame arrived during this tick; the socket can
+        // remain healthy while one JSON-RPC response is lost. Expire individual requests so
+        // list/resume resolution retries instead of remaining permanently in flight.
+        let expired: Vec<i64> = pending
+            .iter()
+            .filter(|(_, request)| now.duration_since(request.sent_at()) >= tun.request_timeout)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            match pending.remove(&id) {
+                Some(Pending::LoadedList { .. }) => {
+                    list_in_flight = false;
+                    log::debug!(
+                        target: "codex-stream",
+                        "thread/loaded/list request timed out — retrying"
+                    );
+                }
+                Some(Pending::Resume { session, .. }) => {
+                    if let Some(state) = resolve.get_mut(&session) {
+                        state.next_try = now + tun.resolve_retry;
+                    }
+                    log::debug!(
+                        target: "codex-stream",
+                        "thread/resume request timed out for session {session} — retrying"
+                    );
+                }
+                None => {}
+            }
+        }
+
         // Config gate + TTL scans, throttled.
         if now.duration_since(last_cfg) >= tun.cfg_refresh {
             last_cfg = now;
@@ -539,6 +786,21 @@ fn run_attached<S: Read + Write>(
                     let _ = ws.send(proto::thread_unsubscribe_request(id, thread_id));
                 }
                 return Ok(Detach::Disabled);
+            }
+            if let Some(connected) = connected_endpoint {
+                let configured = resolve_endpoint(
+                    &cfg.codex_app_server_url,
+                    std::env::var_os("CODEX_HOME").as_deref(),
+                    paths,
+                )
+                .map(|endpoint| endpoint.key());
+                if configured.as_deref() != Some(connected) {
+                    for thread_id in resumed.keys() {
+                        let id = ws.next_id();
+                        let _ = ws.send(proto::thread_unsubscribe_request(id, thread_id));
+                    }
+                    return Ok(Detach::Reconfigure);
+                }
             }
             // Idle-TTL eviction: a session silent this long is gone (Codex has no
             // SessionEnd hook — cleanup is owned HERE).
@@ -589,13 +851,13 @@ fn run_attached<S: Read + Write>(
         // Need a fresh loaded-thread list? (unresolved sessions due a retry, or the
         // periodic eviction scan.)
         let unresolved_due = resolve
-            .values()
-            .any(|st| !st.negative && st.next_try <= now);
+            .iter()
+            .any(|(session, st)| resolution_due(session, st, &pending, now));
         let relist_due = last_list.is_none_or(|at| now.duration_since(at) >= tun.relist);
         if !list_in_flight && (unresolved_due || relist_due) {
             let id = ws.next_id();
             ws.send(proto::thread_loaded_list_request(id))?;
-            pending.insert(id, Pending::LoadedList);
+            pending.insert(id, Pending::LoadedList { sent_at: now });
             list_in_flight = true;
             last_list = Some(now);
         }
@@ -605,7 +867,7 @@ fn run_attached<S: Read + Write>(
             None => {}
             Some(text) => match proto::parse_incoming(&text) {
                 proto::Incoming::Response { id, result } => match pending.remove(&id) {
-                    Some(Pending::LoadedList) => {
+                    Some(Pending::LoadedList { .. }) => {
                         list_in_flight = false;
                         // A JSON-RPC ERROR reply (`result: None`) must NOT drive eviction:
                         // conflating it with "zero threads loaded" would wipe every attached
@@ -637,8 +899,9 @@ fn run_attached<S: Read + Write>(
                             // Resume every loaded thread that maps to a registered session.
                             for thread_id in &loaded {
                                 let session = proto::session_for_thread(thread_id);
-                                let wanted = resolve.contains_key(&session)
-                                    && !resumed.contains_key(thread_id);
+                                let wanted = resume_wanted(
+                                    &session, thread_id, &resolve, &resumed, &pending,
+                                );
                                 if wanted {
                                     let id = ws.next_id();
                                     ws.send(proto::thread_resume_request(id, thread_id))?;
@@ -647,16 +910,21 @@ fn run_attached<S: Read + Write>(
                                         Pending::Resume {
                                             thread_id: thread_id.clone(),
                                             session,
+                                            sent_at: now,
                                         },
                                     );
                                 }
                             }
                             // Sessions still unmatched: schedule the retry / negative-cache.
+                            // Skip a session with a resume genuinely in flight — its thread
+                            // just wasn't in THIS listing snapshot, which races the resume
+                            // rather than proving the thread is actually gone.
                             for (session, st) in resolve.iter_mut() {
                                 let matched = loaded
                                     .iter()
                                     .any(|t| &proto::session_for_thread(t) == session);
-                                if !matched && !st.negative {
+                                if !matched && !st.negative && !resume_in_flight(session, &pending)
+                                {
                                     st.tries += 1;
                                     if st.tries >= tun.resolve_tries {
                                         st.negative = true; // until the next registry nudge
@@ -672,7 +940,9 @@ fn run_attached<S: Read + Write>(
                             );
                         }
                     }
-                    Some(Pending::Resume { thread_id, session }) => match result {
+                    Some(Pending::Resume {
+                        thread_id, session, ..
+                    }) => match result {
                         Some(result) => {
                             // Correlation cross-check: the resume response's sessionId is
                             // authoritative per the codex docs; log divergence (forked
@@ -801,8 +1071,17 @@ fn next_backoff(stable_attachment: bool, backoff: Duration) -> Duration {
         (backoff * 2).min(BACKOFF_CEIL)
     }
 }
-/// Never shell out `daemon start` more often than this.
-#[cfg(unix)]
+
+fn should_park_supervisor(
+    stream_enabled: bool,
+    codex_present: bool,
+    have_sessions: bool,
+    auto_start: bool,
+) -> bool {
+    !stream_enabled || !codex_present || (!have_sessions && !auto_start)
+}
+
+/// Never launch an app-server more often than this.
 const DAEMON_START_MIN_GAP: Duration = Duration::from_secs(60);
 
 /// Spawn the supervisor beside the engine's other background threads. Self-gating: it
@@ -851,17 +1130,61 @@ fn supervise(
 ) {
     let mut backoff = BACKOFF_FLOOR;
     let mut epoch = 0u64;
-    #[cfg(unix)]
     let mut last_daemon_start: Option<Instant> = None;
     // One WARN per unresolvable-binary streak: this branch re-runs every backoff pass,
     // and an explicit opt-in that silently no-ops (nvm/npm-prefix installs off the GUI
     // PATH) is the failure the audit flagged — but a per-pass WARN would spam the log.
-    #[cfg(unix)]
     let mut warned_bin_unresolvable = false;
+    #[cfg(windows)]
+    let mut owned_tcp_server: Option<OwnedTcpAppServer> = None;
     while running.load(Ordering::Relaxed) {
+        #[cfg(windows)]
+        if let Some(server) = owned_tcp_server.as_mut() {
+            match server.child.try_wait() {
+                Ok(Some(status)) => {
+                    log::info!(
+                        target: "engine",
+                        "codex-stream: engine-owned Windows app-server exited with {status} client=codex"
+                    );
+                    owned_tcp_server = None;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::info!(
+                        target: "engine",
+                        "codex-stream: could not probe engine-owned Windows app-server: {e} client=codex"
+                    );
+                    owned_tcp_server = None;
+                }
+            }
+        }
         let cfg = VoiceConfig::load(paths);
+        #[cfg(windows)]
+        if !cfg.codex_stream_daemon_start && owned_tcp_server.is_some() {
+            owned_tcp_server = None;
+            log::info!(
+                target: "engine",
+                "codex-stream: stopped the engine-owned Windows app-server after auto-start was disabled client=codex"
+            );
+        }
         let (sessions, cur_epoch) = registry.snapshot();
-        if !cfg.codex_stream || !paths.codex_dir.exists() || sessions.is_empty() {
+        // Auto-start must not wait for a registered session: a remote TUI cannot connect
+        // (and therefore cannot fire SessionStart) until the app-server already exists.
+        // Without auto-start, preserve the cheap no-session park.
+        if should_park_supervisor(
+            cfg.codex_stream,
+            paths.codex_dir.exists(),
+            !sessions.is_empty(),
+            cfg.codex_stream_daemon_start,
+        ) {
+            #[cfg(windows)]
+            if owned_tcp_server.is_some() {
+                owned_tcp_server = None;
+                log::info!(
+                    target: "engine",
+                    "codex-stream: stopped the engine-owned Windows app-server client=codex"
+                );
+            }
             // Parked. A nudge (or the timeout) re-checks the gate.
             epoch = registry.wait_change(cur_epoch.max(epoch), Duration::from_secs(5));
             continue;
@@ -871,6 +1194,18 @@ fn supervise(
             std::env::var_os("CODEX_HOME").as_deref(),
             paths,
         );
+        #[cfg(windows)]
+        if let (Some(server), Some(Endpoint::Tcp(configured_host))) =
+            (owned_tcp_server.as_ref(), endpoint.as_ref())
+            && server.host != *configured_host
+        {
+            owned_tcp_server = None;
+            log::info!(
+                target: "engine",
+                "codex-stream: stopped the engine-owned Windows app-server after endpoint change client=codex"
+            );
+        }
+        let endpoint_key = endpoint.as_ref().map(Endpoint::key);
         let attempt_started = Instant::now();
         let attached: Result<Result<Detach, String>, String> = match endpoint {
             None => {
@@ -886,7 +1221,7 @@ fn supervise(
                         .filter(|s| !s.is_empty())
                         .map(PathBuf::from)
                         .unwrap_or_else(|| paths.codex_dir.clone());
-                    let bin = resolve_codex_bin(&cfg.codex_bin, &paths.home, &codex_home);
+                    let bin = resolve_codex_bin(&cfg.codex_bin, &paths.home, &codex_home, None);
                     if cfg.codex_stream_daemon_start && bin.is_none() {
                         if !warned_bin_unresolvable {
                             warned_bin_unresolvable = true;
@@ -922,25 +1257,99 @@ fn supervise(
                             Ok(ws)
                         })
                         .map(|mut ws| {
-                            run_attached(&mut ws, paths, running, registry, mic_active, speak, tun)
+                            run_attached(
+                                &mut ws,
+                                paths,
+                                running,
+                                registry,
+                                mic_active,
+                                speak,
+                                tun,
+                                endpoint_key.as_deref(),
+                            )
                         })
                 }
             }
-            Some(Endpoint::Tcp(host)) => std::net::TcpStream::connect(&host)
-                .map_err(|e| format!("connect ws://{host}: {e}"))
-                .and_then(WsClient::handshake)
-                .and_then(|mut ws| {
-                    ws.initialize(Duration::from_secs(10))?;
-                    Ok(ws)
-                })
-                .map(|mut ws| {
-                    run_attached(&mut ws, paths, running, registry, mic_active, speak, tun)
-                }),
+            Some(Endpoint::Tcp(host)) => match std::net::TcpStream::connect(&host) {
+                Ok(stream) => WsClient::handshake(stream)
+                    .and_then(|mut ws| {
+                        ws.initialize(Duration::from_secs(10))?;
+                        Ok(ws)
+                    })
+                    .map(|mut ws| {
+                        run_attached(
+                            &mut ws,
+                            paths,
+                            running,
+                            registry,
+                            mic_active,
+                            speak,
+                            tun,
+                            endpoint_key.as_deref(),
+                        )
+                    }),
+                Err(connect_error) => {
+                    #[cfg(windows)]
+                    if cfg.codex_stream_daemon_start
+                        && owned_tcp_server.is_none()
+                        && can_auto_start_tcp(&host)
+                    {
+                        let codex_home = std::env::var_os("CODEX_HOME")
+                            .filter(|s| !s.is_empty())
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| paths.codex_dir.clone());
+                        let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
+                        let bin = resolve_codex_bin(
+                            &cfg.codex_bin,
+                            &paths.home,
+                            &codex_home,
+                            roaming.as_deref(),
+                        );
+                        if let Some(bin) = bin {
+                            warned_bin_unresolvable = false;
+                            let throttled = last_daemon_start
+                                .is_some_and(|at| at.elapsed() < DAEMON_START_MIN_GAP);
+                            if !throttled {
+                                last_daemon_start = Some(Instant::now());
+                                match start_tcp_app_server(&bin, &host) {
+                                    Ok(child) => {
+                                        owned_tcp_server = Some(child);
+                                        log::info!(
+                                            target: "engine",
+                                            "codex-stream: started engine-owned Windows app-server on ws://{host} client=codex"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::info!(target: "engine", "codex-stream: {e} client=codex")
+                                    }
+                                }
+                            }
+                        } else if !warned_bin_unresolvable {
+                            warned_bin_unresolvable = true;
+                            log::info!(
+                                target: "engine",
+                                "codex-stream: app-server start is enabled but `{}` was not found — set codex_bin to the binary's full path client=codex",
+                                cfg.codex_bin
+                            );
+                        }
+                    } else if cfg.codex_stream_daemon_start && !can_auto_start_tcp(&host) {
+                        log::info!(
+                            target: "engine",
+                            "codex-stream: refusing to auto-start non-loopback ws://{host}; start and authenticate that app-server explicitly client=codex"
+                        );
+                    }
+                    Err(format!("connect ws://{host}: {connect_error}"))
+                }
+            },
         };
         match attached {
             Ok(Ok(Detach::Shutdown)) => return,
             Ok(Ok(Detach::Disabled)) => {
                 backoff = BACKOFF_FLOOR; // clean stand-down; the park above takes over
+            }
+            Ok(Ok(Detach::Reconfigure)) => {
+                backoff = BACKOFF_FLOOR;
+                continue;
             }
             Ok(Err(e)) => {
                 // We WERE attached — but only a STABLE attachment earns the prompt

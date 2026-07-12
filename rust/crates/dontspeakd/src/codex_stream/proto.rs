@@ -44,9 +44,11 @@ pub(crate) const OPT_OUT_METHODS: &[&str] = &[
 /// thread id: expected uuid passthrough — a root thread's id IS its rollout session id
 /// (codex docs: forked threads keep the root's `sessionId`, and clients should read
 /// `thread.sessionId` rather than derive it — we additionally verify the resume response's
-/// `sessionId` when present, see `ThreadResumed`). PENDING the §9 live capture
-/// (docs/STREAMING-NARRATION.md): confirm against a live `codex --remote` session that the
-/// hook `session_id` equals the loaded thread id before relying on this in the field.
+/// `sessionId` when present, see `ThreadResumed`). Verified live on 2026-07-12 with Codex
+/// 0.144.1 over `ws://` on Windows: `SessionStart` and `UserPromptSubmit` hooks both carried
+/// the same id returned by `thread/loaded/list`, and `thread/resume` attached that id. A live
+/// `thread/fork` check also returned a fresh thread whose `thread.id == thread.sessionId`
+/// (with the root only in `forkedFromId`), so the passthrough holds for forked threads too.
 pub(crate) fn session_for_thread(thread_id: &str) -> String {
     thread_id.to_string()
 }
