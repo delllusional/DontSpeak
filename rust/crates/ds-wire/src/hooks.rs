@@ -308,7 +308,6 @@ pub(crate) fn claude_toml_hooks(
 /// was never created — or 1 on a hard error (bin-resolution failure, write/remove failure).
 pub(crate) fn grok_json_hooks(
     cfg: &std::path::Path,
-    client: ClientSource,
     remove: bool,
     print_only: bool,
     paths: &Paths,
@@ -341,7 +340,7 @@ pub(crate) fn grok_json_hooks(
         eprintln!("wire: could not resolve the dontspeak binary path");
         return 1;
     };
-    let v = ds_config::grok_hooks_value(&bin, client);
+    let v = ds_config::grok_hooks_value(&bin);
 
     if print_only {
         println!(
@@ -855,10 +854,7 @@ mod tests {
         let cfg = dir.path().join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(
-            grok_json_hooks(&cfg, ClientSource::Grok, false, false, &paths),
-            0
-        );
+        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
         let v = read_json(&cfg);
         let hooks = v["hooks"].as_object().unwrap();
         let mut keys: Vec<&str> = hooks.keys().map(String::as_str).collect();
@@ -897,17 +893,11 @@ mod tests {
         let cfg = dir.path().join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(
-            grok_json_hooks(&cfg, ClientSource::Grok, false, false, &paths),
-            0
-        );
+        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
         let first = std::fs::read(&cfg).unwrap();
         // Own-the-file overwrite: a second wire re-renders the SAME content (same resolved bin),
         // so the file is byte-for-byte identical.
-        assert_eq!(
-            grok_json_hooks(&cfg, ClientSource::Grok, false, false, &paths),
-            0
-        );
+        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
         let second = std::fs::read(&cfg).unwrap();
         assert_eq!(first, second, "re-wire writes byte-identical contents");
     }
@@ -918,15 +908,9 @@ mod tests {
         let cfg = dir.path().join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(
-            grok_json_hooks(&cfg, ClientSource::Grok, false, false, &paths),
-            0
-        );
+        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 0);
         assert!(cfg.exists());
-        assert_eq!(
-            grok_json_hooks(&cfg, ClientSource::Grok, true, false, &paths),
-            0
-        );
+        assert_eq!(grok_json_hooks(&cfg, true, false, &paths), 0);
         assert!(!cfg.exists(), "unwire deletes the dedicated file");
     }
 
@@ -936,10 +920,7 @@ mod tests {
         let cfg = dir.path().join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(
-            grok_json_hooks(&cfg, ClientSource::Grok, true, false, &paths),
-            0
-        );
+        assert_eq!(grok_json_hooks(&cfg, true, false, &paths), 0);
         assert!(!cfg.exists());
     }
 
@@ -949,10 +930,7 @@ mod tests {
         let cfg = dir.path().join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(
-            grok_json_hooks(&cfg, ClientSource::Grok, false, true, &paths),
-            0
-        );
+        assert_eq!(grok_json_hooks(&cfg, false, true, &paths), 0);
         assert!(!cfg.exists());
     }
 
@@ -965,9 +943,6 @@ mod tests {
         let cfg = dir.path().join("blocked").join("dontspeak.json");
         let paths = Paths::rooted_at(dir.path());
 
-        assert_eq!(
-            grok_json_hooks(&cfg, ClientSource::Grok, false, false, &paths),
-            1
-        );
+        assert_eq!(grok_json_hooks(&cfg, false, false, &paths), 1);
     }
 }

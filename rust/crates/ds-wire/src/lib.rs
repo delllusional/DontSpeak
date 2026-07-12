@@ -290,13 +290,9 @@ fn dispatch_surface(
             seed,
             capture,
         ),
-        WireMechanism::GrokJsonHooks => hooks::grok_json_hooks(
-            (s.config_file)(paths),
-            spec.target,
-            remove,
-            print_only,
-            paths,
-        ),
+        WireMechanism::GrokJsonHooks => {
+            hooks::grok_json_hooks((s.config_file)(paths), remove, print_only, paths)
+        }
         WireMechanism::JsonMcp => mcp::apply(
             &mcp::target_for(spec, s, paths),
             remove,

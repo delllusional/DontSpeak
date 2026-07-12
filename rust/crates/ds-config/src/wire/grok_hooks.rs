@@ -3,87 +3,67 @@
 //! Grok reads per-file hook definitions out of `~/.grok/hooks/*.json` (and project
 //! `.grok/hooks/*.json`) using a Claude-COMPATIBLE event contract — events routed by
 //! `hookEventName`, one JSON object on stdin, `Stop` carrying the final assistant message —
-//! so the SAME `dontspeak notify` / `dontspeak provide` binary serves them. Unlike the
+//! so the SAME `dontspeak` binary serves them. Unlike the
 //! Codex/Qwen hook surfaces, we do NOT merge into a file the client also owns: DontSpeak
 //! writes its OWN dedicated file (`dontspeak.json`) that it owns outright, so wiring is a
 //! whole-file overwrite (a backup is taken first) and unwiring simply DELETES the file. No
 //! `toml_edit`/`merge` machinery is needed — there is nothing of the user's to preserve in
 //! a file that is exclusively ours.
 //!
-//! Two things differ from the Claude Code JSON wiring the [`hooks`](super::hooks) module
-//! emits:
-//!   * the verb is INLINED into `command` (a single shell string, NO `args` array), rendered
-//!     by the shared [`cmdline`](super::cmdline) — quoted on POSIX, but QUOTE-FREE on Windows,
-//!     where an embedded `"` cannot survive cmd.exe (see that module);
-//!   * every entry runs SYNCHRONOUSLY: there is NO `async` key and NO `matcher` key, and the
-//!     `timeout` is in SECONDS.
+//! Grok also imports `~/.claude/settings.json` by default, but its compatibility adapter
+//! ignores Claude Code's `args` array. A Claude DontSpeak entry therefore collapses to the
+//! bare binary path. Native Grok entries deliberately use that exact same bare command:
+//! Grok deduplicates identical command targets across sources, so native + compatibility
+//! wiring becomes one process per event instead of two registrations. The hook runner's
+//! reserved `GROK_HOOK_EVENT` environment variable lets the no-argument binary distinguish
+//! this launch from its normal no-argument MCP-server role and dispatch both the command
+//! side effect and (for `UserPromptSubmit`) the query response itself.
 //!
 //! The per-event set is the full non-streaming shape (Grok has no `MessageDisplay` stream, so
 //! the reply is voiced whole from `Stop`):
 //!
-//!   * `SessionStart` → `notify --greet-only` — the spoken greeting. `--greet-only` skips the
-//!     streaming-witness seed, which on a hook-only client would mark every session "already
+//!   * `SessionStart` → notify, greet-only — the spoken greeting without seeding the
+//!     streaming witness, which on a hook-only client would mark every session "already
 //!     narrated" and silence the `Stop` reply.
 //!   * `SessionEnd` → `notify` — barge this session's playback on close.
-//!   * `UserPromptSubmit` → `notify` + `provide` — mark-active routing, and inject the
+//!   * `UserPromptSubmit` → notify + provide in one process — mark-active routing, and inject the
 //!     narration spec so Grok WRITES the spoken-line blockquotes.
 //!   * `Stop` → `notify` — speak the final reply (end-of-turn narration).
 //!   * `Notification` → `notify` — the needs-input earcon.
 //!
-//! Rendered as (per event, one group holding that event's inner hooks) — POSIX `command`
-//! shown; on Windows it is the quote-free `C:/…/dontspeak.exe notify`:
+//! Rendered as one group and one handler per event:
 //!   { "hooks": { "Stop": [ { "hooks": [ { "type": "command",
-//!                                         "command": "\"…/dontspeak\" notify",
+//!                                         "command": "…/dontspeak",
 //!                                         "timeout": 1800 } ] } ] } }
 
-use super::cmdline::{ShellOverride, host_inline_flavor, inline_command};
-use ds_client::ClientSource;
 use serde_json::{Map, Value, json};
 
-/// The `(event, [(verb, timeout_secs)])` hooks DontSpeak owns for Grok — ONE group per event,
-/// holding that event's inner hooks. The full non-streaming set: Grok has no MessageDisplay
-/// stream, so the reply is voiced from `Stop`; the narration spec is injected at
-/// `UserPromptSubmit` via `provide` (alongside a `notify` sibling for mark-active routing);
-/// and `SessionStart` greets with `--greet-only` — the flag skips the streaming-witness seed,
-/// which on a hook-only client would silence every `Stop` reply. Timeouts are SECONDS, and
-/// every entry runs SYNCHRONOUSLY (no `async` key is ever emitted).
-const GROK_HOOKS: &[(&str, &[(&str, i64)])] = &[
-    ("SessionStart", &[("notify --greet-only", 30)]),
-    ("SessionEnd", &[("notify", 30)]),
-    ("UserPromptSubmit", &[("notify", 5), ("provide", 5)]),
-    ("Stop", &[("notify", 1800)]),
-    ("Notification", &[("notify", 30)]),
+/// The full non-streaming event set and seconds timeouts. Every event gets one bare-binary
+/// handler; the runtime performs the event-specific notify/provide combination.
+const GROK_HOOKS: &[(&str, i64)] = &[
+    ("SessionStart", 30),
+    ("SessionEnd", 30),
+    ("UserPromptSubmit", 5),
+    ("Stop", 1800),
+    ("Notification", 30),
 ];
 
 /// Render the dedicated Grok hooks file body — the WHOLE `dontspeak.json` (DontSpeak owns the
 /// file outright, so this is not merged into anything). `bin` is the absolute path to the
-/// `dontspeak` binary; each command is rendered by the SHARED `super::cmdline::inline_command`
-/// (with a seconds `timeout`, and no `async`/`matcher`/`args` keys) — the same string Codex
-/// gets, because Grok's hook entry likewise carries a bare command string with NO `shell`
-/// field to pin it to a quote-tolerant shell. Each command carries the uniform trailing
-/// `--client <token>` ([`ClientSource`]) every hook mechanism stamps, so the spawned binary
-/// knows who invoked it; `client` is passed in (always `Grok` today) rather than hardcoded, so
-/// this shaper stays client-agnostic.
-pub fn grok_hooks_value(bin: &str, client: ClientSource) -> Value {
+/// `dontspeak` binary. The exact, unmodified path is load-bearing: it matches the `command`
+/// in Claude Code's args-array entries byte-for-byte, allowing Grok to deduplicate the native
+/// and imported handlers. There are no `args`, `async`, `shell`, or `matcher` keys.
+pub fn grok_hooks_value(bin: &str) -> Value {
     let mut events = Map::new();
-    for (event, verbs) in GROK_HOOKS {
-        let inner: Vec<Value> = verbs
-            .iter()
-            .map(|(verb, timeout)| {
-                let (command, _shell) = inline_command(
-                    host_inline_flavor(),
-                    bin,
-                    &[verb, "--client", client.as_str()],
-                    ShellOverride::Unsupported,
-                );
-                json!({
-                    "type": "command",
-                    "command": command,
-                    "timeout": timeout,
-                })
-            })
-            .collect();
-        events.insert((*event).to_string(), json!([{ "hooks": inner }]));
+    for (event, timeout) in GROK_HOOKS {
+        events.insert(
+            (*event).to_string(),
+            json!([{ "hooks": [{
+                "type": "command",
+                "command": bin,
+                "timeout": timeout,
+            }] }]),
+        );
     }
     json!({ "hooks": events })
 }
@@ -119,24 +99,8 @@ mod tests {
             .collect()
     }
 
-    /// The command string Grok should carry for `verb` on THIS host — INCLUDING the uniform
-    /// `--client grok` tail every wired verb now carries. The DIALECT itself (the quote-free
-    /// Windows form, the quoted POSIX form, the 8.3 spaced-path fallback) is pinned per-flavor
-    /// by `wire::cmdline`'s own tests; these tests pin Grok's STRUCTURE — which events, which
-    /// verbs, which timeouts, one group each — without hardcoding a dialect that would make
-    /// them pass on Linux CI and fail on a Windows host.
-    fn grok_command(verb: &str) -> String {
-        inline_command(
-            host_inline_flavor(),
-            BIN,
-            &[verb, "--client", "grok"],
-            ShellOverride::Unsupported,
-        )
-        .0
-    }
-
     fn value() -> Value {
-        grok_hooks_value(BIN, ClientSource::Grok)
+        grok_hooks_value(BIN)
     }
 
     #[test]
@@ -166,30 +130,15 @@ mod tests {
     }
 
     #[test]
-    fn exact_per_event_command_strings_and_seconds_timeouts() {
+    fn every_event_uses_one_identical_bare_command_and_seconds_timeout() {
         let v = value();
-        assert_eq!(
-            event_entries(&v, "SessionStart"),
-            vec![(grok_command("notify --greet-only"), 30)]
-        );
-        assert_eq!(
-            event_entries(&v, "SessionEnd"),
-            vec![(grok_command("notify"), 30)]
-        );
-        // UserPromptSubmit is ONE group with TWO inner hooks: notify (mark-active) then provide.
-        assert_eq!(
-            event_entries(&v, "UserPromptSubmit"),
-            vec![(grok_command("notify"), 5), (grok_command("provide"), 5),]
-        );
-        // Stop's 1800 s is the tell that timeouts are SECONDS (not ms).
-        assert_eq!(
-            event_entries(&v, "Stop"),
-            vec![(grok_command("notify"), 1800)]
-        );
-        assert_eq!(
-            event_entries(&v, "Notification"),
-            vec![(grok_command("notify"), 30)]
-        );
+        for (event, timeout) in GROK_HOOKS {
+            assert_eq!(
+                event_entries(&v, event),
+                vec![(BIN.to_string(), *timeout)],
+                "{event}: one bare command so Grok deduplicates Claude compatibility"
+            );
+        }
     }
 
     #[test]

@@ -70,7 +70,7 @@ fn hook_group_is_ours(group: &Value) -> bool {
 
 // The command-string dialect (`InlineFlavor`), the renderer (`inline_command`) and the
 // "is this entry ours?" parse (`command_is_ours`) all live in the shared `wire::cmdline`
-// module — Codex and Grok render the SAME string and must not drift from it.
+// module — Qwen and Codex share that renderer and must not drift from it.
 //
 // Qwen's `expandCommand` rewrites literal `$GEMINI_PROJECT_DIR`/`$CLAUDE_PROJECT_DIR` in the
 // command string before spawning; our inlined commands contain neither, so that pass is a
@@ -97,7 +97,7 @@ fn hook_entry(spec: &HookSpec, verbs: &[&str], timeout_secs: u64, is_async: bool
         }
         HookCommandStyle::InlineShell => {
             // Qwen's CommandHookConfig HAS a `shell` field, so a spaced bin path can be pinned
-            // to PowerShell rather than needing the 8.3 short name Codex/Grok fall back to.
+            // to PowerShell rather than needing the 8.3 short name Codex falls back to.
             let (cmd, shell) = inline_command(
                 host_inline_flavor(),
                 spec.bin,
@@ -692,7 +692,7 @@ mod tests {
     // AS QWEN SEES IT: no `args` key anywhere, inlined verbs, scaled timeouts, the
     // `shell: "powershell"` pin on a spaced path. The command STRING itself (per-flavor,
     // both driven on any OS so Linux CI covers the Windows form) is pinned by
-    // `wire::cmdline`'s own tests, which is also where Codex and Grok get it from.
+    // `wire::cmdline`'s own tests, which is also where Codex gets it from.
 
     #[test]
     fn command_is_ours_accepts_every_dialect_we_write_and_rejects_the_rest() {

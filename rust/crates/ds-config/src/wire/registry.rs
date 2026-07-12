@@ -51,11 +51,10 @@ pub enum WireMechanism {
     /// `merge_codex_hooks`/`strip_codex_hooks`.
     ClaudeTomlHooks,
     /// DontSpeak's voice hooks written to a DEDICATED JSON file we own outright (Grok's
-    /// `~/.grok/hooks/dontspeak.json`). The Claude hooks-contract shape, but with the verb
-    /// INLINED into a single `command` string (no `args` array) — rendered by the shared
-    /// `wire::cmdline`, so it is quoted on POSIX and QUOTE-FREE on Windows (an embedded `"`
-    /// cannot survive cmd.exe; see that module) — plus seconds timeouts, no `async` key, and
-    /// camelCase (`hookEventName`) payloads handled by the runtime serde aliases.
+    /// `~/.grok/hooks/dontspeak.json`). The Claude hooks-contract shape, but with one BARE
+    /// binary command per event and seconds timeouts. The target matches what Grok's Claude
+    /// adapter produces after dropping `args`, so Grok deduplicates native and imported
+    /// registrations; the runtime dispatches from the reserved `GROK_HOOK_EVENT` marker.
     /// Because the file is exclusively ours, there is nothing to merge: wire OVERWRITES it
     /// (a backup is taken first) and unwire DELETES it. Shaper: `grok_hooks_value`.
     GrokJsonHooks,
@@ -348,15 +347,19 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         // `.grok/hooks/*.json`) using a Claude-COMPATIBLE event contract. So DontSpeak wires
         // its OWN dedicated `~/.grok/hooks/dontspeak.json` — a file it owns outright (wire
         // overwrites, backing up first; unwire deletes it) — via the `GrokJsonHooks`
-        // mechanism. That makes Grok narration FIRST-CLASS and native: it no longer depends on
-        // `wire claude_code` compat being present. The hook set is the full non-streaming
-        // shape (five events): `SessionStart` (greet-only), `SessionEnd`, `UserPromptSubmit`
-        // (notify + provide), `Stop`, `Notification`. Grok has NO `MessageDisplay` streaming
+        // mechanism. That makes Grok narration FIRST-CLASS and native: it does not depend on
+        // `wire claude_code` compat being present. When Claude hooks are also present, Grok's
+        // adapter drops their `args`; our native entries use that exact bare target, so Grok
+        // deduplicates both sources. The no-argument binary sees Grok's reserved hook marker
+        // and performs the event's notify plus any provide response in one process. The hook
+        // set is the full non-streaming shape (five events): `SessionStart` (greet-only),
+        // `SessionEnd`, `UserPromptSubmit` (notify + provide), `Stop`, `Notification`. Grok has
+        // NO `MessageDisplay` streaming
         // hook, so end-of-turn narration rides `Stop` (like Codex, voicing the whole final
         // message). Grok's hook payloads are camelCase (`hookEventName`, `sessionId`,
         // `lastAssistantMessage`, `notificationType`) — handled by the runtime serde aliases
-        // on the hook payload structs, so the same `dontspeak notify`/`provide` binary serves
-        // them. Hooks live in a SEPARATE file from MCP, so the two surfaces edit different
+        // on the hook payload structs, so the same bare `dontspeak` binary serves them. Hooks
+        // live in a SEPARATE file from MCP, so the two surfaces edit different
         // files (unlike Codex/Qwen, which share one).
         surfaces: &[
             Surface {
@@ -385,7 +388,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             },
         ],
         verified_client_version: "0.2.93",
-        verified_on: "2026-07-10",
+        verified_on: "2026-07-12",
     },
 ];
 

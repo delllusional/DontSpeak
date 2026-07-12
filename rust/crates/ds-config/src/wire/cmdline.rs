@@ -1,6 +1,6 @@
 //! The ONE renderer + recogniser for DontSpeak's hook COMMAND STRING — shared by every
 //! client whose hook runner is handed a single command *string* instead of an argv array:
-//! Codex (`ClaudeTomlHooks`), Grok (`GrokJsonHooks`) and Qwen Code (`ClaudeJsonHooks` +
+//! Codex (`ClaudeTomlHooks`) and Qwen Code (`ClaudeJsonHooks` +
 //! `HookCommandStyle::InlineShell`).
 //!
 //! Claude Code is the ONE client that never comes here: it takes `command` + an `args` array
@@ -48,8 +48,8 @@ pub(crate) enum ShellOverride {
     /// Qwen Code: its `CommandHookConfig` has a `shell` field, so a spaced-path command can be
     /// pinned to PowerShell — which does parse the `\"`-escaped argv Node emits.
     Supported,
-    /// Codex and Grok: their command-hook schemas carry `command` (plus Codex's
-    /// `command_windows` / `timeout` / `async` / `statusMessage`) and nothing else — there is
+    /// Codex: its command-hook schema carries `command` (plus `command_windows` / `timeout` /
+    /// `async` / `statusMessage`) and nothing else — there is
     /// NO shell field, so a spaced path must be made space-FREE instead (see
     /// [`inline_command`]).
     Unsupported,
@@ -77,7 +77,7 @@ pub(crate) fn host_inline_flavor() -> InlineFlavor {
 ///     name it, and quotes cannot survive cmd (see module docs), so:
 ///       - [`ShellOverride::Supported`] (Qwen) → `& "<bin>" <verbs>` plus `"shell":
 ///         "powershell"`, pinning the runner to the one shell that parses that escaping.
-///       - [`ShellOverride::Unsupported`] (Codex, Grok) → the path's 8.3 SHORT name
+///       - [`ShellOverride::Unsupported`] (Codex) → the path's 8.3 SHORT name
 ///         (`C:\Users\ALEXSM~1\…`), which is space-free and therefore needs no quotes.
 ///
 /// If 8.3 generation is disabled on the volume (`fsutil 8dot3name`), `GetShortPathNameW`
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn windows_spaced_path_without_shell_override_uses_the_8dot3_short_name() {
-        // Codex/Grok have no `shell` field, so the only quote-free way to name a spaced path
+        // Codex has no `shell` field, so the only quote-free way to name a spaced path
         // is its 8.3 short name.
         let bin = r"C:\Users\Alex Smith\AppData\Local\Programs\DontSpeak\dontspeak.exe";
         let (cmd, shell) = inline_command_with(
@@ -341,7 +341,7 @@ mod tests {
         assert!(command_is_ours(
             "& \"C:\\Users\\Alex Smith\\DontSpeak\\dontspeak.exe\" provide"
         ));
-        // The 8.3 form a spaced-path Codex/Grok wiring now emits.
+        // The 8.3 form a spaced-path Codex wiring emits.
         assert!(command_is_ours(
             "C:/Users/ALEXSM~1/AppData/Local/Programs/DontSpeak/dontspeak.exe notify"
         ));

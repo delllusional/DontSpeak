@@ -1,6 +1,7 @@
-//! `dontspeak` — the single multi-call binary. With NO args (this file's default role)
-//! it is a stdio Model Context Protocol (MCP) server that exposes the DontSpeak engine's
-//! TTS/STT to MCP clients (e.g. Claude Code). With a subcommand it is instead
+//! `dontspeak` — the single multi-call binary. With NO args it is normally a stdio Model
+//! Context Protocol (MCP) server that exposes the DontSpeak engine's TTS/STT to MCP clients
+//! (e.g. Claude Code). A no-argument launch carrying Grok's reserved `GROK_HOOK_EVENT`
+//! variable is instead its deduplicated native/compatibility hook. With a subcommand it is
 //! a Claude Code hook executor or installer step — see the front-door dispatch in `main`
 //! and the `hook_speak` / `hook_narrate` modules (the former `ds-speak` /
 //! `ds-narrate` binaries, now folded in here).
@@ -92,6 +93,28 @@ fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
     }
 }
 
+/// Grok injects this reserved variable into every hook process. Its presence is the
+/// unambiguous discriminator between a bare-command hook and the normal bare-command MCP
+/// server; the value itself is only a marker because the payload remains the routing source
+/// of truth. Kept pure so tests never mutate the process-wide environment in parallel.
+fn is_grok_hook_launch(marker: Option<&std::ffi::OsStr>) -> bool {
+    marker.is_some_and(|value| !value.is_empty())
+}
+
+/// Grok's compatibility adapter drops Claude Code's `args`, and Grok deduplicates handlers
+/// by their resulting bare command target. One no-argument process must therefore perform
+/// both halves of DontSpeak's hook contract: the event side effect and any synchronous query
+/// response. `greet_only=true` matters only for SessionStart and keeps this non-streaming
+/// client from seeding Claude's MessageDisplay witness.
+fn run_grok_hook() {
+    let payload = read_stdin();
+    let event = hook_core::event_name(&payload);
+    hook_core::notify(&event, &payload, true, ClientSource::Grok);
+    if let Some(out) = hook_core::provide(&event, &payload) {
+        println!("{out}");
+    }
+}
+
 fn main() {
     // Subcommand front-door — this ONE `dontspeak` binary is every voice role (busybox-style),
     // selected by argv[1]:
@@ -106,7 +129,7 @@ fn main() {
     //                                   wires (or removes) EVERYTHING that client needs in a
     //                                   single step — claude_code = hooks + MCP, codex
     //                                   = hooks. See the `ds-wire` crate.
-    // With no argv it is the stdio MCP server (the default, spawned by Claude Code / the app).
+    // With no argv it is the stdio MCP server unless Grok's hook runner marker is present.
     // ALL communication is stdio: the MCP tool surface (JSON-RPC over stdio) and the two
     // Claude Code hook verbs above. There is no HTTP transport.
     ds_log::init();
@@ -153,9 +176,15 @@ fn main() {
             log::error!(target: "hook", "{msg}");
             std::process::exit(2);
         }
-        // No arguments: run the stdio MCP server loop.
+        // No arguments: Grok hooks and MCP servers use the same bare executable. The hook
+        // runner's reserved environment marker distinguishes them without changing Claude's
+        // args-array hooks or disabling any of the user's other Claude compatibility hooks.
         Subcommand::Server => {
-            mcp::serve();
+            if is_grok_hook_launch(std::env::var_os("GROK_HOOK_EVENT").as_deref()) {
+                run_grok_hook();
+            } else {
+                mcp::serve();
+            }
         }
     }
 }
@@ -234,6 +263,16 @@ mod tests {
         // Defensive: even with no argv[0] at all, argv.get(1) is still None.
         let argv: Vec<String> = Vec::new();
         assert_eq!(resolve_subcommand(&argv), Subcommand::Server);
+    }
+
+    #[test]
+    fn grok_hook_marker_distinguishes_bare_hook_from_bare_mcp_server() {
+        use std::ffi::OsStr;
+
+        assert!(!is_grok_hook_launch(None));
+        assert!(!is_grok_hook_launch(Some(OsStr::new(""))));
+        assert!(is_grok_hook_launch(Some(OsStr::new("stop"))));
+        assert!(is_grok_hook_launch(Some(OsStr::new("user_prompt_submit"))));
     }
 
     #[test]
