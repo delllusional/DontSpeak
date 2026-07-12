@@ -72,6 +72,7 @@ undocumented_unsafe_blocks = "warn"
 
 # Shared dependency versions pinned once; crates opt in via `workspace = true`.
 [workspace.dependencies]
+ringbuf = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 directories = "6.0"
@@ -220,11 +221,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-opt-level = "z"
+opt-level = 3
 
 # Release profile for the ds-core FFI STATICLIB the macOS SwiftUI app links
 # (opt in with `cargo build --profile release-ffi -p ds-core`). It inherits
-# `release` (LTO, opt-level=z) but does NOT strip: a stripped `.a` loses the
+# `release` (LTO, opt-level=3) but does NOT strip: a stripped `.a` loses the
 # `#[no_mangle] extern "C"` symbol table, so the Swift linker can't resolve
 # `-lds_core`. apps/macos/build.sh uses this profile.
 [profile.release-ffi]

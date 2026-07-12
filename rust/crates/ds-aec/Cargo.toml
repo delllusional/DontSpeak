@@ -24,7 +24,7 @@ objc2-audio-toolbox = { version = "0.3", default-features = false, features = [
     "AudioOutputUnit",
     "AudioUnitProperties",
 ] }
-ringbuf = "0.5"
+ringbuf = { workspace = true }
 
 # ── Windows: WASAPI capture in the "Communications" category (capture-side AEC) ─
 # Open the mic via IAudioClient2 + SetClientProperties(AudioCategory_Communications)
