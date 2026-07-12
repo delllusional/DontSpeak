@@ -142,9 +142,34 @@ pub(super) fn reader_loop(
         cv.notify_all();
     };
     let mut line = String::new();
+    const MAX_HELPER_LINE_BYTES: usize = 1024 * 1024;
     loop {
         line.clear();
-        match stdout.read_line(&mut line) {
+        let read = {
+            let mut limited = std::io::Read::take(&mut stdout, (MAX_HELPER_LINE_BYTES + 1) as u64);
+            limited.read_line(&mut line)
+        };
+        if read.as_ref().is_ok_and(|&n| n > MAX_HELPER_LINE_BYTES) {
+            // Consume the remainder so the next iteration starts at a protocol boundary.
+            if !line.ends_with('\n') {
+                loop {
+                    let (used, done) = match stdout.fill_buf() {
+                        Ok([]) | Err(_) => break,
+                        Ok(buf) => match buf.iter().position(|&b| b == b'\n') {
+                            Some(pos) => (pos + 1, true),
+                            None => (buf.len(), false),
+                        },
+                    };
+                    stdout.consume(used);
+                    if done {
+                        break;
+                    }
+                }
+            }
+            log::warn!(target: "engine", "helper emitted an oversized protocol line; discarded");
+            continue;
+        }
+        match read {
             Ok(0) | Err(_) => {
                 // Child gone: unblock a waiting speak (fatal) and a waiting listen.
                 let (m, cv) = &*speak_slot;

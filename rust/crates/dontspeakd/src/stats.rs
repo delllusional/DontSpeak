@@ -81,11 +81,20 @@ impl TtsStats {
         let (mut synth, mut audio, mut first) = (0.0, 0.0, 0.0);
         for kv in rest.split_whitespace() {
             if let Some(v) = kv.strip_prefix("synth_ms=") {
-                synth = v.parse().unwrap_or(0.0);
+                let parsed: f64 = v.parse().unwrap_or(0.0);
+                if parsed.is_finite() && parsed >= 0.0 {
+                    synth = parsed;
+                }
             } else if let Some(v) = kv.strip_prefix("audio_ms=") {
-                audio = v.parse().unwrap_or(0.0);
+                let parsed: f64 = v.parse().unwrap_or(0.0);
+                if parsed.is_finite() && parsed >= 0.0 {
+                    audio = parsed;
+                }
             } else if let Some(v) = kv.strip_prefix("first_ms=") {
-                first = v.parse().unwrap_or(0.0);
+                let parsed: f64 = v.parse().unwrap_or(0.0);
+                if parsed.is_finite() && parsed >= 0.0 {
+                    first = parsed;
+                }
             }
         }
         if audio > 0.0 {

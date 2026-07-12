@@ -133,7 +133,7 @@ pub(crate) struct DownloadFlags {
 }
 
 pub(crate) fn wire(dl: &DownloadProg, warm: Arc<TtsManager>, paths: Paths, flags: DownloadFlags) {
-    let mut s = dl.lock().unwrap();
+    let mut s = dl.lock().unwrap_or_else(|e| e.into_inner());
     s.warm = Some(warm);
     s.paths = Some(paths);
     s.reload = Some(flags.reload);
@@ -229,7 +229,7 @@ fn download_event_msg(which: DownloadTarget, phase: &str, detail: Option<&str>) 
 /// deduped by ds-model's per-path flight lock — the second target waits, then finds the
 /// file present and moves on.
 pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
-    if !begin_download(&mut dl.lock().unwrap(), which) {
+    if !begin_download(&mut dl.lock().unwrap_or_else(|e| e.into_inner()), which) {
         return; // this target is already downloading — attach, don't retrigger
     }
     log::info!(target: "engine", "{}", download_event_msg(which, "started", None));
@@ -237,7 +237,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
     std::thread::spawn(move || {
         // Grab the warm-child reload hook up front (wired once at boot); used after the fetch.
         let (warm, paths, reload, shutdown) = {
-            let s = dl.lock().unwrap();
+            let s = dl.lock().unwrap_or_else(|e| e.into_inner());
             (
                 s.warm.clone(),
                 s.paths.clone(),
@@ -249,7 +249,12 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             // Update ONLY this target's entry — concurrent targets own their own. A late
             // callback after `finish_download` no longer matches `Active`, so it can't
             // resurrect a retired entry's progress.
-            if let Some(TargetState::Active(p)) = dl.lock().unwrap().targets.get_mut(&which) {
+            if let Some(TargetState::Active(p)) = dl
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .targets
+                .get_mut(&which)
+            {
                 *p = DownloadProgress { done, total };
             }
         };
@@ -337,7 +342,11 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 download_event_msg(which, "failed", Some(&e.to_string()))
             ),
         }
-        finish_download(&mut dl.lock().unwrap(), which, &result);
+        finish_download(
+            &mut dl.lock().unwrap_or_else(|e| e.into_inner()),
+            which,
+            &result,
+        );
         // This thread is DETACHED and can outlive `ds_engine_stop()` (which only joins the
         // top-level engine thread), so it can still be running here after the caller already
         // believes the engine is fully torn down. Re-check the shutdown observer right before

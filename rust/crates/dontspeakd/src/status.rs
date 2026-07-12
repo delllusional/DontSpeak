@@ -294,7 +294,11 @@ pub(crate) fn model_status_json(
     // download in PARALLEL, one progress entry each — every row reports its OWN
     // target's fraction, never a shared value mirrored onto whichever row happened
     // to be fetching.
-    let dl = downloads.lock().unwrap().targets.clone();
+    let dl = downloads
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .targets
+        .clone();
     // A row lights "downloading" for exactly ITS OWN in-flight target. (Note: the
     // voices-only `KokoroVoices` fetch does NOT light the Kokoro row — it only gates the
     // ACTIVE VOICE of an already-runnable model, so a ring there would read as "TTS not
@@ -552,7 +556,7 @@ pub(crate) fn model_status_json(
             // The raw `caps_enabled` SETTING (before the Accessibility preflight that
             // `caps` also folds in), so the UI can tell "off" from "on but blocked by a
             // missing permission" and warn accordingly. Cheap: a tiny TOML read per poll.
-            caps_wanted: caps_loop_enabled(&VoiceConfig::load(paths)),
+            caps_wanted: caps_loop_enabled(&cfg),
             stt_active: stt_active.load(Ordering::Relaxed),
             // True while TTS audio is actually playing — drives the menu-bar
             // TTS state, mirroring `stt_active` for the capture state.
@@ -666,7 +670,7 @@ pub(crate) fn model_status_json(
         // `WaitModelStatus` so it blocks until the NEXT change (see `StatusGate`).
         seq: gate.seq(),
     };
-    serde_json::to_value(status).unwrap()
+    serde_json::to_value(status).unwrap_or(serde_json::Value::Null)
 }
 
 /// Relabel a warm-child REALIZED-provider wire token to the config [`Provider`](ds_config::Provider)
@@ -822,7 +826,11 @@ fn engine_obj(row: RowState, removable: bool, progress: f64) -> EngineObj {
         present: row.present,
         removable,
         state: state.as_str().to_string(),
-        progress: if row.downloading { progress } else { 0.0 },
+        progress: if row.downloading && progress.is_finite() {
+            progress.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
         error: row.error,
     }
 }

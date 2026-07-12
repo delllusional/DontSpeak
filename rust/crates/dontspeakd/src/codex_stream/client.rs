@@ -49,9 +49,9 @@ impl<S: Read + Write + ReadTimeout> WsClient<S> {
     /// HTTP-Upgrade handshake over an already-connected stream, then arm the read timeout
     /// that paces the supervisor's loop. The URI's host part is nominal for the UDS case
     /// (the socket IS the address); tungstenite only needs a well-formed request.
-    pub(crate) fn handshake(stream: S) -> Result<Self, String> {
+    pub(crate) fn handshake(stream: S, uri: &str) -> Result<Self, String> {
         // Handshake blocking (no timeout yet) — it is a couple of round-trips.
-        let mut attempt = tungstenite::client("ws://localhost/", stream);
+        let mut attempt = tungstenite::client(uri, stream);
         let ws = loop {
             match attempt {
                 Ok((ws, _resp)) => break ws,

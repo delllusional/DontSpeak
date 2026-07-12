@@ -149,14 +149,27 @@ pub fn engine_run(
     // Seed the user-editable narration spec on first run (never overwrite the user's edits).
     // The SessionStart hook injects this file's contents into Claude so replies lead with a
     // spoken-line blockquote.
-    if !paths.narration_spec.exists()
-        && let Err(e) = std::fs::write(&paths.narration_spec, ds_config::DEFAULT_NARRATION_SPEC)
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&paths.narration_spec)
     {
-        log::warn!(
+        Ok(mut file) => {
+            use std::io::Write as _;
+            if let Err(e) = file.write_all(ds_config::DEFAULT_NARRATION_SPEC.as_bytes()) {
+                log::warn!(
+                    target: "engine",
+                    "cannot write default narration spec {}: {e}",
+                    paths.narration_spec.display()
+                );
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => log::warn!(
             target: "engine",
-            "cannot write default narration spec {}: {e}",
+            "cannot create default narration spec {}: {e}",
             paths.narration_spec.display()
-        );
+        ),
     }
 
     // Converge each AI client's wiring to config.toml's declared `exclude_clients` (absent ⇒ all
@@ -502,7 +515,10 @@ pub fn engine_run(
         // green (running) or a RED dot + failure note — instead of a stuck ring. Shared engine
         // loop ⇒ identical on all UIs.
         if last_dl_bump.elapsed() >= DL_PROGRESS_BUMP_INTERVAL {
-            let downloading = downloads.lock().unwrap().any_active();
+            let downloading = downloads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .any_active();
             if downloading || dl_was_active {
                 status_gate.bump();
             }

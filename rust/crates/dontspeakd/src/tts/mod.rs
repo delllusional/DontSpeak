@@ -31,6 +31,9 @@ use crate::status::StatusGate;
 mod reader;
 use reader::*;
 
+const SPEAK_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const CAPTURE_TERMINAL_GRACE: u64 = 25;
+
 /// Where the warm child's stderr is sent (the app has no console, so anything that lands here
 /// must go to a file). Routed through the shared `open_aux_log` so it sits BESIDE the engine's
 /// unified log in the one per-OS logs dir AND is size-rotated like it (never a second location,
@@ -1216,8 +1219,20 @@ impl TtsManager {
         // own slot, and `stop` takes the stdin lock — so nothing is serialized.
         let (m, cv) = &*self.speak_slot;
         let mut s = m.lock().unwrap();
+        let deadline = std::time::Instant::now() + SPEAK_TERMINAL_TIMEOUT;
         while !s.done {
-            s = cv.wait(s).unwrap();
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                drop(s);
+                self.mark_dead_if_current(my_gen);
+                self.stats.record_failure();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "TTS helper did not finish the speak request",
+                ));
+            }
+            let (next, _) = cv.wait_timeout(s, deadline - now).unwrap();
+            s = next;
         }
         let err = s.err.take();
         let fatal = s.fatal;
@@ -1510,11 +1525,23 @@ impl TtsManager {
         }
         let (m, cv) = &*self.diarize_slot;
         let mut s = m.lock().unwrap();
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(seconds.clamp(1, 60) + CAPTURE_TERMINAL_GRACE);
         loop {
             if s.done || s.dead {
                 break;
             }
-            s = cv.wait(s).unwrap();
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                drop(s);
+                self.mark_dead();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "diarize helper timed out",
+                ));
+            }
+            let (next, _) = cv.wait_timeout(s, deadline - now).unwrap();
+            s = next;
         }
         match s.result.take() {
             Some(Ok(json)) => Ok(json),
@@ -1549,11 +1576,23 @@ impl TtsManager {
         }
         let (m, cv) = &*self.enroll_slot;
         let mut s = m.lock().unwrap();
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(seconds.clamp(1, 60) + CAPTURE_TERMINAL_GRACE);
         loop {
             if s.done || s.dead {
                 break;
             }
-            s = cv.wait(s).unwrap();
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                drop(s);
+                self.mark_dead();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "enroll helper timed out",
+                ));
+            }
+            let (next, _) = cv.wait_timeout(s, deadline - now).unwrap();
+            s = next;
         }
         match s.result.take() {
             Some(Ok(json)) => serde_json::from_str::<Vec<f32>>(&json)

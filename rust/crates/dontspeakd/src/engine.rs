@@ -740,7 +740,9 @@ impl<P: Platform + 'static> Engine<P> {
                 // timer (see `pending_enter_at`) rather than a blocking sleep, since this
                 // runs on the engine's single tick thread.
                 if self.cfg.paste_submit_delay_ms > 0 {
-                    self.pending_enter_at = Some(Instant::now());
+                    self.pending_enter_at = Some(
+                        Instant::now() + Duration::from_millis(self.cfg.paste_submit_delay_ms),
+                    );
                 } else {
                     self.press_deferred_enter();
                 }
@@ -797,6 +799,7 @@ impl<P: Platform + 'static> Engine<P> {
             // final can't land after this cancel reset the buffer.
             p.epoch = p.epoch.wrapping_add(1);
         }
+        self.pending_enter_at = None;
         self.record_caps("cancel");
         log::debug!(target: "engine", "HOLD cancel — dictation discarded, voice silenced, LED off, idle");
     }
@@ -1079,6 +1082,9 @@ impl<P: Platform + 'static> Engine<P> {
         }
 
         // Record the applied config so the NEXT reload diffs against it.
+        if let Some(q) = &self.ttsq {
+            q.set_config(cfg.clone());
+        }
         self.cfg = cfg.clone();
         // NOTE: `press` is a physical-key latch; a config reload does not change the
         // physical key, so leave it as-is.
@@ -1451,10 +1457,10 @@ impl<P: Platform + 'static> Engine<P> {
             // here. `Up ⇒ tap` matches the old `!self.long_press_fired` (which read
             // true even with no press latched — e.g. a release edge observed after a
             // gate off→on cycle reset the latch but not `caps_phys_prev`).
-            let was_tap = !matches!(
+            let was_tap = matches!(
                 self.press,
                 PressState::Down {
-                    long_press_fired: true,
+                    long_press_fired: false,
                     ..
                 }
             );
@@ -1536,8 +1542,11 @@ impl<P: Platform + 'static> Engine<P> {
     /// once per [`tick`], regardless of gesture state, so a delay armed by
     /// `confirm_paste` still fires even if the gesture moves on in the meantime.
     fn check_pending_enter(&mut self) {
-        if crate::timer::deferred_ready(&mut self.pending_enter_at, self.cfg.paste_submit_delay_ms)
+        if self
+            .pending_enter_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
         {
+            self.pending_enter_at = None;
             self.press_deferred_enter();
         }
     }
@@ -1647,9 +1656,6 @@ impl<P: Platform + 'static> Engine<P> {
             // bumps just advance the counter, so the net effect is one new session.
             p.epoch = p.epoch.wrapping_add(1);
         }
-        // A no-op on `Recording` by design (see `disarm_confirm`'s doc) — kept so the
-        // buffer-side disarm contract stays exercised in one place.
-        self.disarm_confirm();
         // Publish the recording flag BEFORE opening the mic. The half-duplex
         // barge-watcher reads `stt_active` to distinguish our OWN dictation mic from a
         // foreign recorder (its `!ours` gate); setting it first means the watcher can
@@ -1716,9 +1722,14 @@ impl<P: Platform + 'static> Engine<P> {
 
     /// Never leave a key down on shutdown.
     pub(crate) fn shutdown(&mut self) {
-        if self.is_recording() {
-            self.stt.stop();
-        }
+        self.teardown_hold();
+        self.listener = None;
+        self.pending_tap_at = None;
+        self.pending_enter_at = None;
+        self.press = PressState::Up;
+        self.set_caps_gate(false);
+        self.plat.set_caps_lock(false);
+        self.plat.release_caps_key();
         log::info!(target: "engine", "dontspeakd stopped");
     }
 }

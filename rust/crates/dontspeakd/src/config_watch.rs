@@ -30,7 +30,10 @@ pub(crate) fn spawn(
     let dir = config_path.parent()?.to_path_buf();
     let file_name = config_path.file_name()?.to_os_string();
     // First run may predate the config dir; create it so the watch can attach.
-    let _ = std::fs::create_dir_all(&dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::debug!(target: "engine", "could not create config watch directory {dir:?}: {e}");
+        return None;
+    }
 
     let mut watcher = match notify::recommended_watcher(move |res: notify::Result<Event>| {
         let Ok(event) = res else { return };

@@ -283,12 +283,25 @@ pub(crate) fn control_socket_path(
         .join("app-server-control.sock")
 }
 
-/// `ws://host:port[/…]` → `host:port` for `TcpStream::connect`. Anything else → `None`.
+/// A loopback-only `ws://host:port[/…]` → `host:port` for `TcpStream::connect`.
+/// Plaintext WebSockets are never accepted for non-loopback hosts.
 pub(crate) fn parse_ws_url(url: &str) -> Option<String> {
-    url.trim()
-        .strip_prefix("ws://")
-        .map(|rest| rest.split('/').next().unwrap_or(rest).to_string())
-        .filter(|host| !host.is_empty())
+    let authority = url
+        .trim()
+        .strip_prefix("ws://")?
+        .split('/')
+        .next()
+        .filter(|host| !host.is_empty() && !host.contains('@'))?;
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split_once(']')?.0
+    } else {
+        authority.rsplit_once(':')?.0
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    loopback.then(|| authority.to_string())
 }
 
 /// Engine-owned Windows listeners are deliberately loopback-only. Non-loopback Codex
@@ -744,7 +757,6 @@ fn run_attached<S: Read + Write>(
             return Ok(Detach::Shutdown);
         }
         let now = Instant::now();
-
         // A read timeout only proves that no frame arrived during this tick; the socket can
         // remain healthy while one JSON-RPC response is lost. Expire individual requests so
         // list/resume resolution retries instead of remaining permanently in flight.
@@ -1008,7 +1020,8 @@ fn run_attached<S: Read + Write>(
                     }
                 }
                 proto::Incoming::TurnCompleted { thread_id } => {
-                    if let Some(r) = resumed.get(&thread_id) {
+                    if let Some(r) = resumed.get_mut(&thread_id) {
+                        r.last_activity = Instant::now();
                         let session = r.session.clone();
                         for (sess, batch) in
                             coalescer.flush_aged(now, Duration::ZERO, Some(&session))
@@ -1251,7 +1264,7 @@ fn supervise(
                 } else {
                     std::os::unix::net::UnixStream::connect(&sock)
                         .map_err(|e| format!("connect {}: {e}", sock.display()))
-                        .and_then(WsClient::handshake)
+                        .and_then(|stream| WsClient::handshake(stream, "ws://localhost/"))
                         .and_then(|mut ws| {
                             ws.initialize(Duration::from_secs(10))?;
                             Ok(ws)
@@ -1271,7 +1284,7 @@ fn supervise(
                 }
             }
             Some(Endpoint::Tcp(host)) => match std::net::TcpStream::connect(&host) {
-                Ok(stream) => WsClient::handshake(stream)
+                Ok(stream) => WsClient::handshake(stream, &format!("ws://{host}/"))
                     .and_then(|mut ws| {
                         ws.initialize(Duration::from_secs(10))?;
                         Ok(ws)

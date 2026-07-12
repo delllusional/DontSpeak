@@ -60,7 +60,7 @@ struct ListenerWorker {
 }
 
 impl ListenerWorker {
-    fn spawn(provider: &str, model_dir: PathBuf, endpoint_silence_ms: u64) -> Self {
+    fn spawn(provider: &str, model_dir: PathBuf, endpoint_silence_ms: u64) -> Option<Self> {
         let enabled = Arc::new(AtomicBool::new(false));
         let epoch = Arc::new(AtomicU64::new(1));
         let stop = Arc::new(AtomicBool::new(false));
@@ -72,7 +72,7 @@ impl ListenerWorker {
         let capture_enabled = enabled.clone();
         let capture_epoch = epoch.clone();
         let capture_stop = stop.clone();
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("ds-always-capture".into())
             .spawn(move || {
                 capture_worker(
@@ -83,12 +83,15 @@ impl ListenerWorker {
                     endpoint_silence_ms,
                 )
             })
-            .ok();
+        {
+            log::warn!(target: "engine", "always-listen capture thread spawn failed: {e}");
+            return None;
+        }
 
         let provider = provider.to_string();
         let infer_stop = stop.clone();
         let infer_epoch = epoch.clone();
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("ds-always-infer".into())
             .spawn(move || {
                 inference_worker(
@@ -100,14 +103,18 @@ impl ListenerWorker {
                     event_tx,
                 )
             })
-            .ok();
+        {
+            stop.store(true, Ordering::SeqCst);
+            log::warn!(target: "engine", "always-listen inference thread spawn failed: {e}");
+            return None;
+        }
 
-        Self {
+        Some(Self {
             enabled,
             epoch,
             stop,
             rx: event_rx,
-        }
+        })
     }
 
     fn set_enabled(&self, enabled: bool) {
@@ -181,6 +188,20 @@ fn capture_worker(
         let energy = frame_rms(&chunk);
         let dt_ms = ((chunk.len() as u64 * 1000) / rate as u64).max(1);
         segment.extend_from_slice(&chunk);
+        const MAX_SEGMENT_SAMPLES: usize = 48_000 * 60; // ~60s at 48 kHz
+        if segment.len() > MAX_SEGMENT_SAMPLES {
+            let pcm = std::mem::take(&mut segment);
+            if !send_raw(
+                &tx,
+                RawListenerEvent::Segment {
+                    epoch: active_epoch,
+                    pcm,
+                    rate,
+                },
+            ) {
+                return;
+            }
+        }
         let event = match endpointer.step(energy, dt_ms) {
             Some(EndpointEvent::SpeechOnset) => RawListenerEvent::SpeechOnset {
                 epoch: active_epoch,
@@ -227,7 +248,13 @@ fn inference_worker(
             RawListenerEvent::SpeechOnset { epoch } => ListenerEvent::SpeechOnset { epoch },
             RawListenerEvent::Segment { epoch, pcm, rate } => {
                 let pcm16 = resample_to_16k(&pcm, rate);
-                let text = transcriber.transcribe_pcm_16k(&pcm16).unwrap_or_default();
+                let text = match transcriber.transcribe_pcm_16k(&pcm16) {
+                    Ok(text) => text,
+                    Err(e) => {
+                        log::warn!(target: "engine", "hands-free transcription failed: {e}");
+                        String::new()
+                    }
+                };
                 ListenerEvent::Segment { epoch, text }
             }
         };
@@ -302,10 +329,10 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
             ttsq,
             gate,
         } = shared;
-        let available = crate::config_gate::local_stt_available(cfg);
+        let model_available = crate::config_gate::local_stt_available(cfg);
         let provider = crate::config_gate::helper_stt_provider(cfg);
         let hf = &cfg.hands_free;
-        if !available {
+        if !model_available {
             log::warn!(
                 target: "engine",
                 "always-listening needs the selected local STT backend to be ready; \
@@ -319,10 +346,13 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
                 hf.start, hf.submit, hf.cancel, cfg.submit_confirm_ms, cfg.endpoint_silence_ms
             );
         }
+        let worker = model_available
+            .then(|| ListenerWorker::spawn(provider, model_dir, cfg.endpoint_silence_ms))
+            .flatten();
+        let available = worker.is_some();
         Self {
             plat,
-            worker: available
-                .then(|| ListenerWorker::spawn(provider, model_dir, cfg.endpoint_silence_ms)),
+            worker,
             turn: TurnLogic::new(hf, cfg.submit_confirm_ms),
             paste,
             stt_active,

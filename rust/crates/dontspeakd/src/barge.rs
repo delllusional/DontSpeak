@@ -227,6 +227,7 @@ pub(crate) fn spawn_mic_barge_watcher(
     stt_active: Arc<AtomicBool>,
     mic: ds_platform::MicState,
 ) {
+    let ttsq = Arc::downgrade(&ttsq);
     std::thread::spawn(move || {
         // Reads the shared mic watcher's CACHED state (a native CoreAudio property listener
         // on macOS, a centralized poll thread on Windows/Linux) — no per-tick device query.
@@ -234,6 +235,9 @@ pub(crate) fn spawn_mic_barge_watcher(
         let mut st = BargeState::default();
         loop {
             std::thread::sleep(Duration::from_millis(150));
+            let Some(ttsq) = ttsq.upgrade() else {
+                return;
+            };
             // In full-duplex the VPIO mic is permanently live, so `barge_step` stands down
             // and ignores `active` entirely — skip even the cached read.
             let full_duplex = ttsq.is_full_duplex();

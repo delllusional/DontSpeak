@@ -239,10 +239,10 @@ fn ws_url_parses_and_endpoint_resolution_prefers_the_override() {
 
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::rooted_at(dir.path());
-    match resolve_endpoint("ws://10.0.0.5:9", None, &paths) {
-        Some(Endpoint::Tcp(host)) => assert_eq!(host, "10.0.0.5:9"),
-        _ => panic!("override must resolve to Tcp"),
-    }
+    assert!(
+        resolve_endpoint("ws://10.0.0.5:9", None, &paths).is_none(),
+        "plaintext non-loopback endpoints must be rejected"
+    );
     #[cfg(unix)]
     match resolve_endpoint("", None, &paths) {
         Some(Endpoint::Unix(sock)) => assert!(sock.ends_with("app-server-control.sock")),
@@ -449,7 +449,7 @@ fn unix_socket_websocket_transport_still_initializes() {
         }
     });
     let stream = UnixStream::connect(&socket).unwrap();
-    let mut client = WsClient::handshake(stream).unwrap();
+    let mut client = WsClient::handshake(stream, "ws://localhost/").unwrap();
     client.initialize(Duration::from_secs(2)).unwrap();
     server.join().unwrap();
 }
@@ -560,7 +560,8 @@ mod attached {
         connected_endpoint: Option<&str>,
     ) -> Result<Detach, String> {
         let stream = TcpStream::connect(addr).expect("client connect");
-        let mut ws = WsClient::handshake(stream).expect("client handshake");
+        let mut ws =
+            WsClient::handshake(stream, &format!("ws://{addr}/")).expect("client handshake");
         ws.initialize(Duration::from_secs(5)).expect("initialize");
         let running = AtomicBool::new(true);
         let spoken = spoken.clone();

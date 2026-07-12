@@ -43,6 +43,21 @@ fn vkey(session: &Option<String>) -> String {
     session.clone().unwrap_or_default()
 }
 
+/// RAII guard that resets the `healing` flag on drop, even if the closure panics.
+struct HealingGuard(Arc<AtomicBool>);
+impl Drop for HealingGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+struct PlayingGuard<'a>(&'a Mutex<Option<String>>);
+impl Drop for PlayingGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = None;
+    }
+}
+
 /// Rotates greeting templates so consecutive opens don't repeat the same line.
 static GREET_ROTATION: AtomicUsize = AtomicUsize::new(0);
 
@@ -271,6 +286,9 @@ pub struct TtsQueue {
     /// which app is frontmost). Published by the engine poll thread each tick. Init false =
     /// the shipped default (keep speaking); the first poll tick applies the live config.
     pause_in_background: AtomicBool,
+    /// Last config published by the engine reload path. Playback reads this in memory
+    /// instead of reparsing config.toml for every queued item.
+    config: Mutex<VoiceConfig>,
     /// AUTO voice assignments from the preferred-voices pool, keyed by Claude session id.
     /// Filled lazily — the first reply from a new session claims the next untaken pool
     /// voice, so each terminal speaks with a different voice. In-memory; cleared on engine
@@ -290,7 +308,6 @@ pub struct TtsQueue {
     /// prune that window's queued items, leaving another window's playback alone.
     playing_session: Mutex<Option<String>>,
     tts: Arc<TtsManager>,
-    paths: Paths,
     /// The shared status-push gate: a `tts_active` transition bumps it so a blocked
     /// `WaitModelStatus` sees playback start/stop immediately (the flag drives the
     /// menu-bar TTS dot in `model_status`). Routed through [`set_tts_active`].
@@ -318,6 +335,7 @@ impl TtsQueue {
         gate: Arc<StatusGate>,
         mic: ds_platform::MicState,
     ) -> Arc<Self> {
+        let config = VoiceConfig::load(&paths);
         let q = Arc::new(Self {
             items: Mutex::new(VecDeque::new()),
             cv: Condvar::new(),
@@ -328,21 +346,23 @@ impl TtsQueue {
             terminal_front: AtomicBool::new(true),
             terminal_seen: AtomicBool::new(false),
             pause_in_background: AtomicBool::new(false),
+            config: Mutex::new(config),
             pool_assignments: Mutex::new(HashMap::new()),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing_session: Mutex::new(None),
             tts,
-            paths,
             gate,
             mic,
             healing: Arc::new(AtomicBool::new(false)),
         });
         let worker = q.clone();
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("ds-ttsq".into())
             .spawn(move || worker.run())
-            .ok();
+        {
+            log::error!(target: "engine", "failed to spawn TTS queue worker: {e}");
+        }
         q
     }
 
@@ -357,6 +377,7 @@ impl TtsQueue {
     #[cfg(test)]
     pub(crate) fn test_stub() -> Arc<Self> {
         let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
         let tts = Arc::new(TtsManager::new(
             dir.path().join("ds-test-nonexistent-helper"),
             Arc::new(crate::stats::TtsStats::new()),
@@ -378,12 +399,12 @@ impl TtsQueue {
             terminal_front: AtomicBool::new(true),
             terminal_seen: AtomicBool::new(false),
             pause_in_background: AtomicBool::new(false),
+            config: Mutex::new(VoiceConfig::load(&paths)),
             pool_assignments: Mutex::new(HashMap::new()),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing_session: Mutex::new(None),
             tts,
-            paths: Paths::rooted_at(dir.path()),
             gate: StatusGate::new(),
             mic,
             healing: Arc::new(AtomicBool::new(false)),
@@ -496,8 +517,7 @@ impl TtsQueue {
         // that is NOT the one currently playing — hence the gate. (The submit-drop uses
         // [`cancel_for_submit`](Self::cancel_for_submit)'s `current` branch, which
         // cancels unconditionally.)
-        let cancel_current = self.tts_active.load(Ordering::SeqCst)
-            && *self.playing_session.lock().unwrap() == session;
+        let cancel_current = *self.playing_session.lock().unwrap() == session;
         if cancel_current {
             // Per-window barge: fade the in-flight item out (short window) so a clear-on-
             // submit / window close / newest-reply preempt tapers off instead of clicking.
@@ -693,15 +713,26 @@ impl TtsQueue {
         self.pause_in_background.store(pause, Ordering::SeqCst);
     }
 
+    pub(crate) fn set_config(&self, config: VoiceConfig) {
+        *self.config.lock().unwrap() = config;
+    }
+
     /// Mic freed via a genuine Caps/PTT gesture (`engine.rs`'s `toggle_dictation`
     /// ResumeVoice arm and `stop_recording`, UNCHANGED call sites): unconditionally lift
     /// the pause regardless of cause — this IS the matching counterpart of whichever
     /// gesture paused it. No-op when not paused.
     pub fn resume(&self) {
-        let mut st = self.paused.lock().unwrap();
-        if st.paused {
-            *st = PausedState::default();
-            drop(st);
+        let notify = {
+            let mut st = self.paused.lock().unwrap();
+            if st.paused {
+                *st = PausedState::default();
+                true
+            } else {
+                false
+            }
+        };
+        if notify {
+            let _items = self.items.lock().unwrap();
             self.cv.notify_one();
         }
     }
@@ -713,10 +744,17 @@ impl TtsQueue {
     /// guard above is the round-4 half that makes it actually safe, by ensuring the tag
     /// can never have been wrongly stomped in the first place.
     pub fn resume_if_barge_speculative(&self) {
-        let mut st = self.paused.lock().unwrap();
-        if st.cause == Some(PauseCause::BargeSpeculative) {
-            *st = PausedState::default();
-            drop(st);
+        let notify = {
+            let mut st = self.paused.lock().unwrap();
+            if st.cause == Some(PauseCause::BargeSpeculative) {
+                *st = PausedState::default();
+                true
+            } else {
+                false
+            }
+        };
+        if notify {
+            let _items = self.items.lock().unwrap();
             self.cv.notify_one();
         }
     }
@@ -770,8 +808,10 @@ impl TtsQueue {
     fn record_cancel_kind(&self, gen0: u64, requeue: bool) {
         let mut m = self.cancel_kind.lock().unwrap();
         m.insert(gen0, requeue);
-        if m.len() > 32 {
-            m.clear();
+        if m.len() > 32
+            && let Some(oldest) = m.keys().copied().min()
+        {
+            m.remove(&oldest);
         }
     }
 
@@ -808,8 +848,8 @@ impl TtsQueue {
         let tts = self.tts.clone();
         let healing = self.healing.clone();
         std::thread::spawn(move || {
+            let _guard = HealingGuard(healing);
             tts.restart_if_crashed();
-            healing.store(false, Ordering::SeqCst);
         });
     }
 
@@ -867,7 +907,7 @@ impl TtsQueue {
     /// [`resolve_engine_voice`](Self::resolve_engine_voice), so the per-terminal assignment is
     /// locked in at open rather than on first reply.
     pub fn greet_session(&self, session: Option<String>) {
-        let cfg = VoiceConfig::load(&self.paths);
+        let cfg = self.config.lock().unwrap().clone();
         if !cfg.greet_on_open {
             return;
         }
@@ -917,6 +957,8 @@ impl TtsQueue {
                 }
             };
             let gen0 = self.generation.load(Ordering::SeqCst);
+            *self.playing_session.lock().unwrap() = item.session.clone();
+            let _playing = PlayingGuard(&self.playing_session);
 
             // HOLD this item (any kind) while we must stay silent — resume when the
             // gate clears, dropping nothing. Two independent "hold, don't drop" gates:
@@ -941,7 +983,7 @@ impl TtsQueue {
                 continue;
             }
 
-            let cfg = VoiceConfig::load(&self.paths);
+            let cfg = self.config.lock().unwrap().clone();
             // Engine + base voice come from config via the SAME shared helper the greeting
             // uses — System reads `tts_system_voice`; Kokoro claims this terminal's pool voice
             // (the global/empty session and an empty pool fall back to `current_voice()`). Off /
@@ -981,9 +1023,6 @@ impl TtsQueue {
             }
 
             self.set_tts_active(true);
-            // Publish whose item is on air so a per-window `clear_session` can tell
-            // its own playback from another terminal's. Mirrors `tts_active`.
-            *self.playing_session.lock().unwrap() = item.session.clone();
             // Speak the whole block in ONE call (the warm child pipelines synth with
             // playback gaplessly) — uniformly for NARRATION and REPLY. If a record-barge
             // pause (generation bump) interrupts playback mid-way, re-enqueue the item so
@@ -995,7 +1034,6 @@ impl TtsQueue {
                 self.requeue_if_resuming(item, gen0);
             }
             self.set_tts_active(false);
-            *self.playing_session.lock().unwrap() = None;
         }
     }
 
@@ -1003,7 +1041,7 @@ impl TtsQueue {
     /// session override) and `voice`. `None` = TTS off — never speak (defensive; items
     /// shouldn't be enqueued when off).
     fn speak_one(&self, engine: Option<ds_config::TtsEngine>, text: &str, voice: &str, rate: f32) {
-        let _ = match engine {
+        let result = match engine {
             None => return,
             Some(ds_config::TtsEngine::System) => self.tts.speak_system(text, voice, rate),
             Some(ds_config::TtsEngine::Kokoro) => {
@@ -1011,6 +1049,9 @@ impl TtsQueue {
                 self.tts.speak(text, voice, rate)
             }
         };
+        if let Err(e) = result {
+            log::warn!(target: "ttsq", "speak_one failed: {e}");
+        }
     }
 
     /// On a cancel: if the SPECIFIC cancellation that interrupted THIS item (recorded
@@ -1470,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn record_cancel_kind_resets_once_the_32_entry_bound_is_crossed() {
+    fn record_cancel_kind_evicts_only_the_oldest_once_the_bound_is_crossed() {
         // 32 distinct generations fit comfortably under the defensive bound…
         let q = mk_queue();
         for gen0 in 0..32u64 {
@@ -1481,15 +1522,12 @@ mod tests {
             32,
             "32 distinct entries fit under the bound"
         );
-        // …but the 33rd distinct key crosses `len() > 32`, clearing the WHOLE map (a burst of
-        // cancellations nothing ever claims must not grow forever) — including the entry that
-        // just triggered the clear.
+        // …but the 33rd distinct key evicts only the oldest intent.
         q.record_cancel_kind(32, true);
-        assert_eq!(
-            q.cancel_kind.lock().unwrap().len(),
-            0,
-            "crossing the bound clears the whole map, including the triggering entry"
-        );
+        let kinds = q.cancel_kind.lock().unwrap();
+        assert_eq!(kinds.len(), 32);
+        assert!(!kinds.contains_key(&0));
+        assert_eq!(kinds.get(&32), Some(&true));
     }
 
     #[test]

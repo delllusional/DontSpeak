@@ -96,6 +96,7 @@ impl Stt for HelperStt {
         }
         let tts = self.tts.clone();
         let paste = self.paste.clone();
+        let epoch = self.epoch;
         // Fresh per session — see the field doc on `stop_requested`.
         let stop_requested = Arc::new(AtomicBool::new(false));
         self.stop_requested = stop_requested.clone();
@@ -104,7 +105,9 @@ impl Stt for HelperStt {
         // panel shows the running transcript live.
         self.handle = Some(std::thread::spawn(move || {
             tts.listen_cancellable(&stop_requested, &mut |partial| {
-                if let Ok(mut p) = paste.lock() {
+                if let Ok(mut p) = paste.lock()
+                    && p.epoch == epoch
+                {
                     p.partial = partial.to_string();
                 }
             })

@@ -10,6 +10,8 @@ use crate::status::{EngineShared, model_status_json};
 use crate::stt_test::TestSession;
 use crate::ttsq::TtsQueue;
 
+const MAX_SPEAK_BYTES: usize = 10 * 1024;
+
 /// Log one CLIENT-ORIGINATED request at INFO, attributed to the client that sent it — the
 /// activity-log line then ends in ` client=<token>` (`client=dontspeak` renders nothing; a
 /// client-originated request never carries that value in practice).
@@ -142,6 +144,7 @@ pub(crate) fn spawn_ipc_server(
                 ),
             );
         };
+        let capture_busy = Arc::new(AtomicBool::new(false));
         let handler = move |req: ds_ipc::Request, emit: &mut dyn FnMut(&ds_ipc::Response)| {
             match req {
                 ds_ipc::Request::Ping => emit(&ds_ipc::Response::Pong),
@@ -228,8 +231,14 @@ pub(crate) fn spawn_ipc_server(
                             text.chars().count()
                         ),
                     );
-                    ttsq.enqueue(text, voice, rate, session);
-                    emit(&ds_ipc::Response::Done);
+                    if text.len() > MAX_SPEAK_BYTES {
+                        emit(&ds_ipc::Response::error(format!(
+                            "speak: text exceeds the {MAX_SPEAK_BYTES}-byte limit"
+                        )));
+                    } else {
+                        ttsq.enqueue(text, voice, rate, session);
+                        emit(&ds_ipc::Response::Done);
+                    }
                 }
                 ds_ipc::Request::SpeakNarration {
                     text,
@@ -242,8 +251,14 @@ pub(crate) fn spawn_ipc_server(
                     // Deliberately NOT logged: this fires once per blockquote and would spam
                     // the activity log. It still CARRIES its `source` on the wire (a required
                     // field), so nothing is lost — we simply choose not to write a line.
-                    ttsq.enqueue(text, None, None, session);
-                    emit(&ds_ipc::Response::Done);
+                    if text.len() > MAX_SPEAK_BYTES {
+                        emit(&ds_ipc::Response::error(format!(
+                            "speak narration: text exceeds the {MAX_SPEAK_BYTES}-byte limit"
+                        )));
+                    } else {
+                        ttsq.enqueue(text, None, None, session);
+                        emit(&ds_ipc::Response::Done);
+                    }
                 }
                 ds_ipc::Request::SetMuted { on } => {
                     // Global mute toggle (tray checkbox). Silences playback without stopping it.
@@ -360,9 +375,13 @@ pub(crate) fn spawn_ipc_server(
                     // connection for ~`seconds`, then returns the segments (labelled with
                     // enrolled names where a cluster matches a stored voiceprint).
                     let ttsq = ttsq.clone();
-                    match run_bounded_capture(&shared.stt_active, "diarize", seconds, move |secs| {
-                        ttsq.diarize(secs)
-                    }) {
+                    match run_bounded_capture(
+                        &shared.stt_active,
+                        &capture_busy,
+                        "diarize",
+                        seconds,
+                        move |secs| ttsq.diarize(secs),
+                    ) {
                         Ok(json) => match diarize_named_segments(&json, &paths) {
                             Ok(segments) => emit(&ds_ipc::Response::Diarization { segments }),
                             Err(e) => emit(&ds_ipc::Response::error(format!("diarize: {e}"))),
@@ -379,6 +398,7 @@ pub(crate) fn spawn_ipc_server(
                         let ttsq = ttsq.clone();
                         match run_bounded_capture(
                             &shared.stt_active,
+                            &capture_busy,
                             "enroll",
                             seconds,
                             move |secs| ttsq.enroll(secs),
@@ -456,6 +476,7 @@ fn call_with_timeout<T: Send + 'static>(
 /// factored out. `f` receives the CLAMPED seconds, never the raw request value.
 fn run_bounded_capture<T: Send + 'static>(
     stt_active: &AtomicBool,
+    capture_busy: &AtomicBool,
     op_label: &str,
     seconds: u64,
     f: impl FnOnce(u64) -> std::io::Result<T> + Send + 'static,
@@ -469,6 +490,21 @@ fn run_bounded_capture<T: Send + 'static>(
             "{op_label}: dictation is active; try again after it ends"
         ));
     }
+    if capture_busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(format!(
+            "{op_label}: another diarize or enroll capture is already active"
+        ));
+    }
+    struct CaptureGuard<'a>(&'a AtomicBool);
+    impl Drop for CaptureGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = CaptureGuard(capture_busy);
     let secs = seconds.clamp(1, 60);
     // Bounded wait: `TtsManager::diarize`/`enroll` block on a condvar with no timeout of
     // their own, so a wedged/silent helper would otherwise hang THIS connection forever.
@@ -562,7 +598,9 @@ mod tests {
     #[test]
     fn run_bounded_capture_refuses_while_dictation_is_active() {
         let busy = AtomicBool::new(true);
-        let result: Result<u32, String> = run_bounded_capture(&busy, "diarize", 5, |_secs| Ok(42));
+        let capture_busy = AtomicBool::new(false);
+        let result: Result<u32, String> =
+            run_bounded_capture(&busy, &capture_busy, "diarize", 5, |_secs| Ok(42));
         assert_eq!(
             result,
             Err("diarize: dictation is active; try again after it ends".to_string())
@@ -572,11 +610,12 @@ mod tests {
     #[test]
     fn run_bounded_capture_clamps_seconds_to_1_through_60() {
         let idle = AtomicBool::new(false);
+        let capture_busy = AtomicBool::new(false);
 
         let seen = Arc::new(Mutex::new(0u64));
         let seen2 = seen.clone();
         assert_eq!(
-            run_bounded_capture(&idle, "enroll", 999, move |secs| {
+            run_bounded_capture(&idle, &capture_busy, "enroll", 999, move |secs| {
                 *seen2.lock().unwrap() = secs;
                 Ok(())
             }),
@@ -591,7 +630,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(0u64));
         let seen2 = seen.clone();
         assert_eq!(
-            run_bounded_capture(&idle, "enroll", 0, move |secs| {
+            run_bounded_capture(&idle, &capture_busy, "enroll", 0, move |secs| {
                 *seen2.lock().unwrap() = secs;
                 Ok(())
             }),
@@ -607,9 +646,11 @@ mod tests {
     #[test]
     fn run_bounded_capture_propagates_the_inner_error_with_the_op_label() {
         let idle = AtomicBool::new(false);
-        let result: Result<(), String> = run_bounded_capture(&idle, "diarize", 5, |_secs| {
-            Err(std::io::Error::other("boom"))
-        });
+        let capture_busy = AtomicBool::new(false);
+        let result: Result<(), String> =
+            run_bounded_capture(&idle, &capture_busy, "diarize", 5, |_secs| {
+                Err(std::io::Error::other("boom"))
+            });
         assert_eq!(result, Err("diarize: boom".to_string()));
     }
 

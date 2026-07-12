@@ -76,14 +76,14 @@ impl ChildSlot {
             cell.child = Some(child);
             cell.generation += 1;
         }
-        self.expected_eof.store(false, Ordering::Relaxed);
+        self.expected_eof.store(false, Ordering::Release);
     }
 
     /// Mark the teardown that is about to happen DELIBERATE, so the reader doesn't
     /// report the resulting EOF as a crash. Call FIRST on a teardown path — before
     /// the stdin drop that can already make the child exit.
     pub(crate) fn begin_deliberate_stop(&self) {
-        self.expected_eof.store(true, Ordering::Relaxed);
+        self.expected_eof.store(true, Ordering::Release);
     }
 
     /// Take the child out of the slot for the caller to kill/wait/log — OUTSIDE any
@@ -92,7 +92,7 @@ impl ChildSlot {
     /// both teardown paths already ran [`begin_deliberate_stop`](Self::begin_deliberate_stop)),
     /// so a child can never leave the slot without its EOF being marked deliberate.
     pub(crate) fn reap(&self) -> Option<Child> {
-        self.expected_eof.store(true, Ordering::Relaxed);
+        self.expected_eof.store(true, Ordering::Release);
         self.cell.lock().unwrap().child.take()
     }
 
@@ -130,7 +130,7 @@ impl ChildSlot {
     /// the reader's EOF classification must never block behind a teardown path
     /// that is mid `kill()`/`wait()`.
     pub(crate) fn eof_was_expected(&self) -> bool {
-        self.expected_eof.load(Ordering::Relaxed)
+        self.expected_eof.load(Ordering::Acquire)
     }
 
     /// Peek the child's exit status if it has already exited (`None` when the slot
@@ -144,6 +144,17 @@ impl ChildSlot {
             .child
             .as_mut()
             .and_then(|c| c.try_wait().ok().flatten())
+    }
+}
+
+impl Drop for ChildSlot {
+    fn drop(&mut self) {
+        self.expected_eof.store(true, Ordering::Release);
+        let cell = self.cell.get_mut().unwrap_or_else(|e| e.into_inner());
+        if let Some(mut child) = cell.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
