@@ -72,7 +72,7 @@ native report is a directory of linked pages, so it can't be published as-is. Fo
 flatten it with the bundled script, then publish via the Artifact tool:
 
 ```bash
-node .claude/skills/generate-coverage/scripts/merge-crate-coverage.js \
+node scripts/merge-crate-coverage.js \
   "$TEMP/ds-cov-html/html" <crate-name>[,<crate-name2>,...] <scratchpad>/coverage.html
 ```
 

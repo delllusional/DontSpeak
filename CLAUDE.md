@@ -26,14 +26,6 @@ there both resolve to):
   unrelated change, so it gets reviewed on its own before becoming a standing rule
   every future session reads.
 
-## Skills
-
-`build-linux` / `build-macos` / `build-windows` — build+install/package per OS.
-`prepush` — run CI gates locally before pushing. `make-release` — cut and monitor a
-tagged release. `verify-wiring` — re-check the client MCP/hook wiring registry
-(`ds-config/src/wire/registry.rs`) against current client versions. `generate-coverage`
-— produce an LLVM-based Rust test coverage report.
-
 ## Agentic flow for nontrivial changes
 
 For anything bigger than a one-file mechanical edit, use this pipeline rather than

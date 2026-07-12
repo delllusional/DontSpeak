@@ -1,7 +1,7 @@
 // Flattens a cargo-llvm-cov HTML report for one or more crates into a single
 // self-contained HTML file (inlined CSS/JS, per-file links rewritten to in-page
-// <details> anchors) so it can be published as a Claude Code Artifact, which
-// requires one file with no external references.
+// <details> anchors) so it can be published through any agent artifact surface
+// that requires one file with no external references.
 //
 // Usage: node merge-crate-coverage.js <htmlDir> <crateName>[,<crateName2>,...] <outFile>
 //   htmlDir    the --output-dir passed to `cargo llvm-cov report --html`

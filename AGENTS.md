@@ -23,29 +23,12 @@ Build prerequisites per OS: [CONTRIBUTING.md](CONTRIBUTING.md).
 - `web/` — the dontspeak.org site (deployed locally via the `deploy-site` skill, not
   CI — see git log for `site deploys run locally`).
 
-## Reading these instructions with a different coding agent
+## Agent and skill portability
 
-This file is the single source of truth for repo/product knowledge. Codex CLI,
-Gemini CLI, and Grok Build read it natively; Claude Code gets it via `CLAUDE.md`'s
-`@AGENTS.md` import and Qwen Code via `QWEN.md`'s identical import — both wrapper
-files are one line. Edit AGENTS.md itself, never the wrappers, and don't restate
-its content (the invariants below, especially) inside a tool-specific file — point
-at this file instead, so there's one place to update.
-
-Skills live under `.agents/skills/` — the location Codex CLI and Gemini CLI/Qwen Code
-scan natively — and are duplicated file-for-file under `.claude/skills/` so Claude
-Code and Grok Build find the same content. This is a plain copy, not a symlink
-(symlinks need `git config core.symlinks true` plus Developer Mode/admin rights to
-actually work on Windows, and silently degrade to placeholder text files without
-that). `.claude/skills/prepush`'s gate diffs the two trees and fails on drift — when
-you edit a skill, edit `.agents/skills/<name>/` and re-copy into `.claude/skills/<name>/`
-before committing.
-
-`.claude/agents/*.md` (the `ds-planner` / `ds-plan-reviewer` / `ds-implementer` /
-`ds-risk-auditor` / `ds-lander` pipeline, `.claude/workflows/plan-review-implement.js`)
-is a Claude-Code-specific subagent mechanism with no confirmed equivalent discovery
-path across tools yet. Those files reference this file's invariants rather than
-restating them — keep it that way when editing either side.
+[`docs/AGENT-SKILLS.md`](docs/AGENT-SKILLS.md) is the single source of truth for
+instruction wrappers, cross-CLI skill discovery, and skill mirror maintenance. Read
+it before changing any of those surfaces. Shared repository rules belong here;
+vendor-specific files must reference them rather than restate them.
 
 ## Concurrent sessions: work in a worktree
 
@@ -65,11 +48,10 @@ looking something up) don't need one.
   uncommitted edits as the only copy of the work.
 - Don't open a GitHub pull request unless the user asks for one. When the change is
   done (and, for risky changes, audited clear) and there's no PR: squash the branch
-  to a single commit if it has more than one (carry forward every distinct `Agent:`
-  trailer pair per § Commit attribution's squashing rule), rebase onto `main` if
-  it's moved, then fast-forward it in — no merge commit — and push to `origin` (the
-  public repo; never `wip`). A branch that does go through a PR merges normally
-  instead, whatever strategy that PR used.
+  to a single commit if it has more than one (preserving attribution per the canonical
+  policy), rebase onto `main` if it's moved, then fast-forward it in — no merge commit
+  — and push to `origin` (the public repo; never `wip`). A branch that does go through
+  a PR merges normally instead, whatever strategy that PR used.
 - After landing, `ExitWorktree` with `action: remove` so `.claude/worktrees/`
   doesn't accumulate stale directories.
 
@@ -92,29 +74,10 @@ lost.
 
 ## Commit attribution
 
-End every commit message with a single `Agent:` trailer instead of any built-in
-AI-attribution line — no `Co-Authored-By`, `Assisted-by`, `Generated-by`, or similar,
-and no other attribution beyond this one line. Format:
-
-```
-Agent: <model-id> <effort-level>
-```
-
-Use the full active model slug for every provider, not a family shorthand or generic
-product name. Examples: `Agent: claude-sonnet-5 xhigh` and
-`Agent: gpt-5.6-sol xhigh`. State your own model id and the current session's
-reasoning-effort level (Claude Code: read `$CLAUDE_EFFORT`) — don't omit the field if
-the effort level is unclear, give your best description instead.
-Claude Code's own automatic `Co-Authored-By` trailer is disabled repo-wide via
-`.claude/settings.json`'s `attribution` key so it can't duplicate this line; Codex
-and Qwen Code don't read that file, so if either tool's own auto-attribution can't be
-suppressed from here, drop it manually before finishing the commit message.
-
-**Squashing.** When combining several commits into one (interactive rebase,
-squash-merge), carry forward every distinct `Agent: <model-id> <effort-level>` pair
-from the commits being combined — one line per distinct pair, inherited into the
-result. Don't drop a contributor's line just because its commit wasn't the last one
-before the squash; don't repeat a pair that already appears.
+[`docs/COMMIT-ATTRIBUTION.md`](docs/COMMIT-ATTRIBUTION.md) is the single source of
+truth. Read it in full before creating or rewriting a commit and again before pushing.
+Do not copy its rules into agent- or tool-specific files; those workflows must point
+to the canonical policy so updates cannot drift.
 
 ## Commands
 
@@ -190,20 +153,11 @@ the three runtime pieces (CLI, engine, host app) need different rebuild routes.
 
 ## Gates — per-commit vs release (deliberate split, not an oversight)
 
-Per-commit CI (`.github/workflows/ci.yml`, Linux-only) runs **only** `cargo clippy
---workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked`
-— fast, on purpose. `cargo fmt --check`, `RUSTDOCFLAGS="-D warnings" cargo doc`, and
-`cargo deny check` (`rust/deny.toml` — advisories + bans + licenses + sources) are all
-**release-only** gates (the `hygiene` and `cargo-deny` jobs, gated on full-matrix), so
-formatting/doc drift and dependency-graph issues (a new advisory, a new license
-entering the graph) accumulate between releases by design rather than nagging every
-commit — fix them once before tagging (`.claude/skills/make-release` does this). A
-separate scheduled workflow (`.github/workflows/dependency-audit.yml`) re-runs `cargo
-deny check advisories` daily, since a newly-disclosed RustSec advisory against an
-unchanged `Cargo.lock` has no commit — and, now, no imminent release — to attach the
-check to. Use `.claude/skills/prepush` to run the exact per-commit gates locally before
-pushing (cargo-deny is no longer one of them — see the skill for the release-only
-caveat).
+`.github/workflows/ci.yml` is the source of truth. Use the `prepush` skill for the
+intentionally small per-commit gate and `make-release` for the wider release-only
+matrix and hygiene gates; don't silently move checks between those workflows. The
+scheduled dependency audit remains separate because advisories can appear without a
+repository change.
 
 ## Code Comments
 

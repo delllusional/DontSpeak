@@ -15,18 +15,18 @@ before tagging. swift-format is not enforced anywhere.)
 
 ## Commit attribution gate (run first and again immediately before push)
 
-Read `AGENTS.md` § **Commit attribution** in full before creating or rewriting a
-commit. It is the single source of truth; this is a required pre-push gate, not a
-commit-style reminder.
+Read the canonical [commit-attribution policy](../../../docs/COMMIT-ATTRIBUTION.md)
+in full before creating or rewriting a commit. This is a required pre-push gate, not
+a commit-style reminder; the policy lives only in that shared file.
 
 After the final squash, rebase, cherry-pick, or amend, inspect every outgoing commit:
 ```bash
+node scripts/check-commit-attribution.mjs origin/main
 git log --format=full origin/main..HEAD
 ```
-Do not push unless every message follows that section exactly: the final trailer uses
-the full active model slug plus effort level, prohibited built-in attribution is absent,
-and a squash preserves every distinct inherited `Agent:` pair. Re-run this inspection
-after any operation that rewrites commit messages.
+The script enforces the mechanical trailer rules; compare the displayed model and
+effort values against the canonical policy as well. Do not push until every message
+conforms. Re-run both commands after any operation that rewrites commit messages.
 
 ## The two gates
 
@@ -47,7 +47,7 @@ If both pass, push. If either fails, fix it and re-run.
 ## cargo-deny (release-only, not a per-commit gate)
 
 `cargo deny check` (advisories + bans + licenses + sources against `deny.toml` /
-`Cargo.lock`) only runs in the release pipeline now — see `.claude/skills/make-release`.
+`Cargo.lock`) only runs in the release pipeline now — see the `make-release` skill.
 It's still worth running here if you touched `Cargo.toml`/`Cargo.lock` or `deny.toml`,
 so a new advisory or license doesn't surface for the first time at tag time:
 ```bash
@@ -60,15 +60,13 @@ widening — see `rust/deny.toml`'s existing entries for the expected rigor.
 
 ## Skill duplication check
 
-`.agents/skills/` and `.claude/skills/` hold byte-identical copies of every skill
-(see AGENTS.md § "Reading these instructions with a different coding agent") — no
-symlink, so nothing keeps them in sync automatically. Run before every push:
+The canonical and vendor-discovery skill trees must be byte-identical; see
+[`docs/AGENT-SKILLS.md`](../../../docs/AGENT-SKILLS.md). Run before every push:
 ```bash
-diff -rq .agents/skills .claude/skills
+node scripts/sync-agent-skills.mjs --check
 ```
-Non-empty output means a skill was edited in one tree but not re-copied into the
-other — fix by re-copying the edited skill's directory over its counterpart, then
-re-run the diff clean before continuing.
+Drift means the canonical tree changed without regenerating every mirror. Run the
+script without `--check`, review the generated diff, then re-run the check.
 
 ## Push
 
@@ -91,8 +89,8 @@ re-run the diff clean before continuing.
 ## One-liner
 
 ```bash
-git log --format=full origin/main..HEAD
+node scripts/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
 cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings && cargo test --workspace --locked && cargo deny check
-cd .. && diff -rq .agents/skills .claude/skills
+cd .. && node scripts/sync-agent-skills.mjs --check
 ```
 Green gates plus a conforming attribution inspection ⇒ safe to push.
