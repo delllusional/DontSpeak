@@ -1045,8 +1045,11 @@ pub(crate) fn se_tts_engine_pref<S: serde::Serializer>(
 ) -> Result<S::Ok, S::Error> {
     match v {
         Some(rungs) if rungs.is_empty() => s.collect_seq(std::iter::empty::<&str>()),
-        Some(rungs) => s.serialize_str(rungs[0].as_str()),
-        None => unreachable!("skip_serializing_if filters None"),
+        Some(rungs) => {
+            debug_assert_eq!(rungs.len(), 1, "engine preference must have one rung");
+            s.serialize_str(rungs[0].as_str())
+        }
+        None => s.serialize_none(),
     }
 }
 
@@ -1057,8 +1060,11 @@ pub(crate) fn se_stt_engine_pref<S: serde::Serializer>(
 ) -> Result<S::Ok, S::Error> {
     match v {
         Some(rungs) if rungs.is_empty() => s.collect_seq(std::iter::empty::<&str>()),
-        Some(rungs) => s.serialize_str(rungs[0].as_str()),
-        None => unreachable!("skip_serializing_if filters None"),
+        Some(rungs) => {
+            debug_assert_eq!(rungs.len(), 1, "engine preference must have one rung");
+            s.serialize_str(rungs[0].as_str())
+        }
+        None => s.serialize_none(),
     }
 }
 

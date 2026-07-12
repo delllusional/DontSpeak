@@ -42,7 +42,8 @@ impl SpeakerStore {
 
     /// Atomically persist the store to `path` (temp file in the same dir + rename).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let value = serde_json::to_value(self).map_err(std::io::Error::other)?;
+        let value = serde_json::to_value(self)
+            .map_err(|e| std::io::Error::other(format!("serialize speakers: {e}")))?;
         crate::atomic_write_json(path, &value)
     }
 

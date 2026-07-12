@@ -491,9 +491,7 @@ impl<'de> serde::Deserialize<'de> for CaptureGain {
                     as f32;
                 Ok(CaptureGain::Manual(g.clamp(0.5, 20.0)))
             }
-            _ => Err(Error::custom(
-                r#"capture_gain must be "auto" or a number 0.5–20.0"#,
-            )),
+            _ => Ok(CaptureGain::Auto),
         }
     }
 }
@@ -694,6 +692,12 @@ impl VoiceConfig {
         // value would otherwise defer the post-paste Enter indefinitely. Same 0..5000
         // range as the MCP `set_config` path (`ds-config::set_config`).
         self.paste_submit_delay_ms = self.paste_submit_delay_ms.clamp(0, 5000);
+        // 0 is a documented sentinel (`normalize_long_press`: "use the 600ms default"),
+        // not an out-of-range value — clamping it up to 100 here would consume the
+        // sentinel before that function ever sees it. Leave it untouched.
+        if self.long_press_ms != 0 {
+            self.long_press_ms = self.long_press_ms.clamp(100, 5000);
+        }
     }
 
     /// True when the active TTS is the apple-native (FluidAudio Core ML / ANE) Kokoro. It
@@ -816,7 +820,10 @@ pub(crate) mod tests {
             serde_json::from_str::<CaptureGain>("99").unwrap(),
             CaptureGain::Manual(20.0) // clamped
         );
-        assert!(serde_json::from_str::<CaptureGain>("\"loud\"").is_err());
+        assert_eq!(
+            serde_json::from_str::<CaptureGain>("\"loud\"").unwrap(),
+            CaptureGain::Auto
+        );
         // Round-trips: Auto → "auto", Manual → number.
         assert_eq!(
             serde_json::to_string(&CaptureGain::Auto).unwrap(),

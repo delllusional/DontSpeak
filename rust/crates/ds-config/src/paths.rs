@@ -222,7 +222,14 @@ pub fn model_dir() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("DONTSPEAK_MODEL_DIR")
         && !d.is_empty()
     {
-        return Some(PathBuf::from(d));
+        let path = PathBuf::from(d);
+        if path.is_absolute() && path.is_dir() {
+            return Some(path);
+        }
+        eprintln!(
+            "dontspeak: ignoring DONTSPEAK_MODEL_DIR={} because it is not an existing absolute directory",
+            path.display()
+        );
     }
     Some(BaseDirs::new()?.cache_dir().join(APP_DIR).join("models"))
 }

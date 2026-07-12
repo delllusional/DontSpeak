@@ -110,7 +110,7 @@ pub fn atomic_write_str(path: &std::path::Path, contents: &str) -> io::Result<()
     Ok(())
 }
 
-/// Copy `path` to a timestamped sibling `…<suffix>.bak.<epoch-secs>` BEFORE an
+/// Copy `path` to a timestamped sibling `…<suffix>.bak.<epoch-nanos>` BEFORE an
 /// overwrite, returning the backup path on success. CORR-3: the backup is the only
 /// recovery if the about-to-happen write corrupts the user's own file (settings.json is
 /// also Claude Code's), so its failure must NOT be
@@ -127,11 +127,11 @@ pub fn backup_before_write(
     if !path.exists() {
         return Ok(None);
     }
-    let secs = std::time::SystemTime::now()
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let bak = path.with_extension(format!("{suffix}.bak.{secs}"));
+    let bak = path.with_extension(format!("{suffix}.bak.{nanos}"));
     std::fs::copy(path, &bak)?;
     Ok(Some(bak))
 }
