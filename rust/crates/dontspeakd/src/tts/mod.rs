@@ -1446,12 +1446,18 @@ impl TtsManager {
         }
     }
 
-    /// Play a one-shot EARCON (`path` = an absolute sound file) on the warm child's audio
-    /// output — fire-and-forget, OUTSIDE the TTS queue, so a turn-end ding is mixed over any
-    /// in-flight speech rather than queued behind it. No-op when the child isn't running.
-    /// The engine has already gated on `earcon_enabled` + mute and resolved the path.
-    pub fn cue(&self, path: &str) {
-        let _ = self.write_request(&serde_json::json!({ "op": "cue", "text": path }).to_string());
+    /// Play a one-shot EARCON on the warm child's audio output — fire-and-forget, OUTSIDE
+    /// the TTS queue, so a turn-end ding is mixed over any in-flight speech rather than
+    /// queued behind it. No-op when the child isn't running or the path escapes the platform
+    /// sound directories. Revalidating here keeps the helper protocol safe if another caller
+    /// is added without going through `resolve_cue`.
+    pub fn cue(&self, path: &std::path::Path) {
+        let Some(path) = ds_earcon::canonical_sound_path(path) else {
+            return;
+        };
+        let _ = self.write_request(
+            &serde_json::json!({ "op": "cue", "text": path.to_string_lossy() }).to_string(),
+        );
     }
 
     /// End an in-flight `listen` WITHOUT cancelling a concurrent `speak` (the

@@ -4,7 +4,8 @@
 //! rodio output; nothing here opens audio.
 //!
 //! The configured sound IS each cue's on/off — there is no separate enable flag. The value is
-//! either a bundled system-sound NAME or an absolute PATH; empty = this cue is OFF. The reply
+//! either a bundled system-sound NAME or a path within a platform sound directory; empty =
+//! this cue is OFF. The reply
 //! ding defaults to the OS's bundled chime by name — `"ding"` on Windows, `"Tink"` on macOS
 //! (the historical chime), `"message"` on Linux — so it rings out of the box on every OS. A
 //! bare name resolves THROUGH [`system_sounds`]: matched (case-insensitively) to the real file
@@ -14,7 +15,7 @@
 //! the OS's bundled sounds by INTROSPECTION (the per-OS sound dir + extension is the only
 //! constant) and also feeds a UI sound picker.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The distinct eyes-free cues. `ReplyDone` = Claude finished its turn (wired to the Stop
 /// hook); `NeedsInput` = Claude is waiting on you — a permission prompt or idle (wired to the
@@ -89,6 +90,24 @@ fn sound_dirs() -> Vec<PathBuf> {
     }
 }
 
+/// Canonicalize a cue path and keep it within one of the platform sound directories.
+/// This is the trust boundary before a path reaches the warm helper's file-opening protocol.
+pub fn canonical_sound_path(path: &Path) -> Option<PathBuf> {
+    canonical_sound_path_in(path, &sound_dirs())
+}
+
+fn canonical_sound_path_in(path: &Path, sound_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let path = path.canonicalize().ok()?;
+    if !path.is_file() {
+        return None;
+    }
+    sound_dirs
+        .iter()
+        .filter_map(|dir| dir.canonicalize().ok())
+        .any(|dir| path.starts_with(dir))
+        .then_some(path)
+}
+
 /// The file extension the platform's bundled system sounds carry, so the dir scan finds only
 /// playable cues: aiff (macOS), wav (Windows), oga/ogg (Linux). The helper decodes all three
 /// via rodio's symphonia decoders.
@@ -158,10 +177,9 @@ pub fn system_sounds() -> Vec<SystemSound> {
 
 /// Resolve an `event` to a concrete sound file to play, or `None` (callers fail-quiet → no
 /// ding). The configured sound IS the on/off: empty ⇒ `None` (off); an absolute path ⇒ used
-/// as-is (must exist); a bare NAME (the default is `"ding"`) ⇒ matched case-insensitively
-/// against the enumerated system sounds. Anything that doesn't resolve to an existing file is
-/// `None` = effectively off (e.g. `"ding"` resolves on Windows but not on macOS/Linux, which
-/// have no `ding.*` bundled sound — set an OS-appropriate name or a path there).
+/// only when its canonical target is inside a platform sound directory; a bare NAME (the
+/// default is `"ding"`) ⇒ matched case-insensitively against the enumerated system sounds.
+/// Anything that doesn't resolve to an allowed existing file is `None` = effectively off.
 pub fn resolve_cue(
     reply_sound: &str,
     needs_input_sound: &str,
@@ -173,13 +191,13 @@ pub fn resolve_cue(
     }
     let p = PathBuf::from(sound);
     if p.is_absolute() {
-        return p.is_file().then_some(p);
+        return canonical_sound_path(&p);
     }
     // A bare name → the matching bundled sound (case-insensitive), else nothing (off).
     system_sounds()
         .into_iter()
         .find(|s| s.name.eq_ignore_ascii_case(sound))
-        .map(|s| s.path)
+        .and_then(|s| canonical_sound_path(&s.path))
 }
 
 #[cfg(test)]
@@ -227,7 +245,7 @@ mod tests {
         let want = system_sounds()
             .into_iter()
             .find(|s| s.name.eq_ignore_ascii_case(expected_name))
-            .map(|s| s.path);
+            .and_then(|s| canonical_sound_path(&s.path));
         assert_eq!(
             resolve_cue(
                 &cfg.earcon_reply_sound,
@@ -249,27 +267,32 @@ mod tests {
     }
 
     #[test]
-    fn absolute_sound_resolves_only_when_present() {
-        // An absolute-path sound is used verbatim when the file exists, and yields None
-        // (effectively off) when it doesn't — independent of any OS sounds being installed.
+    fn canonical_sound_path_stays_within_allowed_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let sounds = dir.path().join("sounds");
+        let sibling = dir.path().join("sounds-backup");
+        std::fs::create_dir_all(&sounds).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let allowed = sounds.join("ding.wav");
+        let outside = sibling.join("ding.wav");
+        std::fs::write(&allowed, b"RIFF....").unwrap();
+        std::fs::write(&outside, b"RIFF....").unwrap();
+
+        assert_eq!(
+            canonical_sound_path_in(&allowed, std::slice::from_ref(&sounds)),
+            allowed.canonicalize().ok()
+        );
+        assert_eq!(canonical_sound_path_in(&outside, &[sounds]), None);
+    }
+
+    #[test]
+    fn arbitrary_absolute_sound_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let snd = dir.path().join("ding.wav");
         std::fs::write(&snd, b"RIFF....").unwrap();
 
         assert_eq!(
-            resolve_cue(
-                &snd.to_string_lossy(),
-                &dir.path().join("missing.wav").to_string_lossy(),
-                EarconEvent::ReplyDone
-            ),
-            Some(snd.clone())
-        );
-        assert_eq!(
-            resolve_cue(
-                &snd.to_string_lossy(),
-                &dir.path().join("missing.wav").to_string_lossy(),
-                EarconEvent::NeedsInput
-            ),
+            resolve_cue(&snd.to_string_lossy(), "", EarconEvent::ReplyDone),
             None
         );
     }

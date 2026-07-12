@@ -79,10 +79,9 @@ pub const SET_CONFIG_INPUT_CLEARS: &str = "Which sessions a submit (typed + Ente
     untagged/global audio). Default [\"current\"]; [] = never.";
 pub const SET_CONFIG_PAUSE_BG: &str =
     "Pause speech while no terminal is frontmost; resume on focus. Default false.";
-pub const SET_CONFIG_EARCON_REPLY: &str =
-    "Reply-done chime: system-sound name or absolute path. Default: OS chime; empty = off.";
+pub const SET_CONFIG_EARCON_REPLY: &str = "Reply-done chime: system-sound name or path within an OS sound folder. Default: OS chime; empty = off.";
 pub const SET_CONFIG_EARCON_INPUT: &str =
-    "Needs-input cue: system-sound name or absolute path. Default off.";
+    "Needs-input cue: system-sound name or path within an OS sound folder. Default off.";
 pub const SET_CONFIG_CAPS: &str = "Enable the Caps Lock handler — tap-to-talk dictation plus \
     silence/cancel. Default on. With dictation off (stt_engine=\"off\"), Caps still silences the \
     voice.";

@@ -267,8 +267,8 @@ impl SetConfigArgs {
             changes.push(format!("pause_in_background={b}"));
         }
         if let Some(s) = earcon_reply_sound {
-            // The sound IS the on/off: empty turns the reply ding off; a bundled name or an
-            // absolute path turns it on. Resolution + fail-quiet are the engine's.
+            // The sound IS the on/off: empty turns the reply ding off; a bundled name or a path
+            // in a platform sound directory turns it on. Resolution + fail-quiet are the engine's.
             changes.push(format!("earcon_reply_sound={s}"));
             cfg.earcon_reply_sound = s;
         }

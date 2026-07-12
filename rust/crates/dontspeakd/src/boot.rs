@@ -625,7 +625,9 @@ pub fn engine_run(
     // §E.4: remove the engine pidfile ONLY if it still records OUR pid — same
     // don't-clobber-a-newer-instance discipline as ds-narrate::clear_self_pid
     // (a freshly relaunched engine may have already overwritten it).
-    if ds_config::read_engine_pid(&paths.engine_pid) == Some(std::process::id() as i32) {
+    if ds_config::read_engine_pid(&paths.engine_pid).map(|pid| pid as u32)
+        == Some(std::process::id())
+    {
         let _ = std::fs::remove_file(&paths.engine_pid);
     }
     // Tidy the RPC socket on clean exit (a stale file is harmless — serve()
@@ -633,15 +635,10 @@ pub fn engine_run(
     let _ = std::fs::remove_file(&paths.engine_sock);
 
     // Self-relaunch, requested above by the caps-HID-stuck check: spawn a fresh
-    // instance of the CURRENT executable and exit this process outright. Safe to
-    // exit hard here (skipping the host app's normal AppKit quit path) because
-    // EVERYTHING that path would have done — kill ds-helper, flush stats, clear the
-    // pidfile, remove the socket — has already run above, on this same thread, in
-    // the ordinary shutdown sequence every quit takes. `engine_run` normally
-    // returns `Ok(())` here instead of exiting so a startup/runtime failure on this
-    // in-process FFI host thread can't take the whole app down (see `EngineError`
-    // above) — a self-requested relaunch is the one case where taking the whole
-    // process down IS the point.
+    // instance of the CURRENT executable, then return through the normal host path.
+    // This keeps stack unwinding and every still-live local Drop implementation intact;
+    // the ordinary shutdown sequence above has already killed ds-helper, flushed stats,
+    // and removed the pidfile and socket.
     //
     // Deliberately NOT `dontspeak::engine_launch::launch_host()` (`open -g -b
     // app.dontspeak.org`): that helper is for "nothing is running yet, start the
@@ -667,25 +664,22 @@ pub fn engine_run(
         }
         let relaunched = std::env::current_exe()
             .and_then(|exe| std::process::Command::new(&exe).spawn().map(|_| ()));
-        match relaunched {
-            Ok(()) => std::process::exit(0),
-            Err(e) => {
-                // Every resource the normal quit path would have released is ALREADY
-                // gone at this point (ds-helper killed, socket/pidfile removed) — so
-                // this is not "stay up as a host," it's staying alive with nothing
-                // left running, on the theory that a visibly-dead process (no menu
-                // bar icon at all) is worse than a silent one a user can still find
-                // and manually relaunch. Expected to be unreachable in practice
-                // (current_exe/spawn failing on an already-running binary implies
-                // something like the executable vanishing from disk or the process
-                // table being exhausted).
-                log::info!(
-                    target: "engine",
-                    "relaunch failed ({e}) — NOT exiting; this instance has already released \
-                     its resources (no RPC, no caps monitor) and can't serve as a fallback \
-                     host, but exiting with nothing left to bring the app back is worse"
-                );
-            }
+        if let Err(e) = relaunched {
+            // Every resource the normal quit path would have released is ALREADY
+            // gone at this point (ds-helper killed, socket/pidfile removed) — so
+            // this is not "stay up as a host," it's staying alive with nothing
+            // left running, on the theory that a visibly-dead process (no menu
+            // bar icon at all) is worse than a silent one a user can still find
+            // and manually relaunch. Expected to be unreachable in practice
+            // (current_exe/spawn failing on an already-running binary implies
+            // something like the executable vanishing from disk or the process
+            // table being exhausted).
+            log::info!(
+                target: "engine",
+                "relaunch failed ({e}) — NOT exiting; this instance has already released \
+                 its resources (no RPC, no caps monitor) and can't serve as a fallback \
+                 host, but exiting with nothing left to bring the app back is worse"
+            );
         }
     }
     Ok(())

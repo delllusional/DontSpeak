@@ -353,7 +353,7 @@ pub(crate) fn spawn_ipc_server(
                                 ev,
                             )
                         {
-                            shared.tts.cue(&path.to_string_lossy());
+                            shared.tts.cue(&path);
                         }
                     }
                     emit(&ds_ipc::Response::Done);

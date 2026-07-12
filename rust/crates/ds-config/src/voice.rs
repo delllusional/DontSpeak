@@ -283,16 +283,18 @@ pub struct VoiceConfig {
 
     // ── Audible earcons: the reply "ding" + a needs-input cue (see `earcon` module) ──
     /// The sound for the reply-done "ding" — played when Claude finishes a reply (the Stop
-    /// hook). The sound IS the on/off: a bundled system-sound NAME or an ABSOLUTE PATH
-    /// (.aiff/.wav/.oga); EMPTY = off. Defaults to the OS's bundled chime — "ding" on Windows,
-    /// "Tink" on macOS, "message" on Linux — so it rings out of the box. A bare name resolves
-    /// against the OS's bundled sounds by introspection (the real file in the sounds folder, no
-    /// hardcoded path); an unresolvable sound is effectively off. Honors global mute.
+    /// hook). The sound IS the on/off: a bundled system-sound NAME or an ABSOLUTE PATH within
+    /// a platform sound directory (.aiff/.wav/.oga); EMPTY = off. Defaults to the OS's bundled
+    /// chime — "ding" on Windows, "Tink" on macOS, "message" on Linux — so it rings out of the
+    /// box. A bare name resolves against the OS's bundled sounds by introspection (the real file
+    /// in the sounds folder, no hardcoded path); an unresolvable sound is effectively off.
+    /// Honors global mute.
     #[serde(default = "default_earcon_reply")]
     pub earcon_reply_sound: String,
     /// The sound for the needs-input cue — played when Claude is waiting on you, a permission
     /// prompt or idle (the Notification hook). Same rule, but EMPTY by default (off, like the
-    /// historically-unwired earcon): set a bundled name or an absolute path to enable it.
+    /// historically-unwired earcon): set a bundled name or a path within a platform sound
+    /// directory to enable it.
     #[serde(default)]
     pub earcon_needs_input_sound: String,
 
