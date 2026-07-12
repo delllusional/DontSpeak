@@ -28,6 +28,10 @@ const FALLBACK_VOICE: &str = "af_heart";
 /// FluidAudio's Core ML Kokoro behind the C ABI. One per helper process.
 pub struct KokoroCoremlTts {
     lib: Library,
+    /// Set only after `smk_init` returns success — gates `Drop` so a `load()` that
+    /// fails partway through never calls `smk_shutdown` on a store that was never
+    /// (successfully) initialized.
+    initialized: bool,
 }
 
 impl KokoroCoremlTts {
@@ -38,7 +42,10 @@ impl KokoroCoremlTts {
         // Shared shim loader (also used by the Parakeet STT backend) — resolves
         // SMKOKORO_DYLIB_PATH + dlopens, so the two backends can't drift.
         let lib = ds_model::shim::open()?;
-        let me = KokoroCoremlTts { lib };
+        let mut me = KokoroCoremlTts {
+            lib,
+            initialized: false,
+        };
         // Pass our DontSpeak-controlled Core ML cache dir (not "" → FluidAudio's scattered
         // default) so the Kokoro model downloads under our cache folder; compute_units 0 →
         // default ANE routing.
@@ -57,6 +64,7 @@ impl KokoroCoremlTts {
         if rc != 0 {
             return Err(format!("smk_init failed (rc={rc})"));
         }
+        me.initialized = true;
         // Absorb Core ML's one-time graph specialization here (≈1 s) with a throwaway
         // synth, so the user's FIRST real utterance is warm (~11× RTF) instead of
         // paying the cold penalty (~2.5×). Errors are non-fatal — the real call retries.
@@ -142,6 +150,12 @@ impl KokoroCoremlTts {
 
 impl Drop for KokoroCoremlTts {
     fn drop(&mut self) {
+        // Gated on `initialized`: calling smk_shutdown after a failed/incomplete
+        // smk_init is UB, and `load()` returns this struct via `Err(...)` early-outs
+        // that still run Drop on the partially-built value.
+        if !self.initialized {
+            return;
+        }
         // SAFETY: shim shutdown is idempotent; called once as the helper drops it.
         unsafe {
             if let Ok(shutdown) = self.lib.get::<ShutdownFn>(b"smk_shutdown\0") {

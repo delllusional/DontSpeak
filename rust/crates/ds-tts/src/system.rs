@@ -384,8 +384,15 @@ mod windows_tests {
 
 #[cfg(target_os = "linux")]
 fn which(prog: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
     std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(prog).is_file()))
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                dir.join(prog)
+                    .metadata()
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            })
+        })
         .unwrap_or(false)
 }
 
