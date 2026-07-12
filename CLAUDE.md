@@ -31,7 +31,8 @@ there both resolve to):
 `build-linux` / `build-macos` / `build-windows` — build+install/package per OS.
 `prepush` — run CI gates locally before pushing. `make-release` — cut and monitor a
 tagged release. `verify-wiring` — re-check the client MCP/hook wiring registry
-(`ds-config/src/wire/registry.rs`) against current client versions.
+(`ds-config/src/wire/registry.rs`) against current client versions. `generate-coverage`
+— produce an LLVM-based Rust test coverage report.
 
 ## Agentic flow for nontrivial changes
 
@@ -55,8 +56,11 @@ is written, not after:
    dependency licensing, or the release/signing pipeline), run `ds-risk-auditor` on
    the implemented change before calling it done. Skip this step for ordinary changes
    — use `code-review` instead.
+5. **Land** — once implementation (and, if flagged, the audit) is clean, `ds-lander`
+   merges the worktree's branch into `main` and pushes to `origin`. It re-runs the
+   per-commit gates first and stops rather than resolving a conflict itself.
 
-A saved workflow encoding these four stages (with the risk gate) lives at
+A saved workflow encoding these five stages (with the risk gate) lives at
 `.claude/workflows/plan-review-implement.js` — invoke it by name via the Workflow
 tool when full automation is wanted; each stage also works fine invoked by hand via
 the Agent tool.
