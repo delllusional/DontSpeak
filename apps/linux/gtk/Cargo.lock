@@ -777,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "dontspeakd"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "ds-config",
  "ds-earcon",
@@ -806,14 +806,14 @@ dependencies = [
 
 [[package]]
 name = "ds-client"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ds-config"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "directories",
  "ds-client",
@@ -828,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "ds-core"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "dontspeakd",
  "ds-config",
@@ -844,14 +844,14 @@ dependencies = [
 
 [[package]]
 name = "ds-earcon"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "directories",
 ]
 
 [[package]]
 name = "ds-engines"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "ds-config",
  "ds-platform",
@@ -860,11 +860,11 @@ dependencies = [
 
 [[package]]
 name = "ds-helper-proto"
-version = "0.2.7"
+version = "0.2.8-dev"
 
 [[package]]
 name = "ds-i18n"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "rust-i18n",
  "serde_json",
@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "ds-ipc"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "ds-client",
  "serde",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "ds-linux-gtk"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "async-channel",
  "ds-core",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "ds-log"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "directories",
  "ds-client",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "ds-model"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "attohttpc",
  "ds-config",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "ds-narrate"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "ds-config",
  "serde",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "ds-platform"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "arboard",
  "core-graphics",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "ds-proc"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "nix 0.31.3",
  "tempfile",
@@ -966,14 +966,14 @@ dependencies = [
 
 [[package]]
 name = "ds-status"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ds-stt"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "cpal 0.18.1",
  "ds-config",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tools"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "ds-config",
  "serde",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tts"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "ds-config",
  "ds-model",
@@ -1018,14 +1018,14 @@ dependencies = [
 
 [[package]]
 name = "ds-voices"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "ds-config",
 ]
 
 [[package]]
 name = "ds-wire"
-version = "0.2.7"
+version = "0.2.8-dev"
 dependencies = [
  "ds-config",
  "ds-log",
