@@ -143,7 +143,7 @@ mod imp {
                     let _ = CloseHandle(h);
                     true
                 }
-                _ => false,
+                _ => GetLastError() == ERROR_ACCESS_DENIED,
             }
         }
     }

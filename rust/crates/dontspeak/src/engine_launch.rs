@@ -14,15 +14,20 @@ use crate::mcp::log;
 /// Detach a spawned host into its own process group so it survives this short-lived
 /// MCP shim exiting (and isn't killed by a Ctrl-C to our pgroup). Linux uses
 /// `process_group(0)`; the Windows equivalent (CREATE_NEW_PROCESS_GROUP/
-/// DETACHED_PROCESS) is still TODO — a plain spawn links and is correct enough for now.
+/// DETACHED_PROCESS). macOS launches via `open`, which detaches for us.
 /// macOS launches via `open`, which detaches for us, so it needs no `detach`.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn detach(cmd: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 }
-#[cfg(not(unix))]
-fn detach(_cmd: &mut std::process::Command) {}
+#[cfg(target_os = "windows")]
+fn detach(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+}
 
 /// Ensure the engine (RPC host) is up. The engine has NO headless mode — it only ever
 /// runs IN-PROCESS inside the platform's resident host app, so `ensure_engine` launches

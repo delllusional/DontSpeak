@@ -247,7 +247,7 @@ pub(crate) fn serve() -> ! {
             let loaded = if let Some(provider) = crate::listen::preload_streaming(&stt_provider) {
                 Ok(provider)
             } else {
-                let mut t = transcriber.lock().unwrap();
+                let mut t = transcriber.lock().unwrap_or_else(|e| e.into_inner());
                 t.preload().map(|()| t.provider())
             };
             match loaded {
@@ -423,7 +423,7 @@ pub(crate) fn serve() -> ! {
     // Full-duplex COEXIST: spawn the concurrent listen thread (drains the
     // echo-cancelled mic + transcribes while this thread renders TTS). `listen_sig`
     // is the reader→thread control (Some only in full-duplex).
-    let listen_sig: Option<Arc<(Mutex<ListenSig>, Condvar)>> = duplex.as_ref().map(|dx| {
+    let listen_sig: Option<Arc<(Mutex<ListenSig>, Condvar)>> = duplex.as_ref().and_then(|dx| {
         let sig = Arc::new((Mutex::new(ListenSig::default()), Condvar::new()));
         let capture = dx.capture_handle();
         let tr = transcriber.clone();
@@ -431,11 +431,18 @@ pub(crate) fn serve() -> ! {
         let stopped = listen_stopped_through.clone();
         let capturing = capturing_diarize.clone();
         let listening = full_duplex_listening.clone();
-        std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("ds-listen".into())
             .spawn(move || concurrent_listen_loop(capture, tr, sig2, stopped, capturing, listening))
-            .ok();
-        sig
+        {
+            Ok(_) => Some(sig),
+            Err(e) => {
+                eprintln!(
+                    "dontspeak-helper: could not spawn full-duplex listener ({e}); falling back to half-duplex"
+                );
+                None
+            }
+        }
     });
     // Full-duplex mutual exclusion between dictation (the concurrent listen thread
     // above, reading the VPIO capture handle) and the one-shot diarize/enroll capture
@@ -517,7 +524,11 @@ pub(crate) fn serve() -> ! {
                     // full-duplex mode there is no rodio player — drain the VPIO
                     // render ring via its barge flag instead.
                     cancel.store(true, Ordering::SeqCst);
-                    if let Some(p) = cur_player.lock().unwrap().as_ref() {
+                    if let Some(p) = cur_player
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                    {
                         p.stop();
                     }
                     if let Some(f) = &duplex_barge {
@@ -537,20 +548,31 @@ pub(crate) fn serve() -> ! {
                     cancel.store(true, Ordering::SeqCst);
                     // Clone the Arc out so the ramp does NOT hold the `cur_player` lock
                     // (the playback loop touches it too).
-                    let player = cur_player.lock().unwrap().as_ref().cloned();
-                    if let Some(p) = player {
-                        const STEPS: u32 = 12;
-                        let start = p.volume();
-                        let step = std::time::Duration::from_millis(60) / STEPS;
-                        for i in 1..=STEPS {
-                            p.set_volume((start * (1.0 - i as f32 / STEPS as f32)).max(0.0));
-                            std::thread::sleep(step);
-                        }
-                        p.stop();
-                    }
-                    if let Some(f) = &duplex_barge {
-                        f.store(true, Ordering::SeqCst);
-                    }
+                    let player = cur_player
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                        .cloned();
+                    let duplex_barge = duplex_barge.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("ds-stopfade".into())
+                        .spawn(move || {
+                            if let Some(p) = player {
+                                const STEPS: u32 = 12;
+                                let start = p.volume();
+                                let step = std::time::Duration::from_millis(60) / STEPS;
+                                for i in 1..=STEPS {
+                                    p.set_volume(
+                                        (start * (1.0 - i as f32 / STEPS as f32)).max(0.0),
+                                    );
+                                    std::thread::sleep(step);
+                                }
+                                p.stop();
+                            }
+                            if let Some(f) = &duplex_barge {
+                                f.store(true, Ordering::SeqCst);
+                            }
+                        });
                 };
                 match req.op.as_str() {
                     "stop" => {
@@ -566,9 +588,16 @@ pub(crate) fn serve() -> ! {
                         // draining; the audio is just silenced. Apply instantly to the sounding
                         // rodio player so already-queued audio goes quiet immediately; new audio
                         // is zeroed by `append` below.
-                        let on = req.text.trim() == "on";
+                        let on = matches!(
+                            req.text.trim().to_ascii_lowercase().as_str(),
+                            "on" | "true" | "1" | "yes"
+                        );
                         muted.store(on, Ordering::SeqCst);
-                        if let Some(p) = cur_player.lock().unwrap().as_ref() {
+                        if let Some(p) = cur_player
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_ref()
+                        {
                             p.set_volume(if on { 0.0 } else { 1.0 });
                         }
                     }
@@ -609,7 +638,7 @@ pub(crate) fn serve() -> ! {
                         let text = req.text;
                         {
                             let (m, cv) = &*shared;
-                            m.lock().unwrap().req = Some(PlayReq {
+                            m.lock().unwrap_or_else(|e| e.into_inner()).req = Some(PlayReq {
                                 voice,
                                 rate: req.rate,
                                 text,
@@ -633,12 +662,12 @@ pub(crate) fn serve() -> ! {
                             // never run concurrently on the same mic.
                             full_duplex_listening.store(true, Ordering::SeqCst);
                             let (m, cv) = &**sig;
-                            m.lock().unwrap().start = Some(generation);
+                            m.lock().unwrap_or_else(|e| e.into_inner()).start = Some(generation);
                             cv.notify_one();
                         } else {
                             // Half-duplex: serve-loop listen, mutually exclusive w/ speak.
                             let (m, cv) = &*shared;
-                            m.lock().unwrap().listen = Some(generation);
+                            m.lock().unwrap_or_else(|e| e.into_inner()).listen = Some(generation);
                             cv.notify_one();
                             cancel_current();
                         }
@@ -659,7 +688,7 @@ pub(crate) fn serve() -> ! {
                         // cancel any in-flight playback, then queue the job.
                         let secs = req.seconds.unwrap_or(10).clamp(1, 60);
                         let (m, cv) = &*shared;
-                        m.lock().unwrap().diarize = Some(secs);
+                        m.lock().unwrap_or_else(|e| e.into_inner()).diarize = Some(secs);
                         cv.notify_one();
                         cancel_current();
                     }
@@ -667,7 +696,7 @@ pub(crate) fn serve() -> ! {
                         // One-shot record-then-extract-voiceprint (same capture thread).
                         let secs = req.seconds.unwrap_or(15).clamp(1, 60);
                         let (m, cv) = &*shared;
-                        m.lock().unwrap().enroll = Some(secs);
+                        m.lock().unwrap_or_else(|e| e.into_inner()).enroll = Some(secs);
                         cv.notify_one();
                         cancel_current();
                     }
@@ -676,7 +705,7 @@ pub(crate) fn serve() -> ! {
                         // OTHER engine keeps the helper warm. Idle-only (the playback
                         // loop runs it between jobs); no cancel.
                         let (m, cv) = &*shared;
-                        let mut s = m.lock().unwrap();
+                        let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
                         match req.engine.as_str() {
                             "tts" => s.unload_tts = true,
                             "stt" => s.unload_stt = true,
@@ -687,7 +716,7 @@ pub(crate) fn serve() -> ! {
                     "load" => {
                         // Eagerly (pre)load a model so it's resident before first use.
                         let (m, cv) = &*shared;
-                        let mut s = m.lock().unwrap();
+                        let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
                         match req.engine.as_str() {
                             "tts" => s.load_tts = true,
                             "stt" => s.load_stt = true,
@@ -715,7 +744,11 @@ pub(crate) fn serve() -> ! {
             // `full_duplex_listening` (see above) unblocks via `capture_cancel` rather
             // than hanging — the wait loops also check `capture_cancel` directly, this
             // is just belt-and-suspenders.
-            if let Some(p) = cur_player.lock().unwrap().as_ref() {
+            if let Some(p) = cur_player
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
                 p.stop();
             }
             if let Some(f) = &duplex_barge {
@@ -723,12 +756,12 @@ pub(crate) fn serve() -> ! {
             }
             if let Some(sig) = &listen_sig {
                 let (m, cv) = &**sig;
-                let mut ls = m.lock().unwrap();
+                let mut ls = m.lock().unwrap_or_else(|e| e.into_inner());
                 ls.quit = true;
                 cv.notify_one();
             }
             let (m, cv) = &*shared;
-            let mut s = m.lock().unwrap();
+            let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
             s.req = None; // do NOT drain a pending request on quit
             s.listen = None;
             // Also drop every OTHER pending job kind — previously only `req`/`listen`
@@ -784,7 +817,7 @@ pub(crate) fn serve() -> ! {
         }
         let job = {
             let (m, cv) = &*shared;
-            let mut s = m.lock().unwrap();
+            let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
             while s.req.is_none()
                 && s.listen.is_none()
                 && s.diarize.is_none()
@@ -795,7 +828,7 @@ pub(crate) fn serve() -> ! {
                 && !s.load_tts
                 && !s.load_stt
             {
-                s = cv.wait(s).unwrap();
+                s = cv.wait(s).unwrap_or_else(|e| e.into_inner());
             }
             // Drain a pending job even if `quit` also arrived; exit only when idle+quit.
             if let Some(r) = s.req.take() {
@@ -840,7 +873,7 @@ pub(crate) fn serve() -> ! {
                 // Uses `listen_cancel` so a TTS speak barge can't truncate the dictation;
                 // only stop/lstop (the seconds-timer / Caps release) and EOF end it.
                 run_listen(
-                    &mut transcriber.lock().unwrap(),
+                    &mut transcriber.lock().unwrap_or_else(|e| e.into_inner()),
                     &listen_stopped_through,
                     generation,
                 );
@@ -913,7 +946,7 @@ pub(crate) fn serve() -> ! {
                 // streaming-capable providers (cpu/cuda/ane), the SEPARATE resident model a
                 // real listen actually runs on (listen.rs's `backend_cell`) — otherwise that
                 // one stayed loaded, roughly doubling STT memory after the first listen.
-                let mut t = transcriber.lock().unwrap();
+                let mut t = transcriber.lock().unwrap_or_else(|e| e.into_inner());
                 let freed_offline = t.unload();
                 // Release the claim so a LATER `load stt` (a real off→on toggle) can
                 // actually claim + attempt a fresh load — `mark_unloaded` is valid from
@@ -974,7 +1007,7 @@ pub(crate) fn serve() -> ! {
                 {
                     Ok(provider)
                 } else {
-                    let mut t = transcriber.lock().unwrap();
+                    let mut t = transcriber.lock().unwrap_or_else(|e| e.into_inner());
                     t.preload().map(|()| t.provider())
                 };
                 match loaded {
@@ -1038,7 +1071,7 @@ pub(crate) fn serve() -> ! {
                 } else {
                     1.0
                 });
-                *cur_player.lock().unwrap() = Some(p.clone());
+                *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
                 Some(p)
             }
             None => None,
@@ -1184,7 +1217,7 @@ pub(crate) fn serve() -> ! {
                 p.stop(); // barge: drop anything still queued/playing
             }
         }
-        *cur_player.lock().unwrap() = None;
+        *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
         // Stats BEFORE DONE (skip cancelled/empty utterances — they'd skew the RTF).
         if produced && !cancel.load(Ordering::SeqCst) {
             let synth_ms = synth_nanos as f64 / 1e6;

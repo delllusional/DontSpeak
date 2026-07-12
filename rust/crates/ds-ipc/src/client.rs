@@ -43,7 +43,8 @@ pub struct Client {
 impl Client {
     /// Write one request line.
     pub fn send(&mut self, req: &Request) -> io::Result<()> {
-        let mut s = serde_json::to_string(req).map_err(io::Error::other)?;
+        let mut s = serde_json::to_string(req)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         s.push('\n');
         self.writer.write_all(s.as_bytes())?;
         self.writer.flush()
@@ -59,7 +60,7 @@ impl Client {
                 "engine closed the connection",
             ));
         }
-        serde_json::from_str(line.trim()).map_err(io::Error::other)
+        serde_json::from_str(line.trim()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Read lines until a terminal response, returning that terminal line. For
@@ -135,7 +136,7 @@ mod tests {
             .expect_err("a garbled response line must be an error, not Ok");
         // Wrapped via `io::Error::other` around the serde_json parse failure,
         // not an I/O-level failure.
-        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     /// Finding: "recv_terminal's unbounded loop over non-terminal responses".

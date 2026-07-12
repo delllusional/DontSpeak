@@ -123,7 +123,12 @@ where
                     active_conns.fetch_sub(1, Ordering::SeqCst);
                 });
             }
-            Err(_) => continue,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                continue;
+            }
         }
     }
     Ok(())

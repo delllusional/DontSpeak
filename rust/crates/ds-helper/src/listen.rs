@@ -15,6 +15,11 @@ use ds_aec::CaptureHandle;
 use ds_helper_proto as proto;
 use ds_stt::{OnnxStreamer, StreamSession, StreamingStt};
 
+const AUTO_GAIN_NOISE_FLOOR: f32 = 0.02;
+const AUTO_GAIN_TARGET_PEAK: f32 = 0.9;
+const AUTO_GAIN_MIN: f32 = 0.5;
+const AUTO_GAIN_MAX: f32 = 15.0;
+
 fn generation_stopped(stopped_through: &std::sync::atomic::AtomicU64, generation: u64) -> bool {
     use std::sync::atomic::Ordering;
     stopped_through.load(Ordering::SeqCst) >= generation
@@ -49,9 +54,9 @@ pub(crate) fn concurrent_listen_loop(
     loop {
         let generation = {
             let (m, cv) = &*sig;
-            let mut s = m.lock().unwrap();
+            let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
             while s.start.is_none() && !s.quit {
-                s = cv.wait(s).unwrap();
+                s = cv.wait(s).unwrap_or_else(|e| e.into_inner());
             }
             if s.quit {
                 return;
@@ -90,12 +95,10 @@ fn auto_gain(buf: &[f32]) -> f32 {
         return 1.0;
     }
     let peak = buf.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
-    const NOISE_FLOOR: f32 = 0.02; // below this it's silence — leave it alone
-    const TARGET_PEAK: f32 = 0.9; // headroom under full-scale to avoid clipping
-    if peak < NOISE_FLOOR {
+    if peak < AUTO_GAIN_NOISE_FLOOR {
         return 1.0;
     }
-    (TARGET_PEAK / peak).clamp(0.5, 15.0)
+    (AUTO_GAIN_TARGET_PEAK / peak).clamp(AUTO_GAIN_MIN, AUTO_GAIN_MAX)
 }
 
 /// Minimum 16 kHz length a segment must have for transcription. Mirrors FluidAudio's
@@ -149,13 +152,11 @@ impl StreamingGain {
         let gain = if let Some(manual) = self.mode.manual() {
             manual
         } else {
-            const NOISE_FLOOR: f32 = 0.02;
-            const TARGET_PEAK: f32 = 0.9;
-            if block_peak < NOISE_FLOOR {
+            if block_peak < AUTO_GAIN_NOISE_FLOOR {
                 return input.to_vec();
             }
             self.peak = (self.peak * 0.995).max(block_peak);
-            let wanted = (TARGET_PEAK / self.peak).clamp(0.5, 15.0);
+            let wanted = (AUTO_GAIN_TARGET_PEAK / self.peak).clamp(AUTO_GAIN_MIN, AUTO_GAIN_MAX);
             // Reduce hot input promptly; raise quiet input gradually so room noise does not pump.
             let blend = if wanted < self.gain { 0.65 } else { 0.15 };
             self.gain += (wanted - self.gain) * blend;
@@ -424,7 +425,7 @@ fn run_concurrent_listen(
     generation: u64,
 ) {
     let stopped = || {
-        let s = sig.0.lock().unwrap();
+        let s = sig.0.lock().unwrap_or_else(|e| e.into_inner());
         s.quit || generation_stopped(stopped_through, generation)
     };
     // Streaming path first; falls through to the offline loop when unavailable.
@@ -568,7 +569,7 @@ fn backend_cell() -> &'static Mutex<BackendCache> {
 /// ([`build_backend`] returned `None`).
 pub(crate) fn preload_streaming(provider: &str) -> Option<ds_config::RealizedProvider> {
     let cell = backend_cell();
-    let mut guard = cell.lock().unwrap();
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
     if guard.backend.as_ref().is_some_and(|(p, _)| p == provider) {
         guard.unload_requested = false;
         return guard
@@ -597,7 +598,7 @@ pub(crate) fn preload_streaming(provider: &str) -> Option<ds_config::RealizedPro
 /// `unload stt` free the SAME cache a real listen uses, not just the separate offline
 /// `LocalTranscriber` cache (which roughly doubles STT memory if left resident).
 pub(crate) fn unload_streaming() -> bool {
-    let mut guard = backend_cell().lock().unwrap();
+    let mut guard = backend_cell().lock().unwrap_or_else(|e| e.into_inner());
     let freed = guard.backend.take().is_some();
     let active = guard.active.is_some();
     guard.unload_requested = active;
@@ -672,7 +673,7 @@ fn try_streaming(
     }
     let provider = std::env::var("DONTSPEAK_STT_PROVIDER").unwrap_or_default();
     let cell = backend_cell();
-    let mut guard = cell.lock().unwrap();
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
     if guard.active.is_some() {
         log::warn!(target: "helper", "{label}: a streaming backend is already active");
         return false;
@@ -694,14 +695,14 @@ fn try_streaming(
     drop(guard);
     if let Err(e) = backend.reset() {
         log::warn!(target: "helper", "{label}: streaming reset failed, using offline: {e}");
-        cell.lock().unwrap().active = None;
+        cell.lock().unwrap_or_else(|e| e.into_inner()).active = None;
         return false; // broken backend dropped, not re-cached
     }
     let mut session = match StreamSession::new(backend, rate) {
         Ok(s) => s,
         Err(e) => {
             log::warn!(target: "helper", "{label}: streaming resampler init failed, using offline: {e}");
-            cell.lock().unwrap().active = None;
+            cell.lock().unwrap_or_else(|e| e.into_inner()).active = None;
             return false;
         }
     };
@@ -765,7 +766,7 @@ fn try_streaming(
     // Restore the backend for the next listen unless an unload arrived while this
     // full-duplex session owned it. In that case dropping it here completes the unload.
     let backend = session.into_backend();
-    let mut guard = cell.lock().unwrap();
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
     guard.active = None;
     if guard.unload_requested {
         guard.unload_requested = false;
