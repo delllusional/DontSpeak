@@ -50,9 +50,11 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn new(app: &adw::Application) -> Self {
+        let display = gtk::gdk::Display::default();
         // `gtk4_layer_shell::is_supported()` ASSERTS a Wayland display (CRITICAL on X11), so
         // gate it on the actual display backend first — never call layer-shell under X11.
-        let on_wayland = gtk::gdk::Display::default()
+        let on_wayland = display
+            .as_ref()
             .map(|d| d.type_().name().contains("Wayland"))
             .unwrap_or(false);
         let layer_shell = on_wayland && gtk4_layer_shell::is_supported();
@@ -87,11 +89,15 @@ impl Overlay {
             // the ceiling is enforced when the width is saved/restored (GTK toplevels
             // have no max-size). Matches macOS's clamp.
             window.set_size_request(MIN_WIDTH, -1);
-            // CSS `background: transparent` relies on a compositor for alpha blending.
-            // On X11 without a compositing manager the window renders as opaque black
-            // instead of see-through. GTK4 removed `is_composited()`, so we key off
-            // the display backend: Wayland always composites; X11 may not.
-            if !on_wayland {
+            // CSS `background: transparent` relies on a compositor for alpha blending; without
+            // one the window renders as opaque black instead of see-through.
+            // `Display::is_composited()` (still present in gdk4-rs 0.11 — a prior version of
+            // this comment incorrectly assumed GTK4 had removed it) is GDK's own documented
+            // check for exactly this, and more precise than inferring from the backend: a
+            // Wayland compositor always composites by definition, but plain X11 can go either
+            // way — a bare tiling WM with no `picom`/`compton` doesn't, while GNOME/KDE-on-Xorg
+            // does, and the backend-only heuristic wrongly painted the latter opaque too.
+            if !display.as_ref().map(|d| d.is_composited()).unwrap_or(false) {
                 window.add_css_class("ds-overlay-solid");
             }
         }
