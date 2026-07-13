@@ -50,6 +50,9 @@ each crate's own packaged `LICENSE` file:
   transitively for text normalization.
 - **BSL-1.0** (Boost Software License) — `clipboard-win`, `error-code`, `ryu`.
 - **CDLA-Permissive-2.0** — `webpki-roots` (Mozilla's bundled root certificate data).
+- **Unlicense** — `ksni`, the Linux StatusNotifierItem tray implementation.
+- **Apache-2.0 WITH LLVM-exception** — `target-lexicon`, used transitively by the Linux
+  GTK build's system-dependency discovery.
 
 Note: `r-efi` declares `MIT OR Apache-2.0 OR LGPL-2.1-or-later` — DontSpeak satisfies
 this via the MIT alternative, so no LGPL terms are actually invoked (unlike the four

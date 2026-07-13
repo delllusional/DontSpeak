@@ -113,25 +113,36 @@ jobs:
   # cargo-deny gate — RELEASE-ONLY (same `if` as hygiene above): advisories (RustSec) +
   # bans (duplicate/banned crates) + licenses (rust/deny.toml's [licenses.allow] +
   # arpabet's BSD-4-Clause exception) + sources (only crates.io, no stray git/registry
-  # deps). Deliberately skipped per-commit — a new advisory or license entering the
-  # graph needs a considered deny.toml change (dated reason, scoped exception), not a
+  # deps), across both the main Rust workspace and standalone GTK host. Deliberately
+  # skipped per-commit — a new advisory or license entering either graph needs a
+  # considered deny.toml change (dated reason, scoped exception), not a
   # reflexive fix on every push; the release enforces it once, same rationale as
   # rustfmt/rustdoc. dependency-audit.yml's daily schedule still catches newly-disclosed
   # advisories against an unchanged Cargo.lock in between releases.
-  # Linux-only, no OS matrix — unlike clippy/test, this is dependency-GRAPH analysis,
-  # not compiled code: deny.toml's [graph] targets = [] (unset) means cargo-deny already
-  # evaluates every platform's conditional dependencies (Windows/macOS/Linux cfg-gated
-  # deps alike) regardless of which OS runs the check, so running this on all three
-  # release-matrix OSes would be pure duplication of the same Cargo.lock analysis.
+  # Linux-only, no OS matrix — unlike clippy/test, this is dependency-GRAPH analysis.
+  # deny.toml's [graph] targets = [] (unset) means cargo-deny already evaluates every
+  # platform's conditional dependencies regardless of which OS runs the check. The job
+  # matrix is by Cargo.lock graph, not runner OS; GTK reuses the same policy file.
   cargo-deny:
-    name: cargo-deny (advisories + bans + licenses + sources)
+    name: cargo-deny (${{ matrix.graph }})
     if: inputs.full-matrix
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - graph: Rust workspace
+            manifest: rust/Cargo.toml
+            config: deny.toml
+          - graph: Linux GTK host
+            manifest: apps/linux/gtk/Cargo.toml
+            config: ../../../rust/deny.toml
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          manifest-path: rust/Cargo.toml
+          manifest-path: ${{ matrix.manifest }}
+          command-arguments: --config ${{ matrix.config }}
 
   # Pick the OS matrix: Linux-only by default, all three when full-matrix is requested
   # (the release gate). push/PR events have no `inputs`, so they fall to Linux-only.

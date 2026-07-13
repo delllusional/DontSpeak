@@ -271,7 +271,7 @@ static CACHED_LOG_FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLo
 /// client-attributed cached logger would be a brand-new, tempting call site that writes to the
 /// dev's/CI runner's REAL `$HOME` log. Client-attributed logging goes through [`log_from`],
 /// which takes the path — see its doc.
-pub fn log_cached(level: LogLevel, source: &str, msg: &str) {
+pub(crate) fn log_cached(level: LogLevel, source: &str, msg: &str) {
     match CACHED_LOG_FILE.get_or_init(default_log_file) {
         Some(log_file) => log(log_file, level, source, msg),
         None => {

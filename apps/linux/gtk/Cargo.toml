@@ -17,6 +17,7 @@ version = "0.2.9-dev"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
+publish = false
 description = "DontSpeak Linux GUI host (GTK4 + libadwaita): tray, health panel, dictation overlay; hosts the engine in-process via ds-core."
 
 # This standalone workspace's own lint policy — there's no rust/ workspace to inherit
@@ -56,8 +57,9 @@ gtk4-layer-shell = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Pure-Rust SVG rasterizer for the tray status glyph — renders the shared assets/tray-icon.svg
-# to an ARGB pixmap (re-exports usvg + tiny_skia). No system libs, so no new provisioning deps.
-resvg = "0.47"
+# to an ARGB pixmap (re-exports usvg + tiny_skia). The bundled glyph contains no text or
+# embedded raster images, so keep resvg's font discovery/shaping and image decoders disabled.
+resvg = { version = "0.47", default-features = false }
 sys-locale = "0.3"
 # The engine + the stable C ABI (engine lifecycle, status JSON, tools, i18n, formatters).
 ds-core = { path = "../../../rust/crates/ds-core" }

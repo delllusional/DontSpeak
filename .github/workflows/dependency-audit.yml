@@ -3,7 +3,7 @@ name: Dependency audit (scheduled)
 # Catches newly-disclosed RustSec advisories against dependencies that HAVEN'T changed —
 # the cargo-deny job in ci.yml is release-only (see AGENTS.md's Gates section) and only
 # re-evaluates when a commit touches the dependency graph AND a release gets cut; a new
-# CVE against an already-resolved Cargo.lock, with no release imminent, has nothing to
+# CVE against either already-resolved Cargo.lock, with no release imminent, has nothing to
 # attach to otherwise, so it needs a timer. Advisories-only (bans/licenses/sources only
 # change with a Cargo.lock edit, already covered at release time — re-running them here
 # is pure duplication).
@@ -18,11 +18,23 @@ on:
 
 jobs:
   cargo-deny-advisories:
-    name: cargo-deny check advisories
+    name: cargo-deny advisories (${{ matrix.graph }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - graph: Rust workspace
+            manifest: rust/Cargo.toml
+            config: deny.toml
+          - graph: Linux GTK host
+            manifest: apps/linux/gtk/Cargo.toml
+            config: ../../../rust/deny.toml
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          manifest-path: rust/Cargo.toml
-          command-arguments: advisories
+          manifest-path: ${{ matrix.manifest }}
+          # The action runs from the manifest's directory. The GTK workspace reuses
+          # rust/deny.toml so dependency policy remains single-source.
+          command-arguments: --config ${{ matrix.config }} advisories
