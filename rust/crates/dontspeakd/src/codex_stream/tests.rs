@@ -516,7 +516,17 @@ mod attached {
             relist: Duration::from_millis(250),
             idle_ttl: Duration::from_secs(3600),
             flush_age: Duration::from_millis(50),
+            // Keep ordinary scripted requests alive longer than the 150 ms socket read
+            // tick. Under CI load, expiring them sooner can discard a valid response
+            // before the client thread gets scheduled to read it.
+            request_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn retry_tunables() -> Tunables {
+        Tunables {
             request_timeout: Duration::from_millis(100),
+            ..short_tunables()
         }
     }
 
@@ -592,14 +602,15 @@ mod attached {
         registry: &SessionRegistry,
         spoken: &std::sync::Arc<Mutex<Vec<(String, String)>>>,
     ) -> Result<Detach, String> {
-        attach_once_with_endpoint(addr, paths, registry, spoken, None)
+        attach_once_with(addr, paths, registry, spoken, &short_tunables(), None)
     }
 
-    fn attach_once_with_endpoint(
+    fn attach_once_with(
         addr: SocketAddr,
         paths: &Paths,
         registry: &SessionRegistry,
         spoken: &std::sync::Arc<Mutex<Vec<(String, String)>>>,
+        tunables: &Tunables,
         connected_endpoint: Option<&str>,
     ) -> Result<Detach, String> {
         let stream = TcpStream::connect(addr).expect("client connect");
@@ -618,7 +629,7 @@ mod attached {
             registry,
             &|| false,
             &mut speak,
-            &short_tunables(),
+            tunables,
             connected_endpoint,
         )
     }
@@ -733,7 +744,7 @@ mod attached {
             );
             std::thread::sleep(Duration::from_millis(250));
         });
-        let detach = attach_once(addr, &paths, &registry, &spoken);
+        let detach = attach_once_with(addr, &paths, &registry, &spoken, &retry_tunables(), None);
         server.join().unwrap();
         assert!(detach.is_err());
         assert_eq!(
@@ -789,7 +800,7 @@ mod attached {
             );
             std::thread::sleep(Duration::from_millis(250));
         });
-        let detach = attach_once(addr, &paths, &registry, &spoken);
+        let detach = attach_once_with(addr, &paths, &registry, &spoken, &retry_tunables(), None);
         server.join().unwrap();
         assert!(detach.is_err());
         assert_eq!(
@@ -873,6 +884,9 @@ mod attached {
             let (stream, _) = listener.accept().unwrap();
             let mut ws = tungstenite::accept(stream).unwrap();
             serve_initialize(&mut ws);
+            // Simulate a scheduler delay longer than one socket read tick. Ordinary
+            // requests must stay pending instead of enqueueing duplicate protocol work.
+            std::thread::sleep(super::super::client::READ_TICK + Duration::from_millis(100));
             serve_list_and_resumes(&mut ws, &["sess-1"], 1);
             send(&mut ws, completed("sess-1", "item_1", "> Hi.\n\nBody."));
             // The periodic relist: NOW the thread is gone (session ended server-side).
@@ -1007,8 +1021,14 @@ mod attached {
             serve_initialize(&mut ws);
             while ws.read().is_ok() {}
         });
-        let detach =
-            attach_once_with_endpoint(addr, &paths, &registry, &spoken, Some("tcp:127.0.0.1:4888"));
+        let detach = attach_once_with(
+            addr,
+            &paths,
+            &registry,
+            &spoken,
+            &short_tunables(),
+            Some("tcp:127.0.0.1:4888"),
+        );
         assert_eq!(detach, Ok(Detach::Reconfigure));
         server.join().unwrap();
     }
