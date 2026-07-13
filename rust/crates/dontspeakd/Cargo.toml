@@ -9,9 +9,20 @@ authors.workspace = true
 publish.workspace = true
 description = "DontSpeak's voice engine: Caps-Lock dictation, the TTS queue, local STT, and barge-in."
 
-# Library only — the engine is ALWAYS hosted in-process by a platform host app via the
-# `ds-core` C ABI (macOS DontSpeak.app / Windows ds-winui / Linux ds-gtk). There is no
-# standalone headless binary any more; `ds-core::host` calls `engine_run` on a thread.
+# Library only for PRODUCTION purposes — the engine is ALWAYS hosted in-process by a
+# platform host app via the `ds-core` C ABI (macOS DontSpeak.app / Windows ds-winui /
+# Linux ds-gtk). There is no standalone headless engine binary any more. The one `[[bin]]`
+# below (`dontspeakd-fake-helper`) is NOT that — it's a small test fixture; see its own
+# module doc (src/bin/fake_ds_helper.rs) for why it's an always-built, non-test-gated
+# `[[bin]]` rather than a headless daemon.
+
+[[bin]]
+# Fixture-only fake `ds-helper --serve` for tts::wedge_recovery_tests — see its own doc
+# comment (src/bin/fake_ds_helper.rs) for the protocol and why it exists. Explicitly
+# named/prefixed rather than left at the auto-discovered bare `fake_ds_helper`, mirroring
+# ds-aec's `ds-aec-probe`.
+name = "dontspeakd-fake-helper"
+path = "src/bin/fake_ds_helper.rs"
 
 [dependencies]
 ds-platform = { workspace = true }

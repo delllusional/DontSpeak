@@ -52,6 +52,11 @@ impl LinearResampler {
 
     /// The last input sample consumed, if any — for seeding a replacement
     /// resampler so it continues smoothly without a discontinuity.
+    ///
+    /// Only called from the Windows WASAPI-reconnect path (`windows.rs`, `#[cfg(windows)]`)
+    /// — genuinely dead code on macOS/Linux builds outside `#[cfg(test)]` (see
+    /// `seeded_replacement_continues_from_prior_tail` below), hence the `cfg_attr`.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn last_sample(&self) -> Option<f32> {
         self.have_prev.then_some(self.prev)
     }
@@ -59,6 +64,8 @@ impl LinearResampler {
     /// Seed the interpolation interval's left endpoint from a prior resampler's
     /// last sample, so a replacement (e.g. after a WASAPI reconnect at a new
     /// rate) continues smoothly instead of resetting and producing an audible click.
+    /// See [`Self::last_sample`]'s doc for why this is `cfg_attr`-gated.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn seed_prev(&mut self, prev: f32) {
         self.prev = prev;
         self.have_prev = true;

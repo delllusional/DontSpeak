@@ -14,6 +14,7 @@
 import AVFoundation
 import FluidAudio
 import Foundation
+import os
 import Speech
 
 // MARK: - async → blocking bridge (called from a Rust worker thread)
@@ -479,6 +480,13 @@ private func legacyAuthorize() -> Int32 {
     }
 }
 
+/// #34 data-collection sink for `legacySegmentDidReset`'s unretuned 0.65s phrase-gap
+/// constant — see `LegacyRun.recordPartial`. `.debug`-level only: invisible/unpersisted
+/// unless a developer explicitly enables debug capture for this subsystem (mirrors the
+/// Rust engine's own DONTSPEAK_DEBUG-gated verbose telemetry — see ds-log's
+/// `LogLevel::Debug` doc). Never logs dictated text, only the measured gap.
+private let legacyResetLog = Logger(subsystem: "app.dontspeak.org", category: "legacy-stt")
+
 /// One batch recognition's shared state: the callback (on `legacyQueue`) fills it, the
 /// calling C thread parks on `sem`. Also RETAINS the recognizer + task for the duration —
 /// nothing else keeps them alive. `finish` is single-shot: a trailing error after the
@@ -536,6 +544,21 @@ private final class LegacyRun: @unchecked Sendable {
         let now = ProcessInfo.processInfo.systemUptime
         let gap = lastPartialAt.map { now - $0 }
         if legacySegmentDidReset(previous: latestPartial, new: newText, gapSeconds: gap), !latestPartial.isEmpty {
+            // #34: the 0.65s phrase-gap constant in `legacySegmentDidReset` is asserted, not
+            // measured (unlike the paired <0.5 shared-prefix-ratio threshold, which has an
+            // empirical basis — see that function's doc). This records the ACTUAL gap that fired
+            // a reset on a real System STT session, so a future retune has real data instead of
+            // none. `.public` privacy is deliberate: this is a numeric/boolean measurement, never
+            // the dictated text itself. Interpolates the raw `TimeInterval` via os.Logger's own
+            // lazy `format:` specifier rather than pre-formatting with `String(format:)` — the
+            // whole point of os.Logger is that formatting is deferred until the log point is
+            // actually collected, which a pre-built String would defeat on every phrase reset.
+            if let gap {
+                legacyResetLog.debug(
+                    "legacy STT phrase reset: gapSeconds=\(gap, format: .fixed(precision: 3), privacy: .public)")
+            } else {
+                legacyResetLog.debug("legacy STT phrase reset: gapSeconds=nil")
+            }
             committedText = legacyJoin(committedText, latestPartial)
         }
         latestPartial = newText

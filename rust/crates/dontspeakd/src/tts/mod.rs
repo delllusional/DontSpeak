@@ -46,7 +46,21 @@ const CAPTURE_TERMINAL_GRACE: u64 = 25;
 /// last-resort safety net for anything that bypasses explicit logging entirely — a native-
 /// library abort, an unhandled panic, or a startup failure before `ds_log::log_cached` can
 /// even initialize.
-fn helper_stderr() -> Stdio {
+///
+/// `log_dir_override`: when `Some`, use THIS directory instead of
+/// `ds_config::Paths::resolve()`'s real per-OS path — the test-only escape hatch fed by
+/// `TtsManager::stderr_log_dir_override_value`, which is always `None` outside
+/// `#[cfg(test)]` builds, so a release binary's behavior here is unchanged. Routed through
+/// `Paths::rooted_at` (the same tempdir-rooted-`Paths` constructor already used across
+/// `ds-config`/`ds-wire`/`dontspeakd` test helpers) rather than hand-deriving the log
+/// filename, so this can't drift from the real naming convention.
+fn helper_stderr(log_dir_override: Option<&std::path::Path>) -> Stdio {
+    if let Some(dir) = log_dir_override {
+        let log_file = ds_config::Paths::rooted_at(dir).log_file;
+        return ds_log::open_aux_log(&log_file, "ds-helper.log")
+            .map(Stdio::from)
+            .unwrap_or_else(Stdio::null);
+    }
     ds_config::Paths::resolve()
         .and_then(|p| ds_log::open_aux_log(&p.log_file, "ds-helper.log"))
         .map(Stdio::from)
@@ -110,6 +124,20 @@ struct SpawnPrefs {
     tts_preload: bool,
 }
 
+/// Test-only overrides for `TtsManager`'s [`test_overrides`](TtsManager) field — see its doc.
+/// Never compiled into a release binary.
+#[cfg(test)]
+#[derive(Default)]
+struct TestOverrides {
+    /// Overrides `finalize_timeout_limit`'s real 10s/35s bound. See
+    /// [`TtsManager::set_finalize_timeout_for_test`].
+    finalize_timeout: Option<std::time::Duration>,
+    /// Overrides the directory `helper_stderr()` opens `ds-helper.log` under, so a test that
+    /// spawns a REAL child doesn't write under the real per-OS logs dir. See
+    /// [`TtsManager::set_stderr_log_dir_for_test`].
+    stderr_log_dir: Option<std::path::PathBuf>,
+}
+
 pub struct TtsManager {
     /// Path to the `ds-helper` helper binary.
     bin: PathBuf,
@@ -157,6 +185,13 @@ pub struct TtsManager {
     listen_stopped_through: AtomicU64,
     /// When a stop was sent for the active generation. Used to bound a wedged native finalizer.
     listen_stop_started: Mutex<Option<(u64, std::time::Instant)>>,
+    /// Test-only knobs a `#[cfg(test)]` caller can set to steer production code paths that
+    /// are otherwise unreachable/unbounded in a test (`finalize_timeout_limit`'s real
+    /// 10s/35s wait, `helper_stderr()`'s real per-OS log write). One field so a third knob
+    /// doesn't need a fourth copy-pasted `Mutex<Option<T>>` + accessor pair. Absent entirely
+    /// from a release binary — this field doesn't exist outside `cfg(test)`.
+    #[cfg(test)]
+    test_overrides: Mutex<TestOverrides>,
     /// Filled by the reader: a one-shot `diarize` waits here for its DIAR/DIARERR +
     /// terminal DDONE. Cleared at the start of each `diarize()`. Its own slot (not
     /// `listen_slot`) so a diarize and a speak demux independently.
@@ -260,6 +295,8 @@ impl TtsManager {
             active_listen_generation: AtomicU64::new(0),
             listen_stopped_through: AtomicU64::new(0),
             listen_stop_started: Mutex::new(None),
+            #[cfg(test)]
+            test_overrides: Mutex::new(TestOverrides::default()),
             diarize_slot: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
             enroll_slot: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
             say_child: Mutex::new(None),
@@ -711,7 +748,9 @@ impl TtsManager {
             .stdout(Stdio::piped())
             // Helper stderr → a log file (full-duplex status, capture levels,
             // barge-debug, errors) so the warm child is diagnosable; was discarded.
-            .stderr(helper_stderr());
+            .stderr(helper_stderr(
+                self.stderr_log_dir_override_value().as_deref(),
+            ));
         // The daemon→helper env contract, resolved from the spawn prefs:
         //   • DONTSPEAK_PROVIDER      — Kokoro TTS execution provider ("cpu"|"cuda"|…).
         //   • DONTSPEAK_STT_PROVIDER  — local STT backend the child serves ("cpu"|"ane"|…).
@@ -1493,19 +1532,63 @@ impl TtsManager {
         if stopped_generation != generation {
             return false;
         }
-        // Apple's System recognizer intentionally has a 30 s OS-level finalization bound;
-        // native Parakeet should settle much sooner. Both remain finite and recoverable.
+        at.elapsed() >= self.finalize_timeout_limit()
+    }
+
+    /// The wedge-recovery bound `listen_finalize_timed_out` waits out before `mark_dead()`.
+    /// Apple's System recognizer intentionally has a 35s OS-level finalization bound;
+    /// native Parakeet should settle much sooner. Both remain finite and recoverable.
+    /// PRODUCTION path (outside `#[cfg(test)]` builds) ALWAYS returns one of these two
+    /// literal values — `test_overrides.finalize_timeout` only exists in test builds, so a
+    /// shipped binary can never take the override branch; see `tts::wedge_recovery_tests`
+    /// for how a test exercises this in ~1-2s instead of the real 10s/35s window (#34) —
+    /// floored by `listen_cancellable`'s pre-existing 1s `cv.wait_timeout` poll tick, not
+    /// however small the override is set to.
+    fn finalize_timeout_limit(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if let Some(d) = self.test_overrides.lock().unwrap().finalize_timeout {
+            return d;
+        }
         let system = self
             .stt_provider_active
             .lock()
             .unwrap()
             .eq_ignore_ascii_case("system");
-        let limit = if system {
+        if system {
             std::time::Duration::from_secs(35)
         } else {
             std::time::Duration::from_secs(10)
-        };
-        at.elapsed() >= limit
+        }
+    }
+
+    /// Test-only override for `finalize_timeout_limit`'s bound, so a test can drive the
+    /// wedge-recovery path in ~1-2s instead of the real 10s/35s production window (floored
+    /// by `listen_cancellable`'s 1s poll tick — see that function's doc — not literally
+    /// milliseconds). Never compiled into a release binary.
+    #[cfg(test)]
+    fn set_finalize_timeout_for_test(&self, d: std::time::Duration) {
+        self.test_overrides.lock().unwrap().finalize_timeout = Some(d);
+    }
+
+    /// The directory `helper_stderr()` should open `ds-helper.log` under — the test-only
+    /// override when set, else `None` (falls through to the real
+    /// `ds_config::Paths::resolve()` path, exactly as before this seam existed). The
+    /// `#[cfg(test)]` check is compiled out entirely outside test builds, same idiom as
+    /// `finalize_timeout_limit`'s override check.
+    fn stderr_log_dir_override_value(&self) -> Option<std::path::PathBuf> {
+        #[cfg(test)]
+        if let Some(dir) = self.test_overrides.lock().unwrap().stderr_log_dir.clone() {
+            return Some(dir);
+        }
+        None
+    }
+
+    /// Test-only override for where `helper_stderr()` writes the warm child's stderr log —
+    /// point it at a tempdir so a test that spawns a REAL child (`wedge_recovery_tests`)
+    /// doesn't write under the real per-OS logs dir. Never compiled into a release binary.
+    #[cfg(test)]
+    fn set_stderr_log_dir_for_test(&self, dir: std::path::PathBuf) {
+        self.test_overrides.lock().unwrap().stderr_log_dir = Some(dir);
     }
 
     /// One-shot diarization on the warm helper: record `seconds` of mic, then return
@@ -1670,6 +1753,154 @@ mod coexist_it {
         let final_text = listen.join().expect("listen thread panicked");
         eprintln!("[final] {final_text:?}");
         assert!(final_text.is_ok(), "listen failed: {final_text:?}");
+
+        mgr.set_enabled(false);
+    }
+}
+
+#[cfg(test)]
+mod wedge_recovery_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Pins the ACTUAL production 10s/35s values directly (no process, no real wait) —
+    /// so a future edit to either number is a deliberate, visible diff. The integration
+    /// test below deliberately does NOT wait out these real durations; see
+    /// `set_finalize_timeout_for_test`.
+    #[test]
+    fn finalize_timeout_limit_pins_the_system_vs_native_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let tts = TtsManager::new(
+            dir.path().join("ds-test-nonexistent-helper"),
+            Arc::new(crate::stats::TtsStats::new()),
+            Arc::new(crate::stats::SttStats::new()),
+            Arc::new(crate::stats::LifetimeSeconds::load(
+                dir.path().join("lifetime.json"),
+            )),
+        );
+        assert_eq!(tts.finalize_timeout_limit(), Duration::from_secs(10));
+        *tts.stt_provider_active.lock().unwrap() = "system".to_string();
+        assert_eq!(tts.finalize_timeout_limit(), Duration::from_secs(35));
+    }
+
+    /// End-to-end through a REAL (fake) child: a `listen` that never gets a response
+    /// must still recover — `mark_dead()` fires and kills the child within the
+    /// configured bound, a `speak` queued behind the wedge (half-duplex shares this one
+    /// child) fails fast rather than hanging, and the NEXT `ensure_started()` + `speak()`
+    /// (the real `ttsq.rs` caller pattern) succeeds on a freshly restarted child.
+    ///
+    /// NOTE: unlike `coexist_smoke` (which is `#[ignore]`d and so never runs by
+    /// default), this test runs on every commit — so it uses
+    /// `set_stderr_log_dir_for_test` to point `helper_stderr()`'s log write at this
+    /// test's own tempdir instead of letting `start_locked` fall through to
+    /// `ds_config::Paths::resolve()`'s real per-OS logs dir (see `TestOverrides`, above).
+    #[test]
+    fn a_wedged_listen_is_recovered_and_a_queued_speak_succeeds_after_restart() {
+        // Cargo's own CARGO_BIN_EXE_<name> mechanism for locating a sibling `[[bin]]`
+        // target's executable is NOT available here — it's only set when building an
+        // INTEGRATION test/benchmark, not a unit test module like this one (confirmed: a
+        // `env!("CARGO_BIN_EXE_dontspeakd-fake-helper")` here is a hard compile error).
+        // Instead, resolve it relative to the CURRENTLY RUNNING test binary:
+        // `current_exe()` for a unit test binary is `target/<profile>/deps/dontspeakd-<hash>`,
+        // and Cargo places this crate's `[[bin]]` output in `target/<profile>` (its
+        // grandparent) — this self-adapts to profile (debug/release) and to a redirected
+        // `CARGO_TARGET_DIR`, unlike a path hardcoded relative to `CARGO_MANIFEST_DIR`
+        // (the pattern `coexist_smoke`, above, uses — tolerable there only because that
+        // test is `#[ignore]`d and never runs in default CI).
+        let bin_name = if cfg!(windows) {
+            "dontspeakd-fake-helper.exe"
+        } else {
+            "dontspeakd-fake-helper"
+        };
+        let bin = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent()?.parent().map(std::path::Path::to_path_buf))
+            .map(|dir| dir.join(bin_name))
+            .expect("could not resolve the running test binary's own directory");
+        assert!(
+            bin.exists(),
+            "fixture not built at {} — run `cargo build --workspace` (or -p dontspeakd) first",
+            bin.display()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(TtsManager::new(
+            bin,
+            Arc::new(crate::stats::TtsStats::new()),
+            Arc::new(crate::stats::SttStats::new()),
+            Arc::new(crate::stats::LifetimeSeconds::load(
+                dir.path().join("lifetime.json"),
+            )),
+        ));
+        mgr.set_finalize_timeout_for_test(Duration::from_millis(50));
+        // Real-$HOME guard: unlike coexist_smoke (which is #[ignore]d), this test runs
+        // on every commit — without this, ensure_started() below reaches
+        // start_locked()'s helper_stderr() → ds_config::Paths::resolve() →
+        // ds_log::open_aux_log and writes under the REAL per-OS logs dir as a side
+        // effect of spawning the fixture. Point it at this test's own tempdir instead.
+        mgr.set_stderr_log_dir_for_test(dir.path().to_path_buf());
+
+        mgr.ensure_started();
+        assert!(
+            mgr.is_running(),
+            "fixture failed to start: {:?}",
+            mgr.last_error()
+        );
+
+        // Signalled from INSIDE listen_cancellable's own event loop (tts/mod.rs:1384,
+        // `Some(ListenEvt::Partial(t)) => on_partial(&t)`) the moment the fixture's
+        // `PARTIAL wedge-ack` is demuxed — i.e. only after write_request (line 1330)
+        // has ACTUALLY run and the fixture has ACTUALLY read the "listen" line. This is
+        // what closes the race: polling `active_listen_generation` (set at line
+        // 1284-1285, well before the write) is NOT sufficient — a stop_listen() that
+        // lands before the write hits the early-return guard at lines 1318-1321
+        // (`listen_stopped_through >= generation` ⇒ `Ok(String::new())`) and the fixture
+        // never wedges at all, silently defeating the test.
+        let (wedge_ack_tx, wedge_ack_rx) = std::sync::mpsc::channel();
+        let listen_mgr = mgr.clone();
+        let listen = std::thread::spawn(move || {
+            listen_mgr.listen_cancellable(&AtomicBool::new(false), &mut |_partial| {
+                let _ = wedge_ack_tx.send(());
+            })
+        });
+
+        assert!(
+            wedge_ack_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "listen never reached the fake helper (no wedge-ack)"
+        );
+
+        mgr.stop_listen();
+
+        // A speak queued RIGHT BEHIND the wedge, on the same (about-to-be-reaped) child.
+        let speak_mgr = mgr.clone();
+        let speak_attempt_1 = std::thread::spawn(move || speak_mgr.speak("hello", "af_sarah", 1.0));
+
+        let t0 = std::time::Instant::now();
+        let listen_result = listen.join().expect("listen thread panicked");
+        let elapsed = t0.elapsed();
+
+        assert!(matches!(&listen_result, Err(e) if e.kind() == std::io::ErrorKind::TimedOut));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "recovery took {elapsed:?}"
+        );
+        assert!(
+            !mgr.is_running(),
+            "the wedged child must be reaped by mark_dead"
+        );
+
+        let speak_1_result = speak_attempt_1.join().expect("speak thread panicked");
+        assert!(
+            speak_1_result.is_err(),
+            "a speak on the wedged child must fail fast, not hang"
+        );
+
+        mgr.ensure_started();
+        let speak_2_result = mgr.speak("hello again", "af_sarah", 1.0);
+        assert!(
+            speak_2_result.is_ok(),
+            "speak after the wedge is killed must succeed: {speak_2_result:?}"
+        );
 
         mgr.set_enabled(false);
     }

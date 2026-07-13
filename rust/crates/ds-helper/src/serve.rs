@@ -195,6 +195,35 @@ fn leading_silence_pcm(srate_hz: u32) -> Vec<f32> {
     vec![0.0f32; srate_hz as usize * LEAD_SILENCE_MS as usize / 1000]
 }
 
+/// Block until a full-duplex dictation session releases the mic (`full_duplex_listening`
+/// clears) OR shutdown fires (`capture_cancel`) — the full-duplex mutual exclusion between
+/// dictation (the concurrent listen thread, reading the VPIO capture handle) and a
+/// one-shot diarize/enroll job (its own independent cpal stream): half-duplex gets the
+/// "one capture thread" guarantee for free (Listen/Diarize/Enroll dispatch one at a time
+/// on the same playback-loop thread), but full-duplex routes `listen` to a SEPARATE
+/// concurrent-listen thread — nothing else serializes the two capture streams.
+/// `full_duplex_listening` is set the moment a full-duplex `listen` is requested and
+/// cleared on `lstop`; a diarize/enroll job calls this BEFORE opening its own cpal stream.
+/// Returns `false` the instant `capture_cancel` fires (including if it was ALREADY set
+/// before this was even called) — the caller must then skip opening its own capture
+/// rather than racing the process exit; `true` once the mic is genuinely free. Polls every
+/// 30ms — cheap, and this only gates the rare diarize/enroll one-shot jobs. Unused (and so
+/// `#[cfg]`'d out) on non-macOS: diarize/enroll never open a capture there.
+#[cfg(target_os = "macos")]
+fn wait_for_mic_free(
+    full_duplex_listening: &std::sync::atomic::AtomicBool,
+    capture_cancel: &std::sync::atomic::AtomicBool,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    while full_duplex_listening.load(Ordering::SeqCst) {
+        if capture_cancel.load(Ordering::SeqCst) {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    !capture_cancel.load(Ordering::SeqCst)
+}
+
 pub(crate) fn serve() -> ! {
     use std::io::{BufRead, Write};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -780,24 +809,6 @@ pub(crate) fn serve() -> ! {
         });
     }
 
-    // Full-duplex only: block until any active dictation (the concurrent listen
-    // thread) has released the mic (see `full_duplex_listening` above) before a
-    // diarize/enroll job opens its own cpal capture. Returns `false` if shutdown
-    // (`capture_cancel`, stdin EOF) fired while waiting — the caller must then skip
-    // opening the mic rather than racing the process exit. Unused (and so `#[cfg]`'d
-    // out) on non-macOS: diarize/enroll never open a capture there (see the
-    // `not(target_os = "macos")` arms below), so there is nothing to serialize.
-    #[cfg(target_os = "macos")]
-    let wait_for_mic_free = || -> bool {
-        while full_duplex_listening.load(Ordering::SeqCst) {
-            if capture_cancel.load(Ordering::SeqCst) {
-                return false;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(30));
-        }
-        !capture_cancel.load(Ordering::SeqCst)
-    };
-
     // Playback loop (owns the synth; single-threaded synthesis). Synth + play one
     // phoneme batch at a time, checking `cancel` between batches and during
     // playback, so a barge-in cuts in promptly instead of after the whole reply.
@@ -890,7 +901,7 @@ pub(crate) fn serve() -> ! {
                     // two would otherwise be independent streams on the same mic (see
                     // `full_duplex_listening` above). No-op in half-duplex, where this
                     // job already can't overlap a listen (single dispatch thread).
-                    if wait_for_mic_free() {
+                    if wait_for_mic_free(&full_duplex_listening, &capture_cancel) {
                         capturing_diarize.store(true, Ordering::SeqCst);
                         run_diarize(secs, &capture_cancel);
                         capturing_diarize.store(false, Ordering::SeqCst);
@@ -916,7 +927,7 @@ pub(crate) fn serve() -> ! {
                 {
                     // See the matching full-duplex mutual-exclusion comment on
                     // `Job::Diarize` above.
-                    if wait_for_mic_free() {
+                    if wait_for_mic_free(&full_duplex_listening, &capture_cancel) {
                         capturing_diarize.store(true, Ordering::SeqCst);
                         run_enroll(secs, &capture_cancel);
                         capturing_diarize.store(false, Ordering::SeqCst);
@@ -1265,5 +1276,77 @@ mod audio_tests {
         // Compile-time invariant (not a runtime check on a constant): too little lead
         // won't cover the rodio output-stream resume latency.
         const _: () = assert!(LEAD_SILENCE_MS >= 40);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mic_gate_tests {
+    use super::wait_for_mic_free;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn returns_true_immediately_when_mic_already_free() {
+        let listening = AtomicBool::new(false);
+        let cancel = AtomicBool::new(false);
+        let t0 = Instant::now();
+        assert!(wait_for_mic_free(&listening, &cancel));
+        assert!(
+            t0.elapsed() < Duration::from_millis(20),
+            "an already-free mic must not poll"
+        );
+    }
+
+    /// A cancel that arrived BEFORE the wait even started must still be honored.
+    #[test]
+    fn returns_false_when_capture_cancel_was_already_set() {
+        let listening = AtomicBool::new(false);
+        let cancel = AtomicBool::new(true);
+        assert!(!wait_for_mic_free(&listening, &cancel));
+    }
+
+    /// The real mutual-exclusion property, AND pins the 30ms poll interval: the flip is
+    /// timed to land strictly after the first sleep, so the elapsed lower bound proves at
+    /// least one real 30ms sleep happened (a regression to busy-spin or a longer interval
+    /// would fail this).
+    #[test]
+    fn returns_true_once_full_duplex_listening_clears() {
+        let listening = Arc::new(AtomicBool::new(true));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let f = listening.clone();
+        let flipper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(45));
+            f.store(false, Ordering::SeqCst);
+        });
+        let t0 = Instant::now();
+        assert!(wait_for_mic_free(&listening, &cancel));
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(30),
+            "must have polled at least once: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "must not hang: {elapsed:?}"
+        );
+        flipper.join().unwrap();
+    }
+
+    /// `capture_cancel` firing WHILE waiting must unblock promptly, even though
+    /// `full_duplex_listening` never clears.
+    #[test]
+    fn returns_false_promptly_when_capture_cancel_fires_while_waiting() {
+        let listening = Arc::new(AtomicBool::new(true)); // never clears
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = cancel.clone();
+        let flipper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(45));
+            c.store(true, Ordering::SeqCst);
+        });
+        let t0 = Instant::now();
+        assert!(!wait_for_mic_free(&listening, &cancel));
+        assert!(t0.elapsed() < Duration::from_secs(2));
+        flipper.join().unwrap();
     }
 }
