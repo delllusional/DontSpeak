@@ -116,6 +116,20 @@ try {
   try { Move-Item -Path $stagedApp -Destination $dest -ErrorAction Stop }
   catch { Copy-Item -Path $stagedApp -Destination $dest -Recurse -Force }  # TEMP on another volume
 
+  # Publish the CLI for `dontspeak <client>` in NEW terminals. Keep the user PATH
+  # additive/idempotent and never rewrite the machine PATH or require elevation.
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  $pathEntries = @($userPath -split ';' | Where-Object { $_ })
+  $destKey = $dest.TrimEnd('\')
+  if (-not ($pathEntries | Where-Object { $_.TrimEnd('\') -ieq $destKey })) {
+    $userPath = (@($pathEntries) + $dest) -join ';'
+    [Environment]::SetEnvironmentVariable('Path', $userPath, 'User')
+    Say 'added DontSpeak to your user PATH (available in new terminals)'
+  }
+  if (-not (($env:Path -split ';') | Where-Object { $_.TrimEnd('\') -ieq $destKey })) {
+    $env:Path = "$dest;$env:Path"
+  }
+
   $cli = Join-Path $dest 'dontspeak.exe'
   if (Test-Path $cli) {
     Say "wiring clients (MCP + hooks)"
@@ -124,11 +138,8 @@ try {
     # wire warning would abort the install after extraction. Contain it and warn instead
     # (parity with install.sh's `|| warn`).
     try {
-      # dontspeak.exe is a GUI-subsystem binary: the call operator (`&`) launches it DETACHED
-      # and does not wait, so `$LASTEXITCODE` is never set (a hard error under StrictMode 2.0)
-      # AND the script races ahead before the wiring lands — leaving Claude Code unwired.
-      # Start-Process -Wait blocks on the process handle regardless of subsystem, and -PassThru
-      # surfaces the real exit code.
+      # Keep this hidden and waited: the console-subsystem CLI is interactive when launched
+      # by a user, but installation-time reconciliation must not flash a window or race ahead.
       $wp = Start-Process -FilePath $cli -ArgumentList 'wire','--reconcile' -Wait -PassThru -WindowStyle Hidden
       if ($wp.ExitCode -ne 0) { Warn "wire --reconcile reported an issue (exit $($wp.ExitCode))" }
     } catch { Warn "wire --reconcile reported an issue: $($_.Exception.Message)" }
@@ -181,7 +192,7 @@ try {
 $ErrorActionPreference = 'SilentlyContinue'
 # Only the PLACED copy sits next to dontspeak.exe — any other copy (repo checkout,
 # standalone download) must target the standard install dir, NOT its own folder:
-# $PSScriptRoot alone once resolved to a repo's scripts/ dir and step 6 deleted it.
+# $PSScriptRoot alone once resolved to a repo's scripts/ dir and step 7 deleted it.
 $dest = if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'dontspeak.exe'))) { $PSScriptRoot } else { Join-Path $env:LOCALAPPDATA 'Programs\DontSpeak' }
 # 1. Stop the resident app + engine + warm helper so no files are locked.
 Get-Process ds-winui,dontspeak,ds-helper -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -192,12 +203,17 @@ if (Test-Path $cli) { Start-Process -FilePath $cli -ArgumentList 'wire','--all',
 # 3. Start-menu shortcut + start-at-login entry.
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Programs')) 'DontSpeak.lnk') -Force
 Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name DontSpeak
-# 4. Downloaded models + logs + config (everything DontSpeak wrote outside the install dir).
+# 4. Remove only our exact install directory from the user PATH.
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$destKey = $dest.TrimEnd('\')
+$keptPath = @($userPath -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $destKey }) -join ';'
+[Environment]::SetEnvironmentVariable('Path', $keptPath, 'User')
+# 5. Downloaded models + logs + config (everything DontSpeak wrote outside the install dir).
 Remove-Item "$env:LOCALAPPDATA\DontSpeak" -Recurse -Force
 Remove-Item "$env:APPDATA\DontSpeak" -Recurse -Force
-# 5. The uninstall registry entry itself (so it drops out of Settings > Apps).
+# 6. The uninstall registry entry itself (so it drops out of Settings > Apps).
 Remove-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DontSpeak' -Recurse -Force
-# 6. Delete the install dir LAST — from a detached cmd after a short delay, so this running
+# 7. Delete the install dir LAST — from a detached cmd after a short delay, so this running
 #    script's own folder is free to remove once powershell exits.
 if (Test-Path $dest) { Start-Process cmd.exe -ArgumentList '/c',"timeout /t 2 >nul & rmdir /s /q `"$dest`"" -WindowStyle Hidden }
 Write-Host 'DontSpeak removed.'

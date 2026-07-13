@@ -2,7 +2,7 @@
 //! Context Protocol (MCP) server that exposes the DontSpeak engine's TTS/STT to MCP clients
 //! (e.g. Claude Code). A no-argument launch carrying Grok's reserved `GROK_HOOK_EVENT`
 //! variable is instead its deduplicated native/compatibility hook. With a subcommand it is
-//! a Claude Code hook executor or installer step — see the front-door dispatch in `main`
+//! a client launcher, hook executor, or installer step — see the front-door dispatch in `main`
 //! and the `hook_speak` / `hook_narrate` modules (the former `ds-speak` /
 //! `ds-narrate` binaries, now folded in here).
 //!
@@ -31,11 +31,12 @@
 //! [`mcp`] (envelope helpers + [`mcp::dispatch`] + the `initialize`/`tools` methods),
 //! the tool handlers in [`tools`], voice/language enumeration in [`voices`], the engine
 //! spawn lifecycle in [`engine_launch`], and the `prompt-context` hook in [`hook_prompt`].
-// Windows: GUI subsystem so NO console window appears when a GUI host (Claude
-// Code / the WinUI app) spawns this stdio server. stdin/stdout still work over the
-// inherited pipes the MCP client provides.
-#![cfg_attr(windows, windows_subsystem = "windows")]
+// This must remain a console-subsystem binary on Windows. Hook/MCP processes inherit their
+// terminal or redirected stdio, while `dontspeak <client>` needs the invoking shell to WAIT
+// and leave the console attached to the interactive child. A GUI-subsystem binary makes
+// PowerShell return immediately, racing its prompt against the launched TUI.
 
+mod client_launch;
 mod engine_launch;
 mod hook_core;
 mod hook_narrate;
@@ -47,8 +48,8 @@ mod voices;
 
 use ds_config::ClientSource;
 
-/// The four things argv\[1\] can select us into, plus the fallback for an unrecognized
-/// token. Pure decision extracted from `main` so it's testable without touching stdio.
+/// The roles argv\[1\] can select, plus the fallback for an unrecognized token. Pure
+/// decision extracted from `main` so it is testable without touching stdio or spawning a client.
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand<'a> {
     /// `dontspeak notify` — COMMAND hook sink.
@@ -57,6 +58,8 @@ enum Subcommand<'a> {
     Provide,
     /// `dontspeak wire <client> [--remove]` — carries argv\[2..\] (the args after `wire`).
     Wire(&'a [String]),
+    /// `dontspeak <client> [args…]` — launch one registry client with argv\[2..\].
+    Launch(ClientSource, &'a [String]),
     /// No argv\[1\]: the stdio MCP server (the default).
     Server,
     /// An explicit but unrecognized argv\[1\].
@@ -88,6 +91,12 @@ fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
         Some("notify") => Subcommand::Notify,
         Some("provide") => Subcommand::Provide,
         Some("wire") => Subcommand::Wire(&argv[2..]),
+        Some(name) if ds_config::client_spec_for_launch(name).is_some() => Subcommand::Launch(
+            ds_config::client_spec_for_launch(name)
+                .expect("the guarded registry lookup must still resolve")
+                .target,
+            &argv[2..],
+        ),
         Some(other) => Subcommand::Unknown(other.to_string()),
         None => Subcommand::Server,
     }
@@ -128,8 +137,9 @@ fn main() {
     //                                   the narration spec). The only entry Claude Code waits on.
     //   `dontspeak wire <client> [--remove]` — the ONE per-client integration installer: it
     //                                   wires (or removes) EVERYTHING that client needs in a
-    //                                   single step — claude_code = hooks + MCP, codex
-    //                                   = hooks. See the `ds-wire` crate.
+    //                                   single registry-driven step. See the `ds-wire` crate.
+    //   `dontspeak <client> [args…]`   — launch a supported client with its integration active;
+    //                                   Codex's interactive path first prepares app-server narration.
     // With no argv it is the stdio MCP server unless Grok's hook runner marker is present.
     // ALL communication is stdio: the MCP tool surface (JSON-RPC over stdio) and the two
     // Claude Code hook verbs above. There is no HTTP transport.
@@ -163,6 +173,11 @@ fn main() {
         Subcommand::Wire(args) => {
             std::process::exit(ds_wire::run(args));
         }
+        Subcommand::Launch(client, args) => {
+            let spec = ds_config::client_spec(client)
+                .expect("every launchable client is a registry client");
+            std::process::exit(client_launch::run(spec, args));
+        }
         // An explicit but UNRECOGNIZED first argument must NOT fall through to the stdio MCP
         // server: that silently blocks on stdin forever (a typo, or an OLD binary handed a
         // subcommand it predates — e.g. `dontspeak wire` on a build without `wire` — would just
@@ -170,8 +185,9 @@ fn main() {
         // spawn us: `command: dontspeak`, no args). So error out on any leftover argument.
         Subcommand::Unknown(sub) => {
             let msg = format!(
-                "dontspeak: unknown subcommand {sub:?}; expected `notify`, `provide`, or `wire` \
-                 (run with no arguments for the stdio MCP server)"
+                "dontspeak: unknown subcommand {sub:?}; expected `claude`, `codex`, `qwen`, \
+                 `grok`, `notify`, `provide`, or `wire` (run with no arguments for the stdio \
+                 MCP server)"
             );
             eprintln!("{msg}");
             log::error!(target: "hook", "{msg}");
@@ -240,6 +256,22 @@ mod tests {
     fn wire_token_with_no_trailing_args_resolves_to_wire_with_empty_slice() {
         let argv = argv(&["dontspeak", "wire"]);
         assert_eq!(resolve_subcommand(&argv), Subcommand::Wire(&[]));
+    }
+
+    #[test]
+    fn every_registry_launcher_name_dispatches_with_trailing_args() {
+        for spec in ds_config::CLIENT_REGISTRY {
+            for name in
+                std::iter::once(spec.launch.command).chain(spec.launch.aliases.iter().copied())
+            {
+                let argv = argv(&["dontspeak", name, "--version"]);
+                assert_eq!(
+                    resolve_subcommand(&argv),
+                    Subcommand::Launch(spec.target, &argv[2..]),
+                    "{name}"
+                );
+            }
+        }
     }
 
     #[test]

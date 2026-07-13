@@ -69,11 +69,12 @@ independently configurable — play outside the queue, mixed over any in-flight 
 
 Streaming (mid-turn) narration is ONE shared core (`ds-narrate`: per-message
 accumulation → blockquote digests → the per-session on-disk state file that doubles as
-the `Stop`-silencing witness) behind three thin adapters: the Claude Code and Qwen Code
-hook adapters in the `dontspeak` CLI, and — for OpenAI Codex, which has no per-batch
-hook stream — a long-lived app-server subscriber inside the engine
-(`dontspeakd::codex_stream`) that attaches to the user's shared codex daemon and feeds
-the same core in-process. See [docs/STREAMING-NARRATION.md](docs/STREAMING-NARRATION.md).
+the `Stop`-silencing witness). Claude Code feeds it through `MessageDisplay`; Qwen Code's
+compatible adapter remains registry-gated until that event ships in a release; and OpenAI
+Codex feeds it through a long-lived app-server subscriber inside the engine
+(`dontspeakd::codex_stream`). See [docs/STREAMING-NARRATION.md](docs/STREAMING-NARRATION.md)
+for internals and [docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md) for the
+user-facing capability matrix and launch behavior.
 
 ## Local STT (Parakeet)
 

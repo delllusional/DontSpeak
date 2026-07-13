@@ -76,8 +76,8 @@ pub use wire::grok_hooks::grok_hooks_value;
 pub use wire::hooks::{HookSpec, HooksMergeError, INSTALLED_BINS, merge_hooks, strip_hooks};
 pub use wire::json_mcp::{merge_mcp_server, strip_mcp_server};
 pub use wire::registry::{
-    CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, HookCommandStyle, Surface, WireMechanism,
-    client_from_mcp_name, client_spec,
+    CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, HookCommandStyle, LaunchMode, LaunchSpec,
+    Surface, WireMechanism, client_from_mcp_name, client_spec, client_spec_for_launch,
 };
 pub use wire::settings::{
     atomic_write_json, atomic_write_str, backup_before_write, merge_settings, voice_from_value,

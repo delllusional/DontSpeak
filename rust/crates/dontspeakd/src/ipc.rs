@@ -169,6 +169,12 @@ pub(crate) fn spawn_ipc_server(
                     }
                     emit(&ds_ipc::Response::Done);
                 }
+                ds_ipc::Request::EnsureCodexStream => {
+                    match codex_sessions.ensure_remote(std::time::Duration::from_secs(20)) {
+                        Ok(endpoint) => emit(&ds_ipc::Response::CodexStreamReady { endpoint }),
+                        Err(message) => emit(&ds_ipc::Response::error(message)),
+                    }
+                }
                 ds_ipc::Request::GreetSession { session, source } => {
                     // New terminal opened → greet in its assigned pool voice (no-op unless
                     // `greet_on_open` is set). Claims the session's voice at open time.

@@ -27,7 +27,8 @@ use serde_json::Value;
 /// there at all); the STT/diarization requests (`TestRecognitionStart`/`Stop`, `Diarize`,
 /// `Enroll`, `ForgetSpeaker`, `ListSpeakers`) and every app/engine control request
 /// (`SetProvider`, `Reload`, `ModelStatus`, `WaitModelStatus`, `EnsureKokoroVoices`,
-/// `AuthorizeSystemStt`, `Shutdown`, `Ping`, `Status`) are the APP or the ENGINE talking to
+/// `EnsureCodexStream`, `AuthorizeSystemStt`, `Shutdown`, `Ping`, `Status`) are the APP or
+/// the ENGINE talking to
 /// itself, not a client. Keeping `source` off them is also what lets `ds-core/src/ffi.rs`
 /// compile untouched — it constructs `SetMuted`/`ModelStatus`/`WaitModelStatus`/`SetProvider`
 /// and none of the seven.
@@ -42,6 +43,13 @@ pub enum Request {
     /// via the single-flight download manager if absent. Returns immediately — does NOT
     /// wait for the download. → [`Response::Done`].
     EnsureKokoroVoices,
+    /// Make the Codex app-server observation path ready for an interactive
+    /// `dontspeak codex` launch. The engine owns any process it must start and returns only
+    /// after its subscriber has initialized, closing the race where the TUI could begin a
+    /// turn before narration was attached. The engine owns a direct Windows child and
+    /// coordinates the managed Unix daemon. → [`Response::CodexStreamReady`] or
+    /// [`Response::Error`].
+    EnsureCodexStream,
     /// Set global MUTE (the tray checkbox; the Caps-tap toggles it engine-side). Muting
     /// silences playback WITHOUT stopping it — the queue keeps draining. → [`Response::Done`].
     SetMuted { on: bool },
@@ -244,6 +252,9 @@ pub enum Response {
     },
     /// Generic success terminator for a request that returns no payload.
     Done,
+    /// Endpoint an interactive Codex TUI should receive through `--remote`. Returned only
+    /// after the resident engine's narration subscriber is attached to the same app-server.
+    CodexStreamReady { endpoint: String },
     /// Test recognition: mic open, speak now (non-terminal).
     Listening,
     /// Test recognition: live partial transcript (non-terminal).
@@ -298,6 +309,7 @@ impl Response {
             Response::Pong
                 | Response::Status { .. }
                 | Response::Done
+                | Response::CodexStreamReady { .. }
                 | Response::Transcript { .. }
                 | Response::Diarization { .. }
                 | Response::Enrolled { .. }
@@ -318,6 +330,7 @@ mod tests {
         let cases = [
             Request::Ping,
             Request::Status,
+            Request::EnsureCodexStream,
             Request::Diarize { seconds: 10 },
             Request::Enroll {
                 name: "Alex".into(),

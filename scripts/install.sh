@@ -8,10 +8,9 @@
 # wrappers. Logging is ~/Library/Logs/DontSpeak/ (macOS) / $XDG_STATE_HOME/dontspeak/logs/
 # (Linux) with in-process rotation (no conf needed).
 #
-# This wrapper adds the things specific to a fresh CLI install: wiring each client's whole
-# integration via `dontspeak wire <client>` (Claude Code = hooks + MCP, Codex = hooks, Qwen
-# Code = hooks + MCP; additive, backed-up; preview with --print-only, undo with --remove) and
-# the next-steps notes.
+# This wrapper adds the things specific to a fresh CLI install: reconciling every registry
+# client's whole integration (additive, backed-up; preview with --print-only, undo with
+# --remove) and the next-steps notes. docs/CLIENT-INTEGRATIONS.md owns the per-client matrix.
 #
 # ENGINE HOST: the engine runs IN-PROCESS inside the platform's resident host app on EVERY
 # platform — macOS DontSpeak.app (apps/macos/bundle.sh), Linux the GTK host ds-gtk
@@ -46,10 +45,10 @@ echo "==> binaries + hooks installed (BUILD_ID=$BUILD_ID)"
 # The dontspeak binary owns the ONE cross-platform per-client integration definition + a SAFE
 # merge (additive, idempotent, timestamped backup first, malformed file left untouched), so every
 # platform installs the identical set. `wire <client>` does that client's WHOLE integration in one
-# step — Claude Code = voice hooks + MCP server; Codex = narration hooks.
+# step; the registry owns the exact surfaces and files.
 # Preview with --print-only; undo with --remove; a client that isn't installed is a clean skip.
 echo
-echo "==> 5. wire all clients (Claude Code hooks + MCP, Codex hooks, Qwen Code hooks + MCP)"
+echo "==> 5. reconcile all detected client integrations"
 # `wire --reconcile` is the ONE wiring call every install flow uses (bundle.sh, the web
 # installers, the tarball installer) — it converges each client to config.toml's `exclude_clients`
 # (absent ⇒ all, so identical to `--all` on a fresh machine), and each client self-skips if not
@@ -65,13 +64,8 @@ cat <<EOF
 
 Done. Installed:
   • $INSTALL_DIR/{dontspeak,ds-helper}
-  • Claude Code: ~/.claude/settings.json voice hooks + ~/.claude.json MCP server (wired via
-    'dontspeak wire claude_code' — start a NEW Claude Code session to load the MCP server;
-    undo any time with 'dontspeak wire claude_code --remove')
-  • ~/.codex/config.toml narration hooks (only if ~/.codex exists; 'dontspeak wire codex';
-    undo with 'dontspeak wire codex --remove')
-  • ~/.qwen/settings.json voice hooks + MCP server (only if ~/.qwen exists;
-    'dontspeak wire qwen_code'; undo with 'dontspeak wire qwen_code --remove')
+  • detected client hooks + MCP entries reconciled from the shared registry
+    (inspect with 'dontspeak wire --list'; preview with 'dontspeak wire --all --print-only')
   • logs: $LOG_HINT (in-process rotation, no sudo)
 
 Next steps:

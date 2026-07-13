@@ -36,23 +36,24 @@ fn detach(cmd: &mut std::process::Command) {
 /// macOS DontSpeak.app, Windows the WinUI app (`ds-winui.exe`, P/Invokes ds_core.dll),
 /// Linux the GTK app (`ds-gtk`, links ds-core). With no host installed, tools stay
 /// unavailable until the user launches it.
-pub(crate) fn ensure_engine(sock: &Path) {
+pub(crate) fn ensure_engine(sock: &Path) -> bool {
     if ds_ipc::request(sock, &Request::Ping).is_ok() {
-        return;
+        return true;
     }
     if !launch_host() {
         log("no DontSpeak host app installed; tools fail until it runs");
-        return;
+        return false;
     }
     // Wait up to ~5s for the socket (host launch + engine start takes a moment; the
     // engine binds the socket before warming Kokoro, so it answers early).
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(100));
         if ds_ipc::request(sock, &Request::Ping).is_ok() {
-            return;
+            return true;
         }
     }
     log("engine did not become ready in time");
+    false
 }
 
 /// Launch the resident host app that owns the in-process engine + its socket. Returns

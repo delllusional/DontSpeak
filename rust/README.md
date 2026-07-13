@@ -65,7 +65,7 @@ rust/
                   #   a library, hosted in-process via ds-core
     dontspeak/    # bin: the one multi-call client — no args runs the stdio MCP server;
                   #   `notify` is the command hook sink; `provide` is the query hook;
-                  #   `wire <client>` is the per-client installer
+                  #   `wire <client>` installs integrations; `<client>` launches them
 ```
 
 See [../ARCHITECTURE.md](../ARCHITECTURE.md) for the cross-cutting roles (engine, hooks,

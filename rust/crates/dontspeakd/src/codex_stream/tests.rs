@@ -248,6 +248,11 @@ fn ws_url_parses_and_endpoint_resolution_prefers_the_override() {
         Some(Endpoint::Unix(sock)) => assert!(sock.ends_with("app-server-control.sock")),
         _ => panic!("default must be the unix control socket"),
     }
+    #[cfg(windows)]
+    match resolve_endpoint("", None, &paths) {
+        Some(Endpoint::Tcp(host)) => assert_eq!(host, DEFAULT_WINDOWS_APP_SERVER),
+        _ => panic!("default must be the loopback Windows launcher endpoint"),
+    }
     // A malformed override resolves to nothing (park; never silently fall back to a
     // socket the user tried to steer away from).
     assert!(resolve_endpoint("http://nope", None, &paths).is_none());
@@ -419,6 +424,44 @@ fn registry_nudges_wake_snapshot_and_prune() {
     assert!(reg.snapshot().0.is_empty());
     // remove() is idempotent.
     reg.remove("s1");
+}
+
+#[test]
+fn launcher_waits_for_an_attached_endpoint_and_reuses_it() {
+    let reg = SessionRegistry::new();
+    let waiter = reg.clone();
+    let thread = std::thread::spawn(move || waiter.ensure_remote(Duration::from_secs(2)));
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !reg.launch_requested() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        reg.launch_requested(),
+        "the waiting launcher must wake the supervisor"
+    );
+    reg.launch_ready("ws://127.0.0.1:4500".to_string());
+    assert_eq!(thread.join().unwrap().unwrap(), "ws://127.0.0.1:4500");
+    assert_eq!(
+        reg.ensure_remote(Duration::ZERO).unwrap(),
+        "ws://127.0.0.1:4500",
+        "a second launcher reuses the initialized observer"
+    );
+    reg.launch_detached();
+    assert!(reg.ensure_remote(Duration::ZERO).is_err());
+}
+
+#[test]
+fn launcher_receives_a_supervisor_failure_without_waiting_for_timeout() {
+    let reg = SessionRegistry::new();
+    let waiter = reg.clone();
+    let thread = std::thread::spawn(move || waiter.ensure_remote(Duration::from_secs(2)));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !reg.launch_requested() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    reg.launch_failed("codex binary missing");
+    assert_eq!(thread.join().unwrap().unwrap_err(), "codex binary missing");
 }
 
 #[cfg(unix)]

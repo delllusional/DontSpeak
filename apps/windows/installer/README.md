@@ -3,12 +3,14 @@
 DontSpeak ships on Windows as a **self-contained portable zip** — no installer, no
 elevation, no runtime prerequisites. The one-command installer at
 [dontspeak.org](https://dontspeak.org) (`web/install.ps1`) downloads it, extracts it to
-`%LOCALAPPDATA%\Programs\DontSpeak`, wires the MCP server + voice hooks
-(`dontspeak wire --reconcile`), adds a Start-menu shortcut, and launches the app.
+`%LOCALAPPDATA%\Programs\DontSpeak`, adds that directory to the per-user `PATH`, wires
+the client integrations (`dontspeak wire --reconcile`), adds a Start-menu shortcut, and
+launches the app.
 
 ## What the zip contains
 - The WinUI app (`ds-winui.exe`) + the in-process engine `ds_core.dll` + the warm-synth
-  `ds-helper.exe` + the `dontspeak.exe` MCP server / hook executor + `AppIcon.ico`.
+  `ds-helper.exe` + the `dontspeak.exe` client launcher / MCP server / hook executor +
+  `AppIcon.ico`.
 - The **.NET 10 runtime and the Windows App SDK, bundled** (self-contained publish), so the
   extracted app runs with nothing else installed.
 - The voice models download on first launch (into the per-user model dir), the same as

@@ -53,13 +53,10 @@ independent of `narrate`: each plays only when its sound (`earcon_reply_sound` /
 reply ding defaults to the OS chime (`ding`/`Tink`/`message` on Windows/macOS/Linux); the
 needs-input cue ships off.
 
-**OpenAI Codex** and **Qwen Code** use the very same binary and `hook_event_name` contract.
-Codex is wired into `~/.codex/config.toml` by `dontspeak wire codex`, and Qwen Code is wired into `~/.qwen/settings.json` by `dontspeak wire qwen_code` (both are presence-gated and cleanly skip if their target directory does not exist).
-Neither has a `MessageDisplay` stream, so they both omit `MessageDisplay` hooks. Instead:
-- Codex wires three events: `SessionStart` → `notify --greet-only` speaks the session-open greeting (greet-only so the streaming witness is never seeded on a non-streaming client — a seed would silence every `Stop` reply), `UserPromptSubmit` → `provide` injects the narration spec (so Codex *writes* the spoken-line blockquotes), and `Stop` → `notify` speaks the final reply (the whole `last_assistant_message`, run through the same blockquote/short logic as streaming).
-- Qwen Code wires five events: `SessionStart`, `SessionEnd`, `Stop` (which voices the final reply from `last_assistant_message` AND plays the reply ding), `Notification`, and `UserPromptSubmit` (which registers the active terminal and carries the synchronous `provide` query).
-
-**Grok** is a first-class native client: `dontspeak wire grok` gives it its OWN voice hooks in a **dedicated** `~/.grok/hooks/dontspeak.json` — a file DontSpeak owns outright (wire overwrites it, backing up first; `--remove` deletes it), *in addition* to its native TOML MCP entry in `~/.grok/config.toml`. It wires the same five events as Qwen Code. Each event has one synchronous, seconds-timeout handler whose `command` is only the bare DontSpeak binary. Grok's reserved `GROK_HOOK_EVENT` environment marker distinguishes that no-argument hook launch from the binary's normal no-argument MCP role; the handler performs `notify` and, for `UserPromptSubmit`, `provide` in the same process. This shape also fixes Grok's default import of `~/.claude/settings.json`: Grok drops Claude's `args` arrays, producing the same bare targets, then deduplicates those imported entries against the native handlers instead of spawning useless compatibility copies. No global Claude-compatibility setting is disabled, so unrelated Claude hooks keep working in Grok. `SessionStart` is treated as greet-only so a non-streaming client never seeds the streaming witness, and `Stop` voices the whole final message. Grok's hook payloads are **camelCase** (`hookEventName`, `sessionId`, `lastAssistantMessage`, `notificationType`); the hook payload structs carry additive serde aliases so both camelCase and Claude's snake_case parse through the same handlers.
+Codex, Qwen Code, and Grok reuse this executor with different event sets, config formats,
+and upstream capabilities. Their launch commands, exact wiring locations, payload quirks,
+and narration limits are maintained in the canonical
+[client integrations document](../../docs/CLIENT-INTEGRATIONS.md).
 
 The narration / greet / mark-active hooks talk to the **warm engine** over the Unix
 socket (`dontspeak.sock` in our data dir), so speech is synthesized by the engine's
@@ -78,12 +75,10 @@ engine-side. Caps-lock reading and mic-active probing also run in-process in the
 ## Setup on a new machine
 
 Run `./scripts/install.sh` from the repo root. It builds the Rust workspace, installs the
-binaries into `~/.local/bin` (override with `DONTSPEAK_INSTALL_DIR`), and **auto-merges**
-each client's whole integration via `dontspeak wire <client>` — a safe, additive, backed-up
-merge (preview with `--print-only`, undo with `--remove`). `wire claude_code` merges the voice
-hooks into `~/.claude/settings.json` AND registers the MCP server in `~/.claude.json`;
-`wire qwen_code` wires Qwen Code's hooks and MCP server into `~/.qwen/settings.json` (when `~/.qwen` exists);
-`wire codex` wires Codex's hooks AND registers the MCP server, both into `~/.codex/config.toml` (when `~/.codex` exists).
+binaries into `~/.local/bin` (override with `DONTSPEAK_INSTALL_DIR`), and reconciles every
+detected client through the shared registry. See
+[Client integrations and launchers](../../docs/CLIENT-INTEGRATIONS.md) for the supported
+commands, config locations, preview/removal commands, and upstream-specific limits.
 There is no launchd/systemd agent: the engine runs in-process inside the platform's host
 app (macOS `DontSpeak.app`, built by `apps/macos/bundle.sh`; Windows `ds-winui`; Linux
 `ds-gtk`).

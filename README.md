@@ -19,6 +19,20 @@ Or just tell your agent: **"Install DontSpeak.org app."** — it reads [dontspea
 
 **After installing:** macOS grants Accessibility + Microphone on first launch; Linux prints a one-time `sudo` udev step for Caps-Lock capture.
 
+Start any supported client through the shared launcher:
+
+```sh
+dontspeak claude
+dontspeak codex
+dontspeak qwen
+dontspeak grok
+```
+
+The command preserves normal client arguments and exit status. Codex interactive launches
+also prepare its app-server stream so `shorts` and digest narration work mid-turn. Client
+capabilities and upstream-specific flags are documented in
+[Client integrations and launchers](docs/CLIENT-INTEGRATIONS.md).
+
 **Update:** re-run the install command above — it's a clean reinstall (stops the running app, replaces it with the latest release, re-wires, relaunches), safe to run anytime. When a newer release is out, the app's own version number turns into an in-app pill; that just flags it, it doesn't update anything itself.
 
 **Build from source (developers):** `git clone https://github.com/delllusional/DontSpeak && cd DontSpeak && ./scripts/install.sh` (needs a Rust toolchain).
@@ -62,7 +76,7 @@ Each model runs on the fastest backend available, picked by the `provider` ladde
 
 ## MCP tools
 
-`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `list_voices` · `set_config` — full descriptions and parameters in [docs/MCP-TOOLS.md](docs/MCP-TOOLS.md). (Diarization tools `diarize`/`manage_speakers` exist but are hidden pending more testing.) Client wiring is automatic (the engine converges each client to `config.toml`'s `exclude_clients` at boot); wire by hand with `dontspeak wire`.
+`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `list_voices` · `set_config` — full descriptions and parameters in [docs/MCP-TOOLS.md](docs/MCP-TOOLS.md). (Diarization tools `diarize`/`manage_speakers` exist but are hidden pending more testing.) Client wiring is automatic (the engine converges each client to `config.toml`'s `exclude_clients` at boot); inspect or change it with `dontspeak wire --list` and `dontspeak wire <client>`.
 
 ## License
 

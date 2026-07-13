@@ -13,7 +13,7 @@ mechanics differ, so pick your OS's table below.
 
 | Piece | What it is | Built+installed by | What the RUNNING APP actually executes |
 |---|---|---|---|
-| `dontspeak` | the CLI: MCP server **and** the Claude Code hook entries (`notify`/`provide`) | `install-daemon.sh` → `~/.local/bin/dontspeak` | **`~/.local/bin/dontspeak`** — the wired hook command points here, so this IS live after install-daemon |
+| `dontspeak` | the CLI: client launcher, MCP server, and hook entries (`notify`/`provide`) | `install-daemon.sh` → `~/.local/bin/dontspeak` | **`~/.local/bin/dontspeak`** — launch commands and wired hooks execute this copy, so this IS live after install-daemon |
 | `ds-helper` | the warm TTS/STT synthesis child | `install-daemon.sh` → `~/.local/bin/ds-helper` **AND** `bundle.sh` → `DontSpeak.app/Contents/MacOS/ds-helper` | **the BUNDLED copy** — the app spawns `Contents/MacOS/ds-helper`; the `~/.local/bin` copy is not what the app uses |
 | engine (`dontspeakd` logic) | the in-process engine (queue, IPC, playback, `ds_wire::reconcile` at boot) | `bundle.sh` → linked into the `DontSpeak.app` binary | **the app binary** — the engine is linked in and runs in-process |
 
@@ -23,7 +23,7 @@ Use the `build-macos` skill rather than hand-rolling `install-daemon.sh`/`bundle
 
 | Piece | What it is | Built+installed by | What the RUNNING APP actually executes |
 |---|---|---|---|
-| `dontspeak.exe` | the CLI: MCP server **and** the hook entries | `build-portable.ps1` → extracted into `%LOCALAPPDATA%\Programs\DontSpeak\dontspeak.exe` | **the extracted `dontspeak.exe`** — the wired hook command points here, so a re-extract is live immediately |
+| `dontspeak.exe` | the CLI: client launcher, MCP server, and hook entries | `build-portable.ps1` → extracted into `%LOCALAPPDATA%\Programs\DontSpeak\dontspeak.exe` | **the extracted `dontspeak.exe`** — launch commands and wired hooks execute this copy, so a re-extract is live immediately |
 | `ds-helper.exe` | the warm TTS/STT synthesis child | `build-portable.ps1` (`dotnet publish` output dir), extracted alongside `ds-winui.exe` | **the extracted copy** — `ds-winui.exe` spawns it from its own install dir |
 | engine (`dontspeakd` logic) + `ds_core.dll` | the in-process engine, hosted via P/Invoke, `ds_wire::reconcile` at boot | `build-portable.ps1` (`dotnet publish` of `DontSpeak.WinUI.csproj`) → `ds-winui.exe` + `ds_core.dll` | **`ds-winui.exe`** with the extracted `ds_core.dll` — the engine is linked in and runs in-process |
 
@@ -35,7 +35,7 @@ rolling the extract/copy steps.
 
 | Piece | What it is | Built+installed by | What the RUNNING APP actually executes |
 |---|---|---|---|
-| `dontspeak` | the CLI: MCP server **and** the hook entries | `scripts/install.sh` → `~/.local/bin/dontspeak` | **`~/.local/bin/dontspeak`** — the wired hook command points here, so this IS live after `install.sh` |
+| `dontspeak` | the CLI: client launcher, MCP server, and hook entries | `scripts/install.sh` → `~/.local/bin/dontspeak` | **`~/.local/bin/dontspeak`** — launch commands and wired hooks execute this copy, so this IS live after `install.sh` |
 | `ds-helper` | the warm TTS/STT synthesis child | `scripts/install.sh` → `~/.local/bin/ds-helper` | **the installed copy** — spawned from `~/.local/bin` |
 | engine (`dontspeakd` logic) | the in-process engine (queue, IPC, playback, `ds_wire::reconcile` at boot) | `apps/linux/install-gui.sh` (`cargo build --release` in `apps/linux/gtk`) → `~/.local/bin/ds-gtk` | **`~/.local/bin/ds-gtk`** — the engine is linked in and runs in-process |
 

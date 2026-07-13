@@ -8,7 +8,7 @@ crate — `ds-narrate` — and every client feeds it through a thin adapter:
 | Client       | Transport                                     | Payload shape                                        | Adapter |
 |--------------|-----------------------------------------------|------------------------------------------------------|---------|
 | Claude Code  | `MessageDisplay` hook, one process per batch  | incremental `delta` keyed by content-block `index`   | `dontspeak::hook_narrate` |
-| Qwen Code    | same hook route (upstream hook still pending) | cumulative `displayed_text` + `is_final` (snake_case)| `dontspeak::hook_narrate` (serde aliases; registry-gated) |
+| Qwen Code    | same hook route (present on main, not in 0.19.9) | cumulative `displayed_text` + `is_final` (snake_case)| `dontspeak::hook_narrate` (serde aliases; registry-gated) |
 | OpenAI Codex | the engine's **app-server subscriber**        | `item/agentMessage/delta` + `item/completed`         | `dontspeakd::codex_stream` |
 
 All three build a client-neutral `StreamBatch` and call the same file-backed step,
@@ -64,15 +64,13 @@ long-lived resident process) runs a supervisor thread that:
    after a long idle TTL (~12 h), and sweeps crash-orphaned `narrate-display-*` files
    older than ~7 days at startup.
 
-### User setup (what makes a Codex session observable)
+### Observable Codex launches
 
-```sh
-codex app-server daemon start   # once (idempotent)
-codex --remote unix://          # run the TUI as a client of the shared server
-```
-
-A plain `codex` TUI session is NOT on the shared server: it keeps today's behavior —
-the whole reply is voiced at `Stop`. `dontspeak wire codex` prints this hint.
+Use `dontspeak codex` for the base TUI, `resume`, or `fork`. The launcher asks the engine
+to attach first, starts the local app-server path on demand, and passes the initialized
+endpoint to `codex --remote`. A plain `codex` TUI is not on that shared server and keeps
+the end-of-turn `Stop` fallback. User-facing launch rules and noninteractive-command
+behavior are centralized in [CLIENT-INTEGRATIONS.md](CLIENT-INTEGRATIONS.md).
 
 ### Configuration (`config.toml`; all re-read live, no restart)
 
@@ -80,7 +78,7 @@ the whole reply is voiced at `Stop`. `dontspeak wire codex` prints this hint.
 |-----|---------|---------|
 | `codex_stream` | `true` | Master switch for the subscriber (attach + narrate). Observation-only against the user's own socket; inert without `~/.codex` + a running app-server. Note: after an upgrade the engine will start attaching to your daemon socket unprompted — set `false` to opt out. |
 | `codex_stream_daemon_start` | `false` | Opt-in app-server lifecycle, started proactively so a remote TUI can connect before its first hook: run the idempotent managed daemon on Unix; on Windows own `codex app-server --listen <codex_app_server_url>` for the engine's lifetime. |
-| `codex_app_server_url` | `""` | Empty = the default unix control socket; `ws://IP:PORT` attaches over TCP (the Windows/custom path). |
+| `codex_app_server_url` | `""` | Empty = the default Unix control socket or Windows loopback listener; a loopback `ws://IP:PORT` overrides it. |
 | `codex_bin` | `"codex"` | Binary for the lazy daemon start; bare names resolve via PATH + common install dirs. |
 
 ### Outage / cleanup tradeoffs (deliberate)
@@ -120,27 +118,25 @@ deduplication, foreign-thread isolation, cleanup, and recovery when either
 ## Cross-platform status
 
 * **macOS / Linux** — full support over the unix control socket (`cfg(unix)`).
-* **Windows** — verified live with Codex 0.144.1 over a loopback `ws://` override.
-  Codex's managed daemon lifecycle still reports Unix-only; with
-  `codex_stream_daemon_start = true`, DontSpeak starts and owns the direct listener
-  instead. The child runs in a kill-on-close Job Object, so normal exit, host crash, and
-  force-termination all tear down the listener. With auto-start off and no externally
-  running listener, Codex keeps Stop-only narration. Re-check when upstream ships Windows
-  daemon support (then evaluate `uds_windows` if it binds AF_UNIX).
+* **Windows** — verified live with Codex 0.144.1 over loopback WebSocket. An explicit
+  `dontspeak codex` launch starts and owns the direct listener without changing the
+  persistent auto-start preference. The child runs in a kill-on-close Job Object, so
+  normal exit, host crash, and force-termination all tear down the listener.
 * The Stop fallback is untouched on all three OSes for any unwired/unstreamed session.
 
 ## Qwen Code: the pending flip
 
-Qwen's sketched `MessageDisplay` hook (QwenLM/qwen-code#6488) sends debounced cumulative
-snapshots — `{hook_event_name, message_id, displayed_text, is_final}`. The handler
-already parses that shape (serde aliases on `displayed_text` and `is_final`), and the
-wiring for `hook_streaming: true` + `InlineShell` is pinned by test. When the upstream
-hook lands, the whole flip is the registry gate + a version-pin bump via the
-`verify-wiring` skill — zero core or handler edits.
+Qwen's main-branch `MessageDisplay` documentation sends debounced cumulative snapshots —
+`{hook_event_name, message_id, displayed_text, is_final}` — but the latest 0.19.9 release
+documentation does not contain that contract. The handler already parses the future shape,
+and the wiring for `hook_streaming: true` + `InlineShell` is pinned by test. After a release
+ships and verifies the event, the whole flip is the registry gate + a version-pin bump via
+the `verify-wiring` skill — zero core or handler edits.
 
 ## Deploy routes (all three apply — see docs/BUILD-DEPLOY.md)
 
 * `dontspeakd::codex_stream` is an **engine** change → full app rebuild per OS.
-* `ds-narrate` + the hook/CLI adapters → the `install-daemon.sh` (CLI) route.
+* `ds-narrate` + hook/CLI adapters → the CLI route; the Codex launch handshake also changes
+  the engine IPC protocol, so ship the CLI and host app in lockstep.
 * The Codex hook-set change (UserPromptSubmit `notify` + `provide`) → re-run
   `dontspeak wire codex`.

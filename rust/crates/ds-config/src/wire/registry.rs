@@ -10,8 +10,9 @@
 //!     ([`ClientSpec::present`]/[`ClientSpec::detect_dir`]) and each config file the wire
 //!     edits ([`Surface::config_file`]), both resolved per-OS by [`Paths`];
 //!   * HOW — the [`WireMechanism`] each surface is written with (Claude-contract JSON
-//!     hooks, Claude-contract TOML hooks, or a JSON `mcpServers` entry), plus the
-//!     OFFICIAL documentation ([`DocRef`]) the contract was derived from.
+//!     hooks, Claude-contract TOML hooks, or an MCP entry), the [`LaunchSpec`] exposed by
+//!     `dontspeak <client>`, plus the OFFICIAL documentation ([`DocRef`]) the wiring
+//!     contracts were derived from.
 //!
 //! The `dontspeak wire` orchestrator iterates a spec's surfaces and dispatches on the
 //! mechanism — so adding a client (e.g. Qwen Code, whose hooks reuse Claude Code's wire
@@ -35,6 +36,26 @@ pub enum ClientKind {
     /// (macOS `~/Library/Application Support`, Windows `%APPDATA%`, Linux `~/.config`),
     /// so the path is platform-resolved by [`Paths`].
     DesktopApp,
+}
+
+/// How `dontspeak <client>` launches one supported client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchMode {
+    /// Start the client normally after making sure the resident DontSpeak host is running.
+    Direct,
+    /// Ask the engine to attach to an app-server, then start Codex's interactive TUI with
+    /// the returned `--remote` endpoint. Noninteractive Codex commands still pass through.
+    CodexRemote,
+}
+
+/// The executable and public command names for one client launcher. This lives beside the
+/// wiring facts so the command surface cannot silently omit a supported integration.
+pub struct LaunchSpec {
+    /// Preferred `dontspeak <name>` token and executable name.
+    pub command: &'static str,
+    /// Accepted compatibility names (normally the canonical [`ClientSource`] token).
+    pub aliases: &'static [&'static str],
+    pub mode: LaunchMode,
 }
 
 /// HOW one integration surface is written into a client's config file. Every mechanism is
@@ -120,6 +141,8 @@ pub struct ClientSpec {
     /// Human-facing name for messages ("Claude Code", "OpenAI Codex", …).
     pub display_name: &'static str,
     pub kind: ClientKind,
+    /// How the installed client is started through `dontspeak <client>`.
+    pub launch: LaunchSpec,
     /// The `clientInfo.name` values this client announces itself with in the MCP `initialize`
     /// handshake — the MCP half of the client-identity story (the hooks' half is the
     /// `--client <token>` verb the wiring stamps). Matched EXACTLY (after normalizing case /
@@ -162,6 +185,11 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         target: ClientSource::ClaudeCode,
         display_name: "Claude Code",
         kind: ClientKind::TerminalCli,
+        launch: LaunchSpec {
+            command: "claude",
+            aliases: &["claude_code"],
+            mode: LaunchMode::Direct,
+        },
         // VERIFIED: Claude Code announces itself as `claude-code` in `initialize`'s
         // `clientInfo.name`.
         mcp_client_names: &["claude-code"],
@@ -194,13 +222,18 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 url: "https://code.claude.com/docs/en/mcp",
             },
         ],
-        verified_client_version: "2.1.198",
-        verified_on: "2026-07-02",
+        verified_client_version: "2.1.207",
+        verified_on: "2026-07-13",
     },
     ClientSpec {
         target: ClientSource::Codex,
         display_name: "OpenAI Codex",
         kind: ClientKind::TerminalCli,
+        launch: LaunchSpec {
+            command: "codex",
+            aliases: &[],
+            mode: LaunchMode::CodexRemote,
+        },
         // `codex-mcp-client` is the constant codex-rs sets in its MCP connection manager;
         // the other two cover the plain CLI and the VS Code surface.
         mcp_client_names: &["codex-mcp-client", "codex", "codex-vscode"],
@@ -266,12 +299,17 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             },
         ],
         verified_client_version: "0.144.1",
-        verified_on: "2026-07-12",
+        verified_on: "2026-07-13",
     },
     ClientSpec {
         target: ClientSource::QwenCode,
         display_name: "Qwen Code",
         kind: ClientKind::TerminalCli,
+        launch: LaunchSpec {
+            command: "qwen",
+            aliases: &["qwen_code"],
+            mode: LaunchMode::Direct,
+        },
         // UNVERIFIED — Qwen Code's own `clientInfo.name` is not published (the reachable docs
         // describe MCP *server* names). It is a gemini-cli fork, so it may still send a
         // gemini-derived name. The `mcp initialize clientInfo.name=…` capture line is what
@@ -291,10 +329,11 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         // plain-TUI Codex through). Hooks + MCP both live in the ONE `~/.qwen/settings.json`,
         // so the two surfaces share a config_file.
         //
-        // FUTURE FLIP (QwenLM/qwen-code#6488): when Qwen ships its MessageDisplay hook
-        // (snake_case cumulative payload — `displayed_text` + `is_final`, already accepted
-        // by the handler's serde aliases), the WHOLE change is `hook_streaming: true` here
-        // + a version-pin bump via the `verify-wiring` skill — no core or handler edits.
+        // FUTURE FLIP (QwenLM/qwen-code#6488): Qwen's main-branch docs now describe the
+        // MessageDisplay hook, but the latest released 0.19.9 docs do not. When a release
+        // actually includes it (snake_case cumulative payload — `displayed_text` +
+        // `is_final`, already accepted by the handler's serde aliases), the WHOLE change is
+        // `hook_streaming: true` here + a version-pin bump via the `verify-wiring` skill.
         // The wiring side of that combination (InlineShell + streaming: MessageDisplay
         // group with the inlined notify command, ms-scaled timeout, plain-notify
         // SessionStart witness seed) is pinned NOW by
@@ -326,13 +365,18 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 url: "https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/mcp.md",
             },
         ],
-        verified_client_version: "0.19.7",
-        verified_on: "2026-07-07",
+        verified_client_version: "0.19.9",
+        verified_on: "2026-07-13",
     },
     ClientSpec {
         target: ClientSource::Grok,
         display_name: "Grok",
         kind: ClientKind::TerminalCli,
+        launch: LaunchSpec {
+            command: "grok",
+            aliases: &[],
+            mode: LaunchMode::Direct,
+        },
         // Live verified (2026-07-13): Grok sends clientInfo.name="grok-shell-DontSpeak",
         // normalized to "grok-shell-dontspeak". Keep the older aliases for version skew.
         mcp_client_names: &["grok", "grok-cli", "grok-shell-dontspeak"],
@@ -380,7 +424,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 url: "https://docs.x.ai/build/features/hooks",
             },
         ],
-        verified_client_version: "0.2.93",
+        verified_client_version: "0.2.99",
         verified_on: "2026-07-13",
     },
 ];
@@ -392,6 +436,14 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
 /// a clean "unknown client" error instead of a panic (see `ds_wire::run`'s parse arm).
 pub fn client_spec(target: ClientSource) -> Option<&'static ClientSpec> {
     CLIENT_REGISTRY.iter().find(|s| s.target == target)
+}
+
+/// Resolve a public `dontspeak <client>` token through the registry's preferred command
+/// names and aliases. Internal verbs (`notify`, `provide`, `wire`) are not registry names.
+pub fn client_spec_for_launch(name: &str) -> Option<&'static ClientSpec> {
+    CLIENT_REGISTRY
+        .iter()
+        .find(|spec| spec.launch.command == name || spec.launch.aliases.contains(&name))
 }
 
 /// Normalize an MCP `clientInfo.name` for alias matching: trim, lowercase, `_` → `-`. Both
@@ -490,6 +542,37 @@ mod tests {
         }
         assert!(client_spec(ClientSource::DontSpeak).is_none());
         assert!(client_spec(ClientSource::Unknown).is_none());
+    }
+
+    /// The launcher is another registry consumer: every preferred name and compatibility
+    /// alias must be nonempty, unique, and resolve back to the declaring client.
+    #[test]
+    fn launcher_names_are_complete_unique_and_resolvable() {
+        let mut names = std::collections::HashSet::new();
+        for spec in CLIENT_REGISTRY {
+            assert!(!spec.launch.command.is_empty(), "{}", spec.display_name);
+            for name in
+                std::iter::once(spec.launch.command).chain(spec.launch.aliases.iter().copied())
+            {
+                assert!(
+                    !name.is_empty(),
+                    "{}: empty launcher name",
+                    spec.display_name
+                );
+                assert!(
+                    names.insert(name),
+                    "launcher name {name:?} is declared more than once"
+                );
+                assert_eq!(
+                    client_spec_for_launch(name).map(|found| found.target),
+                    Some(spec.target),
+                    "{name}"
+                );
+            }
+        }
+        for internal in ["notify", "provide", "wire"] {
+            assert!(client_spec_for_launch(internal).is_none(), "{internal}");
+        }
     }
 
     /// The alias table's own hygiene: every entry declares at least one `clientInfo.name`,

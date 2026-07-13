@@ -25,9 +25,9 @@
 //!     list, or a long idle TTL) and sweeps crash-orphaned state files at start.
 //!
 //! Config (`config.toml`, re-read per loop pass — no restart needed): `codex_stream`
-//! (master switch, default on), `codex_stream_daemon_start` (opt-in lazy app-server
-//! lifecycle: managed daemon on Unix, engine-owned loopback listener on Windows),
-//! `codex_app_server_url` (`ws://` TCP override — the Windows path), `codex_bin`.
+//! (master switch, default on), `codex_stream_daemon_start` (persistent proactive
+//! lifecycle; `dontspeak codex` can request the same path without changing it),
+//! `codex_app_server_url` (loopback `ws://` override), and `codex_bin`.
 
 mod client;
 mod proto;
@@ -60,6 +60,10 @@ pub(crate) struct SessionRegistry {
 struct RegInner {
     sessions: HashMap<String, Instant>,
     epoch: u64,
+    launch_waiters: usize,
+    launch_error_seq: u64,
+    launch_error: Option<String>,
+    connected_endpoint: Option<String>,
 }
 
 impl SessionRegistry {
@@ -68,6 +72,10 @@ impl SessionRegistry {
             inner: Mutex::new(RegInner {
                 sessions: HashMap::new(),
                 epoch: 0,
+                launch_waiters: 0,
+                launch_error_seq: 0,
+                launch_error: None,
+                connected_endpoint: None,
             }),
             cv: Condvar::new(),
         })
@@ -88,6 +96,70 @@ impl SessionRegistry {
     fn snapshot(&self) -> (Vec<String>, u64) {
         let g = self.inner.lock().unwrap();
         (g.sessions.keys().cloned().collect(), g.epoch)
+    }
+
+    /// Block one `dontspeak codex` caller until the observer has initialized against an
+    /// app-server. The waiter itself is the supervisor's on-demand start signal; no
+    /// preference is persisted and concurrent callers collapse onto the same connection.
+    pub(crate) fn ensure_remote(&self, timeout: Duration) -> Result<String, String> {
+        let deadline = Instant::now() + timeout;
+        let mut g = self.inner.lock().unwrap();
+        if let Some(endpoint) = &g.connected_endpoint {
+            return Ok(endpoint.clone());
+        }
+        let seen_error = g.launch_error_seq;
+        g.launch_waiters += 1;
+        g.epoch += 1;
+        self.cv.notify_all();
+
+        let result = loop {
+            if let Some(endpoint) = &g.connected_endpoint {
+                break Ok(endpoint.clone());
+            }
+            if g.launch_error_seq != seen_error {
+                break Err(g
+                    .launch_error
+                    .clone()
+                    .unwrap_or_else(|| "Codex app-server start failed".to_string()));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                break Err("timed out waiting for the Codex app-server".to_string());
+            }
+            let (next, _) = self.cv.wait_timeout(g, deadline - now).unwrap();
+            g = next;
+        };
+
+        g.launch_waiters -= 1;
+        g.epoch += 1;
+        self.cv.notify_all();
+        result
+    }
+
+    fn launch_requested(&self) -> bool {
+        self.inner.lock().unwrap().launch_waiters > 0
+    }
+
+    fn launch_ready(&self, endpoint: String) {
+        let mut g = self.inner.lock().unwrap();
+        g.connected_endpoint = Some(endpoint);
+        g.epoch += 1;
+        self.cv.notify_all();
+    }
+
+    fn launch_detached(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.connected_endpoint = None;
+        g.epoch += 1;
+        self.cv.notify_all();
+    }
+
+    fn launch_failed(&self, message: impl Into<String>) {
+        let mut g = self.inner.lock().unwrap();
+        g.launch_error = Some(message.into());
+        g.launch_error_seq += 1;
+        g.epoch += 1;
+        self.cv.notify_all();
     }
 
     /// Park until the epoch moves past `seen` or `timeout` elapses; returns the current epoch.
@@ -249,8 +321,11 @@ impl Coalescer {
 
 // ── Endpoint + daemon-start decisions (pure, unit-tested) ────────────────────────
 
-/// Where to attach. Off-unix with no `ws://` override there is nothing to dial
-/// (the upstream daemon is Unix-only today) — the caller parks.
+/// Default loopback listener used by the on-demand Windows launcher.
+#[cfg(windows)]
+const DEFAULT_WINDOWS_APP_SERVER: &str = "127.0.0.1:4500";
+
+/// Where to attach.
 pub(crate) enum Endpoint {
     #[cfg(unix)]
     Unix(PathBuf),
@@ -263,6 +338,14 @@ impl Endpoint {
             #[cfg(unix)]
             Endpoint::Unix(path) => format!("unix:{}", path.display()),
             Endpoint::Tcp(host) => format!("tcp:{host}"),
+        }
+    }
+
+    fn remote_arg(&self) -> String {
+        match self {
+            #[cfg(unix)]
+            Endpoint::Unix(path) => format!("unix://{}", path.display()),
+            Endpoint::Tcp(host) => format!("ws://{host}"),
         }
     }
 }
@@ -314,7 +397,7 @@ fn can_auto_start_tcp(host: &str) -> bool {
 }
 
 /// Resolve the endpoint from config: a non-empty `codex_app_server_url` wins (TCP);
-/// otherwise the default unix control socket (unix only).
+/// otherwise use the managed Unix control socket or the loopback Windows launch default.
 pub(crate) fn resolve_endpoint(
     url_override: &str,
     codex_home_env: Option<&std::ffi::OsStr>,
@@ -330,7 +413,7 @@ pub(crate) fn resolve_endpoint(
     #[cfg(not(unix))]
     {
         let _ = (codex_home_env, paths);
-        None
+        Some(Endpoint::Tcp(DEFAULT_WINDOWS_APP_SERVER.to_string()))
     }
 }
 
@@ -1144,6 +1227,10 @@ fn supervise(
     let mut backoff = BACKOFF_FLOOR;
     let mut epoch = 0u64;
     let mut last_daemon_start: Option<Instant> = None;
+    // Once `dontspeak codex` has requested the managed path, keep it warm for this engine
+    // lifetime. Later launches then reuse the same observer/server instead of racing a
+    // teardown in the gap between the endpoint reply and Codex's SessionStart hook.
+    let mut launch_managed = false;
     // One WARN per unresolvable-binary streak: this branch re-runs every backoff pass,
     // and an explicit opt-in that silently no-ops (nvm/npm-prefix installs off the GUI
     // PATH) is the failure the audit flagged — but a per-pass WARN would spam the log.
@@ -1172,15 +1259,33 @@ fn supervise(
             }
         }
         let cfg = VoiceConfig::load(paths);
+        let (sessions, cur_epoch) = registry.snapshot();
+        let launch_requested = registry.launch_requested();
+        if launch_requested && !cfg.codex_stream {
+            registry.launch_failed(
+                "Codex streaming is disabled; enable `codex_stream` in DontSpeak config",
+            );
+            epoch = registry.wait_change(cur_epoch.max(epoch), Duration::from_millis(100));
+            continue;
+        }
+        if launch_requested && !paths.codex_dir.exists() {
+            registry.launch_failed("Codex is not installed or its config directory is missing");
+            epoch = registry.wait_change(cur_epoch.max(epoch), Duration::from_millis(100));
+            continue;
+        }
         #[cfg(windows)]
-        if !cfg.codex_stream_daemon_start && owned_tcp_server.is_some() {
+        if !cfg.codex_stream_daemon_start
+            && !launch_managed
+            && !launch_requested
+            && owned_tcp_server.is_some()
+        {
             owned_tcp_server = None;
             log::info!(
                 target: "engine",
                 "codex-stream: stopped the engine-owned Windows app-server after auto-start was disabled client=codex"
             );
         }
-        let (sessions, cur_epoch) = registry.snapshot();
+        let force_start = cfg.codex_stream_daemon_start || launch_managed || launch_requested;
         // Auto-start must not wait for a registered session: a remote TUI cannot connect
         // (and therefore cannot fire SessionStart) until the app-server already exists.
         // Without auto-start, preserve the cheap no-session park.
@@ -1188,7 +1293,7 @@ fn supervise(
             cfg.codex_stream,
             paths.codex_dir.exists(),
             !sessions.is_empty(),
-            cfg.codex_stream_daemon_start,
+            force_start,
         ) {
             #[cfg(windows)]
             if owned_tcp_server.is_some() {
@@ -1219,11 +1324,16 @@ fn supervise(
             );
         }
         let endpoint_key = endpoint.as_ref().map(Endpoint::key);
+        let remote_endpoint = endpoint.as_ref().map(Endpoint::remote_arg);
         let attempt_started = Instant::now();
         let attached: Result<Result<Detach, String>, String> = match endpoint {
             None => {
-                // No dialable endpoint on this platform (Windows without a ws:// override)
-                // — Stop-only narration stands. Park until config changes.
+                if launch_requested {
+                    registry.launch_failed(
+                        "codex_app_server_url must be an unauthenticated loopback ws:// endpoint",
+                    );
+                }
+                // Invalid or unsupported override: park until config changes.
                 epoch = registry.wait_change(cur_epoch.max(epoch), Duration::from_secs(30));
                 continue;
             }
@@ -1235,7 +1345,13 @@ fn supervise(
                         .map(PathBuf::from)
                         .unwrap_or_else(|| paths.codex_dir.clone());
                     let bin = resolve_codex_bin(&cfg.codex_bin, &paths.home, &codex_home, None);
-                    if cfg.codex_stream_daemon_start && bin.is_none() {
+                    if force_start && bin.is_none() {
+                        if launch_requested {
+                            registry.launch_failed(format!(
+                                "Codex executable {:?} was not found; set codex_bin to its full path",
+                                cfg.codex_bin
+                            ));
+                        }
                         if !warned_bin_unresolvable {
                             warned_bin_unresolvable = true;
                             log::info!(
@@ -1250,11 +1366,7 @@ fn supervise(
                     let throttled =
                         last_daemon_start.is_some_and(|at| at.elapsed() < DAEMON_START_MIN_GAP);
                     if !throttled
-                        && should_start_daemon(
-                            cfg.codex_stream_daemon_start,
-                            sock.exists(),
-                            bin.is_some(),
-                        )
+                        && should_start_daemon(force_start, sock.exists(), bin.is_some())
                         && let Some(bin) = bin
                     {
                         last_daemon_start = Some(Instant::now());
@@ -1270,7 +1382,15 @@ fn supervise(
                             Ok(ws)
                         })
                         .map(|mut ws| {
-                            run_attached(
+                            registry.launch_ready(
+                                remote_endpoint
+                                    .clone()
+                                    .expect("an endpoint produced this match arm"),
+                            );
+                            if launch_requested {
+                                launch_managed = true;
+                            }
+                            let result = run_attached(
                                 &mut ws,
                                 paths,
                                 running,
@@ -1279,7 +1399,9 @@ fn supervise(
                                 speak,
                                 tun,
                                 endpoint_key.as_deref(),
-                            )
+                            );
+                            registry.launch_detached();
+                            result
                         })
                 }
             }
@@ -1290,7 +1412,15 @@ fn supervise(
                         Ok(ws)
                     })
                     .map(|mut ws| {
-                        run_attached(
+                        registry.launch_ready(
+                            remote_endpoint
+                                .clone()
+                                .expect("an endpoint produced this match arm"),
+                        );
+                        if launch_requested {
+                            launch_managed = true;
+                        }
+                        let result = run_attached(
                             &mut ws,
                             paths,
                             running,
@@ -1299,14 +1429,13 @@ fn supervise(
                             speak,
                             tun,
                             endpoint_key.as_deref(),
-                        )
+                        );
+                        registry.launch_detached();
+                        result
                     }),
                 Err(connect_error) => {
                     #[cfg(windows)]
-                    if cfg.codex_stream_daemon_start
-                        && owned_tcp_server.is_none()
-                        && can_auto_start_tcp(&host)
-                    {
+                    if force_start && owned_tcp_server.is_none() && can_auto_start_tcp(&host) {
                         let codex_home = std::env::var_os("CODEX_HOME")
                             .filter(|s| !s.is_empty())
                             .map(PathBuf::from)
@@ -1333,19 +1462,30 @@ fn supervise(
                                         );
                                     }
                                     Err(e) => {
+                                        if launch_requested {
+                                            registry.launch_failed(e.clone());
+                                        }
                                         log::info!(target: "engine", "codex-stream: {e} client=codex")
                                     }
                                 }
                             }
-                        } else if !warned_bin_unresolvable {
-                            warned_bin_unresolvable = true;
-                            log::info!(
-                                target: "engine",
-                                "codex-stream: app-server start is enabled but `{}` was not found — set codex_bin to the binary's full path client=codex",
-                                cfg.codex_bin
-                            );
+                        } else {
+                            if launch_requested {
+                                registry.launch_failed(format!(
+                                    "Codex executable {:?} was not found; set codex_bin to its full path",
+                                    cfg.codex_bin
+                                ));
+                            }
+                            if !warned_bin_unresolvable {
+                                warned_bin_unresolvable = true;
+                                log::info!(
+                                    target: "engine",
+                                    "codex-stream: app-server start is enabled but `{}` was not found — set codex_bin to the binary's full path client=codex",
+                                    cfg.codex_bin
+                                );
+                            }
                         }
-                    } else if cfg.codex_stream_daemon_start && !can_auto_start_tcp(&host) {
+                    } else if force_start && !can_auto_start_tcp(&host) {
                         log::info!(
                             target: "engine",
                             "codex-stream: refusing to auto-start non-loopback ws://{host}; start and authenticate that app-server explicitly client=codex"
