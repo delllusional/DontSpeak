@@ -18,11 +18,11 @@
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
     <EnableMsixTooling>true</EnableMsixTooling>
-    <!-- The Windows App SDK injects a Bootstrap.Initialize module initializer into
-         exe-shaped unpackaged projects (the test host is an exe). On a runner without
-         the Windows App Runtime installed it BLOCKS at testhost startup (hung CI job).
-         Nothing in these tests touches WinRT, so skip the bootstrap entirely. -->
+    <!-- These are pure logic tests: neither the test assembly nor its app-project reference
+         needs a Windows App Runtime module initializer in the testhost process. -->
     <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
+    <WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize>false</WindowsAppSdkUndockedRegFreeWinRTInitialize>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
@@ -34,7 +34,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\winui\DontSpeak.WinUI.csproj" />
+    <ProjectReference Include="..\winui\DontSpeak.WinUI.csproj"
+                      AdditionalProperties="WindowsAppSdkBootstrapInitialize=false;WindowsAppSdkDeploymentManagerInitialize=false;WindowsAppSdkUndockedRegFreeWinRTInitialize=false" />
   </ItemGroup>
 
 </Project>
