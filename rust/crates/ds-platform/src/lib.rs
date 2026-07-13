@@ -209,16 +209,32 @@ pub trait CapsKeyMonitor {
         Vec::new()
     }
 
-    /// Take ownership of the physical Caps key: install whatever OS-level suppression
-    /// this platform uses (Windows: `WH_KEYBOARD_LL` hook; Linux: XKB `caps:none` remap;
-    /// macOS: `hidutil` null remap) so a physical press no longer toggles native
-    /// capitals/the LED and drives the engine's tap gesture instead. Idempotent — safe
-    /// to call when already owned. Called once at startup if caps dictation starts
-    /// enabled, and again on every OFF→ON live toggle (`Engine::set_caps_gate`).
-    /// DEFAULT no-op (the test mock).
-    fn acquire_caps_key(&self) {}
+    /// First phase of [`acquire_caps_key`]: establish any suppression that must be live
+    /// before the existing logical Caps state is cleared. macOS installs its `hidutil`
+    /// remap here; Windows installs and waits for its low-level hook; Linux uses the
+    /// default because its synthetic normalization tap must still reach XKB. Return
+    /// `false` when ownership could not be prepared; the shared acquisition sequence
+    /// then skips normalization and completion. DEFAULT: ready with no work.
+    fn begin_caps_key_acquisition(&self) -> bool {
+        true
+    }
 
-    /// Release ownership taken by [`acquire_caps_key`](Self::acquire_caps_key),
+    /// Second, mandatory phase of [`acquire_caps_key`]: clear any logical Caps state
+    /// that predates DontSpeak's ownership and leave the indicator dark. The shared
+    /// acquisition sequence calls this on every startup and OFF→ON acquisition, so a
+    /// platform cannot install suppression while accidentally preserving capitals.
+    /// DEFAULT: the platform's ordinary OFF writer; Linux and Windows override because
+    /// their indicator writers are deliberately decoupled from the logical toggle.
+    fn normalize_caps_lock(&self) {
+        self.set_caps_lock(false);
+    }
+
+    /// Final phase of [`acquire_caps_key`]: install suppression that must happen after
+    /// normalization. Linux applies XKB `caps:none` here, after its synthetic Caps tap;
+    /// macOS and Windows use the default no-op because they suppress in the first phase.
+    fn finish_caps_key_acquisition(&self) {}
+
+    /// Release ownership taken by [`acquire_caps_key`],
     /// restoring the key's native OS behavior. Idempotent — safe to call when not
     /// currently owned (including at startup if caps dictation starts disabled).
     /// Called on every ON→OFF live toggle and at final shutdown. Implementations
@@ -227,6 +243,75 @@ pub trait CapsKeyMonitor {
     /// released replays in full the instant the key is re-acquired, desyncing the
     /// tap/double-tap gesture state machine. DEFAULT no-op.
     fn release_caps_key(&self) {}
+}
+
+/// Take ownership of the physical Caps key through one shared cross-platform sequence:
+/// prepare suppression where required, normalize any pre-existing logical Caps state,
+/// then finish suppression where normalization had to run first. This is the only
+/// acquisition entry point; platforms implement the phase primitives above rather than
+/// duplicating (and potentially omitting) the normalization policy.
+pub fn acquire_caps_key(monitor: &(impl CapsKeyMonitor + ?Sized)) {
+    if !monitor.begin_caps_key_acquisition() {
+        return;
+    }
+    monitor.normalize_caps_lock();
+    monitor.finish_caps_key_acquisition();
+}
+
+#[cfg(test)]
+mod caps_key_acquisition_tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    struct Probe {
+        begin_ok: bool,
+        calls: RefCell<Vec<&'static str>>,
+    }
+
+    impl CapsKeyMonitor for Probe {
+        fn is_caps_physically_down(&self) -> bool {
+            false
+        }
+
+        fn set_caps_lock(&self, on: bool) {
+            assert!(!on, "acquisition must normalize Caps Lock to OFF");
+            self.calls.borrow_mut().push("normalize");
+        }
+
+        fn begin_caps_key_acquisition(&self) -> bool {
+            self.calls.borrow_mut().push("begin");
+            self.begin_ok
+        }
+
+        fn finish_caps_key_acquisition(&self) {
+            self.calls.borrow_mut().push("finish");
+        }
+    }
+
+    #[test]
+    fn acquisition_always_normalizes_between_the_platform_phases() {
+        let probe = Probe {
+            begin_ok: true,
+            calls: RefCell::new(Vec::new()),
+        };
+
+        acquire_caps_key(&probe);
+
+        assert_eq!(*probe.calls.borrow(), ["begin", "normalize", "finish"]);
+    }
+
+    #[test]
+    fn failed_preparation_does_not_mutate_caps_state_or_finish_ownership() {
+        let probe = Probe {
+            begin_ok: false,
+            calls: RefCell::new(Vec::new()),
+        };
+
+        acquire_caps_key(&probe);
+
+        assert_eq!(*probe.calls.borrow(), ["begin"]);
+    }
 }
 
 /// One platform's full capability set.

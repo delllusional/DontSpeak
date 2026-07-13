@@ -54,10 +54,13 @@ macOS `say`).
 
 Caps Lock is a tap toggle, driven off the physical key's down/hold/up transitions
 rather than the OS lock latch: a quick press-and-release starts or stops recording; a
-long-press force-resets to idle. The Caps LED is a pure output DontSpeak drives to
-reflect state — it's never read back, so it can't drift out of sync with recording.
-Windows reads the key via a low-level hook (event-driven); macOS and Linux poll the
-physical key every 30 ms.
+long-press force-resets to idle. Every enabled startup and OFF-to-ON transition goes
+through one shared acquisition sequence that clears any pre-existing logical Caps state
+before the app finishes taking ownership of the key; only the suppression and clearing
+mechanisms are platform-specific. Once owned, the Caps LED is a pure output DontSpeak
+drives to reflect recording state — gesture handling never derives state from the light,
+so it can't drift out of sync with recording. Windows reads the key via a low-level hook
+(event-driven); macOS and Linux poll the physical key every 30 ms.
 
 ## TTS pipeline
 

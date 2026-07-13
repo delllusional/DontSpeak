@@ -8,10 +8,10 @@
 //!   session's own settings channel (GNOME gsettings / KDE kxkbrc / setxkbmap; other
 //!   Wayland compositors are DEGRADED to a logged config instruction). XKB sits above
 //!   evdev, so the physical-key read below is unaffected.
-//! * Caps LED (`set_caps_lock`): a pure OUTPUT — the engine writes EV_LED/LED_CAPSL
-//!   on each gesture edge (lit = recording), never reading the state back. With the
-//!   caps toggle neutralized the compositor stops driving this LED too, so it is
-//!   solely ours as the recording indicator. Reading the physical
+//! * Caps LED (`set_caps_lock`): after one pre-ownership normalization probe, the engine
+//!   writes EV_LED/LED_CAPSL on each gesture edge (lit = recording) and never reads it
+//!   back as runtime state. With the caps toggle neutralized the compositor stops driving
+//!   this LED too, so it is solely ours as the recording indicator. Reading the physical
 //!   Caps key (below) needs membership in the `input` group (udev-rule.txt).
 //! * Physical down (`is_caps_physically_down`, §F long-press): the LED can't tell hold
 //!   duration, so we drain EV_KEY/KEY_CAPSLOCK events (non-blocking) each tick and cache
@@ -144,8 +144,8 @@ fn open_uinput() -> Result<VirtualDevice, String> {
         KeyCode::KEY_TAB,
         KeyCode::KEY_ESC,
         KeyCode::KEY_V,
-        // Startup normalize only: one synthetic Caps tap clears a latched caps-lock
-        // BEFORE the toggle is neutralized (see LinuxPlatform::new).
+        // Acquisition normalize only: one synthetic Caps tap clears a latched caps-lock
+        // BEFORE the shared sequence neutralizes the toggle (see `normalize_caps_lock`).
         KeyCode::KEY_CAPSLOCK,
     ] {
         keys.insert(k);
@@ -220,7 +220,7 @@ impl LinuxPlatform {
             extra_terminals: RefCell::new(Vec::new()),
         };
 
-        // Does NOT own the Caps key here — the engine calls `acquire_caps_key` itself
+        // Does NOT own the Caps key here — the engine calls `ds_platform::acquire_caps_key`
         // right after construction, only if caps dictation starts enabled (see
         // `Engine::assemble`), so a `caps_enabled=false` startup never remaps the key at
         // all instead of remapping-then-immediately-suppressing.
@@ -413,19 +413,22 @@ impl CapsKeyMonitor for LinuxPlatform {
         }
     }
 
-    fn acquire_caps_key(&self) {
-        // OWN the Caps key (keymap-level `caps:none` — see capskey.rs), but only when
-        // the keyboard is readable: without the evdev device Caps dictation self-gates
-        // OFF, and neutralizing the toggle then would leave the user a fully dead key.
+    fn normalize_caps_lock(&self) {
+        // The shared acquisition sequence runs this BEFORE `caps:none` is applied: if
+        // Caps is latched ON, clear it with one synthetic tap while XKB still treats the
+        // key normally. Before ownership the compositor keeps LED state aligned with the
+        // logical toggle, so it is the available state probe here.
+        if self.caps_lock_led_on() {
+            self.emit(KeyCode::KEY_CAPSLOCK, true);
+            self.emit(KeyCode::KEY_CAPSLOCK, false);
+        }
+        self.set_caps_lock(false);
+    }
+
+    fn finish_caps_key_acquisition(&self) {
+        // Own the key only when the keyboard is readable: without evdev, Caps dictation
+        // self-gates OFF, and neutralizing the native toggle would leave a dead key.
         if self.kbd.is_some() {
-            // Normalize first (macOS parity): if caps lock is latched ON, the user could
-            // no longer toggle it off once the key is neutralized — clear it with one
-            // synthetic tap while the toggle still works. LED state ≈ lock state here
-            // (the compositor still drives both until the option lands).
-            if self.caps_lock_led_on() {
-                self.emit(KeyCode::KEY_CAPSLOCK, true);
-                self.emit(KeyCode::KEY_CAPSLOCK, false);
-            }
             capskey::own_caps_key();
         }
     }

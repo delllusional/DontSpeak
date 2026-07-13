@@ -203,7 +203,7 @@ pub struct MacOsPlatform {
     /// poll thread.
     caps_down: Arc<AtomicBool>,
     /// Whether THIS instance currently owns the Caps key (last call was
-    /// `acquire_caps_key`, not yet followed by `release_caps_key`). Unlike Linux's
+    /// `ds_platform::acquire_caps_key`, not yet followed by `release_caps_key`). Unlike Linux's
     /// persistent marker file, `hidutil`'s `UserKeyMapping` is a single global, and
     /// `capskey::release_caps_key()` clears the WHOLE thing unconditionally — with no
     /// guard, a `release_caps_key()` call when we never acquired (e.g. `caps_enabled`
@@ -240,7 +240,7 @@ impl MacOsPlatform {
         // Physical Caps-LED writer (best-effort, self-retrying; falls back to the
         // lock-state write alone while it isn't open). See `led::RetryingCapsLed`.
         let led = led::RetryingCapsLed::new();
-        // Does NOT own the Caps key here — the engine calls `acquire_caps_key` itself
+        // Does NOT own the Caps key here — the engine calls `ds_platform::acquire_caps_key`
         // right after construction, only if caps dictation starts enabled (see
         // `Engine::assemble`), so a `caps_enabled=false` startup never remaps the key at
         // all instead of remapping-then-immediately-suppressing.
@@ -261,7 +261,7 @@ impl Drop for MacOsPlatform {
         // Hand the Caps key back to the OS on clean shutdown, but only if we actually
         // took it (via the guarded `release_caps_key`, not the raw `capskey` function —
         // see `owns_key`'s doc for why an unconditional call here is unsafe: a session
-        // that never called `acquire_caps_key` must not wipe a user's own unrelated
+        // that never called `ds_platform::acquire_caps_key` must not wipe a user's own unrelated
         // hidutil remap). (A hard SIGKILL skips this — the remap is per-login and is
         // cleared on the next clean run / logout / reboot.)
         self.release_caps_key();
@@ -508,16 +508,13 @@ impl CapsKeyMonitor for MacOsPlatform {
         self.led.set(on);
     }
 
-    fn acquire_caps_key(&self) {
-        // OWN the Caps key: remap it away from caps-lock at the HID driver level so a press
-        // never enables capitals (the macOS equivalent of the Windows key suppression). The
-        // physical key is still detected by the monitor spawned in `new`; the LED is ours
-        // to drive.
+    fn begin_caps_key_acquisition(&self) -> bool {
+        // Suppress first, then let the shared acquisition sequence normalize the logical
+        // lock via the default `normalize_caps_lock` implementation. The physical key is
+        // still detected by the monitor spawned in `new`; the LED is ours to drive.
         capskey::own_caps_key();
         self.owns_key.set(true);
-        // Normalize on acquire: if caps lock was ON, the user can no longer toggle it off
-        // (the key is remapped), so clear the logical lock and the indicator LED now.
-        self.set_caps_lock(false);
+        true
     }
 
     fn release_caps_key(&self) {

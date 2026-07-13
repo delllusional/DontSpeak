@@ -1113,7 +1113,7 @@ impl<P: Platform + 'static> Engine<P> {
     /// else happens to bump the gate (e.g. a relaunch, which resubscribes fresh).
     ///
     /// A REAL transition also acquires/releases physical ownership of the Caps key
-    /// (`Platform::acquire_caps_key`/`release_caps_key`) so OFF actually restores
+    /// (`ds_platform::acquire_caps_key`/`Platform::release_caps_key`) so OFF actually restores
     /// native OS behavior instead of leaving the key suppressed-but-ignored — and so
     /// no backlog of presses made while OFF can replay in a burst once back ON (see
     /// those methods' docs). Only on a real flip: this is called on every reload
@@ -1129,7 +1129,7 @@ impl<P: Platform + 'static> Engine<P> {
         }
         if now_on != self.caps_enabled {
             if now_on {
-                self.plat.acquire_caps_key();
+                ds_platform::acquire_caps_key(self.plat.as_ref());
             } else {
                 // Releasing means the platform's own press-in-flight tracking is about
                 // to reset (Windows' `release_caps_key` wipes its edge queue) — any
@@ -2013,11 +2013,12 @@ mod tests {
         /// Count of `press_enter` (auto-submit) calls — lets the insert-only
         /// double-tap tests assert whether the paste also pressed Enter.
         press_enter_calls: Cell<u32>,
-        /// Count of `acquire_caps_key`/`release_caps_key` calls — lets tests assert the
+        /// Count of shared acquisition attempts / `release_caps_key` calls — lets tests assert the
         /// engine takes/gives up physical key ownership on exactly the right
         /// construction/ON/OFF transitions (`caps_key_ownership_*` tests below), not just
         /// that `caps_enabled`/`gesture` end up in the right state.
         acquire_caps_key_calls: Cell<u32>,
+        normalize_caps_lock_calls: Cell<u32>,
         release_caps_key_calls: Cell<u32>,
         /// Records every `set_extra_terminals`/`set_extra_custom_text_editors` call, in
         /// order — lets `reload_pushes_extra_paste_target_lists_to_the_platform` assert
@@ -2079,9 +2080,15 @@ mod tests {
         fn drain_caps_events(&self) -> Vec<CapsEdge> {
             self.caps_event_queue.borrow_mut().drain(..).collect()
         }
-        fn acquire_caps_key(&self) {
+        fn begin_caps_key_acquisition(&self) -> bool {
             self.acquire_caps_key_calls
                 .set(self.acquire_caps_key_calls.get() + 1);
+            true
+        }
+        fn normalize_caps_lock(&self) {
+            self.normalize_caps_lock_calls
+                .set(self.normalize_caps_lock_calls.get() + 1);
+            self.set_caps_lock(false);
         }
         fn release_caps_key(&self) {
             self.release_caps_key_calls
@@ -3015,6 +3022,9 @@ mod tests {
         d.plat.tap_up_calls.set(0);
         // Simulate an in-flight dictation on the outgoing engine.
         d.gesture = GestureState::Recording;
+        // Ignore the acquisition-time OFF normalization; this assertion measures only
+        // the engine-changing reload below.
+        d.plat.set_caps_off_calls.set(0);
 
         // Reload to a config that CHANGES the RESOLVED STT engine, forcing a rebuild (the
         // surgical reload only aborts + swaps when the engine actually changes). Disabling
@@ -3164,6 +3174,11 @@ mod tests {
             "acquired once at construction"
         );
         assert_eq!(
+            d.plat.normalize_caps_lock_calls.get(),
+            1,
+            "normalized once at construction"
+        );
+        assert_eq!(
             d.plat.release_caps_key_calls.get(),
             0,
             "nothing to release at construction"
@@ -3189,6 +3204,7 @@ mod tests {
             0,
             "must never acquire when starting disabled"
         );
+        assert_eq!(d.plat.normalize_caps_lock_calls.get(), 0);
         assert_eq!(d.plat.release_caps_key_calls.get(), 0);
     }
 
@@ -3240,6 +3256,11 @@ mod tests {
             d.plat.acquire_caps_key_calls.get(),
             2,
             "ON->reload re-acquires"
+        );
+        assert_eq!(
+            d.plat.normalize_caps_lock_calls.get(),
+            2,
+            "startup and OFF->ON acquisition both normalize Caps Lock"
         );
         assert_eq!(
             d.plat.release_caps_key_calls.get(),
@@ -3398,6 +3419,9 @@ mod tests {
     fn reload_while_idle_does_not_abort() {
         // A reload when NOT recording must not call abort() (nothing in flight).
         let mut d = mk(600);
+        // Ignore the acquisition-time OFF normalization; this assertion measures only
+        // the no-op reload below.
+        d.plat.set_caps_off_calls.set(0);
         assert!(!d.is_recording());
         d.reload(&VoiceConfig::default());
         assert_eq!(

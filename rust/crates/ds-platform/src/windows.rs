@@ -2,7 +2,8 @@
 //! Windows in CI (the release full matrix).
 //!
 //! * Caps LED: `set_caps_lock` drives the physical Caps light out-of-band via
-//!   `IOCTL_KEYBOARD_SET_INDICATORS` — a pure output, never a toggle read.
+//!   `IOCTL_KEYBOARD_SET_INDICATORS` — a pure recording-state output. The logical
+//!   toggle is read only while the shared key-acquisition sequence normalizes startup.
 //! * Dictation key: `SendInput` presses the chord (modifiers + base key) then
 //!   releases — one discrete tap that toggles recording.
 //! * Frontmost: `GetForegroundWindow` + `GetWindowThreadProcessId`, then resolve
@@ -22,8 +23,8 @@ use windows::Win32::System::Threading::{
     QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
-    VIRTUAL_KEY, VK_CAPITAL,
+    GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+    SendInput, VIRTUAL_KEY, VK_CAPITAL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
@@ -229,19 +230,22 @@ fn push_caps_edge(down: bool) {
     }
 }
 
-/// Spawn the hook thread once. Idempotent; failures are logged, not fatal (dictation
-/// simply won't trigger, exactly as before a successful install).
-fn ensure_caps_hook() {
+/// Spawn the hook thread once and wait until `SetWindowsHookExW` has either installed
+/// the suppression hook or failed. The readiness barrier closes the acquisition race:
+/// the shared normalization phase may inspect and clear logical Caps only after physical
+/// presses are guaranteed to be suppressed. Idempotent; failures are logged, not fatal.
+fn ensure_caps_hook() -> bool {
     if HOOK_STARTED.swap(true, Ordering::SeqCst) {
-        return;
+        return HOOK_HANDLE.load(Ordering::SeqCst) != 0;
     }
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let spawned = std::thread::Builder::new()
         .name("caps-ll-hook".into())
         // SAFETY: plain Win32 FFI on this dedicated thread — `caps_hook_proc` is a `fn`
         // item (it can never dangle), `msg` is a live stack local for every
         // GetMessageW/DispatchMessageW call, and UnhookWindowsHookEx gets the handle
         // SetWindowsHookExW just returned, on the same thread that installed it.
-        .spawn(|| unsafe {
+        .spawn(move || unsafe {
             let hmod = GetModuleHandleW(None).unwrap_or_default();
             let hook =
                 SetWindowsHookExW(WH_KEYBOARD_LL, Some(caps_hook_proc), Some(hmod.into()), 0);
@@ -250,6 +254,7 @@ fn ensure_caps_hook() {
                     "dontspeak: SetWindowsHookExW(WH_KEYBOARD_LL) failed — Caps dictation disabled"
                 );
                 HOOK_STARTED.store(false, Ordering::SeqCst);
+                let _ = ready_tx.send(false);
                 return;
             };
             // Publish this thread's id so `shutdown_caps_hook` — called from the engine's
@@ -258,6 +263,20 @@ fn ensure_caps_hook() {
             let tid = GetCurrentThreadId();
             HOOK_HANDLE.store(hook.0 as isize, Ordering::SeqCst);
             HOOK_THREAD_ID.store(tid, Ordering::SeqCst);
+            // If the caller timed out and dropped the receiver, do not leave a hook it
+            // believes failed to start. Unhook here, on the installing thread, and let a
+            // later acquisition retry from a clean global state.
+            if ready_tx.send(true).is_err() {
+                if HOOK_HANDLE
+                    .compare_exchange(hook.0 as isize, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let _ = UnhookWindowsHookEx(hook);
+                }
+                let _ = HOOK_THREAD_ID.compare_exchange(tid, 0, Ordering::SeqCst, Ordering::SeqCst);
+                HOOK_STARTED.store(false, Ordering::SeqCst);
+                return;
+            }
             // A low-level hook is delivered to THIS thread; keep a live message pump or
             // the callback is never invoked. No key messages dispatch here — the pump
             // only services the hook delivery and the WM_QUIT `shutdown_caps_hook` posts
@@ -281,11 +300,31 @@ fn ensure_caps_hook() {
     match spawned {
         Ok(handle) => {
             *HOOK_JOIN.lock().unwrap() = Some(handle);
+            const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+            match ready_rx.recv_timeout(START_TIMEOUT) {
+                Ok(true) => true,
+                Ok(false) => {
+                    shutdown_caps_hook();
+                    false
+                }
+                Err(error) => {
+                    // Dropping the receiver makes a late-starting thread take its
+                    // `send(true).is_err()` cleanup branch above. `shutdown_caps_hook`
+                    // also joins (or forcibly unhooks) within its own bounded timeout.
+                    drop(ready_rx);
+                    eprintln!(
+                        "dontspeak: Caps hook did not become ready within {START_TIMEOUT:?} ({error})"
+                    );
+                    shutdown_caps_hook();
+                    false
+                }
+            }
         }
         Err(_) => {
             // Couldn't spawn — allow a later retry rather than latching the guard on.
             HOOK_STARTED.store(false, Ordering::SeqCst);
             eprintln!("dontspeak: failed to spawn Caps hook thread");
+            false
         }
     }
 }
@@ -296,10 +335,10 @@ fn ensure_caps_hook() {
 /// (bounded — see below) for the unhook to be CONFIRMED complete before returning — not
 /// just requested. Also clears the latched Caps state (`CAPS_DOWN` / `CAPS_EDGES`) so a
 /// later [`ensure_caps_hook`] starts clean — this is what makes `release_caps_key` +
-/// `acquire_caps_key` safe to call on every live `caps_enabled` toggle, not just at
+/// the shared `acquire_caps_key` safe to call on every live `caps_enabled` toggle, not just at
 /// process start/exit: a burst of presses made while released never survives to
 /// replay against the fresh hook — and resets `HOOK_STARTED` so the NEXT
-/// `acquire_caps_key` reinstalls a fresh hook rather than silently staying
+/// acquisition reinstalls a fresh hook rather than silently staying
 /// uninstalled (the bug this closes: without this reset, a stop+start cycle never
 /// reinstalled the hook — or worse, before this fix, `ensure_caps_hook`'s guard let a
 /// SECOND hook thread stack on top of a still-live first one, since nothing ever called
@@ -374,10 +413,9 @@ pub struct WindowsPlatform {
 }
 
 impl WindowsPlatform {
-    /// Does NOT acquire the Caps key — the engine calls [`CapsKeyMonitor::acquire_caps_key`]
-    /// itself right after construction, only if caps dictation starts enabled (see
-    /// `Engine::assemble`), so a `caps_enabled=false` startup never installs the hook
-    /// at all instead of installing-then-immediately-suppressing.
+    /// Does NOT acquire the Caps key — the engine calls `ds_platform::acquire_caps_key`
+    /// right after construction, only if caps dictation starts enabled (see
+    /// `Engine::assemble`), so a `caps_enabled=false` startup never installs the hook.
     pub fn new() -> Result<Self, PreflightError> {
         Ok(WindowsPlatform {
             extra_terminals: RefCell::new(Vec::new()),
@@ -438,6 +476,17 @@ impl WindowsPlatform {
             );
         }
     }
+
+    fn logical_caps_lock_on() -> bool {
+        // SAFETY: GetKeyState takes no pointers. For toggle keys its low bit is the
+        // logical ON/OFF state; unlike the physical LED, that is the state which changes
+        // typed case and must be cleared before DontSpeak owns the key.
+        lock_state_is_on(unsafe { GetKeyState(VK_CAPITAL.0 as i32) })
+    }
+}
+
+fn lock_state_is_on(state: i16) -> bool {
+    (state & 0x0001) != 0
 }
 
 impl Drop for WindowsPlatform {
@@ -648,7 +697,7 @@ mod caps_led {
         QueryDosDeviceW,
     };
     use windows::Win32::System::IO::DeviceIoControl;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_NUMLOCK, VK_SCROLL};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_NUMLOCK, VK_SCROLL};
     use windows::core::PCWSTR;
 
     // ntddkbd.h indicator bits (not surfaced by the `windows` crate).
@@ -691,7 +740,7 @@ mod caps_led {
     fn lock_on(vk: u16) -> bool {
         // SAFETY: GetKeyState takes no pointers and merely returns a state word; any
         // virtual-key value is acceptable input.
-        unsafe { (GetKeyState(vk as i32) & 0x0001) != 0 }
+        super::lock_state_is_on(unsafe { super::GetKeyState(vk as i32) })
     }
 
     /// UTF-16, NUL-terminated — for the `PCWSTR` Win32 string args.
@@ -848,10 +897,10 @@ impl CapsKeyMonitor for WindowsPlatform {
     fn set_caps_lock(&self, on: bool) {
         // Drive the dictation indicator on the PHYSICAL Caps-Lock LED, matching the
         // macOS (IOHIDSetModifierLockState) and Linux (EV_LED) ports. The low-level
-        // hook SUPPRESSES the key, so we can't (and mustn't) toggle the logical lock
-        // — that would re-enable capitals. `IOCTL_KEYBOARD_SET_INDICATORS` drives the
-        // hardware LED directly, decoupled from win32k's toggle bit, so the light
-        // tracks `holding` with no effect on typed case. Num/Scroll LEDs are preserved
+        // hook SUPPRESSES the key during steady-state gesture handling. Logical Caps is
+        // normalized separately, once per acquisition; this writer remains deliberately
+        // decoupled from win32k's toggle bit so the light tracks `holding` with no effect
+        // on typed case. Num/Scroll LEDs are preserved
         // (the IOCTL writes the FULL indicator set), mirroring the other two ports
         // which only ever touch the Caps bit.
         caps_led::drive_caps(on);
@@ -865,8 +914,21 @@ impl CapsKeyMonitor for WindowsPlatform {
             Err(_) => Vec::new(),
         }
     }
-    fn acquire_caps_key(&self) {
-        ensure_caps_hook();
+    fn begin_caps_key_acquisition(&self) -> bool {
+        ensure_caps_hook()
+    }
+    fn normalize_caps_lock(&self) {
+        // The hook is ready before the shared acquisition sequence reaches this phase,
+        // so a physical Caps press cannot race the state read. Injected events bypass
+        // our hook by design (`LLKHF_INJECTED`) and therefore clear the Windows logical
+        // toggle without becoming a DontSpeak gesture.
+        if Self::logical_caps_lock_on() {
+            Self::send(&[
+                Self::key(VK_CAPITAL.0, false),
+                Self::key(VK_CAPITAL.0, true),
+            ]);
+        }
+        self.set_caps_lock(false);
     }
     fn release_caps_key(&self) {
         // Already clears CAPS_EDGES (see its doc) — no backlog survives for the next
@@ -1077,6 +1139,14 @@ mod known_terminal_table {
 #[cfg(test)]
 mod caps_key_ownership {
     use super::*;
+
+    #[test]
+    fn logical_toggle_uses_only_the_get_key_state_low_bit() {
+        assert!(!lock_state_is_on(0));
+        assert!(lock_state_is_on(1));
+        assert!(!lock_state_is_on(0x8000_u16 as i16));
+        assert!(lock_state_is_on(0x8001_u16 as i16));
+    }
 
     /// The regression this closes: while `caps_enabled` was OFF, a still-installed hook
     /// would keep queuing every physical press into `CAPS_EDGES` even though nothing

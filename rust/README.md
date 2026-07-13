@@ -73,14 +73,15 @@ FFI surface, pluggable engines); this file is the crate-level map.
 
 ## macOS platform impl
 
-Caps-Lock state is one read and one write, kept independent: the physical key
-(`iohid.rs`, via `IOHIDManager`) publishes down/up edges that drive the engine's tap /
-long-press gesture machine, gated on the Accessibility grant; the LED (`macos.rs` /
-`iokit.rs`) is a pure output the engine lights on each gesture edge, never read back.
-Dictation's push-to-talk tap is a `CGEvent` posted at the session level for the
-configured `voice:pushToTalk` chord. `AXIsProcessTrusted()` gates only the caps loop —
-TTS/STT keep working without Accessibility, and trust granted later is picked up on
-the next reload.
+Caps-Lock input and output stay independent: the physical key (`iohid.rs`, via
+`IOHIDManager`) publishes down/up edges that drive the engine's tap / long-press gesture
+machine, gated on the Accessibility grant; the LED (`macos.rs` / `iokit.rs`) is an
+output the engine lights on each gesture edge. The shared cross-platform acquisition
+sequence clears any logical Caps state left on before DontSpeak owns the key; runtime
+gesture state never comes from the logical toggle or LED. Dictation's push-to-talk tap
+is a `CGEvent` posted at the session level for the configured `voice:pushToTalk` chord.
+`AXIsProcessTrusted()` gates only the caps loop — TTS/STT keep working without
+Accessibility, and trust granted later is picked up on the next reload.
 
 ## Hook protocol
 
