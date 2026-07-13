@@ -7,11 +7,12 @@ name: CI
 # Cost/coverage split:
 #   • Per commit / PR  → Linux only, essentials only (clippy + tests — fast; covers the
 #     platform-agnostic majority).
-#   • Release pipeline → the FULL ubuntu + windows-2025 + macos-26 matrix PLUS the
-#     hygiene gate (rustfmt + rustdoc) AND cargo-deny (advisories/bans/licenses/sources),
-#     so the macOS Core ML/ANE and Windows CUDA-path tests (cfg-gated to their own OS)
-#     run — and format/doc drift + dependency-graph issues are cleaned up — before
-#     anything is built or published. release.yml calls this with full-matrix: true.
+#   • Release pipeline → clippy + tests on the FULL ubuntu + windows-2025 + macos-26
+#     matrix, PLUS the hygiene gate (rustfmt + rustdoc) AND cargo-deny
+#     (advisories/bans/licenses/sources), so the macOS Core ML/ANE and Windows CUDA paths
+#     are compiled, linted, and tested on their own OS — and format/doc drift +
+#     dependency-graph issues are cleaned up — before anything is built or published.
+#     release.yml calls this with full-matrix: true.
 #     cargo-deny is release-only, same reasoning as hygiene: it's a considered gate
 #     (license/advisory exceptions need a deliberate deny.toml change, not a reflexive
 #     fix), so it's cheaper to clear once per release than to nag every commit. The
@@ -87,17 +88,26 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
 
-  # Clippy gate: deny ALL warnings across the workspace + every target (incl. tests). Linux
-  # only per-commit (matches the test default); covers the platform-agnostic majority plus the
-  # Linux cfg paths. Needs the same ALSA/PulseAudio dev libs as the tests (clippy compiles the
-  # cpal / ds-aec crates). Platform-specific (macOS/Windows cfg) lints are caught when the
-  # release runs the full matrix's tests; clippy here only type-checks the host's active cfg.
+  # Clippy gate: deny ALL warnings across the workspace + every target (incl. tests). It uses
+  # the same cost/coverage split as the test job: Linux per commit, then all three OSes for a
+  # full-matrix run so cfg-gated macOS and Windows code is linted on its native platform.
   clippy:
-    name: clippy
-    runs-on: ubuntu-latest
+    needs: setup
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.setup.outputs.os) }}
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+
       - uses: ./.github/actions/linux-build-deps
+        if: runner.os == 'Linux'
+
+      - uses: ./.github/actions/ring-asm-windows
+        if: runner.os == 'Windows'
+
       # See the hygiene job's comment above: pin to current stable explicitly rather
       # than the runner image's baked-in rustc.
       - uses: dtolnay/rust-toolchain@stable
@@ -144,8 +154,9 @@ jobs:
           manifest-path: ${{ matrix.manifest }}
           command-arguments: --config ${{ matrix.config }}
 
-  # Pick the OS matrix: Linux-only by default, all three when full-matrix is requested
-  # (the release gate). push/PR events have no `inputs`, so they fall to Linux-only.
+  # Pick the shared clippy/test OS matrix: Linux-only by default, all three when
+  # full-matrix is requested (the release gate). push/PR events have no `inputs`, so
+  # they fall to Linux-only.
   setup:
     name: test matrix
     runs-on: ubuntu-latest

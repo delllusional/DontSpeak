@@ -14,10 +14,12 @@ on:
   push:
     paths:
       - 'apps/windows/**'
+      - '.github/actions/dotnet-test-winui/**'
       - '.github/workflows/csharp.yml'
   pull_request:
     paths:
       - 'apps/windows/**'
+      - '.github/actions/dotnet-test-winui/**'
       - '.github/workflows/csharp.yml'
   workflow_dispatch: {}
 
