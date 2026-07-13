@@ -3,9 +3,8 @@ description: >
   The xunit pure-seam tests (HealthSnapshot parse, tray indicator mapping) — they run
   without ds_core.dll or the Windows App Runtime, so no Rust build is needed. Shared by
   ci.yml (release's full-matrix Windows leg) and csharp.yml (per-commit) so the command
-  and its known-crash handling live in one place instead of two. The hosted testhost can
-  abort during bootstrap, but that signature is tolerated only when the TRX report proves
-  tests actually executed and none failed. A missing or zero-test report always fails.
+  and result validation live in one place instead of two. The TRX report must prove that
+  tests actually executed; a missing or zero-test report always fails.
 runs:
   using: composite
   steps:
@@ -31,14 +30,12 @@ runs:
         Get-Content dotnet-test.log
 
         $executed = 0
-        $failed = 0
         $resultFiles = @(Get-ChildItem dotnet-test-results -Filter *.trx -File -ErrorAction SilentlyContinue)
         foreach ($resultFile in $resultFiles) {
           [xml]$report = Get-Content $resultFile.FullName -Raw
           $counters = $report.SelectSingleNode("/*[local-name()='TestRun']/*[local-name()='ResultSummary']/*[local-name()='Counters']")
           if ($null -ne $counters) {
             $executed += [int]$counters.executed
-            $failed += [int]$counters.failed + [int]$counters.error
           }
         }
 
@@ -46,18 +43,7 @@ runs:
           Write-Output "::error::dotnet test did not report any executed tests"
           exit 1
         }
-        if ($code -eq 0) {
-          exit 0
+        if ($code -ne 0) {
+          Write-Output "::error::dotnet test failed after executing $executed tests"
+          exit $code
         }
-
-        # Known issue (see action description above): tolerate only the exact hosted-runner
-        # crash after the result report proves that tests ran without a reported failure.
-        $log = Get-Content dotnet-test.log -Raw
-        $knownCrash = "The active test run was aborted. Reason: Test host process crashed"
-        if ($failed -eq 0 -and $log.Contains($knownCrash)) {
-          Write-Output "::warning::dotnet test hit the known hosted-runner testhost crash after executing $executed tests"
-          exit 0
-        }
-
-        Write-Output "::error::dotnet test failed for a reason other than the documented testhost crash"
-        exit $code
