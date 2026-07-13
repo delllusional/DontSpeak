@@ -2,6 +2,9 @@
 //! available before a client starts and otherwise preserves the child's argv, cwd, stdio,
 //! and exit status. Codex's interactive commands are the one exception: they first ask the
 //! engine to attach its narration subscriber, then receive the same endpoint via `--remote`.
+//! A host that never comes up degrades the integration for this launch (no voice, no
+//! narration) — it never stops the wrapped client from starting; this is a thin
+//! passthrough, not a gate on DontSpeak's own health.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,29 +39,46 @@ fn run_codex(spec: &ClientSpec, args: &[String], paths: &Paths, configured_bin: 
             );
             2
         }
-        CodexInvocation::Narrated => {
-            if !ensure_engine(&paths.engine_sock) {
-                eprintln!("dontspeak codex: the DontSpeak host did not become ready");
-                return 1;
+        CodexInvocation::Narrated => match prepare_codex_stream(paths) {
+            Some(endpoint) => {
+                let mut remote_args = vec!["--remote".to_string(), endpoint];
+                remote_args.extend_from_slice(args);
+                run_direct(spec, &remote_args, paths, configured_bin, false)
             }
-            let endpoint = match ds_ipc::request(&paths.engine_sock, &Request::EnsureCodexStream) {
-                Ok(Response::CodexStreamReady { endpoint }) => endpoint,
-                Ok(Response::Error { message }) => {
-                    eprintln!("dontspeak codex: {message}");
-                    return 1;
-                }
-                Ok(other) => {
-                    eprintln!("dontspeak codex: engine returned an unexpected response: {other:?}");
-                    return 1;
-                }
-                Err(error) => {
-                    eprintln!("dontspeak codex: could not prepare narration: {error}");
-                    return 1;
-                }
-            };
-            let mut remote_args = vec!["--remote".to_string(), endpoint];
-            remote_args.extend_from_slice(args);
-            run_direct(spec, &remote_args, paths, configured_bin, false)
+            // DontSpeak's own health must never keep Codex from starting — fall back to a
+            // plain launch (Stop-only narration, same as running `codex` directly).
+            None => run_direct(spec, args, paths, configured_bin, false),
+        },
+    }
+}
+
+/// Best-effort: prepare the Codex app-server narration path. Any failure (host not ready,
+/// engine declined, IPC error) is reported and treated as "no narration", never as a
+/// reason to block the launch — see `prepare_codex_stream`'s caller.
+fn prepare_codex_stream(paths: &Paths) -> Option<String> {
+    if !ensure_engine(&paths.engine_sock) {
+        eprintln!(
+            "dontspeak codex: the DontSpeak host did not become ready; launching without narration"
+        );
+        return None;
+    }
+    match ds_ipc::request(&paths.engine_sock, &Request::EnsureCodexStream) {
+        Ok(Response::CodexStreamReady { endpoint }) => Some(endpoint),
+        Ok(Response::Error { message }) => {
+            eprintln!("dontspeak codex: {message}; launching without narration");
+            None
+        }
+        Ok(other) => {
+            eprintln!(
+                "dontspeak codex: engine returned an unexpected response: {other:?}; launching without narration"
+            );
+            None
+        }
+        Err(error) => {
+            eprintln!(
+                "dontspeak codex: could not prepare narration: {error}; launching without narration"
+            );
+            None
         }
     }
 }
@@ -70,12 +90,14 @@ fn run_direct(
     configured_bin: &str,
     ensure_host: bool,
 ) -> i32 {
+    // A host that fails to start degrades the DontSpeak integration for this session, but
+    // must never keep the wrapped client from launching — that's the whole point of a
+    // thin passthrough wrapper.
     if ensure_host && !information_only(args) && !ensure_engine(&paths.engine_sock) {
         eprintln!(
-            "dontspeak {}: the DontSpeak host did not become ready",
+            "dontspeak {}: the DontSpeak host did not become ready; launching without DontSpeak integration",
             spec.launch.command
         );
-        return 1;
     }
     let Some(bin) = resolve_client_bin(configured_bin, spec.launch.command, paths) else {
         eprintln!(

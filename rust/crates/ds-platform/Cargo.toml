@@ -64,6 +64,9 @@ windows = { workspace = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_Security",
+    # FreeConsole for detach_console(): drops a console-subsystem process's implicit
+    # console attachment so a GUI-launched hook/MCP child never flashes a window.
+    "Win32_System_Console",
 ] }
 
 # ---- Linux (cfg) -----------------------------------------------------------

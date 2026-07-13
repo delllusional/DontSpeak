@@ -35,6 +35,12 @@
 // terminal or redirected stdio, while `dontspeak <client>` needs the invoking shell to WAIT
 // and leave the console attached to the interactive child. A GUI-subsystem binary makes
 // PowerShell return immediately, racing its prompt against the launched TUI.
+//
+// The tradeoff: a console-subsystem child spawned by a console-LESS GUI host (Claude Code
+// Desktop, the WinUI app) gets a new, briefly visible console window unless it detaches —
+// exactly what the GUI subsystem used to prevent for free. `main` calls
+// `ds_platform::detach_console()` for every role except `Launch`, which is the only one
+// that needs the console kept attached.
 
 mod client_launch;
 mod engine_launch;
@@ -102,6 +108,13 @@ fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
     }
 }
 
+/// Whether this role should detach from any console Windows attached or auto-created for
+/// it. Every role except `Launch` runs headless behind piped stdio; only `Launch` needs
+/// the console kept attached so it can block the invoking shell for the interactive child.
+fn should_detach_console(subcommand: &Subcommand) -> bool {
+    !matches!(subcommand, Subcommand::Launch(..))
+}
+
 /// Grok injects this reserved variable into every hook process. Its presence is the
 /// unambiguous discriminator between a bare-command hook and the normal bare-command MCP
 /// server; the value itself is only a marker because the payload remains the routing source
@@ -145,7 +158,12 @@ fn main() {
     // Claude Code hook verbs above. There is no HTTP transport.
     ds_log::init();
     let argv: Vec<String> = std::env::args().collect();
-    match resolve_subcommand(&argv) {
+    let subcommand = resolve_subcommand(&argv);
+    // A no-op on non-Windows targets; see the file-level comment above.
+    if should_detach_console(&subcommand) {
+        ds_platform::detach_console();
+    }
+    match subcommand {
         Subcommand::Notify => {
             let payload = read_stdin();
             // `--greet-only` (wired on SessionStart for NON-streaming clients like Qwen Code):
@@ -271,6 +289,26 @@ mod tests {
                     "{name}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn only_launch_keeps_the_console_attached() {
+        assert!(!should_detach_console(&Subcommand::Launch(
+            ClientSource::Codex,
+            &[]
+        )));
+        for subcommand in [
+            Subcommand::Notify,
+            Subcommand::Provide,
+            Subcommand::Wire(&[]),
+            Subcommand::Server,
+            Subcommand::Unknown("bogus".to_string()),
+        ] {
+            assert!(
+                should_detach_console(&subcommand),
+                "{subcommand:?} must detach"
+            );
         }
     }
 

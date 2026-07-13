@@ -567,3 +567,16 @@ pub fn is_mic_active() -> bool {
 pub fn is_mic_active() -> bool {
     false
 }
+
+/// Detach this process from any console it inherited or was implicitly given (Windows
+/// only; a no-op elsewhere — only Windows ties a console-subsystem process to an
+/// auto-created window). See `windows::detach_console` for why `dontspeak.exe` needs this
+/// for its non-interactive roles.
+#[cfg(windows)]
+pub fn detach_console() {
+    windows::detach_console();
+}
+
+/// No-op on platforms with no console/subsystem distinction.
+#[cfg(not(windows))]
+pub fn detach_console() {}

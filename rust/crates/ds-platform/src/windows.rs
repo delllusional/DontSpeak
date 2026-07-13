@@ -939,6 +939,24 @@ pub(crate) fn is_mic_active() -> bool {
     }
 }
 
+/// Detach this process from whatever console it inherited or was implicitly given.
+///
+/// `dontspeak.exe` must be a console-subsystem binary so `dontspeak <client>` can block
+/// an interactive shell for the launched TUI (a GUI-subsystem process returns control to
+/// PowerShell/cmd immediately instead of waiting). But most of its roles (`notify`,
+/// `provide`, the bare stdio MCP server) are spawned by a GUI host — Claude Code Desktop,
+/// the WinUI app — that has no console of its own; Windows then allocates a new,
+/// momentarily visible console window for a console-subsystem child unless it detaches.
+/// Piped stdio (always used for these roles) is unaffected: those are independent OS
+/// handles, not tied to console attachment.
+pub(crate) fn detach_console() {
+    use windows::Win32::System::Console::FreeConsole;
+
+    // SAFETY: FreeConsole takes no arguments and has no preconditions; if this process
+    // has no console attached the call just fails harmlessly, which we ignore.
+    let _ = unsafe { FreeConsole() };
+}
+
 #[cfg(test)]
 mod keycode_parity {
     use super::*;
