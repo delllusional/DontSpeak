@@ -60,9 +60,24 @@ let package = Package(
                     "-Xlinker", "../../rust/target/release-ffi/libds_core.a",
                 ]),
                 // System frameworks the staticlib transitively needs — derived
-                // from `cargo rustc -- --print native-static-libs`:
+                // from `cargo rustc -- --print native-static-libs`, EXCEPT Carbon
+                // (added by hand: `ds-platform/build.rs` links it via
+                // `cargo:rustc-link-lib=framework=Carbon` for the Text Input Source
+                // Services calls in `macos.rs`'s `active_layout_keycode`, but that
+                // `println!` directive is Cargo-only metadata — it has no way to
+                // reach this SEPARATE SwiftPM linker-settings list, which links the
+                // prebuilt `libds_core.a` directly via `-force_load` rather than
+                // through Cargo. `--print native-static-libs` won't surface it
+                // either, since the crate's own `extern "C"` block declares the
+                // Carbon symbols directly with no linked crate to report). Missing
+                // this list entry doesn't fail a Rust-only `cargo build`/`cargo
+                // test` — it only surfaces at the SwiftPM app/test LINK step, e.g.
+                // `swift test` or `bundle.sh` — so it's easy to add the Rust side
+                // and forget this one; re-derive the whole list by hand after any
+                // dependency change that could alter native linkage, don't just
+                // trust the snapshot comment above.
                 //   AudioToolbox CoreAudio IOKit ApplicationServices AppKit
-                //   Foundation CoreGraphics CoreFoundation + libiconv/libobjc.
+                //   Foundation CoreGraphics CoreFoundation Carbon + libiconv/libobjc.
                 .linkedFramework("AppKit"),
                 .linkedFramework("Foundation"),
                 .linkedFramework("AVFoundation"),
@@ -72,6 +87,7 @@ let package = Package(
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("CoreFoundation"),
+                .linkedFramework("Carbon"),
                 .linkedLibrary("iconv"),
                 .linkedLibrary("objc"),
             ]

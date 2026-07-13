@@ -23,9 +23,19 @@ description: Cut a DontSpeak release — tag the single-source version, push the
 
 - **Version**: the single source is `rust/Cargo.toml` → `[workspace.package] version` (read by
   `scripts/version.sh`). The tag must be `v` + exactly that version — the `check` job fails the
-  run fast otherwise. Bump it (+ commit) for a new release.
+  run fast otherwise. Bump it (+ commit) for a new release. Going from a `-dev` suffix to a
+  real release version needs no judgment call — the version number was already decided
+  whenever `main` was last bumped (step 9) — it's a mechanical strip of the suffix, not a
+  version choice, unless you're deliberately overriding the preset bump size (e.g. escalating
+  a preset patch to a minor/major release because more accumulated on `main` than expected).
 - **Green main, pushed**: run the `prepush` skill first (clippy + tests — the same suite
-  the release re-runs); the tagged commit must be on `origin/main`.
+  the release re-runs); the tagged commit must be on `origin/main`. **This is a fail-fast
+  optimization, not the actual correctness gate** — `release.yml`'s own `tests` job
+  (full-matrix) reruns clippy + tests + hygiene regardless, and IS the real gate. Running it
+  locally first only exists to catch a broken `main` in ~1-2 minutes instead of burning the
+  full ~25-30 minute CI round-trip. Skipping it is a legitimate choice when the toolchain to
+  run it isn't available where the release is being triggered from — just budget for an
+  occasional wasted CI run (and a re-cut, step 7) as the cost of that trade.
 - **Hygiene clean — run `cargo fmt` + `cargo deny check` locally before tagging.** The
   release (unlike per-commit CI and `prepush`) also gates on rustfmt + rustdoc AND
   cargo-deny (`ci.yml`'s `hygiene` and `cargo-deny` jobs, full-matrix only) — **the
