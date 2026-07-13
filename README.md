@@ -1,10 +1,10 @@
 # DontSpeak
 
-A local voice layer for Claude Code, Codex, and Qwen Code: your agent speaks its replies aloud, and you dictate back with one key.
+A local voice layer for Claude Code, Codex, Qwen Code, and Grok CLI: your agent speaks its replies aloud, and you dictate back with one key.
 
 ## Install
 
-One command — it downloads the prebuilt app for your OS, wires the MCP server + voice hooks into every client, and launches it (the voice models download themselves on first run):
+One command — it downloads the prebuilt app for your OS, wires the MCP server + voice hooks into every supported client, and launches it (the voice models download themselves on first run):
 
 ```sh
 # macOS / Linux
