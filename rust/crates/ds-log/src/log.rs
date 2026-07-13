@@ -158,8 +158,8 @@ pub fn log(log_file: &Path, level: LogLevel, source: &str, msg: &str) {
 ///
 /// This is the ONLY client-attributed logger, and it takes the log-file PATH: every caller
 /// therefore has a `Paths` in scope (a tempdir-rooted one under test). There is deliberately
-/// no `log_cached_from` — see [`log_cached`]'s doc for why a client-typed cached logger would
-/// be a real-`$HOME` write from any unit test that touched it.
+/// no cached client-attributed variant: it would offer unit tests a tempting path to the real
+/// `$HOME` log instead of requiring their tempdir-rooted path.
 pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: ClientSource, msg: &str) {
     use std::io::Write;
     if let Some(dir) = log_file.parent() {

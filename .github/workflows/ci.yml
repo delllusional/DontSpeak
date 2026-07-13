@@ -143,16 +143,15 @@ jobs:
         include:
           - graph: Rust workspace
             manifest: rust/Cargo.toml
-            config: deny.toml
           - graph: Linux GTK host
             manifest: apps/linux/gtk/Cargo.toml
-            config: ../../../rust/deny.toml
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # Pin v2's cargo-deny 0.20.2 invocation: --config is a repo-root option before `check`.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
           manifest-path: ${{ matrix.manifest }}
-          command-arguments: --config ${{ matrix.config }}
+          arguments: --all-features --config rust/deny.toml
 
   # Pick the shared clippy/test OS matrix: Linux-only by default, all three when
   # full-matrix is requested (the release gate). push/PR events have no `inputs`, so
