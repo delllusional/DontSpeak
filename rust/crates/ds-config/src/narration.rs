@@ -82,7 +82,7 @@ pub fn all_blockquotes(msg: &str) -> Vec<String> {
 /// spoken-line blockquote digest; the narrator reads EVERY top-level blockquote aloud, in order
 /// (see [`all_blockquotes`]).
 pub const DEFAULT_NARRATION_SPEC: &str = r#"# Narrate
-Only `>` lines are spoken. Start every reply with one plain-speech `>` line per point; omit markdown, code, URLs, and paths. End with one `>` line per pick-one option.
+Start every reply with a concise plain-speech summary of the full response, one `>` line per point; omit markdown, code, URLs, and paths. Put pick-one options in the final `>` lines.
 "#;
 
 #[cfg(test)]

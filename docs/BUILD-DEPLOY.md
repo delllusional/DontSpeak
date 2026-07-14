@@ -170,8 +170,8 @@ cue). The hook itself is a fresh short-lived process that loads `VoiceConfig` fr
 
 ## Config defaults can mask a deploy/read bug
 
-`narrate` defaults to both kinds on (`["shorts", "digests"]`); most other flags
-(`greet_on_open`, `full_duplex`, the needs-input earcon, …) default off. A config read
+`narrate` defaults to both kinds on (`["shorts", "digests"]`), and `greet_on_open`
+also defaults on; most other flags (`full_duplex`, the needs-input earcon, …) default off. A config read
 from the wrong path can leave default-on narration working while a default-off opt-in
 stays silently off — reading as "the new feature is broken" when the real fault is
 the config path or a stale deploy. When an opt-in stays silent, confirm the reader
