@@ -934,13 +934,20 @@ impl TtsQueue {
         self.tts.is_stt_loaded()
     }
 
-    /// Non-blocking twin of the worker's pre-drop heal, for the DICTATION side: a Caps tap
-    /// that finds Parakeet not resident may be looking at a warm child that CRASHED
-    /// post-READY — and a user who only dictates never queues the speak that would trigger
-    /// the worker's heal, so dictation would stay refused until an app restart. Runs
-    /// [`TtsManager::restart_if_crashed`] on a throwaway thread (a start blocks for seconds
-    /// while the model loads; the tap lives on the input poll tick, which must not stall).
-    /// The refusing tap stays refused — the NEXT one finds the model warm.
+    /// Non-blocking crash heal, shared by TWO callers that must never ride a blocking
+    /// start (a start holds the manager's `lifecycle` lock for seconds — up to the READY
+    /// handshake bound — while the model loads):
+    ///
+    /// * the DICTATION side: a Caps tap that finds Parakeet not resident may be looking
+    ///   at a warm child that CRASHED post-READY — and a user who only dictates never
+    ///   queues the speak that would heal it, so dictation would stay refused until an
+    ///   app restart. The tap lives on the input poll tick, which must not stall; the
+    ///   refusing tap stays refused — the NEXT one finds the model warm.
+    /// * the worker's readiness wait (`wait_until_ready_with_timeout`): while an item is
+    ///   claimed the mic is closed and `stop_speech` polls the same loop, so the wait
+    ///   must keep ticking instead of blocking inside a child restart (issue #59).
+    ///
+    /// Runs [`TtsManager::restart_if_crashed`] on a throwaway thread.
     pub fn heal_crashed_child(&self) {
         // Single-flight: taps during a heal-in-progress (a start blocks for seconds while
         // the model loads) must not pile up threads on the manager's lifecycle lock.
@@ -1164,8 +1171,9 @@ impl TtsQueue {
 
             // Never send Kokoro work before its model is ready. Accepted work is HELD during
             // an ordinary warm-up and remains busy; it is dropped only for an explicit cancel,
-            // disabled engine, terminal load failure, or readiness timeout after helper startup
-            // returns. The spawned-child READY handshake itself remains unbounded (issue #59).
+            // disabled engine, terminal load failure, or readiness timeout. The wait never
+            // blocks on child lifecycle calls (healing is async, issue #59), so its deadline
+            // is a real upper bound.
             if !crate::config_gate::tts_can_play(engine, self.tts.is_tts_loaded()) {
                 match self.wait_until_ready(engine, gen0) {
                     ReadyOutcome::Ready => {}
@@ -1229,20 +1237,47 @@ impl TtsQueue {
             Some(TtsEngine::Kokoro) => {}
         }
 
-        // Complete mark_dead's "next speak heals" contract before waiting. An alive helper
-        // is left alone; an exited/absent one is restarted when it is safe to do so.
-        self.tts.restart_if_crashed();
-        if self.tts.is_running() && !self.tts.is_tts_loaded() {
-            // A cached TTSLOADERR predating this retry is not terminal — the load fired
-            // right below may resolve it (e.g. an AV scan briefly locking the model).
-            // Clear it so the wait loop only fails on a FRESH error from this attempt;
-            // a genuinely permanent failure re-emits TTSLOADERR and still fails fast.
-            self.tts.clear_tts_load_error();
-            self.tts.load_engine("tts");
-        }
-
+        // Complete mark_dead's "next speak heals" contract WITHOUT blocking: the heal
+        // routes through `heal_crashed_child`'s single-flight background thread, never a
+        // synchronous `restart_if_crashed` — a start can hold the manager's `lifecycle`
+        // lock across a whole spawn+READY handshake (bounded since issue #59, but still
+        // up to `READY_HANDSHAKE_TIMEOUT`), and riding it here kept the claimed item
+        // `in_flight` (mic closed, `stop_speech` unheard) for the duration. This worker
+        // instead keeps polling at the 50 ms tick, so cancel/ready/error all stay live.
+        // `heal_kicked`/`load_requested` bound the side effects to one heal kick / one
+        // `load` write per child incarnation, not one per tick.
         let deadline = Instant::now() + timeout;
+        let mut heal_kicked = false;
+        let mut load_requested = false;
+        if self.tts.is_running() {
+            if !self.tts.is_tts_loaded() {
+                // A cached TTSLOADERR predating this retry is not terminal — the load fired
+                // right below may resolve it (e.g. an AV scan briefly locking the model).
+                // Clear it so the wait loop only fails on a FRESH error from this attempt;
+                // a genuinely permanent failure re-emits TTSLOADERR and still fails fast.
+                self.tts.clear_tts_load_error();
+                self.tts.load_engine("tts"); // fire-and-forget stdin write — non-blocking
+                load_requested = true;
+            }
+        } else {
+            // A TTSLOADERR from a dead child is stale by definition — clear it BEFORE
+            // kicking the async heal. The heal is no longer synchronous, so without this
+            // clear the poll loop's error check would fire on its very first iteration
+            // (microseconds from now, long before the heal thread finishes spawn+READY)
+            // and return Unavailable with the dead child's stale error — dropping the
+            // held item instead of healing and retrying. A genuinely permanent failure
+            // re-emits from the fresh child. Pinned by
+            // wait_until_ready_ignores_a_stale_load_error_when_retrying.
+            self.tts.clear_tts_load_error();
+            self.heal_crashed_child();
+            heal_kicked = true;
+        }
         loop {
+            // ORDER LOAD-BEARING: cancel beats ready beats error — pinned by
+            // wait_until_ready_cancellation_beats_a_manager_error. `last_error` is
+            // deliberately NEVER cleared here: a failed start (including a timed-out
+            // READY handshake) parks the manager with it set, and this error check
+            // surfacing it is the intended give-up path.
             if self.generation.load(Ordering::SeqCst) != gen0 {
                 return ReadyOutcome::Cancelled;
             }
@@ -1253,11 +1288,22 @@ impl TtsQueue {
                 return ReadyOutcome::Unavailable(error);
             }
             if !self.tts.is_running() {
-                self.tts.restart_if_crashed();
-                if self.tts.is_running() && !self.tts.is_tts_loaded() {
+                if !heal_kicked {
+                    // A mid-wait death: mirror the entry rule above — the stale-error
+                    // clear must happen when the heal is KICKED (it completes
+                    // asynchronously, so clearing "after" it has no defined moment).
+                    self.tts.clear_tts_load_error();
+                    self.heal_crashed_child();
+                    heal_kicked = true;
+                }
+                load_requested = false; // a fresh child may need a fresh load request
+            } else {
+                heal_kicked = false; // running again; re-kick if it dies later
+                if !load_requested {
                     // Same stale-error rule as the entry retry above.
                     self.tts.clear_tts_load_error();
                     self.tts.load_engine("tts");
+                    load_requested = true;
                 }
             }
             if Instant::now() >= deadline {
@@ -2516,22 +2562,7 @@ mod tests {
     /// path (clear stale error → `load_engine`) actually runs.
     #[test]
     fn wait_until_ready_ignores_a_stale_load_error_when_retrying() {
-        let bin_name = if cfg!(windows) {
-            "dontspeakd-fake-helper.exe"
-        } else {
-            "dontspeakd-fake-helper"
-        };
-        let bin = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent()?.parent().map(std::path::Path::to_path_buf))
-            .map(|dir| dir.join(bin_name))
-            .expect("could not resolve the running test binary's own directory");
-        assert!(
-            bin.exists(),
-            "fixture not built at {} — run `cargo build -p dontspeakd` first",
-            bin.display()
-        );
-
+        let bin = crate::tts::wedge_recovery_tests::fake_helper_bin();
         let dir = tempfile::tempdir().unwrap();
         let q = TtsQueue::test_stub_with_helper(dir.path(), bin);
         q.tts.set_stderr_log_dir_for_test(dir.path().to_path_buf());
@@ -2540,18 +2571,28 @@ mod tests {
         q.tts
             .set_tts_load_error_for_test("transient: model file locked");
 
-        // The fake helper never loads TTS itself; flip residency shortly after the wait
-        // has started polling, as a successful retried load would.
+        // The fake helper never loads TTS itself; flip residency while the wait polls, as
+        // a successful retried load would. Flipped REPEATEDLY (not once): the heal is
+        // asynchronous now, and its `start_locked` tail resets `tts_model` to Idle
+        // (`tts_preload` is false in this stub) at whatever moment the fixture finishes
+        // spawning — a single early flip raced that reset and lost. Re-asserting each
+        // tick mirrors the real helper, which re-confirms TTSLOADED for every retried
+        // `load` request.
+        let stop_flipping = Arc::new(AtomicBool::new(false));
         let flipper = Arc::clone(&q);
+        let stop = Arc::clone(&stop_flipping);
         let flip = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(150));
-            flipper.tts.set_tts_loaded_for_test();
+            while !stop.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(100));
+                flipper.tts.set_tts_loaded_for_test();
+            }
         });
 
         let outcome = q.wait_until_ready(
             Some(ds_config::TtsEngine::Kokoro),
             q.generation.load(Ordering::SeqCst),
         );
+        stop_flipping.store(true, Ordering::SeqCst);
         flip.join().unwrap();
         q.tts.set_enabled(false); // stop the spawned fixture
         assert_eq!(
@@ -2559,6 +2600,47 @@ mod tests {
             ReadyOutcome::Ready,
             "a stale TTSLOADERR must not drop the item its own retry is about to heal"
         );
+    }
+
+    /// Issue #59: the worker's readiness wait must NOT ride a wedged child's READY
+    /// handshake. The fixture wedges pre-READY, so the heal's `start_locked` blocks for
+    /// the full 3 s handshake bound — but the heal now runs on `heal_crashed_child`'s
+    /// background thread, so the wait itself returns at ITS OWN (200 ms) deadline.
+    /// Before this fix the wait called `restart_if_crashed` synchronously and sat inside
+    /// the handshake (then unbounded: forever, mic closed, `stop_speech` unheard).
+    #[test]
+    fn wait_until_ready_does_not_block_on_a_wedged_child_spawn() {
+        let bin = crate::tts::wedge_recovery_tests::fake_helper_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let q = TtsQueue::test_stub_with_helper(dir.path(), bin);
+        q.tts.set_stderr_log_dir_for_test(dir.path().to_path_buf());
+        q.tts
+            .set_spawn_env_for_test(&[("DONTSPEAK_FAKE_WEDGE_PRE_READY", "1")]);
+        // Big enough that a wait that DID ride the handshake would visibly overshoot the
+        // 1.5 s assertion below; small enough to keep the cleanup join bounded.
+        q.tts
+            .set_ready_timeout_for_test(Duration::from_millis(3000));
+
+        let started = std::time::Instant::now();
+        let outcome = q.wait_until_ready_with_timeout(
+            Some(ds_config::TtsEngine::Kokoro),
+            q.generation.load(Ordering::SeqCst),
+            Duration::from_millis(200),
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(
+            outcome,
+            ReadyOutcome::Unavailable(
+                "timed out waiting for the Kokoro model to become ready".to_string()
+            )
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "the wait must return at its own 200 ms deadline, not the 3 s handshake bound \
+             the async heal is stuck in — took {elapsed:?}"
+        );
+        // Bounded now (change A): waits out at most the rest of the heal's handshake.
+        q.tts.set_enabled(false);
     }
 
     /// Residency observed by the poll returns `Ready` (the gate then re-checks holds).
