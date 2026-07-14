@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::_exit;
 use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
 use crate::oneshot::{Backend, load_backend};
-use crate::prepare::{PrepareOutcome, prepare_audio};
+use crate::prepare::{PrepareOutcome, PreparedAudio, prepare_audio};
 use crate::stt_residency::SttResidencySlot;
 
 /// One stdin request in `--serve` mode (one JSON object per line).
@@ -1084,91 +1084,125 @@ pub(crate) fn serve() -> ! {
         let synth = synth.as_mut().expect("synth loaded above");
 
         // ONE Rust frontend normalizes, phonemizes, and bounds the request before the backend
-        // split. ONNX and Core ML consume these exact IPA batches. Stage every PCM piece before
-        // opening a per-request player or touching VPIO: a later synthesis error otherwise cannot
-        // retract an earlier piece the audio device has already rendered.
+        // split. ONNX and Core ML consume these exact IPA batches. Stage every PCM piece of a
+        // bounded group before opening a per-request player or touching VPIO: a later synthesis
+        // error otherwise cannot retract an earlier piece the audio device has already rendered.
+        // An over-cap utterance commits in consecutive groups — see `prepare`.
         let t_req = std::time::Instant::now();
-        let prepared = match synth {
+        let channels = std::num::NonZero::new(1u16).expect("1 channel");
+        let srate = std::num::NonZero::new(24_000u32).expect("24 kHz");
+        let mut player: Option<Arc<rodio::Player>> = None;
+        let mut synth_nanos = 0u128;
+        let mut total_samples = 0usize;
+        let mut first_ms = 0.0f64;
+        let mut commit = |audio: PreparedAudio| -> Result<(), String> {
+            synth_nanos = synth_nanos.saturating_add(audio.synth_nanos);
+            if total_samples == 0 {
+                first_ms = t_req.elapsed().as_secs_f64() * 1000.0;
+                // Output sink: a fresh per-request rodio `Player` on the persistent mixer,
+                // shared via `cur_player` for barge — OR the duplex render queue when the
+                // backend owns render (macOS VPIO), barged via `duplex_barge`.
+                player = match &device {
+                    Some(dev) => {
+                        let p = Arc::new(rodio::Player::connect_new(dev.mixer()));
+                        p.set_volume(if muted.load(Ordering::SeqCst) {
+                            0.0
+                        } else {
+                            1.0
+                        });
+                        *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
+                        Some(p)
+                    }
+                    None => None,
+                };
+                // Prepend a brief silence only after the first group commits. It absorbs an
+                // idle rodio stream's resume latency without making a failed transaction touch
+                // the player.
+                if let Some(p) = &player {
+                    p.append(rodio::buffer::SamplesBuffer::new(
+                        channels,
+                        srate,
+                        leading_silence_pcm(srate.get()),
+                    ));
+                }
+            } else if render_via_duplex {
+                // The VPIO render ring holds exactly one group's cap (90 s): drain the previous
+                // group before pushing the next so a multi-group utterance cannot overflow it.
+                if let Some(dx) = &duplex {
+                    while dx.render_pending() && !cancel.load(Ordering::SeqCst) {
+                        std::thread::sleep(std::time::Duration::from_millis(15));
+                    }
+                }
+            }
+            total_samples = total_samples.saturating_add(audio.total_samples);
+            for pcm in audio.pieces {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                if render_via_duplex {
+                    if let Some(dx) = &duplex {
+                        let pcm = if muted.load(Ordering::SeqCst) {
+                            vec![0.0; pcm.len()]
+                        } else {
+                            pcm
+                        };
+                        dx.render_push(&pcm);
+                    }
+                } else if let Some(p) = &player {
+                    p.append(rodio::buffer::SamplesBuffer::new(channels, srate, pcm));
+                }
+            }
+            Ok(())
+        };
+        let outcome = match synth {
             Backend::Ort(synth) => prepare_audio(
                 &phoneme_batches,
                 || cancel.load(Ordering::SeqCst),
                 |batch| synth.synthesize(batch.as_str(), &voice, rate),
+                &mut commit,
             ),
             #[cfg(target_os = "macos")]
             Backend::Coreml(c) => prepare_audio(
                 &phoneme_batches,
                 || cancel.load(Ordering::SeqCst),
                 |batch| c.synthesize_phonemes(batch.as_str(), &voice, rate),
+                &mut commit,
             ),
         };
-        let prepared = match prepared {
-            Ok(PrepareOutcome::Ready(audio)) => audio,
+        match outcome {
+            Ok(PrepareOutcome::Finished) => {}
             Ok(PrepareOutcome::Cancelled) => {
+                // Committed groups were already stopped by the reader's barge (`cur_player` /
+                // `duplex_barge`); clear defensively for the between-groups window and reset.
+                if render_via_duplex {
+                    if let Some(dx) = &duplex {
+                        dx.render_clear();
+                    }
+                } else if let Some(p) = &player {
+                    p.stop();
+                }
+                *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 println!("{}", proto::DONE);
                 let _ = std::io::stdout().flush();
                 continue;
             }
             Err(e) => {
+                // A failed group must not leave earlier committed groups speaking under an ERR
+                // reply — match the pre-transactional behavior: audio stops once the failure is
+                // known.
+                if render_via_duplex {
+                    if let Some(dx) = &duplex {
+                        dx.render_clear();
+                    }
+                } else if let Some(p) = &player {
+                    p.stop();
+                }
+                *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 log::warn!(target: "helper", "transactional synthesis failed: {e}");
                 let one_line = e.lines().collect::<Vec<_>>().join(" ");
                 println!("{} {one_line}", proto::ERR);
                 let _ = std::io::stdout().flush();
                 continue;
-            }
-        };
-        if cancel.load(Ordering::SeqCst) {
-            println!("{}", proto::DONE);
-            let _ = std::io::stdout().flush();
-            continue;
-        }
-
-        // Output sink: a fresh per-request rodio `Player` on the persistent mixer,
-        // shared via `cur_player` for barge — OR the duplex render queue when the
-        // backend owns render (macOS VPIO), barged via `duplex_barge`.
-        let player = match &device {
-            Some(dev) => {
-                let p = Arc::new(rodio::Player::connect_new(dev.mixer()));
-                p.set_volume(if muted.load(Ordering::SeqCst) {
-                    0.0
-                } else {
-                    1.0
-                });
-                *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
-                Some(p)
-            }
-            None => None,
-        };
-        let channels = std::num::NonZero::new(1u16).expect("1 channel");
-        let srate = std::num::NonZero::new(24_000u32).expect("24 kHz");
-
-        // Prepend a brief silence only after synthesis commits. It absorbs an idle rodio
-        // stream's resume latency without making a failed transaction touch the player.
-        if let Some(p) = &player {
-            p.append(rodio::buffer::SamplesBuffer::new(
-                channels,
-                srate,
-                leading_silence_pcm(srate.get()),
-            ));
-        }
-
-        let first_ms = t_req.elapsed().as_secs_f64() * 1000.0;
-        let synth_nanos = prepared.synth_nanos;
-        let total_samples = prepared.total_samples;
-        for pcm in prepared.pieces {
-            if cancel.load(Ordering::SeqCst) {
-                break;
-            }
-            if render_via_duplex {
-                if let Some(dx) = &duplex {
-                    let pcm = if muted.load(Ordering::SeqCst) {
-                        vec![0.0; pcm.len()]
-                    } else {
-                        pcm
-                    };
-                    dx.render_push(&pcm);
-                }
-            } else if let Some(p) = &player {
-                p.append(rodio::buffer::SamplesBuffer::new(channels, srate, pcm));
             }
         }
         // Wait for playback to finish, then clear on barge.

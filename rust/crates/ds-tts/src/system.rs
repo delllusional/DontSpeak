@@ -195,6 +195,24 @@ impl Tts for SystemTts {
 /// and tracks the child itself. The single source of the Windows say invocation, shared by
 /// the library `SystemTts` and dontspeakd::speak_system so they agree on rate math + escaping
 /// (the macOS counterpart of the same name takes no `text` — it appends it via `.arg`).
+/// Double every code point PowerShell's tokenizer accepts as a single quote — U+0027 plus the
+/// smart-quote variants U+2018..=U+201B. Any of them terminates a `'…'` literal, so doubling
+/// only the ASCII apostrophe let a curly apostrophe ("don’t", ubiquitous in agent prose, and
+/// deliberately preserved by the Markdown frontend) break the script — and a crafted
+/// `x’); <cmd>; (‘y` payload escape the string into executable position.
+#[cfg(target_os = "windows")]
+fn ps_squote_escape(text: &str) -> String {
+    const PS_SINGLE_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if PS_SINGLE_QUOTES.contains(&ch) {
+            escaped.push(ch);
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
 #[cfg(target_os = "windows")]
 pub fn say_command(voice: Option<&str>, rate: f32, text: &str) -> Command {
     use std::os::windows::process::CommandExt;
@@ -212,10 +230,9 @@ pub fn say_command(voice: Option<&str>, rate: f32, text: &str) -> Command {
     } else {
         ((r - 1.0) * 10.0).round() as i32 // 1.0->0 .. 2.0->10
     };
-    // PowerShell single-quote escaping: double any embedded quote.
-    let esc_text = text.replace('\'', "''");
+    let esc_text = ps_squote_escape(text);
     let select = match voice.filter(|v| !v.trim().is_empty()) {
-        Some(v) => format!("$s.SelectVoice('{}');", v.replace('\'', "''")),
+        Some(v) => format!("$s.SelectVoice('{}');", ps_squote_escape(v)),
         None => String::new(),
     };
     let script = format!(
@@ -344,7 +361,38 @@ mod tests {
 
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests {
-    use super::say_command;
+    use super::{ps_squote_escape, say_command};
+
+    /// Regression (audit): only the ASCII apostrophe was doubled, so any smart-quote code
+    /// point (all tokenized as single quotes by PowerShell) terminated the `'…'` literal —
+    /// a parse failure for ordinary "don’t" prose and a script-injection vector for crafted
+    /// text. Every variant must reach the generated script doubled.
+    #[test]
+    fn say_command_escapes_every_powershell_single_quote_variant() {
+        assert_eq!(
+            ps_squote_escape("a'b\u{2018}c\u{2019}d\u{201A}e\u{201B}f"),
+            "a''b\u{2018}\u{2018}c\u{2019}\u{2019}d\u{201A}\u{201A}e\u{201B}\u{201B}f"
+        );
+
+        let cmd = say_command(
+            Some("O\u{2019}Brien"),
+            1.0,
+            "don\u{2019}t \u{2018}quote\u{2019}",
+        );
+        let script = cmd
+            .get_args()
+            .last()
+            .expect("-Command script")
+            .to_string_lossy()
+            .into_owned();
+        for needle in [
+            "O\u{2019}\u{2019}Brien",
+            "don\u{2019}\u{2019}t",
+            "\u{2018}\u{2018}quote\u{2019}\u{2019}",
+        ] {
+            assert!(script.contains(needle), "missing {needle:?} in {script:?}");
+        }
+    }
 
     /// The builder produces a runnable PowerShell `System.Speech` invocation that
     /// SYNTHESIZES on this machine — exit 0 means the OS spoke the text. Audible, so

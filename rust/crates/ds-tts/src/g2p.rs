@@ -381,6 +381,17 @@ mod tests {
             },
         );
 
+        // Reproduce the production hazard state: the convert() that installed the fallback also
+        // rebuilt the live g2p with it, so `is_unresolved` reports false for the word. A
+        // regressed `needs_resolution` that re-consults `is_unresolved` instead of `retry_bart`
+        // (the pre-fix shape) would treat the sentinel as resolved and never retry.
+        let g2p = frontend.g2p.take().expect("live g2p");
+        frontend.g2p = Some(g2p.with_overrides(frontend.overrides.clone()));
+        assert!(
+            !frontend.is_unresolved("Zorblax"),
+            "premise: the installed override must make is_unresolved report false"
+        );
+
         frontend.convert("Zorblax").expect("retryable OOV");
         let retried = frontend.oov_cache.get("zorblax").expect("cached OOV");
         assert_ne!(
@@ -388,6 +399,31 @@ mod tests {
             "the retryable sentinel must be replaced by BART or the live spelling fallback"
         );
         assert_eq!(frontend.oov_order.len(), 1, "a retry updates in place");
+    }
+
+    /// Sibling guard to the retry test above: an entry cached WITHOUT `retry_bart` is a genuine
+    /// hit — `convert` must serve it as-is, not re-resolve it into a spelling fallback.
+    #[test]
+    fn cached_pronunciation_without_retry_flag_is_served_not_re_resolved() {
+        let mut frontend = EnglishFrontend::new();
+        frontend.insert_oov(
+            "zorblax".to_string(),
+            OovEntry {
+                phonemes: "zˈɔɹblæks".to_string(),
+                override_key: "zorblax".to_string(),
+                replacement: None,
+                retry_bart: false,
+            },
+        );
+        let g2p = frontend.g2p.take().expect("live g2p");
+        frontend.g2p = Some(g2p.with_overrides(frontend.overrides.clone()));
+
+        frontend.convert("Zorblax").expect("cached OOV");
+        let cached = frontend.oov_cache.get("zorblax").expect("cached OOV");
+        assert_eq!(
+            cached.phonemes, "zˈɔɹblæks",
+            "a genuine cache hit must not be re-resolved"
+        );
     }
 
     #[test]

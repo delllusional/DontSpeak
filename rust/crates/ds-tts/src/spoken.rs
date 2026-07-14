@@ -36,7 +36,13 @@ impl SpokenText {
                 // "- outer\n  - inner" into the single OOV word "outerinner".
                 Event::Start(tag) if is_block_start(&tag) => rendered.push(' '),
                 Event::End(tag) if is_block_end(&tag) => rendered.push(' '),
-                // Footnote markers, raw HTML, and checkbox glyphs are structure, not prose.
+                // Raw HTML keeps its visible text, not its tags: a block-level element
+                // (`<div>Hello</div>`, `<details><summary>Notes</summary>`) arrives as one
+                // `Html` event whose inner prose would otherwise be silenced wholesale.
+                Event::Html(html) | Event::InlineHtml(html) => {
+                    rendered.push_str(&strip_html_tags(&html));
+                }
+                // Footnote markers and checkbox glyphs are structure, not prose.
                 _ => {}
             }
         }
@@ -87,6 +93,29 @@ fn is_block_end(tag: &TagEnd) -> bool {
             | TagEnd::TableRow
             | TagEnd::TableCell
     )
+}
+
+/// Drop `<...>` tag spans and `<!-- ... -->` comments from raw HTML, keeping the residual
+/// visible text. Speech-oriented, not an HTML parser: an unterminated `<` swallows the rest
+/// of the event, which for well-formed agent output only ever drops markup.
+fn strip_html_tags(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(open) = rest.find('<') {
+        text.push_str(&rest[..open]);
+        let tail = &rest[open..];
+        let consumed = if let Some(comment) = tail.strip_prefix("<!--") {
+            comment.find("-->").map(|end| open + 4 + end + 3)
+        } else {
+            tail.find('>').map(|end| open + end + 1)
+        };
+        match consumed {
+            Some(end) => rest = &rest[end..],
+            None => return text,
+        }
+    }
+    text.push_str(rest);
+    text
 }
 
 fn omit_urls_and_collapse_whitespace(rendered: &str) -> String {
@@ -239,5 +268,26 @@ mod tests {
         for source in ["", "   ", "---", "<div><span></span></div>"] {
             assert_eq!(SpokenText::from_markdown(source).as_str(), "");
         }
+    }
+
+    /// Regression (audit): a block-level HTML element's visible prose was dropped wholesale —
+    /// only its tags are structure. `<details>` blocks are common in agent replies.
+    #[test]
+    fn html_block_keeps_visible_text_and_drops_tags() {
+        assert_eq!(
+            SpokenText::from_markdown("<div>Hello</div>").as_str(),
+            "Hello"
+        );
+        assert_eq!(
+            SpokenText::from_markdown(
+                "<details><summary>Notes</summary>\n\nBody text.\n\n</details>"
+            )
+            .as_str(),
+            "Notes Body text."
+        );
+        assert_eq!(
+            SpokenText::from_markdown("Before <!-- hidden --> after.").as_str(),
+            "Before after."
+        );
     }
 }

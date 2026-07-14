@@ -86,7 +86,9 @@ impl KokoroCoremlTts {
     /// [`crate::g2p::phoneme_batches_for`]. The ANE
     /// repo ships only `af_heart`, but any voice is materialized on demand from the
     /// LOCAL voices npz, so first use Just Works; an id with no local source falls back
-    /// to `af_heart`. Empty result is returned as an empty Vec (the caller skips it).
+    /// to `af_heart`. An empty result is returned as an empty Vec; the helper treats empty
+    /// PCM from a nonempty phoneme chunk as a terminal synthesis failure (see ds-helper's
+    /// transactional prepare module).
     pub fn synthesize_phonemes(
         &self,
         phonemes: &str,

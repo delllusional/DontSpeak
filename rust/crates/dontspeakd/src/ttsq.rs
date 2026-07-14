@@ -1061,6 +1061,46 @@ impl TtsQueue {
             let _in_flight = InFlightGuard(&self.in_flight);
             let _playing = PlayingGuard(&self.playing_session);
 
+            let (engine, voice, rate) = match self.gate_item(&item, gen0) {
+                GateOutcome::Play {
+                    engine,
+                    voice,
+                    rate,
+                } => (engine, voice, rate),
+                GateOutcome::Requeue => {
+                    self.requeue_if_resuming(item, gen0);
+                    continue;
+                }
+                GateOutcome::Drop(reason) => {
+                    log::warn!(target: "ttsq", "queued speak could not start: {reason}");
+                    continue;
+                }
+            };
+
+            self.set_tts_active(true);
+            // Speak the whole block in ONE call (the warm child prepares it transactionally,
+            // then plays it continuously) — uniformly for NARRATION and REPLY. If a record-barge
+            // pause (generation bump) interrupts playback mid-way, re-enqueue the item so
+            // `resume()` continues it. This is the SAME for both kinds: the old per-kind
+            // split re-enqueued only replies, so an interrupted NARRATION was dropped —
+            // tap-to-pause then tap-to-resume came back SILENT.
+            if let Err(e) = self.speak_one(engine, &item.text, &voice, rate) {
+                log::warn!(target: "ttsq", "queued speak failed: {e}");
+            }
+            if self.generation.load(Ordering::SeqCst) != gen0 {
+                self.requeue_if_resuming(item, gen0);
+            }
+            self.set_tts_active(false);
+        }
+    }
+
+    /// The combined pre-playback gate for one claimed item: hold, wait for readiness, then
+    /// hold AGAIN if the wait outlasted a focus/mic change. One loop, so an item can never
+    /// start playing under a hold that arrived during the (up to 60 s) readiness wait —
+    /// `set_terminal_front` only stores atomics and never bumps the generation, so nothing
+    /// else breaks that window.
+    fn gate_item(&self, item: &Item, gen0: u64) -> GateOutcome {
+        loop {
             // HOLD this item (any kind) while we must stay silent — resume when the
             // gate clears, dropping nothing. Two independent "hold, don't drop" gates:
             //   * mic live (HALF-DUPLEX only): never speak into a recording. Full-duplex
@@ -1092,8 +1132,7 @@ impl TtsQueue {
             // which gate we waited on. (`InFlightGuard` still clears it on every exit path.)
             self.in_flight.store(true, Ordering::SeqCst);
             if self.generation.load(Ordering::SeqCst) != gen0 {
-                self.requeue_if_resuming(item, gen0);
-                continue;
+                return GateOutcome::Requeue;
             }
 
             let cfg = self.config.lock().unwrap().clone();
@@ -1117,31 +1156,21 @@ impl TtsQueue {
             if !crate::config_gate::tts_can_play(engine, self.tts.is_tts_loaded()) {
                 match self.wait_until_ready(engine, gen0) {
                     ReadyOutcome::Ready => {}
-                    ReadyOutcome::Cancelled => {
-                        self.requeue_if_resuming(item, gen0);
-                        continue;
-                    }
-                    ReadyOutcome::Unavailable(reason) => {
-                        log::warn!(target: "ttsq", "queued speak could not start: {reason}");
-                        continue;
-                    }
+                    ReadyOutcome::Cancelled => return GateOutcome::Requeue,
+                    ReadyOutcome::Unavailable(reason) => return GateOutcome::Drop(reason),
+                }
+                // Regression guard (audit): focus/mic can flip while the readiness wait runs.
+                // Re-enter the hold gate (re-resolving config, which may have changed too)
+                // instead of playing into a background app the moment the model loads.
+                if self.worker_hold_state().any() {
+                    continue;
                 }
             }
-
-            self.set_tts_active(true);
-            // Speak the whole block in ONE call (the warm child prepares it transactionally,
-            // then plays it continuously) — uniformly for NARRATION and REPLY. If a record-barge
-            // pause (generation bump) interrupts playback mid-way, re-enqueue the item so
-            // `resume()` continues it. This is the SAME for both kinds: the old per-kind
-            // split re-enqueued only replies, so an interrupted NARRATION was dropped —
-            // tap-to-pause then tap-to-resume came back SILENT.
-            if let Err(e) = self.speak_one(engine, &item.text, &voice, rate) {
-                log::warn!(target: "ttsq", "queued speak failed: {e}");
-            }
-            if self.generation.load(Ordering::SeqCst) != gen0 {
-                self.requeue_if_resuming(item, gen0);
-            }
-            self.set_tts_active(false);
+            return GateOutcome::Play {
+                engine,
+                voice,
+                rate,
+            };
         }
     }
 
@@ -1167,6 +1196,18 @@ impl TtsQueue {
     }
 
     fn wait_until_ready(&self, engine: Option<ds_config::TtsEngine>, gen0: u64) -> ReadyOutcome {
+        const READY_TIMEOUT: Duration = Duration::from_secs(60);
+        self.wait_until_ready_with_timeout(engine, gen0, READY_TIMEOUT)
+    }
+
+    /// Timeout-injectable body of [`wait_until_ready`](Self::wait_until_ready) so tests can
+    /// pin the deadline arm in milliseconds instead of the production 60 s.
+    fn wait_until_ready_with_timeout(
+        &self,
+        engine: Option<ds_config::TtsEngine>,
+        gen0: u64,
+        timeout: Duration,
+    ) -> ReadyOutcome {
         use ds_config::TtsEngine;
 
         match engine {
@@ -1182,8 +1223,7 @@ impl TtsQueue {
             self.tts.load_engine("tts");
         }
 
-        const READY_TIMEOUT: Duration = Duration::from_secs(60);
-        let deadline = Instant::now() + READY_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             if self.generation.load(Ordering::SeqCst) != gen0 {
                 return ReadyOutcome::Cancelled;
@@ -1249,6 +1289,18 @@ enum ReadyOutcome {
     Ready,
     Cancelled,
     Unavailable(String),
+}
+
+/// What [`TtsQueue::gate_item`] decided for a claimed item.
+#[derive(Debug)]
+enum GateOutcome {
+    Play {
+        engine: Option<ds_config::TtsEngine>,
+        voice: String,
+        rate: f32,
+    },
+    Requeue,
+    Drop(String),
 }
 
 /// Whether an interrupted item (narration OR reply) should be RE-ENQUEUED to resume later.
@@ -2342,6 +2394,148 @@ mod tests {
         q.tts_active.store(false, Ordering::SeqCst);
         q.set_terminal_front(true);
         assert!(q.is_busy(), "returning focus re-arms pending work as busy");
+    }
+
+    /// `wait_until_ready` fast paths (audit): a disabled engine is `Unavailable` and System is
+    /// `Ready`, both without touching the warm helper.
+    #[test]
+    fn wait_until_ready_fast_paths_for_disabled_and_system_engines() {
+        let q = mk_queue();
+        assert_eq!(
+            q.wait_until_ready(None, 0),
+            ReadyOutcome::Unavailable("TTS is disabled".to_string())
+        );
+        assert_eq!(
+            q.wait_until_ready(Some(ds_config::TtsEngine::System), 0),
+            ReadyOutcome::Ready
+        );
+    }
+
+    /// Pins the cancel-before-error ordering inside the readiness poll: a generation bump must
+    /// come back `Cancelled` (so the worker can requeue a merely-paused item) even when a
+    /// manager error is also present — `Unavailable` here would drop the item instead.
+    #[test]
+    fn wait_until_ready_cancellation_beats_a_manager_error() {
+        let q = mk_queue();
+        let dir = tempfile::tempdir().unwrap();
+        q.tts.set_stderr_log_dir_for_test(dir.path().to_path_buf());
+        q.tts.restart_if_crashed(); // nonexistent helper: the failed spawn records last_error
+        assert!(
+            q.tts.last_error().is_some(),
+            "premise: the failed spawn must leave a manager error"
+        );
+        let stale = q.generation.load(Ordering::SeqCst).wrapping_add(1);
+        assert_eq!(
+            q.wait_until_ready(Some(ds_config::TtsEngine::Kokoro), stale),
+            ReadyOutcome::Cancelled
+        );
+    }
+
+    /// A manager-level error fails fast as `Unavailable` instead of consuming the deadline.
+    #[test]
+    fn wait_until_ready_reports_a_manager_error_without_consuming_the_deadline() {
+        let q = mk_queue();
+        let dir = tempfile::tempdir().unwrap();
+        q.tts.set_stderr_log_dir_for_test(dir.path().to_path_buf());
+        q.tts.restart_if_crashed();
+        assert!(
+            q.tts.last_error().is_some(),
+            "premise: the failed spawn must leave a manager error"
+        );
+        let started = std::time::Instant::now();
+        let outcome = q.wait_until_ready(
+            Some(ds_config::TtsEngine::Kokoro),
+            q.generation.load(Ordering::SeqCst),
+        );
+        assert!(
+            matches!(outcome, ReadyOutcome::Unavailable(_)),
+            "{outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "an error must short-circuit the wait"
+        );
+    }
+
+    /// The deadline arm: a never-ready helper with no error and no cancel times out as
+    /// `Unavailable` (timeout-injectable so the test waits milliseconds, not 60 s).
+    #[test]
+    fn wait_until_ready_times_out_at_the_deadline() {
+        let q = mk_queue();
+        q.tts.suppress_heal_for_test(); // no spawn attempt → no error short-circuit
+        let outcome = q.wait_until_ready_with_timeout(
+            Some(ds_config::TtsEngine::Kokoro),
+            q.generation.load(Ordering::SeqCst),
+            Duration::from_millis(200),
+        );
+        assert_eq!(
+            outcome,
+            ReadyOutcome::Unavailable(
+                "timed out waiting for the Kokoro model to become ready".to_string()
+            )
+        );
+    }
+
+    /// Residency observed by the poll returns `Ready` (the gate then re-checks holds).
+    #[test]
+    fn wait_until_ready_returns_ready_once_the_model_is_resident() {
+        let q = mk_queue();
+        q.tts.suppress_heal_for_test();
+        q.tts.set_tts_loaded_for_test();
+        assert_eq!(
+            q.wait_until_ready(
+                Some(ds_config::TtsEngine::Kokoro),
+                q.generation.load(Ordering::SeqCst)
+            ),
+            ReadyOutcome::Ready
+        );
+    }
+
+    /// Regression (audit): `pause_in_background` focus loss DURING the readiness wait must
+    /// re-enter the hold gate once the model becomes ready — the old shape went straight to
+    /// playback, speaking into whatever app was frontmost after up to 60 s of warm-up.
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    #[test]
+    fn gate_item_rechecks_the_focus_hold_after_the_readiness_wait() {
+        let q = mk_queue();
+        q.tts.suppress_heal_for_test();
+        *q.config.lock().unwrap() = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
+            ..VoiceConfig::default()
+        };
+        q.set_terminal_front(true); // arm the self-disabling focus gate
+        q.set_pause_in_background(true);
+
+        let gen0 = q.generation.load(Ordering::SeqCst);
+        let gated = Arc::clone(&q);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            done_tx
+                .send(gated.gate_item(&item("held across warm-up"), gen0))
+                .unwrap();
+        });
+        // The gate publishes in-flight once it passes the (currently clear) hold gate; give it
+        // a beat more so it is inside `wait_until_ready`'s 50 ms poll loop.
+        while !q.in_flight.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+
+        q.set_terminal_front(false); // the user tabs away mid-wait…
+        q.tts.set_tts_loaded_for_test(); // …then the model becomes ready
+
+        let early = done_rx.recv_timeout(Duration::from_millis(600));
+        assert!(
+            matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "the item must stay held while no terminal is frontmost: {early:?}"
+        );
+
+        q.set_terminal_front(true);
+        let outcome = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the gate returns once focus is back");
+        assert!(matches!(outcome, GateOutcome::Play { .. }), "{outcome:?}");
+        handle.join().unwrap();
     }
 
     #[test]

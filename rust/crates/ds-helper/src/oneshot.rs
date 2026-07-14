@@ -6,7 +6,7 @@ use ds_tts::g2p;
 use ds_tts::play::AudioPlayer;
 use ds_tts::synth::KokoroSynth;
 
-use crate::prepare::{PrepareOutcome, prepare_audio};
+use crate::prepare::prepare_audio;
 
 /// Ensure the assets, point ort at the dylib, and build the session ONCE.
 fn load_synth() -> Result<KokoroSynth, String> {
@@ -79,7 +79,7 @@ pub(crate) fn load_backend() -> Result<Backend, String> {
     Ok(Backend::Ort(load_synth()?))
 }
 
-/// One-shot: prepare the complete utterance, then play it through `AudioPlayer`.
+/// One-shot: stage the utterance in bounded groups, playing each through `AudioPlayer`.
 pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
     // Keep the cold path aligned with `serve`: both backends consume the same normalized,
     // model-bounded Rust phoneme batches.
@@ -90,11 +90,25 @@ pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
     if phoneme_batches.is_empty() {
         return Ok(());
     }
-    let prepared = match load_backend()? {
+    // Commit to playback only after a full group succeeds. Opening the device earlier allowed
+    // initial chunks to become audible before a later synthesis error was known.
+    let mut player: Option<AudioPlayer> = None;
+    let mut commit = |audio: crate::prepare::PreparedAudio| -> Result<(), String> {
+        if player.is_none() {
+            player = Some(AudioPlayer::open()?);
+        }
+        let player = player.as_ref().expect("opened above");
+        for pcm in audio.pieces {
+            player.enqueue(pcm);
+        }
+        Ok(())
+    };
+    match load_backend()? {
         Backend::Ort(mut synth) => prepare_audio(
             &phoneme_batches,
             || false,
             |batch| synth.synthesize(batch.as_str(), voice, rate),
+            &mut commit,
         )?,
         // Core ML consumes the same Rust-produced IPA batches as ONNX.
         #[cfg(target_os = "macos")]
@@ -102,18 +116,11 @@ pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
             &phoneme_batches,
             || false,
             |batch| c.synthesize_phonemes(batch.as_str(), voice, rate),
+            &mut commit,
         )?,
     };
-    let PrepareOutcome::Ready(prepared) = prepared else {
-        return Ok(()); // one-shot has no cancellation source
-    };
-
-    // Commit to playback only after every chunk succeeds. Opening the device earlier allowed
-    // initial chunks to become audible before a later synthesis error was known.
-    let player = AudioPlayer::open()?;
-    for pcm in prepared.pieces {
-        player.enqueue(pcm);
+    if let Some(player) = player {
+        player.wait();
     }
-    player.wait();
     Ok(())
 }

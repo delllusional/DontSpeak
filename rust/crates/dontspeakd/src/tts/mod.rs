@@ -1595,8 +1595,25 @@ impl TtsManager {
     /// point it at a tempdir so a test that spawns a REAL child (`wedge_recovery_tests`)
     /// doesn't write under the real per-OS logs dir. Never compiled into a release binary.
     #[cfg(test)]
-    fn set_stderr_log_dir_for_test(&self, dir: std::path::PathBuf) {
+    pub(crate) fn set_stderr_log_dir_for_test(&self, dir: std::path::PathBuf) {
         self.test_overrides.lock().unwrap().stderr_log_dir = Some(dir);
+    }
+
+    /// Test-only: force the Kokoro residency slot to `Loaded` without a live helper, so
+    /// `ttsq`'s gate tests can flip readiness mid-`wait_until_ready` deterministically.
+    #[cfg(test)]
+    pub(crate) fn set_tts_loaded_for_test(&self) {
+        self.tts_model
+            .transition(ModelState::Loaded, self.gate.get().map(|g| g.as_ref()));
+    }
+
+    /// Test-only: pre-arm the [`HEAL_COOLDOWN`] throttle so `restart_if_crashed` is a no-op.
+    /// A queue test exercising the readiness wait must not spawn (and fail to spawn) the
+    /// stub's nonexistent helper — that failure would land in `last_error` and short-circuit
+    /// the wait under test.
+    #[cfg(test)]
+    pub(crate) fn suppress_heal_for_test(&self) {
+        *self.last_heal.lock().unwrap() = Some(std::time::Instant::now());
     }
 
     /// One-shot diarization on the warm helper: record `seconds` of mic, then return

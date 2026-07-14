@@ -143,9 +143,13 @@ The one-shot and warm-server routes share the frontend and chunk contract:
   utterance and reporting success;
 - successful synthesis returns `DONE` only after the request produced valid audio.
 
-Preparation is transactional and capped at 90 seconds of 24 kHz mono PCM, matching the macOS
-VPIO render-ring capacity. This bounds staging memory and prevents backend-specific tail loss,
-at the cost of delaying first audio until every phoneme chunk has synthesized successfully.
+Preparation stages consecutive transactional groups, each capped at 90 seconds of 24 kHz mono
+PCM to match the macOS VPIO render-ring capacity. An utterance at or under the cap is staged
+whole (all-or-nothing) at the cost of delaying first audio until every phoneme chunk has
+synthesized. A longer utterance — queue admission accepts up to 10 KiB of text, several minutes
+of speech — commits and plays group by group instead of failing outright; a later group's
+failure stops playback and returns `ERR`, losing only audio that had not yet been committed.
+The per-group cap bounds staging memory and prevents backend-specific tail loss.
 
 Queue logs preserve disabled, unavailable, cancelled, timeout, load-error, synthesis-error, and
 played outcomes even though those terminal states are not yet propagated back to the original
