@@ -36,7 +36,8 @@ description: Cut a DontSpeak release — tag the single-source version, push the
   full ~25-30 minute CI round-trip. Skipping it is a legitimate choice when the toolchain to
   run it isn't available where the release is being triggered from — just budget for an
   occasional wasted CI run (and a re-cut, step 7) as the cost of that trade.
-- **Hygiene clean — run `cargo fmt` + `cargo deny check` locally before tagging.** The
+- **Hygiene clean — run `cargo fmt` + `cargo deny --all-features check` locally before
+  tagging.** The
   release (unlike per-commit CI and `prepush`) also gates on rustfmt + rustdoc AND
   cargo-deny (`ci.yml`'s `hygiene` and `cargo-deny` jobs, full-matrix only) — **the
   single most common re-cut cause**. Format both workspaces, verify clean, rebuild docs,
@@ -45,7 +46,7 @@ description: Cut a DontSpeak release — tag the single-source version, push the
   (cd rust && cargo fmt) && (cd apps/linux/gtk && cargo fmt)     # apply
   (cd rust && cargo fmt --check) && (cd apps/linux/gtk && cargo fmt --check)   # must be clean
   (cd rust && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked)   # must pass
-  (cd rust && cargo deny check)   # must pass — advisories/bans/licenses/sources
+  (cd rust && cargo deny --all-features check)   # must pass — matches release.yml's graph
   ```
   Commit whatever `cargo fmt` (or a `cargo update` for a flagged advisory) changed — a
   release is where the codebase gets cleaned up.

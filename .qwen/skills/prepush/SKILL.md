@@ -50,12 +50,12 @@ If both pass, push. If either fails, fix it and re-run.
 
 ## cargo-deny (release-only, not a per-commit gate)
 
-`cargo deny check` (advisories + bans + licenses + sources against `deny.toml` /
+`cargo deny --all-features check` (advisories + bans + licenses + sources against `deny.toml` /
 `Cargo.lock`) only runs in the release pipeline now — see the `make-release` skill.
 It's still worth running here if you touched `Cargo.toml`/`Cargo.lock` or `deny.toml`,
 so a new advisory or license doesn't surface for the first time at tag time:
 ```bash
-cargo deny check
+cargo deny --all-features check
 ```
 Install once with `cargo install cargo-deny --locked` (not part of the default
 toolchain). A new advisory or a new license entering the graph needs a considered
@@ -94,7 +94,7 @@ script without `--check`, review the generated diff, then re-run the check.
 
 ```bash
 node scripts/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
-cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings && cargo test --workspace --locked && cargo deny check
+cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings && cargo test --workspace --locked && cargo deny --all-features check
 cd .. && node scripts/sync-agent-skills.mjs --check
 ```
 Green gates plus a conforming attribution inspection ⇒ safe to push.
