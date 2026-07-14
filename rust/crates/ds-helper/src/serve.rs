@@ -19,6 +19,19 @@ fn tts_output_available(tts_wanted: bool, render_via_duplex: bool) -> bool {
     tts_wanted || render_via_duplex
 }
 
+fn barge_then_publish<T>(
+    shared: &(std::sync::Mutex<T>, std::sync::Condvar),
+    barge: impl FnOnce(),
+    publish: impl FnOnce(&mut T),
+) {
+    barge();
+    let (mutex, cv) = shared;
+    let mut state = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    publish(&mut state);
+    drop(state);
+    cv.notify_one();
+}
+
 /// Flatten an error for a protocol line: the engine's reader parses helper stdout strictly
 /// line-by-line, so a multi-line message (ort/ONNX Runtime `Display` can be) would truncate
 /// the `ERR`/`TTSLOADERR` terminal at its first line and leak the rest as stray lines.
@@ -679,16 +692,13 @@ pub(crate) fn serve() -> ! {
                     }
                     "speak" => {
                         let text = req.text;
-                        {
-                            let (m, cv) = &*shared;
-                            m.lock().unwrap_or_else(|e| e.into_inner()).req = Some(PlayReq {
+                        barge_then_publish(&shared, cancel_current, |state| {
+                            state.req = Some(PlayReq {
                                 voice,
                                 rate: req.rate,
                                 text,
                             });
-                            cv.notify_one();
-                        }
-                        cancel_current(); // newest request wins
+                        });
                     }
                     "listen" => {
                         let generation = req.session.unwrap_or(1);
@@ -709,10 +719,9 @@ pub(crate) fn serve() -> ! {
                             cv.notify_one();
                         } else {
                             // Half-duplex: serve-loop listen, mutually exclusive w/ speak.
-                            let (m, cv) = &*shared;
-                            m.lock().unwrap_or_else(|e| e.into_inner()).listen = Some(generation);
-                            cv.notify_one();
-                            cancel_current();
+                            barge_then_publish(&shared, cancel_current, |state| {
+                                state.listen = Some(generation)
+                            });
                         }
                     }
                     "lstop" => {
@@ -1335,6 +1344,35 @@ mod audio_tests {
         // Compile-time invariant (not a runtime check on a constant): too little lead
         // won't cover the rodio output-stream resume latency.
         const _: () = assert!(LEAD_SILENCE_MS >= 40);
+    }
+}
+
+#[cfg(test)]
+mod request_order_tests {
+    use super::barge_then_publish;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Condvar, Mutex};
+
+    /// A queued job must not become visible until its barge is complete, or the playback loop
+    /// can dequeue it, clear the cancel flag, and then have the late barge cancel the fresh job.
+    #[test]
+    fn barges_before_publishing_a_fresh_job() {
+        let shared = (Mutex::new(false), Condvar::new());
+        let cancelled = AtomicBool::new(false);
+
+        barge_then_publish(
+            &shared,
+            || cancelled.store(true, Ordering::SeqCst),
+            |published| {
+                assert!(
+                    cancelled.load(Ordering::SeqCst),
+                    "the fresh job became visible before the prior job was cancelled"
+                );
+                *published = true;
+            },
+        );
+
+        assert!(*shared.0.lock().unwrap());
     }
 }
 
