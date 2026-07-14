@@ -82,18 +82,18 @@ pub use ort::{
 };
 pub use read_retry::{read_model_file, read_model_file_to_string};
 pub use setup::{
-    run_setup_kokoro, run_setup_kokoro_voices_with_progress, run_setup_kokoro_with_progress,
+    run_setup_kokoro, run_setup_kokoro_frontend_with_progress, run_setup_kokoro_with_progress,
     run_setup_parakeet, run_setup_parakeet_with_progress, run_setup_sepformer_with_progress,
 };
 pub use spec::{
     DownloadFile, KOKORO_G2P_DECODER_FILE, KOKORO_G2P_ENCODER_FILE, KOKORO_ONNX_FILE,
     KOKORO_VOICES_FILE, ModelSpec, PARAKEET_DECODER_FILE, PARAKEET_ENCODER_FILE,
     PARAKEET_JOINER_FILE, PARAKEET_TOKENS_FILE, PrefetchItem, SEPFORMER_FILE,
-    is_kokoro_g2p_present, is_kokoro_present, is_parakeet_present, is_sepformer_present,
-    kokoro_files, kokoro_frontend_files, kokoro_g2p_decoder_spec, kokoro_g2p_encoder_spec,
-    kokoro_onnx_spec, kokoro_voices_spec, parakeet_decoder_spec, parakeet_dir,
-    parakeet_encoder_spec, parakeet_files, parakeet_joiner_spec, parakeet_tokens_spec,
-    prefetch_items, sepformer_spec,
+    is_kokoro_frontend_present, is_kokoro_g2p_present, is_kokoro_present, is_parakeet_present,
+    is_sepformer_present, kokoro_files, kokoro_frontend_files, kokoro_g2p_decoder_spec,
+    kokoro_g2p_encoder_spec, kokoro_onnx_spec, kokoro_voices_spec, parakeet_decoder_spec,
+    parakeet_dir, parakeet_encoder_spec, parakeet_files, parakeet_joiner_spec,
+    parakeet_tokens_spec, prefetch_items, sepformer_spec,
 };
 pub use target::DownloadTarget;
 pub use update_check::{UpdateInfo, check_for_update};

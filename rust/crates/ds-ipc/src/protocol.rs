@@ -26,7 +26,7 @@ use serde_json::Value;
 /// [`Request::SetMuted`] is also sent by the app's own tray via `ds-core` (there is no client
 /// there at all); the STT/diarization requests (`TestRecognitionStart`/`Stop`, `Diarize`,
 /// `Enroll`, `ForgetSpeaker`, `ListSpeakers`) and every app/engine control request
-/// (`SetProvider`, `Reload`, `ModelStatus`, `WaitModelStatus`, `EnsureKokoroVoices`,
+/// (`SetProvider`, `Reload`, `ModelStatus`, `WaitModelStatus`, `EnsureKokoroFrontend`,
 /// `EnsureCodexStream`, `AuthorizeSystemStt`, `Shutdown`, `Ping`, `Status`) are the APP or
 /// the ENGINE talking to
 /// itself, not a client. Keeping `source` off them is also what lets `ds-core/src/ffi.rs`
@@ -39,10 +39,10 @@ pub enum Request {
     Ping,
     /// Snapshot of the TTS queue's playback state → [`Response::Status`]. Read-only.
     Status,
-    /// Ensure the Kokoro voices npz (~28 MB) is present, downloading it in the background
-    /// via the single-flight download manager if absent. Returns immediately — does NOT
-    /// wait for the download. → [`Response::Done`].
-    EnsureKokoroVoices,
+    /// Ensure the shared Kokoro frontend assets (voices, OOV G2P graphs, and ORT) are present,
+    /// downloading them in the background if needed. Returns immediately — does NOT wait for
+    /// the single-flight download. → [`Response::Done`].
+    EnsureKokoroFrontend,
     /// Make the Codex app-server observation path ready for an interactive
     /// `dontspeak codex` launch. The engine owns any process it must start and returns only
     /// after its subscriber has initialized, closing the race where the TUI could begin a
@@ -334,6 +334,7 @@ mod tests {
         let cases = [
             Request::Ping,
             Request::Status,
+            Request::EnsureKokoroFrontend,
             Request::EnsureCodexStream,
             Request::Diarize { seconds: 10 },
             Request::Enroll {
@@ -416,6 +417,15 @@ mod tests {
             serde_json::to_string(&Response::Pong).unwrap(),
             r#"{"ok":"pong"}"#
         );
+    }
+
+    #[test]
+    fn kokoro_frontend_request_uses_its_canonical_wire_name() {
+        assert_eq!(
+            serde_json::to_string(&Request::EnsureKokoroFrontend).unwrap(),
+            r#"{"cmd":"ensure_kokoro_frontend"}"#
+        );
+        assert!(serde_json::from_str::<Request>(r#"{"cmd":"ensure_kokoro_voices"}"#).is_err());
     }
 
     #[test]

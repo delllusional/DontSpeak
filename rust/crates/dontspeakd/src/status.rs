@@ -307,8 +307,8 @@ pub(crate) fn model_status_json(
         .unwrap_or_else(|e| e.into_inner())
         .targets
         .clone();
-    // A row lights "downloading" for exactly its own in-flight targets. `KokoroVoices` now
-    // carries the shared frontend graphs as well as voices, so it correctly gates the row.
+    // A row lights "downloading" for exactly its own in-flight targets. `KokoroFrontend`
+    // carries the shared voices, G2P graphs, and runtime, so it correctly gates the row.
     let downloading = |eng: DownloadTarget| matches!(dl.get(&eng), Some(TargetState::Active(_)));
     // Active-only: a Done entry's finished % must NOT feed these direct per-target
     // fractions (the row-level Done fallback lives in `row_download_frac`).
@@ -335,7 +335,7 @@ pub(crate) fn model_status_json(
         kokoro_present,
         dl_err_for(DownloadTarget::KokoroModel)
             .or_else(|| dl_err_for(DownloadTarget::KokoroCoreml))
-            .or_else(|| dl_err_for(DownloadTarget::KokoroVoices)),
+            .or_else(|| dl_err_for(DownloadTarget::KokoroFrontend)),
         // A mid-session `load tts`/preload failure (e.g. a transient AV-scan file-not-found on
         // an already-downloaded model) ahead of the warm-CHILD start failure — both are
         // per-Kokoro, so either surfaces.
@@ -384,7 +384,7 @@ pub(crate) fn model_status_json(
     let cuda_downloading = downloading(DownloadTarget::Cuda);
     let kokoro_own_downloading = downloading(DownloadTarget::KokoroModel)
         || downloading(DownloadTarget::KokoroCoreml)
-        || downloading(DownloadTarget::KokoroVoices);
+        || downloading(DownloadTarget::KokoroFrontend);
     let kokoro_downloading = row_downloading(
         kokoro_own_downloading,
         cuda_downloading,
@@ -406,7 +406,7 @@ pub(crate) fn model_status_json(
         &[
             DownloadTarget::KokoroModel,
             DownloadTarget::KokoroCoreml,
-            DownloadTarget::KokoroVoices,
+            DownloadTarget::KokoroFrontend,
         ],
     );
     let parakeet_frac = row_download_frac(
@@ -1036,11 +1036,11 @@ mod tests {
 
         // The Apple-native adjunct target now carries required frontend graphs, so it is one
         // of Kokoro's own targets and feeds that row's ring.
-        let frontend: HashMap<_, _> = [(KokoroVoices, TargetState::Active(p(3, 4)))]
+        let frontend: HashMap<_, _> = [(KokoroFrontend, TargetState::Active(p(3, 4)))]
             .into_iter()
             .collect();
         assert_eq!(
-            row_download_frac(&frontend, &[KokoroModel, KokoroCoreml, KokoroVoices]),
+            row_download_frac(&frontend, &[KokoroModel, KokoroCoreml, KokoroFrontend]),
             0.75
         );
 

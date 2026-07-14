@@ -72,6 +72,16 @@ pub fn is_kokoro_g2p_present() -> bool {
     graphs_ok && crate::ort::is_onnxruntime_dylib_version_ok()
 }
 
+/// Are all assets shared by the Kokoro synthesis backends present and checksum-valid?
+/// This includes the version-checked ORT dylib required by unknown-word G2P.
+pub fn is_kokoro_frontend_present() -> bool {
+    let voices = kokoro_voices_spec();
+    let voices_ok = model_path(&voices.file_name)
+        .map(|p| verify_sha256_cached(&p, &voices.sha256))
+        .unwrap_or(false);
+    voices_ok && is_kokoro_g2p_present()
+}
+
 /// Is the full portable Kokoro asset set present and checksum-valid (synth, voices, G2P, ORT)?
 /// The TTS factory uses this as the
 /// network-free availability probe so it can fail-quiet when assets are absent.
@@ -79,19 +89,10 @@ pub fn is_kokoro_g2p_present() -> bool {
 /// version-gated (see `is_onnxruntime_dylib_version_ok`).
 pub fn is_kokoro_present() -> bool {
     let onnx = kokoro_onnx_spec();
-    let voices = kokoro_voices_spec();
     let model_ok = model_path(&onnx.file_name)
         .map(|p| verify_sha256_cached(&p, &onnx.sha256))
         .unwrap_or(false);
-    let voices_ok = model_path(&voices.file_name)
-        .map(|p| verify_sha256_cached(&p, &voices.sha256))
-        .unwrap_or(false);
-    // Dylib must be present AND the version `ort` needs — a wrong version would
-    // deadlock `ort` at session build (see `is_onnxruntime_dylib_version_ok`), so a
-    // mismatch reports "not present" here, surfacing as a red dot + re-download
-    // prompt instead of a silent hang.
-    let dylib_ok = crate::ort::is_onnxruntime_dylib_version_ok();
-    model_ok && voices_ok && dylib_ok && is_kokoro_g2p_present()
+    model_ok && is_kokoro_frontend_present()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -259,7 +260,7 @@ pub struct PrefetchItem {
 /// [`DownloadTarget`] — wire tokens are parsed once at the
 /// CLI edge (`ds-helper --print-manifest`), never inside the library. Only
 /// [`Onnxruntime`](DownloadTarget::Onnxruntime) | [`KokoroModel`](DownloadTarget::KokoroModel) |
-/// [`KokoroVoices`](DownloadTarget::KokoroVoices) | [`ParakeetModel`](DownloadTarget::ParakeetModel) |
+/// [`KokoroFrontend`](DownloadTarget::KokoroFrontend) | [`ParakeetModel`](DownloadTarget::ParakeetModel) |
 /// [`Cuda`](DownloadTarget::Cuda) produce items; every other target yields `vec![]`.
 /// This is the SINGLE source of the installer's download list; the URLs/SHAs never
 /// leave ds-model.
@@ -303,7 +304,7 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
         .iter()
         .filter_map(&spec_item)
         .collect(),
-        DownloadTarget::KokoroVoices => [
+        DownloadTarget::KokoroFrontend => [
             kokoro_voices_spec(),
             kokoro_g2p_encoder_spec(),
             kokoro_g2p_decoder_spec(),

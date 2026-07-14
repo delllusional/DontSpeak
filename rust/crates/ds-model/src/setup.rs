@@ -171,7 +171,7 @@ pub fn run_setup_sepformer_with_progress(progress: &dyn Fn(u64, u64)) -> std::io
 /// Ensure the assets shared by the Apple-native backend: voice tensors, the Rust frontend's
 /// unknown-word G2P graphs, and ORT. The 310 MB synthesis graph remains portable-backend-only.
 /// Returns the voices file path.
-pub fn run_setup_kokoro_voices_with_progress(
+pub fn run_setup_kokoro_frontend_with_progress(
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<PathBuf> {
     let total: u64 = kokoro_frontend_files().iter().map(|f| f.size_bytes).sum();

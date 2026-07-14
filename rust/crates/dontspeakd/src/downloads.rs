@@ -151,7 +151,7 @@ pub(crate) fn wire(dl: &DownloadProg, warm: Arc<TtsManager>, paths: Paths, flags
 fn target_hosts_engine(target: DownloadTarget, kokoro: bool, parakeet: bool) -> bool {
     match target {
         DownloadTarget::KokoroModel
-        | DownloadTarget::KokoroVoices
+        | DownloadTarget::KokoroFrontend
         | DownloadTarget::KokoroCoreml => kokoro,
         DownloadTarget::ParakeetModel | DownloadTarget::ParakeetCoreml => parakeet,
         DownloadTarget::Cuda => kokoro || parakeet,
@@ -274,9 +274,9 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                     ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ())
                 }
                 // Shared frontend assets for ANE: voices, OOV G2P graphs, and ORT, but not the
-                // 310 MB portable synth graph. Requested by `EnsureKokoroVoices`.
-                DownloadTarget::KokoroVoices => {
-                    ds_model::run_setup_kokoro_voices_with_progress(&prog).map(|_| ())
+                // 310 MB portable synth graph. Requested by `EnsureKokoroFrontend`.
+                DownloadTarget::KokoroFrontend => {
+                    ds_model::run_setup_kokoro_frontend_with_progress(&prog).map(|_| ())
                 }
                 DownloadTarget::ParakeetModel => {
                     ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ())
@@ -393,8 +393,8 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
 }
 
 /// The ANE synthesis graph still consumes DontSpeak's shared Rust frontend. Its voice tensors,
-/// OOV graphs, and ORT therefore travel together under the existing `KokoroVoices` adjunct
-/// target. Pure so the backend-specific fetch policy stays unit-testable.
+/// OOV graphs, and ORT therefore travel together under the `KokoroFrontend` target.
+/// Pure so the backend-specific fetch policy stays unit-testable.
 fn ane_needs_frontend_assets(
     tts_is_kokoro: bool,
     ane_active: bool,
@@ -413,7 +413,7 @@ struct DownloadNeeds {
     // flag and the target it kicks can't read as two different things.
     kokoro_model: bool,
     kokoro_coreml: bool,
-    kokoro_voices: bool,
+    kokoro_frontend: bool,
     parakeet_model: bool,
     parakeet_coreml: bool,
     sepformer_model: bool,
@@ -432,8 +432,8 @@ fn needed_downloads(need: &DownloadNeeds) -> Vec<DownloadTarget> {
     if need.kokoro_coreml {
         targets.push(DownloadTarget::KokoroCoreml);
     }
-    if need.kokoro_voices {
-        targets.push(DownloadTarget::KokoroVoices);
+    if need.kokoro_frontend {
+        targets.push(DownloadTarget::KokoroFrontend);
     }
     if need.parakeet_model {
         targets.push(DownloadTarget::ParakeetModel);
@@ -525,7 +525,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     // source for EVERY other voice) must still be fetched on the ANE path — else any
     // configured voice ≠ af_heart silently degrades to af_heart at synth time
     // (`synth_coreml` materializes from this npz, never downloads it).
-    let kokoro_voices = ane_needs_frontend_assets(
+    let kokoro_frontend = ane_needs_frontend_assets(
         tts_is_kokoro,
         ane_active,
         exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
@@ -565,7 +565,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     DownloadNeeds {
         kokoro_model,
         kokoro_coreml,
-        kokoro_voices,
+        kokoro_frontend,
         parakeet_model,
         parakeet_coreml,
         sepformer_model,
@@ -672,7 +672,7 @@ mod tests {
         // set) restart iff Kokoro TTS runs.
         for t in [
             DownloadTarget::KokoroModel,
-            DownloadTarget::KokoroVoices,
+            DownloadTarget::KokoroFrontend,
             DownloadTarget::KokoroCoreml,
         ] {
             assert!(target_hosts_engine(t, true, false), "{t:?} (tts)");
@@ -757,13 +757,13 @@ mod tests {
         assert_eq!(
             need(DownloadNeeds {
                 kokoro_coreml: true,
-                kokoro_voices: true,
+                kokoro_frontend: true,
                 parakeet_coreml: true,
                 ..Default::default()
             }),
             vec![
                 DownloadTarget::KokoroCoreml,
-                DownloadTarget::KokoroVoices,
+                DownloadTarget::KokoroFrontend,
                 DownloadTarget::ParakeetCoreml,
             ]
         );
@@ -771,11 +771,14 @@ mod tests {
         // the ACTIVE TTS voice — alongside Parakeet.
         assert_eq!(
             need(DownloadNeeds {
-                kokoro_voices: true,
+                kokoro_frontend: true,
                 parakeet_model: true,
                 ..Default::default()
             }),
-            vec![DownloadTarget::KokoroVoices, DownloadTarget::ParakeetModel]
+            vec![
+                DownloadTarget::KokoroFrontend,
+                DownloadTarget::ParakeetModel,
+            ]
         );
     }
 

@@ -88,7 +88,7 @@ fn prefetch_local(url: &str) -> Option<PathBuf> {
 // In-flight file registry — ONE download per destination path, attach semantics.
 // Download targets now run in PARALLEL (each in its own thread), and two targets
 // can need the SAME file: both model setups ensure the shared onnxruntime dylib,
-// and the full-Kokoro set contains the voices npz that `kokoro_voices` also
+// and the full-Kokoro set contains the frontend assets that `kokoro_frontend` also
 // fetches alone. The registry hands out one lock per final path; a second caller
 // blocks on it (attaching to the fetch already in flight), then re-checks
 // presence under the lock and returns without re-downloading. Entries are tiny

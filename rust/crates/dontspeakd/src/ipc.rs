@@ -155,15 +155,13 @@ pub(crate) fn spawn_ipc_server(
                         muted,
                     });
                 }
-                ds_ipc::Request::EnsureKokoroVoices => {
-                    // Non-blocking: kick the voices-npz download only if absent.
+                ds_ipc::Request::EnsureKokoroFrontend => {
+                    // Non-blocking: kick the shared-frontend download if any asset is absent.
                     // `start_download` is single-flight PER TARGET — if this target is
                     // already fetching, the request ATTACHES to it (and it runs in
                     // parallel with any other target's download, never queued behind one).
-                    let present = ds_model::model_path(ds_model::KOKORO_VOICES_FILE)
-                        .is_some_and(|p| p.is_file());
-                    if !present {
-                        start_download(&downloads, ds_model::DownloadTarget::KokoroVoices);
+                    if !ds_model::is_kokoro_frontend_present() {
+                        start_download(&downloads, ds_model::DownloadTarget::KokoroFrontend);
                     }
                     emit(&ds_ipc::Response::Done);
                 }

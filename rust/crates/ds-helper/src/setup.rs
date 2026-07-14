@@ -38,6 +38,10 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         Some(DownloadTarget::KokoroModel) => {
             ds_model::run_setup_kokoro_with_progress(&p).map(|_| ())
         }
+        // `kokoro_frontend` — voices, OOV G2P graphs, and the shared runtime.
+        Some(DownloadTarget::KokoroFrontend) => {
+            ds_model::run_setup_kokoro_frontend_with_progress(&p).map(|_| ())
+        }
         Some(DownloadTarget::ParakeetModel) => {
             ds_model::run_setup_parakeet_with_progress(&p).map(|_| ())
         } // parakeet (+ onnxruntime)

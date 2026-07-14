@@ -30,9 +30,9 @@ pub enum DownloadTarget {
     /// Wire token `"kokoro_model"` — the `_model` suffix disambiguates this download target
     /// from the engine brand "kokoro".
     KokoroModel,
-    /// Assets the Apple ANE / Core ML path shares with the portable frontend: voices, OOV G2P
-    /// graphs, and ORT. The stable wire token remains `kokoro_voices` for compatibility.
-    KokoroVoices,
+    /// Assets both Kokoro synthesis backends share: voices, OOV G2P graphs, and ORT.
+    /// Wire token `"kokoro_frontend"` names the bundle by its role rather than one file in it.
+    KokoroFrontend,
     /// The apple-native Kokoro Core ML sets — the runtime ANE chain PLUS the G2P/lexicon
     /// sub-models ([`crate::coreml_repo::KOKORO_COREML_SET`]). macOS-only (ANE shim); fetched
     /// into the dirs the shim loads from offline, like [`DiarizationCoreml`](Self::DiarizationCoreml).
@@ -73,7 +73,7 @@ impl DownloadTarget {
         match self {
             DownloadTarget::Onnxruntime => "onnxruntime",
             DownloadTarget::KokoroModel => "kokoro_model",
-            DownloadTarget::KokoroVoices => "kokoro_voices",
+            DownloadTarget::KokoroFrontend => "kokoro_frontend",
             DownloadTarget::KokoroCoreml => "kokoro_coreml",
             DownloadTarget::ParakeetModel => "parakeet_model",
             DownloadTarget::ParakeetCoreml => "parakeet_coreml",
@@ -92,7 +92,7 @@ impl DownloadTarget {
         Some(match s {
             "onnxruntime" => DownloadTarget::Onnxruntime,
             "kokoro_model" => DownloadTarget::KokoroModel,
-            "kokoro_voices" => DownloadTarget::KokoroVoices,
+            "kokoro_frontend" => DownloadTarget::KokoroFrontend,
             "kokoro_coreml" => DownloadTarget::KokoroCoreml,
             "parakeet_model" => DownloadTarget::ParakeetModel,
             "parakeet_coreml" => DownloadTarget::ParakeetCoreml,
@@ -131,7 +131,7 @@ impl DownloadTarget {
             DownloadTarget::Dotnet | DownloadTarget::Winapp => false,
             DownloadTarget::Onnxruntime
             | DownloadTarget::KokoroModel
-            | DownloadTarget::KokoroVoices
+            | DownloadTarget::KokoroFrontend
             | DownloadTarget::ParakeetModel
             | DownloadTarget::Models => true,
         }
@@ -147,7 +147,7 @@ mod tests {
         for t in [
             DownloadTarget::Onnxruntime,
             DownloadTarget::KokoroModel,
-            DownloadTarget::KokoroVoices,
+            DownloadTarget::KokoroFrontend,
             DownloadTarget::KokoroCoreml,
             DownloadTarget::ParakeetModel,
             DownloadTarget::ParakeetCoreml,
@@ -165,6 +165,7 @@ mod tests {
     #[test]
     fn every_target_has_one_canonical_token_no_legacy_aliases() {
         assert_eq!(DownloadTarget::KokoroModel.as_str(), "kokoro_model");
+        assert_eq!(DownloadTarget::KokoroFrontend.as_str(), "kokoro_frontend");
         assert_eq!(DownloadTarget::ParakeetModel.as_str(), "parakeet_model");
         assert_eq!(DownloadTarget::Onnxruntime.as_str(), "onnxruntime");
         assert_eq!(
@@ -174,6 +175,7 @@ mod tests {
         // The pre-rename bare brand tokens are NOT accepted (single canonical name, no aliases).
         assert_eq!(DownloadTarget::parse("kokoro"), None);
         assert_eq!(DownloadTarget::parse("parakeet"), None);
+        assert_eq!(DownloadTarget::parse("kokoro_voices"), None);
         // Same for the pre-rename runtime/diarization tokens: "onnx" meant the RUNTIME here
         // but a MODEL flavor everywhere else, and "diarization" lacked its `_coreml` flavor
         // suffix — both renamed, neither kept as an alias.
@@ -201,7 +203,7 @@ mod tests {
         for t in [
             Onnxruntime,
             KokoroModel,
-            KokoroVoices,
+            KokoroFrontend,
             ParakeetModel,
             Models,
         ] {
