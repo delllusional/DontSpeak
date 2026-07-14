@@ -33,14 +33,27 @@ Install = extract the portable zip to the per-user folder (the same thing `web/i
    ```powershell
    pwsh -NoProfile -File apps\windows\installer\build-portable.ps1 -Arch x64 -SkipModels
    ```
-2. **Stop running processes** so files aren't locked:
+2. **Stop every process launched from the install directory and wait for those exact
+   process objects to exit** so their runtime files are no longer locked:
    ```powershell
-   Get-Process ds-winui,dontspeak,ds-helper -ErrorAction SilentlyContinue | Stop-Process -Force
+   $dest = Join-Path $env:LOCALAPPDATA 'Programs\DontSpeak'
+   $destPrefix = [IO.Path]::GetFullPath($dest).TrimEnd('\') + '\'
+   $installed = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+     try { $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($destPrefix, [StringComparison]::OrdinalIgnoreCase) }
+     catch { $false }
+   })
+   if ($installed) {
+     $installed | Stop-Process -Force -ErrorAction Stop
+     $installed | Wait-Process -ErrorAction Stop
+   }
    ```
-3. **Extract** over the per-user install dir:
+3. **Remove the old install completely, then extract.** Removal is terminating and
+   extraction must not run if anything remains:
    ```powershell
-   $dest = "$env:LOCALAPPDATA\Programs\DontSpeak"
-   if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+   if (Test-Path -LiteralPath $dest) {
+     Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction Stop
+   }
+   if (Test-Path -LiteralPath $dest) { throw "cannot remove the previous install at $dest" }
    Expand-Archive (Get-Item apps\windows\installer\Output\dontspeak-*-windows-x86_64.zip) $dest -Force
    ```
 4. **Wire + launch**:

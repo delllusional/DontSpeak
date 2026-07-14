@@ -111,8 +111,16 @@ open "$HOME/Applications/DontSpeak.app"
 ```powershell
 cargo build --release -p ds-helper --manifest-path rust\Cargo.toml           # helper
 cargo build --profile release-ffi -p ds-core --manifest-path rust\Cargo.toml # engine/FFI surface
-Get-Process ds-winui,dontspeak,ds-helper -ErrorAction SilentlyContinue | Stop-Process -Force
-$dest = "$env:LOCALAPPDATA\Programs\DontSpeak"
+$dest = Join-Path $env:LOCALAPPDATA 'Programs\DontSpeak'
+$destPrefix = [IO.Path]::GetFullPath($dest).TrimEnd('\') + '\'
+$installed = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+  try { $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($destPrefix, [StringComparison]::OrdinalIgnoreCase) }
+  catch { $false }
+})
+if ($installed) {
+  $installed | Stop-Process -Force -ErrorAction Stop
+  $installed | Wait-Process -ErrorAction Stop
+}
 Copy-Item rust\target\release\ds-helper.exe "$dest\ds-helper.exe" -Force
 Copy-Item rust\target\release-ffi\ds_core.dll "$dest\ds_core.dll" -Force
 Start-Process "$dest\ds-winui.exe"
