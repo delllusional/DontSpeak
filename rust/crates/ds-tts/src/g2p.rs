@@ -333,7 +333,7 @@ pub fn phonemize_for(text: &str, _voice: &str) -> String {
 }
 
 /// A backend-ready Kokoro IPA batch. Construction is private so callers receive only chunks
-/// whose characters exist in [`crate::vocab::KOKORO_VOCAB`] and whose token count fits both
+/// whose characters exist in `crate::vocab::KOKORO_VOCAB` and whose token count fits both
 /// the ONNX voice-style table and FluidAudio's context window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KokoroPhonemeChunk(String);
