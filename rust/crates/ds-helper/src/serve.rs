@@ -7,6 +7,7 @@ use ds_aec::DuplexAudio;
 use ds_helper_proto as proto;
 use ds_tts::g2p::{self, PhonemeBatchesOutcome};
 use serde::Deserialize;
+use std::time::Duration;
 
 use crate::_exit;
 use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
@@ -215,6 +216,58 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
 /// clipping the speech onset — the "first speak, purple icon, no sound" fix. Pure + unit-tested
 /// so it can't silently regress to 0 samples (which would re-break the onset).
 const LEAD_SILENCE_MS: u32 = 80;
+
+/// Feed VPIO in 100 ms source-rate chunks so mute/cancel state is observed throughout a
+/// staged group instead of only once per synthesized phoneme piece.
+const DUPLEX_RENDER_CHUNK_SAMPLES: usize = ds_tts::SAMPLE_RATE as usize / 10;
+/// Normal VPIO lookahead: enough to absorb scheduler jitter without buffering a whole reply.
+const DUPLEX_RENDER_AHEAD: Duration = Duration::from_secs(2);
+/// Keep muted silence shallow so unmuting resumes real audio promptly.
+const DUPLEX_MUTED_RENDER_AHEAD: Duration = Duration::from_millis(100);
+const DUPLEX_RENDER_POLL: Duration = Duration::from_millis(10);
+
+#[derive(Clone, Copy)]
+struct DuplexRenderState {
+    cancelled: bool,
+    muted: bool,
+    buffered: Duration,
+}
+
+/// Pace one already-transactional group into VPIO while re-reading live mute/cancel state.
+/// Returns `false` when cancellation stops the group before every chunk is pushed.
+fn push_duplex_pieces(
+    pieces: Vec<Vec<f32>>,
+    mut read_state: impl FnMut() -> DuplexRenderState,
+    mut push: impl FnMut(&[f32]),
+    mut wait: impl FnMut(),
+) -> bool {
+    let silence = vec![0.0; DUPLEX_RENDER_CHUNK_SAMPLES];
+    for piece in pieces {
+        for chunk in piece.chunks(DUPLEX_RENDER_CHUNK_SAMPLES) {
+            let state = loop {
+                let state = read_state();
+                if state.cancelled {
+                    return false;
+                }
+                let limit = if state.muted {
+                    DUPLEX_MUTED_RENDER_AHEAD
+                } else {
+                    DUPLEX_RENDER_AHEAD
+                };
+                if state.buffered < limit {
+                    break state;
+                }
+                wait();
+            };
+            push(if state.muted {
+                &silence[..chunk.len()]
+            } else {
+                chunk
+            });
+        }
+    }
+    true
+}
 
 /// `LEAD_SILENCE_MS` of mono silence at `srate_hz`. See [`LEAD_SILENCE_MS`].
 fn leading_silence_pcm(srate_hz: u32) -> Vec<f32> {
@@ -540,8 +593,8 @@ pub(crate) fn serve() -> ! {
     // seconds-timer + Caps release) and shutdown (stdin EOF).
     // MUTE: silence output WITHOUT stopping — the queue/playback still drains (timing
     // preserved), only the audio is zeroed. Toggled by the `mute` op (Caps-tap when dictation
-    // is off, or the tray checkbox). Read by the playback `append` below (zeroes the PCM) and
-    // applied instantly to the sounding rodio player on toggle.
+    // is off, or the tray checkbox). Read by the paced VPIO feeder below (zeroes each small
+    // chunk) and applied instantly to the sounding rodio player on toggle.
     let muted = Arc::new(AtomicBool::new(false));
 
     // Reader thread: parse JSON requests. speak/preview enqueue (newest wins) and
@@ -642,8 +695,8 @@ pub(crate) fn serve() -> ! {
                     "mute" => {
                         // Toggle global mute (text "on"/"off"). Does NOT cancel — playback keeps
                         // draining; the audio is just silenced. Apply instantly to the sounding
-                        // rodio player so already-queued audio goes quiet immediately; new audio
-                        // is zeroed by `append` below.
+                        // rodio player so already-queued audio goes quiet immediately; VPIO's
+                        // paced feeder observes the flag between small render chunks.
                         let on = matches!(
                             req.text.trim().to_ascii_lowercase().as_str(),
                             "on" | "true" | "1" | "yes"
@@ -1177,30 +1230,26 @@ pub(crate) fn serve() -> ! {
                         leading_silence_pcm(srate.get()),
                     ));
                 }
-            } else if render_via_duplex {
-                // The VPIO render ring holds exactly one group's cap (90 s): drain the previous
-                // group before pushing the next so a multi-group utterance cannot overflow it.
-                if let Some(dx) = &duplex {
-                    while dx.render_pending() && !cancel.load(Ordering::SeqCst) {
-                        std::thread::sleep(std::time::Duration::from_millis(15));
-                    }
-                }
             }
             total_samples = total_samples.saturating_add(audio.total_samples);
-            for pcm in audio.pieces {
-                if cancel.load(Ordering::SeqCst) {
-                    break;
+            if render_via_duplex {
+                if let Some(dx) = &duplex {
+                    let _ = push_duplex_pieces(
+                        audio.pieces,
+                        || DuplexRenderState {
+                            cancelled: cancel.load(Ordering::SeqCst),
+                            muted: muted.load(Ordering::SeqCst),
+                            buffered: dx.render_buffered(),
+                        },
+                        |pcm| dx.render_push(pcm),
+                        || std::thread::sleep(DUPLEX_RENDER_POLL),
+                    );
                 }
-                if render_via_duplex {
-                    if let Some(dx) = &duplex {
-                        let pcm = if muted.load(Ordering::SeqCst) {
-                            vec![0.0; pcm.len()]
-                        } else {
-                            pcm
-                        };
-                        dx.render_push(&pcm);
+            } else if let Some(p) = &player {
+                for pcm in audio.pieces {
+                    if cancel.load(Ordering::SeqCst) {
+                        break;
                     }
-                } else if let Some(p) = &player {
                     p.append(rodio::buffer::SamplesBuffer::new(channels, srate, pcm));
                 }
             }
@@ -1307,7 +1356,13 @@ pub(crate) fn serve() -> ! {
 
 #[cfg(test)]
 mod audio_tests {
-    use super::{LEAD_SILENCE_MS, leading_silence_pcm, tts_output_available};
+    use std::cell::{Cell, RefCell};
+    use std::time::Duration;
+
+    use super::{
+        DUPLEX_RENDER_AHEAD, DUPLEX_RENDER_CHUNK_SAMPLES, DuplexRenderState, LEAD_SILENCE_MS,
+        leading_silence_pcm, push_duplex_pieces, tts_output_available,
+    };
 
     #[test]
     fn tts_output_requires_preload_or_render_owning_duplex() {
@@ -1344,6 +1399,75 @@ mod audio_tests {
         // Compile-time invariant (not a runtime check on a constant): too little lead
         // won't cover the rodio output-stream resume latency.
         const _: () = assert!(LEAD_SILENCE_MS >= 40);
+    }
+
+    #[test]
+    fn duplex_feeder_rechecks_mute_between_bounded_chunks() {
+        let reads = Cell::new(0usize);
+        let pushed = RefCell::new(Vec::<Vec<f32>>::new());
+        let finished = push_duplex_pieces(
+            vec![vec![1.0; DUPLEX_RENDER_CHUNK_SAMPLES * 2 + 1]],
+            || {
+                let read = reads.get();
+                reads.set(read + 1);
+                DuplexRenderState {
+                    cancelled: false,
+                    muted: read > 0,
+                    buffered: Duration::ZERO,
+                }
+            },
+            |pcm| pushed.borrow_mut().push(pcm.to_vec()),
+            || panic!("an empty render ring must not wait"),
+        );
+
+        assert!(finished);
+        let pushed = pushed.borrow();
+        assert_eq!(pushed.len(), 3);
+        assert!(pushed[0].iter().all(|sample| *sample == 1.0));
+        assert!(pushed[1..].iter().flatten().all(|sample| *sample == 0.0));
+        assert!(
+            pushed
+                .iter()
+                .all(|chunk| chunk.len() <= DUPLEX_RENDER_CHUNK_SAMPLES)
+        );
+    }
+
+    #[test]
+    fn duplex_feeder_waits_at_the_watermark_and_cancels_during_wait() {
+        let buffered = Cell::new(DUPLEX_RENDER_AHEAD);
+        let waits = Cell::new(0usize);
+        let pushed = Cell::new(0usize);
+        let finished = push_duplex_pieces(
+            vec![vec![1.0]],
+            || DuplexRenderState {
+                cancelled: false,
+                muted: false,
+                buffered: buffered.get(),
+            },
+            |_| pushed.set(pushed.get() + 1),
+            || {
+                waits.set(waits.get() + 1);
+                buffered.set(Duration::ZERO);
+            },
+        );
+        assert!(finished);
+        assert_eq!(waits.get(), 1);
+        assert_eq!(pushed.get(), 1);
+
+        let cancelled = Cell::new(false);
+        let pushed = Cell::new(false);
+        let finished = push_duplex_pieces(
+            vec![vec![1.0]],
+            || DuplexRenderState {
+                cancelled: cancelled.get(),
+                muted: false,
+                buffered: DUPLEX_RENDER_AHEAD,
+            },
+            |_| pushed.set(true),
+            || cancelled.set(true),
+        );
+        assert!(!finished);
+        assert!(!pushed.get());
     }
 }
 

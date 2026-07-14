@@ -157,6 +157,12 @@ of speech — commits and plays group by group instead of failing outright; a la
 failure stops playback and returns `ERR`, losing only audio that had not yet been committed.
 The per-group cap bounds staging memory and prevents backend-specific tail loss.
 
+On macOS full-duplex, a committed group is paced into VPIO in small chunks with about two
+seconds of normal render lookahead. The feeder rechecks cancellation and global mute between
+chunks, using a shorter lookahead for muted silence so unmute also responds promptly. This keeps
+the group-level transactional guarantee without making a live mute wait for as much as the full
+90-second staging cap.
+
 Queue logs preserve disabled, unavailable, cancelled, timeout, load-error, synthesis-error, and
 played outcomes even though those terminal states are not yet propagated back to the original
 narration record.

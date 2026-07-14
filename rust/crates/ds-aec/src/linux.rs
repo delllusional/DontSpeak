@@ -162,6 +162,11 @@ impl DuplexAudio {
         false
     }
 
+    /// No render ring: rodio owns output on this capture-side backend.
+    pub fn render_buffered(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+
     /// No-op (no render ring to flush; the helper stops the rodio player on barge).
     pub fn render_clear(&self) {}
 

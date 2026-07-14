@@ -1600,9 +1600,9 @@ impl TtsManager {
 
     /// Set global mute. Records it AND pushes the `mute` op to the warm child so the change
     /// is live (the child silences playback without stopping — the queue keeps draining).
-    /// Idempotent. Caveat (macOS full-duplex): the VPIO render ring has no volume control
-    /// and each staged group is pushed whole, so a mute toggled mid-reply takes effect at
-    /// the next staged group (≤ 90 s away), not instantly — see ds-helper's serve loop.
+    /// Idempotent. macOS full-duplex has no VPIO volume control, so its helper paces small
+    /// chunks to a bounded lookahead and observes mute between pushes; already-buffered audio
+    /// can still sound for that short lookahead rather than stopping instantaneously.
     pub fn set_muted(&self, on: bool) {
         let changed = self.muted.swap(on, Ordering::Relaxed) != on;
         let _ = self.write_request(if on {

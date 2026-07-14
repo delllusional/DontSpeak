@@ -32,6 +32,10 @@ impl DuplexAudio {
         false
     }
 
+    pub fn render_buffered(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+
     pub fn render_clear(&self) {}
 
     pub fn barge_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {

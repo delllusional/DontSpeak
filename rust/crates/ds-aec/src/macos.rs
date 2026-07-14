@@ -37,11 +37,9 @@ const SYNTH_RATE: u32 = 24_000;
 /// caller degrades to half-duplex.
 const UNIT_RATE: u32 = 48_000;
 
-/// Render ring capacity. The helper synthesizes a whole reply UP FRONT and Kokoro
-/// runs FASTER than real time, so the producer races ahead of the real-time render
-/// callback — the ring must hold an entire reply or the tail is dropped (choppy,
-/// truncated playback). 90 s of mono f32 (~17 MB) covers any realistic reply; a
-/// longer one degrades by dropping its tail rather than shredding throughout.
+/// Render ring capacity. The helper normally paces staged audio to a small lookahead,
+/// but the ring remains large enough for one 90-second transactional group so an
+/// accidental oversized push drops only its tail rather than shredding throughout.
 const RENDER_CAP: usize = (UNIT_RATE * 90) as usize;
 
 /// Capture ring: ~2 s is plenty — the helper drains it every poll tick.
@@ -280,6 +278,14 @@ impl DuplexAudio {
     /// Whether the render ring still holds unplayed samples (is TTS still sounding).
     pub fn render_pending(&self) -> bool {
         self.play.lock().unwrap().0.occupied_len() > 0
+    }
+
+    /// Duration of audio currently queued ahead of the realtime render callback.
+    /// The helper uses this occupancy signal to pace staged groups instead of
+    /// filling the whole ring before a live mute transition can be observed.
+    pub fn render_buffered(&self) -> Duration {
+        let samples = self.play.lock().unwrap().0.occupied_len();
+        Duration::from_secs_f64(samples as f64 / UNIT_RATE as f64)
     }
 
     /// Drop queued render audio on the next callback tick (barge-in / stop).
