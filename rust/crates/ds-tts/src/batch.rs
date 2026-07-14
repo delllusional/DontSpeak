@@ -53,55 +53,60 @@ pub fn split_phonemes(phonemes: &str) -> Vec<String> {
         false, // no early strong-boundary flush (keep packing to the cap)
     )
     .into_iter()
-    .flat_map(|b| hard_split_words(&b, MAX_PHONEME_LENGTH))
+    .flat_map(|b| hard_split_words(&b, MAX_PHONEME_LENGTH, MIN_PHONEME_LENGTH))
     .collect()
 }
 
 /// Last-resort split of an over-cap chunk/batch at WORD boundaries (spaces), so nothing
 /// exceeds `cap` even when it has no `.,!?;` to break on. A single word longer than `cap`
-/// is split at a char boundary — degraded but never dropped/truncated. In/under cap → unchanged.
-fn hard_split_words(s: &str, cap: usize) -> Vec<String> {
+/// is split at a char boundary — degraded but never dropped/truncated. Split results also stay
+/// above `floor`; an in-cap whole reply remains unchanged even when it is shorter than the floor.
+fn hard_split_words(s: &str, cap: usize, floor: usize) -> Vec<String> {
     if s.chars().count() <= cap {
         return vec![s.to_string()];
     }
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for word in s.split_whitespace() {
-        let wlen = word.chars().count();
-        // A word longer than the cap on its own: flush, then emit it in char-sized pieces.
-        if wlen > cap {
-            if !cur.is_empty() {
-                out.push(std::mem::take(&mut cur));
-            }
-            let mut piece = String::new();
-            for ch in word.chars() {
-                if piece.chars().count() >= cap {
-                    out.push(std::mem::take(&mut piece));
-                }
-                piece.push(ch);
-            }
-            if !piece.is_empty() {
-                out.push(piece);
-            }
-            continue;
-        }
-        // +1 for the joining space (only when `cur` is non-empty).
-        let need = if cur.is_empty() {
-            wlen
+    debug_assert!(floor > 0 && floor <= cap.div_ceil(2));
+
+    // Match the previous word packer's whitespace normalization before choosing
+    // boundaries. A space used as a batch boundary is omitted as before.
+    let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars = normalized.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    if chars.len() <= cap {
+        return vec![normalized];
+    }
+
+    let mut out = Vec::new();
+    let mut start = 0;
+    while chars.len() - start > cap {
+        let remaining = chars.len() - start;
+        let split_at = if remaining <= cap.saturating_mul(2) {
+            // On the final split, choose a balanced word boundary when possible.
+            // Otherwise bisect a long word so neither side becomes a short tail.
+            let midpoint = remaining / 2;
+            (floor..remaining)
+                .filter(|&at| chars[start + at] == ' ')
+                .filter(|&at| {
+                    let right = remaining - at - 1;
+                    at <= cap && (floor..=cap).contains(&right)
+                })
+                .min_by_key(|&at| at.abs_diff(midpoint))
+                .unwrap_or(midpoint)
         } else {
-            cur.chars().count() + 1 + wlen
+            // More than two chunks remain, so pack to the last usable word boundary.
+            (floor..=cap)
+                .rev()
+                .find(|&at| chars[start + at] == ' ')
+                .unwrap_or(cap)
         };
-        if need > cap && !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
-        }
-        if !cur.is_empty() {
-            cur.push(' ');
-        }
-        cur.push_str(word);
+
+        let end = start + split_at;
+        out.push(chars[start..end].iter().collect());
+        start = end + usize::from(chars[end] == ' ');
     }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
+    out.push(chars[start..].iter().collect());
     out
 }
 
@@ -277,7 +282,7 @@ pub fn stream_batches(phonemes: &str) -> Vec<String> {
         true,
     )
     .into_iter()
-    .flat_map(|b| hard_split_words(&b, MAX_PHONEME_LENGTH))
+    .flat_map(|b| hard_split_words(&b, MAX_PHONEME_LENGTH, MIN_PHONEME_LENGTH))
     .collect()
 }
 
@@ -363,16 +368,51 @@ mod tests {
     #[test]
     fn exact_model_context_is_split_below_the_missing_style_row() {
         // Kokoro advertises a 510-phoneme context, but the copied voice pack has rows 0..=509
-        // indexed by token count. A 510-token input therefore has no style row and must split.
+        // indexed by token count. A 510-token input therefore has no style row and must split
+        // without leaving a one-token tail that selects degenerate short-utterance prosody.
         let exact_context = "ə".repeat(510);
-        let batches = stream_batches(&exact_context);
-        assert!(batches.len() >= 2);
-        assert!(
+        for batches in [
+            split_phonemes(&exact_context),
+            stream_batches(&exact_context),
+        ] {
+            assert_eq!(
+                batches
+                    .iter()
+                    .map(|batch| batch.chars().count())
+                    .collect::<Vec<_>>(),
+                vec![255, 255]
+            );
+            assert!(batches.iter().all(|batch| {
+                let len = batch.chars().count();
+                (MIN_PHONEME_LENGTH..=MAX_PHONEME_LENGTH).contains(&len)
+            }));
+            assert_eq!(batches.concat(), exact_context);
+        }
+    }
+
+    #[test]
+    fn hard_split_rebalances_a_short_final_word() {
+        // The final word cannot fold into the preceding cap-sized chunk, so both sides
+        // must be rebalanced instead of leaving the final phoneme alone.
+        let phonemes = format!("{} {} c", "a".repeat(250), "b".repeat(258));
+        assert_eq!(phonemes.chars().count(), MAX_PHONEME_LENGTH + 2);
+
+        let batches = hard_split_words(&phonemes, MAX_PHONEME_LENGTH, MIN_PHONEME_LENGTH);
+        assert_eq!(
             batches
                 .iter()
-                .all(|batch| batch.chars().count() <= MAX_PHONEME_LENGTH)
+                .map(|batch| batch.chars().count())
+                .collect::<Vec<_>>(),
+            vec![250, 260]
         );
-        assert_eq!(batches.concat(), exact_context);
+        assert!(batches.iter().all(|batch| {
+            let len = batch.chars().count();
+            (MIN_PHONEME_LENGTH..=MAX_PHONEME_LENGTH).contains(&len)
+        }));
+        assert_eq!(
+            batches.join(" ").split_whitespace().collect::<Vec<_>>(),
+            phonemes.split_whitespace().collect::<Vec<_>>()
+        );
     }
 
     #[test]
