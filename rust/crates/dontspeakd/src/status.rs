@@ -9,8 +9,8 @@ use ds_config::{Paths, VoiceConfig};
 
 use crate::config_gate::{
     apple_native_shim_available, apple_native_tts_active, caps_loop_enabled,
-    kokoro_onnx_files_present, kokoro_present_for, parakeet_available, parakeet_onnx_files_present,
-    stt_uses_onnx_runtime,
+    kokoro_g2p_files_present, kokoro_onnx_files_present, kokoro_present_for, parakeet_available,
+    parakeet_onnx_files_present, stt_uses_onnx_runtime,
 };
 use crate::downloads::{DownloadProg, TargetState};
 use crate::engine::{PasteState, dictation_preview};
@@ -172,7 +172,7 @@ pub(crate) fn model_status_json(
     //                    and FluidAudio only LOADS, enforceOffline). Presence reads the SAME
     //                    revision-pinned completion markers the downloader writes, so a
     //                    partial fetch reads MISSING here exactly as it does to the fetcher.
-    //   * onnx (cpu/coreml/cuda) → gated on the downloaded ONNX model + voices + dylib.
+    //   * onnx (cpu/coreml/cuda) → gated on synth, voices, G2P graphs, and ORT.
     // `uses_apple_native_model()` / `resolved_stt_provider()` resolve to `Ane` as a STATIC
     // preference on ANY macOS, but the ANE (FluidAudio Core ML) backend only actually serves when
     // its shim dylib is present; without it the warm child DOWNGRADES to the ONNX-CPU path (e.g.
@@ -184,6 +184,7 @@ pub(crate) fn model_status_json(
     let tts_uses_apple_native = apple_native_tts_active(&cfg);
     let kokoro_files = if tts_uses_apple_native {
         ds_model::coreml_repo::is_coreml_set_present(&ds_model::coreml_repo::KOKORO_COREML_SET)
+            && kokoro_g2p_files_present()
     } else {
         kokoro_onnx_files_present()
     };
@@ -299,10 +300,8 @@ pub(crate) fn model_status_json(
         .unwrap_or_else(|e| e.into_inner())
         .targets
         .clone();
-    // A row lights "downloading" for exactly ITS OWN in-flight target. (Note: the
-    // voices-only `KokoroVoices` fetch does NOT light the Kokoro row — it only gates the
-    // ACTIVE VOICE of an already-runnable model, so a ring there would read as "TTS not
-    // ready" while TTS actually works.)
+    // A row lights "downloading" for exactly its own in-flight targets. `KokoroVoices` now
+    // carries the shared frontend graphs as well as voices, so it correctly gates the row.
     let downloading = |eng: DownloadTarget| matches!(dl.get(&eng), Some(TargetState::Active(_)));
     // Active-only: a Done entry's finished % must NOT feed these direct per-target
     // fractions (the row-level Done fallback lives in `row_download_frac`).
@@ -328,7 +327,8 @@ pub(crate) fn model_status_json(
     let kokoro_error = combined_error(
         kokoro_present,
         dl_err_for(DownloadTarget::KokoroModel)
-            .or_else(|| dl_err_for(DownloadTarget::KokoroCoreml)),
+            .or_else(|| dl_err_for(DownloadTarget::KokoroCoreml))
+            .or_else(|| dl_err_for(DownloadTarget::KokoroVoices)),
         // A mid-session `load tts`/preload failure (e.g. a transient AV-scan file-not-found on
         // an already-downloaded model) ahead of the warm-CHILD start failure — both are
         // per-Kokoro, so either surfaces.
@@ -375,8 +375,9 @@ pub(crate) fn model_status_json(
     let tts_loaded = tts.is_tts_loaded();
     let stt_loaded = tts.is_stt_loaded();
     let cuda_downloading = downloading(DownloadTarget::Cuda);
-    let kokoro_own_downloading =
-        downloading(DownloadTarget::KokoroModel) || downloading(DownloadTarget::KokoroCoreml);
+    let kokoro_own_downloading = downloading(DownloadTarget::KokoroModel)
+        || downloading(DownloadTarget::KokoroCoreml)
+        || downloading(DownloadTarget::KokoroVoices);
     let kokoro_downloading = row_downloading(
         kokoro_own_downloading,
         cuda_downloading,
@@ -395,13 +396,18 @@ pub(crate) fn model_status_json(
     // see `row_download_frac` for the model-wins-over-CUDA priority.
     let kokoro_frac = row_download_frac(
         &dl,
-        DownloadTarget::KokoroModel,
-        DownloadTarget::KokoroCoreml,
+        &[
+            DownloadTarget::KokoroModel,
+            DownloadTarget::KokoroCoreml,
+            DownloadTarget::KokoroVoices,
+        ],
     );
     let parakeet_frac = row_download_frac(
         &dl,
-        DownloadTarget::ParakeetModel,
-        DownloadTarget::ParakeetCoreml,
+        &[
+            DownloadTarget::ParakeetModel,
+            DownloadTarget::ParakeetCoreml,
+        ],
     );
 
     // Dictation flags hoisted to ONE read each so `recording`/`prompt_glow`/`state` below
@@ -775,10 +781,9 @@ fn combined_error(
 /// so the row↔target wiring is unit-tested.
 fn row_download_frac(
     targets: &std::collections::HashMap<DownloadTarget, TargetState>,
-    model: DownloadTarget,
-    coreml: DownloadTarget,
+    own_targets: &[DownloadTarget],
 ) -> f64 {
-    [model, coreml]
+    own_targets
         .iter()
         .find_map(|t| match targets.get(t) {
             // A row's OWN target feeds its ring whether live or just finished;
@@ -986,9 +991,12 @@ mod tests {
         .into_iter()
         .collect();
         // Each row shows its OWN model %, not the other row's and not CUDA's.
-        assert_eq!(row_download_frac(&active, KokoroModel, KokoroCoreml), 0.10);
         assert_eq!(
-            row_download_frac(&active, ParakeetModel, ParakeetCoreml),
+            row_download_frac(&active, &[KokoroModel, KokoroCoreml]),
+            0.10
+        );
+        assert_eq!(
+            row_download_frac(&active, &[ParakeetModel, ParakeetCoreml]),
             0.30
         );
 
@@ -997,11 +1005,11 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(
-            row_download_frac(&cuda_only, KokoroModel, KokoroCoreml),
+            row_download_frac(&cuda_only, &[KokoroModel, KokoroCoreml]),
             0.5
         );
         assert_eq!(
-            row_download_frac(&cuda_only, ParakeetModel, ParakeetCoreml),
+            row_download_frac(&cuda_only, &[ParakeetModel, ParakeetCoreml]),
             0.5
         );
 
@@ -1009,15 +1017,28 @@ mod tests {
         let coreml: HashMap<_, _> = [(KokoroCoreml, TargetState::Active(p(25, 100)))]
             .into_iter()
             .collect();
-        assert_eq!(row_download_frac(&coreml, KokoroModel, KokoroCoreml), 0.25);
+        assert_eq!(
+            row_download_frac(&coreml, &[KokoroModel, KokoroCoreml]),
+            0.25
+        );
         // ...and it does NOT bleed into the Parakeet row.
         assert_eq!(
-            row_download_frac(&coreml, ParakeetModel, ParakeetCoreml),
+            row_download_frac(&coreml, &[ParakeetModel, ParakeetCoreml]),
             0.0
         );
 
+        // The Apple-native adjunct target now carries required frontend graphs, so it is one
+        // of Kokoro's own targets and feeds that row's ring.
+        let frontend: HashMap<_, _> = [(KokoroVoices, TargetState::Active(p(3, 4)))]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            row_download_frac(&frontend, &[KokoroModel, KokoroCoreml, KokoroVoices]),
+            0.75
+        );
+
         // Nothing in flight ⇒ 0.
-        assert_eq!(row_download_frac(&empty, KokoroModel, KokoroCoreml), 0.0);
+        assert_eq!(row_download_frac(&empty, &[KokoroModel, KokoroCoreml]), 0.0);
 
         // THE FIX: Kokoro's own fetch just finished (retired into `Done`) while Cuda is
         // STILL live for some unrelated reason — the row must show its own finished %,
@@ -1030,12 +1051,12 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(
-            row_download_frac(&kokoro_done_cuda_live, KokoroModel, KokoroCoreml),
+            row_download_frac(&kokoro_done_cuda_live, &[KokoroModel, KokoroCoreml]),
             1.0,
             "a finished own-target download wins over a still-live Cuda fetch"
         );
         assert_eq!(
-            row_download_frac(&kokoro_done_cuda_live, ParakeetModel, ParakeetCoreml),
+            row_download_frac(&kokoro_done_cuda_live, &[ParakeetModel, ParakeetCoreml]),
             0.5,
             "Parakeet has nothing of its own, so it still falls back to Cuda"
         );
@@ -1046,7 +1067,7 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(
-            row_download_frac(&cuda_done, KokoroModel, KokoroCoreml),
+            row_download_frac(&cuda_done, &[KokoroModel, KokoroCoreml]),
             0.0,
             "a Done Cuda entry must not feed the fallback"
         );

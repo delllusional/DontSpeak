@@ -152,7 +152,8 @@ pub fn catalog() -> Value {
         }
     };
 
-    // TTS — Kokoro (ONNX, then Core ML / ANE).
+    // TTS — shared English frontend fallback, then Kokoro synthesis runtimes.
+    push_portable(&mut projects, &urls::KOKORO_G2P);
     push_portable(&mut projects, &urls::KOKORO);
     push_coreml(&mut projects, &crate::coreml_repo::KOKORO_COREML);
     // STT — the FastConformer/Parakeet model (portable ONNX, then Core ML).
@@ -209,6 +210,8 @@ mod tests {
         for d in [
             urls::KOKORO_ONNX,
             urls::KOKORO_VOICES,
+            urls::KOKORO_G2P_ENCODER,
+            urls::KOKORO_G2P_DECODER,
             urls::PARAKEET_ENCODER,
             urls::PARAKEET_DECODER,
             urls::PARAKEET_JOINER,

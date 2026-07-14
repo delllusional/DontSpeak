@@ -1,9 +1,10 @@
-//! Phoneme batching / streaming for gapless Kokoro synthesis.
+//! Model-bounded phoneme batching for Kokoro synthesis.
 //!
 //! [`split_phonemes`](crate::batch::split_phonemes) packs a long phoneme string at sentence
 //! marks under `MAX_PHONEME_LENGTH` (port of `splitPhonemes`);
-//! [`stream_batches`](crate::batch::stream_batches) is the
-//! ramped variant for low-latency streaming. Both share `pack_batches`.
+//! [`stream_batches`](crate::batch::stream_batches) is the ramped variant used by the shared
+//! frontend. The helper now prepares its complete sequence transactionally before playback;
+//! the API name records the earlier concurrent-playback design. Both share `pack_batches`.
 
 use crate::vocab::MAX_PHONEME_LENGTH;
 
@@ -30,7 +31,7 @@ fn atomic_parts(phonemes: &str) -> Vec<String> {
 }
 
 pub fn split_phonemes(phonemes: &str) -> Vec<String> {
-    // Constant 510 cap (no ramp), and DON'T break early at every sentence — pack
+    // Constant model cap (no ramp), and DON'T break early at every sentence — pack
     // greedily so multiple sentences share a batch, preserving the inter-sentence
     // pauses (each batch is trimmed only at its ends). A forced break at the cap
     // still backtracks to the last sentence boundary, and a short trailing
@@ -40,7 +41,7 @@ pub fn split_phonemes(phonemes: &str) -> Vec<String> {
     // parts (see `atomic_parts`); a run with NO such mark at all (e.g. a long
     // digit string expanded by `numbers::expand_numbers` into an unpunctuated
     // word run) is a single atomic part and survives packing oversized. Guard
-    // with the same hard word/char-split fallback `chunk_text` uses, so no
+    // with the same hard word/char-split fallback the streaming path uses, so no
     // batch handed to the ONNX/Core ML engines can ever exceed the cap that
     // gets it silently truncated (ONNX) or dropped whole (Core ML/ANE).
     pack_batches(
@@ -56,48 +57,9 @@ pub fn split_phonemes(phonemes: &str) -> Vec<String> {
     .collect()
 }
 
-/// Max characters of TEXT per synthesis chunk — the SHARED bound both TTS engines pack to
-/// (the ONNX path then ramps phoneme batches within a chunk; the Core ML path synthesizes the
-/// chunk whole). Conservative so a chunk's phonemes stay safely under EITHER engine's input
-/// cap: the Core ML (FluidAudio) chain has its own fixed phoneme limit and DROPS a whole
-/// utterance that overflows it (`phonemeSequenceTooLong`), so the splitter is what guarantees
-/// no spoken line is ever lost. ~1.3 phonemes/char worst case → ~340 phonemes, well under the
-/// model context.
-pub const TEXT_CHUNK_CHARS: usize = 260;
-/// Floor on a TEXT chunk (chars) — same role as the phoneme floor: don't emit a tiny chunk
-/// (which renders high-pitched) unless it's the only content; a short tail folds back.
-const TEXT_CHUNK_FLOOR: usize = 48;
-
-/// Split arbitrary TEXT into synthesis chunks, each GUARANTEED ≤ [`TEXT_CHUNK_CHARS`]. The
-/// SINGLE splitter every spoken request flows through — narration AND replies, ONNX AND Core
-/// ML — so no path can overflow an engine and silently drop audio. Greedy sentence packing
-/// (reuses `pack_batches`) at `.,!?;` boundaries: multiple short sentences share a chunk
-/// (natural pauses preserved), a long sentence is cut at the last sentence/clause boundary, and
-/// a short trailing remainder folds back. A run with NO `.,!?;` at all (one long clause)
-/// would survive `pack_batches` oversized, so we additionally HARD-SPLIT any over-cap chunk at
-/// word boundaries — the bound is then unconditional, which is the whole point: a spoken line
-/// must never be lost to a phoneme-cap overflow.
-pub fn chunk_text(text: &str) -> Vec<String> {
-    pack_batches(
-        text,
-        TEXT_CHUNK_CHARS,
-        TEXT_CHUNK_CHARS,
-        TEXT_CHUNK_FLOOR,
-        |b| b, // constant budget — no streaming ramp at the text level
-        false,
-    )
-    .into_iter()
-    .flat_map(|c| hard_split_words(&c, TEXT_CHUNK_CHARS))
-    .collect()
-}
-
 /// Last-resort split of an over-cap chunk/batch at WORD boundaries (spaces), so nothing
-/// exceeds `cap` even when it has no `.,!?;` to break on. Shared by [`chunk_text`] (TEXT
-/// chunks) and [`split_phonemes`]/[`stream_batches`] (phoneme batches) — the same
-/// unpunctuated-run failure mode threatens both: a long clause/digit-run with no sentence
-/// marks is a single atomic part that survives `pack_batches` oversized. A single word longer
-/// than `cap` (e.g. a long URL, or digits expanded with no spaces) is split at a char
-/// boundary — degraded but never dropped/truncated. In/under cap → unchanged.
+/// exceeds `cap` even when it has no `.,!?;` to break on. A single word longer than `cap`
+/// is split at a char boundary — degraded but never dropped/truncated. In/under cap → unchanged.
 fn hard_split_words(s: &str, cap: usize) -> Vec<String> {
     if s.chars().count() <= cap {
         return vec![s.to_string()];
@@ -255,15 +217,11 @@ fn pack_batches(
     batched
 }
 
-/// First streaming batch budget (phonemes). Small so the first audio starts
-/// fast (~3 s at our measured synth speed) instead of waiting for the whole
-/// reply. Subsequent batches grow geometrically up to `MAX_PHONEME_LENGTH`.
+/// First ramped batch budget (phonemes). Subsequent synthesis units grow geometrically up to
+/// `MAX_PHONEME_LENGTH`; retaining these boundaries avoids changing established style-row and
+/// short-tail behavior while the helper's playback commit is transactional.
 pub const STREAM_FIRST_BUDGET: usize = 80;
-/// Per-batch growth factor. Kokoro synth runs ~0.55× real-time here, so audio
-/// drains slower than the next batch synthesizes as long as each batch is at
-/// most ~1/0.55 ≈ 1.8× the previous one. We use 1.4× for margin against synth
-/// jitter and the fixed per-call overhead — that keeps the rodio queue from
-/// ever underrunning, so playback is gapless with NO artificial cushion.
+/// Per-batch growth factor retained from the original streaming sequence.
 const STREAM_GROWTH_NUM: usize = 7; // 1.4 = 7/5
 const STREAM_GROWTH_DEN: usize = 5;
 
@@ -272,14 +230,14 @@ const STREAM_GROWTH_DEN: usize = 5;
 /// short-utterance style row (indexed by token count; see `synth::style_row`),
 /// which compresses durations and renders the words high-pitched / "choked". The
 /// reference Kokoro pipelines avoid this structurally by packing chunks to the
-/// 510 cap and never emitting tiny ones; our low-latency ramp can, so we (a)
+/// model cap and never emitting tiny ones; our low-latency ramp can, so we (a)
 /// never FLUSH a batch below this floor and (b) fold a short trailing remainder
-/// back into the previous batch. Kept ≤ [`STREAM_FIRST_BUDGET`] so the first
-/// batch still flushes early for fast first-audio. Tuned by ear.
+/// back into the previous batch. Kept ≤ [`STREAM_FIRST_BUDGET`] so the first ramped
+/// unit can still reach the floor. Tuned by ear.
 const MIN_PHONEME_LENGTH: usize = 64;
 const _: () = assert!(
     MIN_PHONEME_LENGTH <= STREAM_FIRST_BUDGET,
-    "the min-batch floor must not exceed the first-batch budget, or first-audio latency regresses"
+    "the min-batch floor must not exceed the first-batch budget"
 );
 
 /// Sentence-final marks — the PREFERRED batch boundaries (Kokoro `waterfall_last`
@@ -297,21 +255,19 @@ fn ends_at_strong_boundary(s: &str) -> bool {
         .is_some_and(|c| STRONG_MARKS.contains(&c))
 }
 
-/// Split a phoneme string into a RAMPED sequence of batches for gapless
-/// streaming: a small first batch (fast first-audio) growing geometrically to
-/// `MAX_PHONEME_LENGTH`. Same `.,!?;` boundaries as [`split_phonemes`] (never
-/// breaks mid-clause), but the budget grows per batch so the producer (synth)
-/// stays ahead of the consumer (playback) after the first batch. Pass the whole
-/// reply's phonemes — do NOT pre-split into sentences (that caused the tiny-group
-/// underruns this replaces).
+/// Split a phoneme string into the established ramped sequence: a small first batch growing
+/// geometrically to `MAX_PHONEME_LENGTH`. It uses the same `.,!?;` boundaries as
+/// [`split_phonemes`] and never breaks mid-clause. The helper stages the returned sequence before
+/// playback; callers should still pass the whole reply so the short-tail protections see every
+/// boundary.
 pub fn stream_batches(phonemes: &str) -> Vec<String> {
     // Ramped cap (small first batch, growing geometrically) AND early
     // strong-boundary flushing, so each batch is a whole sentence delivered fast.
     //
     // Same hard-cap guarantee as `split_phonemes`: an unpunctuated run longer than
     // the cap is one atomic part and would otherwise survive packing oversized, so
-    // run every batch through the same hard word/char-split fallback `chunk_text`
-    // uses before it can reach either synthesis engine.
+    // run every batch through the same hard word/char-split fallback before it can
+    // reach either synthesis engine.
     pack_batches(
         phonemes,
         STREAM_FIRST_BUDGET,
@@ -362,7 +318,7 @@ mod tests {
         // run (e.g. digits expanded by `numbers::expand_numbers` into a word run with no
         // `.,!?;`) is a single atomic part and would survive `pack_batches` oversized —
         // silently truncated on ONNX or dropped whole on Core ML/ANE. The hard word-split
-        // fallback (shared with `chunk_text`) must still bound every batch.
+        // fallback must still bound every batch.
         let run = "wʌn tu θɹiː foːɹ faɪv sɪks sɛvn eɪt naɪn tɛn ".repeat(20); // ~460 chars, no marks
         assert!(run.chars().count() > MAX_PHONEME_LENGTH);
         let batches = split_phonemes(&run);
@@ -402,6 +358,21 @@ mod tests {
                 b.chars().count()
             );
         }
+    }
+
+    #[test]
+    fn exact_model_context_is_split_below_the_missing_style_row() {
+        // Kokoro advertises a 510-phoneme context, but the copied voice pack has rows 0..=509
+        // indexed by token count. A 510-token input therefore has no style row and must split.
+        let exact_context = "ə".repeat(510);
+        let batches = stream_batches(&exact_context);
+        assert!(batches.len() >= 2);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.chars().count() <= MAX_PHONEME_LENGTH)
+        );
+        assert_eq!(batches.concat(), exact_context);
     }
 
     #[test]
@@ -469,10 +440,10 @@ mod tests {
             .join(", ");
         let batches = stream_batches(&long);
         assert!(batches.len() >= 3, "expected a ramped multi-batch split");
-        // First batch is small (fast first-audio), within the first-budget + one part.
+        // First batch stays within the ramp's first-budget plus one atomic part.
         assert!(
             batches[0].chars().count() <= STREAM_FIRST_BUDGET + 41,
-            "first batch must stay small for low first-audio latency, got {}",
+            "first batch must stay within the ramp budget, got {}",
             batches[0].chars().count()
         );
         // Batches grow (each ≥ the previous) up to the cap; the FINAL batch is
@@ -548,113 +519,5 @@ mod tests {
         let b = stream_batches("ɡɑt ɪt.");
         assert_eq!(b, vec!["ɡɑt ɪt.".to_string()]);
         assert!(b[0].chars().count() < MIN_PHONEME_LENGTH);
-    }
-
-    // ── chunk_text: the SHARED text splitter that guards BOTH TTS engines ──────────────
-    // The regression these pin: a long narration line was sent whole to the Core ML engine,
-    // overflowed its phoneme cap (`phonemeSequenceTooLong`), and the WHOLE line was dropped.
-    // The invariants below — every chunk ≤ cap, and NO words lost — are what make that
-    // impossible on either engine.
-
-    /// Rejoin chunks and compare the word sequence to the source: the splitter must never
-    /// drop or reorder content, only insert boundaries.
-    fn words(s: &str) -> Vec<String> {
-        s.split_whitespace().map(str::to_string).collect()
-    }
-
-    #[test]
-    fn chunk_text_short_text_is_one_chunk() {
-        assert_eq!(
-            chunk_text("A short spoken line."),
-            vec!["A short spoken line."]
-        );
-    }
-
-    #[test]
-    fn chunk_text_empty_is_no_chunks() {
-        assert!(chunk_text("").is_empty());
-        assert!(chunk_text("   \n  ").is_empty());
-    }
-
-    #[test]
-    fn chunk_text_every_chunk_is_within_cap_and_loses_nothing() {
-        // A long, comma/period-punctuated line (the real narration shape that overflowed) —
-        // comfortably past the cap so it MUST split.
-        let line = "That quote block at the top is my spoken digest, the part that gets read \
-            aloud, and yes it doubles as visible text so it can look heavy and a bit redundant \
-            with the detail below, which is why splitting it cleanly across chunks matters so \
-            much here, because otherwise the whole spoken line overflows the model and is \
-            dropped, leaving you with silence instead of the words you expected to hear today.";
-        assert!(
-            line.chars().count() > TEXT_CHUNK_CHARS,
-            "test fixture must exceed the cap"
-        );
-        let chunks = chunk_text(line);
-        assert!(
-            chunks.len() >= 2,
-            "a long line must split into multiple chunks"
-        );
-        for c in &chunks {
-            assert!(
-                c.chars().count() <= TEXT_CHUNK_CHARS,
-                "chunk over cap: {} chars",
-                c.chars().count()
-            );
-        }
-        assert_eq!(
-            words(&chunks.join(" ")),
-            words(line),
-            "no words may be lost or reordered"
-        );
-    }
-
-    #[test]
-    fn chunk_text_hard_splits_a_long_run_with_no_punctuation() {
-        // THE failure mode the punctuation-only packer can't catch: one long clause with NO
-        // `.,!?;` at all. The hard word-split guarantee must still bound every chunk.
-        let run =
-            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima ".repeat(6); // ~390 chars, zero sentence marks
-        let chunks = chunk_text(&run);
-        assert!(
-            chunks.len() >= 2,
-            "an over-cap unpunctuated run must still split"
-        );
-        for c in &chunks {
-            assert!(
-                c.chars().count() <= TEXT_CHUNK_CHARS,
-                "unpunctuated chunk over cap: {}",
-                c.chars().count()
-            );
-        }
-        assert_eq!(
-            words(&chunks.join(" ")),
-            words(&run),
-            "no words lost in the hard split"
-        );
-    }
-
-    #[test]
-    fn chunk_text_splits_a_single_oversize_word_at_char_boundary() {
-        // Degenerate: a single "word" longer than the cap (e.g. a URL). It must be emitted in
-        // ≤ cap pieces rather than dropped or left oversized.
-        let word = "x".repeat(TEXT_CHUNK_CHARS * 2 + 5);
-        let chunks = chunk_text(&word);
-        assert!(chunks.len() >= 3);
-        for c in &chunks {
-            assert!(c.chars().count() <= TEXT_CHUNK_CHARS);
-        }
-        assert_eq!(
-            chunks.concat(),
-            word,
-            "every character survives the char-split"
-        );
-    }
-
-    #[test]
-    fn chunk_text_packs_several_short_sentences_together() {
-        // Short sentences share a chunk (so inter-sentence pauses are preserved) rather than
-        // each becoming its own tiny, high-pitched utterance.
-        let chunks = chunk_text("One. Two. Three.");
-        assert_eq!(chunks, vec!["One. Two. Three."]);
     }
 }

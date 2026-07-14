@@ -2,10 +2,11 @@
 //! Owns the [`Backend`] enum and its loaders ([`load_synth`], [`load_backend`]),
 //! which the warm serve loop also uses.
 
-use ds_tts::batch::stream_batches;
 use ds_tts::g2p;
 use ds_tts::play::AudioPlayer;
 use ds_tts::synth::KokoroSynth;
+
+use crate::prepare::{PrepareOutcome, prepare_audio};
 
 /// Ensure the assets, point ort at the dylib, and build the session ONCE.
 fn load_synth() -> Result<KokoroSynth, String> {
@@ -34,8 +35,9 @@ fn load_synth() -> Result<KokoroSynth, String> {
 }
 
 /// The active TTS backend. ONNX Kokoro ([`KokoroSynth`]) is the default + fallback;
-/// `apple_native` (macOS) routes to FluidAudio's Core ML / ANE Kokoro, which takes
-/// raw text and runs its own G2P.
+/// `apple_native` (macOS) routes to FluidAudio's Core ML / ANE Kokoro. Both now consume the
+/// SAME validated `KokoroPhonemeChunk`s from the shared Rust frontend — the Apple side no
+/// longer takes raw text and runs a G2P of its own.
 pub(crate) enum Backend {
     Ort(KokoroSynth),
     #[cfg(target_os = "macos")]
@@ -77,42 +79,41 @@ pub(crate) fn load_backend() -> Result<Backend, String> {
     Ok(Backend::Ort(load_synth()?))
 }
 
-/// One-shot: load + stream synth/playback through `AudioPlayer`.
+/// One-shot: prepare the complete utterance, then play it through `AudioPlayer`.
 pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
-    let player = AudioPlayer::open()?;
-    match load_backend()? {
-        Backend::Ort(mut synth) => {
-            let mut synth_err: Option<String> = None;
-            // Phonemize the whole text once, then synth ramped batches (gapless; see
-            // the serve loop). `synthesize` re-batches at the 510 cap internally, so
-            // passing a ≤510 batch is a single forward pass.
-            let phonemes = g2p::phonemize_for(text, voice);
-            for batch in stream_batches(&phonemes) {
-                match synth.synthesize(&batch, voice, rate) {
-                    Ok(pcm) if pcm.is_empty() => continue,
-                    Ok(pcm) => player.enqueue(pcm),
-                    Err(e) => {
-                        synth_err = Some(e);
-                        break;
-                    }
-                }
-            }
-            player.wait();
-            match synth_err {
-                Some(e) => Err(e),
-                None => Ok(()),
-            }
-        }
-        // FluidAudio returns the whole utterance at once (its Core ML chain
-        // phonemizes internally), so there's no per-batch streaming here.
-        #[cfg(target_os = "macos")]
-        Backend::Coreml(c) => {
-            let pcm = c.synthesize_text(text, voice, rate)?;
-            if !pcm.is_empty() {
-                player.enqueue(pcm);
-            }
-            player.wait();
-            Ok(())
-        }
+    // Keep the cold path aligned with `serve`: both backends consume the same normalized,
+    // model-bounded Rust phoneme batches.
+    let phoneme_batches = g2p::phoneme_batches_for(text, voice)?;
+    // Nothing speakable (image-only / emoji-only / punctuation-only). A successful no-op, not a
+    // failure — returning Err here made `ds-helper "🎉"` exit nonzero. Bail before opening a
+    // device we have nothing to play through.
+    if phoneme_batches.is_empty() {
+        return Ok(());
     }
+    let prepared = match load_backend()? {
+        Backend::Ort(mut synth) => prepare_audio(
+            &phoneme_batches,
+            || false,
+            |batch| synth.synthesize(batch.as_str(), voice, rate),
+        )?,
+        // Core ML consumes the same Rust-produced IPA batches as ONNX.
+        #[cfg(target_os = "macos")]
+        Backend::Coreml(c) => prepare_audio(
+            &phoneme_batches,
+            || false,
+            |batch| c.synthesize_phonemes(batch.as_str(), voice, rate),
+        )?,
+    };
+    let PrepareOutcome::Ready(prepared) = prepared else {
+        return Ok(()); // one-shot has no cancellation source
+    };
+
+    // Commit to playback only after every chunk succeeds. Opening the device earlier allowed
+    // initial chunks to become audible before a later synthesis error was known.
+    let player = AudioPlayer::open()?;
+    for pcm in prepared.pieces {
+        player.enqueue(pcm);
+    }
+    player.wait();
+    Ok(())
 }

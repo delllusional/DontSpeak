@@ -118,7 +118,7 @@ pub fn step(
     // speaks only the ACTIVE terminal's items, holding the rest until they become active
     // (see docs/PER-TERMINAL-QUEUES.md). We still suppress narration sent WHILE the user is
     // recording — no reason to stream fresh chatter into a dictation.
-    let gate_on = if prev.gate_set && prev.gate_msg == batch.key && !prev.seen_final {
+    let gate_on = if prev.gate_set && prev.gate_msg == batch.key {
         prev.gate_on
     } else {
         !mic_active
@@ -583,6 +583,21 @@ mod tests {
         ];
         let (_, spoken) = drive(&batches, true);
         assert!(spoken.is_empty(), "mic live at start ⇒ message gated");
+    }
+
+    #[test]
+    fn final_arriving_first_does_not_recompute_the_message_gate() {
+        // Hook processes can race: the final-index batch may land before an earlier batch.
+        // `seen_final` must not invalidate the per-message gate, or a mic transition between
+        // those arrivals changes one message from speak→skip (or skip→speak) halfway through.
+        let final_first = delta("m1", 1, "\n\nBody.", true);
+        let quote_late = delta("m1", 0, "> Spoken.", false);
+
+        let first = step(&DisplayState::default(), &final_first, false, true, false);
+        let state = first.write.expect("final batch persists state");
+        let late = step(&state, &quote_late, true, true, false);
+        assert_eq!(late.speak, vec!["Spoken.".to_string()]);
+        assert!(late.write.expect("late batch persists state").gate_on);
     }
 
     #[test]

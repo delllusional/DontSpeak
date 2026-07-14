@@ -8,7 +8,8 @@ use crate::download::{ensure, ensure_with_progress};
 use crate::model_path;
 use crate::ort::{ensure_onnxruntime, ensure_onnxruntime_with_progress};
 use crate::spec::{
-    kokoro_files, kokoro_onnx_spec, kokoro_voices_spec, parakeet_decoder_spec, parakeet_dir,
+    kokoro_files, kokoro_frontend_files, kokoro_g2p_decoder_spec, kokoro_g2p_encoder_spec,
+    kokoro_onnx_spec, kokoro_voices_spec, parakeet_decoder_spec, parakeet_dir,
     parakeet_encoder_spec, parakeet_files, parakeet_joiner_spec, parakeet_tokens_spec,
     sepformer_spec,
 };
@@ -108,19 +109,21 @@ pub fn run_setup_parakeet_with_progress(progress: &dyn Fn(u64, u64)) -> std::io:
     })
 }
 
-/// Eager pre-download of the FULL native-Kokoro asset set: the onnx model, the
-/// voices file, AND the onnxruntime dylib (route A). The lazy caller
+/// Eager pre-download of the full portable Kokoro set: synth graph, voices, OOV graphs, and
+/// ONNX Runtime. The lazy caller
 /// (`ds-helper` on first speak) uses [`crate::is_kokoro_present`] + these `ensure_*`
 /// directly. Returns the model path on success.
 pub fn run_setup_kokoro() -> std::io::Result<PathBuf> {
     let model = ensure(&kokoro_onnx_spec())?;
     ensure(&kokoro_voices_spec())?;
+    ensure(&kokoro_g2p_encoder_spec())?;
+    ensure(&kokoro_g2p_decoder_spec())?;
     ensure_onnxruntime()?;
     Ok(model)
 }
 
 /// Like [`run_setup_kokoro`] but reports AGGREGATE byte-level progress across the whole
-/// asset set (onnx + voices + onnxruntime dylib) as a single, monotonic
+/// asset set (synth + voices + G2P + ORT) as a single, monotonic
 /// `(downloaded, total)` stream via `run_download_set` — one "X MB of Y MB" bar that
 /// advances steadily 0→100% and reaches 100% exactly when the last byte lands.
 pub fn run_setup_kokoro_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
@@ -131,6 +134,8 @@ pub fn run_setup_kokoro_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::R
         vec![
             Box::new(|p| ensure_with_progress(&kokoro_onnx_spec(), p).map(|_| ())),
             Box::new(|p| ensure_with_progress(&kokoro_voices_spec(), p).map(|_| ())),
+            Box::new(|p| ensure_with_progress(&kokoro_g2p_encoder_spec(), p).map(|_| ())),
+            Box::new(|p| ensure_with_progress(&kokoro_g2p_decoder_spec(), p).map(|_| ())),
             Box::new(|p| ensure_onnxruntime_with_progress(p).map(|_| ())),
         ],
     )?;
@@ -163,16 +168,26 @@ pub fn run_setup_sepformer_with_progress(progress: &dyn Fn(u64, u64)) -> std::io
     })
 }
 
-/// Ensure ONLY the Kokoro voice-tensor packs (`voices-v1.0.bin`, ~28 MB) — the
-/// portable `[510,256]` fp32 style packs — WITHOUT the ~310 MB ONNX model or the
-/// onnxruntime dylib. This is the voice-tensor concern on its own: the apple-native
-/// (Core ML / ANE) backend needs these packs (materialized per voice from this file)
-/// but never the ONNX model or runtime, so they download independently of both.
+/// Ensure the assets shared by the Apple-native backend: voice tensors, the Rust frontend's
+/// unknown-word G2P graphs, and ORT. The 310 MB synthesis graph remains portable-backend-only.
 /// Returns the voices file path.
 pub fn run_setup_kokoro_voices_with_progress(
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<PathBuf> {
-    ensure_with_progress(&kokoro_voices_spec(), progress)
+    let total: u64 = kokoro_frontend_files().iter().map(|f| f.size_bytes).sum();
+    run_download_set(
+        progress,
+        total,
+        vec![
+            Box::new(|p| ensure_with_progress(&kokoro_voices_spec(), p).map(|_| ())),
+            Box::new(|p| ensure_with_progress(&kokoro_g2p_encoder_spec(), p).map(|_| ())),
+            Box::new(|p| ensure_with_progress(&kokoro_g2p_decoder_spec(), p).map(|_| ())),
+            Box::new(|p| ensure_onnxruntime_with_progress(p).map(|_| ())),
+        ],
+    )?;
+    model_path(&kokoro_voices_spec().file_name).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve model_dir()")
+    })
 }
 
 #[cfg(test)]

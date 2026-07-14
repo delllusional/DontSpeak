@@ -3,7 +3,7 @@
 //! Split out of `ds-tts` so the most-spawned artifact in the product (the `dontspeak`
 //! CLI — every hook + MCP call) can list voices (`list_voices` MCP tool, the settings
 //! picker) without linking the full native-synth stack (`ort`, `rodio`, `voice-g2p`,
-//! `grapheme_to_phoneme`, `ds-model`). Only `ds-config` (paths + config enums) is a
+//! `ds-model`). Only `ds-config` (paths + config enums) is a
 //! real dependency here.
 //!
 //! Two engines, two enumeration sources:

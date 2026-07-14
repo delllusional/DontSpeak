@@ -733,10 +733,9 @@ impl VoiceConfig {
         }
     }
 
-    /// True when the active TTS is the apple-native (FluidAudio Core ML / ANE) Kokoro. It
-    /// runs on the Neural Engine and self-manages its model cache (materializing voices on
-    /// demand from the shared `voices-v1.0.bin`), so the status code gates its Kokoro row on
-    /// shim capability rather than the ONNX files. Voices are SHARED — no separate voice set.
+    /// True when resolved TTS configuration selects apple-native (FluidAudio Core ML / ANE)
+    /// Kokoro. This is only the architecture/provider choice; runtime gates separately verify
+    /// the shim, DontSpeak-managed Core ML assets, and shared G2P assets.
     pub fn uses_apple_native_model(&self) -> bool {
         self.resolved_tts() == Some(TtsEngine::Kokoro)
             && cfg!(target_os = "macos")

@@ -3,24 +3,22 @@
 DontSpeak is distributed under the [MIT License](LICENSE). It builds on third-party
 software and machine-learning models that carry their own licenses. This file records the
 attributions those licenses require. DontSpeak's own source stays MIT-only. No GPL or AGPL
-code is linked or bundled anywhere (the one GPLv3 tool, espeak-ng, is invoked only as a
-separate external process — see "Optional external tool" below). The Linux build does
-dynamically link a small number of LGPL-2.1(-or-later) system libraries; see "Linux build:
+code is linked or bundled anywhere. DontSpeak uses the released `voice-g2p` crate with its
+optional external process disabled and handles dictionary misses with a checksum-pinned ONNX
+model. The Linux
+build dynamically links a small number of LGPL-2.1(-or-later) system libraries; see "Linux build:
 LGPL system libraries" below for the full disclosure and why this does not affect
 DontSpeak's MIT licensing.
 
 ## Rust crates of note
 
-- **voice-g2p** (English grapheme-to-phoneme, embeds the misaki dictionary) — **MIT**.
+- **voice-g2p** code (English grapheme-to-phoneme) — **MIT**. Its compiled payload embeds
+  Misaki's `us_gold.json` and `us_silver.json` pronunciation dictionaries byte-for-byte;
+  those data files are **Apache-2.0**. A copy of that license is shipped at
+  `licenses/Apache-2.0.txt`; the crate's MIT notice is at `licenses/voice-g2p-MIT.txt`.
 - **ONNX Runtime** Rust bindings (`ort`) — **MIT OR Apache-2.0**.
 - **attohttpc** (HTTP client used for model downloads) — **MPL-2.0**. Used as an
   unmodified upstream dependency; its own source files remain under MPL-2.0.
-- **grapheme_to_phoneme** (the neural out-of-vocabulary phoneme predictor called from
-  `ds-tts`'s G2P fallback path, `rust/crates/ds-tts/src/g2p.rs`) and its **arpabet**
-  dependency tree (`arpabet`, `arpabet_cmudict`, `arpabet_parser`, `arpabet_types`) —
-  **BSD-4-Clause**, © Brandon Thomas. Per the license's advertising clause, DontSpeak
-  includes this required acknowledgement: "This product includes software developed by
-  Brandon Thomas (bt@brand.io, echelon@gmail.com)."
 - **symphonia** and its bundled format/codec sub-crates (`symphonia-bundle-flac`,
   `symphonia-bundle-mp3`, `symphonia-codec-aac`, `symphonia-codec-pcm`,
   `symphonia-codec-vorbis`, `symphonia-core`, `symphonia-format-isomp4`,
@@ -34,7 +32,8 @@ DontSpeak's MIT licensing.
 
 ### Other permissive licenses in the dependency graph
 
-Enforced per commit by `cargo deny check licenses` (`rust/deny.toml`). These are common,
+Checked by the release-only `cargo deny` gate (`rust/deny.toml`); ordinary per-commit CI runs
+clippy and tests instead. These are common,
 OSI-approved permissive licenses carried by ordinary transitive dependencies across the
 Rust ecosystem — listed here for completeness, not because any of them require special
 handling beyond the standard permissive-license notice preservation already satisfied by
@@ -91,6 +90,12 @@ Each carries its upstream license:
 
 - **ONNX Runtime** (Microsoft) — **MIT**.
 - **Kokoro-82M** TTS model (hexgrad) — **Apache-2.0**.
+- **graphemes_to_phonemes_en_us** tiny BART model (Peter Reid), used for unknown English
+  words in the Kokoro frontend — **Apache-2.0**. The upstream model card declares the license
+  but documents no training record. The pinned repository's script suggests training from local
+  Misaki dictionaries plus regular plurals mined from WikiText, but it does not establish the
+  exact lineage of the published en-US weights and is committed with its British-dictionary flag
+  enabled. The model's precise training provenance therefore remains unverified.
 - **Parakeet TDT 0.6b v2** STT model (NVIDIA), the macOS Core ML / ANE path — **CC-BY-4.0**.
   Attribution is required: "Parakeet TDT 0.6b v2 © NVIDIA, licensed under CC-BY-4.0."
 - **stt_en_fastconformer_hybrid_large_streaming_80ms** STT model (NVIDIA NeMo), the
@@ -109,8 +114,24 @@ Each carries its upstream license:
 - **NVIDIA CUDA** execution-provider runtime (Windows/Linux GPU path, x86_64) — redistributed
   by the user under NVIDIA's CUDA redistributable EULA.
 
-## Optional external tool
+## Optional external tools (process-invoked, never linked)
 
-- **espeak-ng** (non-English Kokoro pronunciation) is **GPLv3**. DontSpeak invokes it only as
-  a separate external process when present — it is never linked, bundled, or shipped — so it
-  does not affect DontSpeak's MIT licensing.
+DontSpeak may shell out to a tool the user already has installed. Running a separate program
+is not linking, so a copyleft tool in this list does not affect DontSpeak's MIT licensing —
+and nothing here is bundled, redistributed, or required.
+
+- **Speech Dispatcher** (`spd-say`) — **GPL-2.0-or-later**. A dormant Linux adapter can invoke
+  it as an external process, but the current engine does not expose Linux `System` TTS.
+  https://github.com/brailcom/speechd
+
+DontSpeak no longer invokes **espeak-ng** (GPLv3) at all: the released `voice-g2p` crate's
+optional espeak fallback is disabled by handing it an empty executable name, which cannot
+resolve through `PATH` on any supported OS, and unknown words go to the checksum-pinned BART
+model listed above instead.
+
+This section is also the place to record DontSpeak's stricter provenance policy: a permissively
+licensed dependency can carry **data generated by** a copyleft tool, which a manifest-only license
+scanner will not expose. Generated output is not automatically covered by the tool's GPL; whether
+particular output is covered depends on its content. DontSpeak nevertheless rejects an
+espeak-ng-produced pronunciation dictionary unless an explicit provenance review clears it. Read
+the payload and its generator, not just the manifest, when a speech dependency changes.

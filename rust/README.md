@@ -121,11 +121,17 @@ Synthesis is fully in-process, with no runtime Python call. Inference runs on
 [`ort`](https://crates.io/crates/ort) with the `load-dynamic` strategy, so
 `libonnxruntime` resolves at runtime via `ORT_DYLIB_PATH` rather than being baked into
 the binary; the same runtime instance is shared by Kokoro TTS and Parakeet STT.
-English G2P is [`voice-g2p`](https://crates.io/crates/voice-g2p), a pure-Rust misaki
-port with an embedded dictionary — English-only and espeak-free, so out-of-dictionary
-words degrade silently rather than aborting. Playback is
-[`rodio`](https://crates.io/crates/rodio), streaming 24 kHz mono PCM per phoneme
-batch. Model assets and a version-matched `libonnxruntime` download on first use
+English G2P uses the released [`voice-g2p`](https://crates.io/crates/voice-g2p),
+a pure-Rust Misaki port with contextual tagging and an embedded dictionary. Its optional
+external eSpeak fallback is disabled; dictionary misses use the checksum-pinned tiny BART
+ONNX model downloaded by `ds-model` — which is why the Apple Core ML path also needs the
+ONNX Runtime dylib, even though its synthesis never touches `ort`. Emitted characters
+Kokoro's vocabulary doesn't contain are dropped with a warning, not rejected: failing the
+utterance meant one stray character silenced a whole reply.
+Both ONNX and Apple Core ML consume the same typed, 509-phoneme-character-bounded IPA
+batches. Playback is [`rodio`](https://crates.io/crates/rodio), streaming 24 kHz mono PCM
+per phoneme batch. The engine's download manager fetches missing model assets and a
+version-matched `libonnxruntime` before first use
 (`ds-model`: pinned SHA-256 checksums, atomic rename into the data dir). Because
 in-process audio can't hand back a child pgid, `ds-helper` runs synth + playback in
 its own process group so barge-in and pidfile-takeover still work as designed.

@@ -36,7 +36,7 @@ ds-ipc = { workspace = true }
 # app-server subscriber is the third adapter (dontspeakd::codex_stream).
 ds-narrate = { workspace = true }
 # Voice/language enumeration split out of ds-tts as ds-voices (issue #5): no
-# ort/rodio/voice-g2p/grapheme_to_phoneme/ds-model in its graph, so the most-spawned
+# ort/rodio/voice-g2p/ds-model in its graph, so the most-spawned
 # artifact in the product (every hook + MCP call) never rebuilds for a synth-stack
 # security advisory.
 ds-voices = { workspace = true }

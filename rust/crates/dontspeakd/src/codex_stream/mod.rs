@@ -515,7 +515,7 @@ fn resolve_codex_bin(
 
 /// Launch `codex app-server daemon start` (idempotent upstream; returns once the control
 /// socket answers `initialize`). We never own or kill the DAEMON itself — an external
-/// tool shell-out, same discipline as espeak-ng; codex is never linked. The short-lived
+/// external-tool shell-out; Codex is never linked. The short-lived
 /// STARTER child, however, is reaped on a background thread: this runs inside a driven
 /// retry loop in the long-lived engine, and a dropped-unwaited Child per attempt would
 /// accumulate zombies until the per-user process limit (spawn-and-drop's repo precedent,
@@ -1199,7 +1199,9 @@ pub(crate) fn spawn_supervisor(
             // per-session hold/active routing, pool voices, and scoped barge all apply
             // because the session id matches the one the hooks use.
             let mut speak = move |session: &str, text: String| {
-                ttsq.enqueue(text, None, None, Some(session.to_string()));
+                if let Err(e) = ttsq.enqueue(text, None, None, Some(session.to_string())) {
+                    log::warn!(target: "codex_stream", "narration rejected: {e}");
+                }
             };
             supervise(
                 &paths,

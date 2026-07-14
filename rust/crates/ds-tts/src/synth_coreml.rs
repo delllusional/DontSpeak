@@ -1,14 +1,14 @@
 //! Apple-native Kokoro TTS backend (macOS).
 //!
 //! `dlopen`s `libsmkokoro.dylib` — a Swift `@_cdecl` shim over FluidAudio's
-//! ANE-resident Core ML Kokoro — and synthesizes **text** → 24 kHz mono f32 PCM.
-//! Unlike the ONNX path ([`crate::synth::KokoroSynth`]) the Core ML chain runs its
-//! own G2P internally, so this takes raw text (no phonemes, no vocab/tokenization).
+//! ANE-resident Core ML Kokoro — and synthesizes Kokoro-compatible IPA phonemes to
+//! 24 kHz mono f32 PCM. Both this and the ONNX path consume the exact same output
+//! from [`crate::g2p`], so platform choice cannot change pronunciation or chunking.
 //!
 //! Selected when `DONTSPEAK_PROVIDER=apple-native`; the helper falls back to the ONNX
 //! CPU path if the dylib or models are unavailable. The dylib is located via
-//! `SMKOKORO_DYLIB_PATH` (set by the macOS app, mirroring `ORT_DYLIB_PATH`). Models
-//! download on first use. See `apps/macos/SmKokoro/include/smkokoro.h`.
+//! `SMKOKORO_DYLIB_PATH` (set by the macOS app, mirroring `ORT_DYLIB_PATH`). DontSpeak
+//! pre-downloads the models; the shim loads them offline. See `apps/macos/SmKokoro/include/smkokoro.h`.
 
 use std::ffi::{CString, c_char, c_void};
 
@@ -35,8 +35,8 @@ pub struct KokoroCoremlTts {
 }
 
 impl KokoroCoremlTts {
-    /// `dlopen` the shim and initialize the model store (downloads models on first
-    /// use). Honors `SMKOKORO_DYLIB_PATH`. Errors (missing dylib, init/download
+    /// `dlopen` the shim and initialize it from DontSpeak's pre-populated model cache.
+    /// Honors `SMKOKORO_DYLIB_PATH`. Errors (missing dylib, model gap, or initialization
     /// failure) are returned so the helper can fall back to ONNX.
     pub fn load() -> Result<Self, String> {
         // Shared shim loader (also used by the Parakeet STT backend) — resolves
@@ -46,9 +46,9 @@ impl KokoroCoremlTts {
             lib,
             initialized: false,
         };
-        // Pass our DontSpeak-controlled Core ML cache dir (not "" → FluidAudio's scattered
-        // default) so the Kokoro model downloads under our cache folder; compute_units 0 →
-        // default ANE routing.
+        // Pass our DontSpeak-controlled, pre-populated Core ML cache dir (not "" →
+        // FluidAudio's scattered default). The shim is offline-only, so a cache gap fails
+        // instead of downloading here; compute_units 0 → default ANE routing.
         // SAFETY: `smk_init` is looked up by NUL-terminated name from the app-signed shim
         // and has exactly `InitFn`'s signature (smkokoro.h); the Symbol borrows `me.lib`,
         // so it can't outlive the dylib, and `dir` is a live CString across the blocking
@@ -68,7 +68,11 @@ impl KokoroCoremlTts {
         // Absorb Core ML's one-time graph specialization here (≈1 s) with a throwaway
         // synth, so the user's FIRST real utterance is warm (~11× RTF) instead of
         // paying the cold penalty (~2.5×). Errors are non-fatal — the real call retries.
-        let _ = me.synthesize_one("Ready.", FALLBACK_VOICE, 1.0);
+        if let Ok(ready) = crate::g2p::phoneme_batches_for("Ready.", FALLBACK_VOICE)
+            && let Some(ready) = ready.first()
+        {
+            let _ = me.synthesize_one(ready.as_str(), FALLBACK_VOICE, 1.0);
+        }
         Ok(me)
     }
 
@@ -77,26 +81,28 @@ impl KokoroCoremlTts {
         ds_config::RealizedProvider::CoreMlAne
     }
 
-    /// Synthesize `text` → 24 kHz mono f32 PCM. `voice` is a Kokoro voice id. The ANE
+    /// Synthesize one bounded IPA `phonemes` batch → 24 kHz mono f32 PCM. `voice` is a
+    /// Kokoro voice id. The caller owns DontSpeak's 509-phoneme-character bound through
+    /// [`crate::g2p::phoneme_batches_for`]. The ANE
     /// repo ships only `af_heart`, but any voice is materialized on demand from the
     /// LOCAL voices npz, so first use Just Works; an id with no local source falls back
     /// to `af_heart`. Empty result is returned as an empty Vec (the caller skips it).
-    pub fn synthesize_text(&self, text: &str, voice: &str, speed: f32) -> Result<Vec<f32>, String> {
-        // FluidAudio's neural BART G2P fallback sounds bare digit runs out as
-        // garbage (heard as "X"), so expand numbers to English words first. The ANE
-        // chain is English-only here, so unconditional English expansion is correct.
-        // See [`crate::numbers`].
-        let text = crate::numbers::expand_numbers(text);
+    pub fn synthesize_phonemes(
+        &self,
+        phonemes: &str,
+        voice: &str,
+        speed: f32,
+    ) -> Result<Vec<f32>, String> {
         // Resolve to a voice whose pack is GUARANTEED resident on disk, so FluidAudio's
         // `ensureVoicePack` always hits the local file and NEVER makes a network call.
         let voice = self.resident_voice(voice);
-        match self.synthesize_one(&text, &voice, speed) {
+        match self.synthesize_one(phonemes, &voice, speed) {
             Ok(pcm) => Ok(pcm),
             Err(e) if voice != FALLBACK_VOICE => {
                 eprintln!(
                     "dontspeak/helper: coreml voice '{voice}' failed ({e}); using {FALLBACK_VOICE}"
                 );
-                self.synthesize_one(&text, FALLBACK_VOICE, speed)
+                self.synthesize_one(phonemes, FALLBACK_VOICE, speed)
             }
             Err(e) => Err(e),
         }
@@ -125,26 +131,26 @@ impl KokoroCoremlTts {
     }
 
     /// One FFI synthesis call for an exact voice (no fallback).
-    fn synthesize_one(&self, text: &str, voice: &str, speed: f32) -> Result<Vec<f32>, String> {
-        let c_text = CString::new(text).map_err(|_| "text contains NUL".to_string())?;
+    fn synthesize_one(&self, phonemes: &str, voice: &str, speed: f32) -> Result<Vec<f32>, String> {
+        let c_phonemes = CString::new(phonemes).map_err(|_| "phonemes contain NUL".to_string())?;
         let c_voice = CString::new(voice).map_err(|_| "voice contains NUL".to_string())?;
-        // SAFETY: `smk_synthesize_text` in the app-signed shim has exactly `SynthFn`'s
+        // SAFETY: `smk_synthesize_phonemes` in the app-signed shim has exactly `SynthFn`'s
         // signature (smkokoro.h); the returned Symbol borrows `self.lib`, so it can't
         // outlive the dylib.
-        let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"smk_synthesize_text\0") }
-            .map_err(|e| format!("smk_synthesize_text symbol: {e}"))?;
+        let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"smk_synthesize_phonemes\0") }
+            .map_err(|e| format!("smk_synthesize_phonemes symbol: {e}"))?;
         // The shim BORROWS the PCM to our sink, which copies it into a `Vec<f32>` while the shim
         // still owns it — so there's no ownership transfer, no `smk_free`, and no raw-pointer/len
-        // guards here. The call blocks; `c_text`/`c_voice` live across it. The sample rate is
+        // guards here. The call blocks; the C strings live across it. The sample rate is
         // 24_000 for Kokoro (the pipeline assumes 24 kHz, so we don't resample); an empty/no-audio
         // result comes back as an empty Vec.
-        // SAFETY: `c_text`/`c_voice` are live NUL-terminated CStrings across the blocking
+        // SAFETY: `c_phonemes`/`c_voice` are live NUL-terminated CStrings across the blocking
         // call, and `ctx`/`cb` are the borrowed-result pair `collect_pcm` supplies (its
         // own stack slot + sink, fired synchronously per smkokoro.h's callback contract).
         ds_model::shim::collect_pcm(|ctx, cb| unsafe {
-            synth(c_text.as_ptr(), c_voice.as_ptr(), speed, ctx, cb)
+            synth(c_phonemes.as_ptr(), c_voice.as_ptr(), speed, ctx, cb)
         })
-        .map_err(|rc| format!("smk_synthesize_text failed (rc={rc})"))
+        .map_err(|rc| format!("smk_synthesize_phonemes failed (rc={rc})"))
     }
 }
 

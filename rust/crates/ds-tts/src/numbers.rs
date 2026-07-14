@@ -6,15 +6,16 @@
 //! alphabetic words — sounds `12` out as garbage (heard as the letter "X"). The
 //! lexicons never contain `"12"`, so nothing upstream ever turns it into "twelve".
 //!
-//! [`expand_numbers`] runs just before phonemization on the ENGLISH path only
-//! (the ONNX English G2P and the English-only ANE shim). Non-English Kokoro voices
-//! go through external `espeak-ng`, which expands numbers in-language itself, so we
-//! must NOT pre-expand to English words for them — the callers gate accordingly.
+//! [`expand_numbers`] runs through [`crate::normalize_kokoro_text`] before text is
+//! split or phonemized. Both supported Kokoro frontends are English-only; unsupported
+//! non-English voice ids are rejected before synthesis.
 //!
 //! Coverage: cardinals (`42` → "forty-two", `2025` → "two thousand twenty-five"),
 //! thousands-grouped (`1,000` → "one thousand"), decimals (`3.14` → "three point
 //! one four"), ordinals (`21st` → "twenty-first"), and a leading minus
-//! (`-5` → "minus five"). A run with a leading zero (`007`, codes/IDs) and any
+//! (`-5` → "minus five"). Dotted versions retain every separator (`0.2.2` → "zero
+//! point two point two"), and letters next to digits get an audible word boundary.
+//! A run with a leading zero (`007`, codes/IDs) and any
 //! run too long to name is read digit-by-digit. Anything that isn't a plain
 //! number token is passed through untouched.
 
@@ -188,6 +189,14 @@ pub fn expand_numbers(text: &str) -> String {
                 minus = true;
             }
         }
+        if !minus
+            && out
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+        {
+            out.push(' ');
+        }
 
         // Integer part, allowing comma group separators between digits.
         let mut int_digits = String::new();
@@ -255,10 +264,26 @@ pub fn expand_numbers(text: &str) -> String {
             out.push_str(&int_words);
             out.push_str(" point ");
             out.push_str(&digit_by_digit(&frac_digits));
+            // A second dot means a version/address-like dotted number, not sentence
+            // punctuation. Preserve every component as "point <digits>" instead of
+            // producing the glued and misleading "zero point two.two" for `0.2.2`.
+            while i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
+                i += 1;
+                let mut component = String::new();
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    component.push(chars[i]);
+                    i += 1;
+                }
+                out.push_str(" point ");
+                out.push_str(&digit_by_digit(&component));
+            }
         } else if ordinal {
             out.push_str(&to_ordinal(&int_words));
         } else {
             out.push_str(&int_words);
+        }
+        if i < chars.len() && chars[i].is_ascii_alphabetic() {
+            out.push(' ');
         }
     }
     out
@@ -347,7 +372,18 @@ mod tests {
         assert_eq!(expand_numbers(""), "");
         // A trailing bare suffix-looking word that isn't after a number is untouched.
         assert_eq!(expand_numbers("first place"), "first place");
-        // Alphanumeric token: digit still expands, letters stay glued (best-effort).
-        assert_eq!(expand_numbers("v2"), "vtwo");
+        // Technical alphanumeric tokens keep an audible word boundary.
+        assert_eq!(expand_numbers("v2"), "v two");
+        assert_eq!(expand_numbers("UTF8"), "UTF eight");
+        assert_eq!(expand_numbers("42items"), "forty-two items");
+    }
+
+    #[test]
+    fn dotted_versions_pronounce_every_separator() {
+        assert_eq!(expand_numbers("0.2.2"), "zero point two point two");
+        assert_eq!(
+            expand_numbers("version 10.12.3"),
+            "version ten point one two point three"
+        );
     }
 }

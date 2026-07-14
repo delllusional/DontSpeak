@@ -88,7 +88,7 @@ fn name_from_voice_identifier(id: &str) -> Option<String> {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn default_voice_name() -> Option<String> {
-    None // TODO(linux): resolve the spd-say/espeak default voice name.
+    None // TODO(linux): resolve the Speech Dispatcher default voice name.
 }
 
 #[cfg(all(test, target_os = "macos"))]

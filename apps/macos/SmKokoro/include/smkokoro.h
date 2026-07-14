@@ -27,15 +27,17 @@ typedef void (*smk_str_cb)(void *ctx, const char *text);
 
 // --- TTS (Kokoro, Core ML / ANE) --------------------------------------------------------
 
-// Initialize the English Kokoro manager (downloads models on first use).
-//   model_dir      : optional override dir for models ("" / NULL = ~/.cache/fluidaudio)
+// Initialize the English Kokoro manager from models pre-downloaded by DontSpeak.
+//   model_dir      : optional model dir ("" / NULL = ~/.cache/fluidaudio); missing files fail
 //   compute_units  : 0 default(ANE+GPU tail), 1 all-ANE, 2 cpu+GPU, 3 cpu-only, 4 ANE+GPU-tail
 int32_t smk_init(const char *model_dir, int32_t compute_units);
 
-// Synthesize text -> 24 kHz mono fp32 PCM, delivered to `cb` (sample_rate is 24000).
+// Synthesize Kokoro-compatible IPA phonemes -> 24 kHz mono fp32 PCM, delivered to `cb`.
+// The caller must keep each batch within DontSpeak's 509-phoneme-character limit.
 //   voice : "" / NULL uses the default English voice (af_heart)
-int32_t smk_synthesize_text(const char *text, const char *voice, float speed,
-                            void *ctx, smk_pcm_cb cb);
+//   cb    : required; receives one borrowed, non-NULL PCM buffer synchronously on success
+int32_t smk_synthesize_phonemes(const char *phonemes, const char *voice, float speed,
+                                void *ctx, smk_pcm_cb cb);
 
 void smk_shutdown(void);
 

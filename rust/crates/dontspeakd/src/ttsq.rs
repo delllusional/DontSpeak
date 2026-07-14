@@ -1,16 +1,15 @@
 //! Engine-owned TTS queue — the single serializer for all speech.
 //!
 //! Producers (the `Speak` / `SpeakNarration` RPC handlers) enqueue whole blocks onto ONE
-//! plain FIFO — there is no "reply vs narration" kind and no cap; what gets spoken is
-//! decided upstream by the `narrate` setting. ONE worker thread plays them in order on the
+//! bounded plain FIFO — there is no "reply vs narration" kind; what gets spoken is decided
+//! upstream by the `narrate` setting. ONE worker thread plays them in order on the
 //! WARM child (`TtsManager`), so there is no per-block model reload. The warm child stays
 //! DUMB: ordering, the mic feedback gate, and the barge/pause/resume policy all live here.
 //!
 //! Playback granularity: each block is sent to the warm child as ONE `tts.speak`. The
-//! child splits the block through the shared text splitter
-//! (`ds_tts::batch::chunk_text`) and streams it gaplessly — the ONNX path then ramps
-//! phoneme batches per chunk (`batch::stream_batches`), the Core ML path synthesizes each
-//! chunk whole — so there is no per-block reload and no per-sentence splitting here.
+//! child runs the shared Rust text-to-phoneme frontend once, transactionally prepares the
+//! same bounded phoneme batches through ONNX or Core ML, then begins playback — so there
+//! is no per-block reload or backend-specific pronunciation path here.
 //!
 //! Focus gate (cross-platform, only when the `pause_in_background` config is set):
 //! the engine poll thread publishes whether a terminal is frontmost via
@@ -22,7 +21,7 @@
 //!
 //! Record barge (mic goes active, HALF-DUPLEX only): the whole queue PAUSES —
 //! every item is kept, nothing is dropped — and resumes once the mic
-//! frees. The interrupted item is re-spoken from its top (a block streams gaplessly,
+//! frees. The interrupted item is re-spoken from its top (a block plays continuously,
 //! so there is no mid-block offset to resume from). Full-duplex never pauses: the
 //! AEC mic stays open and you dictate over the reply.
 //!
@@ -51,10 +50,20 @@ impl Drop for HealingGuard {
     }
 }
 
-struct PlayingGuard<'a>(&'a Mutex<Option<String>>);
+/// `None` = no claimed item; `Some(None)` = an untagged/global item; `Some(Some(id))` = a
+/// session item. The nested option is required because global speech is still real in-flight
+/// work and must remain distinguishable from an idle worker during scoped cancellation.
+struct PlayingGuard<'a>(&'a Mutex<Option<Option<String>>>);
 impl Drop for PlayingGuard<'_> {
     fn drop(&mut self) {
         *self.0.lock().unwrap() = None;
+    }
+}
+
+struct InFlightGuard<'a>(&'a AtomicBool);
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -69,6 +78,19 @@ static GREET_ROTATION: AtomicUsize = AtomicUsize::new(0);
 /// `stale_assignment_is_dropped_when_voice_leaves_the_pool`), so this is safe: a live
 /// terminal just gets a (possibly different) pool voice on its NEXT reply.
 const POOL_ASSIGNMENTS_MAX: usize = 128;
+
+/// One item may carry at most 10 KiB of UTF-8 text, regardless of whether it arrived through
+/// IPC or the in-process Codex subscriber. Keeping the limit here prevents a producer from
+/// bypassing it by avoiding the wire protocol.
+pub(crate) const MAX_SPEAK_BYTES: usize = 10 * 1024;
+
+/// Bound pending work so a stalled focus/microphone gate cannot retain unlimited narration.
+/// The current item is tracked separately as `in_flight`, so total accepted work can be this
+/// many queued items plus one being processed.
+const MAX_PENDING_ITEMS: usize = 128;
+const MAX_PENDING_BYTES: usize = 1024 * 1024;
+const MAX_SESSION_PENDING_ITEMS: usize = 32;
+const MAX_SESSION_PENDING_BYTES: usize = 256 * 1024;
 
 /// Short, non-obtrusive greeting templates; `{n}` = the voice's display name.
 const GREETINGS: &[&str] = &[
@@ -147,10 +169,9 @@ fn record_pool_assignment(
     }
 }
 
-/// One queued unit of speech. The queue is a plain FIFO — there is no "narration vs
-/// reply" kind and no cap: whatever the narration layer enqueues (per the `narrate`
-/// setting) is played in order. Items differ only by their optional per-call voice/rate
-/// and the session they belong to.
+/// One queued unit of speech. The queue is a bounded plain FIFO with no "narration vs reply"
+/// kind: whatever the narration layer successfully enqueues is played in order. Items differ
+/// only by their optional per-call voice/rate and the session they belong to.
 struct Item {
     text: String,
     voice: Option<String>,
@@ -270,6 +291,12 @@ pub struct TtsQueue {
     /// True while the worker is actively playing an item (set around playback,
     /// cleared when it returns to waiting). Read-only signal for `Status`.
     tts_active: AtomicBool,
+    /// True from dequeue until the item reaches a terminal outcome, except while focus is
+    /// the gate holding it. Unlike `tts_active`, this includes readiness and mic-only holds,
+    /// closing the half-duplex gap where an item had left the deque but the listener
+    /// incorrectly considered the pipeline idle. Focus-held work deliberately reads idle so
+    /// always-listening remains usable in another app.
+    in_flight: AtomicBool,
     /// Whether a terminal is the frontmost app — published by the engine poll thread
     /// each tick (the worker thread can't call NSWorkspace; it's poll/main-thread
     /// affine). The worker HOLDS the queue while this is false, so narration pauses
@@ -306,7 +333,7 @@ pub struct TtsQueue {
     /// with it at the end). Lets [`clear_session`](Self::clear_session) decide whether
     /// a per-window stop must cancel the in-flight item (its session matches) or only
     /// prune that window's queued items, leaving another window's playback alone.
-    playing_session: Mutex<Option<String>>,
+    playing_session: Mutex<Option<Option<String>>>,
     tts: Arc<TtsManager>,
     /// The shared status-push gate: a `tts_active` transition bumps it so a blocked
     /// `WaitModelStatus` sees playback start/stop immediately (the flag drives the
@@ -343,6 +370,7 @@ impl TtsQueue {
             paused: Mutex::new(PausedState::default()),
             cancel_kind: Mutex::new(HashMap::new()),
             tts_active: AtomicBool::new(false),
+            in_flight: AtomicBool::new(false),
             terminal_front: AtomicBool::new(true),
             terminal_seen: AtomicBool::new(false),
             pause_in_background: AtomicBool::new(false),
@@ -396,6 +424,7 @@ impl TtsQueue {
             paused: Mutex::new(PausedState::default()),
             cancel_kind: Mutex::new(HashMap::new()),
             tts_active: AtomicBool::new(false),
+            in_flight: AtomicBool::new(false),
             terminal_front: AtomicBool::new(true),
             terminal_seen: AtomicBool::new(false),
             pause_in_background: AtomicBool::new(false),
@@ -420,21 +449,59 @@ impl TtsQueue {
         self.tts_active.store(on, Ordering::SeqCst);
     }
 
-    /// Enqueue one unit of speech onto the FIFO. Empty text is ignored. There is no cap
-    /// and no kind: callers (explicit `speak`, the greeting, and mid-turn narration) all
-    /// land here and are played in order. `voice`/`rate` are optional per-call overrides
-    /// (narration passes `None` for both → the session/config voice at play time).
+    /// Enqueue one bounded unit of speech onto the FIFO. Empty text is ignored. Callers
+    /// (explicit `speak`, the greeting, and mid-turn narration) all land here and are played
+    /// in order. `voice`/`rate` are optional per-call overrides (narration passes `None` for
+    /// both → the session/config voice at play time).
     pub fn enqueue(
         &self,
         text: String,
         voice: Option<String>,
         rate: Option<f32>,
         session: Option<String>,
-    ) {
+    ) -> Result<(), String> {
+        if text.len() > MAX_SPEAK_BYTES {
+            return Err(format!("text exceeds the {MAX_SPEAK_BYTES}-byte limit"));
+        }
         if text.trim().is_empty() {
-            return;
+            return Ok(());
         }
         let mut q = self.items.lock().unwrap();
+        if q.len() >= MAX_PENDING_ITEMS {
+            return Err(format!(
+                "speech queue is full ({MAX_PENDING_ITEMS} pending items)"
+            ));
+        }
+        let pending_bytes = q
+            .iter()
+            .try_fold(0usize, |total, item| total.checked_add(item.text.len()));
+        if !matches!(
+            pending_bytes.and_then(|n| n.checked_add(text.len())),
+            Some(total) if total <= MAX_PENDING_BYTES
+        ) {
+            return Err(format!(
+                "speech queue is full ({MAX_PENDING_BYTES} pending text bytes)"
+            ));
+        }
+        let mut session_items = 0usize;
+        let mut session_bytes = 0usize;
+        for item in q.iter().filter(|item| item.session == session) {
+            session_items += 1;
+            session_bytes = session_bytes.saturating_add(item.text.len());
+        }
+        if session_items >= MAX_SESSION_PENDING_ITEMS {
+            return Err(format!(
+                "session speech queue is full ({MAX_SESSION_PENDING_ITEMS} pending items)"
+            ));
+        }
+        if !matches!(
+            session_bytes.checked_add(text.len()),
+            Some(total) if total <= MAX_SESSION_PENDING_BYTES
+        ) {
+            return Err(format!(
+                "session speech queue is full ({MAX_SESSION_PENDING_BYTES} pending text bytes)"
+            ));
+        }
         self.note_recent(&session);
         q.push_back(Item {
             text,
@@ -443,6 +510,18 @@ impl TtsQueue {
             session,
         });
         self.cv.notify_one();
+        Ok(())
+    }
+
+    /// Claim a selected item while the caller holds `items`. The generation snapshot and
+    /// playback-session publication must stay inside that lock so global and per-session clears
+    /// either remove the queued item first or cancel the fully published in-flight item.
+    fn claim_item(&self, q: &mut VecDeque<Item>, pos: usize) -> (Item, u64) {
+        let gen0 = self.generation.load(Ordering::SeqCst);
+        let item = q.remove(pos).expect("select_pos returns a valid index");
+        self.in_flight.store(true, Ordering::SeqCst);
+        *self.playing_session.lock().unwrap() = Some(item.session.clone());
+        (item, gen0)
     }
 
     /// Record the session of the most-recently enqueued item (the recency fallback
@@ -506,18 +585,14 @@ impl TtsQueue {
     /// the multi-window/one-voice-per-window model, silenced every terminal at once.
     /// `StopSpeech { session: None }` still routes to [`clear`](Self::clear).
     pub fn clear_session(&self, session: Option<String>) {
-        // Prune this window's pending items; leave other sessions' (and untagged
-        // global) items in place. Lock released at the end of the statement.
-        prune_session(&mut self.items.lock().unwrap(), &session);
-        // Cancel the current item only when it's this window's. `tts_active` gates
-        // "something is playing"; `playing_session` names whose it is. A generation
-        // bump cancels exactly the one in-flight item (single worker, one warm child),
-        // so gating it on the match leaves another window's playback alone. This path
-        // serves the per-window StopSpeech (window close), which may target a window
-        // that is NOT the one currently playing — hence the gate. (The submit-drop uses
-        // [`cancel_for_submit`](Self::cancel_for_submit)'s `current` branch, which
-        // cancels unconditionally.)
-        let cancel_current = *self.playing_session.lock().unwrap() == session;
+        // Keep pruning and the in-flight identity snapshot under the same `items →
+        // playing_session` lock order as worker selection. The worker therefore cannot remove
+        // a target item between these operations and escape the session-scoped cancellation.
+        let cancel_current = {
+            let mut items = self.items.lock().unwrap();
+            prune_session(&mut items, &session);
+            self.playing_session.lock().unwrap().as_ref() == Some(&session)
+        };
         if cancel_current {
             // Per-window barge: fade the in-flight item out (short window) so a clear-on-
             // submit / window close / newest-reply preempt tapers off instead of clicking.
@@ -576,11 +651,20 @@ impl TtsQueue {
             self.hard_cancel_in_flight();
         }
         if cancel_other {
-            // Cheap comparison first (no clone); only clone `target` for the retain call,
-            // which needs an owned `Option<String>` to compare against each item's tag.
-            let playing_is_other = self.tts_active.load(Ordering::SeqCst)
-                && self.playing_session.lock().unwrap().as_deref() != Some(target.as_str());
-            retain_only_session(&mut self.items.lock().unwrap(), &Some(target));
+            // Couple queue pruning to the in-flight identity snapshot. Reading the session
+            // before taking `items` allowed the worker to claim another session in between and
+            // start it after this submit returned.
+            let playing_is_other = {
+                let mut items = self.items.lock().unwrap();
+                let playing_is_other = self
+                    .playing_session
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|session| session.as_deref() != Some(target.as_str()));
+                retain_only_session(&mut items, &Some(target));
+                playing_is_other
+            };
             if playing_is_other {
                 self.hard_cancel_in_flight();
             }
@@ -815,11 +899,20 @@ impl TtsQueue {
         }
     }
 
-    /// Whether the queue is active (TTS playing) OR has anything pending — the half-duplex
-    /// play-gate for always-listening: the listener closes the mic whenever this
-    /// is true, which (by freeing the mic) also lets the queue's mic-gate proceed.
+    /// Whether the queue should close always-listening's microphone now.
+    ///
+    /// A focus hold deliberately reads idle so dictation can continue while the user is in
+    /// another app. Otherwise the `items` lock couples this read to the worker's dequeue +
+    /// `in_flight` store: sampling the flag before taking the lock left a false-idle
+    /// interleaving even though the writer published it under that same lock.
     pub fn is_busy(&self) -> bool {
-        self.tts_active.load(Ordering::SeqCst) || !self.items.lock().unwrap().is_empty()
+        if self.worker_focus_hold() && !self.tts_active.load(Ordering::SeqCst) {
+            return false;
+        }
+        let items = self.items.lock().unwrap();
+        self.tts_active.load(Ordering::SeqCst)
+            || self.in_flight.load(Ordering::SeqCst)
+            || !items.is_empty()
     }
 
     /// Whether the warm helper's Parakeet (STT) model is resident + warm — the dictation
@@ -923,16 +1016,25 @@ impl TtsQueue {
         let name = ds_tts::enumerate::voice_display_name(engine, &voice);
         let idx = GREET_ROTATION.fetch_add(1, Ordering::Relaxed);
         let text = greeting_line(name.as_deref(), idx);
-        self.enqueue(text, Some(voice), None, session);
+        if let Err(e) = self.enqueue(text, Some(voice), None, session) {
+            log::warn!(target: "ttsq", "greeting rejected: {e}");
+        }
     }
 
-    /// Whether the worker must HOLD the dequeued item now (delay playback, dropping
-    /// nothing) rather than play it. Reads the live gates; the rule is the pure
-    /// [`should_hold`].
-    fn worker_should_hold(&self) -> bool {
-        should_hold(
+    /// Snapshot the two hold gates together so the loop's hold and busy decisions cannot
+    /// disagree because they sampled the microphone/focus state at different moments.
+    fn worker_hold_state(&self) -> HoldState {
+        hold_state(
             self.tts.is_full_duplex_active(),
             self.mic.is_active(),
+            self.pause_in_background.load(Ordering::SeqCst),
+            self.terminal_seen.load(Ordering::SeqCst),
+            self.terminal_front.load(Ordering::SeqCst),
+        )
+    }
+
+    fn worker_focus_hold(&self) -> bool {
+        focus_holds(
             self.pause_in_background.load(Ordering::SeqCst),
             self.terminal_seen.load(Ordering::SeqCst),
             self.terminal_front.load(Ordering::SeqCst),
@@ -944,20 +1046,19 @@ impl TtsQueue {
             // Wait for a PLAYABLE item (see [`select_pos`]) while not paused: items for
             // other terminals are held in place until their terminal becomes active.
             // Lock order: `items` then `active`.
-            let item = {
+            let (item, gen0) = {
                 let mut q = self.items.lock().unwrap();
                 loop {
                     if !self.is_paused() {
                         let active = self.active.lock().unwrap().effective();
                         if let Some(pos) = select_pos(&q, &active) {
-                            break q.remove(pos).expect("select_pos returns a valid index");
+                            break self.claim_item(&mut q, pos);
                         }
                     }
                     q = self.cv.wait(q).unwrap();
                 }
             };
-            let gen0 = self.generation.load(Ordering::SeqCst);
-            *self.playing_session.lock().unwrap() = item.session.clone();
+            let _in_flight = InFlightGuard(&self.in_flight);
             let _playing = PlayingGuard(&self.playing_session);
 
             // HOLD this item (any kind) while we must stay silent — resume when the
@@ -975,9 +1076,21 @@ impl TtsQueue {
             //     (config) — then speech plays regardless of which app is frontmost.
             // A generation bump (a pause edge or a hard StopSpeech/clear) breaks the
             // wait so it never sticks.
-            while self.generation.load(Ordering::SeqCst) == gen0 && self.worker_should_hold() {
+            while self.generation.load(Ordering::SeqCst) == gen0 {
+                let hold = self.worker_hold_state();
+                if !hold.any() {
+                    break;
+                }
+                // Focus takes precedence while both gates are live. Reporting the mic hold as
+                // busy here made always-listening alternate between opening its capture and
+                // immediately closing/resetting it. Once focus returns, the focus gate clears,
+                // the mic-only hold reports busy once, and closing capture lets playback start.
+                self.in_flight.store(hold.reports_busy(), Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(120));
             }
+            // Past the hold: the item is ours to play, so it is in flight again regardless of
+            // which gate we waited on. (`InFlightGuard` still clears it on every exit path.)
+            self.in_flight.store(true, Ordering::SeqCst);
             if self.generation.load(Ordering::SeqCst) != gen0 {
                 self.requeue_if_resuming(item, gen0);
                 continue;
@@ -997,39 +1110,34 @@ impl TtsQueue {
             let voice = item.voice.clone().unwrap_or(base_voice);
             let rate = item.rate.unwrap_or(cfg.tts_rate);
 
-            // GUARD: never play if the selected engine's model isn't ready — a not-yet-warm
-            // Kokoro would synth silence/garbage while it downloads/loads. Drop this item
-            // (logged); the caller can speak again once the dot goes green. (System needs no
-            // model; Off is handled in `speak_one`.)
+            // Never send Kokoro work before its model is ready. Accepted work is HELD during
+            // an ordinary warm-up and remains busy; it is dropped only for an explicit cancel,
+            // disabled engine, terminal load failure, or readiness timeout after helper startup
+            // returns. The spawned-child READY handshake itself remains unbounded (issue #59).
             if !crate::config_gate::tts_can_play(engine, self.tts.is_tts_loaded()) {
-                // One self-heal attempt before dropping: a warm child that DIED post-READY
-                // (AV false-positive, OOM, GPU driver) never recovers otherwise —
-                // `mark_dead` counts on "the next speak restarts it", but this guard
-                // dropped that very speak, wedging BOTH models in "Starting" until an app
-                // restart. Only a dead child restarts (see `warm_child_heal_action`); one
-                // that's alive (still loading) or whose START failed (model missing — the
-                // download hook owns that retry) drops exactly as before.
-                if engine == Some(ds_config::TtsEngine::Kokoro) {
-                    self.tts.restart_if_crashed();
-                }
-                if !crate::config_gate::tts_can_play(engine, self.tts.is_tts_loaded()) {
-                    log::info!(
-                        target: "engine",
-                        "TTS not ready (engine={engine:?}, tts_loaded={}) — dropping queued speak",
-                        self.tts.is_tts_loaded()
-                    );
-                    continue;
+                match self.wait_until_ready(engine, gen0) {
+                    ReadyOutcome::Ready => {}
+                    ReadyOutcome::Cancelled => {
+                        self.requeue_if_resuming(item, gen0);
+                        continue;
+                    }
+                    ReadyOutcome::Unavailable(reason) => {
+                        log::warn!(target: "ttsq", "queued speak could not start: {reason}");
+                        continue;
+                    }
                 }
             }
 
             self.set_tts_active(true);
-            // Speak the whole block in ONE call (the warm child pipelines synth with
-            // playback gaplessly) — uniformly for NARRATION and REPLY. If a record-barge
+            // Speak the whole block in ONE call (the warm child prepares it transactionally,
+            // then plays it continuously) — uniformly for NARRATION and REPLY. If a record-barge
             // pause (generation bump) interrupts playback mid-way, re-enqueue the item so
             // `resume()` continues it. This is the SAME for both kinds: the old per-kind
             // split re-enqueued only replies, so an interrupted NARRATION was dropped —
             // tap-to-pause then tap-to-resume came back SILENT.
-            self.speak_one(engine, &item.text, &voice, rate);
+            if let Err(e) = self.speak_one(engine, &item.text, &voice, rate) {
+                log::warn!(target: "ttsq", "queued speak failed: {e}");
+            }
             if self.generation.load(Ordering::SeqCst) != gen0 {
                 self.requeue_if_resuming(item, gen0);
             }
@@ -1037,20 +1145,67 @@ impl TtsQueue {
         }
     }
 
-    /// Play one chunk on the warm child using the resolved `engine` (config or a
+    /// Play one queued block on the warm child using the resolved `engine` (config or a
     /// session override) and `voice`. `None` = TTS off — never speak (defensive; items
     /// shouldn't be enqueued when off).
-    fn speak_one(&self, engine: Option<ds_config::TtsEngine>, text: &str, voice: &str, rate: f32) {
+    fn speak_one(
+        &self,
+        engine: Option<ds_config::TtsEngine>,
+        text: &str,
+        voice: &str,
+        rate: f32,
+    ) -> Result<(), String> {
         let result = match engine {
-            None => return,
+            None => return Err("TTS is disabled".to_string()),
             Some(ds_config::TtsEngine::System) => self.tts.speak_system(text, voice, rate),
             Some(ds_config::TtsEngine::Kokoro) => {
                 self.tts.ensure_started();
                 self.tts.speak(text, voice, rate)
             }
         };
-        if let Err(e) = result {
-            log::warn!(target: "ttsq", "speak_one failed: {e}");
+        result.map_err(|e| e.to_string())
+    }
+
+    fn wait_until_ready(&self, engine: Option<ds_config::TtsEngine>, gen0: u64) -> ReadyOutcome {
+        use ds_config::TtsEngine;
+
+        match engine {
+            None => return ReadyOutcome::Unavailable("TTS is disabled".to_string()),
+            Some(TtsEngine::System) => return ReadyOutcome::Ready,
+            Some(TtsEngine::Kokoro) => {}
+        }
+
+        // Complete mark_dead's "next speak heals" contract before waiting. An alive helper
+        // is left alone; an exited/absent one is restarted when it is safe to do so.
+        self.tts.restart_if_crashed();
+        if self.tts.is_running() && !self.tts.is_tts_loaded() {
+            self.tts.load_engine("tts");
+        }
+
+        const READY_TIMEOUT: Duration = Duration::from_secs(60);
+        let deadline = Instant::now() + READY_TIMEOUT;
+        loop {
+            if self.generation.load(Ordering::SeqCst) != gen0 {
+                return ReadyOutcome::Cancelled;
+            }
+            if self.tts.is_tts_loaded() {
+                return ReadyOutcome::Ready;
+            }
+            if let Some(error) = self.tts.tts_load_error().or_else(|| self.tts.last_error()) {
+                return ReadyOutcome::Unavailable(error);
+            }
+            if !self.tts.is_running() {
+                self.tts.restart_if_crashed();
+                if self.tts.is_running() && !self.tts.is_tts_loaded() {
+                    self.tts.load_engine("tts");
+                }
+            }
+            if Instant::now() >= deadline {
+                return ReadyOutcome::Unavailable(
+                    "timed out waiting for the Kokoro model to become ready".to_string(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -1058,7 +1213,7 @@ impl TtsQueue {
     /// against its own `gen0` in `cancel_kind`, at the moment that bump fired) was a
     /// record-barge pause, re-enqueue the interrupted item (narration OR reply) at the
     /// front so the worker resumes the whole queue from there. A block is one synth unit
-    /// (the warm child streams it gaplessly), so we re-speak it from the top rather than
+    /// (the warm child prepares it before playback), so we re-speak it from the top rather than
     /// from a sentence offset. A hard cancel re-enqueues nothing — it dropped the item on
     /// purpose.
     ///
@@ -1089,6 +1244,13 @@ impl TtsQueue {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ReadyOutcome {
+    Ready,
+    Cancelled,
+    Unavailable(String),
+}
+
 /// Whether an interrupted item (narration OR reply) should be RE-ENQUEUED to resume later.
 /// Only when we were PAUSED for a record-barge (resume mode) — a hard clear/StopSpeech
 /// leaves `paused == false` and re-enqueues nothing (it dropped on purpose). Empty text is
@@ -1097,8 +1259,7 @@ fn should_requeue(paused: bool, text: &str) -> bool {
     paused && !text.trim().is_empty()
 }
 
-/// Whether the worker should HOLD (delay, drop nothing) the dequeued item rather than
-/// play it now. Two independent "hold, don't drop" gates, OR-ed together:
+/// The worker's two independent "hold, don't drop" gates.
 ///
 /// - MIC LIVE (half-duplex only): never speak into a recording. Full-duplex skips this
 ///   — the VPIO mic is always live, so the AEC handles the overlap instead (coexist;
@@ -1107,15 +1268,45 @@ fn should_requeue(paused: bool, text: &str) -> bool {
 ///   tabbed to a browser) → hold. Self-arming via `terminal_seen`, so an unrecognized
 ///   terminal emulator (never seen frontmost) degrades to always-play, never mute.
 ///
-/// PURE — the worker re-evaluates it each tick while holding.
-fn should_hold(
+/// PURE — the worker re-evaluates this state each tick while holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HoldState {
+    mic: bool,
+    focus: bool,
+}
+
+impl HoldState {
+    fn any(self) -> bool {
+        self.mic || self.focus
+    }
+
+    /// Only a mic-only hold closes always-listening. If focus also holds, closing the mic
+    /// clears `mic` but not `focus`, so repeatedly mirroring `mic` into busy creates an
+    /// open/close feedback loop instead of progress.
+    fn reports_busy(self) -> bool {
+        self.mic && !self.focus
+    }
+}
+
+fn mic_holds(full_duplex: bool, mic_active: bool) -> bool {
+    !full_duplex && mic_active
+}
+
+fn focus_holds(pause_in_background: bool, terminal_seen: bool, terminal_front: bool) -> bool {
+    pause_in_background && terminal_seen && !terminal_front
+}
+
+fn hold_state(
     full_duplex: bool,
     mic_active: bool,
     pause_in_background: bool,
     terminal_seen: bool,
     terminal_front: bool,
-) -> bool {
-    (!full_duplex && mic_active) || (pause_in_background && terminal_seen && !terminal_front)
+) -> HoldState {
+    HoldState {
+        mic: mic_holds(full_duplex, mic_active),
+        focus: focus_holds(pause_in_background, terminal_seen, terminal_front),
+    }
 }
 
 /// How recently a voice submit must have happened for the next UserPromptSubmit hook to be
@@ -1137,33 +1328,51 @@ mod tests {
     fn should_hold_mic_and_focus_gates() {
         // MIC gate (half-duplex): a live mic holds; full-duplex ignores the mic.
         assert!(
-            should_hold(false, true, false, false, false),
+            hold_state(false, true, false, false, false).any(),
             "half-duplex + mic → hold"
         );
         assert!(
-            !should_hold(true, true, false, false, false),
+            !hold_state(true, true, false, false, false).any(),
             "full-duplex ignores mic"
         );
         // FOCUS gate: only when pause_in_background AND a terminal has been seen AND none
         // is frontmost. Self-arming: unseen terminal never holds (degrade to always-play).
         assert!(
-            should_hold(false, false, true, true, false),
+            hold_state(false, false, true, true, false).any(),
             "bg pause + seen + not front → hold"
         );
         assert!(
-            !should_hold(false, false, true, false, false),
+            !hold_state(false, false, true, false, false).any(),
             "never-seen terminal → play"
         );
         assert!(
-            !should_hold(false, false, true, true, true),
+            !hold_state(false, false, true, true, true).any(),
             "terminal frontmost → play"
         );
         assert!(
-            !should_hold(false, false, false, true, false),
+            !hold_state(false, false, false, true, false).any(),
             "pause_in_background off → play"
         );
         // Nothing gating → play.
-        assert!(!should_hold(false, false, false, false, false));
+        assert!(!hold_state(false, false, false, false, false).any());
+    }
+
+    #[test]
+    fn focus_takes_precedence_over_mic_for_busy_reporting() {
+        let focus_only = hold_state(false, false, true, true, false);
+        assert!(focus_only.any());
+        assert!(!focus_only.reports_busy());
+
+        // Always-listening opens the mic while focus holds. That must remain idle to the
+        // listener; mirroring this mic edge into busy would close it and oscillate forever.
+        let both = hold_state(false, true, true, true, false);
+        assert!(both.any());
+        assert!(!both.reports_busy());
+
+        // Once focus returns, the mic-only hold closes capture exactly once so playback can run.
+        let mic_only = hold_state(false, true, true, true, true);
+        assert!(mic_only.reports_busy());
+        assert!(!hold_state(true, true, false, false, false).any());
     }
 
     #[test]
@@ -1533,15 +1742,103 @@ mod tests {
     #[test]
     fn enqueue_drops_empty_text_and_counts_real_items() {
         let q = mk_queue();
-        q.enqueue("".into(), None, None, None);
-        q.enqueue("   \n\t".into(), None, None, None);
+        q.enqueue("".into(), None, None, None).unwrap();
+        q.enqueue("   \n\t".into(), None, None, None).unwrap();
         assert_eq!(
             q.snapshot().1,
             0,
             "empty/whitespace-only text is dropped, not queued"
         );
-        q.enqueue("hello there".into(), None, None, None);
+        q.enqueue("hello there".into(), None, None, None).unwrap();
         assert_eq!(q.snapshot().1, 1, "a real text block is queued");
+    }
+
+    #[test]
+    fn enqueue_rejects_oversize_text_without_changing_queue_or_recency() {
+        let q = mk_queue();
+        let err = q
+            .enqueue(
+                "x".repeat(MAX_SPEAK_BYTES + 1),
+                None,
+                None,
+                Some("oversize".into()),
+            )
+            .unwrap_err();
+
+        assert!(err.contains("byte limit"));
+        assert!(q.items.lock().unwrap().is_empty());
+        assert_eq!(q.active_session(), None);
+    }
+
+    #[test]
+    fn enqueue_bounds_each_session_and_keeps_other_sessions_usable() {
+        let q = mk_queue();
+        for _ in 0..MAX_SESSION_PENDING_ITEMS {
+            q.enqueue("x".into(), None, None, Some("full".into()))
+                .unwrap();
+        }
+
+        let err = q
+            .enqueue("overflow".into(), None, None, Some("full".into()))
+            .unwrap_err();
+        assert!(err.contains("session speech queue is full"));
+        q.enqueue("still accepted".into(), None, None, Some("other".into()))
+            .unwrap();
+    }
+
+    #[test]
+    fn enqueue_bounds_global_pending_work() {
+        let q = mk_queue();
+        for i in 0..MAX_PENDING_ITEMS {
+            q.enqueue("x".into(), None, None, Some(format!("session-{i}")))
+                .unwrap();
+        }
+
+        let err = q
+            .enqueue("overflow".into(), None, None, Some("last".into()))
+            .unwrap_err();
+        assert!(err.contains("speech queue is full"));
+        assert_eq!(q.items.lock().unwrap().len(), MAX_PENDING_ITEMS);
+    }
+
+    #[test]
+    fn enqueue_accepts_exact_byte_caps_and_rejects_one_more_byte() {
+        let per_session = mk_queue();
+        for _ in 0..25 {
+            per_session
+                .enqueue("x".repeat(MAX_SPEAK_BYTES), None, None, Some("same".into()))
+                .unwrap();
+        }
+        per_session
+            .enqueue("x".repeat(6144), None, None, Some("same".into()))
+            .unwrap();
+        assert!(
+            per_session
+                .enqueue("x".into(), None, None, Some("same".into()))
+                .unwrap_err()
+                .contains("pending text bytes")
+        );
+
+        let global = mk_queue();
+        for i in 0..102 {
+            global
+                .enqueue(
+                    "x".repeat(MAX_SPEAK_BYTES),
+                    None,
+                    None,
+                    Some(format!("session-{i}")),
+                )
+                .unwrap();
+        }
+        global
+            .enqueue("x".repeat(4096), None, None, Some("exact".into()))
+            .unwrap();
+        assert!(
+            global
+                .enqueue("x".into(), None, None, Some("over".into()))
+                .unwrap_err()
+                .contains("pending text bytes")
+        );
     }
 
     #[test]
@@ -1605,7 +1902,7 @@ mod tests {
         // Playing the TARGET session → the in-flight item is cancelled too.
         let q = mk_queue();
         q.tts_active.store(true, Ordering::SeqCst);
-        *q.playing_session.lock().unwrap() = Some("a".into());
+        *q.playing_session.lock().unwrap() = Some(Some("a".into()));
         let gen_before = q.generation.load(Ordering::SeqCst);
         q.clear_session(Some("a".into()));
         assert!(
@@ -1617,7 +1914,7 @@ mod tests {
         // Playing a DIFFERENT session → this per-window stop leaves it alone.
         let q2 = mk_queue();
         q2.tts_active.store(true, Ordering::SeqCst);
-        *q2.playing_session.lock().unwrap() = Some("b".into());
+        *q2.playing_session.lock().unwrap() = Some(Some("b".into()));
         let gen_before2 = q2.generation.load(Ordering::SeqCst);
         q2.clear_session(Some("a".into()));
         assert_eq!(
@@ -1657,7 +1954,7 @@ mod tests {
             .extend([narr(Some("a")), narr(Some("b"))]);
         // Someone ELSE is playing ("b") — `current` must still cancel unconditionally.
         q.tts_active.store(true, Ordering::SeqCst);
-        *q.playing_session.lock().unwrap() = Some("b".into());
+        *q.playing_session.lock().unwrap() = Some(Some("b".into()));
         let gen_before = q.generation.load(Ordering::SeqCst);
 
         q.cancel_for_submit(Some("a".into()), true, false);
@@ -1690,7 +1987,7 @@ mod tests {
             .unwrap()
             .extend([narr(Some("a")), narr(Some("b")), narr(None)]);
         q.tts_active.store(true, Ordering::SeqCst);
-        *q.playing_session.lock().unwrap() = Some("other".into());
+        *q.playing_session.lock().unwrap() = Some(Some("other".into()));
         let gen_before = q.generation.load(Ordering::SeqCst);
 
         q.cancel_for_submit(Some("a".into()), false, true);
@@ -1720,7 +2017,7 @@ mod tests {
             .unwrap()
             .extend([narr(Some("a")), narr(Some("b"))]);
         q2.tts_active.store(true, Ordering::SeqCst);
-        *q2.playing_session.lock().unwrap() = Some("a".into());
+        *q2.playing_session.lock().unwrap() = Some(Some("a".into()));
         let gen_before2 = q2.generation.load(Ordering::SeqCst);
 
         q2.cancel_for_submit(Some("a".into()), false, true);
@@ -1888,8 +2185,163 @@ mod tests {
         q.tts_active.store(false, Ordering::SeqCst);
         assert!(!q.is_busy());
 
+        q.in_flight.store(true, Ordering::SeqCst);
+        assert!(q.is_busy(), "dequeued work held for warm-up counts as busy");
+        q.in_flight.store(false, Ordering::SeqCst);
+        assert!(!q.is_busy());
+
         q.items.lock().unwrap().push_back(narr(Some("a")));
         assert!(q.is_busy(), "anything queued counts as busy");
+    }
+
+    /// Regression: sampling `in_flight` before taking `items` allowed the worker to replace the
+    /// final queued item with in-flight state while the reader retained the stale `false` sample.
+    #[test]
+    fn is_busy_couples_the_dequeue_to_in_flight_transition() {
+        let q = mk_queue();
+        let mut items = q.items.lock().unwrap();
+        items.push_back(narr(Some("a")));
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = Arc::clone(&q);
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx.send(reader.is_busy()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "the busy reader must wait for the queue transition lock"
+        );
+
+        items.pop_front().expect("queued item");
+        q.in_flight.store(true, Ordering::SeqCst);
+        drop(items);
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "the reader must observe either queued or in-flight work, never an idle gap"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn global_clear_cancels_an_item_claimed_during_the_queue_transition() {
+        let q = mk_queue();
+        let mut items = q.items.lock().unwrap();
+        items.push_back(narr(Some("a")));
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let clearer = Arc::clone(&q);
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            clearer.clear();
+        });
+        started_rx.recv().unwrap();
+
+        let (_item, selected_generation) = q.claim_item(&mut items, 0);
+        drop(items);
+        handle.join().unwrap();
+
+        assert_ne!(
+            q.generation.load(Ordering::SeqCst),
+            selected_generation,
+            "a clear waiting on the selection lock must cancel the claimed item"
+        );
+    }
+
+    #[test]
+    fn session_clear_cancels_an_item_claimed_during_the_queue_transition() {
+        let q = mk_queue();
+        let mut items = q.items.lock().unwrap();
+        items.push_back(narr(Some("a")));
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let clearer = Arc::clone(&q);
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            clearer.clear_session(Some("a".into()));
+        });
+        started_rx.recv().unwrap();
+
+        let (_item, selected_generation) = q.claim_item(&mut items, 0);
+        drop(items);
+        handle.join().unwrap();
+
+        assert_ne!(
+            q.generation.load(Ordering::SeqCst),
+            selected_generation,
+            "a session clear must observe and cancel the claimed session"
+        );
+    }
+
+    #[test]
+    fn other_scope_cancels_a_foreign_item_claimed_during_pruning() {
+        let q = mk_queue();
+        let mut items = q.items.lock().unwrap();
+        items.push_back(narr(Some("other")));
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let clearer = Arc::clone(&q);
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            clearer.cancel_for_submit(Some("current".into()), false, true);
+        });
+        started_rx.recv().unwrap();
+
+        let (_item, selected_generation) = q.claim_item(&mut items, 0);
+        drop(items);
+        handle.join().unwrap();
+
+        assert_ne!(
+            q.generation.load(Ordering::SeqCst),
+            selected_generation,
+            "the other-scope clear must cancel a foreign item claimed under its queue lock"
+        );
+    }
+
+    #[test]
+    fn global_session_identity_is_distinct_from_an_idle_worker() {
+        let q = mk_queue();
+        let mut items = q.items.lock().unwrap();
+        items.push_back(narr(None));
+        let (_item, selected_generation) = q.claim_item(&mut items, 0);
+        drop(items);
+
+        q.clear_session(None);
+
+        assert_ne!(
+            q.generation.load(Ordering::SeqCst),
+            selected_generation,
+            "an untagged in-flight item must remain cancellable by its global session"
+        );
+    }
+
+    #[test]
+    fn focus_hold_keeps_listener_open_even_with_multiple_pending_items() {
+        let q = mk_queue();
+        q.set_terminal_front(true); // arm the self-disabling focus gate
+        q.set_pause_in_background(true);
+        q.set_terminal_front(false);
+        q.items
+            .lock()
+            .unwrap()
+            .extend([narr(Some("a")), narr(Some("a"))]);
+        q.in_flight.store(true, Ordering::SeqCst);
+
+        assert!(q.worker_focus_hold());
+        assert!(
+            !q.is_busy(),
+            "focus-held queued/in-flight work must not close always-listening"
+        );
+
+        q.tts_active.store(true, Ordering::SeqCst);
+        assert!(q.is_busy(), "audible playback always gates the listener");
+        q.tts_active.store(false, Ordering::SeqCst);
+        q.set_terminal_front(true);
+        assert!(q.is_busy(), "returning focus re-arms pending work as busy");
     }
 
     #[test]
@@ -1898,7 +2350,8 @@ mod tests {
         assert_eq!(q.active_session(), None);
 
         // `enqueue` records the recency fallback.
-        q.enqueue("hi".into(), None, None, Some("recent-sess".into()));
+        q.enqueue("hi".into(), None, None, Some("recent-sess".into()))
+            .unwrap();
         assert_eq!(q.active_session(), Some("recent-sess".into()));
 
         // `set_active_session` writes the authoritative explicit pick, which wins.
@@ -1939,8 +2392,8 @@ mod tests {
     }
 
     #[test]
-    fn worker_should_hold_wires_live_flags_into_should_hold() {
-        // Just prove the composition is wired correctly — `should_hold` itself is the
+    fn worker_hold_state_wires_live_flags_into_hold_state() {
+        // Just prove the composition is wired correctly — `hold_state` itself is the
         // oracle here, exercised (and truth-tabled) by its own dedicated test above.
         let q = mk_queue();
         for (pause_bg, seen, front) in [
@@ -1952,7 +2405,7 @@ mod tests {
             q.pause_in_background.store(pause_bg, Ordering::SeqCst);
             q.terminal_seen.store(seen, Ordering::SeqCst);
             q.terminal_front.store(front, Ordering::SeqCst);
-            let expected = should_hold(
+            let expected = hold_state(
                 q.tts.is_full_duplex_active(),
                 q.mic.is_active(),
                 pause_bg,
@@ -1960,7 +2413,7 @@ mod tests {
                 front,
             );
             assert_eq!(
-                q.worker_should_hold(),
+                q.worker_hold_state(),
                 expected,
                 "pause_bg={pause_bg} seen={seen} front={front}"
             );
@@ -1979,7 +2432,7 @@ mod tests {
             .unwrap()
             .extend([narr(Some("other")), narr(Some("s1"))]);
         q.tts_active.store(true, Ordering::SeqCst);
-        *q.playing_session.lock().unwrap() = Some("s1".to_string());
+        *q.playing_session.lock().unwrap() = Some(Some("s1".to_string()));
         let gen_before = q.generation.load(Ordering::SeqCst);
 
         q.end_session(Some("s1".to_string()));

@@ -33,13 +33,13 @@ speak. The `pause_in_background` config setting (default false) only controls wh
 playback pauses at all while no terminal is frontmost — it's independent of which
 session is selected.
 
-## One queue, no per-session state
+## One bounded queue, no per-session queue state
 
-Speech is a single FIFO with no reply/narration distinction and no cap: whatever the
-`narrate` setting enqueues plays in order, with pause/resume, barge-in, and focus-hold
-applying identically to every item. Each `Item` carries only `session: Option<String>`;
-the worker holds any item whose session isn't active (or while no terminal is
-frontmost) and plays it once the gate clears. Tagging and filtering one queue gets the
-same per-terminal behavior as separate per-session queues would, without their
-lifecycle/GC overhead. The active session falls back to silence when it goes quiet,
-until the next `MarkActive` repoints it.
+Speech is a single FIFO with no reply/narration distinction. New work is accepted up to
+10 KiB per item, 128 queued items and 1 MiB globally, and 32 queued items and 256 KiB for
+one session; overflow is rejected. Pause/resume, barge-in, and focus-hold apply identically
+to every accepted item. Each `Item` carries only `session: Option<String>`; the worker holds
+any item whose session isn't active (or while no terminal is frontmost) and plays it once
+the gate clears. Tagging and filtering one queue gets the same per-terminal behavior as
+separate per-session queues would, without their lifecycle/GC overhead. The active session
+falls back to silence when it goes quiet, until the next `MarkActive` repoints it.

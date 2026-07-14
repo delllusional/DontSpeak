@@ -70,6 +70,10 @@ Barge-in (starting to record while speech is playing) pauses the queue and resum
 cancel. Short audible earcons — a reply-done cue and a needs-input cue, each
 independently configurable — play outside the queue, mixed over any in-flight speech.
 
+The shared Markdown-to-phoneme frontend, backend parity contract, helper outcomes,
+queue/listener interaction, and planned delivery-state evolution are specified in
+[docs/TTS-PIPELINE.md](docs/TTS-PIPELINE.md).
+
 Streaming (mid-turn) narration is ONE shared core (`ds-narrate`: per-message
 accumulation → blockquote digests → the per-session on-disk state file that doubles as
 the `Stop`-silencing witness). Claude Code feeds it through `MessageDisplay`; Qwen Code's
@@ -96,6 +100,12 @@ CUDA acceleration downloads on demand on Windows/Linux (x86_64), and Apple Silic
 a Core ML / Neural Engine path — each platform reports back which execution provider
 it's actually running on, so the UI's "Runtime" display reflects reality rather than
 just the configured preference.
+
+Kokoro's shared English frontend uses a checksum-pinned BART G2P model for unknown
+words. The model runs through ONNX Runtime before backend selection, so the Apple Core
+ML / ANE TTS path also requires the ORT dylib even though its synthesizer never uses it.
+The exact asset gates and degraded fallback are documented in
+[docs/TTS-PIPELINE.md](docs/TTS-PIPELINE.md#models-runtime-and-backends).
 
 ## FFI boundary
 

@@ -5,13 +5,13 @@
 
 use ds_aec::DuplexAudio;
 use ds_helper_proto as proto;
-use ds_tts::batch::{chunk_text, stream_batches};
 use ds_tts::g2p;
 use serde::Deserialize;
 
 use crate::_exit;
 use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
 use crate::oneshot::{Backend, load_backend};
+use crate::prepare::{PrepareOutcome, prepare_audio};
 use crate::stt_residency::SttResidencySlot;
 
 /// One stdin request in `--serve` mode (one JSON object per line).
@@ -1042,6 +1042,24 @@ pub(crate) fn serve() -> ! {
             }
         };
 
+        // Run the frontend before touching the backend. Empty/image/emoji/punctuation-only
+        // requests are successful no-ops even after `unload tts`; they must not pay for a model
+        // reload or turn a missing model into TTSLOADERR + ERR when no synthesis was requested.
+        let phoneme_batches = match g2p::phoneme_batches_for(&text, &voice) {
+            Ok(batches) => batches,
+            Err(e) => {
+                log::warn!(target: "helper", "Kokoro frontend failed: {e}");
+                println!("{} {e}", proto::ERR);
+                let _ = std::io::stdout().flush();
+                continue;
+            }
+        };
+        if phoneme_batches.is_empty() {
+            println!("{}", proto::DONE);
+            let _ = std::io::stdout().flush();
+            continue;
+        }
+
         // Lazily (re)load the Kokoro synth if a prior `unload tts` freed it.
         if synth.is_none() {
             match load_backend() {
@@ -1057,7 +1075,7 @@ pub(crate) fn serve() -> ! {
                 Err(e) => {
                     log::warn!(target: "helper", "synth reload failed: {e}");
                     println!("{}{e}", proto::TTSLOADERR_PREFIX);
-                    println!("{}", proto::DONE);
+                    println!("{} {e}", proto::ERR);
                     let _ = std::io::stdout().flush();
                     continue;
                 }
@@ -1065,18 +1083,51 @@ pub(crate) fn serve() -> ! {
         }
         let synth = synth.as_mut().expect("synth loaded above");
 
+        // ONE Rust frontend normalizes, phonemizes, and bounds the request before the backend
+        // split. ONNX and Core ML consume these exact IPA batches. Stage every PCM piece before
+        // opening a per-request player or touching VPIO: a later synthesis error otherwise cannot
+        // retract an earlier piece the audio device has already rendered.
+        let t_req = std::time::Instant::now();
+        let prepared = match synth {
+            Backend::Ort(synth) => prepare_audio(
+                &phoneme_batches,
+                || cancel.load(Ordering::SeqCst),
+                |batch| synth.synthesize(batch.as_str(), &voice, rate),
+            ),
+            #[cfg(target_os = "macos")]
+            Backend::Coreml(c) => prepare_audio(
+                &phoneme_batches,
+                || cancel.load(Ordering::SeqCst),
+                |batch| c.synthesize_phonemes(batch.as_str(), &voice, rate),
+            ),
+        };
+        let prepared = match prepared {
+            Ok(PrepareOutcome::Ready(audio)) => audio,
+            Ok(PrepareOutcome::Cancelled) => {
+                println!("{}", proto::DONE);
+                let _ = std::io::stdout().flush();
+                continue;
+            }
+            Err(e) => {
+                log::warn!(target: "helper", "transactional synthesis failed: {e}");
+                let one_line = e.lines().collect::<Vec<_>>().join(" ");
+                println!("{} {one_line}", proto::ERR);
+                let _ = std::io::stdout().flush();
+                continue;
+            }
+        };
+        if cancel.load(Ordering::SeqCst) {
+            println!("{}", proto::DONE);
+            let _ = std::io::stdout().flush();
+            continue;
+        }
+
         // Output sink: a fresh per-request rodio `Player` on the persistent mixer,
         // shared via `cur_player` for barge — OR the duplex render queue when the
-        // backend owns render (macOS VPIO), barged via `duplex_barge`. `device` is
-        // Some exactly when rodio renders (half-duplex OR capture-only duplex), so we
-        // create the player whenever a device exists.
+        // backend owns render (macOS VPIO), barged via `duplex_barge`.
         let player = match &device {
             Some(dev) => {
                 let p = Arc::new(rodio::Player::connect_new(dev.mixer()));
-                // Start at the CURRENT mute volume: if this reply began while muted, it plays
-                // silently (volume 0) but the REAL samples are buffered, so unmuting mid-reply
-                // (the `mute` op sets this player's volume to 1.0) restores the sound — mute
-                // never destroys the audio, it only attenuates it.
                 p.set_volume(if muted.load(Ordering::SeqCst) {
                     0.0
                 } else {
@@ -1090,11 +1141,8 @@ pub(crate) fn serve() -> ! {
         let channels = std::num::NonZero::new(1u16).expect("1 channel");
         let srate = std::num::NonZero::new(24_000u32).expect("24 kHz");
 
-        // Prepend a brief LEADING SILENCE to the rodio sink: when the output stream was idle
-        // (rodio pauses it to save power), restarting it on the first buffer drops the leading
-        // audio — the "purple icon, no sound" first utterance. ~80 ms of silence first absorbs
-        // that resume so the speech onset is intact. Cheap, and inaudible. (VPIO duplex render
-        // owns its own always-live unit, so it needs none.)
+        // Prepend a brief silence only after synthesis commits. It absorbs an idle rodio
+        // stream's resume latency without making a failed transaction touch the player.
         if let Some(p) = &player {
             p.append(rodio::buffer::SamplesBuffer::new(
                 channels,
@@ -1103,30 +1151,13 @@ pub(crate) fn serve() -> ! {
             ));
         }
 
-        // GAPLESS streaming into ONE continuous sink. Both engines pack the reply through the
-        // SAME text splitter — `batch::chunk_text` — so NEITHER can be handed a line whose
-        // phonemes overflow its model and get silently dropped (the Core ML chain rejects an
-        // over-long utterance with `phonemeSequenceTooLong`). Per text chunk: the ONNX path
-        // ramps phoneme batches within the chunk (a small first batch for fast first-audio,
-        // growing to the 510-phoneme cap) and the Core ML path synthesizes the chunk whole
-        // (FluidAudio phonemizes internally). Each piece is synthesized FULLY before it's
-        // appended; chunks/batches append to the one sink in order, so playback stays gapless.
-        // Cancel is checked between pieces for prompt barge-in.
-        //
-        // Per-utterance timing for the app's engine stats: total synth time, total audio
-        // produced (→ realtime factor), and time-to-first-audio. Emitted as a `STATS …` line.
-        let t_req = std::time::Instant::now();
-        let mut synth_nanos: u128 = 0;
-        let mut total_samples: usize = 0;
-        let mut first_ms = 0.0_f64;
-        let mut produced = false;
-        // ONE append path, shared by both engines: VPIO render ring (duplex owns render) or
-        // the rodio sink (half-duplex / capture-only duplex). MUTE is REVERSIBLE on the rodio
-        // path — push the REAL samples and attenuate via the player VOLUME (set at creation +
-        // by the `mute` op), so unmuting mid-reply restores the buffered audio. The VPIO render
-        // ring has no volume control, so there we zero the PCM when muted (best-effort; the
-        // ring is only a few live frames, so unmute resumes within ~a frame).
-        let append = |pcm: Vec<f32>| {
+        let first_ms = t_req.elapsed().as_secs_f64() * 1000.0;
+        let synth_nanos = prepared.synth_nanos;
+        let total_samples = prepared.total_samples;
+        for pcm in prepared.pieces {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
             if render_via_duplex {
                 if let Some(dx) = &duplex {
                     let pcm = if muted.load(Ordering::SeqCst) {
@@ -1138,62 +1169,6 @@ pub(crate) fn serve() -> ! {
                 }
             } else if let Some(p) = &player {
                 p.append(rodio::buffer::SamplesBuffer::new(channels, srate, pcm));
-            }
-        };
-        match synth {
-            // ONNX Kokoro: per SHARED text chunk, ramped phoneme-batch streaming.
-            Backend::Ort(synth) => {
-                // English-only build: pure-Rust g2p, no espeak probe.
-                'ort: for chunk in chunk_text(&text) {
-                    let phonemes = g2p::phonemize_for(&chunk, &voice);
-                    for batch in stream_batches(&phonemes) {
-                        if cancel.load(Ordering::SeqCst) {
-                            break 'ort;
-                        }
-                        let t0 = std::time::Instant::now();
-                        let pcm = match synth.synthesize(&batch, &voice, rate) {
-                            Ok(p) if !p.is_empty() => p,
-                            _ => continue,
-                        };
-                        synth_nanos += t0.elapsed().as_nanos();
-                        if !produced {
-                            first_ms = t_req.elapsed().as_secs_f64() * 1000.0;
-                            produced = true;
-                        }
-                        total_samples += pcm.len();
-                        if cancel.load(Ordering::SeqCst) {
-                            break 'ort;
-                        }
-                        append(pcm);
-                    }
-                }
-            }
-            // Apple-native: per SHARED text chunk, synthesize the whole chunk (FluidAudio
-            // phonemizes internally; the chunk bound keeps it under the model's phoneme cap).
-            #[cfg(target_os = "macos")]
-            Backend::Coreml(c) => {
-                'cm: for chunk in chunk_text(&text) {
-                    if cancel.load(Ordering::SeqCst) {
-                        break 'cm;
-                    }
-                    let t0 = std::time::Instant::now();
-                    match c.synthesize_text(&chunk, &voice, rate) {
-                        Ok(pcm) if !pcm.is_empty() => {
-                            synth_nanos += t0.elapsed().as_nanos();
-                            if !produced {
-                                first_ms = t_req.elapsed().as_secs_f64() * 1000.0;
-                                produced = true;
-                            }
-                            total_samples += pcm.len();
-                            if cancel.load(Ordering::SeqCst) {
-                                break 'cm;
-                            }
-                            append(pcm);
-                        }
-                        Ok(_) => {}
-                        Err(e) => log::warn!(target: "helper", "coreml synth failed: {e}"),
-                    }
-                }
             }
         }
         // Wait for playback to finish, then clear on barge.
@@ -1230,7 +1205,7 @@ pub(crate) fn serve() -> ! {
         }
         *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
         // Stats BEFORE DONE (skip cancelled/empty utterances — they'd skew the RTF).
-        if produced && !cancel.load(Ordering::SeqCst) {
+        if !cancel.load(Ordering::SeqCst) {
             let synth_ms = synth_nanos as f64 / 1e6;
             let audio_ms = total_samples as f64 / 24_000.0 * 1000.0;
             println!(

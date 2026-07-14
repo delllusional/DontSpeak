@@ -719,6 +719,7 @@ impl TtsManager {
             Self::resolve_provider(&prefs.provider) == ds_config::RealizedProvider::CoreMlAne;
         let kokoro_ready = if kokoro_apple_native {
             ds_model::coreml_repo::is_coreml_set_present(&ds_model::coreml_repo::KOKORO_COREML_SET)
+                && crate::config_gate::kokoro_g2p_files_present()
         } else {
             crate::config_gate::kokoro_onnx_files_present()
         };
@@ -1166,21 +1167,7 @@ impl TtsManager {
         // Hand the child to the shared slot so stop() can kill it, then poll for
         // completion holding the lock only briefly (so a concurrent stop can win).
         *self.say_child.lock().unwrap() = Some(child);
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(40));
-            let mut g = self.say_child.lock().unwrap();
-            match g.as_mut() {
-                Some(c) => match c.try_wait() {
-                    Ok(Some(_)) | Err(_) => {
-                        *g = None;
-                        break;
-                    }
-                    Ok(None) => {}
-                },
-                None => break, // stop() killed/took it (barge-in)
-            }
-        }
-        Ok(())
+        self.wait_for_system_child()
     }
 
     /// Windows: speak via the OS synthesizer (PowerShell `System.Speech.Synthesis`),
@@ -1198,26 +1185,47 @@ impl TtsManager {
         // Hand the child to the shared slot so stop() can kill it, then poll for
         // completion holding the lock only briefly (so a concurrent stop can win).
         *self.say_child.lock().unwrap() = Some(child);
+        self.wait_for_system_child()
+    }
+
+    /// Wait for an owned system-speech child without holding the slot across the poll sleep.
+    /// A missing child means a concurrent barge took and killed it; a real process or polling
+    /// failure must propagate so the queue never records failed OS speech as played.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn wait_for_system_child(&self) -> std::io::Result<()> {
         loop {
             std::thread::sleep(std::time::Duration::from_millis(40));
-            let mut g = self.say_child.lock().unwrap();
-            match g.as_mut() {
-                Some(c) => match c.try_wait() {
-                    Ok(Some(_)) | Err(_) => {
-                        *g = None;
-                        break;
-                    }
-                    Ok(None) => {}
-                },
-                None => break, // stop() killed/took it (barge-in)
+            let mut child = self.say_child.lock().unwrap();
+            let Some(process) = child.as_mut() else {
+                return Ok(());
+            };
+            match process.try_wait() {
+                Ok(Some(status)) => {
+                    *child = None;
+                    return if status.success() {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::other(format!(
+                            "system TTS process exited with {status}"
+                        )))
+                    };
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // The handle is no longer pollable, so do not leave a possibly-live speech
+                    // process orphaned after reporting failure.
+                    let _ = process.kill();
+                    let _ = process.wait();
+                    *child = None;
+                    return Err(e);
+                }
             }
         }
-        Ok(())
     }
 
     /// Other platforms (Linux): the System path isn't wired up yet. Returns Unsupported
     /// so callers fall back / record last_error. TODO (Linux): route through
-    /// ds_tts::SystemTts (spd-say/espeak), and/or have the engine selector fall back
+    /// ds_tts::SystemTts (Speech Dispatcher), and/or have the engine selector fall back
     /// to Kokoro when SystemTts::available() is false, so this never reaches the user.
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     pub fn speak_system(&self, _text: &str, _voice: &str, _rate: f32) -> std::io::Result<()> {

@@ -60,6 +60,12 @@ $publishOut = dotnet publish "$repo\apps\windows\winui\DontSpeak.WinUI.csproj" -
 if ($LASTEXITCODE) { $publishOut | Write-Host; throw "dotnet publish failed" }
 Copy-Item "$rel\dontspeak.exe" "$stage\" -Force
 Copy-Item "$repo\apps\windows\winui\AppIcon.ico" "$stage\" -Force
+# The binary embeds Apache-licensed Misaki dictionary data through voice-g2p. Keep the product
+# license, third-party notice, and referenced license copies together in every release archive.
+Copy-Item "$repo\LICENSE" "$stage\LICENSE" -Force
+Copy-Item "$repo\NOTICE.md" "$stage\NOTICE.md" -Force
+New-Item -ItemType Directory -Force "$stage\licenses" | Out-Null
+Copy-Item "$repo\licenses\*" "$stage\licenses\" -Force
 
 Write-Host "==> 3/4  prefetch ALL models → $stage\models (Kokoro + Parakeet + onnxruntime, no CUDA)" -ForegroundColor Cyan
 $models = "$stage\models"

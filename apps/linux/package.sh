@@ -51,11 +51,15 @@ echo "==> [2/2] portable tarball"
 PKG="dontspeak-$VERSION-linux-$ARCH"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT INT TERM HUP
 ROOT="$STAGE/$PKG"
-install -d "$ROOT/bin" "$ROOT/share/applications" "$ROOT/share/icons/hicolor/scalable/apps" "$ROOT/udev"
+install -d "$ROOT/bin" "$ROOT/share/applications" "$ROOT/share/icons/hicolor/scalable/apps" "$ROOT/udev" "$ROOT/licenses"
 install -m0755 "$GREL/ds-gtk" "$RREL/dontspeak" "$RREL/ds-helper" "$ROOT/bin/"
 install -m0644 "$HERE/dontspeak.desktop" "$ROOT/share/applications/dontspeak.desktop"
 install -m0644 "$REPO/assets/app-icon.svg" "$ROOT/share/icons/hicolor/scalable/apps/dontspeak.svg"
 install -m0644 "$HERE/udev-rule.txt" "$ROOT/udev/99-ds-input.rules"
+install -m0644 "$REPO/LICENSE" "$ROOT/LICENSE"
+install -m0644 "$REPO/NOTICE.md" "$ROOT/NOTICE.md"
+install -m0644 "$REPO/licenses/Apache-2.0.txt" "$ROOT/licenses/Apache-2.0.txt"
+install -m0644 "$REPO/licenses/voice-g2p-MIT.txt" "$ROOT/licenses/voice-g2p-MIT.txt"
 
 # Self-contained installer inside the tarball (mirrors the Windows portable zip's run
 # path). Shipped verbatim from tarball-install.sh — the single source; don't inline a

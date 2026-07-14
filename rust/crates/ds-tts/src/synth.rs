@@ -37,7 +37,7 @@ use crate::vocab::{MAX_PHONEME_LENGTH, tokenize};
 pub struct KokoroSynth {
     session: Session,
     // `Arc<Vec<f32>>`, not `Vec<f32>`: each per-voice style array is ~522 KB (510×256 f32),
-    // and `synthesize()` clones the selected voice's array once per streaming batch. Holding
+    // and `synthesize()` clones the selected voice's array once per prepared batch. Holding
     // it behind an Arc makes that clone a pointer bump instead of a half-megabyte memcpy in
     // the synthesis hot loop. Only a 256-float row is read per forward pass (`style_row`).
     voices: HashMap<String, Arc<Vec<f32>>>,

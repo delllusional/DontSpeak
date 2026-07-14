@@ -41,6 +41,23 @@ pub const KOKORO_VOICES: Download = Download {
     size_bytes: 28_214_398,
 };
 
+// Kokoro-compatible English OOV G2P. These are standard Optimum ONNX exports of the
+// PeterReid checkpoint, pinned to an immutable export commit. Keeping them as runtime assets
+// avoids Cargo's inability to smudge Git LFS and lets the normal downloader verify the bytes.
+pub const KOKORO_G2P_ENCODER: Download = Download {
+    file_name: "encoder_model.onnx",
+    url: "https://huggingface.co/PeterReid/graphemes_to_phonemes_en_us/resolve/9470bafd46d1e5c05225f2942853b1de90bc9658/onnx/encoder_model.onnx",
+    sha256: "5419f10161ea94c960c24890b4a125f44295d80ed56dd80a43e3d90dd75e01ae",
+    size_bytes: 1_414_890,
+};
+
+pub const KOKORO_G2P_DECODER: Download = Download {
+    file_name: "decoder_model.onnx",
+    url: "https://huggingface.co/PeterReid/graphemes_to_phonemes_en_us/resolve/9470bafd46d1e5c05225f2942853b1de90bc9658/onnx/decoder_model.onnx",
+    sha256: "c091bca25466cf3c29b2c720c804774e26e9244b856f1c92c08308ac54d5201e",
+    size_bytes: 1_750_816,
+};
+
 // ── Parakeet STT: cache-aware STREAMING FastConformer transducer (80ms, int8) ──
 // NeMo `stt_en_fastconformer_hybrid_large_streaming_80ms`, transducer branch, exported by
 // csukuangfj (sherpa-onnx). This REPLACED the old whole-buffer transcribe-rs Parakeet TDT model;
@@ -98,6 +115,8 @@ pub const SEPFORMER: Download = Download {
 // resolve a path without needing the full `Download`.
 pub const KOKORO_ONNX_FILE: &str = KOKORO_ONNX.file_name;
 pub const KOKORO_VOICES_FILE: &str = KOKORO_VOICES.file_name;
+pub const KOKORO_G2P_ENCODER_FILE: &str = KOKORO_G2P_ENCODER.file_name;
+pub const KOKORO_G2P_DECODER_FILE: &str = KOKORO_G2P_DECODER.file_name;
 pub const PARAKEET_ENCODER_FILE: &str = PARAKEET_ENCODER.file_name;
 pub const PARAKEET_DECODER_FILE: &str = PARAKEET_DECODER.file_name;
 pub const PARAKEET_JOINER_FILE: &str = PARAKEET_JOINER.file_name;
@@ -434,6 +453,17 @@ pub const KOKORO: Project = Project {
     license_url: "https://www.apache.org/licenses/LICENSE-2.0",
     platforms: Platform::ALL,
     files: &[KOKORO_ONNX, KOKORO_VOICES],
+};
+
+/// English grapheme-to-phoneme fallback used only after the contextual Kokoro lexicon misses.
+pub const KOKORO_G2P: Project = Project {
+    name: "Kokoro English G2P",
+    usage: "Unknown-word pronunciation for the Kokoro text frontend",
+    homepage: "https://huggingface.co/PeterReid/graphemes_to_phonemes_en_us",
+    license: "Apache-2.0",
+    license_url: "https://www.apache.org/licenses/LICENSE-2.0",
+    platforms: Platform::ALL,
+    files: &[KOKORO_G2P_ENCODER, KOKORO_G2P_DECODER],
 };
 
 /// Parakeet STT model — NVIDIA NeMo cache-aware streaming FastConformer transducer

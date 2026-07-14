@@ -133,6 +133,7 @@ build_smkokoro_dylib() {
 # Honors DONTSPEAK_SMKOKORO_DYLIB (the apple-native Kokoro shim) if set → Frameworks.
 assemble_app() {
   local app="$1" exe="$2" helper="$3" car="$4" icns="$5" plist="$6" mbsvg="$7" bid="$8" sign="$9"
+  local repo; repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   rm -rf "$app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   cp "$exe"    "$app/Contents/MacOS/DontSpeak"
@@ -187,6 +188,12 @@ assemble_app() {
   plutil -replace CFBundleDisplayName -string "$app_name" "$app/Contents/Info.plist"
   cp "$car"  "$app/Contents/Resources/Assets.car"
   cp "$icns" "$app/Contents/Resources/AppIcon.icns"
+  # The helper embeds Apache-licensed Misaki dictionary data through voice-g2p. Bundle the
+  # product license, attribution notice, and referenced license copies as readable resources.
+  mkdir -p "$app/Contents/Resources/licenses"
+  cp "$repo/LICENSE" "$app/Contents/Resources/LICENSE"
+  cp "$repo/NOTICE.md" "$app/Contents/Resources/NOTICE.md"
+  cp "$repo/licenses/"* "$app/Contents/Resources/licenses/"
   # Menu-bar glyph: the VECTOR source (brandGlyph() prefers it, crisp at any size) plus
   # a 2× PNG fallback for renderers that fail the SVG load.
   if [ -f "$mbsvg" ]; then

@@ -1,12 +1,12 @@
 // libsmkokoro — a thin C ABI over FluidAudio's ANE Kokoro, dlopen'd by the
-// DontSpeak Rust helper. Text in, 24 kHz mono fp32 PCM out. No tokens, no vocab
-// matching — FluidAudio's own Core ML G2P handles phonemization.
+// DontSpeak Rust helper. Kokoro-compatible IPA phonemes in, 24 kHz mono fp32 PCM out.
+// Rust owns the single text frontend used by both ONNX and Core ML; this shim bypasses
+// FluidAudio's separate G2P so pronunciation and chunk boundaries cannot drift by backend.
 //
 // C ABI (see smkokoro.h):
 //   int32 smk_init(const char* model_dir, int32 compute_units)
-//   int32 smk_synthesize_text(const char* text, const char* voice, float speed,
-//                             float** out_pcm, size_t* out_len, int32* out_sample_rate)
-//   void  smk_free(float* pcm)
+//   int32 smk_synthesize_phonemes(const char* phonemes, const char* voice, float speed,
+//                                  void* ctx, smk_pcm_cb cb)
 //   void  smk_shutdown(void)
 //
 // Returns 0 on success, non-zero on error. The helper drives synthesis serially;
@@ -108,14 +108,15 @@ public func smk_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -
     }
 }
 
-@_cdecl("smk_synthesize_text")
-public func smk_synthesize_text(
-    _ text: UnsafePointer<CChar>?,
+@_cdecl("smk_synthesize_phonemes")
+public func smk_synthesize_phonemes(
+    _ phonemes: UnsafePointer<CChar>?,
     _ voice: UnsafePointer<CChar>?,
     _ speed: Float,
     _ ctx: UnsafeMutableRawPointer?,
     _ cb: SmkPcmCb?
 ) -> Int32 {
+    guard let cb else { return 4 }
     state.lock.lock()
     let mgr = state.manager
     state.lock.unlock()
@@ -123,12 +124,14 @@ public func smk_synthesize_text(
         logErr("smk_synthesize: not initialized")
         return 2
     }
-    guard let t = cString(text) else { return 3 }
+    guard let p = cString(phonemes) else { return 3 }
     let v = cString(voice)
-    switch runBlocking({ try await mgr.synthesizeDetailed(text: t, voice: v, speed: speed) }) {
+    switch runBlocking({
+        try await mgr.synthesizeFromPhonemesDetailed(p, voice: v, speed: speed)
+    }) {
     case .success(let r):
         // Borrow the samples to the callback (it copies them out); no ownership transfer.
-        r.samples.withUnsafeBufferPointer { cb?(ctx, $0.baseAddress, $0.count, Int32(r.sampleRate)) }
+        r.samples.withUnsafeBufferPointer { cb(ctx, $0.baseAddress, $0.count, Int32(r.sampleRate)) }
         return 0
     case .failure(let e):
         logErr("smk_synthesize error: \(e)")

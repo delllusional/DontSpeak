@@ -14,15 +14,15 @@
 //!       Protocol (one JSON object per line):
 //!         {"op":"speak","voice":"af_sarah","rate":1.5,"text":"…"}  → play `text`
 //!         {"op":"stop"}                                            → cancel playback
-//!       Replies: `READY` once loaded; exactly one `DONE` per speak (even
-//!       if cancelled); `ERR <msg>` on a fatal load failure. `stop` is silent (it
-//!       writes no line) so the response stream stays one-DONE-per-request. In
+//!       Replies: `READY` once loaded; `DONE` per successful/cancelled speak;
+//!       `ERR <msg>` terminates a failed request. `stop` is silent (it writes no
+//!       line), so the response stream stays one-terminal-per-request. In
 //!       full-duplex mode the user dictates OVER the reply (a concurrent `listen`
 //!       thread, terminated by `LDONE`); stopping the voice is an explicit `stop`
 //!       op / Caps long-press, not an implicit talk-over barge.
 //!     Exits on stdin EOF.
 //!
-//! Fail-quiet: missing model/voices/onnxruntime (or no audio) → non-zero exit.
+//! Fail-quiet: missing synth/frontend/runtime assets (or no audio) → non-zero exit.
 //! In `--serve`, macOS plays through ONE persistent `rodio` sink (per-request
 //! `Player`s on a mixer opened once) so sentences are GAPLESS — no per-chunk
 //! `afplay` launch. ort's C++ thread-pool AND cpal's CoreAudio backend abort on
@@ -31,6 +31,7 @@
 mod duplex;
 mod listen;
 mod oneshot;
+mod prepare;
 mod priority;
 mod serve;
 mod setup;

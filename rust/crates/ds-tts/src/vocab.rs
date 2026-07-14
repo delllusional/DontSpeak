@@ -11,8 +11,11 @@
 //! long phoneme string at sentence marks under [`MAX_PHONEME_LENGTH`] (port of
 //! `splitPhonemes`) lives in [`crate::batch`].
 
-/// Max phonemes per synthesis batch (kokoro-onnx model context).
-pub const MAX_PHONEME_LENGTH: usize = 510;
+/// Maximum phoneme-character count shared by both synthesis backends. Vocabulary filtering
+/// maps each retained character to one token, so a batch also contains at most 509 tokens.
+/// Kokoro's 510-row voice-style table is indexed by token count, making row 509 the last valid
+/// selection; this limit also remains within FluidAudio's 510-phoneme bound.
+pub const MAX_PHONEME_LENGTH: usize = 509;
 /// Kokoro output sample rate (24 kHz mono).
 pub const SAMPLE_RATE: u32 = 24_000;
 

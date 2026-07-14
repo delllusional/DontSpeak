@@ -52,11 +52,9 @@ pub(crate) fn helper_uses_stt(cfg: &VoiceConfig) -> bool {
     )
 }
 
-/// Is the apple-native (FluidAudio Core ML / ANE) backend usable right now? macOS +
-/// the `libsmkokoro` shim dylib present (the app sets SMKOKORO_DYLIB_PATH). The shim
-/// hosts BOTH the Kokoro TTS and the Parakeet STT backends, and FluidAudio
-/// self-manages its model cache (downloads on first use), so this capability probe
-/// is the right "present" gate for either apple-native engine — no on-disk model gate.
+/// Is the shared apple-native shim available right now? This checks only macOS plus the
+/// `libsmkokoro` dylib path set by the app. Callers must combine it with the relevant
+/// DontSpeak-managed Core ML or shared-G2P asset gate before advertising a runnable backend.
 #[cfg(target_os = "macos")]
 pub(crate) fn apple_native_shim_available() -> bool {
     std::env::var_os("SMKOKORO_DYLIB_PATH")
@@ -148,14 +146,22 @@ pub(crate) fn helper_stt_provider(cfg: &VoiceConfig) -> &'static str {
     }
 }
 
-/// CHEAP, is_file()-only presence of the Kokoro ONNX asset set (model + voices + the
-/// shared onnxruntime dylib) — no sha256 (see [`kokoro_present_for`]'s doc for why). Shared
+/// CHEAP, is_file()-only presence of the Kokoro ONNX asset set (synth model, voices, shared
+/// OOV graphs, and onnxruntime dylib) — no sha256 (see [`kokoro_present_for`]'s doc for why). Shared
 /// by `status.rs::model_status_json`'s Kokoro row AND `tts::TtsManager::start_locked`'s spawn
 /// gate, so the two can never drift into two copies of the same logic.
 pub(crate) fn kokoro_onnx_files_present() -> bool {
     let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
     exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
         && exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
+        && kokoro_g2p_files_present()
+}
+
+/// Cheap shared-frontend presence gate used by both Kokoro synthesis backends.
+pub(crate) fn kokoro_g2p_files_present() -> bool {
+    let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
+    exists(ds_model::model_path(ds_model::KOKORO_G2P_ENCODER_FILE))
+        && exists(ds_model::model_path(ds_model::KOKORO_G2P_DECODER_FILE))
         && exists(ds_model::onnxruntime_dylib_path())
 }
 
@@ -497,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn kokoro_onnx_files_present_needs_model_voices_and_dylib() {
+    fn kokoro_onnx_files_present_needs_synth_frontend_and_dylib() {
         // Hermetic: point `model_dir()` at a FRESH, EMPTY temp dir via `DONTSPEAK_MODEL_DIR`
         // (the same override `ds_config::model_dir()` respects) so this never reads the real
         // ambient OS model cache. `ORT_DYLIB_PATH` is checked BEFORE the `DONTSPEAK_MODEL_DIR`-
@@ -520,6 +526,8 @@ mod tests {
 
         std::fs::write(tmp.path().join(ds_model::KOKORO_ONNX_FILE), b"dummy").unwrap();
         std::fs::write(tmp.path().join(ds_model::KOKORO_VOICES_FILE), b"dummy").unwrap();
+        std::fs::write(tmp.path().join(ds_model::KOKORO_G2P_ENCODER_FILE), b"dummy").unwrap();
+        std::fs::write(tmp.path().join(ds_model::KOKORO_G2P_DECODER_FILE), b"dummy").unwrap();
         let dylib = tmp.path().join("dummy-onnxruntime.dylib");
         std::fs::write(&dylib, b"dummy").unwrap();
         // SAFETY: test-only env mutation, still serialized by ENV_LOCK (held for the

@@ -26,7 +26,8 @@
 //!   a soft per-speak error after it (the child stays alive). THE QUIRK: the engine
 //!   strips [`ERR`] with NO trailing space, so `<msg>` keeps its leading space
 //!   (e.g. `"TTS child error: bad phoneme"`). Do not "normalize" this.
-//! * `DONE` — exactly one per speak/preview request, even if cancelled.
+//! * `DONE` — the terminal for a successful or cancelled speak/preview request.
+//!   A failed request terminates with `ERR <msg>` instead.
 //! * `STATS <k=v …>` — per-utterance synth timing, just before `DONE`.
 //! * `TTSLOADED` / `STTLOADED` — model-residency confirmations (load/preload/lazy
 //!   reload succeeded; the model is genuinely resident + warm).
@@ -62,7 +63,7 @@ pub const ERR: &str = "ERR";
 
 // ── speak ────────────────────────────────────────────────────────────────────
 
-/// Exactly one per speak/preview request, even if cancelled.
+/// Terminal for a successful or cancelled speak/preview request; failures use [`ERR`].
 pub const DONE: &str = "DONE";
 /// Per-utterance synth timing (`k=v` pairs), just before [`DONE`].
 pub const STATS_PREFIX: &str = "STATS ";

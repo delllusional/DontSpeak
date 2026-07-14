@@ -1,7 +1,7 @@
 //! ds-model — locate & download model assets for dontspeak (ARCHITECTURE §C.1 / §D).
 //!
 //! Assets: the Parakeet STT model (streaming FastConformer: encoder + decoder + joiner + tokens) AND the native
-//! Kokoro TTS triple — `kokoro-v1.0.onnx` (~310 MB), `voices-v1.0.bin` (~28 MB),
+//! Kokoro TTS set — `kokoro-v1.0.onnx`, voices, the tiny English G2P encoder/decoder,
 //! and the matching `libonnxruntime` dylib for `ort` (load-dynamic, resolved at
 //! runtime). One base dir [`ds_config::model_dir`] holds every asset; each is a
 //! [`ModelSpec`] with a pinned SHA-256. [`ensure`] returns a cached file if its
@@ -86,9 +86,11 @@ pub use setup::{
     run_setup_parakeet, run_setup_parakeet_with_progress, run_setup_sepformer_with_progress,
 };
 pub use spec::{
-    DownloadFile, KOKORO_ONNX_FILE, KOKORO_VOICES_FILE, ModelSpec, PARAKEET_DECODER_FILE,
-    PARAKEET_ENCODER_FILE, PARAKEET_JOINER_FILE, PARAKEET_TOKENS_FILE, PrefetchItem,
-    SEPFORMER_FILE, is_kokoro_present, is_parakeet_present, is_sepformer_present, kokoro_files,
+    DownloadFile, KOKORO_G2P_DECODER_FILE, KOKORO_G2P_ENCODER_FILE, KOKORO_ONNX_FILE,
+    KOKORO_VOICES_FILE, ModelSpec, PARAKEET_DECODER_FILE, PARAKEET_ENCODER_FILE,
+    PARAKEET_JOINER_FILE, PARAKEET_TOKENS_FILE, PrefetchItem, SEPFORMER_FILE,
+    is_kokoro_g2p_present, is_kokoro_present, is_parakeet_present, is_sepformer_present,
+    kokoro_files, kokoro_frontend_files, kokoro_g2p_decoder_spec, kokoro_g2p_encoder_spec,
     kokoro_onnx_spec, kokoro_voices_spec, parakeet_decoder_spec, parakeet_dir,
     parakeet_encoder_spec, parakeet_files, parakeet_joiner_spec, parakeet_tokens_spec,
     prefetch_items, sepformer_spec,

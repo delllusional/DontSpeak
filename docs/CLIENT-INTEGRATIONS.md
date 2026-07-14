@@ -34,12 +34,10 @@ adds the install directory to the per-user `PATH`; use a new terminal after firs
 | Claude Code | Yes, through `MessageDisplay` | Not needed; `Stop` is the reply earcon | Yes | Direct `claude` |
 | OpenAI Codex | Yes for interactive sessions started by `dontspeak codex` | Yes for a plain local TUI | Yes | Engine-managed app-server plus `codex --remote` |
 | Qwen Code 0.19.9 | No released `MessageDisplay` hook | Yes, from `Stop.last_assistant_message` | Yes | Direct `qwen` |
-| Grok 0.2.99 | No reply-text hook | No: `Stop` is metadata-only | Yes | Direct `grok` |
+| Grok 0.2.99 | No message stream | Yes, from the final assistant entry in `Stop.transcriptPath` | Yes | Direct `grok` |
 
-The launcher surface is uniform, but narration cannot be uniform where an upstream client
-does not expose assistant text. In particular, launching Grok through DontSpeak enables its
-MCP tools, session routing, greeting, and earcons; it cannot make Grok replies automatically
-speak until Grok publishes either a message stream or final reply text to hooks.
+The launcher surface is uniform, but only clients exposing a message stream can narrate
+mid-turn. Qwen Code and Grok use end-of-turn fallbacks instead.
 
 ## Client-specific behavior
 
@@ -97,10 +95,12 @@ DontSpeak owns one dedicated native hook file whose bare command matches the tar
 derives from the imported Claude entry. Grok then deduplicates the two instead of running the
 same side effect twice; unrelated Claude-compatible hooks remain enabled.
 
-Grok's hook payload is camelCase and its `Stop` event contains completion metadata but no
-assistant reply text. DontSpeak accepts both camelCase and Claude-style snake_case payloads,
-but it does not invent reply text that the client never supplied. Use the MCP `speak` tool for
-explicit speech until Grok adds a reply-text contract.
+Grok's hook payload is camelCase and its `Stop` event contains completion metadata plus a
+`transcriptPath`, but no assistant reply field. DontSpeak reads a bounded tail of that JSONL
+transcript, selects the last non-empty assistant entry, and feeds it through the same
+end-of-turn narration core as Qwen Code. This provides final-reply narration, not mid-turn
+streaming; an absent, unreadable, or unexpected transcript stays silent and still permits the
+reply-done earcon.
 
 ## Wiring and reconciliation
 

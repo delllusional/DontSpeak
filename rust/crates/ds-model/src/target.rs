@@ -26,14 +26,12 @@ pub enum DownloadTarget {
     /// Wire token `"onnxruntime"` (not the bare format name "onnx", which elsewhere
     /// means a MODEL flavor — e.g. the `kokoro_model`/`parakeet_model` ONNX sets).
     Onnxruntime,
-    /// The FULL native-Kokoro asset set: the ~310 MB `kokoro-v1.0.onnx` model PLUS the
-    /// ~28 MB voices pack (and, on supported platforms, the shared onnxruntime dylib).
+    /// The full portable Kokoro set: synth graph, voices, shared OOV G2P graphs, and ORT.
     /// Wire token `"kokoro_model"` — the `_model` suffix disambiguates this download target
     /// from the engine brand "kokoro".
     KokoroModel,
-    /// The ~28 MB Kokoro voices pack ONLY (`voices-v1.0.bin`), for the Apple ANE / Core ML
-    /// path whose model chain ships only `af_heart` and so still needs the shared voices
-    /// npz that sources every other voice.
+    /// Assets the Apple ANE / Core ML path shares with the portable frontend: voices, OOV G2P
+    /// graphs, and ORT. The stable wire token remains `kokoro_voices` for compatibility.
     KokoroVoices,
     /// The apple-native Kokoro Core ML sets — the runtime ANE chain PLUS the G2P/lexicon
     /// sub-models ([`crate::coreml_repo::KOKORO_COREML_SET`]). macOS-only (ANE shim); fetched

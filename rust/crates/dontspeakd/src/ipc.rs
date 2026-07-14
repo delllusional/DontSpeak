@@ -10,8 +10,6 @@ use crate::status::{EngineShared, model_status_json};
 use crate::stt_test::TestSession;
 use crate::ttsq::TtsQueue;
 
-const MAX_SPEAK_BYTES: usize = 10 * 1024;
-
 /// Log one CLIENT-ORIGINATED request at INFO, attributed to the client that sent it — the
 /// activity-log line then ends in ` client=<token>` (`client=dontspeak` renders nothing; a
 /// client-originated request never carries that value in practice).
@@ -237,13 +235,9 @@ pub(crate) fn spawn_ipc_server(
                             text.chars().count()
                         ),
                     );
-                    if text.len() > MAX_SPEAK_BYTES {
-                        emit(&ds_ipc::Response::error(format!(
-                            "speak: text exceeds the {MAX_SPEAK_BYTES}-byte limit"
-                        )));
-                    } else {
-                        ttsq.enqueue(text, voice, rate, session);
-                        emit(&ds_ipc::Response::Done);
+                    match ttsq.enqueue(text, voice, rate, session) {
+                        Ok(()) => emit(&ds_ipc::Response::Done),
+                        Err(e) => emit(&ds_ipc::Response::error(format!("speak: {e}"))),
                     }
                 }
                 ds_ipc::Request::SpeakNarration {
@@ -251,19 +245,15 @@ pub(crate) fn spawn_ipc_server(
                     session,
                     source: _,
                 } => {
-                    // Mid-turn narration → enqueue onto the same FIFO as everything else
-                    // (no kind, no cap). Warm path: no per-block model reload.
+                    // Mid-turn narration → enqueue onto the same bounded FIFO as everything
+                    // else (no kind). Warm path: no per-block model reload.
                     //
                     // Deliberately NOT logged: this fires once per blockquote and would spam
                     // the activity log. It still CARRIES its `source` on the wire (a required
                     // field), so nothing is lost — we simply choose not to write a line.
-                    if text.len() > MAX_SPEAK_BYTES {
-                        emit(&ds_ipc::Response::error(format!(
-                            "speak narration: text exceeds the {MAX_SPEAK_BYTES}-byte limit"
-                        )));
-                    } else {
-                        ttsq.enqueue(text, None, None, session);
-                        emit(&ds_ipc::Response::Done);
+                    match ttsq.enqueue(text, None, None, session) {
+                        Ok(()) => emit(&ds_ipc::Response::Done),
+                        Err(e) => emit(&ds_ipc::Response::error(format!("speak narration: {e}"))),
                     }
                 }
                 ds_ipc::Request::SetMuted { on } => {
@@ -565,7 +555,8 @@ mod tests {
         let codex_sessions = crate::codex_stream::SessionRegistry::new();
 
         ttsq.set_active_session(Some("other".into()));
-        ttsq.enqueue("hi".into(), None, None, Some("a".into()));
+        ttsq.enqueue("hi".into(), None, None, Some("a".into()))
+            .unwrap();
 
         handle_mark_active(&ttsq, &codex_sessions, &paths, Some("a".into()), true);
 
@@ -589,7 +580,8 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
         let codex_sessions = crate::codex_stream::SessionRegistry::new();
 
-        ttsq.enqueue("hi".into(), None, None, Some("a".into()));
+        ttsq.enqueue("hi".into(), None, None, Some("a".into()))
+            .unwrap();
 
         handle_mark_active(&ttsq, &codex_sessions, &paths, Some("a".into()), false);
 

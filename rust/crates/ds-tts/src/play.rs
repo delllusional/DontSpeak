@@ -4,11 +4,10 @@
 //! `afplay`. `rodio`/`cpal`'s CoreAudio backend aborts on teardown on macOS 26
 //! ("mutex lock failed: Invalid argument"), so for this short-lived one-shot
 //! helper we avoid cpal entirely — `afplay` is blocking, reliable, and has no
-//! teardown crash. (Trade-off: we synth all groups then play, rather than
-//! streaming group N+1 while N plays. Fine for a fire-and-forget reply.)
+//! teardown crash. The helper prepares all groups before constructing this player.
 //!
-//! Other platforms: stream via `rodio` (enqueue is non-blocking; the queue plays
-//! on rodio's own audio thread; `wait` drains it).
+//! Other platforms: play the prepared groups via `rodio` (enqueue is non-blocking;
+//! rodio's audio thread plays them continuously and `wait` drains them).
 //!
 //! NO-AUDIO DISCIPLINE: opening a device / spawning afplay is a real side effect,
 //! so NOTHING here is exercised by unit tests. The ds-helper helper bin is

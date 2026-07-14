@@ -273,8 +273,8 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 DownloadTarget::KokoroModel => {
                     ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ())
                 }
-                // Voice-tensor pack only (~28 MB) — the ANE/Core ML path needs the voices npz
-                // but not the 310 MB ONNX model. Requested by `EnsureKokoroVoices`.
+                // Shared frontend assets for ANE: voices, OOV G2P graphs, and ORT, but not the
+                // 310 MB portable synth graph. Requested by `EnsureKokoroVoices`.
                 DownloadTarget::KokoroVoices => {
                     ds_model::run_setup_kokoro_voices_with_progress(&prog).map(|_| ())
                 }
@@ -392,14 +392,15 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
     });
 }
 
-/// On the apple-native (ANE / Core ML) Kokoro path, FluidAudio self-manages its Core ML
-/// model chain — but that chain ships only `af_heart.bin`. Every OTHER voice's style tensor
-/// lives solely in the shared `voices-v1.0.bin` npz, from which `ds_tts::ane_voices::materialize`
-/// extracts it on demand. So the npz must be fetched even on the ANE path (it isn't part of the
-/// Core ML repo); otherwise a configured voice other than `af_heart` silently degrades to
-/// `af_heart` at synth time. Pure, so the policy is unit-testable without touching the disk.
-fn ane_needs_voices_npz(tts_is_kokoro: bool, ane_active: bool, voices_npz_present: bool) -> bool {
-    tts_is_kokoro && ane_active && !voices_npz_present
+/// The ANE synthesis graph still consumes DontSpeak's shared Rust frontend. Its voice tensors,
+/// OOV graphs, and ORT therefore travel together under the existing `KokoroVoices` adjunct
+/// target. Pure so the backend-specific fetch policy stays unit-testable.
+fn ane_needs_frontend_assets(
+    tts_is_kokoro: bool,
+    ane_active: bool,
+    frontend_assets_present: bool,
+) -> bool {
+    tts_is_kokoro && ane_active && !frontend_assets_present
 }
 
 /// The computed "engine X is enabled but its files are missing" flags that
@@ -419,7 +420,7 @@ struct DownloadNeeds {
 }
 
 /// EVERY download target the computed needs call for, in start order (TTS first — it
-/// gates the engine entirely — then the small voices-only npz that gates the ACTIVE TTS
+/// gates the engine entirely — then the shared frontend assets that gate the ACTIVE TTS
 /// voice, then STT). The order only decides who begins first: ALL of them are kicked at
 /// once and download in parallel, each status row tracking its own target's progress.
 /// Empty ⇒ nothing missing. Pure/testable.
@@ -468,7 +469,7 @@ fn fetch_plan(prefetch_cuda: bool, need: &DownloadNeeds) -> Vec<DownloadTarget> 
 /// Covers EVERY DontSpeak-managed model set the warm child hosts: the
 /// ONNX models, the apple-native Core ML sets (Kokoro chain + G2P, Parakeet EOU + fallback —
 /// the warm child no longer self-fetches; FluidAudio only LOADS, enforceOffline), and the
-/// Kokoro voices npz on the ANE path (see [`ane_needs_voices_npz`]). Called on startup, on
+/// Kokoro frontend assets on the ANE path (see [`ane_needs_frontend_assets`]). Called on startup, on
 /// every config reload, and on a slow poll-loop tick (so a download that failed — e.g. no
 /// network at launch — retries without any user action).
 pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig) {
@@ -511,8 +512,10 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
         && !ane_active
         && !(exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
             && exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
+            && exists(ds_model::model_path(ds_model::KOKORO_G2P_ENCODER_FILE))
+            && exists(ds_model::model_path(ds_model::KOKORO_G2P_DECODER_FILE))
             && exists(ds_model::onnxruntime_dylib_path()));
-    // The ANE flavor: the Kokoro Core ML chain + G2P sub-models, presence-gated on the SAME
+    // The ANE flavor: the Kokoro Core ML chain and its FluidAudio initialization assets,
     // revision-pinned completion markers the downloader writes (`is_coreml_set_present`), so a
     // partial fetch or a stale pin re-downloads instead of reading "present".
     let kokoro_coreml = tts_is_kokoro
@@ -522,10 +525,13 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     // source for EVERY other voice) must still be fetched on the ANE path — else any
     // configured voice ≠ af_heart silently degrades to af_heart at synth time
     // (`synth_coreml` materializes from this npz, never downloads it).
-    let kokoro_voices = ane_needs_voices_npz(
+    let kokoro_voices = ane_needs_frontend_assets(
         tts_is_kokoro,
         ane_active,
-        exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE)),
+        exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
+            && exists(ds_model::model_path(ds_model::KOKORO_G2P_ENCODER_FILE))
+            && exists(ds_model::model_path(ds_model::KOKORO_G2P_DECODER_FILE))
+            && exists(ds_model::onnxruntime_dylib_path()),
     );
     // SAME arch-blind trap as Kokoro above (STT resolves to `Ane` on ANY Mac): gating the ONNX
     // fetch on `provider ∈ {OrtCpu,OrtCuda}` skips it on Intel, but without the shim the built-in
@@ -617,7 +623,7 @@ fn apply_tts_provider(tts: &Arc<TtsManager>, which: Provider) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        DownloadNeeds, DownloadProgress, DownloadState, TargetState, ane_needs_voices_npz,
+        DownloadNeeds, DownloadProgress, DownloadState, TargetState, ane_needs_frontend_assets,
         begin_download, download_event_msg, fetch_plan, finish_download, needed_downloads,
         target_hosts_engine,
     };
@@ -662,7 +668,7 @@ mod tests {
         // `resolved_tts`/`resolved_stt`, tested separately), a completed download target maps
         // to "must restart the child" iff the child hosts a model that target produced.
 
-        // Kokoro targets (full ONNX model, the voices-only pack, AND the apple-native Core ML
+        // Kokoro targets (full ONNX model, shared frontend assets, AND apple-native Core ML
         // set) restart iff Kokoro TTS runs.
         for t in [
             DownloadTarget::KokoroModel,
@@ -705,29 +711,29 @@ mod tests {
     }
 
     #[test]
-    fn ane_path_still_needs_the_voices_npz() {
+    fn ane_path_still_needs_the_shared_frontend_assets() {
         // The crux: the apple-native (ANE / Core ML) Kokoro chain self-manages, but it ships
         // only af_heart. The shared voices npz (the source for every OTHER voice, e.g.
         // af_nicole) must STILL be fetched on the ANE path, or the chosen voice silently
         // falls back to af_heart at synth time.
         assert!(
-            ane_needs_voices_npz(true, true, false),
-            "ANE active + npz missing ⇒ must fetch the voices npz"
+            ane_needs_frontend_assets(true, true, false),
+            "ANE active + frontend assets missing ⇒ must fetch them"
         );
         assert!(
-            !ane_needs_voices_npz(true, true, true),
-            "npz already present ⇒ nothing to fetch"
+            !ane_needs_frontend_assets(true, true, true),
+            "frontend assets already present ⇒ nothing to fetch"
         );
         // ONNX path (ane_active=false): the npz rides along with the full ONNX `kokoro_model`
         // fetch, so the ANE-specific trigger must stay OFF to avoid a redundant download.
         assert!(
-            !ane_needs_voices_npz(true, false, false),
-            "ONNX path fetches the npz via kokoro_model, not this trigger"
+            !ane_needs_frontend_assets(true, false, false),
+            "ONNX path fetches the frontend via kokoro_model, not this trigger"
         );
         // TTS isn't Kokoro at all ⇒ no Kokoro assets needed.
         assert!(
-            !ane_needs_voices_npz(false, true, false),
-            "non-Kokoro TTS needs no voices npz"
+            !ane_needs_frontend_assets(false, true, false),
+            "non-Kokoro TTS needs no Kokoro frontend assets"
         );
     }
 

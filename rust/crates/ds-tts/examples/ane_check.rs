@@ -35,7 +35,8 @@ fn main() {
 
     let text = "The neural engine is now synthesizing speech on device.";
     let t2 = Instant::now();
-    match synth.synthesize_text(text, "af_heart", 1.0) {
+    let phonemes = ds_tts::g2p::phonemize(text);
+    match synth.synthesize_phonemes(&phonemes, "af_heart", 1.0) {
         Ok(pcm) => {
             let audio_s = pcm.len() as f32 / 24_000.0;
             let synth_s = t2.elapsed().as_secs_f32();

@@ -150,6 +150,45 @@ fn linux_tarball_ships_the_installer_file_not_a_heredoc() {
 }
 
 #[test]
+fn release_bundles_ship_the_legal_notice_and_embedded_data_license() {
+    for rel in ["licenses/Apache-2.0.txt", "licenses/voice-g2p-MIT.txt"] {
+        assert!(
+            repo_root().join(rel).is_file(),
+            "missing legal payload {rel}"
+        );
+    }
+
+    let windows = repo_file("apps/windows/installer/build-portable.ps1");
+    for needle in ["NOTICE.md", "LICENSE", r#"Copy-Item "$repo\licenses\*""#] {
+        assert!(
+            windows.contains(needle),
+            "Windows portable builder must ship {needle}"
+        );
+    }
+
+    let linux = repo_file("apps/linux/package.sh");
+    for needle in [
+        "NOTICE.md",
+        "LICENSE",
+        "licenses/Apache-2.0.txt",
+        "licenses/voice-g2p-MIT.txt",
+    ] {
+        assert!(
+            linux.contains(needle),
+            "Linux tarball builder must ship {needle}"
+        );
+    }
+
+    let macos = repo_file("apps/macos/bundle-lib.sh");
+    for needle in ["NOTICE.md", "LICENSE", r#"cp "$repo/licenses/"*"#] {
+        assert!(
+            macos.contains(needle),
+            "macOS app assembler must ship {needle}"
+        );
+    }
+}
+
+#[test]
 fn uninstaller_covers_the_linux_residue() {
     let canon = repo_file("scripts/uninstall.sh");
     for needle in [

@@ -21,7 +21,7 @@ members = [
     "crates/ds-model",
     # Voice/language enumeration split out of ds-tts (issue #5) so the CLI (dontspeak)
     # can list voices without linking ds-tts's heavy synth stack (ort/rodio/voice-g2p/
-    # grapheme_to_phoneme/ds-model); ds-tts re-exports this crate's items unchanged.
+    # ds-model); ds-tts re-exports this crate's items unchanged.
     "crates/ds-voices",
     "crates/ds-tts",
     "crates/ds-stt",
@@ -160,12 +160,11 @@ arboard = "3"
 # `download-binaries`). If ds-model's onnxruntime pin changes, keep it ≥ the ORT
 # release whose API version == this `api-N` (api-24 ⇒ ≥ 1.24).
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "api-24", "coreml", "cuda"] }
-# Pure-Rust English G2P (misaki dict embedded; MIT). Its espeak-ng fallback is an
-# EXTERNAL binary we avoid via the per-word skip wrapper in ds-tts/g2p.rs.
+# Released Misaki-compatible English frontend (MIT). DontSpeak disables its optional
+# external espeak-ng fallback and supplies OOV pronunciations in ds-tts instead.
 voice-g2p = "0.2.2"
-# Pure-Rust NEURAL OOV predictor (g2p.py port; BSD-4, bundled model, ndarray-only).
-# Pronounces dict-miss words without espeak; ARPABET bridged to Kokoro IPA in g2p.rs.
-grapheme_to_phoneme = "0.1"
+# CommonMark parser used to turn rendered agent replies into prose before G2P.
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 # Audio playback of raw f32 mono PCM at 24 kHz.
 rodio = "0.22"
 # Extract libonnxruntime.dylib from the microsoft .tgz (ds-model route A).

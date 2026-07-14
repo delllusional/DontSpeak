@@ -37,8 +37,9 @@ impl ModelSpec {
 // On-disk file-name consts are part of the public API (`ds_model::KOKORO_ONNX_FILE`,
 // …); re-export them from the registry so the historical paths keep resolving.
 pub use crate::urls::{
-    KOKORO_ONNX_FILE, KOKORO_VOICES_FILE, PARAKEET_DECODER_FILE, PARAKEET_ENCODER_FILE,
-    PARAKEET_JOINER_FILE, PARAKEET_TOKENS_FILE, SEPFORMER_FILE,
+    KOKORO_G2P_DECODER_FILE, KOKORO_G2P_ENCODER_FILE, KOKORO_ONNX_FILE, KOKORO_VOICES_FILE,
+    PARAKEET_DECODER_FILE, PARAKEET_ENCODER_FILE, PARAKEET_JOINER_FILE, PARAKEET_TOKENS_FILE,
+    SEPFORMER_FILE,
 };
 
 /// [`ModelSpec`] for `kokoro-v1.0.onnx` (~310 MB).
@@ -51,10 +52,30 @@ pub fn kokoro_voices_spec() -> ModelSpec {
     ModelSpec::of(crate::urls::KOKORO_VOICES)
 }
 
-/// Is the FULL native-Kokoro asset set present AND checksum-valid (model +
-/// voices + the onnxruntime dylib)? The TTS factory uses this as the cheap,
+pub fn kokoro_g2p_encoder_spec() -> ModelSpec {
+    ModelSpec::of(crate::urls::KOKORO_G2P_ENCODER)
+}
+
+pub fn kokoro_g2p_decoder_spec() -> ModelSpec {
+    ModelSpec::of(crate::urls::KOKORO_G2P_DECODER)
+}
+
+/// Is the shared unknown-word G2P runtime present and checksum-valid?
+pub fn is_kokoro_g2p_present() -> bool {
+    let graphs_ok = [kokoro_g2p_encoder_spec(), kokoro_g2p_decoder_spec()]
+        .iter()
+        .all(|spec| {
+            model_path(&spec.file_name)
+                .map(|p| verify_sha256_cached(&p, &spec.sha256))
+                .unwrap_or(false)
+        });
+    graphs_ok && crate::ort::is_onnxruntime_dylib_version_ok()
+}
+
+/// Is the full portable Kokoro asset set present and checksum-valid (synth, voices, G2P, ORT)?
+/// The TTS factory uses this as the
 /// network-free availability probe so it can fail-quiet when assets are absent.
-/// The model + voices are verified against their pinned SHA-256; the dylib is
+/// Every model graph and the voices are verified against pinned SHA-256; the dylib is
 /// version-gated (see `is_onnxruntime_dylib_version_ok`).
 pub fn is_kokoro_present() -> bool {
     let onnx = kokoro_onnx_spec();
@@ -70,7 +91,7 @@ pub fn is_kokoro_present() -> bool {
     // mismatch reports "not present" here, surfacing as a red dot + re-download
     // prompt instead of a silent hang.
     let dylib_ok = crate::ort::is_onnxruntime_dylib_version_ok();
-    model_ok && voices_ok && dylib_ok
+    model_ok && voices_ok && dylib_ok && is_kokoro_g2p_present()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -191,15 +212,22 @@ fn onnxruntime_dylib_file_entry() -> Option<DownloadFile> {
     })
 }
 
-/// The files the FULL native-Kokoro download fetches, in fetch order
-/// (onnx, voices, then the onnxruntime dylib `.tgz` on supported platforms). All
-/// URLs/sizes come from the `urls.rs` registry.
-pub fn kokoro_files() -> Vec<DownloadFile> {
+/// Assets shared by both Kokoro synthesis backends: voices, unknown-word G2P graphs, and ORT.
+pub fn kokoro_frontend_files() -> Vec<DownloadFile> {
     let mut v = vec![
-        DownloadFile::of(crate::urls::KOKORO_ONNX),
         DownloadFile::of(crate::urls::KOKORO_VOICES),
+        DownloadFile::of(crate::urls::KOKORO_G2P_ENCODER),
+        DownloadFile::of(crate::urls::KOKORO_G2P_DECODER),
     ];
     v.extend(onnxruntime_dylib_file_entry());
+    v
+}
+
+/// The files the full portable Kokoro download fetches, in fetch order. All URLs/sizes come
+/// from the registry; the frontend subset is also used by the Apple-native backend.
+pub fn kokoro_files() -> Vec<DownloadFile> {
+    let mut v = vec![DownloadFile::of(crate::urls::KOKORO_ONNX)];
+    v.extend(kokoro_frontend_files());
     v
 }
 
@@ -266,14 +294,23 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
                 None => vec![],
             }
         }
-        DownloadTarget::KokoroModel => [kokoro_onnx_spec(), kokoro_voices_spec()]
-            .iter()
-            .filter_map(&spec_item)
-            .collect(),
-        DownloadTarget::KokoroVoices => [kokoro_voices_spec()]
-            .iter()
-            .filter_map(&spec_item)
-            .collect(),
+        DownloadTarget::KokoroModel => [
+            kokoro_onnx_spec(),
+            kokoro_voices_spec(),
+            kokoro_g2p_encoder_spec(),
+            kokoro_g2p_decoder_spec(),
+        ]
+        .iter()
+        .filter_map(&spec_item)
+        .collect(),
+        DownloadTarget::KokoroVoices => [
+            kokoro_voices_spec(),
+            kokoro_g2p_encoder_spec(),
+            kokoro_g2p_decoder_spec(),
+        ]
+        .iter()
+        .filter_map(&spec_item)
+        .collect(),
         DownloadTarget::ParakeetModel => [
             parakeet_encoder_spec(),
             parakeet_decoder_spec(),
@@ -326,6 +363,8 @@ mod tests {
         let mut urls: Vec<String> = vec![
             kokoro_onnx_spec().url,
             kokoro_voices_spec().url,
+            kokoro_g2p_encoder_spec().url,
+            kokoro_g2p_decoder_spec().url,
             parakeet_encoder_spec().url,
             parakeet_decoder_spec().url,
             parakeet_joiner_spec().url,
@@ -394,6 +433,32 @@ mod tests {
         }
         // The two assets have distinct digests.
         assert_ne!(onnx.sha256, voices.sha256);
+    }
+
+    #[test]
+    fn kokoro_g2p_specs_pin_the_immutable_export_graphs() {
+        let encoder = kokoro_g2p_encoder_spec();
+        let decoder = kokoro_g2p_decoder_spec();
+        assert_eq!(encoder.file_name, "encoder_model.onnx");
+        assert_eq!(decoder.file_name, "decoder_model.onnx");
+        for spec in [&encoder, &decoder] {
+            assert!(
+                spec.url
+                    .contains("9470bafd46d1e5c05225f2942853b1de90bc9658/onnx/"),
+                "G2P URL is not revision-pinned: {}",
+                spec.url
+            );
+            assert_eq!(spec.sha256.len(), 64);
+            assert!(spec.sha256.bytes().all(|c| c.is_ascii_hexdigit()));
+        }
+        assert_ne!(encoder.sha256, decoder.sha256);
+
+        let frontend: Vec<String> = kokoro_frontend_files()
+            .into_iter()
+            .map(|file| file.file_name)
+            .collect();
+        assert!(frontend.contains(&encoder.file_name));
+        assert!(frontend.contains(&decoder.file_name));
     }
 
     #[test]

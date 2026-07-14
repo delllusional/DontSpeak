@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
-description = "Voice/language enumeration for DontSpeak's TTS engines (Kokoro voices bin + `say -v ?`) — split out of ds-tts (issue #5) so the CLI can list voices without linking ort/rodio/voice-g2p/grapheme_to_phoneme/ds-model."
+description = "Voice/language enumeration for DontSpeak's TTS engines (Kokoro voices bin + `say -v ?`) — split out of ds-tts (issue #5) so the CLI can list voices without linking ort/rodio/voice-g2p/ds-model."
 
 [dependencies]
 ds-config = { workspace = true }

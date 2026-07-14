@@ -34,7 +34,7 @@ repo [README](../../README.md).
 | `SessionEnd` | `notify` | Session-scoped `StopSpeech` → barges THIS session's playback so a closing terminal silences its own queued/playing speech (without touching another window's). |
 | `UserPromptSubmit` | `notify` | You just prompted HERE → marks this the active terminal so narration follows the window you're working in (the engine holds the others). |
 | `UserPromptSubmit` | `provide` | The ONE synchronous hook: re-reads the `narrate` setting every turn and returns the narration spec as `hookSpecificOutput.additionalContext` when ON (so flipping narration takes effect next prompt, no reload); returns nothing when off. |
-| `Stop` | `notify` | Turn finished → the reply-done **"ding"** earcon (`Earcon{reply_done}`). (For Codex, whose `Stop` carries `last_assistant_message`, this ALSO voices the reply — Claude Code's `Stop` has no message, so it only dings.) |
+| `Stop` | `notify` | Turn finished → the reply-done **"ding"** earcon (`Earcon{reply_done}`). Non-streaming clients also voice the final reply: Codex/Qwen use `last_assistant_message`, while Grok reads the final assistant entry from `transcriptPath`. Claude's streamed-session witness suppresses duplicate end-of-turn speech. |
 | `Notification` | `notify` | A `permission_prompt` / `idle_prompt` notification → the **needs-input** earcon (`Earcon{needs_input}`). Other notification types are ignored. |
 
 Every `notify` entry is `async` fire-and-forget; the lone `provide` entry is synchronous —

@@ -169,11 +169,15 @@ stays silently off — reading as "the new feature is broken" when the real faul
 the config path or a stale deploy. When an opt-in stays silent, confirm the reader
 sees it set (log `cfg.<field>` and `paths.config_toml`) before touching feature logic.
 
-## TTS phoneme cap — both engines must chunk
+## TTS phoneme cap — both engines share one frontend
 
-The Core ML (FluidAudio) TTS chain has a fixed phoneme-input limit and drops the
-whole utterance over it (`phonemeSequenceTooLong`); the ONNX path batches phonemes
-internally so it never hits this. Route any text bound for synthesis through the one
-shared splitter, `ds_tts::batch::chunk_text` (bounds every chunk to `TEXT_CHUNK_CHARS`,
-hard-splitting even unpunctuated runs), before either engine — see `serve.rs`'s
-playback loop.
+Route text through `ds_tts::g2p::phoneme_batches_for` before selecting a synthesis
+backend. It parses spoken prose (as GitHub-flavored Markdown), normalizes English numbers,
+runs the contextual G2P once, drops any character outside Kokoro's phoneme vocabulary (with a
+warning — a stray character must not silence the reply), and returns typed batches no longer
+than 509 phoneme characters. Vocabulary filtering maps each retained character to one token, so
+the token count is no greater. An empty batch list means "nothing speakable", which is a
+successful no-op, not a synthesis failure.
+The effective limit is 509 rather than the advertised 510 because the ONNX voice-style table
+has rows zero through 509 and is indexed by token count. ONNX and the FluidAudio Core ML shim
+must consume those exact IPA batches; do not add a backend-local text splitter or G2P path.

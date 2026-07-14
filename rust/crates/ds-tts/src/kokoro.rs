@@ -13,8 +13,8 @@
 //!   1. lazily ensures the kokoro model + voices + onnxruntime dylib (ds-model),
 //!   2. voice-g2p (g2p.rs) → vocab tokenize → batch phonemes at clause marks
 //!      (batch.rs `stream_batches`),
-//!   3. per batch: ort synth (synth.rs) → trim → rodio streaming playback
-//!      (play.rs), synth-N+1-while-N-plays.
+//!   3. per batch: ort synth (synth.rs) → trim → bounded transactional staging,
+//!   4. after every batch succeeds: continuous playback (play.rs).
 //!
 //! Degrade-fail-quiet: if the model/voices/onnxruntime aren't present (or audio
 //! can't open), the helper exits non-zero and the hook logs it — exactly like

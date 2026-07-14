@@ -8,16 +8,16 @@
 //!     its own process group, recorded in the single-speaker pidfile. NO Python,
 //!     NO uv, NO speak.py.
 //!   * [`SystemTts`] — macOS `say -v NAME -r WPM` (compiled here); Windows
-//!     PowerShell System.Speech + Linux spd-say/espeak behind cfg (NOT built on
+//!     PowerShell System.Speech + Linux Speech Dispatcher behind cfg (NOT built on
 //!     the macOS host).
 //!
-//! The native Kokoro pipeline (in the helper bin): voice-g2p phonemize the
-//! (already-normalized) text ([`g2p`]) → map to Kokoro vocab token ids (`vocab`)
-//! → batch the phonemes at clause marks into a ramped sequence for gapless
-//! streaming ([`batch`]'s `stream_batches`) → ort session inference over
+//! The native Kokoro pipeline (in the helper bin): parse rendered text into spoken prose,
+//! normalize numbers, and contextually phonemize it with voice-g2p ([`spoken`], [`g2p`])
+//! → map to Kokoro vocab token ids (`vocab`)
+//! → batch the phonemes at clause marks into a ramped sequence ([`batch`]'s
+//! `stream_batches`) → transactional inference of every chunk before playback → ort over
 //! kokoro-v1.0.onnx ([`synth`], style rows from the voices npz parsed by
-//! `voices`) → trim silence (`trim`) → stream 24 kHz mono PCM ([`play`]),
-//! synthesizing batch N+1 while batch N plays. The pure stages (vocab/voices/
+//! `voices`) → trim silence (`trim`) → play 24 kHz mono PCM ([`play`]). The pure stages (vocab/voices/
 //! trim/g2p) are unit-tested with no audio, no model, no network; synth/play are
 //! gated behind the helper bin.
 //!
@@ -34,12 +34,13 @@ use std::io;
 /// `voices-v1.0.bin` (the ANE repo ships only `af_heart`). Path logic is harmless
 /// off-macOS; only the apple-native backend ever calls it.
 pub mod ane_voices;
-/// Phoneme batching / streaming for gapless synth (used by the helper bin).
+/// Model-bounded phoneme batching used by the helper bin.
 pub mod batch;
 pub mod g2p;
 pub(crate) mod kokoro;
 pub(crate) mod numbers;
 pub mod play;
+pub mod spoken;
 pub mod synth;
 /// Apple-native (FluidAudio Core ML / ANE) Kokoro backend. macOS only.
 #[cfg(target_os = "macos")]
@@ -52,9 +53,10 @@ pub mod wav;
 
 pub use kokoro::KokoroTts;
 pub use system::SystemTts;
+pub use vocab::SAMPLE_RATE;
 
 /// Voice/language enumeration + the enumeration-only Gender/Quality/SpeakerVoice types now
-/// live in `ds-voices` (issue #5) — a crate with no ort/rodio/voice-g2p/grapheme_to_phoneme/
+/// live in `ds-voices` (issue #5) — a crate with no ort/rodio/voice-g2p/
 /// ds-model in its graph, so the CLI can depend on it directly instead of this (heavy) crate.
 /// Re-exported here so this crate's own synth code below and every existing
 /// `ds_tts::enumerate` / `ds_tts::SpeakerVoice` call site elsewhere keep compiling unchanged.
@@ -63,6 +65,15 @@ pub use ds_voices::{Gender, Quality, SpeakerVoice};
 // Crate-PRIVATE alias — `voices` was never part of ds-tts's public API and still isn't;
 // synth.rs/ane_voices.rs reach the Kokoro npz parser via `crate::voices::...` exactly as before.
 pub(crate) use ds_voices::voices;
+
+/// Normalize rendered English text before the shared Kokoro frontend phonemizes it.
+///
+/// This is the shared text-front-end boundary used by the helper before its ONNX/Core ML
+/// backend split. It is intentionally idempotent so each backend may also call it
+/// defensively when used outside the helper.
+pub fn normalize_kokoro_text(text: &str) -> String {
+    numbers::expand_numbers(&spoken::SpokenText::from_markdown(text).into_string())
+}
 
 /// The process-GROUP id of a spawned speaker — recorded in the pidfile so the
 /// engine's caps-ON barge-in (`killpg(-pgid, SIGTERM)`) can preempt it.
@@ -118,6 +129,13 @@ pub fn rate_to_wpm(rate: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kokoro_text_normalization_is_shared_and_idempotent() {
+        let normalized = normalize_kokoro_text("Build 57 in room 1,000.");
+        assert_eq!(normalized, "Build fifty-seven in room one thousand.");
+        assert_eq!(normalize_kokoro_text(&normalized), normalized);
+    }
 
     #[test]
     fn rate_to_wpm_baseline_and_clamp() {
