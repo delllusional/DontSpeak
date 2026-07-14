@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use ds_config::{Paths, VoiceConfig};
@@ -564,6 +564,14 @@ impl TtsQueue {
         self.tts.stop_fade();
     }
 
+    /// Scoped-cancel variant whose guard witnesses that queue pruning, the in-flight
+    /// identity snapshot, and the generation bump share one `items` critical section.
+    /// This orders the bump before any later [`claim_item`](Self::claim_item), preventing
+    /// a newly claimed foreign-session item from inheriting the cancellation.
+    fn hard_cancel_in_flight_locked(&self, _items: &MutexGuard<'_, VecDeque<Item>>) {
+        self.hard_cancel_in_flight();
+    }
+
     /// Global hard barge (caps long-press reset / `StopSpeech{None}`): drop everything
     /// pending, cancel whatever is playing, and clear any pause. The audio is faded out
     /// over the short window (not an instant cut) so even this "stop everything" gesture
@@ -601,18 +609,17 @@ impl TtsQueue {
         // Keep pruning and the in-flight identity snapshot under the same `items →
         // playing_session` lock order as worker selection. The worker therefore cannot remove
         // a target item between these operations and escape the session-scoped cancellation.
-        let cancel_current = {
-            let mut items = self.items.lock().unwrap();
-            prune_session(&mut items, &session);
-            self.playing_session.lock().unwrap().as_ref() == Some(&session)
-        };
+        let mut items = self.items.lock().unwrap();
+        prune_session(&mut items, &session);
+        let cancel_current = self.playing_session.lock().unwrap().as_ref() == Some(&session);
         if cancel_current {
             // Per-window barge: fade the in-flight item out (short window) so a clear-on-
             // submit / window close / newest-reply preempt tapers off instead of clicking.
             // Every user-facing barge fades now (global + record-barge included); only the
             // helper's internal block-to-block preempt stays an instant cut.
-            self.hard_cancel_in_flight();
+            self.hard_cancel_in_flight_locked(&items);
         }
+        drop(items);
         // Wake the worker so a held item for this (now-pruned) session re-evaluates,
         // and so the active terminal's next item starts promptly after a cancel.
         self.cv.notify_one();
@@ -660,26 +667,24 @@ impl TtsQueue {
             return;
         };
         if cancel_current {
-            prune_session(&mut self.items.lock().unwrap(), &Some(target.clone()));
-            self.hard_cancel_in_flight();
+            let mut items = self.items.lock().unwrap();
+            prune_session(&mut items, &Some(target.clone()));
+            self.hard_cancel_in_flight_locked(&items);
         }
         if cancel_other {
             // Couple queue pruning to the in-flight identity snapshot. Reading the session
             // before taking `items` allowed the worker to claim another session in between and
             // start it after this submit returned.
-            let playing_is_other = {
-                let mut items = self.items.lock().unwrap();
-                let playing_is_other = self
-                    .playing_session
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|session| session.as_deref() != Some(target.as_str()));
-                retain_only_session(&mut items, &Some(target));
-                playing_is_other
-            };
+            let mut items = self.items.lock().unwrap();
+            let playing_is_other = self
+                .playing_session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|session| session.as_deref() != Some(target.as_str()));
+            retain_only_session(&mut items, &Some(target));
             if playing_is_other {
-                self.hard_cancel_in_flight();
+                self.hard_cancel_in_flight_locked(&items);
             }
         }
         self.cv.notify_one();
@@ -2417,6 +2422,103 @@ mod tests {
             q.generation.load(Ordering::SeqCst),
             selected_generation,
             "the other-scope clear must cancel a foreign item claimed under its queue lock"
+        );
+    }
+
+    /// Hold `StatusGate::bump` between `tts_active=false` and the generation bump. The old
+    /// scoped-cancel shape had already released `items` at that point, allowing this helper
+    /// to claim the surviving item under the stale generation. The fixed shape still holds
+    /// `items`, so the claim can proceed only after the cancellation transition completes.
+    fn claim_survivor_across_scoped_cancel(
+        q: &Arc<TtsQueue>,
+        survivor: Option<&str>,
+        cancel: impl FnOnce(Arc<TtsQueue>) + Send + 'static,
+    ) -> (u64, u64) {
+        let mut items = q.items.lock().unwrap();
+        items.push_back(narr(survivor));
+        q.tts_active.store(true, Ordering::SeqCst);
+        let transition = q.gate.hold_transition_for_test();
+
+        let clearer = Arc::clone(q);
+        let handle = std::thread::spawn(move || cancel(clearer));
+        drop(items);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while q.tts_active.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "scoped cancellation never reached its status transition"
+            );
+            std::thread::yield_now();
+        }
+
+        let selected_generation = match q.items.try_lock() {
+            // This is the buggy ordering: the queue lock escaped before the generation bump.
+            Ok(mut items) => {
+                let (_, generation) = q.claim_item(&mut items, 0);
+                drop(items);
+                drop(transition);
+                generation
+            }
+            // The fixed ordering: let the cancellation finish, then claim its survivor.
+            Err(std::sync::TryLockError::WouldBlock) => {
+                drop(transition);
+                let mut items = q.items.lock().unwrap();
+                let (_, generation) = q.claim_item(&mut items, 0);
+                generation
+            }
+            Err(std::sync::TryLockError::Poisoned(e)) => panic!("items lock poisoned: {e}"),
+        };
+        handle.join().unwrap();
+        let final_generation = q.generation.load(Ordering::SeqCst);
+        (selected_generation, final_generation)
+    }
+
+    #[test]
+    fn session_clear_does_not_cancel_a_foreign_item_claimed_after_pruning() {
+        let q = mk_queue();
+        *q.playing_session.lock().unwrap() = Some(Some("cleared".into()));
+
+        let (selected_generation, final_generation) =
+            claim_survivor_across_scoped_cancel(&q, Some("survivor"), |clearer| {
+                clearer.clear_session(Some("cleared".into()));
+            });
+
+        assert_eq!(
+            selected_generation, final_generation,
+            "a foreign-session survivor must be claimed after the scoped generation bump"
+        );
+    }
+
+    #[test]
+    fn current_scope_does_not_cancel_a_foreign_item_claimed_after_pruning() {
+        let q = mk_queue();
+        *q.playing_session.lock().unwrap() = Some(Some("current".into()));
+
+        let (selected_generation, final_generation) =
+            claim_survivor_across_scoped_cancel(&q, Some("other"), |clearer| {
+                clearer.cancel_for_submit(Some("current".into()), true, false);
+            });
+
+        assert_eq!(
+            selected_generation, final_generation,
+            "another session's survivor must be claimed after the current-scope bump"
+        );
+    }
+
+    #[test]
+    fn other_scope_does_not_cancel_the_target_item_claimed_after_pruning() {
+        let q = mk_queue();
+        *q.playing_session.lock().unwrap() = Some(Some("other".into()));
+
+        let (selected_generation, final_generation) =
+            claim_survivor_across_scoped_cancel(&q, Some("current"), |clearer| {
+                clearer.cancel_for_submit(Some("current".into()), false, true);
+            });
+
+        assert_eq!(
+            selected_generation, final_generation,
+            "the retained target item must be claimed after the other-scope bump"
         );
     }
 

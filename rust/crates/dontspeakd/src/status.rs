@@ -76,6 +76,13 @@ impl StatusGate {
         self.cv.notify_all();
     }
 
+    /// Hold a status transition immediately after its atomic flag write so queue race
+    /// tests can deterministically inspect the surrounding lock ordering.
+    #[cfg(test)]
+    pub(crate) fn hold_transition_for_test(&self) -> std::sync::MutexGuard<'_, u64> {
+        self.seq.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The current sequence (embedded in `model_status_json` so the app echoes it
     /// back as `since` on the next wait).
     pub(crate) fn seq(&self) -> u64 {
