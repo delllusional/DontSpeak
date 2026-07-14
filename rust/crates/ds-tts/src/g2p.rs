@@ -36,6 +36,11 @@ struct OovEntry {
     retry_bart: bool,
 }
 
+enum Cancellable<T> {
+    Finished(T),
+    Cancelled,
+}
+
 struct EnglishFrontend {
     g2p: Option<voice_g2p::G2P>,
     overrides: HashMap<String, String>,
@@ -61,11 +66,19 @@ impl EnglishFrontend {
         }
     }
 
-    fn convert(&mut self, text: &str) -> Result<String, String> {
+    fn convert(
+        &mut self,
+        text: &str,
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<Cancellable<String>, String> {
         let mut rewritten = String::with_capacity(text.len());
         let mut overrides_changed = false;
 
         for token in voice_g2p::tokenizer::tokenize_simple(text) {
+            if cancelled() {
+                self.refresh_overrides(overrides_changed)?;
+                return Ok(Cancellable::Cancelled);
+            }
             let mut surface = token.text;
             if surface.chars().any(char::is_alphabetic) {
                 let cache_key = surface.to_lowercase();
@@ -78,7 +91,13 @@ impl EnglishFrontend {
                     None => self.is_unresolved(&surface),
                 };
                 let entry = if needs_resolution {
-                    let entry = self.resolve_oov(&surface, cached.as_ref());
+                    let entry = match self.resolve_oov(&surface, cached.as_ref(), cancelled) {
+                        Cancellable::Finished(entry) => entry,
+                        Cancellable::Cancelled => {
+                            self.refresh_overrides(overrides_changed)?;
+                            return Ok(Cancellable::Cancelled);
+                        }
+                    };
                     self.insert_oov(cache_key, entry.clone());
                     overrides_changed = true;
                     Some(entry)
@@ -93,18 +112,21 @@ impl EnglishFrontend {
             rewritten.push_str(&token.whitespace);
         }
 
-        if overrides_changed {
-            let g2p = self
-                .g2p
-                .take()
-                .ok_or_else(|| "English G2P frontend unavailable".to_string())?;
-            self.g2p = Some(g2p.with_overrides(self.overrides.clone()));
+        self.refresh_overrides(overrides_changed)?;
+        if cancelled() {
+            return Ok(Cancellable::Cancelled);
         }
-        self.g2p
+        let phonemes = self
+            .g2p
             .as_ref()
             .ok_or_else(|| "English G2P frontend unavailable".to_string())?
             .convert(&rewritten)
-            .map_err(|e| format!("English G2P failed: {e}"))
+            .map_err(|e| format!("English G2P failed: {e}"))?;
+        if cancelled() {
+            Ok(Cancellable::Cancelled)
+        } else {
+            Ok(Cancellable::Finished(phonemes))
+        }
     }
 
     fn is_unresolved(&self, word: &str) -> bool {
@@ -114,7 +136,15 @@ impl EnglishFrontend {
             .is_none_or(|phonemes| phonemes.trim().is_empty())
     }
 
-    fn resolve_oov(&mut self, word: &str, previous: Option<&OovEntry>) -> OovEntry {
+    fn resolve_oov(
+        &mut self,
+        word: &str,
+        previous: Option<&OovEntry>,
+        cancelled: &impl Fn() -> bool,
+    ) -> Cancellable<OovEntry> {
+        if cancelled() {
+            return Cancellable::Cancelled;
+        }
         let (phonemes, retry_bart) = match bart::phonemize(word)
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -130,6 +160,9 @@ impl EnglishFrontend {
                 (fallback, true)
             }
         };
+        if cancelled() {
+            return Cancellable::Cancelled;
+        }
         let grouped = voice_g2p::tokenizer::subtokenize(word).len() > 1;
         let (override_key, replacement) = if grouped {
             match previous {
@@ -142,12 +175,23 @@ impl EnglishFrontend {
         } else {
             (word.to_lowercase(), None)
         };
-        OovEntry {
+        Cancellable::Finished(OovEntry {
             phonemes,
             override_key,
             replacement,
             retry_bart,
+        })
+    }
+
+    fn refresh_overrides(&mut self, changed: bool) -> Result<(), String> {
+        if changed {
+            let g2p = self
+                .g2p
+                .take()
+                .ok_or_else(|| "English G2P frontend unavailable".to_string())?;
+            self.g2p = Some(g2p.with_overrides(self.overrides.clone()));
         }
+        Ok(())
     }
 
     fn insert_oov(&mut self, cache_key: String, entry: OovEntry) {
@@ -188,25 +232,41 @@ impl EnglishFrontend {
 }
 
 fn try_phonemize(text: &str) -> Result<String, String> {
+    match try_phonemize_cancellable(text, &|| false)? {
+        Cancellable::Finished(phonemes) => Ok(phonemes),
+        Cancellable::Cancelled => unreachable!("the non-cancellable frontend cannot cancel"),
+    }
+}
+
+fn try_phonemize_cancellable(
+    text: &str,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Cancellable<String>, String> {
     static FRONTEND: OnceLock<Mutex<EnglishFrontend>> = OnceLock::new();
     let normalized = crate::normalize_kokoro_text(text);
     // voice-g2p intentionally maps punctuation to model pause tokens. A punctuation-only
     // request therefore looks non-empty after G2P even though there is no speech to synthesize.
     // Decide the no-op at the normalized text boundary, before loading either G2P or synth.
     if !normalized.chars().any(char::is_alphanumeric) {
-        return Ok(String::new());
+        return Ok(Cancellable::Finished(String::new()));
+    }
+    if cancelled() {
+        return Ok(Cancellable::Cancelled);
     }
     let mut frontend = FRONTEND
         .get_or_init(|| Mutex::new(EnglishFrontend::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let phonemes = frontend.convert(&normalized)?;
+    let phonemes = match frontend.convert(&normalized, cancelled)? {
+        Cancellable::Finished(phonemes) => phonemes,
+        Cancellable::Cancelled => return Ok(Cancellable::Cancelled),
+    };
     // The early guard established there was something pronounceable, so silence here is a real
     // frontend failure rather than the successful no-op used for emoji/punctuation-only input.
     if phonemes.trim().is_empty() {
         return Err("English G2P returned no phonemes".to_string());
     }
-    Ok(phonemes)
+    Ok(Cancellable::Finished(phonemes))
 }
 
 /// The voice-g2p config with the external `espeak-ng` process fallback disabled: an empty
@@ -284,6 +344,14 @@ impl KokoroPhonemeChunk {
     }
 }
 
+/// Result of a cancellable Markdown-to-IPA frontend pass. Cancellation is a successful
+/// terminal rather than an error because the helper protocol reports stopped speech as DONE.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PhonemeBatchesOutcome {
+    Finished(Vec<KokoroPhonemeChunk>),
+    Cancelled,
+}
+
 /// Drop phonemes Kokoro's vocabulary doesn't contain, logging the set once.
 ///
 /// LOAD-BEARING failure mode. Kokoro's vocabulary is the MODEL's, not the frontend's: the
@@ -321,11 +389,30 @@ fn drop_unsupported_phonemes(phonemes: &str) -> String {
 /// An empty result means "nothing speakable" (an image-only or punctuation-only block), which
 /// is a successful no-op — callers must not report it as a synthesis failure.
 pub fn phoneme_batches_for(text: &str, _voice: &str) -> Result<Vec<KokoroPhonemeChunk>, String> {
-    let phonemes = drop_unsupported_phonemes(&try_phonemize(text)?);
-    Ok(crate::batch::stream_batches(&phonemes)
+    match phoneme_batches_for_cancellable(text, _voice, || false)? {
+        PhonemeBatchesOutcome::Finished(batches) => Ok(batches),
+        PhonemeBatchesOutcome::Cancelled => {
+            unreachable!("the non-cancellable frontend cannot cancel")
+        }
+    }
+}
+
+/// Cancellable form of [`phoneme_batches_for`]. The callback is checked between frontend
+/// tokens and immediately before and after every potentially slow BART OOV inference.
+pub fn phoneme_batches_for_cancellable(
+    text: &str,
+    _voice: &str,
+    cancelled: impl Fn() -> bool,
+) -> Result<PhonemeBatchesOutcome, String> {
+    let phonemes = match try_phonemize_cancellable(text, &cancelled)? {
+        Cancellable::Finished(phonemes) => phonemes,
+        Cancellable::Cancelled => return Ok(PhonemeBatchesOutcome::Cancelled),
+    };
+    let batches = crate::batch::stream_batches(&drop_unsupported_phonemes(&phonemes))
         .into_iter()
         .map(KokoroPhonemeChunk)
-        .collect())
+        .collect();
+    Ok(PhonemeBatchesOutcome::Finished(batches))
 }
 
 #[cfg(test)]
@@ -399,7 +486,12 @@ mod tests {
             "premise: the installed override must make is_unresolved report false"
         );
 
-        frontend.convert("Zorblax").expect("retryable OOV");
+        assert!(matches!(
+            frontend
+                .convert("Zorblax", &|| false)
+                .expect("retryable OOV"),
+            Cancellable::Finished(_)
+        ));
         let retried = frontend.oov_cache.get("zorblax").expect("cached OOV");
         assert_ne!(
             retried.phonemes, "sˈɛntɪnəl",
@@ -425,12 +517,35 @@ mod tests {
         let g2p = frontend.g2p.take().expect("live g2p");
         frontend.g2p = Some(g2p.with_overrides(frontend.overrides.clone()));
 
-        frontend.convert("Zorblax").expect("cached OOV");
+        assert!(matches!(
+            frontend.convert("Zorblax", &|| false).expect("cached OOV"),
+            Cancellable::Finished(_)
+        ));
         let cached = frontend.oov_cache.get("zorblax").expect("cached OOV");
         assert_eq!(
             cached.phonemes, "zˈɔɹblæks",
             "a genuine cache hit must not be re-resolved"
         );
+    }
+
+    /// A stop observed at the OOV boundary must bypass BART entirely. This is the boundary that
+    /// keeps a long identifier-heavy request from starting another autoregressive inference.
+    #[test]
+    fn cancellation_before_oov_inference_is_a_distinct_outcome() {
+        let mut frontend = EnglishFrontend::new();
+        assert!(matches!(
+            frontend.resolve_oov("Zorblax", None, &|| true),
+            Cancellable::Cancelled
+        ));
+    }
+
+    #[test]
+    fn cancellable_batching_reports_cancellation_without_an_error() {
+        assert!(matches!(
+            phoneme_batches_for_cancellable("Zorblax", "af_heart", || true)
+                .expect("cancellation is not a frontend error"),
+            PhonemeBatchesOutcome::Cancelled
+        ));
     }
 
     /// LOAD-BEARING GPL guard: the frontend must hand voice-g2p an empty espeak path — an

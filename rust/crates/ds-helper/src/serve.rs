@@ -5,7 +5,7 @@
 
 use ds_aec::DuplexAudio;
 use ds_helper_proto as proto;
-use ds_tts::g2p;
+use ds_tts::g2p::{self, PhonemeBatchesOutcome};
 use serde::Deserialize;
 
 use crate::_exit;
@@ -1073,8 +1073,15 @@ pub(crate) fn serve() -> ! {
         // Run the frontend before touching the backend. Empty/image/emoji/punctuation-only
         // requests are successful no-ops even after `unload tts`; they must not pay for a model
         // reload or turn a missing model into TTSLOADERR + ERR when no synthesis was requested.
-        let phoneme_batches = match g2p::phoneme_batches_for(&text, &voice) {
-            Ok(batches) => batches,
+        let phoneme_batches = match g2p::phoneme_batches_for_cancellable(&text, &voice, || {
+            cancel.load(Ordering::SeqCst)
+        }) {
+            Ok(PhonemeBatchesOutcome::Finished(batches)) => batches,
+            Ok(PhonemeBatchesOutcome::Cancelled) => {
+                println!("{}", proto::DONE);
+                let _ = std::io::stdout().flush();
+                continue;
+            }
             Err(e) => {
                 log::warn!(target: "helper", "Kokoro frontend failed: {e}");
                 println!("{} {}", proto::ERR, one_line(&e));
