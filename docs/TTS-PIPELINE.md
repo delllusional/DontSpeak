@@ -107,7 +107,12 @@ during the callback, and the expected sample rate is 24 kHz. A null callback is 
 
 `TtsQueue` is one bounded, session-tagged FIFO. Admission limits every item to 10 KiB of UTF-8
 text and stops accepting new work at 128 queued items or 1 MiB globally, and 32 queued items or
-256 KiB for one session.
+256 KiB for one session. An overflow rejection is permanent for narration: the producers have
+already advanced their spoken offset past the rejected text and cannot replay it, so a session
+held long enough to fill its budget (for example `pause_in_background` during a long agent run)
+skips the overflowed blocks. The rejection is logged by the engine and, on the hook route,
+echoed to the hook's stderr; committing the offset only after admission is deferred work
+(see the delivery-state architecture below).
 The active session and terminal-focus signals select which item may run; barge and explicit
 cancellation use the same queue state. Details of session selection are in
 [PER-TERMINAL-QUEUES.md](PER-TERMINAL-QUEUES.md).

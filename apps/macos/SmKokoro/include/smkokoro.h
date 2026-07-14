@@ -85,6 +85,18 @@ int32_t smk_sys_authorize(void);
 int32_t smk_sys_transcribe(const float *samples, size_t n, int32_t sample_rate,
                            void *ctx, smk_str_cb cb);
 
+// Streaming system STT — mirrors the smk_asr_stream_* trio above.
+
+// Begin a new streaming utterance (tears down any prior session). rc 0 ok.
+int32_t smk_sys_stream_start(void);
+
+// Feed a 16 kHz mono chunk; `cb` receives the running hypothesis-so-far.
+int32_t smk_sys_stream_push(const float *samples, size_t n, int32_t sample_rate,
+                            void *ctx, smk_str_cb cb);
+
+// Flush the stream; `cb` receives the final transcript.
+int32_t smk_sys_stream_finish(void *ctx, smk_str_cb cb);
+
 // --- Diarization (Pyannote + WeSpeaker, Core ML / ANE) — "who spoke when" ---
 
 // Download (first use) + load the segmentation + embedding models. "" / NULL = default

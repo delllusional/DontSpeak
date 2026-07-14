@@ -220,14 +220,18 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) {
         streamed,
     );
     for line in speak {
-        let _ = ds_ipc::request(
+        // Surface a rejected enqueue (queue admission caps): the narration state has
+        // already advanced past this text, so stderr is the only place the drop shows.
+        if let Ok(ds_ipc::Response::Error { message }) = ds_ipc::request(
             &paths.engine_sock,
             &ds_ipc::Request::SpeakNarration {
                 text: line,
                 session: session.clone(),
                 source: client,
             },
-        );
+        ) {
+            eprintln!("dontspeak: narration rejected: {message}");
+        }
     }
 }
 
@@ -342,14 +346,17 @@ pub fn message_display(paths: &Paths, payload: &str, client: ClientSource) {
     // a multi-point spoken digest is heard point by point rather than in one breath.
     let session = Some(session).filter(|s| !s.is_empty());
     for text in speak {
-        let _ = ds_ipc::request(
+        // See speak_reply: a rejected narration is otherwise untraceable.
+        if let Ok(ds_ipc::Response::Error { message }) = ds_ipc::request(
             &paths.engine_sock,
             &ds_ipc::Request::SpeakNarration {
                 text,
                 session: session.clone(),
                 source: client,
             },
-        );
+        ) {
+            eprintln!("dontspeak: narration rejected: {message}");
+        }
     }
 }
 

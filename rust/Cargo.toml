@@ -162,7 +162,9 @@ arboard = "3"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "api-24", "coreml", "cuda"] }
 # Released Misaki-compatible English frontend (MIT). DontSpeak disables its optional
 # external espeak-ng fallback and supplies OOV pronunciations in ds-tts instead.
-voice-g2p = "0.2.2"
+# Exact-pinned: the no-espeak GPL invariant rests on this version's verbatim handling of an
+# empty `espeak_path` (see ds-tts::g2p::espeak_free_config) — audit that before any bump.
+voice-g2p = "=0.2.2"
 # CommonMark parser used to turn rendered agent replies into prose before G2P.
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 # Audio playback of raw f32 mono PCM at 24 kHz.

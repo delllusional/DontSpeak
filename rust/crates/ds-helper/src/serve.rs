@@ -12,6 +12,13 @@ use crate::_exit;
 use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
 use crate::oneshot::{Backend, load_backend};
 use crate::prepare::{PrepareOutcome, PreparedAudio, prepare_audio};
+
+/// Flatten an error for a protocol line: the engine's reader parses helper stdout strictly
+/// line-by-line, so a multi-line message (ort/ONNX Runtime `Display` can be) would truncate
+/// the `ERR`/`TTSLOADERR` terminal at its first line and leak the rest as stray lines.
+fn one_line(e: &str) -> String {
+    e.lines().collect::<Vec<_>>().join(" ")
+}
 use crate::stt_residency::SttResidencySlot;
 
 /// One stdin request in `--serve` mode (one JSON object per line).
@@ -325,7 +332,7 @@ pub(crate) fn serve() -> ! {
                 Some(s)
             }
             Err(e) => {
-                println!("{} {e}", proto::ERR);
+                println!("{} {}", proto::ERR, one_line(&e));
                 let _ = std::io::stdout().flush();
                 // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
                 // destructors is this crate's teardown convention (see main.rs's top
@@ -422,7 +429,7 @@ pub(crate) fn serve() -> ! {
                 Some(d)
             }
             Err(e) => {
-                println!("{} audio: {e}", proto::ERR);
+                println!("{} audio: {}", proto::ERR, one_line(&e.to_string()));
                 let _ = std::io::stdout().flush();
                 // SAFETY: `_exit` takes only an exit code and never returns; skipping
                 // Rust destructors is this crate's teardown convention (see main.rs's
@@ -991,7 +998,7 @@ pub(crate) fn serve() -> ! {
                         }
                         Err(e) => {
                             use std::io::Write as _;
-                            println!("{}{e}", proto::TTSLOADERR_PREFIX);
+                            println!("{}{}", proto::TTSLOADERR_PREFIX, one_line(&e));
                             let _ = std::io::stdout().flush();
                             log::warn!(target: "helper", "preload tts failed: {e}");
                         }
@@ -1049,12 +1056,20 @@ pub(crate) fn serve() -> ! {
             Ok(batches) => batches,
             Err(e) => {
                 log::warn!(target: "helper", "Kokoro frontend failed: {e}");
-                println!("{} {e}", proto::ERR);
+                println!("{} {}", proto::ERR, one_line(&e));
                 let _ = std::io::stdout().flush();
                 continue;
             }
         };
         if phoneme_batches.is_empty() {
+            println!("{}", proto::DONE);
+            let _ = std::io::stdout().flush();
+            continue;
+        }
+        // A stop/barge that landed during the frontend phase (Markdown → IPA, including
+        // per-OOV BART inference — potentially seconds on identifier-heavy text) must not
+        // start a backend load or synthesis it no longer needs.
+        if cancel.load(Ordering::SeqCst) {
             println!("{}", proto::DONE);
             let _ = std::io::stdout().flush();
             continue;
@@ -1074,8 +1089,8 @@ pub(crate) fn serve() -> ! {
                 }
                 Err(e) => {
                     log::warn!(target: "helper", "synth reload failed: {e}");
-                    println!("{}{e}", proto::TTSLOADERR_PREFIX);
-                    println!("{} {e}", proto::ERR);
+                    println!("{}{}", proto::TTSLOADERR_PREFIX, one_line(&e));
+                    println!("{} {}", proto::ERR, one_line(&e));
                     let _ = std::io::stdout().flush();
                     continue;
                 }
@@ -1199,8 +1214,7 @@ pub(crate) fn serve() -> ! {
                 }
                 *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 log::warn!(target: "helper", "transactional synthesis failed: {e}");
-                let one_line = e.lines().collect::<Vec<_>>().join(" ");
-                println!("{} {one_line}", proto::ERR);
+                println!("{} {}", proto::ERR, one_line(&e));
                 let _ = std::io::stdout().flush();
                 continue;
             }
@@ -1247,7 +1261,8 @@ pub(crate) fn serve() -> ! {
                 proto::STATS_PREFIX
             );
         }
-        // Exactly one DONE per speak/preview request (even if cancelled).
+        // Terminal DONE for a successful or cancelled request; failure paths above already
+        // terminated with ERR instead (see ds-helper-proto's DONE/ERR contract).
         println!("{}", proto::DONE);
         let _ = std::io::stdout().flush();
     }

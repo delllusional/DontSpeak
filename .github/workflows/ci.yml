@@ -121,8 +121,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings
 
   # cargo-deny gate — RELEASE-ONLY (same `if` as hygiene above): advisories (RustSec) +
-  # bans (duplicate/banned crates) + licenses (rust/deny.toml's [licenses.allow] +
-  # arpabet's BSD-4-Clause exception) + sources (only crates.io, no stray git/registry
+  # bans (duplicate/banned crates) + licenses (rust/deny.toml's [licenses.allow]) +
+  # sources (only crates.io, no stray git/registry
   # deps), across both the main Rust workspace and standalone GTK host. Deliberately
   # skipped per-commit — a new advisory or license entering either graph needs a
   # considered deny.toml change (dated reason, scoped exception), not a

@@ -189,8 +189,9 @@ public func smk_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int3
     }
 }
 
-/// Transcribe 16 kHz mono f32 PCM → UTF-8 text. Caller owns *out_text; free via
-/// smk_free_str. Empty input yields an empty string (rc 0).
+/// Transcribe 16 kHz mono f32 PCM → UTF-8 text. `cb` borrows the text for the duration of
+/// the synchronous call (see the borrowed-result MARK above); nothing to free. Empty input
+/// yields an empty string (rc 0).
 @_cdecl("smk_transcribe")
 public func smk_transcribe(
     _ samples: UnsafePointer<Float>?,
@@ -287,7 +288,7 @@ public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
 }
 
 /// Feed a 16 kHz mono chunk; hand back the running hypothesis-so-far (via `getPartialTranscript`,
-/// since `process` itself returns "" mid-stream). Caller frees *out via smk_free_str.
+/// since `process` itself returns "" mid-stream). `cb` borrows the text; nothing to free.
 @_cdecl("smk_asr_stream_push")
 public func smk_asr_stream_push(
     _ samples: UnsafePointer<Float>?,
@@ -338,7 +339,7 @@ public func smk_asr_stream_push(
     }
 }
 
-/// Flush the stream and return the final transcript. Caller frees *out via smk_free_str.
+/// Flush the stream and return the final transcript. `cb` borrows the text; nothing to free.
 @_cdecl("smk_asr_stream_finish")
 public func smk_asr_stream_finish(
     _ ctx: UnsafeMutableRawPointer?,
@@ -1325,7 +1326,8 @@ public func smk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThresho
 ///    "speakers":{"<id>":[..floats..]}}
 /// Each segment's `speaker` and the `speakers` map share ONE id-space (FluidAudio's
 /// speakerId) so the engine can join them to relabel clusters by enrolled name.
-/// Caller owns *out_json; free via smk_free_str. Empty input yields {"segments":[]} (rc 0).
+/// `cb` borrows the JSON for the duration of the call; nothing to free. Empty input yields
+/// {"segments":[]} (rc 0).
 @_cdecl("smk_diarize")
 public func smk_diarize(
     _ samples: UnsafePointer<Float>?,
@@ -1395,7 +1397,8 @@ public func smk_diar_shutdown() {
 
 /// Extract a single WeSpeaker voiceprint embedding from 16 kHz mono f32 PCM — the
 /// enrollment primitive. Requires the diarizer to be initialized (`smk_diar_init`).
-/// Caller owns *out_floats; free via `smk_free`. Empty input → rc 3.
+/// `cb` borrows the float buffer for the duration of the call; nothing to free.
+/// Empty input → rc 3.
 @_cdecl("smk_diar_embed")
 public func smk_diar_embed(
     _ samples: UnsafePointer<Float>?,

@@ -50,12 +50,8 @@ impl EnglishFrontend {
             .iter()
             .map(|&(word, phonemes)| (word.to_string(), phonemes.to_string()))
             .collect();
-        let g2p = voice_g2p::G2P::with_config(voice_g2p::G2PConfig {
-            // An empty executable name cannot resolve through PATH. This keeps the released
-            // crate's optional process fallback unreachable on every supported platform.
-            espeak_path: String::new(),
-        })
-        .with_overrides(overrides.clone());
+        let g2p =
+            voice_g2p::G2P::with_config(espeak_free_config()).with_overrides(overrides.clone());
         Self {
             g2p: Some(g2p),
             overrides,
@@ -211,6 +207,17 @@ fn try_phonemize(text: &str) -> Result<String, String> {
         return Err("English G2P returned no phonemes".to_string());
     }
     Ok(phonemes)
+}
+
+/// The voice-g2p config with the external `espeak-ng` process fallback disabled: an empty
+/// executable name cannot resolve through PATH on any supported platform. LOAD-BEARING for
+/// the no-GPL invariant (espeak-ng is GPLv3) — voice-g2p is exact-pinned in the workspace
+/// manifest because this relies on 0.2.2 passing the path through verbatim; the test below
+/// pins the empty path so a refactor cannot silently reintroduce a resolvable command.
+fn espeak_free_config() -> voice_g2p::G2PConfig {
+    voice_g2p::G2PConfig {
+        espeak_path: String::new(),
+    }
 }
 
 fn spell_out(word: &str) -> String {
@@ -424,6 +431,42 @@ mod tests {
             cached.phonemes, "zˈɔɹblæks",
             "a genuine cache hit must not be re-resolved"
         );
+    }
+
+    /// LOAD-BEARING GPL guard: the frontend must hand voice-g2p an empty espeak path — an
+    /// empty command can never resolve through PATH, so the crate's optional GPLv3
+    /// espeak-ng process fallback is structurally unreachable (issue #57).
+    #[test]
+    fn espeak_process_fallback_is_disabled_by_an_empty_path() {
+        assert!(
+            espeak_free_config().espeak_path.is_empty(),
+            "a non-empty espeak path could spawn the GPLv3 espeak-ng process"
+        );
+    }
+
+    /// Drift guard for every hand-authored IPA table in this file (restores the deleted
+    /// `every_letter_phoneme_is_vocab_safe` and extends it over OVERRIDES and the
+    /// unknown-word fallback): one out-of-vocab char (e.g. ASCII 'g' for U+0261) would
+    /// silently degrade every spelled-out OOV word at synth time.
+    #[test]
+    fn hand_authored_phoneme_tables_are_vocab_safe() {
+        let mut all: Vec<(String, &str)> = ('a'..='z')
+            .map(|c| (c.to_string(), letter_phonemes(c).expect("letter covered")))
+            .collect();
+        all.extend(OVERRIDES.iter().map(|&(w, p)| (w.to_string(), p)));
+        all.push(("unknown-word fallback".to_string(), "ʌnˈnOn"));
+        for (label, phonemes) in all {
+            assert!(
+                !crate::vocab::tokenize(phonemes).is_empty(),
+                "{label}: {phonemes:?} tokenizes to nothing"
+            );
+            for ch in phonemes.chars().filter(|ch| !ch.is_whitespace()) {
+                assert!(
+                    crate::vocab::vocab_id(ch).is_some(),
+                    "{label}: {ch:?} in {phonemes:?} is not in the Kokoro vocab"
+                );
+            }
+        }
     }
 
     #[test]

@@ -243,17 +243,22 @@ pub(crate) fn spawn_ipc_server(
                 ds_ipc::Request::SpeakNarration {
                     text,
                     session,
-                    source: _,
+                    source,
                 } => {
                     // Mid-turn narration → enqueue onto the same bounded FIFO as everything
                     // else (no kind). Warm path: no per-block model reload.
                     //
-                    // Deliberately NOT logged: this fires once per blockquote and would spam
-                    // the activity log. It still CARRIES its `source` on the wire (a required
-                    // field), so nothing is lost — we simply choose not to write a line.
+                    // Success is deliberately NOT logged: it fires once per blockquote and
+                    // would spam the activity log. A REJECTION is logged — the narration
+                    // producer has already advanced its spoken offset past this text (see
+                    // ds-narrate) and cannot replay it, so this line is the only trace an
+                    // admission-capped drop leaves anywhere.
                     match ttsq.enqueue(text, None, None, session) {
                         Ok(()) => emit(&ds_ipc::Response::Done),
-                        Err(e) => emit(&ds_ipc::Response::error(format!("speak narration: {e}"))),
+                        Err(e) => {
+                            log_client(&paths, source, &format!("narration rejected: {e}"));
+                            emit(&ds_ipc::Response::error(format!("speak narration: {e}")));
+                        }
                     }
                 }
                 ds_ipc::Request::SetMuted { on } => {

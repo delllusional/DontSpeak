@@ -132,9 +132,11 @@ fn omit_urls_and_collapse_whitespace(rendered: &str) -> String {
 /// destroyed the `.!?` boundaries `batch::pack_batches` prefers to break on.
 fn spoken_token(token: &str) -> String {
     const OPENERS: &[char] = &['(', '[', '{', '<', '"', '\'', '‘', '“', '„', '«', '‹'];
+    // '“' is both an English OPENER and the German-style CLOSER („so“) — a token end is
+    // only ever the closing role, so listing it here is safe.
     const CLOSERS: &[char] = &[
-        ')', ']', '}', '>', '"', '\'', '’', '”', '»', '›', '.', ',', ';', ':', '!', '?', '…', '。',
-        '，', '；', '：', '！', '？',
+        ')', ']', '}', '>', '"', '\'', '’', '”', '“', '»', '›', '.', ',', ';', ':', '!', '?', '…',
+        '。', '，', '；', '：', '！', '？',
     ];
     // In agent prose these commonly delimit the next sentence without whitespace. Raw URL
     // path/query text can contain them, so this is intentionally a speech-oriented heuristic,
@@ -260,6 +262,11 @@ mod tests {
         assert_eq!(
             SpokenText::from_markdown("参照 https://example.com。次へ。").as_str(),
             "参照 link。次へ。"
+        );
+        // German-style quotes: '“' closes what '„' opened and must survive the replacement.
+        assert_eq!(
+            SpokenText::from_markdown("Siehe „https://example.com“ hier.").as_str(),
+            "Siehe „link“ hier."
         );
     }
 

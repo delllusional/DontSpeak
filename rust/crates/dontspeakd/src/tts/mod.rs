@@ -380,7 +380,7 @@ impl TtsManager {
     }
     /// Change-gated clear for [`tts_load_error`](Self::tts_load_error) — see
     /// [`ModelSlot::clear_error`].
-    fn clear_tts_load_error(&self) {
+    pub(crate) fn clear_tts_load_error(&self) {
         self.tts_model
             .clear_error(self.gate.get().map(|g| g.as_ref()));
     }
@@ -1143,8 +1143,11 @@ impl TtsManager {
     }
 
     /// Speak `text` through the warm child and block until it finishes (or is
-    /// cancelled — the child reports `DONE` for both). Err ⇒ the engine could not
-    /// speak (no child / IO error), so the caller falls back to the cold path.
+    /// cancelled — the child reports `DONE` for both). Err ⇒ either the engine could
+    /// not speak (no child / IO error / terminal timeout — fatal, the child is
+    /// reaped) or the helper reported a per-request `ERR` (frontend or transactional
+    /// synthesis failure — soft, the child stays alive). There is no fallback: the
+    /// queue worker logs the Err and the utterance is dropped.
     pub fn speak(&self, text: &str, voice: &str, rate: f32) -> std::io::Result<()> {
         self.play("speak", text, voice, rate)
     }
@@ -1288,11 +1291,12 @@ impl TtsManager {
             // EOF/read-error ⇒ the child died: reap it so the next speak restarts — but
             // only if it's STILL the child we sent this request to (see
             // `mark_dead_if_current`). A soft `ERR` line (child alive) just fails this
-            // one utterance either way.
+            // one utterance — but it still counts as a failure in the stats, or a helper
+            // failing every utterance would look identical to a healthy idle one.
             if fatal {
                 self.mark_dead_if_current(my_gen);
-                self.stats.record_failure();
             }
+            self.stats.record_failure();
             return Err(std::io::Error::other(e));
         }
         Ok(())
@@ -1465,7 +1469,9 @@ impl TtsManager {
 
     /// Set global mute. Records it AND pushes the `mute` op to the warm child so the change
     /// is live (the child silences playback without stopping — the queue keeps draining).
-    /// Idempotent.
+    /// Idempotent. Caveat (macOS full-duplex): the VPIO render ring has no volume control
+    /// and each staged group is pushed whole, so a mute toggled mid-reply takes effect at
+    /// the next staged group (≤ 90 s away), not instantly — see ds-helper's serve loop.
     pub fn set_muted(&self, on: bool) {
         let changed = self.muted.swap(on, Ordering::Relaxed) != on;
         let _ = self.write_request(if on {
@@ -1614,6 +1620,13 @@ impl TtsManager {
     #[cfg(test)]
     pub(crate) fn suppress_heal_for_test(&self) {
         *self.last_heal.lock().unwrap() = Some(std::time::Instant::now());
+    }
+
+    /// Test-only: seed the Kokoro residency slot with a `Failed` state, simulating a
+    /// cached `TTSLOADERR` from an earlier load attempt.
+    #[cfg(test)]
+    pub(crate) fn set_tts_load_error_for_test(&self, msg: &str) {
+        self.set_tts_load_error(msg);
     }
 
     /// One-shot diarization on the warm helper: record `seconds` of mic, then return

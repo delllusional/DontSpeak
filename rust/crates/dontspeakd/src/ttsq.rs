@@ -405,13 +405,26 @@ impl TtsQueue {
     #[cfg(test)]
     pub(crate) fn test_stub() -> Arc<Self> {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::rooted_at(dir.path());
+        let helper = dir.path().join("ds-test-nonexistent-helper");
+        Self::test_stub_with_helper(dir.path(), helper)
+    }
+
+    /// [`test_stub`](Self::test_stub) with an explicit helper binary — for the readiness-gate
+    /// tests that need a REAL (fake-helper) child so `is_running()` turns true. `root` backs
+    /// `paths` and the lifetime file; keep its TempDir alive in the test when the helper will
+    /// actually be spawned (stderr-log override dirs live there too).
+    #[cfg(test)]
+    pub(crate) fn test_stub_with_helper(
+        root: &std::path::Path,
+        helper: std::path::PathBuf,
+    ) -> Arc<Self> {
+        let paths = Paths::rooted_at(root);
         let tts = Arc::new(TtsManager::new(
-            dir.path().join("ds-test-nonexistent-helper"),
+            helper,
             Arc::new(crate::stats::TtsStats::new()),
             Arc::new(crate::stats::SttStats::new()),
             Arc::new(crate::stats::LifetimeSeconds::load(
-                dir.path().join("ds-ttsq-test-lifetime.json"),
+                root.join("ds-ttsq-test-lifetime.json"),
             )),
         ));
         // A real (briefly-lived) mic watcher: `MicState` has no other constructor. Dropped
@@ -1220,6 +1233,11 @@ impl TtsQueue {
         // is left alone; an exited/absent one is restarted when it is safe to do so.
         self.tts.restart_if_crashed();
         if self.tts.is_running() && !self.tts.is_tts_loaded() {
+            // A cached TTSLOADERR predating this retry is not terminal — the load fired
+            // right below may resolve it (e.g. an AV scan briefly locking the model).
+            // Clear it so the wait loop only fails on a FRESH error from this attempt;
+            // a genuinely permanent failure re-emits TTSLOADERR and still fails fast.
+            self.tts.clear_tts_load_error();
             self.tts.load_engine("tts");
         }
 
@@ -1237,6 +1255,8 @@ impl TtsQueue {
             if !self.tts.is_running() {
                 self.tts.restart_if_crashed();
                 if self.tts.is_running() && !self.tts.is_tts_loaded() {
+                    // Same stale-error rule as the entry retry above.
+                    self.tts.clear_tts_load_error();
                     self.tts.load_engine("tts");
                 }
             }
@@ -2356,7 +2376,20 @@ mod tests {
 
     #[test]
     fn global_session_identity_is_distinct_from_an_idle_worker() {
+        // The idle half: with NO claimed item (`playing_session` = None), a global-session
+        // clear must NOT hard-cancel. The nested representation distinguishes "idle" (None)
+        // from "playing the untagged global session" (Some(None)); the flat Option<String>
+        // it replaced could not — this assertion fails under a revert to it.
         let q = mk_queue();
+        let before = q.generation.load(Ordering::SeqCst);
+        q.clear_session(None);
+        assert_eq!(
+            q.generation.load(Ordering::SeqCst),
+            before,
+            "an idle worker must not be hard-cancelled by a global-session clear"
+        );
+
+        // The playing half: an untagged claimed item IS the global session — it must cancel.
         let mut items = q.items.lock().unwrap();
         items.push_back(narr(None));
         let (_item, selected_generation) = q.claim_item(&mut items, 0);
@@ -2473,6 +2506,58 @@ mod tests {
             ReadyOutcome::Unavailable(
                 "timed out waiting for the Kokoro model to become ready".to_string()
             )
+        );
+    }
+
+    /// Regression (audit): a cached TTSLOADERR from an EARLIER load attempt must not drop a
+    /// held item while the retry that `wait_until_ready` itself fires is still in flight —
+    /// only a fresh error from this attempt is terminal. Uses the fake-helper fixture (see
+    /// `tts::wedge_recovery_tests`) so `is_running()` is genuinely true and the entry retry
+    /// path (clear stale error → `load_engine`) actually runs.
+    #[test]
+    fn wait_until_ready_ignores_a_stale_load_error_when_retrying() {
+        let bin_name = if cfg!(windows) {
+            "dontspeakd-fake-helper.exe"
+        } else {
+            "dontspeakd-fake-helper"
+        };
+        let bin = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent()?.parent().map(std::path::Path::to_path_buf))
+            .map(|dir| dir.join(bin_name))
+            .expect("could not resolve the running test binary's own directory");
+        assert!(
+            bin.exists(),
+            "fixture not built at {} — run `cargo build -p dontspeakd` first",
+            bin.display()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let q = TtsQueue::test_stub_with_helper(dir.path(), bin);
+        q.tts.set_stderr_log_dir_for_test(dir.path().to_path_buf());
+        // A transient failure cached by a PRIOR load attempt (e.g. an AV scan holding the
+        // model file) — the exact state that used to fail the wait instantly.
+        q.tts
+            .set_tts_load_error_for_test("transient: model file locked");
+
+        // The fake helper never loads TTS itself; flip residency shortly after the wait
+        // has started polling, as a successful retried load would.
+        let flipper = Arc::clone(&q);
+        let flip = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            flipper.tts.set_tts_loaded_for_test();
+        });
+
+        let outcome = q.wait_until_ready(
+            Some(ds_config::TtsEngine::Kokoro),
+            q.generation.load(Ordering::SeqCst),
+        );
+        flip.join().unwrap();
+        q.tts.set_enabled(false); // stop the spawned fixture
+        assert_eq!(
+            outcome,
+            ReadyOutcome::Ready,
+            "a stale TTSLOADERR must not drop the item its own retry is about to heal"
         );
     }
 
