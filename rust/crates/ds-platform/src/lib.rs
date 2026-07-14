@@ -112,17 +112,12 @@ pub trait FrontmostWindow {
         None
     }
 
-    /// Whether something focused would ACCEPT a paste right now — i.e. an editable
-    /// text field / input has keyboard focus (macOS: a system-wide focused AX element
-    /// whose value is settable; Windows: the foreground thread has a focus window).
-    /// Used by the `paste_focus_check` guard to decide whether a confirm tap pastes
-    /// or instead flashes "nothing to paste into" and keeps the transcript.
+    /// Whether the current focus appears able to accept pasted text.
     ///
-    /// DEFAULT `true` so the Linux stub + the engine-test `MockPlatform` behave
-    /// exactly as today (the paste always proceeds); only the macOS and Windows
-    /// impls override it. Because the guard is opt-in (`paste_focus_check`, default
-    /// off) AND a second tap force-pastes regardless, an occasional false negative
-    /// here can never trap a transcript.
+    /// This is a best-effort presentation signal: the engine samples it while the
+    /// dictation panel is visible and warns when false. It never gates delivery; a
+    /// confirmed transcript is pasted into whatever is focused. Default `true` so
+    /// platforms without a reliable probe fail open; macOS and Windows override it.
     fn has_paste_target(&self) -> bool {
         true
     }
