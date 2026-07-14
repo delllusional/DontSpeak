@@ -33,6 +33,11 @@ use reader::*;
 
 const SPEAK_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const CAPTURE_TERMINAL_GRACE: u64 = 25;
+/// Upper bound on the spawned child's pre-READY handshake. Generous — a first-run
+/// CoreML/ANE compile or cold ORT provider init can take tens of seconds — but finite:
+/// a child that stays alive without ever printing READY (issue #59) is killed at this
+/// bound instead of blocking `start_locked` (and the `lifecycle` lock) forever.
+const READY_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Where the warm child's stderr is sent (the app has no console, so anything that lands here
 /// must go to a file). Routed through the shared `open_aux_log` so it sits BESIDE the engine's
@@ -136,6 +141,15 @@ struct TestOverrides {
     /// spawns a REAL child doesn't write under the real per-OS logs dir. See
     /// [`TtsManager::set_stderr_log_dir_for_test`].
     stderr_log_dir: Option<std::path::PathBuf>,
+    /// Overrides `ready_handshake_timeout`'s real [`READY_HANDSHAKE_TIMEOUT`] bound. See
+    /// [`TtsManager::set_ready_timeout_for_test`].
+    ready_timeout: Option<std::time::Duration>,
+    /// Extra env vars `start_locked` applies to the spawned child (e.g. the fake helper's
+    /// `DONTSPEAK_FAKE_WEDGE_PRE_READY` switch). Per-manager, via `Command::env`, NOT a
+    /// process-global `std::env::set_var` — that is `unsafe` in edition 2024 and races
+    /// parallel tests that also spawn the fixture. See
+    /// [`TtsManager::set_spawn_env_for_test`].
+    spawn_env: Vec<(String, String)>,
 }
 
 pub struct TtsManager {
@@ -674,8 +688,9 @@ impl TtsManager {
         }
     }
 
-    /// Spawn `ds-helper --serve` and wait for its `READY` line (model warm).
-    /// On any failure the manager stays "not running" and the hooks fall back to
+    /// Spawn `ds-helper --serve` and wait — bounded by [`READY_HANDSHAKE_TIMEOUT`] —
+    /// for its `READY` line (model warm). On any failure (including a child that
+    /// never answers) the manager stays "not running" and the hooks fall back to
     /// the cold one-shot path.
     fn start(&self) {
         let _lifecycle = self.lifecycle.lock().unwrap();
@@ -767,6 +782,12 @@ impl TtsManager {
                 None => cmd.env_remove(key),
             };
         }
+        // Test-only: per-manager extras layered on top of the contract above — see
+        // `TestOverrides::spawn_env` for why this is not a process-global `set_var`.
+        #[cfg(test)]
+        for (key, val) in self.test_overrides.lock().unwrap().spawn_env.clone() {
+            cmd.env(key, val);
+        }
         // Windows: the engine runs inside a windowless GUI host (the WinUI app), so
         // spawning this CONSOLE-subsystem helper would pop a stray terminal window.
         // CREATE_NO_WINDOW suppresses it; the piped stdio still works without a console.
@@ -797,19 +818,47 @@ impl TtsManager {
             return;
         };
 
-        // Wait for READY (model loaded) or ERR (fatal). Bounded by the child
-        // closing stdout on failure; load takes a few seconds the first time.
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match stdout.read_line(&mut line) {
-                Ok(0) => {
-                    let _ = child.wait();
-                    self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
-                    log::warn!(target: "engine", "TTS warm child closed before READY");
-                    return;
+        // Wait for READY (model loaded) or ERR (fatal) — bounded by
+        // `ready_handshake_timeout()`. A child that fails normally closes stdout (EOF) or
+        // prints ERR, but a child that stays ALIVE without ever answering (issue #59 —
+        // ORT/CoreML provider init spinning, the model file on a stalled mount or held by
+        // an AV scanner) used to block this loop, and the `lifecycle` lock with it,
+        // forever. A pipe read is not portably interruptible, so a dedicated handshake
+        // thread owns the `BufReader` and feeds lines over a channel; the main thread
+        // bounds the wait with `recv_timeout`. On READY the thread stops reading and
+        // RETURNS the same buffered reader, so the persistent demux reader below takes
+        // over the stream with no data loss.
+        let (line_tx, line_rx) = std::sync::mpsc::channel();
+        let handshake = std::thread::spawn(move || {
+            loop {
+                let mut line = String::new();
+                match stdout.read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = line_tx.send(Ok(None));
+                        break;
+                    }
+                    Ok(_) => {
+                        let ready = line.trim() == proto::READY;
+                        let _ = line_tx.send(Ok(Some(line)));
+                        if ready {
+                            // Success terminal: stop reading so `start_locked` can hand the
+                            // stream to the persistent reader.
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = line_tx.send(Err(e));
+                        break;
+                    }
                 }
-                Ok(_) => {
+            }
+            stdout
+        });
+        let deadline = std::time::Instant::now() + self.ready_handshake_timeout();
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match line_rx.recv_timeout(remaining) {
+                Ok(Ok(Some(line))) => {
                     let l = line.trim();
                     if l == proto::READY {
                         break;
@@ -852,21 +901,55 @@ impl TtsManager {
                     if let Some(msg) = l.strip_prefix(proto::ERR) {
                         let _ = child.kill();
                         let _ = child.wait();
+                        // Kill closed the pipe → the handshake thread EOFs; the join is
+                        // bounded (same on every failure arm below).
+                        let _ = handshake.join();
                         self.set_error(msg.trim());
                         log::warn!(target: "engine", "TTS warm child failed to load:{msg}");
                         return;
                     }
                     // ignore any other chatter before READY
                 }
-                Err(e) => {
+                Ok(Ok(None)) => {
+                    let _ = child.wait();
+                    let _ = handshake.join();
+                    self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
+                    log::warn!(target: "engine", "TTS warm child closed before READY");
+                    return;
+                }
+                Ok(Err(e)) => {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = handshake.join();
                     self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
                     log::warn!(target: "engine", "TTS warm child read error before READY: {e}");
                     return;
                 }
+                Err(_) => {
+                    // Timeout (or the handshake thread vanished): the child is alive but
+                    // never answered — kill it rather than wait forever. The manager parks
+                    // "not running" with `last_error` set, so `warm_child_heal_action`
+                    // (absent, error=true) resolves to `Nothing` — no automatic retry
+                    // storm; recovery is owned by the download-completion hook, a config
+                    // change, or the next `set_enabled`, exactly like every other start
+                    // failure.
+                    let pid = child.id();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = handshake.join();
+                    self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
+                    log::warn!(
+                        target: "engine",
+                        "TTS warm child (pid {pid}) never printed READY within {:?} — killed",
+                        self.ready_handshake_timeout()
+                    );
+                    return;
+                }
             }
         }
+        let stdout = handshake
+            .join()
+            .expect("the READY-handshake reader thread panicked");
 
         self.clear_error();
         // A fresh child is about to be installed: any stale per-model load error from a
@@ -1584,6 +1667,39 @@ impl TtsManager {
         self.test_overrides.lock().unwrap().finalize_timeout = Some(d);
     }
 
+    /// The bound `start_locked`'s pre-READY wait enforces before killing the child.
+    /// PRODUCTION path (outside `#[cfg(test)]` builds) ALWAYS returns
+    /// [`READY_HANDSHAKE_TIMEOUT`] — `test_overrides.ready_timeout` only exists in test
+    /// builds (same idiom as [`finalize_timeout_limit`](Self::finalize_timeout_limit)),
+    /// so a shipped binary can never take the override branch.
+    fn ready_handshake_timeout(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if let Some(d) = self.test_overrides.lock().unwrap().ready_timeout {
+            return d;
+        }
+        READY_HANDSHAKE_TIMEOUT
+    }
+
+    /// Test-only override for [`ready_handshake_timeout`](Self::ready_handshake_timeout),
+    /// so a wedged-spawn test resolves in milliseconds instead of the real 120 s window.
+    /// Never compiled into a release binary.
+    #[cfg(test)]
+    pub(crate) fn set_ready_timeout_for_test(&self, d: std::time::Duration) {
+        self.test_overrides.lock().unwrap().ready_timeout = Some(d);
+    }
+
+    /// Test-only: extra env vars for the NEXT spawned child — see
+    /// [`TestOverrides::spawn_env`] for why this is per-manager rather than a
+    /// process-global `std::env::set_var`. Replaces the whole set (pass `&[]` to clear).
+    /// Never compiled into a release binary.
+    #[cfg(test)]
+    pub(crate) fn set_spawn_env_for_test(&self, env: &[(&str, &str)]) {
+        self.test_overrides.lock().unwrap().spawn_env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+    }
+
     /// The directory `helper_stderr()` should open `ds-helper.log` under — the test-only
     /// override when set, else `None` (falls through to the real
     /// `ds_config::Paths::resolve()` path, exactly as before this seam existed). The
@@ -1797,9 +1913,42 @@ mod coexist_it {
 }
 
 #[cfg(test)]
-mod wedge_recovery_tests {
+pub(crate) mod wedge_recovery_tests {
     use super::*;
     use std::time::Duration;
+
+    /// Resolve the `dontspeakd-fake-helper` fixture's executable — `pub(crate)` because
+    /// `ttsq.rs`'s readiness-gate tests spawn the same fixture.
+    ///
+    /// Cargo's own CARGO_BIN_EXE_<name> mechanism for locating a sibling `[[bin]]`
+    /// target's executable is NOT available here — it's only set when building an
+    /// INTEGRATION test/benchmark, not a unit test module like this one (confirmed: a
+    /// `env!("CARGO_BIN_EXE_dontspeakd-fake-helper")` here is a hard compile error).
+    /// Instead, resolve it relative to the CURRENTLY RUNNING test binary:
+    /// `current_exe()` for a unit test binary is `target/<profile>/deps/dontspeakd-<hash>`,
+    /// and Cargo places this crate's `[[bin]]` output in `target/<profile>` (its
+    /// grandparent) — this self-adapts to profile (debug/release) and to a redirected
+    /// `CARGO_TARGET_DIR`, unlike a path hardcoded relative to `CARGO_MANIFEST_DIR`
+    /// (the pattern `coexist_smoke`, above, uses — tolerable there only because that
+    /// test is `#[ignore]`d and never runs in default CI).
+    pub(crate) fn fake_helper_bin() -> std::path::PathBuf {
+        let bin_name = if cfg!(windows) {
+            "dontspeakd-fake-helper.exe"
+        } else {
+            "dontspeakd-fake-helper"
+        };
+        let bin = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent()?.parent().map(std::path::Path::to_path_buf))
+            .map(|dir| dir.join(bin_name))
+            .expect("could not resolve the running test binary's own directory");
+        assert!(
+            bin.exists(),
+            "fixture not built at {} — run `cargo build --workspace` (or -p dontspeakd) first",
+            bin.display()
+        );
+        bin
+    }
 
     /// Pins the ACTUAL production 10s/35s values directly (no process, no real wait) —
     /// so a future edit to either number is a deliberate, visible diff. The integration
@@ -1834,33 +1983,7 @@ mod wedge_recovery_tests {
     /// `ds_config::Paths::resolve()`'s real per-OS logs dir (see `TestOverrides`, above).
     #[test]
     fn a_wedged_listen_is_recovered_and_a_queued_speak_succeeds_after_restart() {
-        // Cargo's own CARGO_BIN_EXE_<name> mechanism for locating a sibling `[[bin]]`
-        // target's executable is NOT available here — it's only set when building an
-        // INTEGRATION test/benchmark, not a unit test module like this one (confirmed: a
-        // `env!("CARGO_BIN_EXE_dontspeakd-fake-helper")` here is a hard compile error).
-        // Instead, resolve it relative to the CURRENTLY RUNNING test binary:
-        // `current_exe()` for a unit test binary is `target/<profile>/deps/dontspeakd-<hash>`,
-        // and Cargo places this crate's `[[bin]]` output in `target/<profile>` (its
-        // grandparent) — this self-adapts to profile (debug/release) and to a redirected
-        // `CARGO_TARGET_DIR`, unlike a path hardcoded relative to `CARGO_MANIFEST_DIR`
-        // (the pattern `coexist_smoke`, above, uses — tolerable there only because that
-        // test is `#[ignore]`d and never runs in default CI).
-        let bin_name = if cfg!(windows) {
-            "dontspeakd-fake-helper.exe"
-        } else {
-            "dontspeakd-fake-helper"
-        };
-        let bin = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent()?.parent().map(std::path::Path::to_path_buf))
-            .map(|dir| dir.join(bin_name))
-            .expect("could not resolve the running test binary's own directory");
-        assert!(
-            bin.exists(),
-            "fixture not built at {} — run `cargo build --workspace` (or -p dontspeakd) first",
-            bin.display()
-        );
-
+        let bin = fake_helper_bin();
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(TtsManager::new(
             bin,
@@ -1940,6 +2063,82 @@ mod wedge_recovery_tests {
             "speak after the wedge is killed must succeed: {speak_2_result:?}"
         );
 
+        mgr.set_enabled(false);
+    }
+
+    /// Pins the ACTUAL production READY-handshake bound directly (no process, no real
+    /// wait) — so a future edit to the number is a deliberate, visible diff (mirrors
+    /// `finalize_timeout_limit_pins_the_system_vs_native_bound`). The integration test
+    /// below deliberately does NOT wait out the real 120 s; see
+    /// `set_ready_timeout_for_test`.
+    #[test]
+    fn ready_handshake_timeout_pins_the_production_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let tts = TtsManager::new(
+            dir.path().join("ds-test-nonexistent-helper"),
+            Arc::new(crate::stats::TtsStats::new()),
+            Arc::new(crate::stats::SttStats::new()),
+            Arc::new(crate::stats::LifetimeSeconds::load(
+                dir.path().join("lifetime.json"),
+            )),
+        );
+        assert_eq!(tts.ready_handshake_timeout(), Duration::from_secs(120));
+    }
+
+    /// Issue #59: a spawned child that stays ALIVE without ever printing READY, ERR, or
+    /// closing stdout (ORT provider init spinning, the model on a stalled mount, an AV
+    /// scanner holding the `.onnx`) used to block `start_locked` — and the `lifecycle`
+    /// lock, wedging every other lifecycle operation — forever. Now it is killed at the
+    /// handshake bound, the manager parks in the ordinary "failed start" state, and the
+    /// next start (here: with the wedge switch cleared) fully recovers the slot.
+    #[test]
+    fn a_child_that_wedges_before_ready_is_killed_at_the_handshake_bound() {
+        let bin = fake_helper_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = TtsManager::new(
+            bin,
+            Arc::new(crate::stats::TtsStats::new()),
+            Arc::new(crate::stats::SttStats::new()),
+            Arc::new(crate::stats::LifetimeSeconds::load(
+                dir.path().join("lifetime.json"),
+            )),
+        );
+        mgr.set_spawn_env_for_test(&[("DONTSPEAK_FAKE_WEDGE_PRE_READY", "1")]);
+        mgr.set_ready_timeout_for_test(Duration::from_millis(200));
+        // Same real-$HOME guard as the wedged-listen test above.
+        mgr.set_stderr_log_dir_for_test(dir.path().to_path_buf());
+
+        let t0 = std::time::Instant::now();
+        mgr.ensure_started();
+        let elapsed = t0.elapsed();
+        // Generous CI bound — the point is "finite", not "exactly 200 ms".
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the handshake must be bounded, took {elapsed:?}"
+        );
+        assert!(
+            !mgr.is_running(),
+            "a wedged child must be killed, never installed"
+        );
+        assert!(
+            mgr.last_error().is_some(),
+            "a timed-out handshake parks the manager with last_error set"
+        );
+
+        // Recovery: with the wedge switch cleared, the same manager starts a healthy
+        // child — proving the wedged one was actually killed (not orphaned holding the
+        // slot) and the failure state is fully cleared by a successful start.
+        mgr.set_spawn_env_for_test(&[]);
+        mgr.ensure_started();
+        assert!(
+            mgr.is_running(),
+            "restart after the wedge must succeed: {:?}",
+            mgr.last_error()
+        );
+        assert!(
+            mgr.last_error().is_none(),
+            "a successful start clears the parked error"
+        );
         mgr.set_enabled(false);
     }
 }

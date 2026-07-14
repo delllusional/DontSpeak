@@ -8,7 +8,11 @@
 //! to simulate a genuinely hung native STT finalize call, without the real `ds-helper`'s
 //! model/mic/audio dependencies.
 //!
-//! Protocol: emits READY immediately, then per stdin line:
+//! Protocol: emits READY immediately (unless `DONTSPEAK_FAKE_WEDGE_PRE_READY` is set in
+//! the env — then it wedges FIRST: alive, silent, stdout open, never printing READY/ERR
+//! or closing the pipe, mirroring a real helper stuck pre-READY in ORT provider init or
+//! behind an AV scan of the model file — the issue #59 shape the READY-handshake bound
+//! in `tts::start_locked` exists to kill), then per stdin line:
 //!   * a `listen` request emits one `PARTIAL wedge-ack` line FIRST — a real, recognized
 //!     `ds-helper-proto` token that `listen_cancellable`'s own event loop demuxes and
 //!     hands to the caller's `on_partial` callback, which is how the test proves the
@@ -27,6 +31,12 @@
 use std::io::{BufRead, Write};
 
 fn main() {
+    if std::env::var_os("DONTSPEAK_FAKE_WEDGE_PRE_READY").is_some() {
+        // Pre-READY wedge (see module doc): alive, silent, stdout open.
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let _ = writeln!(out, "{}", ds_helper_proto::READY);

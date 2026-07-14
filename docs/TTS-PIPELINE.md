@@ -192,9 +192,12 @@ The concrete gaps are:
   generally become the audible word `unknown`; deterministic transliteration is still absent.
 - Queue overflow is rejected at acceptance, but the FIFO has no stale-work age or priority
   distinction between user-requested MCP speech and replaceable streaming narration.
-- The nominal Kokoro readiness deadline is not a real upper bound. A newly spawned helper can
-  remain alive without printing `READY`, `ERR`, EOF, or a read error, so `start_locked()` can block
-  before `wait_until_ready()` rechecks its deadline. This remains tracked in issue #59.
+
+The Kokoro readiness deadline is a real upper bound (issue #59, fixed): `start_locked()`'s
+pre-`READY` handshake is itself bounded (120 seconds, `READY_HANDSHAKE_TIMEOUT`) and a helper
+that stays alive without printing `READY`, `ERR`, or EOF is killed at that bound; the queue
+worker's readiness wait never blocks on child lifecycle calls — crash healing runs on a
+single-flight background thread while the wait keeps polling.
 
 ## Verification boundaries
 
@@ -202,7 +205,7 @@ The concrete gaps are:
 |---|---|
 | Adapter to reducer | Delta/cumulative input, duplicate, reordered, interleaved, missing-ID, malformed-final, reconnect |
 | Reducer to normalizer | Multiple blockquotes, short fallback, Markdown links/code, URLs/paths, long digits, Unicode |
-| Queue policy | Warm-up, load failure, IPC failure, mic/focus transitions, session barge, overflow, duplicate ID |
+| Queue policy | Warm-up, load failure, IPC failure, pre-READY wedge, mic/focus transitions, session barge, overflow, duplicate ID |
 | Helper protocol | Success, cancellation, empty PCM, first-piece failure, partial-piece failure, lazy reload failure |
 | Backend parity | Normalized input equality, exact input bounds, representative phoneme/token coverage |
 | End to end | One identified utterance reaches one terminal playback outcome on every client route |
