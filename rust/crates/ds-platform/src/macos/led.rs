@@ -24,7 +24,6 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_uint};
 use std::ptr;
-use std::sync::OnceLock;
 use std::time::Instant;
 
 use super::stuck_grant::StuckGrantLatch;
@@ -95,11 +94,33 @@ struct LedTarget {
     element: IoHidElementRef,
 }
 
+#[derive(Default)]
+struct TargetCache {
+    /// Every attached keyboard, including devices without a writable Caps-Lock element.
+    /// Keeping this complete snapshot prevents a rescan on every edge for such devices.
+    devices: Vec<IoHidDeviceRef>,
+    targets: Vec<LedTarget>,
+}
+
+impl Drop for TargetCache {
+    fn drop(&mut self) {
+        // SAFETY: discovery retained each element and device exactly once for this cache.
+        unsafe {
+            for target in self.targets.drain(..) {
+                CFRelease(target.element);
+            }
+            for device in self.devices.drain(..) {
+                CFRelease(device);
+            }
+        }
+    }
+}
+
 /// Owns an open HID Manager (matching all devices) used to drive the physical
 /// Caps-Lock LED on every keyboard.
 pub struct CapsLed {
     manager: IoHidManagerRef,
-    targets: OnceLock<Vec<LedTarget>>,
+    targets: RefCell<TargetCache>,
 }
 
 // SAFETY: `CapsLed` wraps only the IOHIDManagerRef it owns, and HID Manager calls are not
@@ -137,23 +158,21 @@ impl CapsLed {
             }
             Ok(CapsLed {
                 manager,
-                targets: OnceLock::new(),
+                targets: RefCell::new(TargetCache::default()),
             })
         }
     }
 
     /// Drive the Caps-Lock LED on every keyboard to `on`, WITHOUT changing the
-    /// logical caps state. The manager's keyboard/element pairs are resolved and
-    /// retained once on the first call; later edges only create and set HID values.
-    /// A keyboard hot-plugged later is discovered after the next engine lifecycle
-    /// reopens the manager.
+    /// logical caps state. The manager's keyboard/element pairs stay cached while
+    /// the attached keyboard set is unchanged; hot-plugging refreshes the cache on
+    /// the next edge without repeating the element scan on ordinary edges.
     pub fn set(&self, on: bool) {
-        let targets = self.targets.get_or_init(|| {
-            // SAFETY: `self.manager` stays open and owned by `self` for the full lifetime
-            // of the targets retained by this OnceLock.
-            unsafe { discover_targets(self.manager) }
-        });
-        for target in targets {
+        let mut cache = self.targets.borrow_mut();
+        // SAFETY: `self.manager` stays open and owned by `self` for the full lifetime
+        // of every target retained in the refreshed cache.
+        unsafe { refresh_targets(self.manager, &mut cache) };
+        for target in &cache.targets {
             // SAFETY: discovery retains both refs until `CapsLed::drop`, the manager is
             // still open, and SetValue consumes neither ref.
             unsafe { set_caps_led(target, on) };
@@ -161,56 +180,74 @@ impl CapsLed {
     }
 }
 
-/// Resolve and retain every keyboard's Caps-Lock LED element once for this open manager.
-unsafe fn discover_targets(manager: IoHidManagerRef) -> Vec<LedTarget> {
+/// Refresh retained keyboard targets only when the attached-device identity set changes.
+unsafe fn refresh_targets(manager: IoHidManagerRef, cache: &mut TargetCache) {
     // SAFETY: `manager` is open for this call. CopyDevices/CopyMatchingElements return
     // owned collections released below; the selected borrowed device/element refs are
-    // explicitly retained so the returned targets outlive those collections.
+    // explicitly retained so the refreshed cache outlives those collections.
     unsafe {
-        let mut targets = Vec::new();
         let devices = IOHIDManagerCopyDevices(manager);
         if devices.is_null() {
-            return targets;
+            return;
         }
         let count = CFSetGetCount(devices);
+        let mut keyboards = Vec::new();
         if count > 0 {
             let mut refs: Vec<*const c_void> = vec![ptr::null(); count as usize];
             CFSetGetValues(devices, refs.as_mut_ptr());
             for &raw_device in &refs {
                 let device = raw_device as IoHidDeviceRef;
-                if device.is_null()
-                    || IOHIDDeviceConformsTo(
+                if !device.is_null()
+                    && IOHIDDeviceConformsTo(
                         device,
                         K_HID_PAGE_GENERIC_DESKTOP,
                         K_HID_USAGE_GD_KEYBOARD,
-                    ) == 0
+                    ) != 0
                 {
-                    continue;
+                    keyboards.push(device);
                 }
-                let elements =
-                    IOHIDDeviceCopyMatchingElements(device, ptr::null(), KIO_HID_OPTIONS_TYPE_NONE);
-                if elements.is_null() {
-                    continue;
-                }
-                let element_count = CFArrayGetCount(elements);
-                for index in 0..element_count {
-                    let element = CFArrayGetValueAtIndex(elements, index) as IoHidElementRef;
-                    if !element.is_null()
-                        && IOHIDElementGetUsagePage(element) == K_HID_PAGE_LEDS
-                        && IOHIDElementGetUsage(element) == K_HID_USAGE_LED_CAPSLOCK
-                    {
-                        CFRetain(device);
-                        CFRetain(element);
-                        targets.push(LedTarget { device, element });
-                        break;
-                    }
-                }
-                CFRelease(elements);
             }
         }
+
+        if device_sets_match(&cache.devices, &keyboards) {
+            CFRelease(devices);
+            return;
+        }
+
+        let mut refreshed = TargetCache::default();
+        for device in keyboards {
+            CFRetain(device);
+            refreshed.devices.push(device);
+
+            let elements =
+                IOHIDDeviceCopyMatchingElements(device, ptr::null(), KIO_HID_OPTIONS_TYPE_NONE);
+            if elements.is_null() {
+                continue;
+            }
+            let element_count = CFArrayGetCount(elements);
+            for index in 0..element_count {
+                let element = CFArrayGetValueAtIndex(elements, index) as IoHidElementRef;
+                if !element.is_null()
+                    && IOHIDElementGetUsagePage(element) == K_HID_PAGE_LEDS
+                    && IOHIDElementGetUsage(element) == K_HID_USAGE_LED_CAPSLOCK
+                {
+                    CFRetain(element);
+                    refreshed.targets.push(LedTarget { device, element });
+                    break;
+                }
+            }
+            CFRelease(elements);
+        }
         CFRelease(devices);
-        targets
+        *cache = refreshed;
     }
+}
+
+fn device_sets_match(cached: &[IoHidDeviceRef], current: &[IoHidDeviceRef]) -> bool {
+    cached.len() == current.len()
+        && cached
+            .iter()
+            .all(|cached_device| current.contains(cached_device))
 }
 
 unsafe fn set_caps_led(target: &LedTarget, on: bool) {
@@ -230,12 +267,7 @@ impl Drop for CapsLed {
         // closed and released at most once (nulled right after), pairing
         // IOHIDManagerCreate/IOHIDManagerOpen.
         unsafe {
-            if let Some(targets) = self.targets.get_mut() {
-                for target in targets.drain(..) {
-                    CFRelease(target.element);
-                    CFRelease(target.device);
-                }
-            }
+            *self.targets.get_mut() = TargetCache::default();
             if !self.manager.is_null() {
                 IOHIDManagerClose(self.manager, KIO_HID_OPTIONS_TYPE_NONE);
                 CFRelease(self.manager);
@@ -373,5 +405,24 @@ impl RetryingCapsLed {
     /// Whether this process's LED writer is confirmed stuck — see [`LED_STUCK`].
     pub fn is_stuck(&self) -> bool {
         LED_STUCK.is_stuck()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_snapshot_detects_hotplug_and_same_count_replacement() {
+        let mut first = 0_u8;
+        let mut second = 0_u8;
+        let mut replacement = 0_u8;
+        let first = ptr::from_mut(&mut first).cast();
+        let second = ptr::from_mut(&mut second).cast();
+        let replacement = ptr::from_mut(&mut replacement).cast();
+
+        assert!(device_sets_match(&[first, second], &[second, first]));
+        assert!(!device_sets_match(&[first], &[first, second]));
+        assert!(!device_sets_match(&[first, second], &[first, replacement]));
     }
 }
