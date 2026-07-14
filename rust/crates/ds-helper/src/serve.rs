@@ -13,6 +13,12 @@ use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
 use crate::oneshot::{Backend, load_backend};
 use crate::prepare::{PrepareOutcome, PreparedAudio, prepare_audio};
 
+const TTS_OUTPUT_UNAVAILABLE: &str = "helper started without TTS output; restart required";
+
+fn tts_output_available(tts_wanted: bool, render_via_duplex: bool) -> bool {
+    tts_wanted || render_via_duplex
+}
+
 /// Flatten an error for a protocol line: the engine's reader parses helper stdout strictly
 /// line-by-line, so a multi-line message (ort/ONNX Runtime `Display` can be) would truncate
 /// the `ERR`/`TTSLOADERR` terminal at its first line and leak the rest as stray lines.
@@ -415,6 +421,7 @@ pub(crate) fn serve() -> ! {
     // (Windows WASAPI Communications, Linux module-echo-cancel) return false: rodio
     // still renders and the duplex only supplies the echo-cancelled capture.
     let render_via_duplex = duplex.as_ref().is_some_and(|d| d.owns_render());
+    let tts_output_available = tts_output_available(tts_wanted, render_via_duplex);
     // One persistent audio device (the cpal stream is !Send → it must stay on THIS
     // playback thread). `log_on_drop(false)` + `_exit` on quit avoid the macOS-26
     // CoreAudio teardown abort. Per-request `Player`s are created on its mixer.
@@ -989,6 +996,12 @@ pub(crate) fn serve() -> ! {
                 // model is truly resident — never on the mere `load` request (the old optimistic
                 // green). Already-resident ⇒ still confirm, so a reconcile after startup keeps the
                 // flag honest.
+                if !tts_output_available {
+                    use std::io::Write as _;
+                    println!("{}{}", proto::TTSLOADERR_PREFIX, TTS_OUTPUT_UNAVAILABLE);
+                    let _ = std::io::stdout().flush();
+                    continue;
+                }
                 let mut resident = synth.is_some();
                 if synth.is_none() {
                     match load_backend() {
@@ -1048,6 +1061,14 @@ pub(crate) fn serve() -> ! {
                 continue;
             }
         };
+
+        // A helper started for STT only deliberately owns no playback sink. Refuse the whole
+        // request before frontend/backend work so it cannot discard PCM and report STATS+DONE.
+        if !tts_output_available {
+            println!("{} {}", proto::ERR, TTS_OUTPUT_UNAVAILABLE);
+            let _ = std::io::stdout().flush();
+            continue;
+        }
 
         // Run the frontend before touching the backend. Empty/image/emoji/punctuation-only
         // requests are successful no-ops even after `unload tts`; they must not pay for a model
@@ -1270,7 +1291,14 @@ pub(crate) fn serve() -> ! {
 
 #[cfg(test)]
 mod audio_tests {
-    use super::{LEAD_SILENCE_MS, leading_silence_pcm};
+    use super::{LEAD_SILENCE_MS, leading_silence_pcm, tts_output_available};
+
+    #[test]
+    fn tts_output_requires_preload_or_render_owning_duplex() {
+        assert!(!tts_output_available(false, false));
+        assert!(tts_output_available(true, false));
+        assert!(tts_output_available(false, true));
+    }
 
     /// Regression guard for the "first speak, no sound" fix: every utterance must be preceded by
     /// a NON-EMPTY, fully-SILENT leading buffer so the rodio output-stream resume is absorbed

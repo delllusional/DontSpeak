@@ -253,6 +253,18 @@ pub fn engine_run(
     // cached state feeds BOTH the TTS worker's focus-hold and the mic-barge watcher, so
     // neither queries the audio device on a timer. Held for the engine's lifetime.
     let mic_watcher = ds_platform::MicWatcher::spawn(|_| {});
+    // Seed every helper spawn preference before starting the queue or exposing IPC. A speak can
+    // otherwise reach `restart_if_crashed` during boot and start an STT-only helper from the
+    // constructor defaults; that process has no playback sink and persists until a later reload.
+    tts.set_full_duplex_pref(full_duplex_wanted(&cfg));
+    tts.set_stt_provider_pref(helper_stt_provider(&cfg));
+    // Preload STT only for the built-in engine. `helper_stt_provider` resolves to "cpu" even for
+    // Off/ClaudeCode, so the provider token itself cannot gate this.
+    tts.set_stt_wanted(helper_uses_stt(&cfg));
+    tts.set_tts_wanted(helper_uses_tts(&cfg));
+    // `start_locked` resolves its model-presence gate from this stored preference. While stopped,
+    // `set_provider` only records the value; its restart behavior begins once a child is running.
+    tts.set_provider(cfg.resolved_tts_provider().as_str());
     // The single TTS serializer: all speech (replies + narration) flows through
     // this queue onto the warm child, so there is no per-block model reload.
     let ttsq = TtsQueue::start(
@@ -318,22 +330,6 @@ pub fn engine_run(
         ttsq.clone(),
     );
 
-    // Full-duplex AEC env for the warm helper, decided BEFORE the boot start so the
-    // child spawns with the right mode (Parakeet STT + Kokoro TTS — see docs/AEC.md).
-    tts.set_full_duplex_pref(full_duplex_wanted(&cfg));
-    tts.set_stt_provider_pref(helper_stt_provider(&cfg));
-    // Preload STT in parallel with the TTS load only when STT is the built-in (Parakeet)
-    // engine — `helper_stt_provider` resolves to "cpu" even for Off/ClaudeCode, so it
-    // can't gate this.
-    tts.set_stt_wanted(helper_uses_stt(&cfg));
-    tts.set_tts_wanted(helper_uses_tts(&cfg));
-    // Seed the TTS provider preference BEFORE the boot start below: the new model-presence
-    // gate in `start_locked` resolves ANE-vs-ONNX from `spawn_prefs.provider`, and without this
-    // the FIRST start would gate on `TtsManager::new`'s hardcoded "auto" default instead of the
-    // config's actually-resolved provider (`apply_provider_and_autofetch` below only applies it
-    // AFTER `set_enabled`). `set_provider` is a no-op beyond storing the preference while
-    // stopped — its restart logic only fires once a child is already running.
-    tts.set_provider(cfg.resolved_tts_provider().as_str());
     // Warm Kokoro only when TTS is on AND Kokoro is the engine (System uses `say`,
     // which needs no warm model). Blocks on the model load, but the RPC server
     // thread above is already serving.
