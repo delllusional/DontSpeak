@@ -440,26 +440,33 @@ impl TtsQueue {
     pub(crate) fn test_stub() -> Arc<Self> {
         let dir = tempfile::tempdir().unwrap();
         let helper = dir.path().join("ds-test-nonexistent-helper");
-        Self::test_stub_with_helper(dir.path(), helper)
+        Self::test_stub_with_helper(
+            dir.path(),
+            helper,
+            crate::tts::TtsManagerTestOptions::default(),
+        )
     }
 
     /// [`test_stub`](Self::test_stub) with an explicit helper binary — for the readiness-gate
     /// tests that need a REAL (fake-helper) child so `is_running()` turns true. `root` backs
     /// `paths` and the lifetime file; keep its TempDir alive in the test when the helper will
-    /// actually be spawned (stderr-log override dirs live there too).
+    /// actually be spawned. Test-only manager behavior is fixed before construction.
     #[cfg(test)]
     pub(crate) fn test_stub_with_helper(
         root: &std::path::Path,
         helper: std::path::PathBuf,
+        test_options: crate::tts::TtsManagerTestOptions,
     ) -> Arc<Self> {
         let paths = Paths::rooted_at(root);
-        let tts = Arc::new(TtsManager::new(
+        let tts = Arc::new(TtsManager::new_for_test(
             helper,
+            paths.log_file.clone(),
             Arc::new(crate::stats::TtsStats::new()),
             Arc::new(crate::stats::SttStats::new()),
             Arc::new(crate::stats::LifetimeSeconds::load(
                 root.join("ds-ttsq-test-lifetime.json"),
             )),
+            test_options,
         ));
         // A real (briefly-lived) mic watcher: `MicState` has no other constructor. Dropped
         // immediately — the handle just freezes at its last (safe) reading.
@@ -2725,8 +2732,6 @@ mod tests {
     #[test]
     fn wait_until_ready_cancellation_beats_a_manager_error() {
         let q = mk_queue();
-        let dir = tempfile::tempdir().unwrap();
-        q.tts.set_stderr_log_dir_for_test(dir.path().to_path_buf());
         q.tts.restart_if_crashed(); // nonexistent helper: the failed spawn records last_error
         assert!(
             q.tts.last_error().is_some(),
@@ -2743,8 +2748,6 @@ mod tests {
     #[test]
     fn wait_until_ready_reports_a_manager_error_without_consuming_the_deadline() {
         let q = mk_queue();
-        let dir = tempfile::tempdir().unwrap();
-        q.tts.set_stderr_log_dir_for_test(dir.path().to_path_buf());
         q.tts.restart_if_crashed();
         assert!(
             q.tts.last_error().is_some(),
@@ -2793,8 +2796,11 @@ mod tests {
     fn wait_until_ready_ignores_a_stale_load_error_when_retrying() {
         let bin = crate::tts::wedge_recovery_tests::fake_helper_bin();
         let dir = tempfile::tempdir().unwrap();
-        let q = TtsQueue::test_stub_with_helper(dir.path(), bin);
-        q.tts.set_stderr_log_dir_for_test(dir.path().to_path_buf());
+        let q = TtsQueue::test_stub_with_helper(
+            dir.path(),
+            bin,
+            crate::tts::TtsManagerTestOptions::default(),
+        );
         // A transient failure cached by a PRIOR load attempt (e.g. an AV scan holding the
         // model file) — the exact state that used to fail the wait instantly.
         q.tts
@@ -2841,14 +2847,15 @@ mod tests {
     fn wait_until_ready_does_not_block_on_a_wedged_child_spawn() {
         let bin = crate::tts::wedge_recovery_tests::fake_helper_bin();
         let dir = tempfile::tempdir().unwrap();
-        let q = TtsQueue::test_stub_with_helper(dir.path(), bin);
-        q.tts.set_stderr_log_dir_for_test(dir.path().to_path_buf());
-        q.tts
-            .set_spawn_env_for_test(&[("DONTSPEAK_FAKE_WEDGE_PRE_READY", "1")]);
+        let q = TtsQueue::test_stub_with_helper(
+            dir.path(),
+            bin,
+            crate::tts::TtsManagerTestOptions::default()
+                .with_first_spawn_env(&[("DONTSPEAK_FAKE_WEDGE_PRE_READY", "1")])
+                .with_ready_timeout(Duration::from_millis(3000)),
+        );
         // Big enough that a wait that DID ride the handshake would visibly overshoot the
         // 1.5 s assertion below; small enough to keep the cleanup join bounded.
-        q.tts
-            .set_ready_timeout_for_test(Duration::from_millis(3000));
 
         let started = std::time::Instant::now();
         let outcome = q.wait_until_ready_with_timeout(

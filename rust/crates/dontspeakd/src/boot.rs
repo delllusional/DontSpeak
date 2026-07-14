@@ -230,6 +230,7 @@ pub fn engine_run(
     let status_gate = StatusGate::new();
     let tts = Arc::new(TtsManager::new(
         install_bin("ds-helper"),
+        paths.log_file.clone(),
         tts_stats.clone(),
         stt_stats.clone(),
         lifetime.clone(),

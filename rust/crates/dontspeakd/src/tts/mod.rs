@@ -52,22 +52,10 @@ const READY_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// library abort, an unhandled panic, or a startup failure before `ds_log::log_cached` can
 /// even initialize.
 ///
-/// `log_dir_override`: when `Some`, use THIS directory instead of
-/// `ds_config::Paths::resolve()`'s real per-OS path — the test-only escape hatch fed by
-/// `TtsManager::stderr_log_dir_override_value`, which is always `None` outside
-/// `#[cfg(test)]` builds, so a release binary's behavior here is unchanged. Routed through
-/// `Paths::rooted_at` (the same tempdir-rooted-`Paths` constructor already used across
-/// `ds-config`/`ds-wire`/`dontspeakd` test helpers) rather than hand-deriving the log
-/// filename, so this can't drift from the real naming convention.
-fn helper_stderr(log_dir_override: Option<&std::path::Path>) -> Stdio {
-    if let Some(dir) = log_dir_override {
-        let log_file = ds_config::Paths::rooted_at(dir).log_file;
-        return ds_log::open_aux_log(&log_file, "ds-helper.log")
-            .map(Stdio::from)
-            .unwrap_or_else(Stdio::null);
-    }
-    ds_config::Paths::resolve()
-        .and_then(|p| ds_log::open_aux_log(&p.log_file, "ds-helper.log"))
+/// The engine log path is resolved once by the caller and injected with the helper binary,
+/// so tests can use a tempdir without a test-only branch in this production path.
+fn helper_stderr(engine_log_file: &std::path::Path) -> Stdio {
+    ds_log::open_aux_log(engine_log_file, "ds-helper.log")
         .map(Stdio::from)
         .unwrap_or_else(Stdio::null)
 }
@@ -129,32 +117,45 @@ struct SpawnPrefs {
     tts_preload: bool,
 }
 
-/// Test-only overrides for `TtsManager`'s [`test_overrides`](TtsManager) field — see its doc.
-/// Never compiled into a release binary.
+/// Constructor-injected settings for production paths that tests must bound or steer. A new
+/// test-only dependency belongs here rather than in a post-construction manager setter.
 #[cfg(test)]
 #[derive(Default)]
-struct TestOverrides {
-    /// Overrides `finalize_timeout_limit`'s real 10s/35s bound. See
-    /// [`TtsManager::set_finalize_timeout_for_test`].
+pub(crate) struct TtsManagerTestOptions {
     finalize_timeout: Option<std::time::Duration>,
-    /// Overrides the directory `helper_stderr()` opens `ds-helper.log` under, so a test that
-    /// spawns a REAL child doesn't write under the real per-OS logs dir. See
-    /// [`TtsManager::set_stderr_log_dir_for_test`].
-    stderr_log_dir: Option<std::path::PathBuf>,
-    /// Overrides `ready_handshake_timeout`'s real [`READY_HANDSHAKE_TIMEOUT`] bound. See
-    /// [`TtsManager::set_ready_timeout_for_test`].
     ready_timeout: Option<std::time::Duration>,
-    /// Extra env vars `start_locked` applies to the spawned child (e.g. the fake helper's
-    /// `DONTSPEAK_FAKE_WEDGE_PRE_READY` switch). Per-manager, via `Command::env`, NOT a
-    /// process-global `std::env::set_var` — that is `unsafe` in edition 2024 and races
-    /// parallel tests that also spawn the fixture. See
-    /// [`TtsManager::set_spawn_env_for_test`].
-    spawn_env: Vec<(String, String)>,
+    /// Extra env vars consumed by the first spawn. This lets the READY-wedge regression prove
+    /// recovery on the same manager without mutating either the manager or process-global env.
+    first_spawn_env: Mutex<Option<Vec<(String, String)>>>,
+}
+
+#[cfg(test)]
+impl TtsManagerTestOptions {
+    pub(crate) fn with_finalize_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.finalize_timeout = Some(timeout);
+        self
+    }
+
+    pub(crate) fn with_ready_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.ready_timeout = Some(timeout);
+        self
+    }
+
+    pub(crate) fn with_first_spawn_env(mut self, env: &[(&str, &str)]) -> Self {
+        self.first_spawn_env = Mutex::new(Some(
+            env.iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        ));
+        self
+    }
 }
 
 pub struct TtsManager {
     /// Path to the `ds-helper` helper binary.
     bin: PathBuf,
+    /// Unified engine log path used to place the helper's last-resort stderr log beside it.
+    helper_log_file: PathBuf,
     /// Serializes warm-child LIFECYCLE transitions — `start` / `stop_child` /
     /// `mark_dead`. Without it, a crash-driven `mark_dead` from a concurrent
     /// play+listen pair (both wake fatal on the same EOF) could race a restart and
@@ -199,13 +200,9 @@ pub struct TtsManager {
     listen_stopped_through: AtomicU64,
     /// When a stop was sent for the active generation. Used to bound a wedged native finalizer.
     listen_stop_started: Mutex<Option<(u64, std::time::Instant)>>,
-    /// Test-only knobs a `#[cfg(test)]` caller can set to steer production code paths that
-    /// are otherwise unreachable/unbounded in a test (`finalize_timeout_limit`'s real
-    /// 10s/35s wait, `helper_stderr()`'s real per-OS log write). One field so a third knob
-    /// doesn't need a fourth copy-pasted `Mutex<Option<T>>` + accessor pair. Absent entirely
-    /// from a release binary — this field doesn't exist outside `cfg(test)`.
+    /// Constructor-injected test dependencies; absent entirely from release binaries.
     #[cfg(test)]
-    test_overrides: Mutex<TestOverrides>,
+    test_options: TtsManagerTestOptions,
     /// Filled by the reader: a one-shot `diarize` waits here for its DIAR/DIARERR +
     /// terminal DDONE. Cleared at the start of each `diarize()`. Its own slot (not
     /// `listen_slot`) so a diarize and a speak demux independently.
@@ -289,14 +286,65 @@ pub struct TtsManager {
 const HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl TtsManager {
+    #[cfg(not(test))]
     pub fn new(
         bin: PathBuf,
+        helper_log_file: PathBuf,
         stats: Arc<crate::stats::TtsStats>,
         stt_stats: Arc<crate::stats::SttStats>,
         lifetime: Arc<crate::stats::LifetimeSeconds>,
     ) -> Self {
+        Self::new_inner(bin, helper_log_file, stats, stt_stats, lifetime)
+    }
+
+    #[cfg(test)]
+    pub fn new(
+        bin: PathBuf,
+        helper_log_file: PathBuf,
+        stats: Arc<crate::stats::TtsStats>,
+        stt_stats: Arc<crate::stats::SttStats>,
+        lifetime: Arc<crate::stats::LifetimeSeconds>,
+    ) -> Self {
+        Self::new_for_test(
+            bin,
+            helper_log_file,
+            stats,
+            stt_stats,
+            lifetime,
+            TtsManagerTestOptions::default(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        bin: PathBuf,
+        helper_log_file: PathBuf,
+        stats: Arc<crate::stats::TtsStats>,
+        stt_stats: Arc<crate::stats::SttStats>,
+        lifetime: Arc<crate::stats::LifetimeSeconds>,
+        test_options: TtsManagerTestOptions,
+    ) -> Self {
+        Self::new_inner(
+            bin,
+            helper_log_file,
+            stats,
+            stt_stats,
+            lifetime,
+            test_options,
+        )
+    }
+
+    fn new_inner(
+        bin: PathBuf,
+        helper_log_file: PathBuf,
+        stats: Arc<crate::stats::TtsStats>,
+        stt_stats: Arc<crate::stats::SttStats>,
+        lifetime: Arc<crate::stats::LifetimeSeconds>,
+        #[cfg(test)] test_options: TtsManagerTestOptions,
+    ) -> Self {
         Self {
             bin,
+            helper_log_file,
             lifecycle: Mutex::new(()),
             last_restart: Mutex::new(None),
             child: Arc::new(ChildSlot::new()),
@@ -310,7 +358,7 @@ impl TtsManager {
             listen_stopped_through: AtomicU64::new(0),
             listen_stop_started: Mutex::new(None),
             #[cfg(test)]
-            test_overrides: Mutex::new(TestOverrides::default()),
+            test_options,
             diarize_slot: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
             enroll_slot: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
             say_child: Mutex::new(None),
@@ -764,9 +812,7 @@ impl TtsManager {
             .stdout(Stdio::piped())
             // Helper stderr → a log file (full-duplex status, capture levels,
             // barge-debug, errors) so the warm child is diagnosable; was discarded.
-            .stderr(helper_stderr(
-                self.stderr_log_dir_override_value().as_deref(),
-            ));
+            .stderr(helper_stderr(&self.helper_log_file));
         // The daemon→helper env contract, resolved from the spawn prefs:
         //   • DONTSPEAK_PROVIDER      — Kokoro TTS execution provider ("cpu"|"cuda"|…).
         //   • DONTSPEAK_STT_PROVIDER  — local STT backend the child serves ("cpu"|"ane"|…).
@@ -782,11 +828,13 @@ impl TtsManager {
                 None => cmd.env_remove(key),
             };
         }
-        // Test-only: per-manager extras layered on top of the contract above — see
-        // `TestOverrides::spawn_env` for why this is not a process-global `set_var`.
+        // Constructor-injected, first-spawn-only fixture controls. Per-manager command env
+        // avoids the process-global environment race while letting the same manager recover.
         #[cfg(test)]
-        for (key, val) in self.test_overrides.lock().unwrap().spawn_env.clone() {
-            cmd.env(key, val);
+        if let Some(env) = self.test_options.first_spawn_env.lock().unwrap().take() {
+            for (key, value) in env {
+                cmd.env(key, value);
+            }
         }
         // Windows: the engine runs inside a windowless GUI host (the WinUI app), so
         // spawning this CONSOLE-subsystem helper would pop a stray terminal window.
@@ -1636,14 +1684,14 @@ impl TtsManager {
     /// Apple's System recognizer intentionally has a 35s OS-level finalization bound;
     /// native Parakeet should settle much sooner. Both remain finite and recoverable.
     /// PRODUCTION path (outside `#[cfg(test)]` builds) ALWAYS returns one of these two
-    /// literal values — `test_overrides.finalize_timeout` only exists in test builds, so a
+    /// literal values — `test_options.finalize_timeout` only exists in test builds, so a
     /// shipped binary can never take the override branch; see `tts::wedge_recovery_tests`
     /// for how a test exercises this in ~1-2s instead of the real 10s/35s window (#34) —
     /// floored by `listen_cancellable`'s pre-existing 1s `cv.wait_timeout` poll tick, not
     /// however small the override is set to.
     fn finalize_timeout_limit(&self) -> std::time::Duration {
         #[cfg(test)]
-        if let Some(d) = self.test_overrides.lock().unwrap().finalize_timeout {
+        if let Some(d) = self.test_options.finalize_timeout {
             return d;
         }
         let system = self
@@ -1658,67 +1706,17 @@ impl TtsManager {
         }
     }
 
-    /// Test-only override for `finalize_timeout_limit`'s bound, so a test can drive the
-    /// wedge-recovery path in ~1-2s instead of the real 10s/35s production window (floored
-    /// by `listen_cancellable`'s 1s poll tick — see that function's doc — not literally
-    /// milliseconds). Never compiled into a release binary.
-    #[cfg(test)]
-    fn set_finalize_timeout_for_test(&self, d: std::time::Duration) {
-        self.test_overrides.lock().unwrap().finalize_timeout = Some(d);
-    }
-
     /// The bound `start_locked`'s pre-READY wait enforces before killing the child.
     /// PRODUCTION path (outside `#[cfg(test)]` builds) ALWAYS returns
-    /// [`READY_HANDSHAKE_TIMEOUT`] — `test_overrides.ready_timeout` only exists in test
+    /// [`READY_HANDSHAKE_TIMEOUT`] — `test_options.ready_timeout` only exists in test
     /// builds (same idiom as [`finalize_timeout_limit`](Self::finalize_timeout_limit)),
     /// so a shipped binary can never take the override branch.
     fn ready_handshake_timeout(&self) -> std::time::Duration {
         #[cfg(test)]
-        if let Some(d) = self.test_overrides.lock().unwrap().ready_timeout {
+        if let Some(d) = self.test_options.ready_timeout {
             return d;
         }
         READY_HANDSHAKE_TIMEOUT
-    }
-
-    /// Test-only override for [`ready_handshake_timeout`](Self::ready_handshake_timeout),
-    /// so a wedged-spawn test resolves in milliseconds instead of the real 120 s window.
-    /// Never compiled into a release binary.
-    #[cfg(test)]
-    pub(crate) fn set_ready_timeout_for_test(&self, d: std::time::Duration) {
-        self.test_overrides.lock().unwrap().ready_timeout = Some(d);
-    }
-
-    /// Test-only: extra env vars for the NEXT spawned child — see
-    /// [`TestOverrides::spawn_env`] for why this is per-manager rather than a
-    /// process-global `std::env::set_var`. Replaces the whole set (pass `&[]` to clear).
-    /// Never compiled into a release binary.
-    #[cfg(test)]
-    pub(crate) fn set_spawn_env_for_test(&self, env: &[(&str, &str)]) {
-        self.test_overrides.lock().unwrap().spawn_env = env
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-    }
-
-    /// The directory `helper_stderr()` should open `ds-helper.log` under — the test-only
-    /// override when set, else `None` (falls through to the real
-    /// `ds_config::Paths::resolve()` path, exactly as before this seam existed). The
-    /// `#[cfg(test)]` check is compiled out entirely outside test builds, same idiom as
-    /// `finalize_timeout_limit`'s override check.
-    fn stderr_log_dir_override_value(&self) -> Option<std::path::PathBuf> {
-        #[cfg(test)]
-        if let Some(dir) = self.test_overrides.lock().unwrap().stderr_log_dir.clone() {
-            return Some(dir);
-        }
-        None
-    }
-
-    /// Test-only override for where `helper_stderr()` writes the warm child's stderr log —
-    /// point it at a tempdir so a test that spawns a REAL child (`wedge_recovery_tests`)
-    /// doesn't write under the real per-OS logs dir. Never compiled into a release binary.
-    #[cfg(test)]
-    pub(crate) fn set_stderr_log_dir_for_test(&self, dir: std::path::PathBuf) {
-        self.test_overrides.lock().unwrap().stderr_log_dir = Some(dir);
     }
 
     /// Test-only: force the Kokoro residency slot to `Loaded` without a live helper, so
@@ -1867,6 +1865,7 @@ mod coexist_it {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ds-helper");
         let mgr = Arc::new(TtsManager::new(
             bin,
+            std::env::temp_dir().join("ds-engine-coexist-test.log"),
             Arc::new(crate::stats::TtsStats::new()),
             Arc::new(crate::stats::SttStats::new()),
             Arc::new(crate::stats::LifetimeSeconds::load(
@@ -1952,13 +1951,14 @@ pub(crate) mod wedge_recovery_tests {
 
     /// Pins the ACTUAL production 10s/35s values directly (no process, no real wait) —
     /// so a future edit to either number is a deliberate, visible diff. The integration
-    /// test below deliberately does NOT wait out these real durations; see
-    /// `set_finalize_timeout_for_test`.
+    /// test below deliberately does NOT wait out these real durations; it injects a short
+    /// bound at construction.
     #[test]
     fn finalize_timeout_limit_pins_the_system_vs_native_bound() {
         let dir = tempfile::tempdir().unwrap();
         let tts = TtsManager::new(
             dir.path().join("ds-test-nonexistent-helper"),
+            dir.path().join("engine.log"),
             Arc::new(crate::stats::TtsStats::new()),
             Arc::new(crate::stats::SttStats::new()),
             Arc::new(crate::stats::LifetimeSeconds::load(
@@ -1976,30 +1976,22 @@ pub(crate) mod wedge_recovery_tests {
     /// child) fails fast rather than hanging, and the NEXT `ensure_started()` + `speak()`
     /// (the real `ttsq.rs` caller pattern) succeeds on a freshly restarted child.
     ///
-    /// NOTE: unlike `coexist_smoke` (which is `#[ignore]`d and so never runs by
-    /// default), this test runs on every commit — so it uses
-    /// `set_stderr_log_dir_for_test` to point `helper_stderr()`'s log write at this
-    /// test's own tempdir instead of letting `start_locked` fall through to
-    /// `ds_config::Paths::resolve()`'s real per-OS logs dir (see `TestOverrides`, above).
+    /// Unlike `coexist_smoke`, this runs on every commit, so both the helper log path and
+    /// shortened finalize timeout are injected at construction.
     #[test]
     fn a_wedged_listen_is_recovered_and_a_queued_speak_succeeds_after_restart() {
         let bin = fake_helper_bin();
         let dir = tempfile::tempdir().unwrap();
-        let mgr = Arc::new(TtsManager::new(
+        let mgr = Arc::new(TtsManager::new_for_test(
             bin,
+            dir.path().join("engine.log"),
             Arc::new(crate::stats::TtsStats::new()),
             Arc::new(crate::stats::SttStats::new()),
             Arc::new(crate::stats::LifetimeSeconds::load(
                 dir.path().join("lifetime.json"),
             )),
+            TtsManagerTestOptions::default().with_finalize_timeout(Duration::from_millis(50)),
         ));
-        mgr.set_finalize_timeout_for_test(Duration::from_millis(50));
-        // Real-$HOME guard: unlike coexist_smoke (which is #[ignore]d), this test runs
-        // on every commit — without this, ensure_started() below reaches
-        // start_locked()'s helper_stderr() → ds_config::Paths::resolve() →
-        // ds_log::open_aux_log and writes under the REAL per-OS logs dir as a side
-        // effect of spawning the fixture. Point it at this test's own tempdir instead.
-        mgr.set_stderr_log_dir_for_test(dir.path().to_path_buf());
 
         mgr.ensure_started();
         assert!(
@@ -2069,13 +2061,13 @@ pub(crate) mod wedge_recovery_tests {
     /// Pins the ACTUAL production READY-handshake bound directly (no process, no real
     /// wait) — so a future edit to the number is a deliberate, visible diff (mirrors
     /// `finalize_timeout_limit_pins_the_system_vs_native_bound`). The integration test
-    /// below deliberately does NOT wait out the real 120 s; see
-    /// `set_ready_timeout_for_test`.
+    /// below deliberately does NOT wait out the real 120 s; it injects a short bound.
     #[test]
     fn ready_handshake_timeout_pins_the_production_bound() {
         let dir = tempfile::tempdir().unwrap();
         let tts = TtsManager::new(
             dir.path().join("ds-test-nonexistent-helper"),
+            dir.path().join("engine.log"),
             Arc::new(crate::stats::TtsStats::new()),
             Arc::new(crate::stats::SttStats::new()),
             Arc::new(crate::stats::LifetimeSeconds::load(
@@ -2095,18 +2087,18 @@ pub(crate) mod wedge_recovery_tests {
     fn a_child_that_wedges_before_ready_is_killed_at_the_handshake_bound() {
         let bin = fake_helper_bin();
         let dir = tempfile::tempdir().unwrap();
-        let mgr = TtsManager::new(
+        let mgr = TtsManager::new_for_test(
             bin,
+            dir.path().join("engine.log"),
             Arc::new(crate::stats::TtsStats::new()),
             Arc::new(crate::stats::SttStats::new()),
             Arc::new(crate::stats::LifetimeSeconds::load(
                 dir.path().join("lifetime.json"),
             )),
+            TtsManagerTestOptions::default()
+                .with_ready_timeout(Duration::from_millis(200))
+                .with_first_spawn_env(&[("DONTSPEAK_FAKE_WEDGE_PRE_READY", "1")]),
         );
-        mgr.set_spawn_env_for_test(&[("DONTSPEAK_FAKE_WEDGE_PRE_READY", "1")]);
-        mgr.set_ready_timeout_for_test(Duration::from_millis(200));
-        // Same real-$HOME guard as the wedged-listen test above.
-        mgr.set_stderr_log_dir_for_test(dir.path().to_path_buf());
 
         let t0 = std::time::Instant::now();
         mgr.ensure_started();
@@ -2125,10 +2117,9 @@ pub(crate) mod wedge_recovery_tests {
             "a timed-out handshake parks the manager with last_error set"
         );
 
-        // Recovery: with the wedge switch cleared, the same manager starts a healthy
-        // child — proving the wedged one was actually killed (not orphaned holding the
-        // slot) and the failure state is fully cleared by a successful start.
-        mgr.set_spawn_env_for_test(&[]);
+        // Recovery: the constructor-injected wedge switch was consumed by the first spawn,
+        // so the same manager now starts a healthy child. This proves the wedged one was
+        // killed (not orphaned holding the slot) and a successful start clears the failure.
         mgr.ensure_started();
         assert!(
             mgr.is_running(),
@@ -2192,6 +2183,7 @@ mod status_gate_tests {
         let dir = tempfile::tempdir().unwrap();
         let tts = TtsManager::new(
             dir.path().join("ds-test-nonexistent-helper"),
+            dir.path().join("engine.log"),
             Arc::new(crate::stats::TtsStats::new()),
             Arc::new(crate::stats::SttStats::new()),
             Arc::new(crate::stats::LifetimeSeconds::load(
