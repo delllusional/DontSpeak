@@ -86,8 +86,8 @@ pub extern "C" fn ds_open_voice_settings() -> u8 {
     guard_val(0, || ds_tts::system::open_voice_settings() as u8)
 }
 
-/// Run `f`, returning `default` on a panic (panics must never cross the FFI
-/// boundary). All exported fns are read-only, so a default is always safe.
+/// Run `f`, returning its documented failure default on panic. Panics must not
+/// cross the FFI boundary.
 fn guard_val<T>(default: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(default)
 }

@@ -33,11 +33,15 @@ also prepare its app-server stream so `shorts` and digest narration work mid-tur
 capabilities and upstream-specific flags are documented in
 [Client integrations and launchers](docs/CLIENT-INTEGRATIONS.md).
 
-**Update:** re-run the install command above — it's a clean reinstall (stops the running app, replaces it with the latest release, re-wires, relaunches), safe to run anytime. When a newer release is out, the app's own version number turns into an in-app pill; that just flags it, it doesn't update anything itself.
+**Update:** re-run the install command. It stops and replaces the app, re-wires clients,
+and relaunches. The in-app version pill only signals an available update.
 
 **Build from source (developers):** `git clone https://github.com/delllusional/DontSpeak && cd DontSpeak && ./scripts/install.sh` (needs a Rust toolchain).
 
-**Uninstall** (app + integrations + all data/models): macOS/Linux — `~/.local/bin/dontspeak-uninstall` (or `scripts/uninstall.sh` from a checkout); Windows — Settings › Apps › DontSpeak. To stop wiring a specific client while keeping the app, list it in `exclude_clients` in `config.toml` — the engine unwires it on the next launch (a one-shot `dontspeak wire --all --remove` is re-applied by the next boot's reconcile).
+**Uninstall** (app, integrations, data, and models): macOS/Linux —
+`~/.local/bin/dontspeak-uninstall` (or `scripts/uninstall.sh` from a checkout); Windows —
+Settings › Apps › DontSpeak. To keep the app but exclude a client, add it to
+`exclude_clients` in `config.toml`; boot reconciliation restores the configured wiring.
 
 ## What it does
 
@@ -58,12 +62,18 @@ The Caps-Lock LED is the state light: **lit = recording, dark = idle.**
 | **Long press** | Silence the voice | Discard dictation and silence the voice |
 | **Double tap** | Skip the current spoken message | Stop and paste **without** Enter |
 
-Double tap while idle only counts when the voice is speaking — otherwise a tap starts recording immediately, zero added latency. On the stop tap, a second tap within the double-tap window flips that tap's outcome (submit ↔ insert-only); it only applies to the local transcription engines (Parakeet / system), which deliver the transcript after the stop tap. Which gesture submits is configurable, not fixed: `double_tap_submits` (default `false`) swaps the table above — single-submits/double-inserts becomes single-inserts/double-submits. Long-press threshold: `long_press_ms`. Hands-free [always-listening mode](docs/ALWAYS-LISTENING.md) ignores the Caps key.
+An idle double tap only applies while speech is playing; otherwise the first tap starts
+recording immediately. A second stop tap flips submit and insert-only for local transcription
+(Parakeet or system). `double_tap_submits` (default `false`) swaps those gestures, and
+`long_press_ms` sets the long-press threshold. [Always-listening mode](docs/ALWAYS-LISTENING.md)
+does not use Caps Lock.
 
 ## Models & runtimes
 
 - **TTS** — Kokoro-82M, or the OS system voice.
-- **STT** — a built-in streaming recognizer (NeMo FastConformer 80ms across platforms; Parakeet TDT 0.6b v2 via Core ML on macOS), the macOS system recognizer, or Claude Code's dictation.
+- **STT** — a built-in streaming recognizer (NeMo FastConformer 80ms across platforms;
+  Parakeet TDT 0.6b v2 via Core ML on macOS), the macOS system recognizer, or Claude Code's
+  dictation. See [the STT pipeline](docs/STT-PIPELINE.md) for capture and recovery behavior.
 - (Diarization / speaker-lock — pyannote segmentation + WeSpeaker embeddings, with SepFormer separation — implemented, hidden behind an internal flag pending more testing.)
 
 Each model runs on the fastest backend available, picked by the `provider` ladder (`["ane", "cuda", "cpu"]`):

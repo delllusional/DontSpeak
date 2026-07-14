@@ -1,10 +1,8 @@
 # Per-terminal narration: focus-gated TTS
 
-DontSpeak's TTS queue is a single, session-tagged FIFO: the worker plays only the
-active session's items and pauses everything when no terminal is frontmost. Tabbing
-away from a terminal pauses its narration without dropping it; tabbing back resumes at
-the latest item, whether you tabbed to a browser or to another terminal. This works the
-same way on macOS, Windows, and Linux — it isn't a Terminal.app special case.
+DontSpeak uses one session-tagged TTS FIFO. The worker plays only the active session.
+With `pause_in_background` enabled, it pauses when no terminal is frontmost and resumes
+when one returns on macOS, Windows, and Linux.
 
 ## Focus signal
 
@@ -25,13 +23,9 @@ APIs directly):
    human typed — does NOT reassign active-terminal status; only a genuine submit does
    (issue #11).
 
-Since there's no cheap, portable way to map "which window/tab has focus" to "which
-Claude session," the active session tracks the terminal you last typed in rather than
-the one you most recently brought to the front. Foregrounding a terminal picks which
-session's narration you're listening *for*, but prompting it is what actually makes it
-speak. The `pause_in_background` config setting (default false) only controls whether
-playback pauses at all while no terminal is frontmost — it's independent of which
-session is selected.
+There is no portable mapping from a focused window or tab to a Claude session, so the
+active session is the terminal most recently prompted. `pause_in_background` (default
+`false`) only controls pausing while no terminal is frontmost.
 
 ## One bounded queue, no per-session queue state
 

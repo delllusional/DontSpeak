@@ -90,6 +90,8 @@ Built-in dictation runs through the same warm helper as TTS: on Caps-ON the help
 opens the mic and streams audio through a cache-aware FastConformer transducer (Apple
 Silicon uses a Core ML path via FluidAudio) for live partial transcripts. On Caps-OFF
 the engine takes the final transcript and pastes it via a focus-gated key injector.
+The concurrency, capture, recovery, and platform-specific contracts are in
+[docs/STT-PIPELINE.md](docs/STT-PIPELINE.md).
 
 ## Models & ONNX runtime
 
