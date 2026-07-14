@@ -21,17 +21,17 @@ use serde::{Deserialize, Deserializer};
 // `CancelSpeechScope`) are their building blocks.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// STT backend selection. Default `BuiltIn` — DontSpeak's own on-device Parakeet model
-/// (each backend, incl. the `claude_code` delegation, is documented on its variant below).
-/// "Off" is structural now, not a token: the `stt_engine` preference is `Option<Vec<SttEngine>>`,
-/// with `Some(vec![])` meaning explicit off — there is no `SttEngine::Off` variant.
+/// STT backend token. The enum-level [`Default`] is `BuiltIn`; [`crate::VoiceConfig`]'s
+/// out-of-box engine selection instead walks `stt_engine_ladder` (system → built-in →
+/// Claude Code). "Off" is structural, not a token: the `stt_engine` preference is
+/// `Option<Vec<SttEngine>>`, with `Some(vec![])` meaning explicit off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SttEngine {
     /// DontSpeak's BUILT-IN local STT: a cache-aware streaming FastConformer transducer. The
     /// RUNTIME (cross-platform ONNX via `ort`, or macOS FluidAudio Core ML / ANE) is
     /// selected by the shared [`Provider`] — exactly as it drives Kokoro TTS. The factory
-    /// degrades it to ClaudeCode when the model is unavailable. Token `built_in`. The DEFAULT
-    /// (on-device dictation).
+    /// degrades it to ClaudeCode when the model is unavailable. Token `built_in`; the
+    /// enum-level default (not necessarily the first rung in the configured ladder).
     #[default]
     BuiltIn,
     /// Local on-device STT via the OS recognizer: macOS `SFSpeechRecognizer` (en-US,
@@ -780,7 +780,7 @@ pub(crate) fn default_tray_indicator() -> Vec<TrayKind> {
 }
 
 /// Fail-open deserialize for `tray_indicator` — now a SET of [`TrayKind`] tokens (config
-/// `tray_indicator = ["stt", "tts"]`). An ARRAY keeps its known tokens in order (deduped)
+/// `tray_indicator = ["stt", "tts_animated"]`). An ARRAY keeps its known tokens in order (deduped)
 /// and drops unknown ones; an EMPTY array means never color the icon (the old "none"). Any
 /// NON-array value (an absent field is handled by the serde default; a legacy `"both"`/
 /// `"none"` string) fails open to [`default_tray_indicator`] — there is NO legacy token

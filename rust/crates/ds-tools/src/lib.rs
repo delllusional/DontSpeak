@@ -491,6 +491,175 @@ mod tests {
         }
     }
 
+    /// DRIFT GUARD: every default stated by a `set_config` parameter description must agree
+    /// with the object used when `config.toml` is absent. This deliberately bridges the
+    /// authored catalog and `ds-config`; tests in either crate alone cannot catch that split.
+    #[test]
+    fn set_config_descriptions_match_voice_defaults() {
+        use ds_config::{
+            CancelSpeechScope, CaptureGain, NarrateKind, Provider, TrayKind, VoiceConfig,
+        };
+
+        fn mentions(description: &str, expected: &str, field: &str) {
+            assert!(
+                description.contains(expected),
+                "`{field}` description does not state its live default `{expected}`:\n{description}"
+            );
+        }
+
+        let v = VoiceConfig::default();
+        assert!(v.tts_engine.is_none());
+        mentions(
+            SET_CONFIG_TTS_ENGINE,
+            "Omit to keep the automatic preference",
+            "tts_engine",
+        );
+        assert!(v.tts_system_voice.is_empty());
+        mentions(
+            SET_CONFIG_TTS_SYSTEM_VOICE,
+            "empty = OS default",
+            "tts_system_voice",
+        );
+        mentions(
+            SET_CONFIG_TTS_RATE,
+            &format!("{:.1} = normal", v.tts_rate),
+            "tts_rate",
+        );
+
+        assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
+        mentions(SET_CONFIG_NARRATE, "default both", "narrate");
+        mentions(
+            SET_CONFIG_GREET,
+            if v.greet_on_open {
+                "Default on"
+            } else {
+                "Default off"
+            },
+            "greet_on_open",
+        );
+        mentions(
+            SET_CONFIG_INPUT_CLEARS,
+            &format!(
+                "Default {}",
+                serde_json::to_string(&v.input_clears).unwrap()
+            ),
+            "input_clears",
+        );
+        mentions(
+            SET_CONFIG_PAUSE_BG,
+            if v.pause_in_background {
+                "Default true"
+            } else {
+                "Default false"
+            },
+            "pause_in_background",
+        );
+
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        assert!(!v.earcon_reply_sound.is_empty());
+        mentions(
+            SET_CONFIG_EARCON_REPLY,
+            "Default: OS chime",
+            "earcon_reply_sound",
+        );
+        assert!(v.earcon_needs_input_sound.is_empty());
+        mentions(
+            SET_CONFIG_EARCON_INPUT,
+            "Default off",
+            "earcon_needs_input_sound",
+        );
+
+        mentions(
+            SET_CONFIG_CAPS,
+            if v.caps_enabled {
+                "Default on"
+            } else {
+                "Default off"
+            },
+            "caps_enabled",
+        );
+        assert!(v.stt_engine.is_none());
+        mentions(
+            SET_CONFIG_STT_ENGINE,
+            "Omit to keep the automatic preference",
+            "stt_engine",
+        );
+        assert_eq!(v.capture_gain, CaptureGain::Auto);
+        mentions(
+            SET_CONFIG_CAPTURE_GAIN,
+            "\"auto\" (default)",
+            "capture_gain",
+        );
+        mentions(
+            SET_CONFIG_DOUBLE_TAP_SUBMITS,
+            if v.double_tap_submits {
+                "Default true"
+            } else {
+                "Default false"
+            },
+            "double_tap_submits",
+        );
+        mentions(
+            SET_CONFIG_PASTE_SUBMIT_DELAY_MS,
+            &format!("Default {}", v.paste_submit_delay_ms),
+            "paste_submit_delay_ms",
+        );
+
+        assert_eq!(
+            v.provider,
+            vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]
+        );
+        mentions(
+            SET_CONFIG_PROVIDER,
+            &format!("Default {}", serde_json::to_string(&v.provider).unwrap()),
+            "provider",
+        );
+        assert!(v.diarizer_provider.is_empty());
+        mentions(
+            SET_CONFIG_DIARIZER,
+            "[] = off (default)",
+            "diarizer_provider",
+        );
+        mentions(
+            SET_CONFIG_CLUSTERING,
+            &format!("default {}", v.clustering_threshold),
+            "clustering_threshold",
+        );
+        mentions(
+            SET_CONFIG_SPEAKER_THRESH,
+            &format!("default {}", v.speaker_threshold),
+            "speaker_threshold",
+        );
+        mentions(
+            SET_CONFIG_SPEAKER_LOCK,
+            if v.stt_speaker_lock {
+                "Default on"
+            } else {
+                "Default off"
+            },
+            "stt_speaker_lock",
+        );
+        mentions(
+            SET_CONFIG_FULL_DUPLEX,
+            if v.full_duplex {
+                "Default true"
+            } else {
+                "Default false"
+            },
+            "full_duplex",
+        );
+        assert_eq!(v.tray_indicator, vec![TrayKind::Stt, TrayKind::TtsAnimated]);
+        mentions(
+            SET_CONFIG_TRAY,
+            &format!(
+                "default {}",
+                serde_json::to_string(&v.tray_indicator).unwrap()
+            ),
+            "tray_indicator",
+        );
+        assert_eq!(v.input_clears, vec![CancelSpeechScope::Current]);
+    }
+
     #[test]
     fn catalog_is_a_nonempty_array_of_named_tools() {
         let c = catalog();

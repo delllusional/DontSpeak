@@ -115,8 +115,8 @@ pub struct VoiceConfig {
     )]
     pub stt_engine: Option<Vec<SttEngine>>,
     /// Dictation engine — the AUTOMATIC PREFERENCE LADDER, walked when [`Self::stt_engine`] is
-    /// unset. Walk the list, use the first rung usable on this build/platform: `built_in`
-    /// (Parakeet) → `system` (macOS SpeechAnalyzer) → `claude_code` (delegate to Claude Code),
+    /// unset. Walk the list, use the first rung usable on this build/platform: `system`
+    /// (macOS SpeechAnalyzer) → `built_in` (Parakeet) → `claude_code` (delegate to Claude Code),
     /// the default. EMPTY = dictation OFF (Caps still silences). ARRAYS ONLY — a scalar string
     /// (or wrong type) degrades to the default ladder. Config-file only (no MCP setter). See
     /// [`Self::resolved_stt`].
@@ -202,10 +202,10 @@ pub struct VoiceConfig {
     #[serde(default = "default_enabled")]
     pub caps_enabled: bool,
     /// Which live states the MENU-BAR icon colors itself for — a SET, `tray_indicator =
-    /// ["stt", "tts"]` (default `["stt", "tts"]`). The app reads this; the engine just passes
-    /// it through in model_status. `stt` colors the pill while the mic is live, `tts` while
-    /// talking. An EMPTY array never colors the icon (the old "none"). Unknown tokens drop;
-    /// any non-array value ⇒ the default set.
+    /// ["stt", "tts_animated"]` (the default). The app reads this; the engine just passes it
+    /// through in model_status. `stt` colors the pill while the mic is live; `tts_animated`
+    /// colors and pulses it while talking. An EMPTY array never colors the icon (the old
+    /// "none"). Unknown tokens drop; any non-array value ⇒ the default set.
     #[serde(
         default = "default_tray_indicator",
         deserialize_with = "de_tray_indicator"
@@ -879,6 +879,8 @@ pub(crate) mod tests {
             ..v.clone()
         };
         assert_eq!(empty.current_voice(), DEFAULT_KOKORO_VOICE);
+        assert!(v.tts_system_voice.is_empty());
+        assert!(v.greet_on_open);
         // Default narration: shorts first, then digests — both on out of the box.
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
         assert!(v.narrates(NarrateKind::Digests) && v.narrates(NarrateKind::Shorts));
@@ -896,18 +898,46 @@ pub(crate) mod tests {
             v.stt_engine_ladder,
             vec![SttEngine::System, SttEngine::BuiltIn, SttEngine::ClaudeCode]
         );
+        assert!(v.diarizer_provider.is_empty());
+        assert_eq!(v.clustering_threshold, 0.7);
+        assert_eq!(v.speaker_threshold, 0.65);
+        assert!(!v.stt_speaker_lock);
         assert_eq!(v.tts_rate, 1.0);
+        assert!(v.caps_enabled);
         // Always-listening defaults: unset == today (record-and-submit PTT).
         assert_eq!(v.listen_mode, ListenMode::RecordSubmit);
+        assert_eq!(v.hands_free.start, "computer");
         assert_eq!(v.hands_free.submit, "submit");
+        assert_eq!(v.hands_free.cancel, "cancel");
         assert_eq!(v.submit_confirm_ms, 1000);
         assert_eq!(v.endpoint_silence_ms, 700);
+        assert!(!v.full_duplex);
+        assert_eq!(v.capture_gain, CaptureGain::Auto);
+        assert!(!v.double_tap_submits);
         assert_eq!(v.paste_submit_delay_ms, 100);
+        assert_eq!(v.input_clears, vec![CancelSpeechScope::Current]);
+        assert!(!v.pause_in_background);
+        #[cfg(target_os = "macos")]
+        assert_eq!(v.earcon_reply_sound, "Tink");
+        #[cfg(target_os = "windows")]
+        assert_eq!(v.earcon_reply_sound, "ding");
+        #[cfg(target_os = "linux")]
+        assert_eq!(v.earcon_reply_sound, "message");
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        assert!(v.earcon_reply_sound.is_empty());
+        assert!(v.earcon_needs_input_sound.is_empty());
         assert_eq!(
             v.provider,
             vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]
         );
         assert_eq!(v.tray_indicator, vec![TrayKind::Stt, TrayKind::TtsAnimated]);
+        assert!(v.codex_stream);
+        assert!(!v.codex_stream_daemon_start);
+        assert!(v.codex_app_server_url.is_empty());
+        assert_eq!(v.codex_bin, "codex");
+        assert!(v.extra_terminals.is_empty());
+        assert!(v.extra_custom_text_editors.is_empty());
+        assert!(v.exclude_clients.is_none());
     }
 
     #[test]
@@ -1651,7 +1681,7 @@ pub(crate) mod tests {
             paste_submit_delay_ms: 150, // non-default (default is 100)
             input_clears: vec![CancelSpeechScope::Other], // non-default (default is [current])
             pause_in_background: true,  // non-default (default is false)
-            earcon_reply_sound: "Glass".into(), // non-default (default is empty/off)
+            earcon_reply_sound: "Glass".into(), // non-default (default is the OS chime)
             earcon_needs_input_sound: "Funk".into(),
             codex_stream: false,             // non-default (default is true)
             codex_stream_daemon_start: true, // non-default (default is false)

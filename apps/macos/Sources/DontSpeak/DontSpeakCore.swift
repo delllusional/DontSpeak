@@ -54,8 +54,8 @@ struct Activity: Sendable, Equatable {
     /// Global mute (Caps-tap with dictation off, or the tray checkbox): playback still runs,
     /// only the audio is silenced. Marks the menu-bar icon with a diagonal slash.
     var muted = false
-    /// Which states the menu-bar icon colors itself for — a SET of tokens (stt|tts);
-    /// ["stt","tts"] = both (default), [] = never color.
+    /// Which states color the menu-bar icon and whether they animate;
+    /// ["stt","tts_animated"] = mic static + voice breathing (default), [] = never color.
     var trayIndicator = ["stt", "tts_animated"]
 }
 

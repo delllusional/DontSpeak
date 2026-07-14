@@ -42,9 +42,10 @@ Engine selection is a two-field model, each resolved by `resolved_stt` / `resolv
   Parakeet), the engine degrades to the SAME inert off-placeholder rather than to a
   different, working engine the user didn't choose.
 
-**STT** — `built_in` (DontSpeak's bundled Parakeet model, the default), `system`
-(the OS's on-device recognizer), `claude_code` (delegates to Claude Code's own voice
-dictation by tapping its bound `voice:pushToTalk` key).
+**STT** — the default ladder is `system` (the OS's on-device recognizer), `built_in`
+(DontSpeak's bundled Parakeet model), then `claude_code` (delegates to Claude Code's
+own voice dictation by tapping its bound `voice:pushToTalk` key). `system` is currently
+usable only on macOS, so Parakeet is the first usable default on Windows and Linux.
 
 **TTS** — `Kokoro` (native in-process synth via `ort` + `voice-g2p` + `rodio`, the
 default; Apple Silicon also gets a Core ML / ANE path), `System` (the OS voice, e.g.
