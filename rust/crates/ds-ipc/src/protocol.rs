@@ -134,6 +134,10 @@ pub enum Request {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// Stable producer identity for admission retries. New engines deduplicate it;
+        /// `None` preserves compatibility with older hook binaries.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        narration_id: Option<String>,
         /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED — it
         /// rides the wire even though the engine does not LOG this variant (it fires per
         /// blockquote and would spam the activity log).
@@ -350,6 +354,7 @@ mod tests {
             Request::SpeakNarration {
                 text: "working on it".into(),
                 session: None,
+                narration_id: Some("narration-1".into()),
                 source: ClientSource::QwenCode,
             },
             Request::StopSpeech {

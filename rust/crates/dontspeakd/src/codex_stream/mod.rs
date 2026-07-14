@@ -16,7 +16,7 @@
 //!     witness ([`ds_narrate::seed_witness`]), so `Stop` stays silent for streamed
 //!     sessions with ZERO changes to the Stop path; a plain-TUI session (no `--remote`)
 //!     never resumes → no witness → `Stop` speaks exactly as today.
-//!   * **Never double-speak** — every flush goes through [`ds_narrate::narrate_batch`],
+//!   * **Never double-speak** — every flush goes through [`ds_narrate::deliver_batch`],
 //!     whose on-disk high-water mark makes reconnect/replay dedup-safe. On transient
 //!     disconnects state files are KEPT (documented tradeoff: narration for turns during
 //!     an app-server outage is lost rather than double-spoken).
@@ -40,7 +40,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use ds_config::{NarrateKind, Paths, VoiceConfig};
-use ds_narrate::{BatchPayload, StreamBatch};
+use ds_narrate::{BatchPayload, NarrationUtterance, StreamBatch};
 
 use client::WsClient;
 
@@ -186,7 +186,7 @@ impl SessionRegistry {
 
 // ── Delta coalescing (bound the state-file RMW frequency) ────────────────────────
 
-/// Per-(session, item) delta buffer: flush into `narrate_batch` on a newline, on age
+/// Per-(session, item) delta buffer: flush into `deliver_batch` on a newline, on age
 /// (~150 ms), or on `item/completed` — so a fast token stream doesn't do a locked
 /// read-modify-write per token. The per-item `seq` is the monotone `Delta.index` feed;
 /// it survives flushes (the entry lives until the item completes).
@@ -808,7 +808,7 @@ fn run_attached<S: Read + Write>(
     running: &AtomicBool,
     registry: &SessionRegistry,
     mic_active: &dyn Fn() -> bool,
-    speak: &mut dyn FnMut(&str, String),
+    speak: &mut dyn FnMut(&str, &NarrationUtterance) -> Result<(), String>,
     tun: &Tunables,
     connected_endpoint: Option<&str>,
 ) -> Result<Detach, String> {
@@ -1121,6 +1121,16 @@ fn run_attached<S: Read + Write>(
         for (sess, batch) in coalescer.flush_aged(Instant::now(), tun.flush_age, None) {
             flush(paths, &cfg, mic_active, speak, &sess, &batch);
         }
+        // A completed item may have no later app-server event to trigger a replay. Retry
+        // persisted admission failures on the housekeeping cadence so queue drainage alone
+        // is enough to unblock them.
+        for session in resumed.values().map(|resumed| resumed.session.as_str()) {
+            if let Err(error) =
+                ds_narrate::retry_pending(paths, session, |utterance| speak(session, utterance))
+            {
+                log::debug!(target: "codex_stream", "pending narration still blocked: {error}");
+            }
+        }
     }
 }
 
@@ -1130,7 +1140,7 @@ fn flush(
     paths: &Paths,
     cfg: &VoiceConfig,
     mic_active: &dyn Fn() -> bool,
-    speak: &mut dyn FnMut(&str, String),
+    speak: &mut dyn FnMut(&str, &NarrationUtterance) -> Result<(), String>,
     session: &str,
     batch: &StreamBatch,
 ) {
@@ -1139,9 +1149,16 @@ fn flush(
     if !digests_on && !shorts_on {
         return;
     }
-    for utt in ds_narrate::narrate_batch(paths, session, batch, mic_active(), digests_on, shorts_on)
-    {
-        speak(session, utt);
+    if let Err(error) = ds_narrate::deliver_batch(
+        paths,
+        session,
+        batch,
+        mic_active(),
+        digests_on,
+        shorts_on,
+        |utterance| speak(session, utterance),
+    ) {
+        log::warn!(target: "codex_stream", "narration rejected: {error}");
     }
 }
 
@@ -1198,10 +1215,12 @@ pub(crate) fn spawn_supervisor(
             // Utterances ride the SAME per-session queue path as hook narration —
             // per-session hold/active routing, pool voices, and scoped barge all apply
             // because the session id matches the one the hooks use.
-            let mut speak = move |session: &str, text: String| {
-                if let Err(e) = ttsq.enqueue(text, None, None, Some(session.to_string())) {
-                    log::warn!(target: "codex_stream", "narration rejected: {e}");
-                }
+            let mut speak = move |session: &str, utterance: &NarrationUtterance| {
+                ttsq.enqueue_narration(
+                    utterance.text.clone(),
+                    Some(session.to_string()),
+                    Some(utterance.id.clone()),
+                )
             };
             supervise(
                 &paths,
@@ -1223,7 +1242,7 @@ fn supervise(
     running: &AtomicBool,
     registry: &SessionRegistry,
     mic_active: &dyn Fn() -> bool,
-    speak: &mut dyn FnMut(&str, String),
+    speak: &mut dyn FnMut(&str, &NarrationUtterance) -> Result<(), String>,
     tun: &Tunables,
 ) {
     let mut backoff = BACKOFF_FLOOR;

@@ -14,7 +14,7 @@
 //!     (`dontspeakd::codex_stream`), translating `item/agentMessage/delta` /
 //!     `item/completed` in-process.
 //!
-//! Every adapter persists through [`narrate_batch`], so the witness comes for free for
+//! Every adapter persists through [`deliver_batch`], so the witness comes for free for
 //! all three and a reconnect/restart can never double-speak (the `offset` high-water
 //! mark is on disk). Extracted from the `dontspeak` crate (`narrate.rs` +
 //! `hook_narrate.rs`) so BOTH the CLI hooks and the engine can depend on it without the
@@ -25,6 +25,7 @@ mod stream;
 
 pub use accum::{Accum, short_reply_utterance};
 pub use stream::{
-    BatchPayload, DisplayState, DisplayStep, StreamBatch, clear_session_state, display_state_path,
-    narrate_batch, seed_witness, step, stop_utterances, witness_exists,
+    BatchPayload, DisplayState, DisplayStep, NarrationUtterance, StreamBatch, clear_session_state,
+    deliver_batch, display_state_path, retry_pending, seed_witness, step, stop_utterances,
+    witness_exists,
 };

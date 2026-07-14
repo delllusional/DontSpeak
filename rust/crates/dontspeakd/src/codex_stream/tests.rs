@@ -619,8 +619,12 @@ mod attached {
         ws.initialize(Duration::from_secs(5)).expect("initialize");
         let running = AtomicBool::new(true);
         let spoken = spoken.clone();
-        let mut speak = move |session: &str, text: String| {
-            spoken.lock().unwrap().push((session.to_string(), text));
+        let mut speak = move |session: &str, utterance: &NarrationUtterance| {
+            spoken
+                .lock()
+                .unwrap()
+                .push((session.to_string(), utterance.text.clone()));
+            Ok(())
         };
         run_attached(
             &mut ws,

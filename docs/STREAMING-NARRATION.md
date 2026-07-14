@@ -11,8 +11,8 @@ crate — `ds-narrate` — and every client feeds it through a thin adapter:
 | Qwen Code    | same hook route (present on main, not in 0.19.9) | cumulative `displayed_text` + `is_final` (snake_case)| `dontspeak::hook_narrate` (serde aliases; registry-gated) |
 | OpenAI Codex | the engine's **app-server subscriber**        | `item/agentMessage/delta` + `item/completed`         | `dontspeakd::codex_stream` |
 
-All three build a client-neutral `StreamBatch` and call the same file-backed step,
-`ds_narrate::narrate_batch`.
+All three build a client-neutral `StreamBatch` and call the same file-backed delivery step,
+`ds_narrate::deliver_batch`.
 
 ## The witness contract
 
@@ -22,7 +22,7 @@ simultaneously:
 
 * the **cross-process accumulator** (Claude Code spawns racing per-batch hook
   processes; a lock file beside it serializes the read-modify-write);
-* the **dedup high-water mark** (`offset` = blockquote runs already voiced) — a
+* the **dedup high-water mark** (`offset` = blockquote runs accepted by the queue) — a
   reconnect, an engine restart, or a replayed final batch can never double-speak;
 * the **streaming witness**: the `Stop` hook's `speak_reply` checks
   `witness_exists(session)` and stays silent when a streaming pass already narrated the
@@ -56,7 +56,7 @@ long-lived resident process) runs a supervisor thread that:
    passthrough) — a Codex Desktop or third-party thread on the same daemon is never
    narrated, and CC/Qwen session ids simply never match;
 4. coalesces `item/agentMessage/delta` per item (flush on newline / ~150 ms /
-   `item/completed`), feeds `narrate_batch`, and enqueues each utterance on the engine's
+   `item/completed`), feeds `deliver_batch`, and enqueues each utterance on the engine's
    TTS queue tagged with the session id — so per-terminal hold/active routing, pool
    voices, and scoped barge all work unchanged;
 5. **owns cleanup** (no SessionEnd hook exists): evicts a session — deleting its

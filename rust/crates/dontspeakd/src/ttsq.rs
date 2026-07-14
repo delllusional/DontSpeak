@@ -27,7 +27,7 @@
 //!
 //! A hard barge (StopSpeech / long-press reset) still CLEARS the whole queue.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -78,6 +78,36 @@ static GREET_ROTATION: AtomicUsize = AtomicUsize::new(0);
 /// `stale_assignment_is_dropped_when_voice_leaves_the_pool`), so this is safe: a live
 /// terminal just gets a (possibly different) pool voice on its NEXT reply.
 const POOL_ASSIGNMENTS_MAX: usize = 128;
+
+/// Admission IDs outlive queue playback so a producer that was interrupted between the
+/// engine's success response and its state-file commit can retry safely. SessionEnd removes
+/// scoped entries; this cap bounds clients that never send it.
+const ACCEPTED_NARRATION_IDS_MAX: usize = 8192;
+
+#[derive(Default)]
+struct AcceptedNarrations {
+    seen: HashSet<String>,
+    order: VecDeque<(String, Option<String>)>,
+}
+
+impl AcceptedNarrations {
+    fn insert(&mut self, id: String, session: Option<String>) {
+        if !self.seen.insert(id.clone()) {
+            return;
+        }
+        self.order.push_back((id, session));
+        while self.order.len() > ACCEPTED_NARRATION_IDS_MAX {
+            if let Some((old, _)) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+    }
+
+    fn forget_session(&mut self, session: &str) {
+        self.order
+            .retain(|(id, owner)| owner.as_deref() != Some(session) || !self.seen.remove(id));
+    }
+}
 
 /// One item may carry at most 10 KiB of UTF-8 text, regardless of whether it arrived through
 /// IPC or the in-process Codex subscriber. Keeping the limit here prevents a producer from
@@ -263,6 +293,9 @@ struct PausedState {
 
 pub struct TtsQueue {
     items: Mutex<VecDeque<Item>>,
+    /// Stable narration IDs accepted during this engine lifetime. Always lock this before
+    /// `items`, matching [`enqueue_narration`](Self::enqueue_narration).
+    accepted_narrations: Mutex<AcceptedNarrations>,
     cv: Condvar,
     /// Bumped on every barge/pause; the worker abandons its in-flight item when
     /// the generation moves past the one it dequeued under.
@@ -365,6 +398,7 @@ impl TtsQueue {
         let config = VoiceConfig::load(&paths);
         let q = Arc::new(Self {
             items: Mutex::new(VecDeque::new()),
+            accepted_narrations: Mutex::new(AcceptedNarrations::default()),
             cv: Condvar::new(),
             generation: AtomicU64::new(0),
             paused: Mutex::new(PausedState::default()),
@@ -432,6 +466,7 @@ impl TtsQueue {
         let mic = ds_platform::MicWatcher::spawn(|_| {}).handle();
         Arc::new(TtsQueue {
             items: Mutex::new(VecDeque::new()),
+            accepted_narrations: Mutex::new(AcceptedNarrations::default()),
             cv: Condvar::new(),
             generation: AtomicU64::new(0),
             paused: Mutex::new(PausedState::default()),
@@ -524,6 +559,34 @@ impl TtsQueue {
         });
         self.cv.notify_one();
         Ok(())
+    }
+
+    /// Enqueue identified narration exactly once at the admission boundary. A duplicate ID
+    /// returns success even when the queue is currently full because its original attempt was
+    /// already accepted; a rejected first attempt is not remembered and remains retryable.
+    pub fn enqueue_narration(
+        &self,
+        text: String,
+        session: Option<String>,
+        narration_id: Option<String>,
+    ) -> Result<(), String> {
+        let Some(id) = narration_id else {
+            return self.enqueue(text, None, None, session);
+        };
+        let mut accepted = self.accepted_narrations.lock().unwrap();
+        if accepted.seen.contains(&id) {
+            return Ok(());
+        }
+        self.enqueue(text, None, None, session.clone())?;
+        accepted.insert(id, session);
+        Ok(())
+    }
+
+    pub fn forget_narration_session(&self, session: &str) {
+        self.accepted_narrations
+            .lock()
+            .unwrap()
+            .forget_session(session);
     }
 
     /// Claim a selected item while the caller holds `items`. The generation snapshot and
@@ -1907,6 +1970,70 @@ mod tests {
         assert!(err.contains("session speech queue is full"));
         q.enqueue("still accepted".into(), None, None, Some("other".into()))
             .unwrap();
+    }
+
+    #[test]
+    fn overflowed_stream_narration_retries_once_after_queue_drain() {
+        // Issue #62: fill one paused/background-style session, complete a streamed digest,
+        // then make queue drainage (without another Codex event) admit it exactly once.
+        let q = mk_queue();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let session = "full";
+        for _ in 0..MAX_SESSION_PENDING_ITEMS {
+            q.enqueue("filler".into(), None, None, Some(session.into()))
+                .unwrap();
+        }
+
+        let delta = ds_narrate::StreamBatch {
+            key: "item-1".into(),
+            payload: ds_narrate::BatchPayload::Delta {
+                index: Some(0),
+                text: "> Blocked digest.".into(),
+            },
+            is_final: false,
+        };
+        ds_narrate::deliver_batch(&paths, session, &delta, false, true, false, |utt| {
+            q.enqueue_narration(utt.text.clone(), Some(session.into()), Some(utt.id.clone()))
+        })
+        .unwrap();
+
+        let completed = ds_narrate::StreamBatch {
+            key: "item-1".into(),
+            payload: ds_narrate::BatchPayload::Cumulative {
+                text: "> Blocked digest.\n\nBody.".into(),
+            },
+            is_final: true,
+        };
+        let error =
+            ds_narrate::deliver_batch(&paths, session, &completed, false, true, false, |utt| {
+                q.enqueue_narration(utt.text.clone(), Some(session.into()), Some(utt.id.clone()))
+            })
+            .unwrap_err();
+        assert!(error.contains("session speech queue is full"));
+
+        q.items.lock().unwrap().clear();
+        let mut admitted_id = None;
+        ds_narrate::retry_pending(&paths, session, |utt| {
+            admitted_id = Some(utt.id.clone());
+            q.enqueue_narration(utt.text.clone(), Some(session.into()), Some(utt.id.clone()))
+        })
+        .unwrap();
+        assert_eq!(
+            q.items
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|item| item.text == "Blocked digest.")
+                .count(),
+            1
+        );
+
+        // Re-offer the ID to model a producer crash after the engine accepted it but before
+        // the state commit. Engine-side idempotency reports success without duplicating work.
+        q.enqueue_narration("Blocked digest.".into(), Some(session.into()), admitted_id)
+            .unwrap();
+        assert_eq!(q.items.lock().unwrap().len(), 1);
     }
 
     #[test]

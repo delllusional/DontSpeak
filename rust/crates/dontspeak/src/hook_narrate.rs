@@ -2,7 +2,7 @@
 //! shared streaming-narration core (`ds-narrate`). Dispatched from
 //! [`crate::hook_core::notify`]. This file only: parses the hook payload, builds a
 //! client-neutral `ds_narrate::StreamBatch`, runs the shared file-backed step
-//! ([`ds_narrate::narrate_batch`]), and forwards each utterance to the engine.
+//! ([`ds_narrate::deliver_batch`]), and forwards each utterance to the engine.
 //!
 //! [`message_display`] (`MessageDisplay`): runs once per streaming batch. Claude Code
 //! sends an incremental `delta` chunk keyed by content-block `index` (+ a sticky `final`
@@ -212,6 +212,18 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) {
     let session = hook.session_id.clone().filter(|s| !s.trim().is_empty());
     let streamed = streamed_via_message_display(paths, session.as_deref().unwrap_or_default());
 
+    // Stop is the hook route's final retry opportunity for work rejected while the queue
+    // was full. It retries the identified pending utterance, then the ordinary streaming
+    // witness still suppresses the whole-reply fallback.
+    if streamed {
+        let session_id = session.as_deref().unwrap_or_default();
+        if let Err(message) = ds_narrate::retry_pending(paths, session_id, |utterance| {
+            admit_narration(paths, session.clone(), client, utterance)
+        }) {
+            eprintln!("dontspeak: narration rejected: {message}");
+        }
+    }
+
     let speak = stop_utterances(
         hook.last_assistant_text(client).as_deref(),
         messages_on,
@@ -220,13 +232,13 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) {
         streamed,
     );
     for line in speak {
-        // Surface a rejected enqueue (queue admission caps): the narration state has
-        // already advanced past this text, so stderr is the only place the drop shows.
+        // Surface a rejected enqueue from the non-streaming fallback.
         if let Ok(ds_ipc::Response::Error { message }) = ds_ipc::request(
             &paths.engine_sock,
             &ds_ipc::Request::SpeakNarration {
                 text: line,
                 session: session.clone(),
+                narration_id: None,
                 source: client,
             },
         ) {
@@ -329,39 +341,47 @@ pub fn message_display(paths: &Paths, payload: &str, client: ClientSource) {
     let session = hook.session_id.clone().unwrap_or_default();
     let batch = batch_from_hook(&hook);
 
-    // The whole cross-process dance — the per-session lock, the state-file
-    // read-modify-write, the atomic write — lives in the shared core; racing per-batch
-    // hook processes take turns there. The engine forward stays OUTSIDE the lock — no
-    // socket round-trip held under the mutex.
-    let speak = ds_narrate::narrate_batch(
+    // The state transaction stays locked through the local admission round-trip: racing
+    // hook processes cannot both offer the same checkpoint, and rejected work remains
+    // pending instead of advancing the delivered high-water mark.
+    let session_tag = Some(session.clone()).filter(|s| !s.is_empty());
+    if let Err(message) = ds_narrate::deliver_batch(
         paths,
         &session,
         &batch,
         ds_platform::is_mic_active(),
         messages_on,
         short_on,
-    );
-    // Each completed blockquote is forwarded as its OWN narration item, in order — the
-    // engine's per-session worker plays them sequentially with a natural pause between, so
-    // a multi-point spoken digest is heard point by point rather than in one breath.
-    let session = Some(session).filter(|s| !s.is_empty());
-    for text in speak {
-        // See speak_reply: a rejected narration is otherwise untraceable.
-        if let Ok(ds_ipc::Response::Error { message }) = ds_ipc::request(
-            &paths.engine_sock,
-            &ds_ipc::Request::SpeakNarration {
-                text,
-                session: session.clone(),
-                source: client,
-            },
-        ) {
-            eprintln!("dontspeak: narration rejected: {message}");
-        }
+        |utterance| admit_narration(paths, session_tag.clone(), client, utterance),
+    ) {
+        eprintln!("dontspeak: narration rejected: {message}");
+    }
+}
+
+fn admit_narration(
+    paths: &Paths,
+    session: Option<String>,
+    client: ClientSource,
+    utterance: &ds_narrate::NarrationUtterance,
+) -> Result<(), String> {
+    match ds_ipc::request(
+        &paths.engine_sock,
+        &ds_ipc::Request::SpeakNarration {
+            text: utterance.text.clone(),
+            session,
+            narration_id: Some(utterance.id.clone()),
+            source: client,
+        },
+    ) {
+        Ok(ds_ipc::Response::Done) => Ok(()),
+        Ok(ds_ipc::Response::Error { message }) => Err(message),
+        Ok(other) => Err(format!("unexpected engine response: {other:?}")),
+        Err(error) => Err(format!("engine request failed: {error}")),
     }
 }
 
 /// The test seam kept from the pre-extraction shape: hook payload in → the shared core's
-/// pure step. Production goes through [`ds_narrate::narrate_batch`] instead (same
+/// pure step. Production goes through [`ds_narrate::deliver_batch`] instead (same
 /// translation via [`batch_from_hook`]).
 #[cfg(test)]
 fn step_display(
@@ -754,7 +774,7 @@ mod tests {
             },
             is_final: false,
         };
-        let _ = ds_narrate::narrate_batch(&paths, cc, &batch, false, true, false);
+        ds_narrate::deliver_batch(&paths, cc, &batch, false, true, false, |_| Ok(())).unwrap();
         assert!(
             streamed_via_message_display(&paths, cc),
             "CC session streamed"

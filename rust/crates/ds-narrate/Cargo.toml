@@ -18,6 +18,7 @@ description = "The shared streaming-narration core: per-message accumulation, bl
 ds-config = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

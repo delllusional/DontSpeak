@@ -1,11 +1,11 @@
 //! The client-neutral streaming step + the file-backed per-session state (the streaming
 //! WITNESS). Moved out of `dontspeak::hook_narrate` so the CLI hook adapters (Claude
 //! Code / Qwen Code) and the engine's Codex app-server subscriber all drive the ONE
-//! pipeline: [`StreamBatch`] in → [`step`] (pure) → [`narrate_batch`] (lock → read state
-//! → step → atomic write) → utterances out. Because every adapter persists through the
+//! pipeline: [`StreamBatch`] in → [`step`] (pure) → [`deliver_batch`] (lock → read state
+//! → step → queue admission → atomic commit). Because every adapter persists through the
 //! same per-session file, the witness ([`witness_exists`]) that keeps `Stop` silent
-//! comes for free for all three, and the on-disk `offset` high-water mark makes a
-//! reconnect/restart dedup-safe (already-spoken runs never re-emit).
+//! comes for free for all three, and the on-disk admission-committed `offset` plus stable
+//! utterance IDs make reconnect/retry dedup-safe.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use ds_config::Paths;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::accum::Accum;
 
@@ -47,14 +48,15 @@ pub enum BatchPayload {
 }
 
 /// Per-session state for the streaming diff: how many blockquote utterances of the
-/// current message we've already spoken (`offset` = spoken count), plus the message key
+/// current message the engine queue has accepted (`offset`), plus the message key
 /// to detect when a NEW message starts (accumulation resets). Serialized as
 /// `narrate-display-<session>.json` — the field names are the ON-DISK contract, shared
 /// by every adapter process; don't rename them.
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 pub struct DisplayState {
-    /// Count of this message's top-level blockquotes already voiced. Each batch speaks any
-    /// newly-completed run beyond this count and advances it; a new message resets it to 0.
+    /// Count of this message's top-level blockquotes accepted for delivery. `step` uses this
+    /// as its selection mark; `deliver_batch` supplies a shadow mark for pending work and
+    /// advances the serialized value only after admission succeeds.
     pub offset: usize,
     pub key: String,
     /// Delta mode: each batch's chunk keyed by its content-block `index`, so the cumulative
@@ -82,6 +84,35 @@ pub struct DisplayState {
     /// all-empty serde/default state.
     #[serde(default)]
     pub gate_set: bool,
+    /// Utterances selected from the stream but not yet accepted by the engine queue. They
+    /// stay in the same locked state transaction as the delivered high-water mark, so an
+    /// admission rejection can be retried without re-selecting or skipping text.
+    #[serde(default)]
+    pending: Vec<PendingUtterance>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+struct PendingUtterance {
+    id: String,
+    key: String,
+    text: String,
+    after: DeliveryCheckpoint,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+enum DeliveryCheckpoint {
+    Offset(usize),
+    Short,
+}
+
+/// One identified utterance offered to a delivery adapter. Retrying the same value is
+/// intentional: the engine deduplicates `id`, while the state high-water mark advances only
+/// after the adapter reports successful queue admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NarrationUtterance {
+    pub id: String,
+    pub text: String,
 }
 
 /// One batch's effect, decided PURELY (no IO) so it is unit-testable — the seam the
@@ -136,6 +167,7 @@ pub fn step(
                 gate_msg: batch.key.clone(),
                 gate_on: false,
                 gate_set: true,
+                pending: prev.pending.clone(),
             }),
             speak: Vec::new(),
         };
@@ -150,7 +182,7 @@ pub fn step(
     // logic, kept pure so it is exhaustively unit-testable and a fix lands in one place.
     // The per-session state FILE is this path's cross-process persistence, so we hydrate an
     // `Accum` from the prior state (for the same message) or fresh, step it, and write it
-    // back. `offset` ⇆ `Accum::emitted` (runs already voiced); `parts`/`seen_final` map 1:1.
+    // back. `offset` ⇆ `Accum::emitted` (runs already selected); `parts`/`seen_final` map 1:1.
     let mut accum = if same {
         Accum {
             parts: prev.parts.clone(),
@@ -182,6 +214,7 @@ pub fn step(
         gate_msg: batch.key.clone(),
         gate_on: true,
         gate_set: true,
+        pending: prev.pending.clone(),
     };
     DisplayStep {
         write: Some(next),
@@ -189,59 +222,215 @@ pub fn step(
     }
 }
 
-/// The composed FILE-BACKED step — the whole cross-adapter contract in one function:
-/// serialize on the per-session lock, hydrate the prior [`DisplayState`] from disk, run
-/// the pure [`step`], persist its decision atomically, and return the utterances that
-/// became ready THIS batch (the caller forwards them to the engine / TTS queue). Every
-/// adapter persists through this same per-session file, so the streaming witness
-/// ([`witness_exists`]) is written as a side effect and a reconnect/restart can never
-/// double-speak (the `offset` high-water mark is on disk).
-pub fn narrate_batch(
+/// Run one batch and make successful queue admission the delivery commit point. Rejected
+/// utterances remain in the state file and are offered again before newly selected work on a
+/// later batch. The adapter must treat `NarrationUtterance::id` idempotently because a process
+/// can exit after admission succeeds but before the following atomic state write lands.
+pub fn deliver_batch(
     paths: &Paths,
     session: &str,
     batch: &StreamBatch,
     mic_active: bool,
     digests_on: bool,
     shorts_on: bool,
-) -> Vec<String> {
+    mut admit: impl FnMut(&NarrationUtterance) -> Result<(), String>,
+) -> Result<(), String> {
     let state_path = display_state_path(paths, session);
-    // Make sure the state dir exists BEFORE taking the lock: `with_state_lock`'s
-    // `create_new` can never succeed under a missing parent, which would spin out the
-    // whole 800 ms ceiling on every batch. (The engine creates the dir at boot; the
-    // per-batch hook processes shouldn't rely on that ordering.)
+    ensure_state_parent(&state_path);
+    with_state_lock(&state_path, || {
+        let prev = read_state(&state_path);
+
+        // `step`'s offset is the selection high-water mark. Pending checkpoints extend that
+        // shadow mark while the serialized `offset` itself remains admission-committed.
+        let mut selected = prev.clone();
+        for pending in prev
+            .pending
+            .iter()
+            .filter(|pending| pending.key == prev.key)
+        {
+            match pending.after {
+                DeliveryCheckpoint::Offset(offset) => selected.offset = selected.offset.max(offset),
+                DeliveryCheckpoint::Short => selected.short_done = true,
+            }
+        }
+        let selected_before = if selected.key == batch.key {
+            selected.offset
+        } else {
+            0
+        };
+        let short_before = selected.key == batch.key && selected.short_done;
+        let decided = step(&selected, batch, mic_active, digests_on, shorts_on);
+        let newly_selected = decided.speak;
+        let Some(mut next) = decided.write else {
+            return admit_pending(&state_path, prev, &mut admit);
+        };
+        let selected_after = next.offset;
+        let short_after = next.short_done;
+
+        next.pending = prev.pending.clone();
+        next.offset = if prev.key == next.key { prev.offset } else { 0 };
+        next.short_done = prev.key == next.key && prev.short_done;
+
+        let block_count = selected_after.saturating_sub(selected_before);
+        if block_count > 0 && !digests_on {
+            debug_assert!(newly_selected.is_empty());
+            next.offset = selected_after;
+        } else if block_count == newly_selected.len() {
+            for (index, text) in newly_selected.into_iter().enumerate() {
+                let after = DeliveryCheckpoint::Offset(selected_before + index + 1);
+                next.pending
+                    .push(pending_utterance(session, &next.key, text, after));
+            }
+            // A batch with no blockquote checkpoint has no offset work to admit.
+            if block_count == 0 {
+                next.offset = selected_after;
+            }
+        } else if block_count == 0 && !short_before && short_after && newly_selected.len() == 1 {
+            next.pending.push(pending_utterance(
+                session,
+                &next.key,
+                newly_selected.into_iter().next().expect("length checked"),
+                DeliveryCheckpoint::Short,
+            ));
+        } else {
+            debug_assert!(
+                false,
+                "narration selections must map one-to-one to delivery checkpoints"
+            );
+            // Fail closed: retain the prior committed state rather than advancing past work
+            // whose admission checkpoint cannot be represented safely.
+            return admit_pending(&state_path, prev, &mut admit);
+        }
+        if !short_after
+            || short_before
+            || next
+                .pending
+                .iter()
+                .any(|p| p.key == next.key && matches!(p.after, DeliveryCheckpoint::Short))
+        {
+            // A selected short with no utterance (empty after cleanup) needs no admission.
+        } else {
+            next.short_done = true;
+        }
+
+        // Persist the newly selected work before offering it. Rejection or process exit can
+        // therefore only leave a retryable pending record, never an advanced/lost offset.
+        write_state(&state_path, &next);
+        admit_pending(&state_path, next, &mut admit)
+    })
+}
+
+/// Retry only the delivery work already persisted for `session`. The Codex subscriber calls
+/// this from its housekeeping tick, allowing a full background-held queue to drain and admit
+/// the blocked digest even when no further app-server event arrives.
+pub fn retry_pending(
+    paths: &Paths,
+    session: &str,
+    mut admit: impl FnMut(&NarrationUtterance) -> Result<(), String>,
+) -> Result<(), String> {
+    let state_path = display_state_path(paths, session);
+    if !state_path.exists() {
+        return Ok(());
+    }
+    with_state_lock(&state_path, || {
+        let state = read_state(&state_path);
+        if state.pending.is_empty() {
+            return Ok(());
+        }
+        admit_pending(&state_path, state, &mut admit)
+    })
+}
+
+fn admit_pending(
+    state_path: &Path,
+    mut state: DisplayState,
+    admit: &mut impl FnMut(&NarrationUtterance) -> Result<(), String>,
+) -> Result<(), String> {
+    while let Some(pending) = state.pending.first().cloned() {
+        let utterance = NarrationUtterance {
+            id: pending.id.clone(),
+            text: pending.text.clone(),
+        };
+        admit(&utterance)?;
+        state.pending.remove(0);
+        if state.key == pending.key {
+            match pending.after {
+                DeliveryCheckpoint::Offset(offset) => state.offset = state.offset.max(offset),
+                DeliveryCheckpoint::Short => state.short_done = true,
+            }
+        }
+        // This closes the ordinary retry window one utterance at a time. The stable ID
+        // closes the remaining crash window between engine acceptance and this write.
+        write_state(state_path, &state);
+    }
+    Ok(())
+}
+
+fn pending_utterance(
+    session: &str,
+    key: &str,
+    text: String,
+    after: DeliveryCheckpoint,
+) -> PendingUtterance {
+    let mut hash = Sha256::new();
+    for part in [session.as_bytes(), key.as_bytes(), text.as_bytes()] {
+        hash.update(part.len().to_le_bytes());
+        hash.update(part);
+    }
+    match after {
+        DeliveryCheckpoint::Offset(offset) => {
+            hash.update([0]);
+            hash.update(offset.to_le_bytes());
+        }
+        DeliveryCheckpoint::Short => hash.update([1]),
+    }
+    let digest = hash.finalize();
+    let id = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    PendingUtterance {
+        id,
+        key: key.to_string(),
+        text,
+        after,
+    }
+}
+
+fn ensure_state_parent(state_path: &Path) {
     if let Some(parent) = state_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    with_state_lock(&state_path, || {
-        let prev: DisplayState = match std::fs::read_to_string(&state_path) {
-            Ok(text) => match serde_json::from_str(&text) {
-                Ok(state) => state,
-                Err(e) => {
-                    eprintln!(
-                        "dontspeak: ignoring corrupt narration state {}: {e}",
-                        state_path.display()
-                    );
-                    DisplayState::default()
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => DisplayState::default(),
+}
+
+fn read_state(state_path: &Path) -> DisplayState {
+    match std::fs::read_to_string(state_path) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(state) => state,
             Err(e) => {
                 eprintln!(
-                    "dontspeak: could not read narration state {}: {e}",
+                    "dontspeak: ignoring corrupt narration state {}: {e}",
                     state_path.display()
                 );
                 DisplayState::default()
             }
-        };
-        let decided = step(&prev, batch, mic_active, digests_on, shorts_on);
-        if let Some(next) = decided.write {
-            atomic_write(
-                &state_path,
-                &serde_json::to_string(&next).unwrap_or_default(),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DisplayState::default(),
+        Err(e) => {
+            eprintln!(
+                "dontspeak: could not read narration state {}: {e}",
+                state_path.display()
             );
+            DisplayState::default()
         }
-        decided.speak
-    })
+    }
+}
+
+fn write_state(state_path: &Path, state: &DisplayState) {
+    atomic_write(
+        state_path,
+        &serde_json::to_string(state).unwrap_or_default(),
+    );
 }
 
 // ── The streaming witness + session lifecycle ────────────────────────────────────
@@ -619,43 +808,129 @@ mod tests {
         assert_eq!(spoken, vec!["Spoken line.".to_string()]);
     }
 
-    // ── narrate_batch: the file-backed composition ────────────────────────────────
+    // ── deliver_batch: the file-backed composition ────────────────────────────────
 
     #[test]
-    fn narrate_batch_persists_across_processes_and_never_double_speaks() {
-        // Two independent `narrate_batch` calls (as two hook processes / a reconnected
+    fn deliver_batch_persists_across_processes_and_never_double_speaks() {
+        // Two independent `deliver_batch` calls (as two hook processes / a reconnected
         // subscriber would make) share state through the file: the second call sees the
         // first's high-water mark and re-emits nothing.
         let dir = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(dir.path());
         let session = "sess-a";
         let fin = cumulative("item_1", REPLY, true);
-        assert_eq!(
-            narrate_batch(&paths, session, &fin, false, true, false),
-            EXPECT
-        );
-        assert!(
-            narrate_batch(&paths, session, &fin, false, true, false).is_empty(),
-            "replayed batch after the state landed on disk must be silent"
-        );
+        let mut spoken = Vec::new();
+        deliver_batch(&paths, session, &fin, false, true, false, |utt| {
+            spoken.push(utt.text.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(spoken, EXPECT);
+        deliver_batch(&paths, session, &fin, false, true, false, |_| {
+            panic!("replayed batch after the state landed on disk must be silent")
+        })
+        .unwrap();
         // And the witness came for free.
         assert!(witness_exists(&paths, session));
     }
 
     #[test]
-    fn narrate_batch_scopes_state_per_session() {
+    fn deliver_batch_scopes_state_per_session() {
         let dir = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(dir.path());
         let fin = cumulative("m", "> Hi.\n\nBody.", true);
-        assert_eq!(
-            narrate_batch(&paths, "s1", &fin, false, true, false),
-            vec!["Hi.".to_string()]
-        );
+        let mut first = Vec::new();
+        deliver_batch(&paths, "s1", &fin, false, true, false, |utt| {
+            first.push(utt.text.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(first, vec!["Hi.".to_string()]);
         // A different session has its own file ⇒ speaks again.
+        let mut second = Vec::new();
+        deliver_batch(&paths, "s2", &fin, false, true, false, |utt| {
+            second.push(utt.text.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(second, vec!["Hi.".to_string()]);
+    }
+
+    #[test]
+    fn rejected_delivery_keeps_offset_pending_and_retries_same_id_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
+        let fin = cumulative("m", "> Retry me.\n\nBody.", true);
+        let mut rejected_id = None;
+        let error = deliver_batch(&paths, "s", &fin, false, true, false, |utt| {
+            rejected_id = Some(utt.id.clone());
+            Err("queue full".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(error, "queue full");
+        let state = read_state(&display_state_path(&paths, "s"));
+        assert_eq!(state.offset, 0, "rejection must not commit delivery");
+        assert_eq!(state.pending.len(), 1);
+
+        let mut admitted = Vec::new();
+        retry_pending(&paths, "s", |utt| {
+            admitted.push((utt.id.clone(), utt.text.clone()));
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(
-            narrate_batch(&paths, "s2", &fin, false, true, false),
-            vec!["Hi.".to_string()]
+            admitted,
+            vec![(rejected_id.unwrap(), "Retry me.".to_string())]
         );
+        retry_pending(&paths, "s", |_| {
+            panic!("committed retry must not be offered twice")
+        })
+        .unwrap();
+        assert_eq!(read_state(&display_state_path(&paths, "s")).offset, 1);
+    }
+
+    #[test]
+    fn shorts_only_consumes_blockquotes_without_creating_delivery_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
+        let fin = cumulative("m", "> Digest disabled.\n\nBody.", true);
+        deliver_batch(&paths, "s", &fin, false, false, true, |_| {
+            panic!("shorts mode must not offer a reply that contains a blockquote")
+        })
+        .unwrap();
+        let state = read_state(&display_state_path(&paths, "s"));
+        assert_eq!(state.offset, 1);
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn partial_multi_utterance_admission_commits_only_the_accepted_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(dir.path());
+        let fin = cumulative("m", "> First.\n\nBody.\n\n> Second.", true);
+        let mut attempts = 0;
+        deliver_batch(&paths, "s", &fin, false, true, false, |_| {
+            attempts += 1;
+            if attempts == 1 {
+                Ok(())
+            } else {
+                Err("queue full".to_string())
+            }
+        })
+        .unwrap_err();
+        let state = read_state(&display_state_path(&paths, "s"));
+        assert_eq!(state.offset, 1);
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending[0].text, "Second.");
+
+        let mut retried = Vec::new();
+        retry_pending(&paths, "s", |utterance| {
+            retried.push(utterance.text.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(retried, vec!["Second.".to_string()]);
+        assert_eq!(read_state(&display_state_path(&paths, "s")).offset, 2);
     }
 
     // ── Witness + lifecycle ───────────────────────────────────────────────────────

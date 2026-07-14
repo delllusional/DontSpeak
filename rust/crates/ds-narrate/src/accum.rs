@@ -1,6 +1,6 @@
 //! The per-message narration accumulation core — "given a streamed text batch, which
 //! top-level blockquote runs become speakable now". PURE of IO (no socket, no disk) so
-//! it is exhaustively unit-testable; [`crate::narrate_batch`] wraps it with the
+//! it is exhaustively unit-testable; [`crate::deliver_batch`] wraps it with the
 //! per-session state file + lock; the adapters forward the utterances to the engine.
 //!
 //! Claude Code streams an assistant message as many `MessageDisplay` batches (a `delta` chunk
@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 /// Per-message accumulation: feed batches, get back the blockquote runs that became newly
-/// speakable. [`crate::narrate_batch`] persists one of these per session (serialized to a
+/// speakable. [`crate::deliver_batch`] persists one of these per session (serialized to a
 /// file under a lock, so overlapping per-batch hook processes take turns).
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct Accum {
