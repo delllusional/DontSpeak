@@ -75,7 +75,7 @@ pub fn all_blockquotes(msg: &str) -> Vec<String> {
 /// The built-in narration spec injected by the `UserPromptSubmit` `provide` hook when
 /// `narrate` includes `digests`. See [`all_blockquotes`] for its extraction contract.
 pub const DEFAULT_NARRATION_SPEC: &str = r#"# Narrate
-Start every reply with a concise spoken summary of the full response. Write each point on its own `>` line in plain text, without other Markdown, code, URLs, or paths. End the summary with any choices the user must make.
+Start every reply with a concise spoken summary of the full response. Write each point on its own `>` line in plain text, without other Markdown, code, URLs, or paths.
 "#;
 
 #[cfg(test)]
