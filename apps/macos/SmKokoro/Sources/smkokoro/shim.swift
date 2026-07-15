@@ -516,7 +516,7 @@ final class LegacyRun: @unchecked Sendable {
 
     private let textLock = NSLock()
     private var committedText: String = ""
-    /// The raw newest callback, retained for phrase-reset detection.
+    /// The newest nonempty callback, retained for phrase-reset detection.
     private var latestPartial: String = ""
     /// The popup/final candidate, protected from empty callback regressions.
     private var settledPartial: String = ""
@@ -550,6 +550,10 @@ final class LegacyRun: @unchecked Sendable {
     /// pre-reset settled partial into `committedText` (finding #7's pattern: skip an empty
     /// segment so it can't bake in a stray separator) before starting the new segment.
     func recordPartial(_ newText: String) {
+        // #84: legacy Speech can emit an empty non-final callback between two hypotheses.
+        // It carries no boundary identity, and consuming it loses the last nonempty timing.
+        guard !newText.isEmpty else { return }
+
         textLock.lock()
         defer { textLock.unlock() }
         let now = ProcessInfo.processInfo.systemUptime
@@ -813,8 +817,8 @@ private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) thr
 //     whole utterance (no restart needed), but its `bestTranscription` only ever covers the
 //     CURRENT phrase segment — mirroring `SysModernSession`, `LegacyRun` (see its doc
 //     comment for why it lives THERE and not on `SysStreamState`) accumulates each
-//     completed segment in `committedText`, tracks the CURRENT segment's raw callback in
-//     `latestPartial`, and preserves its last nonempty candidate in `settledPartial`. A
+//     completed segment in `committedText`, tracks the CURRENT segment's newest nonempty
+//     callback in `latestPartial`, and preserves its popup/final candidate in `settledPartial`. A
 //     segment boundary is inferred from the text itself in `legacySegmentDidReset` (see its doc
 //     comment for the exact heuristic and why a naive word/length check false-positives on
 //     ordinary in-phrase revisions like digit re-grouping); when detected,
