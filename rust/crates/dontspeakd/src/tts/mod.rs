@@ -136,7 +136,6 @@ pub(crate) struct TtsManagerTestOptions {
     finalize_timeout: Option<std::time::Duration>,
     ready_timeout: Option<std::time::Duration>,
     cue_timeout: Option<std::time::Duration>,
-    full_duplex_active: bool,
     /// Extra env vars consumed by the first spawn. This lets the READY-wedge regression prove
     /// recovery on the same manager without mutating either the manager or process-global env.
     first_spawn_env: Mutex<Option<Vec<(String, String)>>>,
@@ -156,14 +155,6 @@ impl TtsManagerTestOptions {
 
     pub(crate) fn with_cue_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.cue_timeout = Some(timeout);
-        self
-    }
-
-    /// Pre-set the manager's private `full_duplex_active` state at construction. `ttsq.rs`'s
-    /// dispatch test can't reach the field and needs `mic_holds` neutralized (the full-duplex
-    /// arm ignores the mic) so a dev machine's genuinely live microphone can't skew its hold.
-    pub(crate) fn with_full_duplex_active(mut self, on: bool) -> Self {
-        self.full_duplex_active = on;
         self
     }
 
@@ -372,12 +363,6 @@ impl TtsManager {
         lifetime: Arc<crate::stats::LifetimeSeconds>,
         #[cfg(test)] test_options: TtsManagerTestOptions,
     ) -> Self {
-        // Both `new` entry points funnel here, so a test seam consumed at construction
-        // (the options struct's contract) applies regardless of which one built the manager.
-        #[cfg(test)]
-        let full_duplex_active = test_options.full_duplex_active;
-        #[cfg(not(test))]
-        let full_duplex_active = false;
         Self {
             bin,
             helper_log_file,
@@ -413,7 +398,7 @@ impl TtsManager {
                 stt_preload: false,
                 tts_preload: false,
             }),
-            full_duplex_active: Mutex::new(full_duplex_active),
+            full_duplex_active: Mutex::new(false),
             stt_provider_active: Mutex::new(String::new()),
             tts_wanted_active: Mutex::new(false),
             tts_model: Arc::new(ModelSlot::new()),
@@ -1827,6 +1812,14 @@ impl TtsManager {
             .transition(ModelState::Loaded, self.gate.get().map(|g| g.as_ref()));
     }
 
+    /// Test-only: force the "running child is full-duplex" flag without a live helper.
+    /// `ttsq`'s earcon-routing tests neutralize `mic_holds` through the full-duplex arm
+    /// so a dev machine's genuinely live microphone can't skew the hold under test.
+    #[cfg(test)]
+    pub(crate) fn set_full_duplex_active_for_test(&self, on: bool) {
+        *self.full_duplex_active.lock().unwrap() = on;
+    }
+
     /// Test-only: pre-arm the [`HEAL_COOLDOWN`] throttle so `restart_if_crashed` is a no-op.
     /// A queue test exercising the readiness wait must not spawn (and fail to spawn) the
     /// stub's nonexistent helper — that failure would land in `last_error` and short-circuit
@@ -2049,6 +2042,35 @@ pub(crate) mod wedge_recovery_tests {
         bin
     }
 
+    /// One shared constructor for this module's managers (mirrors `ttsq.rs`'s `mk_queue`):
+    /// tempdir-rooted log/lifetime paths plus the caller's helper binary — the nonexistent
+    /// stub for the no-process pin tests, [`fake_helper_bin`] for the integration tests.
+    fn mk_mgr_with(
+        dir: &tempfile::TempDir,
+        bin: std::path::PathBuf,
+        opts: TtsManagerTestOptions,
+    ) -> TtsManager {
+        TtsManager::new_for_test(
+            bin,
+            dir.path().join("engine.log"),
+            Arc::new(crate::stats::TtsStats::new()),
+            Arc::new(crate::stats::SttStats::new()),
+            Arc::new(crate::stats::LifetimeSeconds::load(
+                dir.path().join("lifetime.json"),
+            )),
+            opts,
+        )
+    }
+
+    /// [`mk_mgr_with`] with default options and the nonexistent helper — the pin tests' shape.
+    fn mk_mgr(dir: &tempfile::TempDir) -> TtsManager {
+        mk_mgr_with(
+            dir,
+            dir.path().join("ds-test-nonexistent-helper"),
+            TtsManagerTestOptions::default(),
+        )
+    }
+
     /// Pins the ACTUAL production 10s/35s values directly (no process, no real wait) —
     /// so a future edit to either number is a deliberate, visible diff. The integration
     /// test below deliberately does NOT wait out these real durations; it injects a short
@@ -2056,15 +2078,7 @@ pub(crate) mod wedge_recovery_tests {
     #[test]
     fn finalize_timeout_limit_pins_the_system_vs_native_bound() {
         let dir = tempfile::tempdir().unwrap();
-        let tts = TtsManager::new(
-            dir.path().join("ds-test-nonexistent-helper"),
-            dir.path().join("engine.log"),
-            Arc::new(crate::stats::TtsStats::new()),
-            Arc::new(crate::stats::SttStats::new()),
-            Arc::new(crate::stats::LifetimeSeconds::load(
-                dir.path().join("lifetime.json"),
-            )),
-        );
+        let tts = mk_mgr(&dir);
         assert_eq!(tts.finalize_timeout_limit(), Duration::from_secs(10));
         *tts.stt_provider_active.lock().unwrap() = "system".to_string();
         assert_eq!(tts.finalize_timeout_limit(), Duration::from_secs(35));
@@ -2080,16 +2094,10 @@ pub(crate) mod wedge_recovery_tests {
     /// shortened finalize timeout are injected at construction.
     #[test]
     fn a_wedged_listen_is_recovered_and_a_queued_speak_succeeds_after_restart() {
-        let bin = fake_helper_bin();
         let dir = tempfile::tempdir().unwrap();
-        let mgr = Arc::new(TtsManager::new_for_test(
-            bin,
-            dir.path().join("engine.log"),
-            Arc::new(crate::stats::TtsStats::new()),
-            Arc::new(crate::stats::SttStats::new()),
-            Arc::new(crate::stats::LifetimeSeconds::load(
-                dir.path().join("lifetime.json"),
-            )),
+        let mgr = Arc::new(mk_mgr_with(
+            &dir,
+            fake_helper_bin(),
             TtsManagerTestOptions::default().with_finalize_timeout(Duration::from_millis(50)),
         ));
 
@@ -2165,15 +2173,7 @@ pub(crate) mod wedge_recovery_tests {
     #[test]
     fn ready_handshake_timeout_pins_the_production_bound() {
         let dir = tempfile::tempdir().unwrap();
-        let tts = TtsManager::new(
-            dir.path().join("ds-test-nonexistent-helper"),
-            dir.path().join("engine.log"),
-            Arc::new(crate::stats::TtsStats::new()),
-            Arc::new(crate::stats::SttStats::new()),
-            Arc::new(crate::stats::LifetimeSeconds::load(
-                dir.path().join("lifetime.json"),
-            )),
-        );
+        let tts = mk_mgr(&dir);
         assert_eq!(tts.ready_handshake_timeout(), Duration::from_secs(120));
     }
 
@@ -2185,16 +2185,10 @@ pub(crate) mod wedge_recovery_tests {
     /// next start (here: with the wedge switch cleared) fully recovers the slot.
     #[test]
     fn a_child_that_wedges_before_ready_is_killed_at_the_handshake_bound() {
-        let bin = fake_helper_bin();
         let dir = tempfile::tempdir().unwrap();
-        let mgr = TtsManager::new_for_test(
-            bin,
-            dir.path().join("engine.log"),
-            Arc::new(crate::stats::TtsStats::new()),
-            Arc::new(crate::stats::SttStats::new()),
-            Arc::new(crate::stats::LifetimeSeconds::load(
-                dir.path().join("lifetime.json"),
-            )),
+        let mgr = mk_mgr_with(
+            &dir,
+            fake_helper_bin(),
             TtsManagerTestOptions::default()
                 .with_ready_timeout(Duration::from_millis(200))
                 .with_first_spawn_env(&[("DONTSPEAK_FAKE_WEDGE_PRE_READY", "1")]),
@@ -2240,15 +2234,7 @@ pub(crate) mod wedge_recovery_tests {
     #[test]
     fn cue_terminal_timeout_pins_the_production_bound() {
         let dir = tempfile::tempdir().unwrap();
-        let tts = TtsManager::new(
-            dir.path().join("ds-test-nonexistent-helper"),
-            dir.path().join("engine.log"),
-            Arc::new(crate::stats::TtsStats::new()),
-            Arc::new(crate::stats::SttStats::new()),
-            Arc::new(crate::stats::LifetimeSeconds::load(
-                dir.path().join("lifetime.json"),
-            )),
-        );
+        let tts = mk_mgr(&dir);
         assert_eq!(tts.cue_terminal_timeout(), Duration::from_secs(120));
     }
 
@@ -2258,16 +2244,10 @@ pub(crate) mod wedge_recovery_tests {
     /// not ride the 600 s speak timeout with the audio queue wedged behind it.
     #[test]
     fn a_cue_with_no_cuedone_times_out_and_reaps_the_child() {
-        let bin = fake_helper_bin();
         let dir = tempfile::tempdir().unwrap();
-        let mgr = TtsManager::new_for_test(
-            bin,
-            dir.path().join("engine.log"),
-            Arc::new(crate::stats::TtsStats::new()),
-            Arc::new(crate::stats::SttStats::new()),
-            Arc::new(crate::stats::LifetimeSeconds::load(
-                dir.path().join("lifetime.json"),
-            )),
+        let mgr = mk_mgr_with(
+            &dir,
+            fake_helper_bin(),
             TtsManagerTestOptions::default().with_cue_timeout(Duration::from_millis(100)),
         );
 

@@ -2251,16 +2251,11 @@ mod tests {
 
     #[test]
     fn dispatch_earcon_bypasses_the_held_queue_only_for_idle_needs_input() {
-        // Construct with full-duplex pre-set: `mic_holds(full_duplex=true, …)` is always
-        // false, so a dev machine's genuinely live microphone can't turn the focus-only
-        // hold under test into focus+mic and silently defeat the bypass.
-        let dir = tempfile::tempdir().unwrap();
-        let helper = dir.path().join("ds-test-nonexistent-helper");
-        let q = TtsQueue::test_stub_with_helper(
-            dir.path(),
-            helper,
-            crate::tts::TtsManagerTestOptions::default().with_full_duplex_active(true),
-        );
+        // Force full-duplex: `mic_holds(full_duplex=true, …)` is always false, so a dev
+        // machine's genuinely live microphone can't turn the focus-only hold under test
+        // into focus+mic and silently defeat the bypass.
+        let q = mk_queue();
+        q.tts.set_full_duplex_active_for_test(true);
         let s = Some("term-1".to_string());
 
         // Engage the focus hold: config on, terminal seen frontmost once, then backgrounded.
@@ -2322,15 +2317,10 @@ mod tests {
 
     #[test]
     fn gate_earcon_lets_a_queued_needs_input_pass_a_focus_only_hold() {
-        // Full-duplex seam for the same reason as the dispatch test above: a dev
-        // machine's live microphone must not add a mic hold to the focus-only one.
-        let dir = tempfile::tempdir().unwrap();
-        let helper = dir.path().join("ds-test-nonexistent-helper");
-        let q = TtsQueue::test_stub_with_helper(
-            dir.path(),
-            helper,
-            crate::tts::TtsManagerTestOptions::default().with_full_duplex_active(true),
-        );
+        // Full-duplex for the same reason as the dispatch test above: a dev machine's
+        // live microphone must not add a mic hold to the focus-only one.
+        let q = mk_queue();
+        q.tts.set_full_duplex_active_for_test(true);
         q.set_pause_in_background(true);
         q.set_terminal_front(true);
         q.set_terminal_front(false);
