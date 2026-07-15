@@ -24,7 +24,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::download::{DEFAULT_RETRIES, download_to, is_permanent_error};
+use crate::download::{DEFAULT_RETRIES, DownloadState, download_to_with_state, is_permanent_error};
 use crate::hash::verify_sha256;
 
 const HF_HOST: &str = "https://huggingface.co";
@@ -527,11 +527,12 @@ fn download_one_at(
         std::fs::create_dir_all(parent)?;
     }
     let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = tempfile::Builder::new().tempfile_in(dir)?;
+    let mut state = DownloadState::default();
     let mut attempt = 0;
     loop {
-        let tmp = tempfile::Builder::new().tempfile_in(dir)?;
-        let res =
-            download_to(url, tmp.path(), progress).and_then(|()| verify_downloaded(tmp.path(), f));
+        let res = download_to_with_state(url, tmp.path(), progress, &mut state)
+            .and_then(|()| verify_downloaded(tmp.path(), f));
         match res {
             Ok(()) => {
                 tmp.persist(dest).map_err(|e| e.error)?;

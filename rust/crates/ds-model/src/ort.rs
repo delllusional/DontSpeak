@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::archive::extract_runtime_member;
-use crate::download::{DEFAULT_RETRIES, download_to, is_permanent_error};
+use crate::download::{DEFAULT_RETRIES, DownloadState, download_to_with_state, is_permanent_error};
 use crate::hash::verify_sha256;
 use crate::model_path;
 
@@ -494,11 +494,12 @@ fn ensure_onnxruntime_at(
     // failures (truncation/timeout/5xx) retry with backoff; permanent ones
     // (complete-body sha mismatch / 404) fail fast.
     let retries = DEFAULT_RETRIES.max(1);
+    let tmp_tgz = tempfile::NamedTempFile::new_in(dir)?;
+    let mut state = DownloadState::default();
     let mut last_err: Option<std::io::Error> = None;
     for attempt in 0..retries {
-        let tmp_tgz = tempfile::NamedTempFile::new_in(dir)?;
         let result = (|| -> std::io::Result<()> {
-            download_to(url, tmp_tgz.path(), progress)?;
+            download_to_with_state(url, tmp_tgz.path(), progress, &mut state)?;
             if !verify_sha256(tmp_tgz.path(), archive_sha256) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -747,11 +748,12 @@ pub fn ensure_cuda_runtime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io
             let dir = dir.clone();
             Box::new(move |p: &dyn Fn(u64, u64)| -> std::io::Result<()> {
                 let retries = DEFAULT_RETRIES.max(1);
+                let tmp = tempfile::NamedTempFile::new_in(&dir)?;
+                let mut state = DownloadState::default();
                 let mut last_err: Option<std::io::Error> = None;
                 for attempt in 0..retries {
-                    let tmp = tempfile::NamedTempFile::new_in(&dir)?;
                     let r = (|| -> std::io::Result<()> {
-                        download_to(url, tmp.path(), p)?;
+                        download_to_with_state(url, tmp.path(), p, &mut state)?;
                         if !verify_sha256(tmp.path(), sha) {
                             return Err(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,

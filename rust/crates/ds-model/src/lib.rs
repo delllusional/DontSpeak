@@ -24,10 +24,9 @@
 //! ONLY for the one-member ORT `.tgz` extraction (model paths come from ds-config).
 //! No async runtime in the engine.
 //!
-//! A stalled download restarts from the beginning; HTTP Range resume is tracked in issue
-//! #76. Download progress is exposed by the engine. The pure fns below
-//! are network-free and unit-tested; `ensure` is exercised by a localhost-
-//! TcpListener fixture (no real CDN).
+//! A stalled download retains its partial temp file and resumes with a validated HTTP Range
+//! request. Download progress is exposed by the engine. The pure fns below are network-free
+//! and unit-tested; `ensure` is exercised by localhost fixtures (no real CDN).
 //!
 //! ## Module map
 //! - [`hash`] — SHA-256 + checksum verify (pure).

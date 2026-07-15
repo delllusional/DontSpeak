@@ -1,6 +1,7 @@
-//! Download engine — atomic temp + rename, retry with backoff, sha-verify, and
-//! the installer prefetch fast-path. Blocking `attohttpc` (no tokio); a
-//! socket-level per-read inactivity timeout aborts a stalled CDN.
+//! Download engine — atomic temp + rename, validated HTTP Range resume across
+//! retries, sha-verify, and the installer prefetch fast-path. Blocking
+//! `attohttpc` (no tokio); a socket-level per-read inactivity timeout aborts a
+//! stalled CDN.
 //!
 //! Retry classification rides on `io::ErrorKind`, not a custom error enum:
 //! `InvalidData` = checksum mismatch and `NotFound` = HTTP 4xx or definitive DNS
@@ -14,7 +15,7 @@ use crate::hash::verify_sha256;
 use crate::model_path;
 use crate::spec::ModelSpec;
 
-/// Default download retry count (full re-download; Range-resume deferred).
+/// Default download retry count.
 pub(crate) const DEFAULT_RETRIES: u32 = 3;
 
 /// Stall guards so a wedged CDN never hangs the caller (engine tick / GUI). A
@@ -29,6 +30,9 @@ pub(crate) const DEFAULT_RETRIES: u32 = 3;
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Prevent a compliant but pathological server from keeping one attempt alive with endless
+/// tiny successful ranges. Hitting the cap yields to the ordinary retry/backoff budget.
+const MAX_RANGE_SEGMENTS_PER_ATTEMPT: u32 = 64;
 
 /// The OS trust store, loaded ONCE, as attohttpc root certs. attohttpc's
 /// `tls-rustls-webpki-roots-ring` feature pulls the webpki-roots crate but NOT the feature
@@ -126,11 +130,9 @@ fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> st
 /// Ensure `spec`'s file exists locally and matches its SHA-256, downloading it
 /// if needed. Returns the final path on success.
 ///
-/// Flow (§D, Range-resume deferred): if the final path already verifies, return
-/// it. Otherwise GET the URL into a sibling `.part` temp file (up to N retries),
-/// verify the `.part`'s SHA-256, then atomically persist (rename) it onto the
-/// final path. A failed verify deletes the `.part` and retries with a full
-/// re-download.
+/// If the final path already verifies, return it. Otherwise GET the URL into a
+/// sibling temp file, retaining validated partial bytes across transient retries,
+/// verify its SHA-256, then atomically persist it onto the final path.
 pub fn ensure(spec: &ModelSpec) -> std::io::Result<PathBuf> {
     ensure_with_retries(spec, DEFAULT_RETRIES, &|_, _| {})
 }
@@ -189,10 +191,38 @@ fn ensure_at(
         .ok_or_else(|| std::io::Error::other("model path has no parent"))?;
     std::fs::create_dir_all(dir)?;
 
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+
+    // A corrupt installer-prefetched copy falls back to the network. Handle it once here so
+    // retries do not keep copying the same bad local bytes back over the resumable temp file.
+    if let Some(local) = prefetch_local(&spec.url) {
+        copy_prefetched(&local, tmp.path(), progress)?;
+        if verify_sha256(tmp.path(), &spec.sha256) {
+            tmp.persist(final_path).map_err(|e| e.error)?;
+            return Ok(());
+        }
+        tmp.as_file().set_len(0)?;
+    }
+
+    let mut state = DownloadState::default();
     let mut last_err: Option<std::io::Error> = None;
     for attempt in 0..retries.max(1) {
-        match download_once(&spec.url, dir, final_path, &spec.sha256, progress) {
-            Ok(()) => return Ok(()),
+        let result =
+            download_to_network(&spec.url, tmp.path(), progress, &mut state).and_then(|()| {
+                if verify_sha256(tmp.path(), &spec.sha256) {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "sha256 mismatch on downloaded file",
+                    ))
+                }
+            });
+        match result {
+            Ok(()) => {
+                tmp.persist(final_path).map_err(|e| e.error)?;
+                return Ok(());
+            }
             Err(e) => {
                 // Fast-fail permanent errors (checksum mismatch, HTTP 404): a
                 // retry would only re-fetch the same wrong/absent body — for a
@@ -267,23 +297,140 @@ fn transport_err(e: attohttpc::Error) -> std::io::Error {
     std::io::Error::new(kind, e.to_string())
 }
 
-/// Open a GET body stream: returns the body reader + the `Content-Length` (0 if
-/// absent). `attohttpc`'s `read_timeout` is a SOCKET-level per-read timeout, so a
-/// stalled CDN aborts mid-download while a slow-but-progressing large model keeps
-/// going. Non-2xx status is classified (4xx permanent / 5xx transient); transport
-/// errors are transient.
-fn http_get_stream(url: &str) -> std::io::Result<(attohttpc::ResponseReader, u64)> {
-    let resp = http_get_builder(url).send().map_err(transport_err)?;
-    if !resp.is_success() {
-        return Err(classify_http_status(resp.status().as_u16()));
-    }
-    let (_status, headers, reader) = resp.split();
-    let total: u64 = headers
+/// The response metadata needed to decide whether the destination is truncated or appendable.
+enum HttpStream {
+    Body {
+        reader: Box<attohttpc::ResponseReader>,
+        start: u64,
+        response_len: u64,
+        total: u64,
+    },
+    RangeUnsatisfiable,
+}
+
+/// State shared by retry attempts for one temporary file. `If-Range` binds an appended suffix
+/// to the representation that supplied the existing prefix; checksum verification remains the
+/// final integrity gate.
+#[derive(Default)]
+pub(crate) struct DownloadState {
+    validator: Option<String>,
+}
+
+fn parse_content_length(headers: &attohttpc::header::HeaderMap) -> Option<u64> {
+    headers
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    Ok((reader, total))
+}
+
+/// Parse `Content-Range: bytes START-END/TOTAL`. Resume is allowed only when every
+/// component is concrete and internally consistent; otherwise appending could silently
+/// produce a corrupt file that merely fails its checksum after wasting the remaining transfer.
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let (unit, value) = value.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (range, total) = value.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let start = start.parse().ok()?;
+    let end = end.parse().ok()?;
+    let total = total.parse().ok()?;
+    (start <= end && end < total).then_some((start, end, total))
+}
+
+/// Prefer a strong ETag, falling back to the HTTP date that `If-Range` also accepts.
+fn response_validator(headers: &attohttpc::header::HeaderMap) -> Option<String> {
+    let strong_etag = headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .filter(|etag| !etag.starts_with("W/"));
+    strong_etag
+        .or_else(|| headers.get("last-modified").and_then(|v| v.to_str().ok()))
+        .map(str::to_owned)
+}
+
+/// Open a full or resumed GET. A `206` is accepted only when `Content-Range` starts at the
+/// requested offset and agrees with `Content-Length`. A `200` after a Range request means the
+/// server ignored Range and is a safe full restart. `416` asks the caller to retry once from
+/// zero because the local partial and remote representation no longer agree.
+fn http_get_stream(
+    url: &str,
+    resume_from: u64,
+    state: &mut DownloadState,
+) -> std::io::Result<HttpStream> {
+    let mut request = http_get_builder(url);
+    if resume_from > 0 {
+        request = request.header("Range", format!("bytes={resume_from}-"));
+        if let Some(validator) = &state.validator {
+            request = request.header("If-Range", validator);
+        }
+    }
+    let resp = request.send().map_err(transport_err)?;
+    let status = resp.status().as_u16();
+    if status == 416 && resume_from > 0 {
+        return Ok(HttpStream::RangeUnsatisfiable);
+    }
+    if !resp.is_success() {
+        return Err(classify_http_status(status));
+    }
+
+    let (_status, headers, reader) = resp.split();
+    let content_len = parse_content_length(&headers).unwrap_or(0);
+    if status == 206 {
+        let value = headers
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "HTTP 206 response is missing Content-Range",
+                )
+            })?;
+        let (start, end, total) = parse_content_range(value).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP 206 response has invalid Content-Range",
+            )
+        })?;
+        let expected_len = end - start + 1;
+        if start != resume_from || (content_len > 0 && content_len != expected_len) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "HTTP 206 response does not match requested range: requested {resume_from}, \
+                     received {start}-{end}/{total} with length {content_len}"
+                ),
+            ));
+        }
+        if let Some(received) = response_validator(&headers) {
+            if state
+                .validator
+                .as_ref()
+                .is_some_and(|sent| sent != &received)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "HTTP 206 response changed the download validator",
+                ));
+            }
+            state.validator.get_or_insert(received);
+        }
+        return Ok(HttpStream::Body {
+            reader: Box::new(reader),
+            start,
+            response_len: expected_len,
+            total,
+        });
+    }
+
+    state.validator = response_validator(&headers);
+    Ok(HttpStream::Body {
+        reader: Box::new(reader),
+        start: 0,
+        response_len: content_len,
+        total: content_len,
+    })
 }
 
 /// Whether an error from one download attempt is PERMANENT — retrying it would
@@ -298,8 +445,9 @@ pub(crate) fn is_permanent_error(e: &std::io::Error) -> bool {
     )
 }
 
-/// One download attempt: GET → `.part` → verify → atomic rename. The temp file
-/// is cleaned up automatically on any early return (NamedTempFile drops).
+/// One download attempt: GET → temp file → verify → atomic rename. The temp file
+/// is cleaned up automatically on any early return.
+#[cfg(test)]
 fn download_once(
     url: &str,
     dir: &Path,
@@ -307,7 +455,7 @@ fn download_once(
     expected_sha: &str,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
 
     // Installer path: a pre-downloaded copy exists locally — use it if it verifies.
     // If the local copy is CORRUPT, fall through to a normal network fetch rather than
@@ -320,56 +468,10 @@ fn download_once(
             return Ok(());
         }
         // Discard the bad copy and start the network path with a clean temp file.
-        tmp = tempfile::NamedTempFile::new_in(dir)?;
+        tmp.as_file().set_len(0)?;
     }
 
-    // Per-read inactivity + connect timeouts (see CONNECT_TIMEOUT / READ_TIMEOUT):
-    // a stalled CDN aborts instead of hanging the caller indefinitely.
-    let (mut reader, total) = http_get_stream(url)?;
-    if total > MAX_DOWNLOAD_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "download Content-Length exceeds size limit",
-        ));
-    }
-    let mut buf = [0u8; 64 * 1024];
-    let mut downloaded: u64 = 0;
-    let mut next_emit: u64 = 0;
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        tmp.write_all(&buf[..n])?;
-        downloaded += n as u64;
-        if downloaded > MAX_DOWNLOAD_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "download exceeds size limit",
-            ));
-        }
-        // Throttle progress to ~1 MB steps to bound UI callbacks.
-        if downloaded >= next_emit {
-            progress(downloaded, total);
-            next_emit = downloaded + 1_048_576;
-        }
-    }
-    tmp.flush()?;
-    progress(downloaded, total.max(downloaded)); // final 100%
-
-    // TRUNCATION (transient): the CDN closed the stream early — `read` returns 0
-    // (clean EOF) with no error, so the body is short. This is a network hiccup,
-    // NOT corrupt bytes, so surface it as TimedOut so the retry loop RE-FETCHES it
-    // (otherwise the short `.part` fails the sha check below and is mis-classified
-    // as a permanent InvalidData, forcing the user to re-click — the reported
-    // "succeeds on the 2nd/3rd attempt" symptom). Only checkable when the server
-    // sent a Content-Length.
-    if total > 0 && downloaded < total {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("truncated download: got {downloaded} of {total} bytes"),
-        ));
-    }
+    download_to_network(url, tmp.path(), progress, &mut DownloadState::default())?;
 
     // Verify the .part BEFORE renaming so a corrupt body never lands as final. A
     // mismatch on a COMPLETE body (downloaded == total, or length unknown) is a
@@ -386,59 +488,156 @@ fn download_once(
     Ok(())
 }
 
-/// GET `url` straight into `dest` (no checksum here; caller verifies). Used by
-/// the onnxruntime `.tgz` download (the dylib is extracted + verified separately
-/// via the archive digest).
-pub(crate) fn download_to(
-    url: &str,
-    dest: &Path,
-    progress: &dyn Fn(u64, u64),
-) -> std::io::Result<()> {
+#[cfg(test)]
+fn download_to(url: &str, dest: &Path, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
     // Installer path: copy the pre-downloaded archive (the caller verifies its sha).
     if let Some(local) = prefetch_local(url) {
         return copy_prefetched(&local, dest, progress);
     }
-    let (mut reader, total) = http_get_stream(url)?;
-    if total > MAX_DOWNLOAD_BYTES {
+    download_to_network(url, dest, progress, &mut DownloadState::default())
+}
+
+/// GET `url` into `dest` without checksum verification, retaining the response validator across
+/// caller-owned retries. Archive and Core ML callers verify before atomic extraction or rename.
+pub(crate) fn download_to_with_state(
+    url: &str,
+    dest: &Path,
+    progress: &dyn Fn(u64, u64),
+    state: &mut DownloadState,
+) -> std::io::Result<()> {
+    if let Some(local) = prefetch_local(url) {
+        return copy_prefetched(&local, dest, progress);
+    }
+    download_to_network(url, dest, progress, state)
+}
+
+fn download_to_network(
+    url: &str,
+    dest: &Path,
+    progress: &dyn Fn(u64, u64),
+    state: &mut DownloadState,
+) -> std::io::Result<()> {
+    let mut resume_from = dest.metadata().map(|m| m.len()).unwrap_or(0);
+    if resume_from > MAX_DOWNLOAD_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "download Content-Length exceeds size limit",
+            "partial download exceeds size limit",
         ));
     }
-    let mut f = std::fs::File::create(dest)?;
-    let mut buf = [0u8; 64 * 1024];
-    let mut downloaded: u64 = 0;
-    let mut next_emit: u64 = 0;
+
+    let mut restarted_after_416 = false;
+    let mut range_segments = 0;
     loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
+        // Without a validator, Range cannot prove that the suffix belongs to the retained
+        // prefix. Keep checksum safety and fall back to a clean full request.
+        if resume_from > 0 && state.validator.is_none() {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(dest)?
+                .set_len(0)?;
+            resume_from = 0;
         }
-        f.write_all(&buf[..n])?;
-        downloaded += n as u64;
-        if downloaded > MAX_DOWNLOAD_BYTES {
+
+        let (mut reader, start, response_len, total) =
+            match http_get_stream(url, resume_from, state)? {
+                HttpStream::Body {
+                    reader,
+                    start,
+                    response_len,
+                    total,
+                } => (reader, start, response_len, total),
+                HttpStream::RangeUnsatisfiable if !restarted_after_416 => {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(dest)?
+                        .set_len(0)?;
+                    resume_from = 0;
+                    restarted_after_416 = true;
+                    state.validator = None;
+                    continue;
+                }
+                HttpStream::RangeUnsatisfiable => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "server rejected a full download range",
+                    ));
+                }
+            };
+        if total > MAX_DOWNLOAD_BYTES || start.saturating_add(response_len) > MAX_DOWNLOAD_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "download exceeds size limit",
+                "download Content-Length exceeds size limit",
             ));
         }
-        if downloaded >= next_emit {
-            progress(downloaded, total);
-            next_emit = downloaded + 1_048_576;
+        if start > 0 && dest.metadata().map(|m| m.len()).unwrap_or(0) != start {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "partial download changed while its range request was in flight",
+            ));
         }
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true);
+        if start == 0 {
+            options.truncate(true);
+        } else {
+            options.append(true);
+        }
+        let mut f = options.open(dest)?;
+        let mut buf = [0u8; 64 * 1024];
+        let mut received: u64 = 0;
+        let mut downloaded = start;
+        let mut next_emit = downloaded;
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            f.write_all(&buf[..n])?;
+            received += n as u64;
+            downloaded += n as u64;
+            if downloaded > MAX_DOWNLOAD_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "download exceeds size limit",
+                ));
+            }
+            if downloaded >= next_emit {
+                progress(downloaded, total);
+                next_emit = downloaded + 1_048_576;
+            }
+        }
+        f.flush()?;
+        progress(downloaded, total.max(downloaded));
+        // Preserve a short partial on transient truncation so the caller's next attempt resumes it.
+        if response_len > 0 && received < response_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("truncated download: got {received} of {response_len} response bytes"),
+            ));
+        }
+        if response_len > 0 && received > response_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("oversized response: got {received} of {response_len} declared bytes"),
+            ));
+        }
+        if total > 0 && downloaded < total {
+            range_segments += 1;
+            if range_segments >= MAX_RANGE_SEGMENTS_PER_ATTEMPT {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "server returned {range_segments} short range segments; \
+                         downloaded {downloaded} of {total} bytes"
+                    ),
+                ));
+            }
+            resume_from = downloaded;
+            continue;
+        }
+        return Ok(());
     }
-    f.flush()?;
-    progress(downloaded, total.max(downloaded));
-    // Same truncation guard as download_once: a short body (CDN closed early) is
-    // TRANSIENT, so the caller's retry loop re-fetches instead of failing on the
-    // downstream sha check.
-    if total > 0 && downloaded < total {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("truncated download: got {downloaded} of {total} bytes"),
-        ));
-    }
-    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -513,7 +712,26 @@ pub(crate) fn sweep_orphaned_temp_files(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
+
+    fn read_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    fn has_header(request: &str, expected: &str) -> bool {
+        request
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case(expected))
+    }
 
     /// Localhost happy-path: serve a known body over an `httpmock` server and exercise
     /// the temp+rename+verify path of `ensure`'s inner `download_once` WITHOUT a
@@ -713,13 +931,321 @@ mod tests {
         mock.assert_calls(1);
     }
 
+    /// A server may return less than the requested suffix. Keep advancing the range with the
+    /// original validator until the full representation can be checksummed and renamed.
+    #[test]
+    fn ensure_resumes_across_short_range_responses_with_a_validator() {
+        let body = b"a model body whose second half is resumed instead of fetched twice".to_vec();
+        let split = body.len() / 2;
+        let short_len = 7;
+        let sha = crate::hash::sha256_hex(&body);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model.bin", listener.local_addr().unwrap());
+
+        let served_body = body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let request = read_request(&mut first);
+            assert!(!request.to_ascii_lowercase().contains("\r\nrange:"));
+            write!(
+                first,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture-v1\"\r\n\
+                 Connection: close\r\n\r\n",
+                served_body.len()
+            )
+            .unwrap();
+            first.write_all(&served_body[..split]).unwrap();
+            first.flush().unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().unwrap();
+            let request = read_request(&mut second);
+            assert!(has_header(&request, &format!("Range: bytes={split}-")));
+            assert!(has_header(&request, "If-Range: \"fixture-v1\""));
+            write!(
+                second,
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {short_len}\r\n\
+                 Content-Range: BYTES {split}-{}/{}\r\nETag: \"fixture-v1\"\r\n\
+                 Connection: close\r\n\r\n",
+                split + short_len - 1,
+                served_body.len()
+            )
+            .unwrap();
+            second
+                .write_all(&served_body[split..split + short_len])
+                .unwrap();
+            drop(second);
+
+            let third_start = split + short_len;
+            let (mut third, _) = listener.accept().unwrap();
+            let request = read_request(&mut third);
+            assert!(has_header(
+                &request,
+                &format!("Range: bytes={third_start}-")
+            ));
+            assert!(has_header(&request, "If-Range: \"fixture-v1\""));
+            let remaining = served_body.len() - third_start;
+            write!(
+                third,
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {remaining}\r\n\
+                 Content-Range: bytes {third_start}-{}/{}\r\nETag: \"fixture-v1\"\r\n\
+                 Connection: close\r\n\r\n",
+                served_body.len() - 1,
+                served_body.len()
+            )
+            .unwrap();
+            third.write_all(&served_body[third_start..]).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("model.bin");
+        let spec = ModelSpec {
+            file_name: "model.bin".into(),
+            url,
+            sha256: sha,
+        };
+        ensure_at(&final_path, &spec, 2, &|_, _| {}).expect("the retry resumes and verifies");
+        server.join().unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), body);
+        let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the atomically persisted final file remains"
+        );
+    }
+
+    /// Range support is optional. A `200` response to a Range request is a full body, so the
+    /// old partial must be truncated before writing rather than appended and corrupted.
+    #[test]
+    fn range_ignored_by_server_restarts_the_partial_from_zero() {
+        let body = b"the complete replacement body".to_vec();
+        let partial = b"old-partial";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/ignored.bin", listener.local_addr().unwrap());
+
+        let served_body = body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            assert!(has_header(
+                &request,
+                &format!("Range: bytes={}-", partial.len())
+            ));
+            assert!(has_header(&request, "If-Range: \"fixture\""));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served_body.len()
+            )
+            .unwrap();
+            stream.write_all(&served_body).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("ignored.bin");
+        std::fs::write(&dest, partial).unwrap();
+        let mut state = DownloadState {
+            validator: Some("\"fixture\"".into()),
+        };
+        download_to_with_state(&url, &dest, &|_, _| {}, &mut state)
+            .expect("a full response restarts safely");
+        server.join().unwrap();
+        assert_eq!(std::fs::read(dest).unwrap(), body);
+    }
+
+    /// `If-Range` turns a representation change into a full `200`, which must replace the
+    /// retained prefix and its validator instead of mixing bytes from two versions.
+    #[test]
+    fn changed_validator_restarts_with_the_new_full_representation() {
+        let old_body = b"the old representation that gets interrupted".to_vec();
+        let new_body = b"the complete new representation".to_vec();
+        let split = old_body.len() / 2;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/changed.bin", listener.local_addr().unwrap());
+
+        let served_old = old_body.clone();
+        let served_new = new_body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let request = read_request(&mut first);
+            assert!(!request.to_ascii_lowercase().contains("\r\nrange:"));
+            write!(
+                first,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"old\"\r\n\
+                 Connection: close\r\n\r\n",
+                served_old.len()
+            )
+            .unwrap();
+            first.write_all(&served_old[..split]).unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().unwrap();
+            let request = read_request(&mut second);
+            assert!(has_header(&request, &format!("Range: bytes={split}-")));
+            assert!(has_header(&request, "If-Range: \"old\""));
+            write!(
+                second,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"new\"\r\n\
+                 Connection: close\r\n\r\n",
+                served_new.len()
+            )
+            .unwrap();
+            second.write_all(&served_new).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("changed.bin");
+        let mut state = DownloadState::default();
+        let first = download_to_with_state(&url, &dest, &|_, _| {}, &mut state)
+            .expect_err("the first response is truncated");
+        assert_eq!(first.kind(), std::io::ErrorKind::TimedOut);
+        download_to_with_state(&url, &dest, &|_, _| {}, &mut state)
+            .expect("the changed representation restarts in full");
+        server.join().unwrap();
+        assert_eq!(std::fs::read(dest).unwrap(), new_body);
+    }
+
+    /// When the first response has no validator, discard its partial before retrying so bytes
+    /// from two representations can never be combined.
+    #[test]
+    fn missing_validator_restarts_without_sending_range() {
+        let body = b"a complete unvalidated representation".to_vec();
+        let split = body.len() / 2;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/no-validator.bin", listener.local_addr().unwrap());
+
+        let served_body = body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let request = read_request(&mut first);
+            assert!(!request.to_ascii_lowercase().contains("\r\nrange:"));
+            write!(
+                first,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served_body.len()
+            )
+            .unwrap();
+            first.write_all(&served_body[..split]).unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().unwrap();
+            let request = read_request(&mut second);
+            assert!(!request.to_ascii_lowercase().contains("\r\nrange:"));
+            write!(
+                second,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served_body.len()
+            )
+            .unwrap();
+            second.write_all(&served_body).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("no-validator.bin");
+        let mut state = DownloadState::default();
+        let first = download_to_with_state(&url, &dest, &|_, _| {}, &mut state)
+            .expect_err("the first response is truncated");
+        assert_eq!(first.kind(), std::io::ErrorKind::TimedOut);
+        download_to_with_state(&url, &dest, &|_, _| {}, &mut state)
+            .expect("the unvalidated partial restarts from zero");
+        server.join().unwrap();
+        assert_eq!(std::fs::read(dest).unwrap(), body);
+    }
+
+    /// Never append a `206` body unless its range starts at the exact local file length.
+    #[test]
+    fn mismatched_content_range_is_rejected_without_touching_the_partial() {
+        let partial = b"trusted-prefix";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/bad-range.bin", listener.local_addr().unwrap());
+        let wrong_start = partial.len() + 1;
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            assert!(has_header(
+                &request,
+                &format!("Range: bytes={}-", partial.len())
+            ));
+            assert!(has_header(&request, "If-Range: \"fixture\""));
+            write!(
+                stream,
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\n\
+                 Content-Range: bytes {wrong_start}-{}/{}\r\nConnection: close\r\n\r\nxyz",
+                wrong_start + 2,
+                wrong_start + 3
+            )
+            .unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("bad-range.bin");
+        std::fs::write(&dest, partial).unwrap();
+        let mut state = DownloadState {
+            validator: Some("\"fixture\"".into()),
+        };
+        let err = download_to_with_state(&url, &dest, &|_, _| {}, &mut state)
+            .expect_err("the range must be rejected");
+        server.join().unwrap();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(dest).unwrap(), partial);
+    }
+
+    /// A stale oversized partial can produce `416`; retrying once without Range recovers it.
+    #[test]
+    fn unsatisfiable_range_restarts_once_from_zero() {
+        let body = b"remote body".to_vec();
+        let partial = b"a local partial longer than the remote body";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/stale.bin", listener.local_addr().unwrap());
+
+        let served_body = body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let request = read_request(&mut first);
+            assert!(has_header(
+                &request,
+                &format!("Range: bytes={}-", partial.len())
+            ));
+            assert!(has_header(&request, "If-Range: \"fixture\""));
+            first
+                .write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+
+            let (mut second, _) = listener.accept().unwrap();
+            let request = read_request(&mut second);
+            assert!(!request.to_ascii_lowercase().contains("\r\nrange:"));
+            write!(
+                second,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served_body.len()
+            )
+            .unwrap();
+            second.write_all(&served_body).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("stale.bin");
+        std::fs::write(&dest, partial).unwrap();
+        let mut state = DownloadState {
+            validator: Some("\"fixture\"".into()),
+        };
+        download_to_with_state(&url, &dest, &|_, _| {}, &mut state)
+            .expect("416 falls back to a full request");
+        server.join().unwrap();
+        assert_eq!(std::fs::read(dest).unwrap(), body);
+    }
+
     /// The truncation guard's whole reason to exist: a server that DECLARES a
     /// `Content-Length` larger than the body it actually sends (then closes the
     /// connection) simulates a CDN that truncates mid-stream — the historical "succeeds
     /// on the 2nd/3rd attempt" bug. A naive implementation reaches the sha check on the
     /// short `.part` file, mismatches, and mis-classifies it as a PERMANENT `InvalidData`
     /// (no retry). `download_once` must instead classify this as TRANSIENT (`TimedOut`)
-    /// BEFORE the sha check, so `ensure_at`'s retry loop re-fetches it. A regression that
+    /// BEFORE the sha check, so `ensure_at`'s retry loop resumes it. A regression that
     /// reclassifies truncation as permanent would pass every OTHER test in this suite
     /// (every fixture server's Content-Length matches its body exactly) and silently
     /// reintroduce the original bug — this is the one test that would catch it.
