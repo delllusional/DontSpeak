@@ -89,9 +89,16 @@ pub(crate) fn barge_step(
     max_ticks: u32,
 ) -> (BargeAction, BargeState) {
     if full_duplex {
-        // Mic permanently live → no edges; never barge, and forget any prior barge.
+        // Mic permanently live → no edges. If the watcher paused just before the warm
+        // helper reported that VPIO is active, unwind that pause before forgetting it;
+        // otherwise the queue stays wedged for the helper's entire lifetime. The queue's
+        // cause guard makes this Resume harmless if a real dictation pause won the race.
         return (
-            BargeAction::None,
+            if st.barged {
+                BargeAction::Resume
+            } else {
+                BargeAction::None
+            },
             BargeState {
                 prev: true,
                 barged: false,
@@ -372,6 +379,18 @@ mod tests {
         // Even a foreign rising edge does nothing in full-duplex; prev latches true.
         let (a, st) = barge_step(true, false, true, IDLE, MAX);
         assert_eq!(a, BargeAction::None);
+        assert!(st.prev && !st.barged);
+    }
+
+    #[test]
+    fn entering_full_duplex_unwinds_a_watcher_owned_pause() {
+        // Startup race: VPIO opens and makes the mic active one watcher tick before
+        // TtsManager publishes full_duplex_active, so the watcher briefly owns a pause.
+        let (a, barged) = step(true, false, IDLE);
+        assert_eq!(a, BargeAction::Pause);
+
+        let (a, st) = barge_step(false, false, true, barged, MAX);
+        assert_eq!(a, BargeAction::Resume);
         assert!(st.prev && !st.barged);
     }
 
