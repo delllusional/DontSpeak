@@ -6,8 +6,9 @@
 use ds_aec::DuplexAudio;
 use ds_helper_proto as proto;
 use ds_tts::g2p::{self, PhonemeBatchesOutcome};
+use ds_tts::sink::IncrementalSink;
 use serde::Deserialize;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::_exit;
 use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
@@ -389,12 +390,6 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
 // restart once the files land. A load attempted while the files are still absent simply
 // fails; the engine restarts this helper after the fetch completes (the shared self-heal).
 
-/// Leading silence prepended to EACH utterance's rodio sink, so the output-stream RESUME
-/// latency (rodio pauses the CoreAudio output when idle) is absorbed by the silence instead of
-/// clipping the speech onset — the "first speak, purple icon, no sound" fix. Pure + unit-tested
-/// so it can't silently regress to 0 samples (which would re-break the onset).
-const LEAD_SILENCE_MS: u32 = 80;
-
 /// Feed VPIO in 100 ms source-rate chunks so mute/cancel state is observed throughout a
 /// committed phoneme batch instead of only once for its synthesized PCM.
 const DUPLEX_RENDER_CHUNK_SAMPLES: usize = ds_tts::SAMPLE_RATE as usize / 10;
@@ -450,39 +445,6 @@ fn push_duplex_pcm(
 fn run_duplex_feeder(rx: std::sync::mpsc::Receiver<Vec<f32>>, mut push_batch: impl FnMut(&[f32])) {
     for pcm in rx {
         push_batch(&pcm);
-    }
-}
-
-/// `LEAD_SILENCE_MS` of mono silence at `srate_hz`. See [`LEAD_SILENCE_MS`].
-fn leading_silence_pcm(srate_hz: u32) -> Vec<f32> {
-    vec![0.0f32; srate_hz as usize * LEAD_SILENCE_MS as usize / 1000]
-}
-
-/// Wall-clock drain detector for the incremental rodio path. `empty()` lies on WASAPI
-/// (see the sleep_until_end note in the serve loop), so drained-ness is deterministic:
-/// once more wall time has elapsed in this playback run than audio was appended, the sink
-/// idled and the next append needs a fresh leading silence to absorb the output-stream
-/// resume (the "purple icon, no sound" clip, now reachable mid-utterance because batches
-/// stream while later inference runs).
-#[derive(Default)]
-struct AppendClock {
-    started: Option<Instant>,
-    queued: Duration,
-}
-
-impl AppendClock {
-    fn drained(&self, now: Instant) -> bool {
-        self.started
-            .is_none_or(|t| now.saturating_duration_since(t) >= self.queued)
-    }
-
-    fn begin_run(&mut self, now: Instant) {
-        self.started = Some(now);
-        self.queued = Duration::ZERO;
-    }
-
-    fn append(&mut self, samples: usize, srate_hz: u32) {
-        self.queued += Duration::from_secs_f64(samples as f64 / f64::from(srate_hz));
     }
 }
 
@@ -1436,10 +1398,7 @@ pub(crate) fn serve() -> ! {
         // synthesized and validated before it is committed, then playback can overlap inference
         // for the remaining batches — see `prepare`.
         let t_req = std::time::Instant::now();
-        let channels = std::num::NonZero::new(1u16).expect("1 channel");
-        let srate = std::num::NonZero::new(24_000u32).expect("24 kHz");
-        let mut player: Option<Arc<rodio::Player>> = None;
-        let mut clock = AppendClock::default();
+        let mut sink: Option<IncrementalSink> = None;
         let mut synth_nanos = 0u128;
         let mut total_samples = 0usize;
         let mut first_ms = 0.0f64;
@@ -1484,22 +1443,20 @@ pub(crate) fn serve() -> ! {
             synth_nanos = synth_nanos.saturating_add(audio.synth_nanos);
             if total_samples == 0 {
                 first_ms = t_req.elapsed().as_secs_f64() * 1000.0;
-                // Output sink: a fresh per-request rodio `Player` on the persistent mixer,
-                // shared via `cur_player` for barge — OR the duplex render queue when the
-                // backend owns render (macOS VPIO), barged via `duplex_barge`.
-                player = match &device {
-                    Some(dev) => {
-                        let p = Arc::new(rodio::Player::connect_new(dev.mixer()));
-                        p.set_volume(if muted.load(Ordering::SeqCst) {
-                            0.0
-                        } else {
-                            1.0
-                        });
-                        *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
-                        Some(p)
-                    }
-                    None => None,
-                };
+                // Output sink: a fresh per-request incremental sink on the persistent
+                // mixer, its player shared via `cur_player` for barge — OR the duplex
+                // render queue when the backend owns render (macOS VPIO), barged via
+                // `duplex_barge`. Mute POLICY stays here (the sink is transport only).
+                if let Some(dev) = &device {
+                    let s = IncrementalSink::connect_to(dev.mixer());
+                    s.player().set_volume(if muted.load(Ordering::SeqCst) {
+                        0.0
+                    } else {
+                        1.0
+                    });
+                    *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = Some(s.player());
+                    sink = Some(s);
+                }
             }
             total_samples = total_samples.saturating_add(audio.pcm.len());
             if render_via_duplex {
@@ -1523,26 +1480,14 @@ pub(crate) fn serve() -> ! {
                         || std::thread::sleep(DUPLEX_RENDER_POLL),
                     );
                 }
-            } else if let Some(p) = &player
+            } else if let Some(s) = &mut sink
                 && !cancel.load(Ordering::SeqCst)
             {
-                // Re-prepend the leading silence whenever the sink drained (first commit,
-                // or synthesis fell behind real time mid-utterance), so the output-stream
-                // resume never clips an onset. Deliberately conservative: a borderline
-                // call gets an extra 80 ms of inaudible silence versus a clipped onset.
-                // The duplex path needs no guard — the VPIO render callback zero-fills
-                // any shortfall, so there is no resume latency to absorb.
-                let now = Instant::now();
-                if clock.drained(now) {
-                    clock.begin_run(now);
-                    let lead = leading_silence_pcm(srate.get());
-                    clock.append(lead.len(), srate.get());
-                    p.append(rodio::buffer::SamplesBuffer::new(channels, srate, lead));
-                }
-                clock.append(audio.pcm.len(), srate.get());
-                p.append(rodio::buffer::SamplesBuffer::new(
-                    channels, srate, audio.pcm,
-                ));
+                // The drained-sink re-lead (onset-clip fix) + played-batch accounting
+                // live in `ds_tts::sink`. The duplex path needs no lead — the VPIO
+                // render callback zero-fills any shortfall, so there is no resume
+                // latency to absorb.
+                s.append(audio.pcm);
             }
             Ok(())
         };
@@ -1582,8 +1527,8 @@ pub(crate) fn serve() -> ! {
                     if let Some(dx) = &duplex {
                         dx.render_clear();
                     }
-                } else if let Some(p) = &player {
-                    p.stop();
+                } else if let Some(s) = &sink {
+                    s.stop();
                 }
                 *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 println!("{}", proto::DONE);
@@ -1597,8 +1542,8 @@ pub(crate) fn serve() -> ! {
                     if let Some(dx) = &duplex {
                         dx.render_clear();
                     }
-                } else if let Some(p) = &player {
-                    p.stop();
+                } else if let Some(s) = &sink {
+                    s.stop();
                 }
                 *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 log::warn!(target: "helper", "batch synthesis failed: {e}");
@@ -1626,8 +1571,8 @@ pub(crate) fn serve() -> ! {
                         std::thread::sleep(std::time::Duration::from_millis(15));
                     }
                 }
-            } else if let Some(p) = &player {
-                p.sleep_until_end();
+            } else if let Some(s) = &sink {
+                s.wait();
             }
         }
         if cancel.load(Ordering::SeqCst) {
@@ -1635,8 +1580,8 @@ pub(crate) fn serve() -> ! {
                 if let Some(dx) = &duplex {
                     dx.render_clear(); // barge: drop queued render audio
                 }
-            } else if let Some(p) = &player {
-                p.stop(); // barge: drop anything still queued/playing
+            } else if let Some(s) = &sink {
+                s.stop(); // barge: drop anything still queued/playing
             }
         }
         *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1659,49 +1604,21 @@ pub(crate) fn serve() -> ! {
 #[cfg(test)]
 mod audio_tests {
     use std::cell::{Cell, RefCell};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::{
-        AppendClock, DUPLEX_RENDER_AHEAD, DUPLEX_RENDER_CHUNK_SAMPLES, DuplexRenderState,
-        LEAD_SILENCE_MS, leading_silence_pcm, push_duplex_pcm, run_duplex_feeder,
-        tts_output_available,
+        DUPLEX_RENDER_AHEAD, DUPLEX_RENDER_CHUNK_SAMPLES, DuplexRenderState, push_duplex_pcm,
+        run_duplex_feeder, tts_output_available,
     };
+
+    // The lead-silence + AppendClock (drain detection) tests moved WITH the code to
+    // `ds_tts::sink` — this module keeps only the duplex feeder/pacing coverage.
 
     #[test]
     fn tts_output_requires_preload_or_render_owning_duplex() {
         assert!(!tts_output_available(false, false));
         assert!(tts_output_available(true, false));
         assert!(tts_output_available(false, true));
-    }
-
-    /// Regression guard for the "first speak, no sound" fix: every utterance must be preceded by
-    /// a NON-EMPTY, fully-SILENT leading buffer so the rodio output-stream resume is absorbed
-    /// instead of clipping the speech onset. If someone drops the prepend or zeroes its duration,
-    /// this fails.
-    #[test]
-    fn leading_silence_is_nonempty_and_pure_silence() {
-        let pcm = leading_silence_pcm(24_000);
-        // ~80 ms @ 24 kHz mono = 1920 samples — and NEVER empty (empty re-breaks the onset).
-        assert_eq!(pcm.len(), 24_000 * LEAD_SILENCE_MS as usize / 1000);
-        assert_eq!(pcm.len(), 1_920);
-        assert!(
-            !pcm.is_empty(),
-            "leading silence must not regress to 0 samples"
-        );
-        // Pure silence — a non-zero lead would be an audible click before every reply.
-        assert!(pcm.iter().all(|&s| s == 0.0));
-    }
-
-    #[test]
-    fn leading_silence_scales_with_sample_rate() {
-        // Duration is fixed; sample count tracks the rate.
-        assert_eq!(
-            leading_silence_pcm(48_000).len(),
-            48_000 * LEAD_SILENCE_MS as usize / 1000
-        );
-        // Compile-time invariant (not a runtime check on a constant): too little lead
-        // won't cover the rodio output-stream resume latency.
-        const _: () = assert!(LEAD_SILENCE_MS >= 40);
     }
 
     #[test]
@@ -1811,53 +1728,6 @@ mod audio_tests {
             offered.set(offered.get() + 1);
         });
         assert_eq!(offered.get(), 4, "every queued batch must still be offered");
-    }
-
-    /// Pins the mid-utterance onset clip fix: the FIRST commit of a request must read as
-    /// drained so it gets the leading silence (the old first-commit-only prepend).
-    #[test]
-    fn append_clock_reads_drained_before_any_run() {
-        let clock = AppendClock::default();
-        assert!(clock.drained(Instant::now()));
-    }
-
-    /// While appended audio outpaces wall time the sink is still busy — re-prepending the
-    /// silence there would inject an audible gap mid-utterance.
-    #[test]
-    fn append_clock_is_not_drained_while_queued_audio_outpaces_wall_time() {
-        let t0 = Instant::now();
-        let mut clock = AppendClock::default();
-        clock.begin_run(t0);
-        clock.append(24_000, 24_000); // 1 s of audio
-        assert!(!clock.drained(t0 + Duration::from_millis(500)));
-    }
-
-    /// Wall time catching up with the appended total means the sink idled (we distrust
-    /// WASAPI's `empty()` — see the sleep_until_end note) → the next append needs a fresh
-    /// leading silence.
-    #[test]
-    fn append_clock_drains_once_wall_time_reaches_the_queued_total() {
-        let t0 = Instant::now();
-        let mut clock = AppendClock::default();
-        clock.begin_run(t0);
-        clock.append(24_000, 24_000); // 1 s of audio
-        assert!(clock.drained(t0 + Duration::from_secs(1)));
-        assert!(clock.drained(t0 + Duration::from_secs(2)));
-    }
-
-    /// `begin_run` must reset the accounting: a stale `queued` total from the previous run
-    /// would postpone the next drain detection past the real sink idle.
-    #[test]
-    fn append_clock_begin_run_resets_the_accounting() {
-        let t0 = Instant::now();
-        let mut clock = AppendClock::default();
-        clock.begin_run(t0);
-        clock.append(24_000 * 10, 24_000); // 10 s of audio in run 1
-        let t1 = t0 + Duration::from_secs(30);
-        clock.begin_run(t1);
-        clock.append(2_400, 24_000); // 100 ms in run 2
-        assert!(!clock.drained(t1 + Duration::from_millis(50)));
-        assert!(clock.drained(t1 + Duration::from_millis(100)));
     }
 }
 

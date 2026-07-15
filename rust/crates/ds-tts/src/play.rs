@@ -7,12 +7,16 @@
 //! teardown crash. The one-shot player accumulates committed batches before `wait`;
 //! the default warm helper uses its persistent output path for incremental playback.
 //!
-//! Other platforms: play the prepared batches via `rodio` (enqueue is non-blocking;
-//! rodio's audio thread plays them continuously and `wait` drains them).
+//! Other platforms: play the prepared batches through the shared incremental
+//! [`crate::sink::IncrementalSink`] (enqueue is non-blocking; rodio's audio thread
+//! plays them continuously and `wait` drains them). The sink prepends its short
+//! leading silence on a drained start, so the one-shot rodio path shares the warm
+//! serve loop's onset-clip fix.
 //!
 //! NO-AUDIO DISCIPLINE: opening a device / spawning afplay is a real side effect,
 //! so NOTHING here is exercised by unit tests. The ds-helper helper bin is
-//! the only constructor; the pure pipeline is tested in vocab/voices/trim/batch.
+//! the only constructor; the pure pipeline is tested in vocab/voices/trim/batch,
+//! and the sink's clock/accounting is tested device-free in `crate::sink`.
 
 pub use imp::AudioPlayer;
 
@@ -62,43 +66,30 @@ mod imp {
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    use std::num::NonZero;
+    use std::cell::RefCell;
 
-    use rodio::buffer::SamplesBuffer;
-    use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
+    use crate::sink::IncrementalSink;
 
-    use crate::vocab::SAMPLE_RATE;
-
-    /// Owns the open output device + a rodio `Player`. Dropping it closes the stream.
+    /// Owns the open output device through the shared [`IncrementalSink`]. Dropping it
+    /// closes the stream. `RefCell` keeps the historical `enqueue(&self)` signature
+    /// while the sink's append accounting needs `&mut` (single-threaded one-shot use).
     pub struct AudioPlayer {
-        // `player` must drop before `_device` — declare it first.
-        player: Player,
-        _device: MixerDeviceSink,
+        sink: RefCell<IncrementalSink>,
     }
 
     impl AudioPlayer {
         pub fn open() -> Result<Self, String> {
-            let device = DeviceSinkBuilder::open_default_sink()
-                .map_err(|e| format!("open audio output: {e}"))?;
-            let player = Player::connect_new(device.mixer());
             Ok(Self {
-                player,
-                _device: device,
+                sink: RefCell::new(IncrementalSink::open_default()?),
             })
         }
 
         pub fn enqueue(&self, samples: Vec<f32>) {
-            if samples.is_empty() {
-                return;
-            }
-            let channels = NonZero::new(1u16).expect("1 channel");
-            let rate = NonZero::new(SAMPLE_RATE).expect("24000 sample rate");
-            self.player
-                .append(SamplesBuffer::new(channels, rate, samples));
+            self.sink.borrow_mut().append(samples);
         }
 
         pub fn wait(&self) {
-            self.player.sleep_until_end();
+            self.sink.borrow().wait();
         }
     }
 }

@@ -41,6 +41,8 @@ pub mod g2p;
 pub(crate) mod kokoro;
 pub(crate) mod numbers;
 pub mod play;
+/// Incremental rodio sink shared by the warm serve loop and the one-shot player.
+pub mod sink;
 pub mod spoken;
 pub mod synth;
 /// Apple-native (FluidAudio Core ML / ANE) Kokoro backend. macOS only.
