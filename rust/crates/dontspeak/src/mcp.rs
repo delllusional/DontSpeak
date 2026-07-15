@@ -575,6 +575,15 @@ pub(crate) fn tool_result(text: String, is_error: bool) -> Value {
     json!({ "content": [ { "type": "text", "text": text } ], "isError": is_error })
 }
 
+pub(crate) fn structured_tool_result(value: Value) -> Value {
+    let text = serde_json::to_string_pretty(&value).expect("JSON values always serialize");
+    json!({
+        "content": [ { "type": "text", "text": text } ],
+        "structuredContent": value,
+        "isError": false,
+    })
+}
+
 pub(crate) fn log(message: &str) {
     eprintln!("{message}");
     log::info!(target: "mcp", "{message}");
@@ -597,6 +606,18 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn structured_results_include_machine_and_text_content() {
+        let value = json!({"engine": "off"});
+        let result = structured_tool_result(value.clone());
+        assert_eq!(result["structuredContent"], value);
+        assert_eq!(result["isError"], false);
+        assert_eq!(
+            serde_json::from_str::<Value>(result["content"][0]["text"].as_str().unwrap()).unwrap(),
+            value
+        );
     }
 
     fn initialize_line(id: i64) -> String {

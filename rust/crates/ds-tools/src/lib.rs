@@ -3,8 +3,7 @@
 //! Tools + their parameters are authored ONCE here as structured data (`TOOLS`, in
 //! display order), and BOTH consumer shapes are GENERATED from it so they can't drift:
 //!
-//! * [`catalog`] — `{ name, description, inputSchema }` (JSON-Schema 2020-12), the MCP
-//!   form the `dontspeak` server exposes to Claude.
+//! * [`catalog`] — MCP tool definitions with input/output schemas and behavioral annotations.
 //! * [`catalog_ui`] — `{ name, description, params: [ … ] }` with the params as an
 //!   ORDERED ARRAY, the form the app-facing FFI (`ds-core::ds_tools_json`)
 //!   hands the SwiftUI Tools window. An array (not the unordered JSON-Schema `properties`
@@ -76,6 +75,31 @@ struct Tool {
     description: &'static str,
     params: &'static [Param],
     min_one: bool,
+    annotations: Annotations,
+    output: Option<Output>,
+}
+
+#[derive(Clone, Copy)]
+struct Annotations {
+    read_only: bool,
+    destructive: bool,
+    idempotent: bool,
+    open_world: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Output {
+    Status,
+    Voices,
+}
+
+const fn annotations(read_only: bool, destructive: bool, idempotent: bool) -> Annotations {
+    Annotations {
+        read_only,
+        destructive,
+        idempotent,
+        open_world: false,
+    }
 }
 
 const fn p(name: &'static str, ty: PType, required: bool, description: &'static str) -> Param {
@@ -104,6 +128,8 @@ static TOOLS: &[Tool] = &[
             p("rate", PType::Num(0.5, 2.0), false, SPEAK_RATE),
         ],
         min_one: false,
+        annotations: annotations(false, false, false),
+        output: None,
     },
     // Core action: hear something back (dictation).
     Tool {
@@ -111,6 +137,8 @@ static TOOLS: &[Tool] = &[
         description: LISTEN,
         params: &[p("seconds", PType::Int(1, 60), false, LISTEN_SECONDS)],
         min_one: false,
+        annotations: annotations(true, false, false),
+        output: None,
     },
     // Interrupt spoken output.
     Tool {
@@ -118,6 +146,8 @@ static TOOLS: &[Tool] = &[
         description: STOP_SPEECH,
         params: &[],
         min_one: false,
+        annotations: annotations(false, true, true),
+        output: None,
     },
     // Persistent silence toggle for all spoken output (the global mute the app also drives).
     Tool {
@@ -125,6 +155,8 @@ static TOOLS: &[Tool] = &[
         description: MUTE,
         params: &[p("on", PType::Bool, true, MUTE_ON)],
         min_one: false,
+        annotations: annotations(false, false, true),
+        output: None,
     },
     // Read-only introspection: current runtime state, then the voices replies can use (the
     // voice itself is a persistent setting — see `set_config`'s tts_built_in_voices).
@@ -133,6 +165,8 @@ static TOOLS: &[Tool] = &[
         description: GET_STATUS,
         params: &[p("detail", PType::Bool, false, STATUS_DETAIL)],
         min_one: false,
+        annotations: annotations(true, false, true),
+        output: Some(Output::Status),
     },
     Tool {
         name: "list_voices",
@@ -144,6 +178,8 @@ static TOOLS: &[Tool] = &[
             LIST_VOICES_ENGINE,
         )],
         min_one: false,
+        annotations: annotations(true, false, true),
+        output: Some(Output::Voices),
     },
     // ── Speaker diarization (who spoke when) + voiceprint enrollment ──
     Tool {
@@ -151,6 +187,8 @@ static TOOLS: &[Tool] = &[
         description: DIARIZE,
         params: &[p("seconds", PType::Int(1, 60), false, DIARIZE_SECONDS)],
         min_one: false,
+        annotations: annotations(true, false, false),
+        output: None,
     },
     // Manage the enrolled-voiceprint library that diarize uses to put names to speakers:
     // one action-dispatched tool (list / enroll / forget) instead of three.
@@ -168,6 +206,8 @@ static TOOLS: &[Tool] = &[
             p("seconds", PType::Int(1, 60), false, SPEAKERS_SECONDS),
         ],
         min_one: false,
+        annotations: annotations(false, true, false),
+        output: None,
     },
     // Persistent settings, then one-time client wiring.
     Tool {
@@ -292,6 +332,8 @@ static TOOLS: &[Tool] = &[
             ),
         ],
         min_one: true,
+        annotations: annotations(false, true, true),
+        output: None,
     },
 ];
 
@@ -402,15 +444,108 @@ fn validate_param(param: &Param, value: &Value) -> Result<(), String> {
     }
 }
 
-/// The MCP catalog: `[{ name, description, inputSchema }]`, generated from `TOOLS`.
+/// The MCP catalog, generated from `TOOLS`.
 pub fn catalog() -> Value {
     Value::Array(
         TOOLS
             .iter()
             .filter(|t| is_visible(t))
-            .map(|t| json!({ "name": t.name, "description": t.description, "inputSchema": input_schema(t) }))
+            .map(tool_schema)
             .collect(),
     )
+}
+
+fn tool_schema(t: &Tool) -> Value {
+    let mut tool = json!({
+        "name": t.name,
+        "description": t.description,
+        "inputSchema": input_schema(t),
+        "annotations": {
+            "readOnlyHint": t.annotations.read_only,
+            "destructiveHint": t.annotations.destructive,
+            "idempotentHint": t.annotations.idempotent,
+            "openWorldHint": t.annotations.open_world,
+        },
+    });
+    if let Some(output) = t.output {
+        tool["outputSchema"] = output_schema_for(output);
+    }
+    tool
+}
+
+fn output_schema_for(output: Output) -> Value {
+    match output {
+        Output::Status => json!({
+            "type": "object",
+            "properties": {
+                "engine": { "type": "string", "enum": ["kokoro", "system", "off"] },
+                "voice": { "type": "string" },
+                "voices": { "type": "array", "items": { "type": "string" } },
+                "rate": { "type": "number" },
+                "state": {
+                    "type": "object",
+                    "properties": {
+                        "running": { "type": "boolean" },
+                        "tts_active": { "type": "boolean" },
+                        "queued": { "type": "integer", "minimum": 0 },
+                        "paused": { "type": "boolean" },
+                        "muted": { "type": "boolean" },
+                        "note": { "type": "string" }
+                    },
+                    "required": ["running"],
+                    "additionalProperties": false
+                },
+                "models": { "type": "object" }
+            },
+            "required": ["engine", "voice", "voices", "rate", "state"],
+            "additionalProperties": false
+        }),
+        Output::Voices => json!({
+            "type": "object",
+            "properties": {
+                "engine": { "type": "string", "enum": ["kokoro", "system"] },
+                "language": { "type": "string", "enum": ["en"] },
+                "languages": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "language": { "type": "string" },
+                            "voices": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string" },
+                                        "label": { "type": "string" },
+                                        "language_tag": { "type": ["string", "null"] },
+                                        "gender": { "type": ["string", "null"] },
+                                        "engine": { "type": "string", "enum": ["kokoro", "system"] },
+                                        "active": { "type": "boolean" }
+                                    },
+                                    "required": ["id", "label", "language_tag", "gender", "engine", "active"],
+                                    "additionalProperties": false
+                                }
+                            }
+                        },
+                        "required": ["language", "voices"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["engine", "language", "languages"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+/// The advertised output schema for a visible structured-result tool.
+pub fn output_schema(name: &str) -> Option<Value> {
+    TOOLS
+        .iter()
+        .find(|tool| tool.name == name && is_visible(tool))
+        .and_then(|tool| tool.output)
+        .map(output_schema_for)
 }
 
 /// The RAW `inputSchema` for one tool by name, looked up directly in `TOOLS` — ignoring
@@ -652,7 +787,7 @@ mod tests {
         );
 
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
-        mentions(SET_CONFIG_NARRATE, "default both", "narrate");
+        mentions(SET_CONFIG_NARRATE, "Default both", "narrate");
         mentions(
             SET_CONFIG_GREET,
             if v.greet_on_open {
@@ -747,12 +882,12 @@ mod tests {
         );
         mentions(
             SET_CONFIG_CLUSTERING,
-            &format!("default {}", v.clustering_threshold),
+            &format!("Default {}", v.clustering_threshold),
             "clustering_threshold",
         );
         mentions(
             SET_CONFIG_SPEAKER_THRESH,
-            &format!("default {}", v.speaker_threshold),
+            &format!("Default {}", v.speaker_threshold),
             "speaker_threshold",
         );
         mentions(
@@ -777,7 +912,7 @@ mod tests {
         mentions(
             SET_CONFIG_TRAY,
             &format!(
-                "default {}",
+                "Default {}",
                 serde_json::to_string(&v.tray_indicator).unwrap()
             ),
             "tray_indicator",
@@ -804,6 +939,35 @@ mod tests {
                 t.get("inputSchema").is_some(),
                 "each tool has an inputSchema"
             );
+            let annotations = t["annotations"]
+                .as_object()
+                .expect("each tool has annotations");
+            assert_eq!(annotations.len(), 4, "all annotation hints are explicit");
+            assert_eq!(annotations["openWorldHint"], false);
+            for hint in [
+                "readOnlyHint",
+                "destructiveHint",
+                "idempotentHint",
+                "openWorldHint",
+            ] {
+                assert!(annotations[hint].is_boolean(), "{hint} is boolean");
+            }
+        }
+    }
+
+    #[test]
+    fn structured_tools_advertise_their_output_schemas() {
+        let catalog = catalog();
+        let tools = catalog.as_array().unwrap();
+        for tool in tools {
+            let name = tool["name"].as_str().unwrap();
+            if matches!(name, "get_status" | "list_voices") {
+                assert_eq!(tool["outputSchema"]["type"], "object");
+                assert_eq!(output_schema(name), Some(tool["outputSchema"].clone()));
+            } else {
+                assert!(tool.get("outputSchema").is_none(), "{name}");
+                assert!(output_schema(name).is_none(), "{name}");
+            }
         }
     }
 

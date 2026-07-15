@@ -17,6 +17,15 @@ automatically (at boot and on config change), converging to `config.toml`'s `exc
 `stt_speaker_lock`), are implemented but hidden from user-facing surfaces pending the
 validation tracked in issue #77 — see `ds_tools::DIARIZATION_ENABLED`.
 
+Every tool explicitly declares all four MCP behavioral annotations. All tools operate only on
+the local DontSpeak installation (`openWorldHint=false`). `get_status`, `list_voices`, `listen`,
+and `diarize` are read-only; `stop_speech`, `mute`, and `set_config` are idempotent. Tools that
+discard queued work, replace stored state, or remove data are marked destructive.
+
+`get_status` and `list_voices` advertise output schemas and return their data in
+`structuredContent`; their required text content contains the same JSON. Action tools return a
+short text result.
+
 The stdio server accepts one JSON-RPC message per line and caps each line at 1 MiB. It
 validates every `tools/call` against the same schema shown below before dispatch. At most
 8 tool calls run concurrently; additional calls receive a protocol error, providing
@@ -25,137 +34,130 @@ the cancelled request's response.
 
 ## speak
 
-Speak text aloud.
+Queue text for spoken playback.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `text` | string | yes | The text to speak. |
-| `voice` | string | no | Voice id (default: the configured voice). |
-| `rate` | number 0.5–2.0 | no | Speed multiplier (default: from config). |
+| `text` | string | yes | Text to speak. |
+| `voice` | string | no | Voice ID. Defaults to the configured voice. |
+| `rate` | number 0.5–2.0 | no | Playback speed. Defaults to the configured rate. |
 
 ## listen
 
-Open the mic and return the transcribed text. Auto-stops when the speaker stops
-talking — no key press needed.
+Record the microphone and return a transcript. Stops after speech ends or the time limit is
+reached.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `seconds` | integer 1–60 | no | Hard upper bound in seconds (default 30); the mic normally stops on end-of-speech first. |
+| `seconds` | integer 1–60 | no | Maximum recording time in seconds. Default 30. |
 
 ## stop_speech
 
-Stop any in-progress speech immediately. No parameters.
+Stop queued and active speech for this terminal session. If no session identity is available,
+stop all speech. Active audio fades out. No parameters.
 
 ## mute
 
-Silence or restore ALL audio output — the app's global mute. Muted replies and narration
-drain silently; queued earcons are suppressed and an active cue stops without replaying on
-unmute. Persists, unlike `stop_speech`; `get_status` shows mute.
+Set global audio mute. While muted, speech drains silently and earcons are suppressed. The
+setting lasts until changed or the DontSpeak engine restarts.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `on` | boolean | yes | `true` = mute; `false` = unmute. |
+| `on` | boolean | yes | Set true to mute or false to unmute. |
 
 ## get_status
 
-Report current state: engine, active voice, default rate, whether speech is playing,
-queue length, paused, muted. Pass `detail=true` for per-engine model status,
-dictation state, and stats.
+Get speech configuration and runtime state.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `detail` | boolean | no | Per-engine model status, dictation state, and stats. Default false. |
+| `detail` | boolean | no | Include model, dictation, and runtime statistics. Default false. |
 
 ## list_voices
 
-List available voices, grouped by language (English only in this build). Optional
-engine filter; default: the configured engine.
+List available English voices by engine and language.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `tts_engine` | enum: `built_in`, `system` | no | Which engine's voices to list. Default: the configured engine. |
+| `tts_engine` | enum: `built_in`, `system` | no | Engine to inspect. Defaults to the configured speech engine, or the built-in engine when speech is off. |
 
 ## diarize
 
-Record the mic and return who spoke when: per-speaker time spans (seconds), labelled
-with an enrolled name when matched. Needs diarization on (`set_config
-diarizer_provider`). macOS-only.
+Record the microphone and identify who spoke when. Requires enabled diarization and is available
+only on macOS.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `seconds` | integer 1–60 | no | Seconds to record (default 10). |
+| `seconds` | integer 1–60 | no | Recording time in seconds. Default 10. |
 
 ## manage_speakers
 
-Manage the enrolled voiceprints `diarize` uses to name speakers. `list`: show enrolled
-names. `enroll`: record the mic and learn the name (re-enrolling replaces it). `forget`:
-remove the name. macOS-only.
+List, enroll, or remove speaker voiceprints used by `diarize`. Re-enrolling a name replaces it.
+Available only on macOS.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `action` | enum: `list`, `enroll`, `forget` | yes | What to do. |
-| `name` | string | no | Speaker name — required for `enroll` and `forget`. |
-| `seconds` | integer 1–60 | no | Seconds to record for `enroll` (default 15; longer/varied = stronger). Ignored otherwise. |
+| `action` | enum: `list`, `enroll`, `forget` | yes | Operation to perform. |
+| `name` | string | no | Speaker name. Required for `enroll` and `forget`. |
+| `seconds` | integer 1–60 | no | Enrollment recording time in seconds. Default 15. |
 
 ## set_config
 
-Update persistent settings. All fields optional; provide at least one. Validated,
-applied together, then hot-reloaded. To change the voice, set `tts_built_in_voices`
-or `tts_system_voice`.
+Update one or more persistent settings atomically and reload them.
 
 **TTS output**
 
 | Param | Type | Description |
 |---|---|---|
-| `tts_engine` | enum: `built_in`, `system`, `off` | Spoken-reply engine: `built_in` (on-device) or `system` (OS voice) to force exactly that engine, or `off` to turn spoken replies off. Omit to keep the automatic preference (config-file only). Rejected if the engine isn't usable on this platform/build. |
-| `tts_built_in_voices` | array of strings | Ordered voice ids for the built-in engine — first is the default, the rest a per-terminal pool. English ids only in this build. Built-in only. |
+| `tts_engine` | enum: `built_in`, `system`, `off` | Speech engine: `built_in`, `system`, or `off`. Omit to keep the automatic preference. Unsupported engines are rejected. |
+| `tts_built_in_voices` | array of strings | Ordered built-in voice IDs. The first is the default; remaining voices form the per-terminal pool. |
 | `tts_system_voice` | string | Voice name for the system engine; empty = OS default. System engine only. |
-| `tts_rate` | number 0.5–2.0 | Speech rate (1.0 = normal). Both engines. |
+| `tts_rate` | number 0.5–2.0 | Speech rate. 1.0 = normal. |
 
 **Narration**
 
 | Param | Type | Description |
 |---|---|---|
-| `narrate` | array of `shorts`, `digests` | What to narrate aloud (default both). `digests`: speak the spoken digest of long replies. `shorts`: also speak short replies in full. `[]` = nothing. |
+| `narrate` | array of `shorts`, `digests` | Reply types to narrate. Default both: `digests` speaks long-reply summaries; `shorts` speaks short replies in full. `[]` disables narration. |
 | `greet_on_open` | boolean | Greet each new terminal aloud in its pool voice. Default on. |
-| `input_clears` | array of `current`, `other` | Which sessions a submit (typed + Enter, or a voice/dictation submit) clears pending speech for: `current` (the submitting window) and/or `other` (every other window, including untagged/global audio). Default `["current"]`; `[]` = never. |
+| `input_clears` | array of `current`, `other` | Speech queues cleared when input is submitted: `current` for this terminal and `other` for all others, including global audio. Default `["current"]`; `[]` clears none. |
 | `pause_in_background` | boolean | Pause speech while no terminal is frontmost; resume on focus. Default false. |
 
 **Earcons**
 
 | Param | Type | Description |
 |---|---|---|
-| `earcon_reply_sound` | string | Reply-done chime: system-sound name or absolute path. Default: OS chime; empty = off. |
+| `earcon_reply_sound` | string | Reply-complete sound name or path within an OS sound folder. Default: OS chime; empty = off. |
 | `earcon_needs_input_sound` | string | Needs-input cue: system-sound name or absolute path. Default off. |
 
 **STT / dictation**
 
 | Param | Type | Description |
 |---|---|---|
-| `caps_enabled` | boolean | Enable the Caps Lock handler — tap-to-talk dictation plus silence/cancel. Default on. With dictation off (`stt_engine="off"`), Caps still silences the voice. |
-| `stt_engine` | enum: `built_in`, `system`, `claude_code`, `off` | Dictation engine: `built_in` (on-device), `system` (OS recognizer, macOS only), or `claude_code` (Claude Code's voice key) to force exactly that engine, or `off` to turn dictation off. Omit to keep the automatic preference (config-file only). Rejected if the engine isn't usable on this platform/build; `system` is also checked for on-device availability/authorization when set. |
+| `caps_enabled` | boolean | Enable Caps Lock tap-to-talk and speech cancellation. Default on. Caps still silences speech when dictation is off. |
+| `stt_engine` | enum: `built_in`, `system`, `claude_code`, `off` | Dictation engine: `built_in`, `system`, `claude_code`, or `off`. Omit to keep the automatic preference. Unsupported or unauthorized engines are rejected. |
 | `capture_gain` | `"auto"` or number 0.5–20.0 | Mic gain before recognition. Default `"auto"`. |
-| `double_tap_submits` | boolean | Default false: a single tap submits (paste + Return), a fast double tap only inserts. `true` swaps them. |
-| `paste_submit_delay_ms` | integer 0–5000 | Delay between the paste and the Enter that submits — lets the async clipboard paste settle before Enter. Default 100; 0 = instant. |
+| `double_tap_submits` | boolean | Whether a double tap submits and a single tap only inserts. Default false, which swaps those actions. |
+| `paste_submit_delay_ms` | integer 0–5000 | Delay between paste and submit, in milliseconds. Default 100; 0 submits immediately. |
 | `full_duplex` | boolean | Keep the mic open while replies play, using platform echo cancellation, instead of closing it during speech. Default false; only takes effect with built-in dictation and built-in speech output. |
 
 **Compute backend**
 
 | Param | Type | Description |
 |---|---|---|
-| `provider` | array of `ane`, `cuda`, `coreml`, `cpu` | Compute-backend ladder for speech output and recognition (first usable wins). Default `["ane","cuda","cpu"]`. |
+| `provider` | array of `ane`, `cuda`, `coreml`, `cpu` | Compute providers in preference order; the first usable provider wins. Default `["ane","cuda","cpu"]`. |
 
 **Diarization**
 
 | Param | Type | Description |
 |---|---|---|
 | `diarizer_provider` | array of `apple_native` | Diarization runtime + on/off switch: `["apple_native"]` = on, `[]` = off (default). macOS-only. |
-| `clustering_threshold` | number 0.5–0.9 | Diarization sensitivity (default 0.7); lower splits more speakers apart. |
-| `speaker_threshold` | number 0.0–1.0 | Match cutoff (default 0.65) for labelling a span with an enrolled name; higher = stricter. |
+| `clustering_threshold` | number 0.5–0.9 | Diarization sensitivity; lower values split more speakers. Default 0.7. |
+| `speaker_threshold` | number 0.0–1.0 | Minimum voiceprint match score; higher values are stricter. Default 0.65. |
 | `stt_speaker_lock` | boolean | Transcribe only enrolled speaker(s), dropping others — needs diarization on and ≥1 enrolled voice. Built-in dictation only. Default off. |
 
 **UI**
 
 | Param | Type | Description |
 |---|---|---|
-| `tray_indicator` | array of `stt`, `tts`, `stt_animated`, `tts_animated` | Tray icon: which states color it and whether it pulses. Default `["stt","tts_animated"]`. `[]` = never color. |
+| `tray_indicator` | array of `stt`, `tts`, `stt_animated`, `tts_animated` | Speech states that color or animate the tray icon. Default `["stt","tts_animated"]`; `[]` disables the indicator. |
