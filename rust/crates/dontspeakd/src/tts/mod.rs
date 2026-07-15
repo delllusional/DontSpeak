@@ -32,6 +32,11 @@ mod reader;
 use reader::*;
 
 const SPEAK_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Bound on the CUEDONE wait, separate from [`SPEAK_TERMINAL_TIMEOUT`]: cues are short
+/// system sounds, but a stale helper binary predating CUEDONE (a dev partial rebuild —
+/// see docs/BUILD-DEPLOY.md) never answers at all, and riding the 600 s speak timeout
+/// wedged the audio queue for 10 minutes per earcon before the child was killed.
+const CUE_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CAPTURE_TERMINAL_GRACE: u64 = 25;
 /// Upper bound on the spawned child's pre-READY handshake. Generous — a first-run
 /// CoreML/ANE compile or cold ORT provider init can take tens of seconds — but finite:
@@ -124,6 +129,7 @@ struct SpawnPrefs {
 pub(crate) struct TtsManagerTestOptions {
     finalize_timeout: Option<std::time::Duration>,
     ready_timeout: Option<std::time::Duration>,
+    cue_timeout: Option<std::time::Duration>,
     /// Extra env vars consumed by the first spawn. This lets the READY-wedge regression prove
     /// recovery on the same manager without mutating either the manager or process-global env.
     first_spawn_env: Mutex<Option<Vec<(String, String)>>>,
@@ -138,6 +144,11 @@ impl TtsManagerTestOptions {
 
     pub(crate) fn with_ready_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.ready_timeout = Some(timeout);
+        self
+    }
+
+    pub(crate) fn with_cue_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.cue_timeout = Some(timeout);
         self
     }
 
@@ -1639,6 +1650,12 @@ impl TtsManager {
         let Some(path) = ds_earcon::canonical_sound_path(path) else {
             return Ok(());
         };
+        self.cue_validated(&path)
+    }
+
+    /// [`cue`](Self::cue) past its `canonical_sound_path` trust-boundary check — split out so
+    /// tests can drive the helper protocol with a tempdir path that can never pass that check.
+    fn cue_validated(&self, path: &std::path::Path) -> std::io::Result<()> {
         let Some(my_gen) = self.child.running_gen() else {
             return Err(std::io::Error::other("TTS child not running"));
         };
@@ -1655,7 +1672,7 @@ impl TtsManager {
 
         let (m, cv) = &*self.cue_slot;
         let mut state = m.lock().unwrap();
-        let deadline = std::time::Instant::now() + SPEAK_TERMINAL_TIMEOUT;
+        let deadline = std::time::Instant::now() + self.cue_terminal_timeout();
         while !state.done && !state.dead {
             let now = std::time::Instant::now();
             if now >= deadline {
@@ -1751,6 +1768,17 @@ impl TtsManager {
             return d;
         }
         READY_HANDSHAKE_TIMEOUT
+    }
+
+    /// The bound on `cue_validated`'s CUEDONE wait. PRODUCTION path (outside `#[cfg(test)]`
+    /// builds) ALWAYS returns [`CUE_TERMINAL_TIMEOUT`] — same idiom as
+    /// [`ready_handshake_timeout`](Self::ready_handshake_timeout).
+    fn cue_terminal_timeout(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if let Some(d) = self.test_options.cue_timeout {
+            return d;
+        }
+        CUE_TERMINAL_TIMEOUT
     }
 
     /// Test-only: force the Kokoro residency slot to `Loaded` without a live helper, so
@@ -2164,6 +2192,66 @@ pub(crate) mod wedge_recovery_tests {
             mgr.last_error().is_none(),
             "a successful start clears the parked error"
         );
+        mgr.set_enabled(false);
+    }
+
+    /// Pins the ACTUAL production cue bound directly (no process, no real wait) — so a
+    /// future edit to the number is a deliberate, visible diff (mirrors
+    /// `ready_handshake_timeout_pins_the_production_bound`). The integration test below
+    /// deliberately does NOT wait out the real 30 s; it injects a short bound.
+    #[test]
+    fn cue_terminal_timeout_pins_the_production_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let tts = TtsManager::new(
+            dir.path().join("ds-test-nonexistent-helper"),
+            dir.path().join("engine.log"),
+            Arc::new(crate::stats::TtsStats::new()),
+            Arc::new(crate::stats::SttStats::new()),
+            Arc::new(crate::stats::LifetimeSeconds::load(
+                dir.path().join("lifetime.json"),
+            )),
+        );
+        assert_eq!(tts.cue_terminal_timeout(), Duration::from_secs(30));
+    }
+
+    /// A helper that never answers a `cue` op with CUEDONE — exactly the shape of a stale
+    /// helper binary predating the cue protocol (the fixture's `_ => {}` arm silently
+    /// swallows `"cue"`) — must time out at the dedicated cue bound and reap the child,
+    /// not ride the 600 s speak timeout with the audio queue wedged behind it.
+    #[test]
+    fn a_cue_with_no_cuedone_times_out_and_reaps_the_child() {
+        let bin = fake_helper_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = TtsManager::new_for_test(
+            bin,
+            dir.path().join("engine.log"),
+            Arc::new(crate::stats::TtsStats::new()),
+            Arc::new(crate::stats::SttStats::new()),
+            Arc::new(crate::stats::LifetimeSeconds::load(
+                dir.path().join("lifetime.json"),
+            )),
+            TtsManagerTestOptions::default().with_cue_timeout(Duration::from_millis(100)),
+        );
+
+        mgr.ensure_started();
+        assert!(
+            mgr.is_running(),
+            "fixture failed to start: {:?}",
+            mgr.last_error()
+        );
+
+        let t0 = std::time::Instant::now();
+        let result = mgr.cue_validated(&dir.path().join("cue.wav"));
+        let elapsed = t0.elapsed();
+
+        assert!(matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::TimedOut));
+        // Generous CI bound — the point is "finite", not "exactly 100 ms".
+        assert!(elapsed < Duration::from_secs(5), "cue wait took {elapsed:?}");
+        assert!(
+            !mgr.is_running(),
+            "the unanswered child must be reaped by mark_dead_if_current"
+        );
+
         mgr.set_enabled(false);
     }
 }
