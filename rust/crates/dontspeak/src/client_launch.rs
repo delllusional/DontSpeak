@@ -106,7 +106,7 @@ fn run_direct(
         );
         return 127;
     };
-    match Command::new(&bin).args(args).status() {
+    match client_command(&bin, args).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(error) => {
             eprintln!(
@@ -117,6 +117,12 @@ fn run_direct(
             1
         }
     }
+}
+
+fn client_command(bin: &Path, args: &[String]) -> Command {
+    let mut command = Command::new(bin);
+    command.args(args);
+    command
 }
 
 fn information_only(args: &[String]) -> bool {
@@ -273,6 +279,7 @@ fn resolve_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
@@ -325,6 +332,51 @@ mod tests {
         assert_eq!(
             resolve_in_dirs("agent", &dirs).as_deref(),
             Some(expected.as_path())
+        );
+    }
+
+    #[test]
+    fn client_command_preserves_program_and_argument_boundaries() {
+        let values = args(&["prompt with spaces", "--flag", "value", ""]);
+        let command = client_command(Path::new("client-bin"), &values);
+
+        assert_eq!(command.get_program(), "client-bin");
+        assert_eq!(
+            command.get_args().map(OsString::from).collect::<Vec<_>>(),
+            values
+                .iter()
+                .map(|arg| OsString::from(arg.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn direct_launch_propagates_exit_status_and_missing_binary_is_127() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(temp.path());
+        let spec = ds_config::client_spec_for_launch("codex").unwrap();
+
+        #[cfg(windows)]
+        let (shell, shell_args) = (
+            PathBuf::from(std::env::var_os("COMSPEC").expect("COMSPEC")),
+            args(&["/C", "exit 23"]),
+        );
+        #[cfg(not(windows))]
+        let (shell, shell_args) = (PathBuf::from("/bin/sh"), args(&["-c", "exit 23"]));
+
+        assert_eq!(
+            run_direct(spec, &shell_args, &paths, shell.to_str().unwrap(), false,),
+            23
+        );
+        assert_eq!(
+            run_direct(
+                spec,
+                &[],
+                &paths,
+                temp.path().join("missing-client").to_str().unwrap(),
+                false,
+            ),
+            127
         );
     }
 }

@@ -915,14 +915,143 @@ pub(crate) fn dictation_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        StatusGate, combined_error, dictation_local_stt, dictation_state, engine_state,
-        realized_ort_token, row_download_frac, row_downloading, stt_provider_token,
-        tts_provider_token,
+        CapsEvent, EngineShared, StatusGate, combined_error, dictation_local_stt, dictation_state,
+        engine_state, model_status_json, realized_ort_token, row_download_frac, row_downloading,
+        stt_provider_token, tts_provider_token,
     };
-    use ds_config::{Provider, SttEngine, TtsEngine};
-    use ds_status::{DictationState, EngineState};
+    use crate::downloads::{DownloadProgress, DownloadState, TargetState};
+    use crate::engine::PasteBuf;
+    use crate::stats::{LifetimeSeconds, SttStats, TtsStats};
+    use crate::tts::TtsManager;
+    use ds_config::{Paths, Provider, SttEngine, TtsEngine};
+    use ds_model::DownloadTarget;
+    use ds_status::{DictationState, EngineState, ModelStatus};
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    /// Exercise the real status serializer with isolated files and an unstarted helper. This
+    /// pins the cross-platform wire snapshot without probing the ambient model cache or spawning
+    /// any process.
+    #[test]
+    fn model_status_json_combines_downloads_runtime_flags_preview_and_stats() {
+        let _env_guard = crate::config_gate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let previous_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
+        let previous_ort = std::env::var_os("ORT_DYLIB_PATH");
+        let previous_shim = std::env::var_os("SMKOKORO_DYLIB_PATH");
+
+        let temp = tempfile::tempdir().unwrap();
+        let model_dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(temp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            &paths.config_toml,
+            "stt_engine_ladder = []\ntts_engine_ladder = []\ncaps_enabled = false\ntray_indicator = []\n",
+        )
+        .unwrap();
+        // SAFETY: process-wide test environment mutation is serialized by ENV_LOCK and restored
+        // before assertions leave this test.
+        unsafe {
+            std::env::set_var("DONTSPEAK_MODEL_DIR", model_dir.path());
+            std::env::remove_var("ORT_DYLIB_PATH");
+            std::env::remove_var("SMKOKORO_DYLIB_PATH");
+        }
+
+        let tts_stats = Arc::new(TtsStats::new());
+        tts_stats.record(20.0, 100.0, 5.0);
+        let stt_stats = Arc::new(SttStats::new());
+        stt_stats.record(40.0, 200.0);
+        let lifetime = Arc::new(LifetimeSeconds::load(paths.stats_toml.clone()));
+        let tts = Arc::new(TtsManager::new(
+            temp.path().join("unused-helper"),
+            paths.log_file.clone(),
+            tts_stats.clone(),
+            stt_stats.clone(),
+            lifetime.clone(),
+        ));
+        let paste = Arc::new(Mutex::new(PasteBuf::default()));
+        {
+            let mut p = paste.lock().unwrap();
+            p.partial = "live words".to_string();
+            p.target = Some("Editor".to_string());
+            p.has_paste_target = false;
+        }
+        let downloads = Arc::new(Mutex::new(DownloadState::default()));
+        {
+            let mut state = downloads.lock().unwrap();
+            state.targets.insert(
+                DownloadTarget::KokoroModel,
+                TargetState::Active(DownloadProgress {
+                    done: 25,
+                    total: 100,
+                }),
+            );
+            state.targets.insert(
+                DownloadTarget::ParakeetModel,
+                TargetState::Failed("download failed".to_string()),
+            );
+        }
+        let gate = StatusGate::new();
+        gate.bump();
+        let shared = EngineShared {
+            tts,
+            caps_active: Arc::new(AtomicBool::new(true)),
+            stt_active: Arc::new(AtomicBool::new(true)),
+            caps_log: Arc::new(Mutex::new(VecDeque::from([CapsEvent {
+                ts_ms: 123,
+                kind: "start",
+            }]))),
+            paste,
+            downloads,
+            tts_stats,
+            stt_stats,
+            lifetime,
+            gate,
+        };
+
+        let value = model_status_json(&shared, &paths, true);
+        // SAFETY: restore the three values while ENV_LOCK is still held.
+        unsafe {
+            match previous_model_dir {
+                Some(value) => std::env::set_var("DONTSPEAK_MODEL_DIR", value),
+                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
+            }
+            match previous_ort {
+                Some(value) => std::env::set_var("ORT_DYLIB_PATH", value),
+                None => std::env::remove_var("ORT_DYLIB_PATH"),
+            }
+            match previous_shim {
+                Some(value) => std::env::set_var("SMKOKORO_DYLIB_PATH", value),
+                None => std::env::remove_var("SMKOKORO_DYLIB_PATH"),
+            }
+        }
+
+        let status: ModelStatus = serde_json::from_value(value).unwrap();
+        assert_eq!(status.kokoro.state, "downloading");
+        assert_eq!(status.kokoro.progress, 0.25);
+        assert_eq!(status.parakeet.state, "failed");
+        assert_eq!(status.parakeet.error.as_deref(), Some("download failed"));
+        assert_eq!(status.stt_engine, "off");
+        assert_eq!(status.tts_engine, "off");
+        assert!(status.running.caps);
+        assert!(!status.running.caps_wanted);
+        assert!(status.running.stt_active);
+        assert!(status.running.tts_active);
+        assert_eq!(status.dictation.text, "live words");
+        assert_eq!(status.dictation.target.as_deref(), Some("Editor"));
+        assert!(!status.dictation.local_stt);
+        assert!(!status.dictation.has_paste_target);
+        assert_eq!(status.dictation.state, "hidden");
+        assert_eq!(status.stats.tts.utterances, 1);
+        assert_eq!(status.stats.stt.transcriptions, 1);
+        assert_eq!(status.caps_events[0].kind, "start");
+        assert_eq!(status.seq, 1);
+        assert!(status.tray_indicator.is_empty());
+    }
 
     /// The gate's two real transitions, exercised directly (no test anywhere else
     /// constructs a `StatusGate` and calls `wait_changed`):

@@ -825,6 +825,60 @@ impl StreamSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct FakeBackendState {
+        accepted: Vec<Vec<f32>>,
+        finalized: bool,
+        fail_accept: bool,
+    }
+
+    struct FakeBackend {
+        state: Arc<Mutex<FakeBackendState>>,
+    }
+
+    impl StreamingStt for FakeBackend {
+        fn reset(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn accept_16k(&mut self, pcm_16k: &[f32]) -> Result<String, String> {
+            let mut state = self.state.lock().unwrap();
+            state.accepted.push(pcm_16k.to_vec());
+            if state.fail_accept && !pcm_16k.is_empty() {
+                Err("accept failed".to_string())
+            } else {
+                Ok("partial".to_string())
+            }
+        }
+
+        fn finalize(&mut self) -> Result<String, String> {
+            self.state.lock().unwrap().finalized = true;
+            Ok("final".to_string())
+        }
+
+        fn transcribe_ms(&self) -> f64 {
+            12.5
+        }
+
+        fn provider(&self) -> ds_config::RealizedProvider {
+            ds_config::RealizedProvider::Cpu
+        }
+    }
+
+    fn fake_backend(fail_accept: bool) -> (Box<dyn StreamingStt>, Arc<Mutex<FakeBackendState>>) {
+        let state = Arc::new(Mutex::new(FakeBackendState {
+            fail_accept,
+            ..FakeBackendState::default()
+        }));
+        (
+            Box::new(FakeBackend {
+                state: state.clone(),
+            }),
+            state,
+        )
+    }
 
     /// Minimal 16-bit PCM mono WAV reader → f32 [-1,1] (test-only; assumes 16 kHz mono LE).
     fn read_wav_16k_mono_pcm(path: &std::path::Path) -> Vec<f32> {
@@ -917,5 +971,57 @@ mod tests {
         assert!(rs.pending.is_empty());
         assert!(rs.finish().unwrap().is_empty());
         assert_eq!(rs.processed_input, 1_120);
+    }
+
+    #[test]
+    fn stream_session_passthrough_preserves_audio_and_backend_metadata() {
+        let (backend, state) = fake_backend(false);
+        let mut session = StreamSession::new(backend, 16_000).unwrap();
+        let pcm = vec![0.25f32, -0.5, 0.75, 0.0];
+
+        assert_eq!(session.accept(&pcm).unwrap(), "partial");
+        assert_eq!(session.audio_ms(), 0.25);
+        assert_eq!(session.transcribe_ms(), 12.5);
+        assert_eq!(session.finalize().unwrap(), "final");
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.accepted, vec![pcm]);
+        assert!(state.finalized);
+        drop(state);
+        assert_eq!(
+            session.into_backend().provider(),
+            ds_config::RealizedProvider::Cpu
+        );
+    }
+
+    /// The tail accept can fail on a native backend, but finalization owns native-session
+    /// cleanup and therefore must still run.
+    #[test]
+    fn stream_session_finalizes_after_resampled_tail_accept_fails() {
+        let (backend, state) = fake_backend(true);
+        let mut session = StreamSession::new(backend, 48_000).unwrap();
+
+        assert!(session.accept(&vec![0.1; 480]).is_ok());
+        assert_eq!(session.finalize().unwrap(), "final");
+        assert!(session.audio_ms() > 0.0);
+
+        let state = state.lock().unwrap();
+        assert!(state.accepted.iter().any(|chunk| !chunk.is_empty()));
+        assert!(state.finalized);
+    }
+
+    #[test]
+    fn stream_session_resampling_accounts_for_exact_audio_duration() {
+        let (backend, state) = fake_backend(false);
+        let mut session = StreamSession::new(backend, 48_000).unwrap();
+        let input = vec![0.1f32; 4_800];
+
+        session.accept(&input[..1_700]).unwrap();
+        session.accept(&input[1_700..]).unwrap();
+        session.finalize().unwrap();
+
+        let received: usize = state.lock().unwrap().accepted.iter().map(Vec::len).sum();
+        assert_eq!(received, 1_600);
+        assert_eq!(session.audio_ms(), 100.0);
     }
 }

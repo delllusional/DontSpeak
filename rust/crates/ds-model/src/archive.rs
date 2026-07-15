@@ -22,13 +22,21 @@ const MAX_EXTRACTED_MEMBERS: u32 = 512;
     target_arch = "x86_64"
 ))]
 fn add_extracted_bytes(total: &mut u64, copied: u64) -> std::io::Result<()> {
+    add_extracted_bytes_with_limit(total, copied, MAX_EXTRACTED_TOTAL_BYTES)
+}
+
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
+fn add_extracted_bytes_with_limit(total: &mut u64, copied: u64, limit: u64) -> std::io::Result<()> {
     *total = total.checked_add(copied).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "archive extraction size overflow",
         )
     })?;
-    if *total > MAX_EXTRACTED_TOTAL_BYTES {
+    if *total > limit {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "archive exceeds total extraction size limit",
@@ -38,11 +46,16 @@ fn add_extracted_bytes(total: &mut u64, copied: u64) -> std::io::Result<()> {
 }
 
 fn copy_bounded(mut src: impl Read, mut dest: impl Write) -> std::io::Result<u64> {
-    let copied = std::io::copy(
-        &mut src.by_ref().take(MAX_EXTRACTED_MEMBER_BYTES + 1),
-        &mut dest,
-    )?;
-    if copied > MAX_EXTRACTED_MEMBER_BYTES {
+    copy_bounded_with_limit(&mut src, &mut dest, MAX_EXTRACTED_MEMBER_BYTES)
+}
+
+fn copy_bounded_with_limit(
+    mut src: impl Read,
+    mut dest: impl Write,
+    limit: u64,
+) -> std::io::Result<u64> {
+    let copied = std::io::copy(&mut src.by_ref().take(limit.saturating_add(1)), &mut dest)?;
+    if copied > limit {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "archive member exceeds extraction size limit",
@@ -249,6 +262,25 @@ pub(crate) fn extract_all_sos(zip_path: &Path, dir: &Path) -> std::io::Result<()
 mod tests {
     use super::*;
 
+    fn write_tgz(path: &Path, members: &[(&str, &[u8])]) {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        let file = std::fs::File::create(path).unwrap();
+        let encoder = GzEncoder::new(file, Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        for (name, payload) in members {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, name, &payload[..])
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+    }
+
     /// Build a tiny gzip'd tar with a fake `libonnxruntime.dylib` member and
     /// assert `extract_dylib_member` pulls exactly that member — no network, no
     /// real ORT.
@@ -308,5 +340,67 @@ mod tests {
         let dest = dir.path().join("libonnxruntime.dylib");
         extract_dylib_member(&tgz_path, &dest).expect("extracts the dylib member");
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    }
+
+    #[test]
+    fn copy_bounded_rejects_a_member_over_the_limit() {
+        let mut output = Vec::new();
+        let error = copy_bounded_with_limit(&b"12345"[..], &mut output, 4).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(output, b"12345");
+    }
+
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
+    #[test]
+    fn extracted_total_rejects_limit_and_integer_overflow() {
+        let mut total = 3;
+        let error = add_extracted_bytes_with_limit(&mut total, 2, 4).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        let mut total = u64::MAX;
+        let error = add_extracted_bytes_with_limit(&mut total, 1, u64::MAX).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn provider_only_archive_is_rejected_without_touching_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("provider-only.tgz");
+        write_tgz(
+            &archive,
+            &[("lib/libonnxruntime_providers_shared.so", b"provider")],
+        );
+        let dest = dir.path().join("libonnxruntime.so");
+        std::fs::write(&dest, b"existing").unwrap();
+
+        let error = extract_dylib_member(&archive, &dest).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"existing");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_runtime_zip_selects_core_dll_not_provider_shim() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("runtime.zip");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("lib/onnxruntime_providers_shared.dll", options)
+            .unwrap();
+        archive.write_all(b"provider").unwrap();
+        archive.start_file("lib/onnxruntime.dll", options).unwrap();
+        archive.write_all(b"runtime").unwrap();
+        archive.finish().unwrap();
+
+        let dest = dir.path().join("onnxruntime.dll");
+        extract_runtime_member(&archive_path, &dest).unwrap();
+        assert_eq!(std::fs::read(dest).unwrap(), b"runtime");
     }
 }

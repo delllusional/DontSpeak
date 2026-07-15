@@ -518,6 +518,72 @@ pub extern "C" fn ds_string_free(s: *mut c_char) {
 mod tests {
     use super::*;
 
+    fn take_string(ptr: *mut c_char) -> String {
+        assert!(!ptr.is_null());
+        // SAFETY: every pointer passed here is freshly returned by an FFI function in this
+        // module and remains owned until the matching ds_string_free below.
+        let value = unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        ds_string_free(ptr);
+        value
+    }
+
+    #[test]
+    fn ffi_string_marshaling_and_panic_guards_use_documented_fallbacks() {
+        assert_eq!(guard_val(7, || panic!("boundary panic")), 7);
+        assert_eq!(
+            take_string(guard_str("fallback", || panic!("string boundary panic"))),
+            "fallback"
+        );
+        assert_eq!(take_string(to_cstring(b"bad\0value".to_vec())), "");
+
+        let invalid_utf8 = [0xffu8, 0];
+        assert_eq!(cstr_or(std::ptr::null(), "default"), "default");
+        assert_eq!(cstr_or(invalid_utf8.as_ptr().cast(), "default"), "default");
+        let empty = CString::new("").unwrap();
+        assert_eq!(cstr_or(empty.as_ptr(), "default"), "");
+        ds_string_free(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn handle_free_metadata_exports_return_owned_valid_values() {
+        assert_eq!(take_string(ds_homepage_url()), crate::HOMEPAGE_URL);
+        assert_eq!(take_string(ds_version()), crate::VERSION);
+
+        let brand: serde_json::Value =
+            serde_json::from_str(&take_string(ds_brand_colors_json())).unwrap();
+        assert!(brand["seed_purple"].as_str().is_some());
+        let logs: serde_json::Value =
+            serde_json::from_str(&take_string(ds_log_colors_json())).unwrap();
+        assert!(logs["source_palette"].as_array().is_some());
+        let libraries: serde_json::Value =
+            serde_json::from_str(&take_string(ds_libraries_json())).unwrap();
+        assert!(!libraries.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn formatter_exports_accept_c_inputs_and_return_freeable_strings() {
+        let unknown = CString::new("custom-runtime").unwrap();
+        assert_eq!(
+            take_string(ds_runtime_label(unknown.as_ptr())),
+            "custom-runtime"
+        );
+        assert!(!take_string(ds_duration_live(3_661.0)).is_empty());
+        assert!(!take_string(ds_human_size(1_500_000)).is_empty());
+        assert!(!take_string(ds_stats_count(3, 1.5)).is_empty());
+
+        let state = CString::new("failed").unwrap();
+        let why = CString::new("runtime unavailable").unwrap();
+        assert!(
+            take_string(ds_engine_state_word(state.as_ptr(), 0.0, why.as_ptr()))
+                .ends_with("runtime unavailable")
+        );
+        assert_eq!(take_string(ds_t(std::ptr::null())), "");
+        ds_set_locale(std::ptr::null());
+    }
+
     /// The new FFI-boundary function itself, not a duplicate of `ds-model`'s own httpmock unit
     /// tests for `check_for_update_at`: goes through the real `ds_update_check_json_at` seam
     /// (same `guard_str`/`to_cstring` marshaling `ds_update_check_json` uses), pointed at a
