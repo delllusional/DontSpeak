@@ -1,6 +1,6 @@
 ---
 name: make-release
-description: Cut a DontSpeak release — tag the single-source version, push the tag to trigger release.yml on GitHub, MONITOR the ~25-30-min run (it can and does fail), verify the published assets, then deploy the site. Also covers re-cutting a failed release. Use when asked to release, cut/publish a version, re-release, or when a release build failed.
+description: Cut a DontSpeak release — tag the single-source version, push the tag to trigger release.yml on GitHub, MONITOR the ~25-30-min run (it can and does fail), verify the published assets, then deploy the site. Also covers re-cutting a failed release, and cutting/replacing an on-demand DRAFT release of the current `-dev` version for real installable dev binaries without officially shipping. Use when asked to release, cut/publish a version, re-release, cut a dev/preview/draft build, or when a release build failed.
 ---
 
 # DontSpeak — make a release
@@ -73,6 +73,19 @@ description: Cut a DontSpeak release — tag the single-source version, push the
 ver="$(bash scripts/version.sh)"
 git tag "v$ver"
 git push origin main "v$ver"
+```
+Any `-dev` draft release(s) cut via step 10 are now superseded — clean up ALL of them (there
+should only ever be one, but query rather than guess the exact tag string: a mid-cycle version
+escalation, per step 1, can leave a draft tagged under an EARLIER `-dev` string than the one
+that just shipped). Safe to run unconditionally (no-op if none exist):
+```bash
+gh api --paginate "repos/delllusional/DontSpeak/releases" --jq '.[] | select(.draft==true and (.tag_name | test("-dev"))) | "\(.id) \(.tag_name)"' |
+while read -r id tag; do
+  echo "Removing stale dev draft: $tag (id=$id)"
+  gh api -X DELETE "repos/delllusional/DontSpeak/releases/$id"
+  git push origin ":refs/tags/$tag" 2>/dev/null || true
+  git tag -d "$tag" 2>/dev/null || true
+done
 ```
 
 ## 3 — What runs on GitHub (release.yml)
@@ -187,6 +200,47 @@ version. When it's time to cut the NEXT release, first replace `-dev` with the r
 version in both files (bumping further
 to `minor`/`major` instead of `patch` if what accumulated warrants it), commit, then tag as
 usual (step 2).
+
+## 10 — Cut (or replace) an on-demand `-dev` draft release
+
+For real installable dev binaries without officially shipping — e.g. someone needs to test a
+fix before the next numbered release. Publishes the CURRENT `-dev` version already on `main`
+(`rust/Cargo.toml`'s `[workspace.package] version`, e.g. `0.2.10-dev`) as a **draft** GitHub
+Release with the full three-OS build matrix — same gates, same signing, nothing skipped (see
+`release.yml`'s comment) — just marked `--draft` so GitHub's `releases/latest` resolution (used
+by the one-command installers and the in-app update check) never picks it up.
+
+Safe to run repeatedly as `main` moves, on the same `-dev` string: **replaces the previous
+draft's tag and release object in place**, mirroring step 7's re-cut recipe — delete the remote
+tag first, or GitHub keeps the old tag object and Actions may not re-trigger:
+```bash
+ver="$(bash scripts/version.sh)"
+case "$ver" in
+  *-dev*) ;;
+  *) echo "current version '$ver' has no -dev suffix — this is for on-demand DEV drafts only; use step 2 for a real release" >&2; exit 1 ;;
+esac
+git push origin ":refs/tags/v$ver" 2>/dev/null || true   # drop any prior remote tag for this dev version
+git tag -d "v$ver" 2>/dev/null || true
+git tag "v$ver"
+git push origin main "v$ver"                              # (re-)triggers release.yml
+```
+`release.yml`'s `release` job detects `-dev` in the tag and passes `--draft` (never
+`--prerelease` — draft alone already excludes it from `releases/latest`), replacing any
+existing release for that tag first via `gh api` list+delete-by-id (`gh release view`/`delete
+<tag>` are unreliable for drafts — see the workflow's inline comment).
+
+Monitor (step 4) and verify (step 5) exactly as for a real release, plus confirm draft status:
+```bash
+gh release view "v$ver" --repo delllusional/DontSpeak --json isDraft --jq .isDraft   # expect: true
+```
+Skip step 6 (hand-written release notes — disposable, the auto-generated compare link is fine)
+and steps 8–9 (site deploy, version bump) — the `-dev` version doesn't change and nothing about
+it is user-facing until a real release supersedes it (step 2 cleans it up automatically).
+
+**Known cosmetic quirk:** the release's web URL may briefly show `untagged-<hash>` instead of
+`v$ver` while draft (a known GitHub CLI/API display quirk) — the underlying `tag_name` is
+correct, so this recipe's replace-in-place logic, asset attachment, and `--json
+isDraft`/`tagName` all still work; it's display-only.
 
 ## Caveats
 

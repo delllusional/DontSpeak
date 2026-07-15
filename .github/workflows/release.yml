@@ -15,6 +15,12 @@ name: Release
 # notarize path runs when APPLE_* secrets exist, else the app is ad-hoc-signed (first
 # launch hits Gatekeeper). The Windows portable zip is self-contained and unsigned (the
 # app runs from an extracted folder; SmartScreen may warn on first run).
+#
+# Pushing a tag whose name contains "-dev" (the current -dev version already on main,
+# from rust/Cargo.toml's [workspace.package] version) runs this same full matrix, but the
+# `release` job publishes it with --draft and replaces any existing release+tag for that
+# same string in place, instead of erroring or accumulating duplicates. A real numbered
+# tag (no -dev) publishes as before. See .agents/skills/make-release/SKILL.md step 10.
 
 on:
   push:
@@ -23,6 +29,15 @@ on:
 
 permissions:
   contents: write          # gh release create needs to write the release
+
+# One run per ref at a time: re-pushing the SAME tag (the step-10 dev-draft replace
+# recipe deletes + re-tags on the same `-dev` string, and step 7's re-cut recipe does
+# the same for a real tag) cancels whatever's already running for it, rather than
+# letting two runs race to `gh release create` for the same tag and produce a
+# duplicate/conflicting release. A different tag gets its own group and is unaffected.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # ── Guard: the pushed tag must equal the single-source version ───────────────
@@ -323,6 +338,30 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          TAG="${GITHUB_REF_NAME}"
+          export TAG
+          DRAFT_ARGS=()
+          case "$TAG" in
+            *-dev*)
+              DRAFT_ARGS+=(--draft)
+              # On-demand dev draft: replace any existing release for this same tag in
+              # place instead of erroring "already exists" or accumulating a second one.
+              # `gh release view/delete <tag>` are unreliable for drafts — GitHub's
+              # get-release-by-tag REST endpoint only returns published releases, and
+              # `gh release delete <tag>` can match a PUBLISHED release sharing that tag
+              # instead — so list + filter by tag_name via the API directly instead.
+              # `gh api` has no `--arg` flag (its --jq takes one filter string, not extra
+              # positional args — `--jq --arg tag ... '...'` fails with "accepts 1 arg(s),
+              # received 4"); use jq's own `env.TAG` builtin against the exported var instead,
+              # keeping --paginate to see all pages rather than just the first 30 releases.
+              existing_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+                --jq '.[] | select(.tag_name==env.TAG) | .id' | head -n1)"
+              if [ -n "$existing_id" ]; then
+                echo "Replacing existing draft release id=$existing_id for tag $TAG"
+                gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/$existing_id"
+              fi
+              ;;
+          esac
           # Windows + macOS are required; Linux packages are best-effort (the linux job
           # is continue-on-error) — nullglob drops them silently if the job produced none.
           FILES=(
@@ -338,8 +377,13 @@ jobs:
             [ -f "$f" ] || continue
             ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) >> "$GITHUB_WORKSPACE/checksums.txt"
           done
-          gh release create "${GITHUB_REF_NAME}" \
+          TITLE="DontSpeak ${TAG}"
+          if [ ${#DRAFT_ARGS[@]} -gt 0 ]; then
+            TITLE="DontSpeak ${TAG} (dev draft — not a release)"
+          fi
+          gh release create "$TAG" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "DontSpeak ${GITHUB_REF_NAME}" \
+            --title "$TITLE" \
             --generate-notes \
+            "${DRAFT_ARGS[@]}" \
             "${FILES[@]}" checksums.txt
