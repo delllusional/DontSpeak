@@ -35,9 +35,11 @@ session association until the engine completes the dictation action.
   Reconnect retries every 500 ms; it currently has no UI-facing terminal-failure state.
 - Windows reconnects WASAPI capture and resamples a changed device rate back to the stable
   published rate. Its capture state exposes a recoverable error while reconnecting.
-- macOS detects a System Speech phrase reset from either a shorter hypothesis or a long gap
-  before an unrelated replacement phrase. The 0.65-second gap threshold is asserted by tests
-  but still needs hardware telemetry before tuning.
+- macOS detects a System Speech phrase reset from either a shorter hypothesis or a 0.65-second
+  gap before an unrelated replacement phrase. Hardware telemetry showed that System Speech can
+  repeat an unchanged partial at the boundary, so duplicates do not refresh the last-change
+  clock. Measuring from the last actual text change preserves the threshold's separation from
+  ordinary low-prefix revisions, which were observed at gaps up to 0.306 seconds.
 
 ## Verification boundaries
 

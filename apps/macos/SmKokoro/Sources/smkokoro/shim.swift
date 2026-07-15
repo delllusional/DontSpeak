@@ -484,11 +484,10 @@ private func legacyAuthorize() -> Int32 {
     }
 }
 
-/// #34 data-collection sink for `legacySegmentDidReset`'s unretuned 0.65s phrase-gap
-/// constant — see `LegacyRun.recordPartial`. `.debug`-level only: invisible/unpersisted
-/// unless a developer explicitly enables debug capture for this subsystem (mirrors the
-/// Rust engine's own DONTSPEAK_DEBUG-gated verbose telemetry — see ds-log's
-/// `LogLevel::Debug` doc). Never logs dictated text, only the measured gap.
+/// Debug-only timing for detected legacy phrase resets. Invisible/unpersisted unless a
+/// developer explicitly enables debug capture for this subsystem (mirrors the Rust engine's
+/// DONTSPEAK_DEBUG-gated verbose telemetry — see ds-log's `LogLevel::Debug` doc). Never logs
+/// dictated text, only the interval since the prior changed hypothesis.
 private let legacyResetLog = Logger(subsystem: "app.dontspeak.org", category: "legacy-stt")
 
 /// One batch recognition's shared state: the callback (on `legacyQueue`) fills it, the
@@ -518,7 +517,7 @@ private final class LegacyRun: @unchecked Sendable {
     private let textLock = NSLock()
     private var committedText: String = ""
     private var latestPartial: String = ""
-    private var lastPartialAt: TimeInterval?
+    private var lastPartialChangedAt: TimeInterval?
 
     func finish(text: String?, error: Error?) {
         lock.lock()
@@ -546,17 +545,15 @@ private final class LegacyRun: @unchecked Sendable {
         textLock.lock()
         defer { textLock.unlock() }
         let now = ProcessInfo.processInfo.systemUptime
-        let gap = lastPartialAt.map { now - $0 }
+        let timing = legacyPartialTiming(
+            previous: latestPartial,
+            new: newText,
+            lastChangedAt: lastPartialChangedAt,
+            now: now)
+        let gap = timing.gapSeconds
         if legacySegmentDidReset(previous: latestPartial, new: newText, gapSeconds: gap), !latestPartial.isEmpty {
-            // #34: the 0.65s phrase-gap constant in `legacySegmentDidReset` is asserted, not
-            // measured (unlike the paired <0.5 shared-prefix-ratio threshold, which has an
-            // empirical basis — see that function's doc). This records the ACTUAL gap that fired
-            // a reset on a real System STT session, so a future retune has real data instead of
-            // none. `.public` privacy is deliberate: this is a numeric/boolean measurement, never
-            // the dictated text itself. Interpolates the raw `TimeInterval` via os.Logger's own
-            // lazy `format:` specifier rather than pre-formatting with `String(format:)` — the
-            // whole point of os.Logger is that formatting is deferred until the log point is
-            // actually collected, which a pre-built String would defeat on every phrase reset.
+            // `.public` privacy is deliberate: this is a numeric measurement, never dictated
+            // text. Keep os.Logger's lazy `format:` instead of eagerly formatting every reset.
             if let gap {
                 legacyResetLog.debug(
                     "legacy STT phrase reset: gapSeconds=\(gap, format: .fixed(precision: 3), privacy: .public)")
@@ -566,7 +563,7 @@ private final class LegacyRun: @unchecked Sendable {
             committedText = legacyJoin(committedText, latestPartial)
         }
         latestPartial = newText
-        lastPartialAt = now
+        lastPartialChangedAt = timing.lastChangedAt
     }
 
     /// `committedText + " " + finalSegment` — the shape `isFinal`'s callback hands to
@@ -972,6 +969,20 @@ private func legacyJoin(_ committed: String, _ current: String) -> String {
     if current.isEmpty { return committed }
     if committed.isEmpty { return current }
     return "\(committed) \(current)"
+}
+
+/// Gap since the previous actual hypothesis change. System Speech repeats the final partial
+/// unchanged while crossing a phrase boundary; treating that duplicate as fresh made a measured
+/// ~2s pause look like ~0.3s and hid a genuine reset. Ordinary low-prefix revisions were observed
+/// at 0.197–0.306s, so lowering the 0.65s threshold instead would introduce false commits.
+func legacyPartialTiming(
+    previous: String,
+    new: String,
+    lastChangedAt: TimeInterval?,
+    now: TimeInterval
+) -> (gapSeconds: TimeInterval?, lastChangedAt: TimeInterval?) {
+    let gap = lastChangedAt.map { now - $0 }
+    return (gap, new == previous ? lastChangedAt : now)
 }
 
 /// Heuristic detection of a legacy-tier phrase-segment boundary. `SFSpeechRecognizer` gives

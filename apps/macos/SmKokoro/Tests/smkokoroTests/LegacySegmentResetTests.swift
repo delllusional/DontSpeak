@@ -36,7 +36,32 @@ final class LegacySegmentResetTests: XCTestCase {
         XCTAssertFalse(
             legacySegmentDidReset(
                 previous: "hello", new: "a completely different sentence entirely",
-                gapSeconds: nil))
+                gapSeconds: 0.649))
+    }
+
+    /// System Speech repeats the last unchanged partial at a phrase boundary. The duplicate
+    /// must not replace the timestamp of the last actual text change, or the genuine ~2s pause
+    /// measured on hardware appears as the 0.3s gap from that duplicate to the replacement.
+    func testDuplicatePartialDoesNotHideGenuineResetGap() {
+        let first = legacyPartialTiming(
+            previous: "", new: "Hello", lastChangedAt: nil, now: 0.0)
+        XCTAssertNil(first.gapSeconds)
+        XCTAssertEqual(first.lastChangedAt, 0.0)
+
+        let duplicate = legacyPartialTiming(
+            previous: "Hello", new: "Hello", lastChangedAt: first.lastChangedAt, now: 1.95)
+        XCTAssertEqual(duplicate.gapSeconds!, 1.95, accuracy: 0.001)
+        XCTAssertEqual(duplicate.lastChangedAt, 0.0)
+
+        let replacement = legacyPartialTiming(
+            previous: "Hello", new: "Completely", lastChangedAt: duplicate.lastChangedAt,
+            now: 2.26)
+        XCTAssertEqual(replacement.gapSeconds!, 2.26, accuracy: 0.001)
+        XCTAssertEqual(replacement.lastChangedAt, 2.26)
+        XCTAssertTrue(
+            legacySegmentDidReset(
+                previous: "Hello", new: "Completely",
+                gapSeconds: replacement.gapSeconds))
     }
 
     /// Documented limitation: a longer reset that coincidentally shares >= 50% of its
@@ -51,13 +76,13 @@ final class LegacySegmentResetTests: XCTestCase {
                 gapSeconds: 2.0))
     }
 
-    /// Below the 0.65s phrase-gap threshold, a growing phrase with no shared-prefix
-    /// break is left alone (still in-flight, not yet a reset).
-    func testShortGapBelowThresholdDoesNotTriggerOnGrowth() {
+    /// Hardware telemetry included ordinary low-prefix in-flight revisions at 0.306s. Keeping
+    /// the calibrated 0.65s guard prevents such a revision from committing a false phrase.
+    func testObservedLowPrefixRevisionDoesNotTriggerBelowThreshold() {
         XCTAssertFalse(
             legacySegmentDidReset(
-                previous: "the quick brown fox jumps", new: "the quick brown fox jumps over",
-                gapSeconds: 0.3))
+                previous: "A completely different", new: "I completely different",
+                gapSeconds: 0.306))
     }
 
     /// Empty previous text has nothing to reset from.
