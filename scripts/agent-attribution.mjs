@@ -286,7 +286,11 @@ export function validateAttribution(model, effort) {
   const errors = [];
   if (!model) {
     errors.push("active model slug is unavailable");
-  } else if (!/^\S+$/.test(model) || /^(?:unknown|default|auto)$/i.test(model)) {
+  } else if (
+    !/^\S+$/.test(model)
+    || /^(?:unknown|default|auto)$/i.test(model)
+    || /^gpt-\d+(?:\.\d+)?$/i.test(model)
+  ) {
     errors.push(`model is not an exact slug: ${JSON.stringify(model)}`);
   }
   if (!effort) {

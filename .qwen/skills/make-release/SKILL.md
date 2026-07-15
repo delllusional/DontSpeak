@@ -27,7 +27,7 @@ description: Cut a DontSpeak release — tag the single-source version, push the
   optimization, not the actual correctness gate** — `release.yml`'s own `tests` job
   (full-matrix) reruns clippy + tests + hygiene regardless, and IS the real gate. Running it
   locally catches a broken `main` before starting the slower release matrix.
-- **Hygiene clean — run `cargo fmt` + `cargo deny --all-features check` locally before
+- **Hygiene clean — run `cargo fmt` + both all-feature cargo-deny graphs locally before
   tagging.** The
   release (unlike per-commit CI and `prepush`) also gates on rustfmt + rustdoc AND
   cargo-deny (`ci.yml`'s `hygiene` and `cargo-deny` jobs, full-matrix only) — **the
@@ -37,8 +37,12 @@ description: Cut a DontSpeak release — tag the single-source version, push the
   (cd rust && cargo fmt) && (cd apps/linux/gtk && cargo fmt)     # apply
   (cd rust && cargo fmt --check) && (cd apps/linux/gtk && cargo fmt --check)   # must be clean
   (cd rust && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked)   # must pass
-  (cd rust && cargo deny --all-features check)   # must pass — matches release.yml's graph
+  cargo deny --manifest-path rust/Cargo.toml --all-features check --config rust/deny.toml
+  cargo deny --manifest-path apps/linux/gtk/Cargo.toml --all-features check --config rust/deny.toml
   ```
+  Run those cargo-deny commands from the repository root. They exactly match the two
+  `ci.yml` release graphs; a default-feature check can miss build-dependency duplicates,
+  and checking only `rust/Cargo.toml` misses the standalone GTK lockfile.
   Commit whatever `cargo fmt` (or a `cargo update` for a flagged advisory) changed — a
   release is where the codebase gets cleaned up.
 - **macOS Swift tests (run on a Mac).** The release matrix runs `swift test` on the macos-26

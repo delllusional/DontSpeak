@@ -137,6 +137,12 @@ test("unavailable effort is an error instead of a guessed default", () => {
   assert.match(validateAttribution("gpt-5.6-sol", "default")[0], /ambiguous effort/);
 });
 
+test("family-level GPT names are rejected instead of accepted as exact slugs", () => {
+  assert.match(validateAttribution("gpt-5", "high")[0], /not an exact slug/);
+  assert.match(validateAttribution("gpt-5.6", "high")[0], /not an exact slug/);
+  assert.deepEqual(validateAttribution("gpt-5.6-sol", "high"), []);
+});
+
 test("rewriting replaces one guessed trailer and removes built-in attribution", () => {
   const rewritten = rewriteCommitMessage(
     "Fix the thing\n\nAgent: gpt-5 high\nCo-Authored-By: Codex <noreply@example.com>\n",

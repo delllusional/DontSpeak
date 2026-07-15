@@ -50,12 +50,14 @@ If both pass, push. If either fails, fix it and re-run.
 
 ## cargo-deny (release-only, not a per-commit gate)
 
-`cargo deny --all-features check` (advisories + bans + licenses + sources against `deny.toml` /
-`Cargo.lock`) only runs in the release pipeline now — see the `make-release` skill.
+The two all-feature cargo-deny graphs (advisories + bans + licenses + sources against
+`deny.toml` / both lockfiles) only run in the release pipeline now — see the
+`make-release` skill.
 It's still worth running here if you touched `Cargo.toml`/`Cargo.lock` or `deny.toml`,
 so a new advisory or license doesn't surface for the first time at tag time:
 ```bash
-cargo deny --all-features check
+cargo deny --manifest-path rust/Cargo.toml --all-features check --config rust/deny.toml
+cargo deny --manifest-path apps/linux/gtk/Cargo.toml --all-features check --config rust/deny.toml
 ```
 Install once with `cargo install cargo-deny --locked` (not part of the default
 toolchain). A new advisory or a new license entering the graph needs a considered
