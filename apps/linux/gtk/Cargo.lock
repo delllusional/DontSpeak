@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "dontspeakd"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "ds-config",
  "ds-earcon",
@@ -738,14 +738,14 @@ dependencies = [
 
 [[package]]
 name = "ds-client"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ds-config"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "directories",
  "ds-client",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "ds-core"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "dontspeakd",
  "ds-config",
@@ -776,14 +776,14 @@ dependencies = [
 
 [[package]]
 name = "ds-earcon"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "directories",
 ]
 
 [[package]]
 name = "ds-engines"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "ds-config",
  "ds-platform",
@@ -792,11 +792,11 @@ dependencies = [
 
 [[package]]
 name = "ds-helper-proto"
-version = "0.3.0-dev"
+version = "0.3.0"
 
 [[package]]
 name = "ds-i18n"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "rust-i18n",
  "serde_json",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "ds-ipc"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "ds-client",
  "serde",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "ds-linux-gtk"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "async-channel",
  "ds-core",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "ds-log"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "directories",
  "ds-client",
@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "ds-model"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "attohttpc",
  "ds-config",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "ds-narrate"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "ds-config",
  "serde",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "ds-platform"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "arboard",
  "core-graphics",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "ds-proc"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "nix 0.31.3",
  "tempfile",
@@ -899,14 +899,14 @@ dependencies = [
 
 [[package]]
 name = "ds-status"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ds-stt"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "cpal 0.18.1",
  "ds-config",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tools"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "ds-config",
  "serde",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tts"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "ds-config",
  "ds-model",
@@ -952,14 +952,14 @@ dependencies = [
 
 [[package]]
 name = "ds-voices"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "ds-config",
 ]
 
 [[package]]
 name = "ds-wire"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "ds-config",
  "ds-log",
@@ -1490,9 +1490,9 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "globset"
-version = "0.4.18"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+checksum = "e47d37d2ae4464254884b60ab7071be2b876a9c35b696bd018ddcc76847309cd"
 dependencies = [
  "aho-corasick",
  "bstr",
@@ -1838,9 +1838,9 @@ dependencies = [
 
 [[package]]
 name = "ignore"
-version = "0.4.28"
+version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2adf14691c72bcfc1058740436a35bdd3ae9c07d1a941ef00b749e9ea16aefa7"
+checksum = "d4ffa3a0547a138e59ddd6fa3b7c672ed47e6ad6a3cd177984ff1116aa5ba742"
 dependencies = [
  "crossbeam-deque",
  "globset",
@@ -2056,9 +2056,9 @@ dependencies = [
 
 [[package]]
 name = "ksni"
-version = "0.3.5"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da9eeb3f510b6148ae68f963af2c1fbb0de4d9e4e05f82813cfb319837c3ad2b"
+checksum = "814b44c24cd2cb236c3b8a41c7f08237b452a8e76ecaa81f1cec40b5b678215b"
 dependencies = [
  "futures-util",
  "pastey",

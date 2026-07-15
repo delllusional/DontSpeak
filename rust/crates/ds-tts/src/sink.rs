@@ -9,16 +9,18 @@
 //!     clipping the speech onset — the "first speak, purple icon, no sound" fix.
 //!   * **Wall-clock drain detection.** rodio's `empty()` lies on WASAPI (it reports
 //!     true before the mixer consumed freshly appended buffers), so drained-ness is
-//!     computed deterministically from wall time vs. appended audio ([`AppendClock`]).
+//!     computed deterministically from wall time vs. appended audio (`AppendClock`).
 //!   * **Played-batch accounting.** Each appended PCM batch records the cumulative
-//!     queued duration at its end; [`played_batches`](IncrementalSink::played_batches)
+//!     queued duration at its end; [`played_batches`](crate::sink::IncrementalSink::played_batches)
 //!     estimates how many batches have fully sounded by a given instant — the basis
 //!     for batch-granular resume after a barge (lead silence is never counted as a
 //!     batch).
 //!
-//! NO-AUDIO DISCIPLINE: unit tests construct via [`IncrementalSink::connect_to`] on a
+//! NO-AUDIO DISCIPLINE: unit tests construct via
+//! [`IncrementalSink::connect_to`](crate::sink::IncrementalSink::connect_to) on a
 //! detached `rodio::mixer::Mixer` (no output device) and drive the clock with injected
-//! instants; [`IncrementalSink::open_default`] opens a real device and is exercised
+//! instants; [`IncrementalSink::open_default`](crate::sink::IncrementalSink::open_default)
+//! opens a real device and is exercised
 //! only by the ds-helper binary.
 
 use std::num::NonZero;
