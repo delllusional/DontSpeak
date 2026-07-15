@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use crate::shared::{CaptureHandle, enqueue_bounded};
+use crate::shared::{CaptureHandle, RenderHandle, enqueue_bounded};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
@@ -148,6 +148,12 @@ impl DuplexAudio {
 
     /// No-op (no render ring to flush; the helper stops the rodio player on barge).
     pub fn render_clear(&self) {}
+
+    /// No-op render handle (rodio owns output; parity with macOS keeps the helper's
+    /// feeder path cfg-free).
+    pub fn render_handle(&self) -> RenderHandle {
+        RenderHandle::new()
+    }
 
     /// Drain the echo-cancelled mono f32 captured since the last call. Empty when no
     /// new audio has arrived.

@@ -79,8 +79,8 @@ pub(crate) fn load_backend() -> Result<Backend, String> {
     Ok(Backend::Ort(load_synth()?))
 }
 
-/// One-shot: offer each validated phoneme batch to `AudioPlayer` as soon as it is ready.
-/// Non-macOS playback starts incrementally; macOS accumulates for reliable `afplay` teardown.
+/// One-shot: commit each validated batch to `AudioPlayer` — see `ds_tts::play` for the
+/// per-platform incremental/accumulate split.
 pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
     // Keep the cold path aligned with `serve`: both backends consume the same normalized,
     // model-bounded Rust phoneme batches.

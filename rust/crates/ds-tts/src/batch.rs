@@ -3,8 +3,9 @@
 //! [`split_phonemes`](crate::batch::split_phonemes) packs a long phoneme string at sentence
 //! marks under `MAX_PHONEME_LENGTH` (port of `splitPhonemes`);
 //! [`stream_batches`](crate::batch::stream_batches) is the ramped variant used by the shared
-//! frontend. The helper fully prepares each batch transactionally, then commits it while later
-//! batches synthesize. Both paths share `pack_batches`.
+//! frontend — a ramped, model-bounded, floor-protected batch sequence. What happens to a
+//! finished batch is the consumer's contract — see the helper's `prepare` module. Both paths
+//! share `pack_batches`.
 
 use crate::vocab::MAX_PHONEME_LENGTH;
 

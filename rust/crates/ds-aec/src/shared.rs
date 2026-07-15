@@ -32,6 +32,26 @@ impl CaptureHandle {
     }
 }
 
+/// Render-side no-op twin of [`CaptureHandle`] for the capture-side backends
+/// (`owns_render()` is `false` — rodio renders TTS). Exists so the helper's duplex
+/// feeder compiles without cfg on every OS; it never receives samples here.
+#[derive(Clone)]
+pub struct RenderHandle {
+    _private: (),
+}
+
+impl RenderHandle {
+    pub(crate) fn new() -> Self {
+        Self { _private: () }
+    }
+
+    pub fn push(&self, _pcm_24k: &[f32]) {}
+
+    pub fn buffered(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+}
+
 /// Append `samples` to the shared capture buffer, dropping the oldest f32 once it grows past
 /// `cap_limit` — a stalled listen must never grow the ring without bound. The single
 /// overflow-trim rule for both capture threads.

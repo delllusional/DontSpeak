@@ -31,14 +31,14 @@ mod resample;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{CaptureHandle, DuplexAudio};
+pub use macos::{CaptureHandle, DuplexAudio, RenderHandle};
 
 // The Windows + Linux backends share an identical `Mutex<VecDeque<f32>>`-backed
 // `CaptureHandle` and overflow-trim (macOS uses ringbuf, above) — both live in `shared`.
 #[cfg(any(windows, target_os = "linux"))]
 mod shared;
 #[cfg(any(windows, target_os = "linux"))]
-pub use shared::CaptureHandle;
+pub use shared::{CaptureHandle, RenderHandle};
 
 #[cfg(windows)]
 mod windows;
@@ -53,4 +53,4 @@ pub use linux::DuplexAudio;
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod stub;
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
-pub use stub::{CaptureHandle, DuplexAudio};
+pub use stub::{CaptureHandle, DuplexAudio, RenderHandle};

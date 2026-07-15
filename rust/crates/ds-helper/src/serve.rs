@@ -7,7 +7,7 @@ use ds_aec::DuplexAudio;
 use ds_helper_proto as proto;
 use ds_tts::g2p::{self, PhonemeBatchesOutcome};
 use serde::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::_exit;
 use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
@@ -414,7 +414,7 @@ struct DuplexRenderState {
 /// Pace one already-transactional phoneme batch into VPIO while re-reading live mute/cancel
 /// state. Returns `false` when cancellation stops the batch before every chunk is pushed.
 fn push_duplex_pcm(
-    pcm: Vec<f32>,
+    pcm: &[f32],
     mut read_state: impl FnMut() -> DuplexRenderState,
     mut push: impl FnMut(&[f32]),
     mut wait: impl FnMut(),
@@ -445,9 +445,45 @@ fn push_duplex_pcm(
     true
 }
 
+/// Drains committed batches until the sender closes. `push_batch`'s return is ignored:
+/// after a cancel it keeps consuming so the queue empties cheaply and join stays fast.
+fn run_duplex_feeder(rx: std::sync::mpsc::Receiver<Vec<f32>>, mut push_batch: impl FnMut(&[f32])) {
+    for pcm in rx {
+        push_batch(&pcm);
+    }
+}
+
 /// `LEAD_SILENCE_MS` of mono silence at `srate_hz`. See [`LEAD_SILENCE_MS`].
 fn leading_silence_pcm(srate_hz: u32) -> Vec<f32> {
     vec![0.0f32; srate_hz as usize * LEAD_SILENCE_MS as usize / 1000]
+}
+
+/// Wall-clock drain detector for the incremental rodio path. `empty()` lies on WASAPI
+/// (see the sleep_until_end note in the serve loop), so drained-ness is deterministic:
+/// once more wall time has elapsed in this playback run than audio was appended, the sink
+/// idled and the next append needs a fresh leading silence to absorb the output-stream
+/// resume (the "purple icon, no sound" clip, now reachable mid-utterance because batches
+/// stream while later inference runs).
+#[derive(Default)]
+struct AppendClock {
+    started: Option<Instant>,
+    queued: Duration,
+}
+
+impl AppendClock {
+    fn drained(&self, now: Instant) -> bool {
+        self.started
+            .is_none_or(|t| now.saturating_duration_since(t) >= self.queued)
+    }
+
+    fn begin_run(&mut self, now: Instant) {
+        self.started = Some(now);
+        self.queued = Duration::ZERO;
+    }
+
+    fn append(&mut self, samples: usize, srate_hz: u32) {
+        self.queued += Duration::from_secs_f64(samples as f64 / f64::from(srate_hz));
+    }
 }
 
 /// Block until a full-duplex dictation session releases the mic (`full_duplex_listening`
@@ -1403,9 +1439,47 @@ pub(crate) fn serve() -> ! {
         let channels = std::num::NonZero::new(1u16).expect("1 channel");
         let srate = std::num::NonZero::new(24_000u32).expect("24 kHz");
         let mut player: Option<Arc<rodio::Player>> = None;
+        let mut clock = AppendClock::default();
         let mut synth_nanos = 0u128;
         let mut total_samples = 0usize;
         let mut first_ms = 0.0f64;
+        // Duplex render feeder: committing a batch must return immediately so the next
+        // batch's inference overlaps pacing (otherwise the ~2 s lookahead wait would
+        // serialize inference behind playback). The feeder thread owns the pacing loop;
+        // `feed_abort` stops it on an ERR outcome, which does NOT set `cancel`.
+        let feed_abort = Arc::new(AtomicBool::new(false));
+        let (feed_tx, feeder) = if render_via_duplex && let Some(dx) = &duplex {
+            let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+            let handle = dx.render_handle();
+            let cancel = cancel.clone();
+            let muted = muted.clone();
+            let feed_abort = feed_abort.clone();
+            match std::thread::Builder::new()
+                .name("ds-duplex-feed".into())
+                .spawn(move || {
+                    run_duplex_feeder(rx, |pcm| {
+                        let _ = push_duplex_pcm(
+                            pcm,
+                            || DuplexRenderState {
+                                cancelled: cancel.load(Ordering::SeqCst)
+                                    || feed_abort.load(Ordering::SeqCst),
+                                muted: muted.load(Ordering::SeqCst),
+                                buffered: handle.buffered(),
+                            },
+                            |chunk| handle.push(chunk),
+                            || std::thread::sleep(DUPLEX_RENDER_POLL),
+                        );
+                    });
+                }) {
+                Ok(j) => (Some(tx), Some(j)),
+                Err(e) => {
+                    log::warn!(target: "helper", "duplex feeder spawn failed ({e}); pacing inline");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
         let mut commit = |audio: PreparedAudio| -> Result<(), String> {
             synth_nanos = synth_nanos.saturating_add(audio.synth_nanos);
             if total_samples == 0 {
@@ -1426,22 +1500,20 @@ pub(crate) fn serve() -> ! {
                     }
                     None => None,
                 };
-                // Prepend a brief silence only after the first batch commits. It absorbs an
-                // idle rodio stream's resume latency without making a failed transaction touch
-                // the player.
-                if let Some(p) = &player {
-                    p.append(rodio::buffer::SamplesBuffer::new(
-                        channels,
-                        srate,
-                        leading_silence_pcm(srate.get()),
-                    ));
-                }
             }
-            total_samples = total_samples.saturating_add(audio.total_samples);
+            total_samples = total_samples.saturating_add(audio.pcm.len());
             if render_via_duplex {
-                if let Some(dx) = &duplex {
+                if let Some(tx) = &feed_tx {
+                    // Send error = feeder died. If a barge landed, the barge owns the outcome
+                    // (prepare's next cancelled() check returns Cancelled) — otherwise
+                    // surface ERR.
+                    if tx.send(audio.pcm).is_err() && !cancel.load(Ordering::SeqCst) {
+                        return Err("duplex render feeder exited unexpectedly".to_string());
+                    }
+                } else if let Some(dx) = &duplex {
+                    // Spawn-failure fallback: pace inline (commit blocks on the lookahead).
                     let _ = push_duplex_pcm(
-                        audio.pcm,
+                        &audio.pcm,
                         || DuplexRenderState {
                             cancelled: cancel.load(Ordering::SeqCst),
                             muted: muted.load(Ordering::SeqCst),
@@ -1454,6 +1526,20 @@ pub(crate) fn serve() -> ! {
             } else if let Some(p) = &player
                 && !cancel.load(Ordering::SeqCst)
             {
+                // Re-prepend the leading silence whenever the sink drained (first commit,
+                // or synthesis fell behind real time mid-utterance), so the output-stream
+                // resume never clips an onset. Deliberately conservative: a borderline
+                // call gets an extra 80 ms of inaudible silence versus a clipped onset.
+                // The duplex path needs no guard — the VPIO render callback zero-fills
+                // any shortfall, so there is no resume latency to absorb.
+                let now = Instant::now();
+                if clock.drained(now) {
+                    clock.begin_run(now);
+                    let lead = leading_silence_pcm(srate.get());
+                    clock.append(lead.len(), srate.get());
+                    p.append(rodio::buffer::SamplesBuffer::new(channels, srate, lead));
+                }
+                clock.append(audio.pcm.len(), srate.get());
                 p.append(rodio::buffer::SamplesBuffer::new(
                     channels, srate, audio.pcm,
                 ));
@@ -1475,6 +1561,18 @@ pub(crate) fn serve() -> ! {
                 &mut commit,
             ),
         };
+        if outcome.is_err() {
+            // ERR does NOT set `cancel`; without this abort the feeder would keep feeding
+            // the committed prefix into the ring the Err arm is about to clear — audibly
+            // playing it under an ERR reply.
+            feed_abort.store(true, Ordering::SeqCst);
+        }
+        // Close the channel: on Finished the feeder pushes the remaining tail, then exits.
+        drop(feed_tx);
+        if let Some(j) = feeder {
+            // After this join no push can race the render_clear/render_pending below.
+            let _ = j.join();
+        }
         match outcome {
             Ok(PrepareOutcome::Finished) => {}
             Ok(PrepareOutcome::Cancelled) => {
@@ -1561,11 +1659,12 @@ pub(crate) fn serve() -> ! {
 #[cfg(test)]
 mod audio_tests {
     use std::cell::{Cell, RefCell};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{
-        DUPLEX_RENDER_AHEAD, DUPLEX_RENDER_CHUNK_SAMPLES, DuplexRenderState, LEAD_SILENCE_MS,
-        leading_silence_pcm, push_duplex_pcm, tts_output_available,
+        AppendClock, DUPLEX_RENDER_AHEAD, DUPLEX_RENDER_CHUNK_SAMPLES, DuplexRenderState,
+        LEAD_SILENCE_MS, leading_silence_pcm, push_duplex_pcm, run_duplex_feeder,
+        tts_output_available,
     };
 
     #[test]
@@ -1610,7 +1709,7 @@ mod audio_tests {
         let reads = Cell::new(0usize);
         let pushed = RefCell::new(Vec::<Vec<f32>>::new());
         let finished = push_duplex_pcm(
-            vec![1.0; DUPLEX_RENDER_CHUNK_SAMPLES * 2 + 1],
+            &[1.0; DUPLEX_RENDER_CHUNK_SAMPLES * 2 + 1],
             || {
                 let read = reads.get();
                 reads.set(read + 1);
@@ -1642,7 +1741,7 @@ mod audio_tests {
         let waits = Cell::new(0usize);
         let pushed = Cell::new(0usize);
         let finished = push_duplex_pcm(
-            vec![1.0],
+            &[1.0],
             || DuplexRenderState {
                 cancelled: false,
                 muted: false,
@@ -1661,7 +1760,7 @@ mod audio_tests {
         let cancelled = Cell::new(false);
         let pushed = Cell::new(false);
         let finished = push_duplex_pcm(
-            vec![1.0],
+            &[1.0],
             || DuplexRenderState {
                 cancelled: cancelled.get(),
                 muted: false,
@@ -1672,6 +1771,93 @@ mod audio_tests {
         );
         assert!(!finished);
         assert!(!pushed.get());
+    }
+
+    /// Pins "join can't hang": the feeder must deliver every committed batch in order and
+    /// terminate on its own the moment the sender side drops.
+    #[test]
+    fn feeder_delivers_batches_in_order_and_exits_when_sender_closes() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        tx.send(vec![1.0]).unwrap();
+        tx.send(vec![2.0, 2.0]).unwrap();
+        tx.send(vec![3.0]).unwrap();
+        drop(tx);
+
+        let delivered = RefCell::new(Vec::<Vec<f32>>::new());
+        run_duplex_feeder(rx, |pcm| delivered.borrow_mut().push(pcm.to_vec()));
+
+        // Reaching this line at all proves termination on channel close.
+        assert_eq!(
+            *delivered.borrow(),
+            vec![vec![1.0], vec![2.0, 2.0], vec![3.0]]
+        );
+    }
+
+    /// Pins "join is fast after barge": a batch the push rejects (push_duplex_pcm returning
+    /// false on cancel) must not stop the consume loop — the remaining queued batches are
+    /// still offered (and cheaply rejected) so the channel empties and join returns.
+    #[test]
+    fn feeder_keeps_consuming_after_a_rejected_batch() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        for i in 0..4 {
+            tx.send(vec![i as f32]).unwrap();
+        }
+        drop(tx);
+
+        let offered = Cell::new(0usize);
+        run_duplex_feeder(rx, |_| {
+            // Simulate a cancel landing after the first batch: every later push is a
+            // rejection, and the feeder must keep draining regardless.
+            offered.set(offered.get() + 1);
+        });
+        assert_eq!(offered.get(), 4, "every queued batch must still be offered");
+    }
+
+    /// Pins the mid-utterance onset clip fix: the FIRST commit of a request must read as
+    /// drained so it gets the leading silence (the old first-commit-only prepend).
+    #[test]
+    fn append_clock_reads_drained_before_any_run() {
+        let clock = AppendClock::default();
+        assert!(clock.drained(Instant::now()));
+    }
+
+    /// While appended audio outpaces wall time the sink is still busy — re-prepending the
+    /// silence there would inject an audible gap mid-utterance.
+    #[test]
+    fn append_clock_is_not_drained_while_queued_audio_outpaces_wall_time() {
+        let t0 = Instant::now();
+        let mut clock = AppendClock::default();
+        clock.begin_run(t0);
+        clock.append(24_000, 24_000); // 1 s of audio
+        assert!(!clock.drained(t0 + Duration::from_millis(500)));
+    }
+
+    /// Wall time catching up with the appended total means the sink idled (we distrust
+    /// WASAPI's `empty()` — see the sleep_until_end note) → the next append needs a fresh
+    /// leading silence.
+    #[test]
+    fn append_clock_drains_once_wall_time_reaches_the_queued_total() {
+        let t0 = Instant::now();
+        let mut clock = AppendClock::default();
+        clock.begin_run(t0);
+        clock.append(24_000, 24_000); // 1 s of audio
+        assert!(clock.drained(t0 + Duration::from_secs(1)));
+        assert!(clock.drained(t0 + Duration::from_secs(2)));
+    }
+
+    /// `begin_run` must reset the accounting: a stale `queued` total from the previous run
+    /// would postpone the next drain detection past the real sink idle.
+    #[test]
+    fn append_clock_begin_run_resets_the_accounting() {
+        let t0 = Instant::now();
+        let mut clock = AppendClock::default();
+        clock.begin_run(t0);
+        clock.append(24_000 * 10, 24_000); // 10 s of audio in run 1
+        let t1 = t0 + Duration::from_secs(30);
+        clock.begin_run(t1);
+        clock.append(2_400, 24_000); // 100 ms in run 2
+        assert!(!clock.drained(t1 + Duration::from_millis(50)));
+        assert!(clock.drained(t1 + Duration::from_millis(100)));
     }
 }
 

@@ -153,14 +153,20 @@ The shared frontend creates model-bounded, sentence-aware phoneme batches with a
 budget and a ramp toward the model limit. Preparation synthesizes and validates one complete
 batch, commits it immediately, then synthesizes the next batch while playback drains the already
 committed PCM. This keeps the failing batch transactional while making time-to-first-audio depend
-on the first batch rather than the entire utterance. It also bounds preparation memory to one
+on the first batch rather than the entire utterance. When synthesis runs slower than real time,
+playback can gap briefly between batches; the previous design instead delayed all audio until the
+whole utterance was staged. After such a drain the helper re-prepends the short leading silence so
+the resumed onset is not clipped. It also bounds preparation memory to one
 phoneme batch, including for queue items near the 10 KiB admission limit. The default warm helper
 commits into a persistent output stream and starts incrementally. The short-lived macOS one-shot
 route still accumulates committed batches for reliable `afplay` teardown.
 
-On macOS full-duplex, a committed phoneme batch is paced into VPIO in small chunks with about two
-seconds of normal render lookahead. The feeder rechecks cancellation and global mute between
-chunks, using a shorter lookahead for muted silence so unmute also responds promptly.
+On macOS full-duplex, committed batches are handed to a dedicated feeder thread, so committing
+returns immediately and the next batch's inference overlaps pacing. The feeder paces small chunks
+into VPIO with about two seconds of render lookahead, rechecking cancellation and global mute
+between chunks and using a shorter lookahead for muted silence so unmute also responds promptly.
+On failure the helper aborts the feeder before clearing the render ring, so a committed prefix
+never plays under an error reply.
 
 Queue logs preserve disabled, unavailable, cancelled, timeout, load-error, synthesis-error, and
 played outcomes even though those terminal states are not yet propagated back to the original

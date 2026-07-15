@@ -45,6 +45,10 @@ impl DuplexAudio {
     pub fn capture_handle(&self) -> CaptureHandle {
         CaptureHandle { _private: () }
     }
+
+    pub fn render_handle(&self) -> RenderHandle {
+        RenderHandle { _private: () }
+    }
 }
 
 /// Non-macOS stub capture handle (no VPIO unit exists).
@@ -59,5 +63,18 @@ impl CaptureHandle {
     }
     pub fn drain(&self) -> Vec<f32> {
         Vec::new()
+    }
+}
+
+/// Stub render handle (no render ring exists; `open()` always fails here).
+#[derive(Clone)]
+pub struct RenderHandle {
+    _private: (),
+}
+
+impl RenderHandle {
+    pub fn push(&self, _pcm_24k: &[f32]) {}
+    pub fn buffered(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
     }
 }

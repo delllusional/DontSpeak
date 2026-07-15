@@ -37,9 +37,9 @@ const SYNTH_RATE: u32 = 24_000;
 /// caller degrades to half-duplex.
 const UNIT_RATE: u32 = 48_000;
 
-/// Render ring capacity. The helper normally paces staged audio to a small lookahead,
-/// but the ring remains large enough for one 90-second transactional group so an
-/// accidental oversized push drops only its tail rather than shredding throughout.
+/// Render ring capacity. The helper's feeder thread paces ≤100 ms chunks against a
+/// ~2 s lookahead, so normal occupancy stays around 2 s; 90 s is headroom so an
+/// accidental oversized push drops only its tail rather than shredding throughput.
 const RENDER_CAP: usize = (UNIT_RATE * 90) as usize;
 
 /// Capture ring: ~2 s is plenty — the helper drains it every poll tick.
@@ -52,7 +52,9 @@ pub struct DuplexAudio {
     _unit: AudioUnit,
     capture_rate: u32,
     /// Helper-side producer for the render ring + the 24 kHz→unit-rate resampler.
-    play: Mutex<(HeapProd<f32>, LinearResampler)>,
+    /// Behind `Arc` so the helper's feeder thread can push via a [`RenderHandle`]
+    /// while the `!Send` `AudioUnit` stays on the playback thread.
+    play: Arc<Mutex<(HeapProd<f32>, LinearResampler)>>,
     /// Helper-side consumer for the capture ring. Behind `Arc` so a separate thread
     /// (the helper's concurrent listen) can drain it via a [`CaptureHandle`] while
     /// the `!Send` `AudioUnit` stays on this thread — enabling speak+listen at once.
@@ -187,7 +189,10 @@ impl DuplexAudio {
         Ok(Self {
             _unit: unit,
             capture_rate: UNIT_RATE,
-            play: Mutex::new((play_prod, LinearResampler::new(SYNTH_RATE, UNIT_RATE))),
+            play: Arc::new(Mutex::new((
+                play_prod,
+                LinearResampler::new(SYNTH_RATE, UNIT_RATE),
+            ))),
             cap: Arc::new(Mutex::new(cap_cons)),
             flush,
             render_gen,
@@ -217,48 +222,20 @@ impl DuplexAudio {
         true
     }
 
-    /// Push 24 kHz mono f32 TTS PCM to be rendered (and used as the AEC reference).
-    /// Resamples to the unit rate and writes the play ring. Non-blocking; if the
-    /// ring is full the overflow is dropped (only for a reply longer than the
-    /// 90 s render ring).
+    /// See [`RenderHandle::push`] (this delegates to a fresh handle).
     pub fn render_push(&self, pcm_24k: &[f32]) {
-        if pcm_24k.is_empty() {
-            return;
+        self.render_handle().push(pcm_24k);
+    }
+
+    /// A `Send`+`Sync` push handle for the render ring, so the helper's feeder
+    /// thread can pace committed TTS into VPIO while this (`!Send`) unit stays on
+    /// the playback thread.
+    pub fn render_handle(&self) -> RenderHandle {
+        RenderHandle {
+            play: self.play.clone(),
+            flush: self.flush.clone(),
+            render_gen: self.render_gen.clone(),
         }
-        // If a flush requested by `render_clear()`/`barge_flag()` is still pending
-        // (the render callback hasn't ticked since it was set), wait briefly for the
-        // callback to service it before we add new samples. Otherwise the
-        // callback's next tick would perform its unconditional full-ring drain —
-        // meant to discard the ABANDONED utterance — just after we've written
-        // THESE new samples, sweeping them away too (the drain can't tell old
-        // samples from new ones already sitting in the ring). The render callback
-        // ticks every audio quantum (sub-10ms) for as long as the unit is running,
-        // so this is a short, bounded wait, not a real block; a generous timeout
-        // guards against ever hanging this (non-RT) thread if the unit stalls.
-        let deadline = Instant::now() + Duration::from_millis(200);
-        let mut g = loop {
-            let generation = self.render_gen.load(Ordering::Acquire);
-            if generation & 1 == 0 && !self.flush.load(Ordering::Acquire) {
-                let g = self.play.lock().unwrap();
-                // Recheck after acquiring the producer lock. If the callback claimed
-                // a pending flush in the gap, its odd generation keeps us out until
-                // the drain is complete; if a new clear arrived, `flush` keeps us out.
-                if self.render_gen.load(Ordering::Acquire) == generation
-                    && !self.flush.load(Ordering::Acquire)
-                {
-                    break g;
-                }
-                drop(g);
-            }
-            if Instant::now() >= deadline {
-                return;
-            }
-            std::thread::yield_now();
-        };
-        let (prod, rs) = &mut *g;
-        let mut scratch = Vec::with_capacity(pcm_24k.len() * 2 + 8);
-        rs.process(pcm_24k, &mut scratch);
-        prod.push_slice(&scratch);
     }
 
     /// Drain the echo-cancelled mono f32 captured since the last call (at
@@ -280,12 +257,9 @@ impl DuplexAudio {
         self.play.lock().unwrap().0.occupied_len() > 0
     }
 
-    /// Duration of audio currently queued ahead of the realtime render callback.
-    /// The helper uses this occupancy signal to pace staged groups instead of
-    /// filling the whole ring before a live mute transition can be observed.
+    /// See [`RenderHandle::buffered`].
     pub fn render_buffered(&self) -> Duration {
-        let samples = self.play.lock().unwrap().0.occupied_len();
-        Duration::from_secs_f64(samples as f64 / UNIT_RATE as f64)
+        self.render_handle().buffered()
     }
 
     /// Drop queued render audio on the next callback tick (barge-in / stop).
@@ -338,5 +312,71 @@ impl CaptureHandle {
         let got = cons.pop_slice(&mut out);
         out.truncate(got);
         out
+    }
+}
+
+/// A `Send`+`Sync` push handle for the VPIO render ring (see
+/// [`DuplexAudio::render_handle`]). Lets the helper's feeder thread pace committed
+/// TTS into VPIO while the `!Send` unit stays on the playback thread.
+#[derive(Clone)]
+pub struct RenderHandle {
+    play: Arc<Mutex<(HeapProd<f32>, LinearResampler)>>,
+    flush: Arc<AtomicBool>,
+    render_gen: Arc<AtomicU64>,
+}
+
+impl RenderHandle {
+    /// Push 24 kHz mono f32 TTS PCM to be rendered (and used as the AEC reference).
+    /// Resamples to the unit rate and writes the play ring. Non-blocking; if the
+    /// ring is full the overflow is dropped (a full ring indicates a pacing bug in
+    /// the feeder, not a long reply). Exactly ONE feeding site may push per
+    /// request: the `play` mutex serializes concurrent pushers, but interleaved
+    /// producers would corrupt sample order.
+    pub fn push(&self, pcm_24k: &[f32]) {
+        if pcm_24k.is_empty() {
+            return;
+        }
+        // If a flush requested by `render_clear()`/`barge_flag()` is still pending
+        // (the render callback hasn't ticked since it was set), wait briefly for the
+        // callback to service it before we add new samples. Otherwise the
+        // callback's next tick would perform its unconditional full-ring drain —
+        // meant to discard the ABANDONED utterance — just after we've written
+        // THESE new samples, sweeping them away too (the drain can't tell old
+        // samples from new ones already sitting in the ring). The render callback
+        // ticks every audio quantum (sub-10ms) for as long as the unit is running,
+        // so this is a short, bounded wait, not a real block; a generous timeout
+        // guards against ever hanging this (non-RT) thread if the unit stalls.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let mut g = loop {
+            let generation = self.render_gen.load(Ordering::Acquire);
+            if generation & 1 == 0 && !self.flush.load(Ordering::Acquire) {
+                let g = self.play.lock().unwrap();
+                // Recheck after acquiring the producer lock. If the callback claimed
+                // a pending flush in the gap, its odd generation keeps us out until
+                // the drain is complete; if a new clear arrived, `flush` keeps us out.
+                if self.render_gen.load(Ordering::Acquire) == generation
+                    && !self.flush.load(Ordering::Acquire)
+                {
+                    break g;
+                }
+                drop(g);
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
+            std::thread::yield_now();
+        };
+        let (prod, rs) = &mut *g;
+        let mut scratch = Vec::with_capacity(pcm_24k.len() * 2 + 8);
+        rs.process(pcm_24k, &mut scratch);
+        prod.push_slice(&scratch);
+    }
+
+    /// Duration of audio currently queued ahead of the realtime render callback —
+    /// the feeder thread's occupancy signal for its lookahead, instead of filling
+    /// the whole ring before a live mute transition can be observed.
+    pub fn buffered(&self) -> Duration {
+        let samples = self.play.lock().unwrap().0.occupied_len();
+        Duration::from_secs_f64(samples as f64 / UNIT_RATE as f64)
     }
 }

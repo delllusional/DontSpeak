@@ -13,7 +13,6 @@ use std::time::Instant;
 pub(crate) struct PreparedAudio {
     pub(crate) pcm: Vec<f32>,
     pub(crate) synth_nanos: u128,
-    pub(crate) total_samples: usize,
 }
 
 pub(crate) enum PrepareOutcome {
@@ -47,11 +46,9 @@ pub(crate) fn prepare_audio<T>(
         if pcm.is_empty() {
             return Err("synthesis produced no audio for a phoneme chunk".to_string());
         }
-        let total_samples = pcm.len();
         commit(PreparedAudio {
             pcm,
             synth_nanos: elapsed,
-            total_samples,
         })?;
     }
 

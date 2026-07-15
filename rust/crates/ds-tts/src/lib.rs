@@ -15,7 +15,8 @@
 //! normalize numbers, and contextually phonemize it with voice-g2p ([`spoken`], [`g2p`])
 //! → map to Kokoro vocab token ids (`vocab`)
 //! → batch the phonemes at clause marks into a ramped sequence ([`batch`]'s
-//! `stream_batches`) → transactional inference and incremental commit of each batch → ort over
+//! `stream_batches`) → per-batch synthesis and commit (strategy: the helper's `prepare`
+//! module) → ort over
 //! kokoro-v1.0.onnx ([`synth`], style rows from the voices npz parsed by
 //! `voices`) → trim silence (`trim`) → play 24 kHz mono PCM ([`play`]). The pure stages (vocab/voices/
 //! trim/g2p) are unit-tested with no audio, no model, no network; synth/play are
