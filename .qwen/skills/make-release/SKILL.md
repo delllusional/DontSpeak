@@ -185,20 +185,23 @@ run time, so a brief site lag degrades gracefully — but don't skip the deploy.
 
 ## 9 — Bump to the next dev version
 
-Immediately after the release publishes (step 5), bump **both** `rust/Cargo.toml`'s
-`[workspace.package] version` **and** `apps/linux/gtk/Cargo.toml`'s `version` (it can't
-inherit — see its own header comment) to the next version with a `-dev` suffix — e.g.
+Immediately after the release publishes (step 5), bump `rust/Cargo.toml`'s
+`[workspace.package] version` to the next version with a `-dev` suffix — e.g.
 `0.1.0` → `0.1.1-dev` for a patch-level next release, or `0.2.0-dev` if you already know
-the next release is minor-sized. Missing the second file doesn't fail fast: the tag/version
-guard (step 3.1) only compares them at the NEXT tag push, so a skipped bump here silently
-sits stale for a whole release cycle. Regenerate both lock files — `cargo build --offline` in `rust/` and **`cargo
-generate-lockfile`** in `apps/linux/gtk/` (same lesson as step 1: a string replace is not
-enough) — and commit all four. This is a small, code-free commit whose
-only job is to make `main` visibly "ahead of the last release" — the exact-string
+the next release is minor-sized — then run `bash scripts/sync-gtk-version.sh` to propagate
+it into `apps/linux/gtk/Cargo.toml`'s `version` (it can't inherit — see its own header
+comment) instead of hand-editing that file. Skipping the sync script doesn't fail fast: the
+tag/version guard (step 3.1) only compares them at the NEXT tag push, so a missed sync here
+silently sits stale for a whole release cycle. Regenerate both lock files — `cargo build
+--offline` in `rust/` and **`cargo generate-lockfile`** in `apps/linux/gtk/` (same lesson as
+step 1: a string replace is not enough — this is why the sync script only rewrites
+`Cargo.toml`, never `Cargo.lock`) — and commit all four (`rust/Cargo.toml`, `rust/Cargo.lock`,
+`apps/linux/gtk/Cargo.toml`, `apps/linux/gtk/Cargo.lock`). This is a small, code-free commit
+whose only job is to make `main` visibly "ahead of the last release" — the exact-string
 tag/version guard (step 3.1) never sees this suffix since nothing ever tags a `-dev`
 version. When it's time to cut the NEXT release, first replace `-dev` with the real next
-version in both files (bumping further
-to `minor`/`major` instead of `patch` if what accumulated warrants it), commit, then tag as
+version in `rust/Cargo.toml` (bumping further to `minor`/`major` instead of `patch` if what
+accumulated warrants it), run `bash scripts/sync-gtk-version.sh` again, commit, then tag as
 usual (step 2).
 
 ## 10 — Cut (or replace) an on-demand `-dev` draft release
