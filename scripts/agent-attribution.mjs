@@ -366,15 +366,19 @@ export function commandFromHookInput(input) {
 
 function git(cwd, ...args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
-  if (result.status !== 0) {
-    throw new Error(result.stderr.trim() || `git ${args.join(" ")} failed`);
+  if (result.error) {
+    throw new Error(`git ${args.join(" ")} failed to start: ${result.error.message}`);
   }
-  return result.stdout.trim();
+  if (result.status !== 0) {
+    throw new Error((result.stderr ?? "").trim() || `git ${args.join(" ")} failed`);
+  }
+  return (result.stdout ?? "").trim();
 }
 
 function optionalGit(cwd, ...args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
-  return result.status === 0 ? result.stdout.trim() : undefined;
+  if (result.error || result.status !== 0) return undefined;
+  return (result.stdout ?? "").trim();
 }
 
 export function repositoryRoot(cwd) {
