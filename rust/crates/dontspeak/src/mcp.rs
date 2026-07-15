@@ -1,133 +1,567 @@
-//! The stdio JSON-RPC 2.0 MCP server core: the request/response envelope helpers,
-//! the [`dispatch`] router, the `initialize`/`tools`/`tools_call` handlers, and the
-//! stderr logger. stdio is the only transport.
+//! Strict MCP 2025-11-25 / JSON-RPC 2.0 stdio boundary. Framing, envelope and
+//! lifecycle failures stay protocol errors; only failures from a valid tool
+//! invocation become `CallToolResult.isError`. Tool calls use a small bounded
+//! worker pool so cancellation notifications remain observable while `listen`
+//! is blocked on its streaming IPC connection.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 
 use ds_config::{ClientSource, client_from_mcp_name};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::engine_launch::ensure_engine;
 use crate::tools;
 
-/// MCP protocol revision we implement (date-based). We echo the client's version
-/// when it matches; otherwise we answer with this one and let the client decide.
 pub(crate) const PROTOCOL_VERSION: &str = "2025-11-25";
 pub(crate) const SERVER_NAME: &str = "DontSpeak";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const MAX_STDIN_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_IN_FLIGHT_TOOL_CALLS: usize = 8;
 
-/// Run the stdio MCP server loop. A real MCP client (Claude Code, the WinUI/GTK/macOS
-/// host, …) always sends at least one JSON-RPC message before EOF. If stdin hits EOF
-/// having handled zero, this wasn't a real client — most likely `dontspeak`/
-/// `dontspeak.exe` invoked directly by a human (e.g. double-clicked) rather than
-/// spawned by an MCP client — so fall back to launching the resident host app, same as
-/// a real `tools/call` would (see [`ensure_engine`]). Without this, a stray direct
-/// launch silently exits 0 with no host app started and no log line — GH issue #20.
+type Executor = dyn Fn(Option<Value>, &Value, Option<&PathBuf>, ClientSource, Arc<AtomicBool>) -> Value
+    + Send
+    + Sync;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum RequestId {
+    String(String),
+    Integer(String),
+}
+
+impl RequestId {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::String(value) => Some(Self::String(value.clone())),
+            Value::Number(value) if value.is_i64() || value.is_u64() => {
+                Some(Self::Integer(value.to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    fn value(&self) -> Value {
+        match self {
+            Self::String(value) => json!(value),
+            Self::Integer(value) => serde_json::from_str(value).expect("stored JSON integer"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Lifecycle {
+    #[default]
+    Uninitialized,
+    Initialized,
+}
+
+#[derive(Default)]
+struct Session {
+    lifecycle: Lifecycle,
+    initialized_notification: bool,
+    client: ClientSource,
+}
+
+struct Envelope<'a> {
+    id: Option<RequestId>,
+    method: &'a str,
+    params: Option<&'a Map<String, Value>>,
+}
+
+enum Route {
+    Reply(Value),
+    Notification,
+    ToolCall {
+        id: RequestId,
+        message: Value,
+        client: ClientSource,
+    },
+    Cancel(RequestId),
+}
+
+enum Frame {
+    Bytes(Vec<u8>),
+    TooLarge,
+}
+
 pub(crate) fn serve() {
-    let sock = ds_config::Paths::resolve().map(|p| p.engine_sock);
+    let sock = ds_config::Paths::resolve().map(|paths| paths.engine_sock);
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    serve_on(stdin.lock(), stdout.lock(), sock.as_ref(), || {
-        match sock.as_ref() {
+    serve_on(
+        stdin.lock(),
+        std::io::stdout(),
+        sock.as_ref(),
+        || match sock.as_ref() {
             Some(sock) => {
                 log(
-                    "no MCP client sent a request before EOF; launching the resident host \
-                     app as a standalone-run fallback",
+                    "no MCP client sent traffic before EOF; launching the resident host app as a standalone-run fallback",
                 );
                 ensure_engine(sock);
             }
             None => log("cannot resolve engine socket path; skipping standalone-run fallback"),
-        }
-    });
+        },
+    );
 }
 
-/// The stdio loop's actual logic, generic over reader/writer so it's unit-testable
-/// without real stdio. Calls `on_no_requests` once, after EOF, if the reader never
-/// produced a single parseable JSON-RPC message (blank lines and unparseable lines
-/// don't count; a bare no-id notification DOES count — it's still real client traffic).
-fn serve_on<R: BufRead, W: Write>(
-    reader: R,
-    mut out: W,
+fn serve_on<R, W>(reader: R, out: W, sock: Option<&PathBuf>, on_no_traffic: impl FnOnce())
+where
+    R: BufRead,
+    W: Write + Send + 'static,
+{
+    let executor: Arc<Executor> = Arc::new(|id, message, sock, client, cancelled| {
+        tools::tools_call_validated(id, message, sock, client, cancelled)
+    });
+    serve_on_with(reader, out, sock, on_no_traffic, executor);
+}
+
+fn serve_on_with<R, W>(
+    mut reader: R,
+    out: W,
     sock: Option<&PathBuf>,
-    on_no_requests: impl FnOnce(),
-) {
+    on_no_traffic: impl FnOnce(),
+    executor: Arc<Executor>,
+) where
+    R: BufRead,
+    W: Write + Send + 'static,
+{
+    let out = Arc::new(Mutex::new(out));
+    let output_open = Arc::new(AtomicBool::new(true));
+    let active = Arc::new(AtomicUsize::new(0));
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let mut workers = HashMap::<RequestId, std::thread::JoinHandle<()>>::new();
+    let mut in_flight = HashMap::<RequestId, Arc<AtomicBool>>::new();
+    let mut session = Session::default();
+    let sock = sock.cloned();
     let mut handled_any = false;
-    // WHO is calling us. stdio MCP is ONE server process per client, so a single value for the
-    // whole loop is exactly right: the `initialize` handshake sets it (from `clientInfo.name`),
-    // and every tool call afterwards stamps it onto the engine requests it sends. `Unknown`
-    // until the handshake lands — and it STAYS `Unknown` for a client whose name we don't
-    // recognise, which is the honest answer, not a bug.
-    let mut client = ClientSource::Unknown;
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(msg) = serde_json::from_str::<Value>(line) else {
-            log("ignoring non-JSON line");
-            continue;
-        };
-        handled_any = true;
-        if let Some(resp) = dispatch(&msg, sock, &mut client) {
-            let mut s = resp.to_string();
-            s.push('\n');
-            if out.write_all(s.as_bytes()).is_err() || out.flush().is_err() {
-                break; // client went away
+    let mut reached_eof = false;
+
+    loop {
+        while let Ok(id) = completed_rx.try_recv() {
+            in_flight.remove(&id);
+            if let Some(worker) = workers.remove(&id) {
+                let _ = worker.join();
             }
         }
-    }
-    if !handled_any {
-        on_no_requests();
-    }
-}
+        let frame = match read_frame(&mut reader) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                reached_eof = true;
+                break;
+            }
+            Err(error) => {
+                log(&format!("MCP stdin read failed: {error}"));
+                break;
+            }
+        };
+        let message = match frame {
+            Frame::TooLarge => {
+                handled_any = true;
+                if !write_response(
+                    &out,
+                    &err(None, -32700, "Parse error: input frame exceeds 1 MiB"),
+                ) {
+                    break;
+                }
+                continue;
+            }
+            Frame::Bytes(bytes) => {
+                if bytes.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
+                handled_any = true;
+                match serde_json::from_slice::<Value>(&bytes) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        log(&format!("MCP JSON parse error: {error}"));
+                        if !write_response(&out, &err(None, -32700, "Parse error")) {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            }
+        };
 
-/// Route one JSON-RPC message to its handler, returning the response envelope (or
-/// `None` for a notification, which gets no reply). The stdio loop calls this with
-/// the `sock` to the engine and the process-wide `client` (see [`serve`]): the `initialize`
-/// arm SETS it from the handshake's `clientInfo`, and `tools/call` READS it to attribute every
-/// engine request the tool sends.
-pub(crate) fn dispatch(
-    msg: &Value,
-    sock: Option<&PathBuf>,
-    client: &mut ClientSource,
-) -> Option<Value> {
-    // A message with no "id" is a notification — never respond.
-    let id = msg.get("id").cloned();
-    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-    match method {
-        "initialize" => {
-            // Learn WHO is calling, and log the RAW `clientInfo.name` we saw. That capture line
-            // is the mechanism that turns an UNVERIFIED `mcp_client_names` alias (currently
-            // Qwen) into a verified one from the field — a one-line registry edit.
-            //
-            // Deliberately on the `log` FACADE (see `log`), not `ds_log::log_from`: the facade
-            // is a no-op under `cargo test` (no sink is installed without `ds_log::init()`), so
-            // the pure `initialize` tests below can never create or append the REAL per-OS
-            // unified log on a dev machine / CI runner. In production the sink is installed and
-            // the line lands with `source = mcp`, ending in the same trailing `client=<token>`
-            // k=v the engine's lines carry.
-            let (c, raw) = client_from_initialize(msg);
-            *client = c;
-            log(&format!(
-                "initialize clientInfo.name={raw:?} client={}",
-                c.as_str()
-            ));
-            Some(ok(id, initialize(msg)))
+        match route(&message, &mut session) {
+            Route::Reply(response) => {
+                if !write_response(&out, &response) {
+                    break;
+                }
+            }
+            Route::Notification => {}
+            Route::Cancel(id) => {
+                if let Some(cancelled) = in_flight.get(&id) {
+                    cancelled.store(true, Ordering::Release);
+                }
+            }
+            Route::ToolCall {
+                id,
+                message,
+                client,
+            } => {
+                if in_flight.contains_key(&id) {
+                    if !write_response(
+                        &out,
+                        &err(
+                            Some(id.value()),
+                            -32600,
+                            "Invalid Request: request id is already in flight",
+                        ),
+                    ) {
+                        break;
+                    }
+                    continue;
+                }
+                if !reserve_slot(&active) {
+                    if !write_response(
+                        &out,
+                        &err(Some(id.value()), -32000, "Too many in-flight tool calls"),
+                    ) {
+                        break;
+                    }
+                    continue;
+                }
+                let cancelled = Arc::new(AtomicBool::new(false));
+                in_flight.insert(id.clone(), cancelled.clone());
+                let worker_out = out.clone();
+                let worker_output_open = output_open.clone();
+                let worker_active = active.clone();
+                let worker_sock = sock.clone();
+                let worker_executor = executor.clone();
+                let worker_completed = completed_tx.clone();
+                let worker_id = id.clone();
+                let worker = std::thread::spawn(move || {
+                    let _slot = SlotGuard(worker_active);
+                    let response = worker_executor(
+                        Some(id.value()),
+                        &message,
+                        worker_sock.as_ref(),
+                        client,
+                        cancelled.clone(),
+                    );
+                    if !cancelled.load(Ordering::Acquire) && !write_response(&worker_out, &response)
+                    {
+                        worker_output_open.store(false, Ordering::Release);
+                    }
+                    let _ = worker_completed.send(id);
+                });
+                workers.insert(worker_id, worker);
+            }
         }
-        "notifications/initialized" => None, // notification: no reply
-        "ping" => Some(ok(id, json!({}))),
-        "tools/list" => Some(ok(id, json!({ "tools": tools() }))),
-        "tools/call" => Some(tools::tools_call(id, msg, sock, *client)),
-        // Unknown method: respond with an error only if it had an id.
-        _ => id
-            .as_ref()
-            .map(|_| err(id.clone(), -32601, &format!("method not found: {method}"))),
+        if !output_open.load(Ordering::Acquire) {
+            break;
+        }
+    }
+
+    for cancelled in in_flight.values() {
+        cancelled.store(true, Ordering::Release);
+    }
+    for worker in workers.into_values() {
+        let _ = worker.join();
+    }
+    if reached_eof && !handled_any {
+        on_no_traffic();
     }
 }
 
-// ── JSON-RPC envelope helpers ────────────────────────────────────────────────
+fn reserve_slot(active: &AtomicUsize) -> bool {
+    active
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < MAX_IN_FLIGHT_TOOL_CALLS).then_some(count + 1)
+        })
+        .is_ok()
+}
+
+struct SlotGuard(Arc<AtomicUsize>);
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn read_frame(reader: &mut impl BufRead) -> std::io::Result<Option<Frame>> {
+    let mut bytes = Vec::new();
+    let mut too_large = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if bytes.is_empty() && !too_large {
+                Ok(None)
+            } else if too_large {
+                Ok(Some(Frame::TooLarge))
+            } else {
+                Ok(Some(Frame::Bytes(bytes)))
+            };
+        }
+        let end = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if !too_large {
+            if bytes.len() + end > MAX_STDIN_FRAME_BYTES {
+                too_large = true;
+                bytes.clear();
+            } else {
+                bytes.extend_from_slice(&available[..end]);
+            }
+        }
+        let ended = available[..end].last() == Some(&b'\n');
+        reader.consume(end);
+        if ended {
+            return Ok(Some(if too_large {
+                Frame::TooLarge
+            } else {
+                Frame::Bytes(bytes)
+            }));
+        }
+    }
+}
+
+fn write_response<W: Write>(out: &Arc<Mutex<W>>, response: &Value) -> bool {
+    let Ok(mut out) = out.lock() else {
+        return false;
+    };
+    writeln!(out, "{response}").is_ok() && out.flush().is_ok()
+}
+
+fn route(message: &Value, session: &mut Session) -> Route {
+    let envelope = match validate_envelope(message) {
+        Ok(envelope) => envelope,
+        Err(response) => return Route::Reply(response),
+    };
+    match envelope.method {
+        "initialize" => route_initialize(message, envelope, session),
+        "notifications/initialized" => {
+            if let Some(id) = envelope.id {
+                Route::Reply(err(
+                    Some(id.value()),
+                    -32600,
+                    "Invalid Request: notifications/initialized must not carry an id",
+                ))
+            } else {
+                if session.lifecycle == Lifecycle::Initialized {
+                    session.initialized_notification = true;
+                } else {
+                    log("ignoring notifications/initialized before initialize");
+                }
+                Route::Notification
+            }
+        }
+        "ping" => match envelope.id {
+            Some(id) => Route::Reply(ok(Some(id.value()), json!({}))),
+            None => Route::Notification,
+        },
+        "notifications/cancelled" => route_cancellation(envelope, session),
+        _ if session.lifecycle == Lifecycle::Uninitialized => match envelope.id {
+            Some(id) => Route::Reply(err(Some(id.value()), -32002, "Server not initialized")),
+            None => Route::Notification,
+        },
+        "tools/list" => match envelope.id {
+            Some(id) => {
+                if let Some(cursor) = envelope.params.and_then(|params| params.get("cursor"))
+                    && !cursor.is_string()
+                {
+                    Route::Reply(err(
+                        Some(id.value()),
+                        -32602,
+                        "Invalid params: cursor must be a string",
+                    ))
+                } else {
+                    Route::Reply(ok(Some(id.value()), json!({ "tools": tools() })))
+                }
+            }
+            None => Route::Notification,
+        },
+        "tools/call" => match envelope.id {
+            None => Route::Notification,
+            Some(id) => match tools::validate_tools_call(message) {
+                Ok(()) => Route::ToolCall {
+                    id,
+                    message: message.clone(),
+                    client: session.client,
+                },
+                Err(reason) => Route::Reply(err(
+                    Some(id.value()),
+                    -32602,
+                    &format!("Invalid params: {reason}"),
+                )),
+            },
+        },
+        method => match envelope.id {
+            Some(id) => Route::Reply(err(
+                Some(id.value()),
+                -32601,
+                &format!("Method not found: {method}"),
+            )),
+            None => Route::Notification,
+        },
+    }
+}
+
+fn route_initialize(message: &Value, envelope: Envelope<'_>, session: &mut Session) -> Route {
+    let Some(id) = envelope.id else {
+        log("ignoring initialize notification without an id");
+        return Route::Notification;
+    };
+    if session.lifecycle != Lifecycle::Uninitialized {
+        return Route::Reply(err(
+            Some(id.value()),
+            -32600,
+            "Invalid Request: initialize may only be sent once",
+        ));
+    }
+    if let Err(reason) = validate_initialize(envelope.params) {
+        return Route::Reply(err(
+            Some(id.value()),
+            -32602,
+            &format!("Invalid params: {reason}"),
+        ));
+    }
+
+    let (client, raw) = client_from_initialize(message);
+    session.client = client;
+    session.lifecycle = Lifecycle::Initialized;
+    log(&format!(
+        "initialize clientInfo.name={raw:?} client={}",
+        client.as_str()
+    ));
+    Route::Reply(ok(Some(id.value()), initialize(message)))
+}
+
+fn route_cancellation(envelope: Envelope<'_>, session: &Session) -> Route {
+    if let Some(id) = envelope.id {
+        return Route::Reply(err(
+            Some(id.value()),
+            -32600,
+            "Invalid Request: notifications/cancelled must not carry an id",
+        ));
+    }
+    if session.lifecycle == Lifecycle::Uninitialized {
+        return Route::Notification;
+    }
+    let Some(params) = envelope.params else {
+        log("ignoring malformed cancellation notification without params");
+        return Route::Notification;
+    };
+    let Some(id) = params.get("requestId").and_then(RequestId::from_value) else {
+        log("ignoring malformed cancellation notification without a valid requestId");
+        return Route::Notification;
+    };
+    if params
+        .get("reason")
+        .is_some_and(|reason| !reason.is_string())
+    {
+        log("ignoring malformed cancellation notification with a non-string reason");
+        return Route::Notification;
+    }
+    if let Some(reason) = params.get("reason").and_then(Value::as_str) {
+        log(&format!(
+            "cancelling MCP request id={:?} reason={reason:?}",
+            id
+        ));
+    }
+    Route::Cancel(id)
+}
+
+fn validate_envelope(message: &Value) -> Result<Envelope<'_>, Value> {
+    let Some(object) = message.as_object() else {
+        return Err(err(None, -32600, "Invalid Request"));
+    };
+    let safe_id = object.get("id").and_then(RequestId::from_value);
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(err(
+            safe_id.as_ref().map(RequestId::value),
+            -32600,
+            "Invalid Request: jsonrpc must be `2.0`",
+        ));
+    }
+    let Some(method) = object.get("method").and_then(Value::as_str) else {
+        return Err(err(
+            safe_id.as_ref().map(RequestId::value),
+            -32600,
+            "Invalid Request: method must be a string",
+        ));
+    };
+    if object.contains_key("id") && safe_id.is_none() {
+        return Err(err(
+            None,
+            -32600,
+            "Invalid Request: id must be a non-null string or integer",
+        ));
+    }
+    let params = match object.get("params") {
+        Some(Value::Object(params)) => Some(params),
+        Some(_) => {
+            return Err(err(
+                safe_id.as_ref().map(RequestId::value),
+                -32600,
+                "Invalid Request: params must be an object",
+            ));
+        }
+        None => None,
+    };
+    Ok(Envelope {
+        id: safe_id,
+        method,
+        params,
+    })
+}
+
+fn validate_initialize(params: Option<&Map<String, Value>>) -> Result<(), String> {
+    let params = params.ok_or_else(|| "params are required".to_string())?;
+    if !params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .is_some_and(|version| !version.is_empty())
+    {
+        return Err("protocolVersion must be a non-empty string".into());
+    }
+    if !params.get("capabilities").is_some_and(Value::is_object) {
+        return Err("capabilities must be an object".into());
+    }
+    let client = params
+        .get("clientInfo")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "clientInfo must be an object".to_string())?;
+    for field in ["name", "version"] {
+        if !client
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        {
+            return Err(format!("clientInfo.{field} must be a non-empty string"));
+        }
+    }
+    Ok(())
+}
+
+fn client_from_initialize(message: &Value) -> (ClientSource, String) {
+    let raw = message["params"]["clientInfo"]["name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    (client_from_mcp_name(&raw), raw)
+}
+
+fn initialize(message: &Value) -> Value {
+    let requested = message["params"]["protocolVersion"].as_str();
+    let version = requested
+        .filter(|version| *version == PROTOCOL_VERSION)
+        .unwrap_or(PROTOCOL_VERSION);
+    json!({
+        "protocolVersion": version,
+        "capabilities": { "tools": { "listChanged": false } },
+        "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+    })
+}
+
+fn tools() -> Value {
+    ds_tools::catalog()
+}
 
 pub(crate) fn ok(id: Option<Value>, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -137,357 +571,335 @@ fn err(id: Option<Value>, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-/// A tools/call SUCCESS result with a single text content block. `is_error=true`
-/// surfaces a tool-level failure the model can see/retry (distinct from a
-/// protocol error).
 pub(crate) fn tool_result(text: String, is_error: bool) -> Value {
     json!({ "content": [ { "type": "text", "text": text } ], "isError": is_error })
 }
 
-// ── MCP methods ──────────────────────────────────────────────────────────────
-
-/// WHO is calling, from the `initialize` handshake's `params.clientInfo.name` (the MCP
-/// lifecycle spec's standard, already-existing mechanism — we invent nothing and add no flag to
-/// the MCP surface). Returns `(mapped client, the RAW name verbatim)`; the raw half is what the
-/// capture line logs, so an unrecognised client can be identified and its alias added to the
-/// registry. An absent/empty/foreign name maps to [`ClientSource::Unknown`].
-///
-/// PURE (no IO), and a SIBLING of [`initialize`] rather than a change to it — `initialize` stays
-/// exactly as it was, tests and all.
-fn client_from_initialize(msg: &Value) -> (ClientSource, String) {
-    let raw = msg
-        .get("params")
-        .and_then(|p| p.get("clientInfo"))
-        .and_then(|c| c.get("name"))
-        .and_then(|n| n.as_str())
-        .unwrap_or("")
-        .to_string();
-    (client_from_mcp_name(&raw), raw)
-}
-
-fn initialize(msg: &Value) -> Value {
-    // Echo the client's protocolVersion if we support it; else advertise ours.
-    let client_ver = msg
-        .get("params")
-        .and_then(|p| p.get("protocolVersion"))
-        .and_then(|v| v.as_str());
-    let version = match client_ver {
-        Some(v) if v == PROTOCOL_VERSION => v,
-        _ => PROTOCOL_VERSION,
-    };
-    json!({
-        "protocolVersion": version,
-        "capabilities": { "tools": { "listChanged": false } },
-        "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-    })
-}
-
-/// The static tool catalog (JSON Schema 2020-12 input schemas). Lives in the
-/// shared `ds-tools` crate so the app's FFI (`ds_tools_json`) exposes the
-/// EXACT same list to the Tools window — the catalog can never drift from what
-/// Claude sees here.
-fn tools() -> Value {
-    ds_tools::catalog()
-}
-
-/// Log to STDERR (stdout is reserved for JSON-RPC messages) AND persist to the unified
-/// activity log (source `mcp`) via the `log` facade.
-pub(crate) fn log(msg: &str) {
-    eprintln!("{msg}");
-    log::info!(target: "mcp", "{msg}");
+pub(crate) fn log(message: &str) {
+    eprintln!("{message}");
+    log::info!(target: "mcp", "{message}");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
 
-    // ── serve_on ─────────────────────────────────────────────────────────────
-    // Pure `io::Cursor` fixtures only — no real stdio, socket, or process spawn, so
-    // these never touch the real engine socket or launch a real host app (GH #20's
-    // fallback logic, in isolation from `ensure_engine`'s own real-world side effects).
+    #[derive(Clone, Default)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 
-    #[test]
-    fn serve_on_falls_back_when_no_request_ever_arrives() {
-        let reader = std::io::Cursor::new(&b""[..]); // immediate EOF — no console/pipe attached
-        let mut out = Vec::new();
-        let mut fell_back = false;
-        serve_on(reader, &mut out, None, || fell_back = true);
-        assert!(fell_back, "empty stdin must trigger the fallback");
+    impl Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
-    #[test]
-    fn serve_on_falls_back_when_only_blank_or_unparseable_lines_arrive() {
-        let reader = std::io::Cursor::new(&b"\n   \nnot json\n"[..]);
-        let mut out = Vec::new();
-        let mut fell_back = false;
-        serve_on(reader, &mut out, None, || fell_back = true);
-        assert!(
-            fell_back,
-            "blank/unparseable-only input is not real client traffic"
-        );
-    }
-
-    #[test]
-    fn serve_on_skips_fallback_once_a_real_request_arrives() {
-        let reader = std::io::Cursor::new(&br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#[..]);
-        let mut out = Vec::new();
-        let mut fell_back = false;
-        serve_on(reader, &mut out, None, || fell_back = true);
-        assert!(!fell_back, "a real request must suppress the fallback");
-        assert!(!out.is_empty(), "the ping response was actually written");
-    }
-
-    #[test]
-    fn serve_on_skips_fallback_for_a_bare_notification() {
-        // notifications/initialized has no id and gets no reply, but it IS real
-        // traffic from a real client — must not trigger the standalone fallback.
-        let reader =
-            std::io::Cursor::new(&br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#[..]);
-        let mut out = Vec::new();
-        let mut fell_back = false;
-        serve_on(reader, &mut out, None, || fell_back = true);
-        assert!(!fell_back, "a notification is still real client traffic");
-    }
-
-    // ── dispatch ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn dispatch_initialize_routes_to_initialize() {
-        let msg = json!({
+    fn initialize_line(id: i64) -> String {
+        json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": id,
             "method": "initialize",
-            "params": { "protocolVersion": PROTOCOL_VERSION },
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "codex-mcp-client", "version": "1.0" }
+            }
+        })
+        .to_string()
+    }
+
+    fn run(input: impl Into<Vec<u8>>) -> (Vec<Value>, bool) {
+        let writer = SharedWriter::default();
+        let bytes = writer.0.clone();
+        let fell_back = Arc::new(AtomicBool::new(false));
+        let fallback = fell_back.clone();
+        serve_on(io::Cursor::new(input.into()), writer, None, move || {
+            fallback.store(true, Ordering::Release)
         });
-        let resp =
-            dispatch(&msg, None, &mut ClientSource::Unknown).expect("initialize gets a reply");
-        assert_eq!(resp["jsonrpc"], "2.0");
-        assert_eq!(resp["id"], 1);
-        assert_eq!(resp["result"]["protocolVersion"], PROTOCOL_VERSION);
-        assert_eq!(resp["result"]["serverInfo"]["name"], SERVER_NAME);
+        let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let messages = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("stdout contains only JSON-RPC"))
+            .collect();
+        (messages, fell_back.load(Ordering::Acquire))
     }
 
     #[test]
-    fn dispatch_notifications_initialized_returns_none_even_with_id() {
-        // Per spec this is a notification and gets no reply — even if the (malformed)
-        // request happens to carry an "id".
-        let msg = json!({ "jsonrpc": "2.0", "id": 7, "method": "notifications/initialized" });
-        assert!(dispatch(&msg, None, &mut ClientSource::Unknown).is_none());
+    fn empty_or_blank_stdin_falls_back() {
+        assert!(run(Vec::new()).1);
+        assert!(run(b"\n  \n".to_vec()).1);
     }
 
     #[test]
-    fn dispatch_ping_replies_with_empty_result() {
-        let msg = json!({ "jsonrpc": "2.0", "id": "abc", "method": "ping" });
-        let resp = dispatch(&msg, None, &mut ClientSource::Unknown).expect("ping gets a reply");
-        assert_eq!(resp["jsonrpc"], "2.0");
-        assert_eq!(resp["id"], "abc");
-        assert_eq!(resp["result"], json!({}));
+    fn malformed_traffic_returns_parse_error_and_suppresses_fallback() {
+        let (messages, fell_back) = run(b"not json\n".to_vec());
+        assert!(!fell_back);
+        assert_eq!(messages[0]["error"]["code"], -32700);
+        assert!(messages[0]["id"].is_null());
     }
 
     #[test]
-    fn dispatch_tools_list_matches_catalog() {
-        let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
-        let resp =
-            dispatch(&msg, None, &mut ClientSource::Unknown).expect("tools/list gets a reply");
-        let tools = resp["result"]["tools"]
-            .as_array()
-            .expect("result.tools is an array");
-        let catalog = ds_tools::catalog();
-        let catalog = catalog.as_array().expect("catalog is an array");
-        assert_eq!(tools.len(), catalog.len());
-        assert_eq!(tools, catalog);
+    fn oversized_frame_is_bounded_discarded_and_does_not_poison_the_next_frame() {
+        let mut input = vec![b'x'; MAX_STDIN_FRAME_BYTES + 1];
+        input.push(b'\n');
+        input.extend_from_slice(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
+        let (messages, fell_back) = run(input);
+        assert!(!fell_back);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["error"]["code"], -32700);
+        assert_eq!(messages[1]["result"], json!({}));
     }
 
     #[test]
-    fn dispatch_tools_call_delegates_to_tools_call() {
-        // Smoke test only: confirm dispatch wires "tools/call" through to
-        // `tools::tools_call` — its own logic is covered in tools.rs's tests. Use an
-        // unknown tool name so this stays a pure dispatch check with no engine socket,
-        // filesystem, or process spawning involved.
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": { "name": "definitely_not_a_real_tool", "arguments": {} },
-        });
-        let resp =
-            dispatch(&msg, None, &mut ClientSource::Unknown).expect("tools/call gets a reply");
-        assert_eq!(resp["jsonrpc"], "2.0");
-        assert_eq!(resp["id"], 1);
-        assert_eq!(resp["result"]["isError"], true);
-        let text = resp["result"]["content"][0]["text"]
-            .as_str()
-            .expect("text content");
-        assert!(text.contains("definitely_not_a_real_tool"));
-    }
-
-    #[test]
-    fn dispatch_unknown_method_with_id_is_method_not_found_error() {
-        let msg = json!({ "jsonrpc": "2.0", "id": 42, "method": "bogus/method" });
-        let resp = dispatch(&msg, None, &mut ClientSource::Unknown)
-            .expect("unknown method with an id gets a reply");
-        assert_eq!(resp["jsonrpc"], "2.0");
-        assert_eq!(resp["id"], 42);
-        assert_eq!(resp["error"]["code"], -32601);
-        assert!(
-            resp["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("bogus/method")
-        );
-    }
-
-    #[test]
-    fn dispatch_unknown_method_without_id_returns_none() {
-        // Mirrors a notification: no id means no reply, even for an unrecognized method.
-        let msg = json!({ "jsonrpc": "2.0", "method": "bogus/method" });
-        assert!(dispatch(&msg, None, &mut ClientSource::Unknown).is_none());
-    }
-
-    // ── initialize ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn initialize_echoes_matching_protocol_version() {
-        let msg = json!({ "params": { "protocolVersion": PROTOCOL_VERSION } });
-        let result = initialize(&msg);
-        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
-        assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
-    }
-
-    #[test]
-    fn initialize_falls_back_on_mismatched_protocol_version() {
-        let msg = json!({ "params": { "protocolVersion": "1999-01-01" } });
-        let result = initialize(&msg);
-        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
-        assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
-    }
-
-    #[test]
-    fn initialize_falls_back_when_protocol_version_missing() {
-        let msg = json!({ "params": {} });
-        let result = initialize(&msg);
-        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
-
-        let msg_no_params = json!({});
-        let result = initialize(&msg_no_params);
-        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
-    }
-
-    // ── client identity (the MCP half of ClientSource) ────────────────────────
-
-    #[test]
-    fn client_from_initialize_maps_the_handshake_name_and_returns_it_raw() {
-        // PURE — no socket, no disk. The raw name comes back VERBATIM (it's what the capture
-        // line logs, and what turns an UNVERIFIED registry alias into a verified one).
-        let msg =
-            json!({ "params": { "clientInfo": { "name": "claude-code", "version": "2.1.0" } } });
-        assert_eq!(
-            client_from_initialize(&msg),
-            (ClientSource::ClaudeCode, "claude-code".to_string())
-        );
-
-        let msg = json!({ "params": { "clientInfo": { "name": "codex-mcp-client" } } });
-        assert_eq!(
-            client_from_initialize(&msg),
-            (ClientSource::Codex, "codex-mcp-client".to_string())
-        );
-    }
-
-    #[test]
-    fn an_unrecognised_or_absent_clientinfo_is_unknown_but_still_reports_the_raw_name() {
-        // A foreign client we haven't wired: `Unknown` (the honest answer), with its raw name
-        // preserved so the capture line names it and we can add an alias.
-        let msg = json!({ "params": { "clientInfo": { "name": "gemini-cli" } } });
-        assert_eq!(
-            client_from_initialize(&msg),
-            (ClientSource::Unknown, "gemini-cli".to_string())
-        );
-        // No clientInfo / no params / a non-string name: `Unknown`, empty raw — never a panic.
-        for msg in [
-            json!({ "params": {} }),
-            json!({}),
-            json!({ "params": { "clientInfo": {} } }),
-            json!({ "params": { "clientInfo": { "name": 42 } } }),
-        ] {
-            assert_eq!(
-                client_from_initialize(&msg),
-                (ClientSource::Unknown, String::new()),
-                "{msg}"
-            );
+    fn invalid_request_objects_are_rejected_with_only_safe_ids() {
+        let cases = [
+            (json!([]), Value::Null),
+            (json!({"id": 3, "method": "ping"}), json!(3)),
+            (
+                json!({"jsonrpc": "2.0", "id": null, "method": "ping"}),
+                Value::Null,
+            ),
+            (
+                json!({"jsonrpc": "2.0", "id": 1.5, "method": "ping"}),
+                Value::Null,
+            ),
+            (json!({"jsonrpc": "2.0", "id": 4, "method": 9}), json!(4)),
+            (
+                json!({"jsonrpc": "2.0", "id": 5, "method": "ping", "params": []}),
+                json!(5),
+            ),
+        ];
+        for (message, expected_id) in cases {
+            let (responses, _) = run(message.to_string());
+            assert_eq!(responses[0]["error"]["code"], -32600, "{message}");
+            assert_eq!(responses[0]["id"], expected_id, "{message}");
         }
     }
 
     #[test]
-    fn dispatch_initialize_sets_the_process_client() {
-        // The handshake is what teaches the stdio loop who it's serving; every later tool call
-        // stamps that client onto its engine requests.
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
+    fn initialize_requires_all_required_fields_and_controls_lifecycle() {
+        let malformed = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": PROTOCOL_VERSION, "clientInfo": {"name": "x", "version": "1"}}
+        });
+        let (responses, _) = run(malformed.to_string());
+        assert_eq!(responses[0]["error"]["code"], -32602);
+
+        let before = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+        let (responses, _) = run(before.to_string());
+        assert_eq!(responses[0]["error"]["code"], -32002);
+
+        let input = format!(
+            "{}\n{}\n",
+            initialize_line(3),
+            json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
+        );
+        let (responses, _) = run(input);
+        assert_eq!(responses[0]["result"]["protocolVersion"], PROTOCOL_VERSION);
+        assert!(responses[1]["result"]["tools"].is_array());
+    }
+
+    #[test]
+    fn duplicate_initialize_is_an_invalid_request() {
+        let input = format!("{}\n{}\n", initialize_line(1), initialize_line(2));
+        let (responses, _) = run(input);
+        assert_eq!(responses[1]["error"]["code"], -32600);
+    }
+
+    #[test]
+    fn notification_methods_with_ids_are_not_mistaken_for_notifications() {
+        for method in ["notifications/initialized", "notifications/cancelled"] {
+            let input = format!(
+                "{}\n{}\n",
+                initialize_line(1),
+                json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": {"requestId": 1}})
+            );
+            let (responses, _) = run(input);
+            assert_eq!(responses.len(), 2);
+            assert_eq!(responses[1]["error"]["code"], -32600);
+        }
+    }
+
+    #[test]
+    fn valid_notifications_never_receive_responses() {
+        let input = format!(
+            "{}\n{}\n{}\n",
+            initialize_line(1),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": "unknown"}})
+        );
+        let (responses, _) = run(input);
+        assert_eq!(responses.len(), 1);
+    }
+
+    #[test]
+    fn malformed_tools_calls_are_protocol_errors() {
+        let calls = [
+            json!({"params": {"name": "unknown", "arguments": {}}}),
+            json!({"params": {"arguments": {}}}),
+            json!({"params": {"name": "get_status", "arguments": []}}),
+        ];
+        for (index, call) in calls.into_iter().enumerate() {
+            let request = json!({
+                "jsonrpc": "2.0", "id": index + 2, "method": "tools/call",
+                "params": call["params"].clone()
+            });
+            let input = format!("{}\n{}\n", initialize_line(1), request);
+            let (responses, _) = run(input);
+            assert_eq!(responses[1]["error"]["code"], -32602, "{request}");
+            assert!(responses[1].get("result").is_none(), "{request}");
+        }
+    }
+
+    #[test]
+    fn advertised_schema_failures_are_actionable_tool_results() {
+        let calls = [
+            json!({"name": "speak", "arguments": {}}),
+            json!({"name": "listen", "arguments": {"seconds": 61}}),
+            json!({"name": "get_status", "arguments": {"extra": true}}),
+            json!({"name": "mute", "arguments": {"on": "yes"}}),
+            json!({"name": "list_voices", "arguments": {"tts_engine": "off"}}),
+        ];
+        for (index, params) in calls.into_iter().enumerate() {
+            let request = json!({
+                "jsonrpc": "2.0", "id": index + 2, "method": "tools/call", "params": params
+            });
+            let mut session = Session::default();
+            let init: Value = serde_json::from_str(&initialize_line(1)).unwrap();
+            assert!(matches!(route(&init, &mut session), Route::Reply(_)));
+            let Route::ToolCall {
+                id,
+                message,
+                client,
+            } = route(&request, &mut session)
+            else {
+                panic!("valid tools/call structure must reach execution: {request}");
+            };
+            let response = tools::tools_call_validated(
+                Some(id.value()),
+                &message,
+                None,
+                client,
+                Arc::new(AtomicBool::new(false)),
+            );
+            assert_eq!(response["result"]["isError"], true, "{request}");
+            assert!(response.get("error").is_none(), "{request}");
+        }
+    }
+
+    #[test]
+    fn cancellation_is_observed_while_a_tool_call_is_running() {
+        let writer = SharedWriter::default();
+        let bytes = writer.0.clone();
+        let executor: Arc<Executor> = Arc::new(|id, _, _, _, cancelled| {
+            while !cancelled.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            ok(id, tool_result("cancelled".into(), true))
+        });
+        let input = format!(
+            "{}\n{}\n{}\n",
+            initialize_line(1),
+            json!({"jsonrpc": "2.0", "id": "listen-1", "method": "tools/call", "params": {"name": "listen", "arguments": {}}}),
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": "listen-1", "reason": "test"}})
+        );
+        serve_on_with(io::Cursor::new(input), writer, None, || {}, executor);
+        let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let responses: Vec<Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            responses.len(),
+            1,
+            "a cancelled request must not receive a response"
+        );
+        assert_eq!(responses[0]["id"], 1);
+    }
+
+    #[test]
+    fn worker_slots_are_strictly_bounded() {
+        let active = AtomicUsize::new(MAX_IN_FLIGHT_TOOL_CALLS);
+        assert!(!reserve_slot(&active));
+        active.store(MAX_IN_FLIGHT_TOOL_CALLS - 1, Ordering::Release);
+        assert!(reserve_slot(&active));
+        assert_eq!(active.load(Ordering::Acquire), MAX_IN_FLIGHT_TOOL_CALLS);
+    }
+
+    #[test]
+    fn stdio_boundary_applies_backpressure_to_concurrent_calls() {
+        let writer = SharedWriter::default();
+        let bytes = writer.0.clone();
+        let executor: Arc<Executor> = Arc::new(|id, _, _, _, cancelled| {
+            while !cancelled.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            ok(id, tool_result("cancelled".into(), true))
+        });
+        let mut input = format!("{}\n", initialize_line(1));
+        for id in 0..=MAX_IN_FLIGHT_TOOL_CALLS {
+            input.push_str(
+                &json!({
+                    "jsonrpc": "2.0", "id": format!("call-{id}"), "method": "tools/call",
+                    "params": {"name": "get_status", "arguments": {}}
+                })
+                .to_string(),
+            );
+            input.push('\n');
+        }
+        for id in 0..MAX_IN_FLIGHT_TOOL_CALLS {
+            input.push_str(
+                &json!({
+                    "jsonrpc": "2.0", "method": "notifications/cancelled",
+                    "params": {"requestId": format!("call-{id}")}
+                })
+                .to_string(),
+            );
+            input.push('\n');
+        }
+
+        serve_on_with(io::Cursor::new(input), writer, None, || {}, executor);
+        let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let responses: Vec<Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(
+            responses[1]["id"],
+            format!("call-{MAX_IN_FLIGHT_TOOL_CALLS}")
+        );
+        assert_eq!(responses[1]["error"]["code"], -32000);
+    }
+
+    #[test]
+    fn version_negotiation_and_client_identity_remain_compatible() {
+        let message = json!({
             "params": {
-                "protocolVersion": PROTOCOL_VERSION,
-                "clientInfo": { "name": "claude-code", "version": "2.1.0" },
-            },
+                "protocolVersion": "2024-11-05",
+                "clientInfo": {"name": "claude-code", "version": "1"}
+            }
         });
-        let mut client = ClientSource::Unknown;
-        dispatch(&msg, None, &mut client).expect("initialize gets a reply");
-        assert_eq!(client, ClientSource::ClaudeCode);
-
-        // …and a client we don't recognise leaves it `Unknown` rather than guessing.
-        let msg = json!({
-            "jsonrpc": "2.0", "id": 2, "method": "initialize",
-            "params": { "clientInfo": { "name": "some-other-agent" } },
-        });
-        let mut client = ClientSource::ClaudeCode;
-        dispatch(&msg, None, &mut client).expect("initialize gets a reply");
-        assert_eq!(client, ClientSource::Unknown);
-    }
-
-    // ── envelope helpers ─────────────────────────────────────────────────────
-
-    #[test]
-    fn ok_builds_a_result_envelope_with_id_passthrough() {
-        let resp = ok(Some(json!(5)), json!({ "x": 1 }));
-        assert_eq!(resp["jsonrpc"], "2.0");
-        assert_eq!(resp["id"], 5);
-        assert_eq!(resp["result"], json!({ "x": 1 }));
+        assert_eq!(initialize(&message)["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(
+            client_from_initialize(&message),
+            (ClientSource::ClaudeCode, "claude-code".to_string())
+        );
     }
 
     #[test]
-    fn ok_passes_through_a_null_id() {
-        let resp = ok(Some(Value::Null), json!({}));
-        assert_eq!(resp["jsonrpc"], "2.0");
-        assert!(resp["id"].is_null());
-    }
-
-    #[test]
-    fn err_builds_an_error_envelope_with_id_passthrough() {
-        let resp = err(Some(json!("req-1")), -32601, "method not found: foo");
-        assert_eq!(resp["jsonrpc"], "2.0");
-        assert_eq!(resp["id"], "req-1");
-        assert_eq!(resp["error"]["code"], -32601);
-        assert_eq!(resp["error"]["message"], "method not found: foo");
-    }
-
-    #[test]
-    fn err_passes_through_a_null_id() {
-        let resp = err(Some(Value::Null), -32601, "method not found: foo");
-        assert!(resp["id"].is_null());
-    }
-
-    #[test]
-    fn tool_result_marks_success_not_an_error() {
-        let r = tool_result("all good".into(), false);
-        assert_eq!(r["isError"], false);
-        assert_eq!(r["content"][0]["type"], "text");
-        assert_eq!(r["content"][0]["text"], "all good");
-    }
-
-    #[test]
-    fn tool_result_marks_failure_as_an_error() {
-        let r = tool_result("boom".into(), true);
-        assert_eq!(r["isError"], true);
-        assert_eq!(r["content"][0]["text"], "boom");
+    fn tool_execution_errors_remain_successful_json_rpc_results() {
+        let response = ok(
+            Some(json!(1)),
+            tool_result("engine unavailable".into(), true),
+        );
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response.get("error").is_none());
     }
 }

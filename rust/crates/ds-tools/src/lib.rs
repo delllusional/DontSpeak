@@ -317,6 +317,91 @@ pub fn tool_names() -> impl Iterator<Item = &'static str> {
     TOOLS.iter().filter(|t| is_visible(t)).map(|t| t.name)
 }
 
+/// Validate one invocation against the exact definition used to advertise its
+/// `inputSchema`. Unknown or currently-hidden tools are rejected as unavailable.
+pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), String> {
+    let tool = TOOLS
+        .iter()
+        .find(|tool| tool.name == name && is_visible(tool))
+        .ok_or_else(|| format!("unknown tool: {name}"))?;
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| "arguments must be an object".to_string())?;
+    let params = visible_params(tool);
+
+    if tool.min_one && object.is_empty() {
+        return Err("arguments must contain at least one property".into());
+    }
+    for key in object.keys() {
+        if !params.iter().any(|param| param.name == key) {
+            return Err(format!("unknown argument `{key}`"));
+        }
+    }
+    for param in params {
+        let Some(value) = object.get(param.name) else {
+            if param.required {
+                return Err(format!("missing required argument `{}`", param.name));
+            }
+            continue;
+        };
+        validate_param(param, value)
+            .map_err(|reason| format!("invalid argument `{}`: {reason}", param.name))?;
+    }
+    Ok(())
+}
+
+fn validate_param(param: &Param, value: &Value) -> Result<(), String> {
+    fn number_in(value: &Value, min: f64, max: f64) -> bool {
+        value
+            .as_f64()
+            .is_some_and(|number| number >= min && number <= max)
+    }
+
+    fn token_in(value: &Value, values: &[&str]) -> bool {
+        value.as_str().is_some_and(|token| values.contains(&token))
+    }
+
+    match &param.ty {
+        PType::Str if value.is_string() => Ok(()),
+        PType::Str => Err("must be a string".into()),
+        PType::Enum(values) if token_in(value, values) => Ok(()),
+        PType::Enum(values) => Err(format!("must be one of: {}", values.join(", "))),
+        PType::Num(min, max) if number_in(value, *min, *max) => Ok(()),
+        PType::Num(min, max) => Err(format!("must be a number from {min} to {max}")),
+        PType::Int(min, max)
+            if value
+                .as_i64()
+                .is_some_and(|number| number >= *min && number <= *max) =>
+        {
+            Ok(())
+        }
+        PType::Int(min, max) => Err(format!("must be an integer from {min} to {max}")),
+        PType::Bool if value.is_boolean() => Ok(()),
+        PType::Bool => Err("must be a boolean".into()),
+        PType::StrArray
+            if value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string)) =>
+        {
+            Ok(())
+        }
+        PType::StrArray => Err("must be an array of strings".into()),
+        PType::EnumArray(values)
+            if value
+                .as_array()
+                .is_some_and(|items| items.iter().all(|item| token_in(item, values))) =>
+        {
+            Ok(())
+        }
+        PType::EnumArray(values) => Err(format!(
+            "must be an array containing only: {}",
+            values.join(", ")
+        )),
+        PType::Gain if value.as_str() == Some("auto") || number_in(value, 0.5, 20.0) => Ok(()),
+        PType::Gain => Err("must be `auto` or a number from 0.5 to 20".into()),
+    }
+}
+
 /// The MCP catalog: `[{ name, description, inputSchema }]`, generated from `TOOLS`.
 pub fn catalog() -> Value {
     Value::Array(
@@ -459,6 +544,46 @@ fn param_ui(param: &Param) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_validation_matches_advertised_constraints() {
+        let cases = [
+            ("speak", json!({"text": "hello", "rate": 1.25}), true),
+            ("speak", json!({"rate": 1.25}), false),
+            ("speak", json!({"text": 7}), false),
+            ("speak", json!({"text": "hello", "rate": 2.1}), false),
+            ("listen", json!({"seconds": 60}), true),
+            ("listen", json!({"seconds": 0}), false),
+            ("listen", json!({"seconds": 1.5}), false),
+            ("mute", json!({"on": true}), true),
+            ("mute", json!({"on": "true"}), false),
+            ("list_voices", json!({"tts_engine": "built_in"}), true),
+            ("list_voices", json!({"tts_engine": "off"}), false),
+            ("set_config", json!({"narrate": ["shorts"]}), true),
+            ("set_config", json!({"narrate": ["other"]}), false),
+            (
+                "set_config",
+                json!({"tts_built_in_voices": ["af_sarah"]}),
+                true,
+            ),
+            ("set_config", json!({"tts_built_in_voices": [7]}), false),
+            ("set_config", json!({"tts_rate": 0.49}), false),
+            ("set_config", json!({"capture_gain": "auto"}), true),
+            ("set_config", json!({"capture_gain": 20.1}), false),
+            ("set_config", json!({}), false),
+            ("get_status", json!({"extra": true}), false),
+        ];
+
+        for (tool, arguments, valid) in cases {
+            assert_eq!(
+                validate_arguments(tool, &arguments).is_ok(),
+                valid,
+                "{tool} {arguments}"
+            );
+        }
+        assert!(validate_arguments("get_status", &json!([])).is_err());
+        assert!(validate_arguments("unknown", &json!({})).is_err());
+    }
 
     /// DRIFT GUARD: `docs/MCP-TOOLS.md` is hand-written, not generated, so nothing else
     /// forces it to track the catalog. Embed it at compile time and assert every tool's

@@ -17,6 +17,12 @@ automatically (at boot and on config change), converging to `config.toml`'s `exc
 `stt_speaker_lock`), are implemented but hidden from user-facing surfaces pending the
 validation tracked in issue #77 — see `ds_tools::DIARIZATION_ENABLED`.
 
+The stdio server accepts one JSON-RPC message per line and caps each line at 1 MiB. It
+validates every `tools/call` against the same schema shown below before dispatch. At most
+8 tool calls run concurrently; additional calls receive a protocol error, providing
+explicit backpressure. MCP cancellation notifications stop an active `listen` and suppress
+the cancelled request's response.
+
 ## speak
 
 Speak text aloud.

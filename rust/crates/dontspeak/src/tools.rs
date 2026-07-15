@@ -5,6 +5,8 @@
 //! a running one to Reload).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ds_config::{ClientSource, Paths, TtsEngine, VoiceConfig};
@@ -20,11 +22,67 @@ use crate::voices::voice_groups;
 /// `clientInfo.name` (see `mcp::client_from_initialize`) and stamped onto every engine request
 /// a tool sends, so the engine's activity log attributes a tool-driven `speak`/`stop_speech`
 /// to the right client. `Unknown` for a client whose name isn't in the registry's alias table.
+#[cfg(test)]
 pub(crate) fn tools_call(
     id: Option<Value>,
     msg: &Value,
     sock: Option<&PathBuf>,
     client: ClientSource,
+) -> Value {
+    tools_call_cancellable(id, msg, sock, client, Arc::new(AtomicBool::new(false)))
+}
+
+/// Validate the protocol-level `tools/call` shape and the advertised schema
+/// before any handler, filesystem, process-launch, or IPC work occurs.
+pub(crate) fn validate_tools_call(msg: &Value) -> Result<(), String> {
+    let params = msg
+        .get("params")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "params must be an object".to_string())?;
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "params.name must be a non-empty string".to_string())?;
+    if !ds_tools::tool_names().any(|candidate| candidate == name) {
+        return Err(format!("unknown tool: {name}"));
+    }
+    if params
+        .get("arguments")
+        .is_some_and(|arguments| !arguments.is_object())
+    {
+        return Err("params.arguments must be an object".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn tools_call_validated(
+    id: Option<Value>,
+    msg: &Value,
+    sock: Option<&PathBuf>,
+    client: ClientSource,
+    cancelled: Arc<AtomicBool>,
+) -> Value {
+    let name = msg["params"]["name"].as_str().unwrap_or_default();
+    let arguments = msg["params"]
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if let Err(reason) = ds_tools::validate_arguments(name, &arguments) {
+        return ok(
+            id,
+            tool_result(format!("invalid {name} arguments: {reason}"), true),
+        );
+    }
+    tools_call_cancellable(id, msg, sock, client, cancelled)
+}
+
+pub(crate) fn tools_call_cancellable(
+    id: Option<Value>,
+    msg: &Value,
+    sock: Option<&PathBuf>,
+    client: ClientSource,
+    cancelled: Arc<AtomicBool>,
 ) -> Value {
     let params = msg.get("params");
     let name = params
@@ -70,7 +128,7 @@ pub(crate) fn tools_call(
                 "mute" => call_mute(sock, &args),
                 "diarize" => call_diarize(sock, &args),
                 "manage_speakers" => call_speakers(sock, &args),
-                _ => call_listen(sock, &args),
+                _ => call_listen(sock, &args, cancelled),
             }
         }
         other => Err(format!("unknown tool: {other}")),
@@ -496,9 +554,8 @@ const LISTEN_ENDPOINT_SILENCE: Duration = Duration::from_millis(1500);
 /// sends `TestRecognitionStop` after [`LISTEN_ENDPOINT_SILENCE`] of no new partial — and,
 /// regardless, after the `seconds` hard cap for a user who never stops. This reuses the
 /// existing two-connection stop path; the helper/engine are untouched.
-fn call_listen(sock: &Path, args: &Value) -> Result<String, String> {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<String, String> {
+    use std::sync::atomic::AtomicU64;
 
     let a: ListenArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid listen arguments: {e}"))?;
@@ -532,6 +589,10 @@ fn call_listen(sock: &Path, args: &Value) -> Result<String, String> {
                 _ => return, // cancelled/finished
             }
             let elapsed = base.elapsed();
+            if cancelled.load(Ordering::Acquire) {
+                let _ = ds_ipc::request(&sock2, &Request::TestRecognitionStop);
+                return;
+            }
             let went_quiet = wd_spoke.load(Ordering::Relaxed)
                 && elapsed.saturating_sub(Duration::from_millis(wd_last.load(Ordering::Relaxed)))
                     >= LISTEN_ENDPOINT_SILENCE;
