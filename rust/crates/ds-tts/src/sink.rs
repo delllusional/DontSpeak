@@ -158,6 +158,13 @@ impl IncrementalSink {
     /// (committed audio races ahead of the playhead, so commit counts would over-skip).
     /// Callers on a cancelled path must cap `now` at the audible-stop instant, or wall
     /// time keeps "playing" boundaries nobody heard.
+    ///
+    /// Known tolerances (accepted; resume misses at most a few words, exactly once):
+    /// a machine suspend or output-device stall mid-utterance inflates elapsed wall
+    /// time, so a barge right after resume can over-count batches the user never
+    /// heard; and a batch whose final tens of milliseconds were still in the DAC at
+    /// the stop instant counts as played — the symmetric twin of the ~60 ms fade-tail
+    /// under-skip the cancel-instant cap accepts.
     pub fn played_batches(&self, now: Instant) -> usize {
         let Some(started) = self.clock.started else {
             return self.completed;
