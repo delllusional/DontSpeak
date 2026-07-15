@@ -32,11 +32,17 @@ mod reader;
 use reader::*;
 
 const SPEAK_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-/// Bound on the CUEDONE wait, separate from [`SPEAK_TERMINAL_TIMEOUT`]: cues are short
-/// system sounds, but a stale helper binary predating CUEDONE (a dev partial rebuild —
-/// see docs/BUILD-DEPLOY.md) never answers at all, and riding the 600 s speak timeout
-/// wedged the audio queue for 10 minutes per earcon before the child was killed.
-const CUE_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Bound on the CUEDONE wait, separate from [`SPEAK_TERMINAL_TIMEOUT`]: a stale helper
+/// binary predating CUEDONE (a dev partial rebuild — see docs/BUILD-DEPLOY.md) never
+/// answers at all, and riding the 600 s speak timeout wedged the audio queue for 10
+/// minutes per earcon before the child was killed. The bound must EXCEED any legitimate
+/// custom sound: CUEDONE arrives only after the cue plays to completion, and ds-earcon's
+/// allowed dirs include user-writable locations with no duration validation anywhere —
+/// at 30 s a long custom cue tripped the timeout arm and killed the HEALTHY warm child
+/// (dropping the resident models) on every cue. 120 s still cuts the stale-helper wedge
+/// 5×, and the reap-on-timeout must stay: it is what closes the late-CUEDONE
+/// cross-satisfaction path (see `cue_validated`'s lease comment).
+const CUE_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const CAPTURE_TERMINAL_GRACE: u64 = 25;
 /// Upper bound on the spawned child's pre-READY handshake. Generous — a first-run
 /// CoreML/ANE compile or cold ORT provider init can take tens of seconds — but finite:
@@ -2227,7 +2233,7 @@ pub(crate) mod wedge_recovery_tests {
     /// Pins the ACTUAL production cue bound directly (no process, no real wait) — so a
     /// future edit to the number is a deliberate, visible diff (mirrors
     /// `ready_handshake_timeout_pins_the_production_bound`). The integration test below
-    /// deliberately does NOT wait out the real 30 s; it injects a short bound.
+    /// deliberately does NOT wait out the real 120 s; it injects a short bound.
     #[test]
     fn cue_terminal_timeout_pins_the_production_bound() {
         let dir = tempfile::tempdir().unwrap();
@@ -2240,7 +2246,7 @@ pub(crate) mod wedge_recovery_tests {
                 dir.path().join("lifetime.json"),
             )),
         );
-        assert_eq!(tts.cue_terminal_timeout(), Duration::from_secs(30));
+        assert_eq!(tts.cue_terminal_timeout(), Duration::from_secs(120));
     }
 
     /// A helper that never answers a `cue` op with CUEDONE — exactly the shape of a stale
@@ -2275,7 +2281,10 @@ pub(crate) mod wedge_recovery_tests {
 
         assert!(matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::TimedOut));
         // Generous CI bound — the point is "finite", not "exactly 100 ms".
-        assert!(elapsed < Duration::from_secs(5), "cue wait took {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cue wait took {elapsed:?}"
+        );
         assert!(
             !mgr.is_running(),
             "the unanswered child must be reaped by mark_dead_if_current"
