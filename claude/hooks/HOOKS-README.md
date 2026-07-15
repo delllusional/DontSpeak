@@ -34,7 +34,7 @@ repo [README](../../README.md).
 | `SessionEnd` | `notify` | Session-scoped `StopSpeech` → barges THIS session's playback so a closing terminal silences its own queued/playing speech (without touching another window's). |
 | `UserPromptSubmit` | `notify` | You just prompted HERE → marks this the active terminal so narration follows the window you're working in (the engine holds the others). |
 | `UserPromptSubmit` | `provide` | The ONE synchronous hook: re-reads the `narrate` setting every turn and returns the narration spec as `hookSpecificOutput.additionalContext` when ON (so flipping narration takes effect next prompt, no reload); returns nothing when off. |
-| `Stop` | `notify` | Turn finished → the reply-done **"ding"** earcon (`Earcon{reply_done}`). Non-streaming clients also voice the final reply: Codex/Qwen use `last_assistant_message`, while Grok reads the final assistant entry from `transcriptPath`. Claude's streamed-session witness suppresses duplicate end-of-turn speech. |
+| `Stop` | `notify` | Turn finished → queues the reply-done **"ding"** earcon (`Earcon{reply_done}`) behind narration already admitted for that session. Non-streaming clients also voice the final reply: Codex/Qwen use `last_assistant_message`, while Grok reads the final assistant entry from `transcriptPath`. Claude's streamed-session witness suppresses duplicate end-of-turn speech. |
 | `Notification` | `notify` | A `permission_prompt` / `idle_prompt` notification → the **needs-input** earcon (`Earcon{needs_input}`). Other notification types are ignored. |
 
 Every `notify` entry is `async` fire-and-forget; the lone `provide` entry is synchronous —
@@ -44,8 +44,9 @@ outright, so its entries run synchronously, with tight explicit timeouts instead
 
 For **Claude Code** the final reply and tool-step narration are **not** special-cased — they
 are just streamed assistant messages handled by `MessageDisplay` (no per-reply mode, no
-final-reply dedup). The `Stop` hook is wired only for the turn-done earcon (its payload has
-no `last_assistant_message`, so it never re-speaks the streamed reply), and `Notification`
+final-reply dedup). The `Stop` hook carries `last_assistant_message`, but Claude's
+streamed-session witness keeps that fallback from re-speaking the streamed reply; it still
+queues the turn-done earcon. `Notification`
 only for the needs-input earcon. Narration is gated on the `narrate` setting (a set of
 `shorts` and/or `digests`); an empty set, or `tts_engine = off`, silences it. The earcons are
 independent of `narrate`: each plays only when its sound (`earcon_reply_sound` /

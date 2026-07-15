@@ -21,7 +21,7 @@ description: Re-verify the client-wiring registry against the CURRENT client ver
    - Claude Code: `claude --version`
    - Codex CLI: `codex --version` if installed, else `npm view @openai/codex version`
      (not installed ⇒ the pin means "docs read while X was current", note it as such)
-   - Qwen Code: `qwen --version` if installed, else `npm view @qwenlm/qwen-code version` (or check package metadata)
+   - Qwen Code: `qwen --version` if installed, else `npm view @qwen-code/qwen-code version` (or check package metadata)
 
 2. **Re-read the entry's own `DocRef` URLs** (they are the source-of-truth list — don't
    search) and check the exact contract points the wiring depends on:

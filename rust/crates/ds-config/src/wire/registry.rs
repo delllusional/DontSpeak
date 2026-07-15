@@ -222,7 +222,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 url: "https://code.claude.com/docs/en/mcp",
             },
         ],
-        verified_client_version: "2.1.209",
+        verified_client_version: "2.1.210",
         verified_on: "2026-07-15",
     },
     ClientSpec {
@@ -416,8 +416,8 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 url: "https://docs.x.ai/build/features/hooks",
             },
         ],
-        verified_client_version: "0.2.99",
-        verified_on: "2026-07-13",
+        verified_client_version: "0.2.101",
+        verified_on: "2026-07-15",
     },
 ];
 

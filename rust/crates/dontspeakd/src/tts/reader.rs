@@ -35,6 +35,14 @@ pub(super) struct SpeakSlot {
     pub(super) fatal: bool,
 }
 
+/// What an ordered earcon waits for: the reader sets `done` on `CUEDONE`; `dead` wakes the
+/// queue if the helper exits mid-cue.
+#[derive(Default)]
+pub(super) struct CueSlot {
+    pub(super) done: bool,
+    pub(super) dead: bool,
+}
+
 /// One demuxed line of a `listen` session (the reader routes the child's
 /// LISTENING/PARTIAL/FINAL/STTERR/LDONE lines here).
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -74,11 +82,11 @@ pub(super) struct EnrollSlot {
     pub(super) dead: bool,
 }
 
-/// The four demux slots [`reader_loop`] routes the child's lines into.
-/// Bundled into one clone because every caller (production and all four tests)
-/// always supplies the whole set together — never a subset independently.
+/// The five demux slots [`reader_loop`] routes the child's lines into. Bundled because every
+/// caller always supplies the whole set together rather than passing a fixed-order run of arcs.
 pub(super) struct ReaderSlots {
     pub(super) speak: Arc<(Mutex<SpeakSlot>, Condvar)>,
+    pub(super) cue: Arc<(Mutex<CueSlot>, Condvar)>,
     pub(super) listen: Arc<(Mutex<ListenSlot>, Condvar)>,
     pub(super) diarize: Arc<(Mutex<DiarizeSlot>, Condvar)>,
     pub(super) enroll: Arc<(Mutex<EnrollSlot>, Condvar)>,
@@ -107,9 +115,8 @@ pub(super) struct ReaderModelState {
 }
 
 /// The persistent stdout reader: owns the warm child's stdout and demuxes each
-/// line into the speak/listen slots, so a `speak` and a `listen` can be served
-/// concurrently. Returns on EOF / read error (child gone), signalling both
-/// slots so any waiter unblocks.
+/// line into the operation slots, so independent operations can be served concurrently.
+/// Returns on EOF / read error (child gone), signalling every slot so all waiters unblock.
 pub(super) fn reader_loop(
     // `impl BufRead` (not `BufReader<ChildStdout>`) so the EOF handling is unit-testable
     // with a canned byte slice — production passes the child's buffered stdout.
@@ -120,6 +127,7 @@ pub(super) fn reader_loop(
 ) {
     let ReaderSlots {
         speak: speak_slot,
+        cue: cue_slot,
         listen: listen_slot,
         diarize: diarize_slot,
         enroll: enroll_slot,
@@ -181,6 +189,9 @@ pub(super) fn reader_loop(
                 }
                 cv.notify_all();
                 drop(s);
+                let (cm, ccv) = &*cue_slot;
+                cm.lock().unwrap().dead = true;
+                ccv.notify_all();
                 let (lm, lcv) = &*listen_slot;
                 lm.lock().unwrap().dead = true;
                 lcv.notify_all();
@@ -230,6 +241,10 @@ pub(super) fn reader_loop(
                 // ── speak terminals ──────────────────────────────────────────
                 if l == proto::DONE {
                     let (m, cv) = &*speak_slot;
+                    m.lock().unwrap().done = true;
+                    cv.notify_all();
+                } else if l == proto::CUEDONE {
+                    let (m, cv) = &*cue_slot;
                     m.lock().unwrap().done = true;
                     cv.notify_all();
                 } else if let Some(rest) = l.strip_prefix(proto::STATS_PREFIX) {
@@ -371,6 +386,7 @@ mod reader_eof_tests {
             stdout,
             ReaderSlots {
                 speak: speak_slot.clone(),
+                cue: Arc::new((Mutex::new(CueSlot::default()), Condvar::new())),
                 listen: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
                 diarize: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
                 enroll: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
@@ -431,6 +447,7 @@ mod reader_eof_tests {
             stdout,
             ReaderSlots {
                 speak: speak_slot,
+                cue: Arc::new((Mutex::new(CueSlot::default()), Condvar::new())),
                 listen: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
                 diarize: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
                 enroll: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
@@ -503,6 +520,7 @@ mod reader_eof_tests {
             stdout,
             ReaderSlots {
                 speak: Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new())),
+                cue: Arc::new((Mutex::new(CueSlot::default()), Condvar::new())),
                 listen: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
                 diarize: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
                 enroll: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
@@ -555,6 +573,7 @@ mod reader_eof_tests {
             stdout,
             ReaderSlots {
                 speak: Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new())),
+                cue: Arc::new((Mutex::new(CueSlot::default()), Condvar::new())),
                 listen: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
                 diarize: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
                 enroll: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
@@ -672,6 +691,7 @@ mod reader_eof_tests {
                 stdout,
                 ReaderSlots {
                     speak: reader_speak,
+                    cue: Arc::new((Mutex::new(CueSlot::default()), Condvar::new())),
                     listen: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
                     diarize: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
                     enroll: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
@@ -729,6 +749,7 @@ mod reader_eof_tests {
         bool,
         Option<Result<String, String>>,
         bool,
+        bool,
     );
 
     /// Drive `reader_loop` over a canned child stdout and return the drained `listen_slot`
@@ -740,10 +761,12 @@ mod reader_eof_tests {
         let listen_slot = Arc::new((Mutex::new(ListenSlot::default()), Condvar::new()));
         let diarize_slot = Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new()));
         let enroll_slot = Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new()));
+        let cue_slot = Arc::new((Mutex::new(CueSlot::default()), Condvar::new()));
         reader_loop(
             stdout,
             ReaderSlots {
                 speak: Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new())),
+                cue: cue_slot.clone(),
                 listen: listen_slot.clone(),
                 diarize: diarize_slot.clone(),
                 enroll: enroll_slot.clone(),
@@ -772,7 +795,20 @@ mod reader_eof_tests {
             diarize.done,
             enroll.result.clone(),
             enroll.done,
+            cue_slot.0.lock().unwrap().done,
         )
+    }
+
+    #[test]
+    fn cuedone_routes_to_the_cue_slot_only() {
+        let (events, diarize, diarize_done, enroll, enroll_done, cue_done) =
+            run_reader_slots(b"CUEDONE\n");
+        assert!(cue_done);
+        assert!(events.is_empty());
+        assert_eq!(diarize, None);
+        assert!(!diarize_done);
+        assert_eq!(enroll, None);
+        assert!(!enroll_done);
     }
 
     #[test]
@@ -813,14 +849,14 @@ mod reader_eof_tests {
 
     #[test]
     fn enroll_demux_routes_ok_result_and_done() {
-        let (_, _, _, result, done) = run_reader_slots(b"EMB [0.1,0.2]\nEDONE\n");
+        let (_, _, _, result, done, _) = run_reader_slots(b"EMB [0.1,0.2]\nEDONE\n");
         assert_eq!(result, Some(Ok("[0.1,0.2]".to_string())));
         assert!(done);
     }
 
     #[test]
     fn enroll_demux_routes_err_result_and_done() {
-        let (_, _, _, result, done) = run_reader_slots(b"ENROLLERR boom\nEDONE\n");
+        let (_, _, _, result, done, _) = run_reader_slots(b"ENROLLERR boom\nEDONE\n");
         assert_eq!(result, Some(Err("boom".to_string())));
         assert!(done);
     }

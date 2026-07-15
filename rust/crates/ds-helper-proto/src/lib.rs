@@ -28,6 +28,7 @@
 //!   (e.g. `"TTS child error: bad phoneme"`). Do not "normalize" this.
 //! * `DONE` — the terminal for a successful or cancelled speak/preview request.
 //!   A failed request terminates with `ERR <msg>` instead.
+//! * `CUEDONE` — the terminal for a played, suppressed, or cancelled earcon.
 //! * `STATS <k=v …>` — per-utterance synth timing, just before `DONE`.
 //! * `TTSLOADED` / `STTLOADED` — model-residency confirmations (load/preload/lazy
 //!   reload succeeded; the model is genuinely resident + warm).
@@ -67,6 +68,11 @@ pub const ERR: &str = "ERR";
 pub const DONE: &str = "DONE";
 /// Per-utterance synth timing (`k=v` pairs), just before [`DONE`].
 pub const STATS_PREFIX: &str = "STATS ";
+
+// ── earcon ────────────────────────────────────────────────────────────────────────────
+
+/// Terminal for a played, muted-before-start, or explicitly cancelled earcon.
+pub const CUEDONE: &str = "CUEDONE";
 
 // ── model residency ──────────────────────────────────────────────────────────
 
@@ -131,6 +137,7 @@ mod tests {
         assert_eq!(READY, "READY");
         assert_eq!(ERR, "ERR");
         assert_eq!(DONE, "DONE");
+        assert_eq!(CUEDONE, "CUEDONE");
         assert_eq!(TTSLOADED, "TTSLOADED");
         assert_eq!(STTLOADED, "STTLOADED");
         assert_eq!(LISTENING, "LISTENING");

@@ -109,17 +109,18 @@ pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str, client: ClientSourc
     }
 }
 
-/// Ask the warm engine to play an audible earcon (`event` = `"reply_done"` / `"needs_input"`).
-/// Best-effort fire-and-forget: the engine self-gates on `earcon_enabled` + mute and resolves
-/// the sound, so this just forwards the event. Engine down ⇒ no-op; never blocks the hook.
-pub fn engine_earcon(paths: &Paths, event: &str, client: ClientSource) {
-    let _ = ds_ipc::request(
-        &paths.engine_sock,
-        &ds_ipc::Request::Earcon {
-            event: event.to_string(),
-            source: client,
-        },
-    );
+fn earcon_request(payload: &str, event: &str, client: ClientSource) -> ds_ipc::Request {
+    ds_ipc::Request::Earcon {
+        event: event.to_string(),
+        session: crate::hook_core::session_id_from_payload(payload),
+        source: client,
+    }
+}
+
+/// Ask the warm engine to enqueue an audible earcon (`event` = `"reply_done"` /
+/// `"needs_input"`) behind this session's earlier speech. Engine down ⇒ no-op.
+pub fn engine_earcon(paths: &Paths, event: &str, payload: &str, client: ClientSource) {
+    let _ = ds_ipc::request(&paths.engine_sock, &earcon_request(payload, event, client));
 }
 
 /// The `Notification` hook payload (subset): which kind of notification Claude Code surfaced.
@@ -147,7 +148,7 @@ fn wants_needs_input_earcon(payload: &str) -> bool {
 /// elicitation chatter) are ignored so the cue stays meaningful. `payload` is the hook JSON.
 pub fn notification_earcon(paths: &Paths, payload: &str, client: ClientSource) {
     if wants_needs_input_earcon(payload) {
-        engine_earcon(paths, "needs_input", client);
+        engine_earcon(paths, "needs_input", payload, client);
     }
 }
 
@@ -213,7 +214,33 @@ mod tests {
     fn engine_earcon_with_no_socket_returns_promptly() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        engine_earcon(&paths, "needs_input", ClientSource::Grok);
+        engine_earcon(
+            &paths,
+            "needs_input",
+            r#"{"sessionId":"grok-session"}"#,
+            ClientSource::Grok,
+        );
+    }
+
+    #[test]
+    fn earcon_request_derives_session_from_each_hook_dialect() {
+        for payload in [
+            r#"{"session_id":"claude-session"}"#,
+            r#"{"sessionId":"grok-session"}"#,
+        ] {
+            let expected = if payload.contains("claude") {
+                "claude-session"
+            } else {
+                "grok-session"
+            };
+            assert!(matches!(
+                earcon_request(payload, "reply_done", ClientSource::ClaudeCode),
+                ds_ipc::Request::Earcon {
+                    session: Some(ref session),
+                    ..
+                } if session == expected
+            ));
+        }
     }
 
     #[test]

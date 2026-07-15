@@ -1,8 +1,8 @@
-//! Engine-owned TTS queue — the single serializer for all speech.
+//! Engine-owned audio queue — the single serializer for speech and earcons.
 //!
-//! Producers (the `Speak` / `SpeakNarration` RPC handlers) enqueue whole blocks onto ONE
-//! bounded plain FIFO — there is no "reply vs narration" kind; what gets spoken is decided
-//! upstream by the `narrate` setting. ONE worker thread plays them in order on the
+//! Producers enqueue speech blocks and session-scoped completion cues onto ONE bounded FIFO.
+//! There is no "reply vs narration" speech kind; what gets spoken is decided upstream by the
+//! `narrate` setting. ONE worker thread plays every action in order on the
 //! WARM child (`TtsManager`), so there is no per-block model reload. The warm child stays
 //! DUMB: ordering, the mic feedback gate, and the barge/pause/resume policy all live here.
 //!
@@ -114,12 +114,15 @@ impl AcceptedNarrations {
 /// bypassing it by avoiding the wire protocol.
 pub(crate) const MAX_SPEAK_BYTES: usize = 10 * 1024;
 
-/// Bound pending work so a stalled focus/microphone gate cannot retain unlimited narration.
-/// The current item is tracked separately as `in_flight`, so total accepted work can be this
-/// many queued items plus one being processed.
+/// Bound pending work so a stalled focus/microphone gate cannot retain unlimited audio.
+/// Speech and passive cues have separate item quotas: a cue burst must never consume the
+/// capacity reserved for text the user still needs to hear. The current action is tracked
+/// separately as `in_flight`.
 const MAX_PENDING_ITEMS: usize = 128;
+const MAX_PENDING_CUES: usize = 64;
 const MAX_PENDING_BYTES: usize = 1024 * 1024;
 const MAX_SESSION_PENDING_ITEMS: usize = 32;
+const MAX_SESSION_PENDING_CUES: usize = 16;
 const MAX_SESSION_PENDING_BYTES: usize = 256 * 1024;
 
 /// Short, non-obtrusive greeting templates; `{n}` = the voice's display name.
@@ -199,16 +202,43 @@ fn record_pool_assignment(
     }
 }
 
-/// One queued unit of speech. The queue is a bounded plain FIFO with no "narration vs reply"
-/// kind: whatever the narration layer successfully enqueues is played in order. Items differ
-/// only by their optional per-call voice/rate and the session they belong to.
+#[derive(Debug)]
+enum QueueAction {
+    Speech {
+        text: String,
+        voice: Option<String>,
+        rate: Option<f32>,
+    },
+    Earcon(ds_earcon::EarconEvent),
+}
+
+impl QueueAction {
+    fn pending_bytes(&self) -> usize {
+        match self {
+            Self::Speech { text, .. } => text.len(),
+            Self::Earcon(_) => 0,
+        }
+    }
+
+    fn speech_text(&self) -> Option<&str> {
+        match self {
+            Self::Speech { text, .. } => Some(text),
+            Self::Earcon(_) => None,
+        }
+    }
+
+    fn requeueable(&self) -> bool {
+        self.speech_text()
+            .is_none_or(|text| !text.trim().is_empty())
+    }
+}
+
+/// One ordered audio action. Speech retains the old plain reply/narration FIFO semantics;
+/// earcons share the same session and cancellation path so they cannot overtake narration.
 struct Item {
-    text: String,
-    voice: Option<String>,
-    rate: Option<f32>,
-    /// The Claude session this item belongs to (`None` = default/global), used to
-    /// resolve the per-session voice override at play time AND to gate playback on
-    /// the active terminal (the worker plays only the active session's items).
+    action: QueueAction,
+    /// The client session this action belongs to (`None` = default/global), used for
+    /// voice resolution, active-terminal selection, and scoped cancellation.
     session: Option<String>,
 }
 
@@ -521,17 +551,42 @@ impl TtsQueue {
         if text.trim().is_empty() {
             return Ok(());
         }
+        self.enqueue_action(QueueAction::Speech { text, voice, rate }, session)
+    }
+
+    /// Enqueue a cue as an ordered session action. Resolving the configured sound and checking
+    /// mute happen at dequeue so a later mute suppresses already-queued cues.
+    pub fn enqueue_earcon(
+        &self,
+        event: ds_earcon::EarconEvent,
+        session: Option<String>,
+    ) -> Result<(), String> {
+        self.enqueue_action(QueueAction::Earcon(event), session)
+    }
+
+    fn enqueue_action(&self, action: QueueAction, session: Option<String>) -> Result<(), String> {
         let mut q = self.items.lock().unwrap();
-        if q.len() >= MAX_PENDING_ITEMS {
+        let is_cue = matches!(&action, QueueAction::Earcon(_));
+        let pending_items = q
+            .iter()
+            .filter(|item| matches!(&item.action, QueueAction::Earcon(_)) == is_cue)
+            .count();
+        let max_pending_items = if is_cue {
+            MAX_PENDING_CUES
+        } else {
+            MAX_PENDING_ITEMS
+        };
+        if pending_items >= max_pending_items {
+            let kind = if is_cue { "audio cue" } else { "speech" };
             return Err(format!(
-                "speech queue is full ({MAX_PENDING_ITEMS} pending items)"
+                "{kind} queue is full ({max_pending_items} pending items)"
             ));
         }
-        let pending_bytes = q
-            .iter()
-            .try_fold(0usize, |total, item| total.checked_add(item.text.len()));
+        let pending_bytes = q.iter().try_fold(0usize, |total, item| {
+            total.checked_add(item.action.pending_bytes())
+        });
         if !matches!(
-            pending_bytes.and_then(|n| n.checked_add(text.len())),
+            pending_bytes.and_then(|n| n.checked_add(action.pending_bytes())),
             Some(total) if total <= MAX_PENDING_BYTES
         ) {
             return Err(format!(
@@ -541,16 +596,24 @@ impl TtsQueue {
         let mut session_items = 0usize;
         let mut session_bytes = 0usize;
         for item in q.iter().filter(|item| item.session == session) {
-            session_items += 1;
-            session_bytes = session_bytes.saturating_add(item.text.len());
+            if matches!(&item.action, QueueAction::Earcon(_)) == is_cue {
+                session_items += 1;
+            }
+            session_bytes = session_bytes.saturating_add(item.action.pending_bytes());
         }
-        if session_items >= MAX_SESSION_PENDING_ITEMS {
+        let max_session_pending_items = if is_cue {
+            MAX_SESSION_PENDING_CUES
+        } else {
+            MAX_SESSION_PENDING_ITEMS
+        };
+        if session_items >= max_session_pending_items {
+            let kind = if is_cue { "audio cue" } else { "speech" };
             return Err(format!(
-                "session speech queue is full ({MAX_SESSION_PENDING_ITEMS} pending items)"
+                "session {kind} queue is full ({max_session_pending_items} pending items)"
             ));
         }
         if !matches!(
-            session_bytes.checked_add(text.len()),
+            session_bytes.checked_add(action.pending_bytes()),
             Some(total) if total <= MAX_SESSION_PENDING_BYTES
         ) {
             return Err(format!(
@@ -558,12 +621,7 @@ impl TtsQueue {
             ));
         }
         self.note_recent(&session);
-        q.push_back(Item {
-            text,
-            voice,
-            rate,
-            session,
-        });
+        q.push_back(Item { action, session });
         self.cv.notify_one();
         Ok(())
     }
@@ -614,8 +672,7 @@ impl TtsQueue {
         self.active.lock().unwrap().recent = session.clone();
     }
 
-    /// Set global mute on the warm child (delegates to the [`TtsManager`]). Silences playback
-    /// without stopping it — the queue keeps draining.
+    /// Set global mute on the warm child. Speech drains silently; cues are suppressed/stopped.
     pub fn set_muted(&self, on: bool) {
         self.tts.set_muted(on);
     }
@@ -933,7 +990,7 @@ impl TtsQueue {
 
     /// Read-only playback snapshot: `(tts_active, queued, paused, muted)`.
     /// `queued` counts items still waiting in the deque (excludes the one being played);
-    /// `muted` is the global mute (output plays silently while set).
+    /// `muted` is the global mute (speech is silent and cues are suppressed while set).
     pub fn snapshot(&self) -> (bool, usize, bool, bool) {
         let queued = self.items.lock().unwrap().len();
         (
@@ -1156,31 +1213,44 @@ impl TtsQueue {
             let _in_flight = InFlightGuard(&self.in_flight);
             let _playing = PlayingGuard(&self.playing_session);
 
-            let (engine, voice, rate) = match self.gate_item(&item, gen0) {
-                GateOutcome::Play {
-                    engine,
-                    voice,
-                    rate,
-                } => (engine, voice, rate),
-                GateOutcome::Requeue => {
-                    self.requeue_if_resuming(item, gen0);
-                    continue;
-                }
-                GateOutcome::Drop(reason) => {
-                    log::warn!(target: "ttsq", "queued speak could not start: {reason}");
-                    continue;
-                }
-            };
+            match &item.action {
+                QueueAction::Speech { text, voice, rate } => {
+                    let (engine, voice, rate) = match self.gate_item(
+                        &item,
+                        gen0,
+                        voice.as_ref(),
+                        *rate,
+                    ) {
+                        GateOutcome::Play {
+                            engine,
+                            voice,
+                            rate,
+                        } => (engine, voice, rate),
+                        GateOutcome::Requeue => {
+                            self.requeue_if_resuming(item, gen0);
+                            continue;
+                        }
+                        GateOutcome::Drop(reason) => {
+                            log::warn!(target: "ttsq", "queued speak could not start: {reason}");
+                            continue;
+                        }
+                    };
 
-            self.set_tts_active(true);
-            // Speak the whole block in ONE call (the warm child prepares it transactionally,
-            // then plays it continuously) — uniformly for NARRATION and REPLY. If a record-barge
-            // pause (generation bump) interrupts playback mid-way, re-enqueue the item so
-            // `resume()` continues it. This is the SAME for both kinds: the old per-kind
-            // split re-enqueued only replies, so an interrupted NARRATION was dropped —
-            // tap-to-pause then tap-to-resume came back SILENT.
-            if let Err(e) = self.speak_one(engine, &item.text, &voice, rate) {
-                log::warn!(target: "ttsq", "queued speak failed: {e}");
+                    self.set_tts_active(true);
+                    if let Err(e) = self.speak_one(engine, text, &voice, rate) {
+                        log::warn!(target: "ttsq", "queued speak failed: {e}");
+                    }
+                }
+                QueueAction::Earcon(event) => {
+                    if !self.gate_earcon(gen0) {
+                        self.requeue_if_resuming(item, gen0);
+                        continue;
+                    }
+                    self.set_tts_active(true);
+                    if let Err(e) = self.cue_one(*event) {
+                        log::warn!(target: "ttsq", "queued earcon failed: {e}");
+                    }
+                }
             }
             if self.generation.load(Ordering::SeqCst) != gen0 {
                 self.requeue_if_resuming(item, gen0);
@@ -1194,7 +1264,13 @@ impl TtsQueue {
     /// start playing under a hold that arrived during the (up to 60 s) readiness wait —
     /// `set_terminal_front` only stores atomics and never bumps the generation, so nothing
     /// else breaks that window.
-    fn gate_item(&self, item: &Item, gen0: u64) -> GateOutcome {
+    fn gate_item(
+        &self,
+        item: &Item,
+        gen0: u64,
+        voice_override: Option<&String>,
+        rate_override: Option<f32>,
+    ) -> GateOutcome {
         loop {
             // HOLD this item (any kind) while we must stay silent — resume when the
             // gate clears, dropping nothing. Two independent "hold, don't drop" gates:
@@ -1241,8 +1317,8 @@ impl TtsQueue {
                 Some((e, v)) => (Some(e), v),
                 None => (None, String::new()),
             };
-            let voice = item.voice.clone().unwrap_or(base_voice);
-            let rate = item.rate.unwrap_or(cfg.tts_rate);
+            let voice = voice_override.cloned().unwrap_or(base_voice);
+            let rate = rate_override.unwrap_or(cfg.tts_rate);
 
             // Never send Kokoro work before its model is ready. Accepted work is HELD during
             // an ordinary warm-up and remains busy; it is dropped only for an explicit cancel,
@@ -1268,6 +1344,34 @@ impl TtsQueue {
                 rate,
             };
         }
+    }
+
+    fn gate_earcon(&self, gen0: u64) -> bool {
+        while self.generation.load(Ordering::SeqCst) == gen0 {
+            let hold = self.worker_hold_state();
+            if !hold.any() {
+                self.in_flight.store(true, Ordering::SeqCst);
+                return true;
+            }
+            self.in_flight.store(hold.reports_busy(), Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(120));
+        }
+        false
+    }
+
+    fn cue_one(&self, event: ds_earcon::EarconEvent) -> Result<(), String> {
+        if self.tts.is_muted() {
+            return Ok(());
+        }
+        let cfg = self.config.lock().unwrap().clone();
+        let Some(path) = ds_earcon::resolve_cue(
+            &cfg.earcon_reply_sound,
+            &cfg.earcon_needs_input_sound,
+            event,
+        ) else {
+            return Ok(());
+        };
+        self.tts.cue(&path).map_err(|e| e.to_string())
     }
 
     /// Play one queued block on the warm child using the resolved `engine` (config or a
@@ -1412,16 +1516,11 @@ impl TtsQueue {
             .unwrap()
             .remove(&gen0)
             .unwrap_or_else(|| self.is_paused());
-        if !should_requeue(requeue, &item.text) {
+        if !should_requeue(requeue, &item.action) {
             return;
         }
         let mut q = self.items.lock().unwrap();
-        q.push_front(Item {
-            text: item.text,
-            voice: item.voice,
-            rate: item.rate,
-            session: item.session,
-        });
+        q.push_front(item);
     }
 }
 
@@ -1448,8 +1547,8 @@ enum GateOutcome {
 /// Only when we were PAUSED for a record-barge (resume mode) — a hard clear/StopSpeech
 /// leaves `paused == false` and re-enqueues nothing (it dropped on purpose). Empty text is
 /// never requeued. Pure, so the "resume keeps the item, clear drops it" rule is unit-tested.
-fn should_requeue(paused: bool, text: &str) -> bool {
-    paused && !text.trim().is_empty()
+fn should_requeue(resuming: bool, action: &QueueAction) -> bool {
+    resuming && action.requeueable()
 }
 
 /// The worker's two independent "hold, don't drop" gates.
@@ -1570,13 +1669,28 @@ mod tests {
 
     #[test]
     fn should_requeue_only_when_paused_and_nonempty() {
+        let speech = QueueAction::Speech {
+            text: "the held narration".into(),
+            voice: None,
+            rate: None,
+        };
         // Resume mode (paused) keeps a non-empty item → re-enqueued to continue.
-        assert!(should_requeue(true, "the held narration"));
+        assert!(should_requeue(true, &speech));
         // A hard clear / StopSpeech leaves paused == false → dropped on purpose.
-        assert!(!should_requeue(false, "the held narration"));
+        assert!(!should_requeue(false, &speech));
         // Empty / whitespace-only text is never requeued, even when paused.
-        assert!(!should_requeue(true, ""));
-        assert!(!should_requeue(true, "   \n\t "));
+        assert!(!should_requeue(
+            true,
+            &QueueAction::Speech {
+                text: "   \n\t ".into(),
+                voice: None,
+                rate: None,
+            }
+        ));
+        assert!(should_requeue(
+            true,
+            &QueueAction::Earcon(ds_earcon::EarconEvent::ReplyDone)
+        ));
     }
 
     #[test]
@@ -1686,9 +1800,11 @@ mod tests {
     /// inspects), for the selection truth-table tests.
     fn narr(session: Option<&str>) -> Item {
         Item {
-            text: "x".into(),
-            voice: None,
-            rate: None,
+            action: QueueAction::Speech {
+                text: "x".into(),
+                voice: None,
+                rate: None,
+            },
             session: session.map(str::to_string),
         }
     }
@@ -1826,9 +1942,11 @@ mod tests {
     /// the `cancel_kind`/`requeue_if_resuming` tests below).
     fn item(text: &str) -> Item {
         Item {
-            text: text.to_string(),
-            voice: None,
-            rate: None,
+            action: QueueAction::Speech {
+                text: text.to_string(),
+                voice: None,
+                rate: None,
+            },
             session: None,
         }
     }
@@ -1849,7 +1967,7 @@ mod tests {
             "the interrupted item is re-enqueued, not dropped"
         );
         assert_eq!(
-            items.front().map(|it| it.text.as_str()),
+            items.front().and_then(|it| it.action.speech_text()),
             Some("interrupted"),
             "it lands at the FRONT, ahead of the rest of the queue"
         );
@@ -1947,6 +2065,77 @@ mod tests {
     }
 
     #[test]
+    fn speech_and_cues_preserve_fifo_action_order() {
+        let q = mk_queue();
+        let session = Some("turn-1".to_string());
+        q.enqueue("first".into(), None, None, session.clone())
+            .unwrap();
+        q.enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, session.clone())
+            .unwrap();
+        q.enqueue("later".into(), None, None, session).unwrap();
+
+        let items = q.items.lock().unwrap();
+        assert!(matches!(
+            items[0].action,
+            QueueAction::Speech { ref text, .. } if text == "first"
+        ));
+        assert!(matches!(
+            items[1].action,
+            QueueAction::Earcon(ds_earcon::EarconEvent::ReplyDone)
+        ));
+        assert!(matches!(
+            items[2].action,
+            QueueAction::Speech { ref text, .. } if text == "later"
+        ));
+    }
+
+    #[test]
+    fn queued_cue_is_suppressed_when_mute_arrives_before_dequeue() {
+        let q = mk_queue();
+        q.enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, Some("turn-1".into()))
+            .unwrap();
+        q.set_muted(true);
+        let item = q.items.lock().unwrap().pop_front().unwrap();
+        let QueueAction::Earcon(event) = item.action else {
+            panic!("queued action must remain a cue");
+        };
+        assert!(
+            q.cue_one(event).is_ok(),
+            "mute must suppress before the absent helper is contacted"
+        );
+    }
+
+    #[test]
+    fn explicit_clears_prune_queued_cues_with_their_sessions() {
+        let q = mk_queue();
+        for session in [Some("a".into()), Some("b".into()), None] {
+            q.enqueue_earcon(ds_earcon::EarconEvent::NeedsInput, session)
+                .unwrap();
+        }
+        q.clear_session(Some("a".into()));
+        let kept: Vec<_> = q
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|item| item.session.clone())
+            .collect();
+        assert_eq!(kept, vec![Some("b".into()), None]);
+
+        q.cancel_for_submit(Some("b".into()), false, true);
+        let kept: Vec<_> = q
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|item| item.session.clone())
+            .collect();
+        assert_eq!(kept, vec![Some("b".into())]);
+        q.clear();
+        assert!(q.items.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn enqueue_rejects_oversize_text_without_changing_queue_or_recency() {
         let q = mk_queue();
         let err = q
@@ -2031,7 +2220,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|item| item.text == "Blocked digest.")
+                .filter(|item| item.action.speech_text() == Some("Blocked digest."))
                 .count(),
             1
         );
@@ -2056,6 +2245,61 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("speech queue is full"));
         assert_eq!(q.items.lock().unwrap().len(), MAX_PENDING_ITEMS);
+    }
+
+    #[test]
+    fn passive_cues_cannot_consume_reserved_speech_capacity() {
+        let global = mk_queue();
+        for i in 0..MAX_PENDING_CUES {
+            global
+                .enqueue_earcon(
+                    ds_earcon::EarconEvent::ReplyDone,
+                    Some(format!("cue-session-{i}")),
+                )
+                .unwrap();
+        }
+        assert!(
+            global
+                .enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, Some("overflow".into()))
+                .unwrap_err()
+                .contains("audio cue queue is full")
+        );
+        global
+            .enqueue(
+                "narration survives".into(),
+                None,
+                None,
+                Some("overflow".into()),
+            )
+            .unwrap();
+
+        let per_session = mk_queue();
+        for _ in 0..MAX_SESSION_PENDING_CUES {
+            per_session
+                .enqueue_earcon(ds_earcon::EarconEvent::NeedsInput, Some("held".into()))
+                .unwrap();
+        }
+        assert!(
+            per_session
+                .enqueue_earcon(ds_earcon::EarconEvent::NeedsInput, Some("held".into()))
+                .unwrap_err()
+                .contains("session audio cue queue is full")
+        );
+        per_session
+            .enqueue("still admitted".into(), None, None, Some("held".into()))
+            .unwrap();
+    }
+
+    #[test]
+    fn speech_saturation_leaves_bounded_cue_capacity() {
+        let q = mk_queue();
+        for i in 0..MAX_PENDING_ITEMS {
+            q.enqueue("x".into(), None, None, Some(format!("session-{i}")))
+                .unwrap();
+        }
+        q.enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, Some("session-0".into()))
+            .unwrap();
+        assert_eq!(q.items.lock().unwrap().len(), MAX_PENDING_ITEMS + 1);
     }
 
     #[test]
@@ -2910,7 +3154,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
             done_tx
-                .send(gated.gate_item(&item("held across warm-up"), gen0))
+                .send(gated.gate_item(&item("held across warm-up"), gen0, None, None))
                 .unwrap();
         });
         // The gate publishes in-flight once it passes the (currently clear) hold gate; give it

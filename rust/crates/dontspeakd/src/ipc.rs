@@ -37,6 +37,12 @@ pub(crate) fn should_cancel_on_submit(was_voice: bool, scope_configured: bool) -
     !was_voice && scope_configured
 }
 
+/// Old hook binaries did not send an earcon session. Keep those cues on the active stream
+/// instead of treating them as global audio, which could overtake a held background session.
+fn earcon_session(ttsq: &TtsQueue, requested: Option<String>) -> Option<String> {
+    requested.or_else(|| ttsq.active_session())
+}
+
 /// Apply a `MarkActive` ping (UserPromptSubmit hook — every submit: typed, dictated,
 /// or, when `synthetic`, a harness-injected continuation Claude Code auto-re-invokes,
 /// e.g. a background-task `<task-notification>` re-invocation — issue #11).
@@ -336,28 +342,30 @@ pub(crate) fn spawn_ipc_server(
                     reload_requested.store(true, Ordering::Relaxed);
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::Earcon { event, source } => {
-                    // Turn-end "ding" (Stop hook) / needs-input cue (Notification hook). Resolve
-                    // the configured-or-introspected sound and play it on the warm child's audio
-                    // path — OUTSIDE the TTS queue, so it never waits behind queued narration.
-                    // Skipped when earcons are off or muted, or the sound can't be resolved.
-                    log_client(&paths, source, &format!("earcon event={event}"));
+                ds_ipc::Request::Earcon {
+                    event,
+                    session,
+                    source,
+                } => {
+                    // Completion cues share the session FIFO with speech, so Stop/Notification
+                    // can never overtake narration already admitted for that turn.
+                    let session = earcon_session(&ttsq, session);
+                    log_client(
+                        &paths,
+                        source,
+                        &format!(
+                            "earcon event={event} session={}",
+                            session.as_deref().unwrap_or("-")
+                        ),
+                    );
                     if let Some(ev) = ds_earcon::EarconEvent::parse(&event) {
-                        // The configured sound IS the on/off: `resolve_cue` returns None when
-                        // this event's sound is empty or unresolvable, so an unset cue is simply
-                        // silent. Still honor global mute.
-                        let cfg = VoiceConfig::load(&paths);
-                        if !shared.tts.is_muted()
-                            && let Some(path) = ds_earcon::resolve_cue(
-                                &cfg.earcon_reply_sound,
-                                &cfg.earcon_needs_input_sound,
-                                ev,
-                            )
-                        {
-                            shared.tts.cue(&path);
+                        match ttsq.enqueue_earcon(ev, session) {
+                            Ok(()) => emit(&ds_ipc::Response::Done),
+                            Err(e) => emit(&ds_ipc::Response::error(format!("earcon: {e}"))),
                         }
+                    } else {
+                        emit(&ds_ipc::Response::Done);
                     }
-                    emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::AuthorizeSystemStt => {
                     // Opt-in gate for `stt_engine=system`: prompt for Speech Recognition
@@ -550,6 +558,19 @@ mod tests {
         // A genuine submit: cancels only when the user opted into that scope.
         assert!(should_cancel_on_submit(false, true));
         assert!(!should_cancel_on_submit(false, false));
+    }
+
+    #[test]
+    fn sessionless_legacy_earcon_inherits_active_session() {
+        let ttsq = TtsQueue::test_stub();
+        ttsq.set_active_session(Some("active".into()));
+
+        assert_eq!(earcon_session(&ttsq, None), Some("active".into()));
+        assert_eq!(
+            earcon_session(&ttsq, Some("explicit".into())),
+            Some("explicit".into()),
+            "a session sent by a current hook must remain authoritative"
+        );
     }
 
     #[test]

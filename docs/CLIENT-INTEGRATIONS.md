@@ -34,7 +34,7 @@ adds the install directory to the per-user `PATH`; use a new terminal after firs
 | Claude Code | Yes, through `MessageDisplay` | Not needed; `Stop` is the reply earcon | Yes | Direct `claude` |
 | OpenAI Codex | Yes for interactive sessions started by `dontspeak codex` | Yes for a plain local TUI | Yes | Engine-managed app-server plus `codex --remote` |
 | Qwen Code 0.19.10 | Yes, through `MessageDisplay` | No; the session witness suppresses duplicate `Stop` narration | Yes | Direct `qwen` |
-| Grok 0.2.99 | No message stream | Yes, from the final assistant entry in `Stop.transcriptPath` | Yes | Direct `grok` |
+| Grok 0.2.101 | No message stream | Yes, from the final assistant entry in `Stop.transcriptPath` | Yes | Direct `grok` |
 
 The launcher surface is uniform, but only clients exposing a message stream can narrate
 mid-turn. Grok uses an end-of-turn fallback instead.
@@ -127,9 +127,9 @@ Current registry pins and official contract sources:
 
 | Client | Verified version | Official contracts |
 |---|---:|---|
-| Claude Code | 2.1.209 | [hooks](https://code.claude.com/docs/en/hooks), [MCP](https://code.claude.com/docs/en/mcp) |
+| Claude Code | 2.1.210 | [hooks](https://code.claude.com/docs/en/hooks), [MCP](https://code.claude.com/docs/en/mcp) |
 | OpenAI Codex | 0.144.4 | [hooks](https://developers.openai.com/codex/hooks), [app server](https://developers.openai.com/codex/app-server), [MCP](https://developers.openai.com/codex/mcp) |
 | Qwen Code | 0.19.10 | [release hooks](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/hooks.md), [MCP](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/mcp.md) |
-| Grok | 0.2.99 | [CLI](https://docs.x.ai/build/cli/reference), [hooks](https://docs.x.ai/build/features/hooks), [MCP](https://docs.x.ai/build/features/mcp-servers) |
+| Grok | 0.2.101 | [CLI](https://docs.x.ai/build/cli/reference), [hooks](https://docs.x.ai/build/features/hooks), [MCP](https://docs.x.ai/build/features/mcp-servers) |
 
 The version pin records when a contract was checked; it is not a minimum-version claim.

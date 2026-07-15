@@ -68,8 +68,9 @@ so it can't drift out of sync with recording. Windows reads the key via a low-le
 The engine owns a single FIFO TTS queue served by a warm helper process that keeps the
 Kokoro model loaded. What gets spoken is decided upstream by the `narrate` setting.
 Barge-in (starting to record while speech is playing) pauses the queue and resumes on
-cancel. Short audible earcons — a reply-done cue and a needs-input cue, each
-independently configurable — play outside the queue, mixed over any in-flight speech.
+cancel. Short audible earcons — a reply-done cue and a needs-input cue, each independently
+configurable — are session-scoped queue actions, ordered after narration already admitted for
+their hook event. They never mix over in-flight speech.
 
 The shared Markdown-to-phoneme frontend, backend parity contract, helper outcomes,
 queue/listener interaction, and planned delivery-state evolution are specified in

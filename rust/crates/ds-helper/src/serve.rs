@@ -33,6 +33,185 @@ fn barge_then_publish<T>(
     cv.notify_one();
 }
 
+#[derive(Default)]
+struct CueGate {
+    muted: bool,
+    next_generation: u64,
+    active: Option<u64>,
+}
+
+impl CueGate {
+    fn begin(&mut self) -> Option<(u64, Option<u64>)> {
+        if self.muted {
+            return None;
+        }
+        let previous = self.active.take();
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        self.active = Some(self.next_generation);
+        Some((self.next_generation, previous))
+    }
+
+    fn accepts_handle(&self, generation: u64) -> bool {
+        !self.muted && self.active == Some(generation)
+    }
+
+    fn finish(&mut self, generation: u64) {
+        if self.active == Some(generation) {
+            self.active = None;
+        }
+    }
+
+    fn set_muted(&mut self, on: bool) -> Option<u64> {
+        self.muted = on;
+        if on { self.active.take() } else { None }
+    }
+
+    fn cancel(&mut self) -> Option<u64> {
+        self.active.take()
+    }
+}
+
+#[derive(Default)]
+struct CuePlayback {
+    gate: std::sync::Mutex<CueGate>,
+    player: std::sync::Mutex<Option<(u64, std::sync::Arc<rodio::Player>)>>,
+    #[cfg(target_os = "macos")]
+    afplay: std::sync::Mutex<Option<(u64, std::process::Child)>>,
+}
+
+impl CuePlayback {
+    fn begin(&self) -> Option<u64> {
+        let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        let (generation, previous) = gate.begin()?;
+        if let Some(previous) = previous {
+            self.stop_handles(previous);
+        }
+        Some(generation)
+    }
+
+    fn install_player(&self, generation: u64, player: std::sync::Arc<rodio::Player>) -> bool {
+        let gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if !gate.accepts_handle(generation) {
+            player.stop();
+            return false;
+        }
+        *self.player.lock().unwrap_or_else(|e| e.into_inner()) = Some((generation, player));
+        true
+    }
+
+    #[cfg(target_os = "macos")]
+    fn install_afplay(&self, generation: u64, mut child: std::process::Child) -> bool {
+        let gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if !gate.accepts_handle(generation) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        *self.afplay.lock().unwrap_or_else(|e| e.into_inner()) = Some((generation, child));
+        true
+    }
+
+    #[cfg(target_os = "macos")]
+    fn wait_afplay(&self, generation: u64) {
+        loop {
+            let done = {
+                let mut active = self.afplay.lock().unwrap_or_else(|e| e.into_inner());
+                match active.as_mut() {
+                    Some((active_generation, child)) if *active_generation == generation => {
+                        match child.try_wait() {
+                            Ok(Some(_)) => {
+                                *active = None;
+                                true
+                            }
+                            Ok(None) => false,
+                            Err(_) => {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                *active = None;
+                                true
+                            }
+                        }
+                    }
+                    _ => true,
+                }
+            };
+            if done {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+
+    fn finish(&self, generation: u64) {
+        let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        gate.finish(generation);
+        let mut player = self.player.lock().unwrap_or_else(|e| e.into_inner());
+        if player
+            .as_ref()
+            .is_some_and(|(active_generation, _)| *active_generation == generation)
+        {
+            *player = None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut afplay = self.afplay.lock().unwrap_or_else(|e| e.into_inner());
+            if afplay
+                .as_ref()
+                .is_some_and(|(active_generation, _)| *active_generation == generation)
+            {
+                if let Some((_, mut child)) = afplay.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+    }
+
+    fn set_muted(&self, on: bool) {
+        let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(generation) = gate.set_muted(on) {
+            self.stop_handles(generation);
+        }
+    }
+
+    fn cancel(&self) {
+        let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(generation) = gate.cancel() {
+            self.stop_handles(generation);
+        }
+    }
+
+    /// Called with `gate` held, keeping admission/handle installation ordered with stops.
+    fn stop_handles(&self, generation: u64) {
+        let mut player = self.player.lock().unwrap_or_else(|e| e.into_inner());
+        if player
+            .as_ref()
+            .is_some_and(|(active_generation, _)| *active_generation == generation)
+            && let Some((_, player)) = player.take()
+        {
+            player.stop();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut afplay = self.afplay.lock().unwrap_or_else(|e| e.into_inner());
+            if afplay
+                .as_ref()
+                .is_some_and(|(active_generation, _)| *active_generation == generation)
+                && let Some((_, mut child)) = afplay.take()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
+fn emit_cue_done() {
+    use std::io::Write as _;
+    println!("{}", proto::CUEDONE);
+    let _ = std::io::stdout().flush();
+}
+
 /// Flatten an error for a protocol line: the engine's reader parses helper stdout strictly
 /// line-by-line, so a multi-line message (ort/ONNX Runtime `Display` can be) would truncate
 /// the `ERR`/`TTSLOADERR` terminal at its first line and leak the rest as stray lines.
@@ -511,11 +690,11 @@ pub(crate) fn serve() -> ! {
             }
         }
     };
-    // An OWNED, `Send` clone of the device mixer (it's an `Arc` handle) for the reader thread
-    // to play one-shot EARCONS on — mixed alongside any in-flight TTS by the OS. `None` when
-    // the duplex backend owns render (macOS VPIO, no rodio mixer); the cue then falls back to
-    // `afplay` on macOS (see the `cue` op below).
+    // An OWNED, `Send` clone of the device mixer (it's an `Arc` handle) for ordered one-shot
+    // EARCONS. `None` when the duplex backend owns render (macOS VPIO, no rodio mixer); the
+    // tracked cue then uses `afplay` on macOS (see the `cue` op below).
     let cue_mixer = device.as_ref().map(|d| d.mixer().clone());
+    let cue_playback = Arc::new(CuePlayback::default());
     // The model is loaded + warm and the output device is open → signal READY (green). The
     // audio-stream RESUME latency (rodio pauses the CoreAudio output when idle) is handled
     // per-utterance below — a brief leading silence absorbs the resume so the speech onset
@@ -591,10 +770,8 @@ pub(crate) fn serve() -> ! {
     // arriving mid-listen (narration) must QUEUE behind the dictation, not abort it (which
     // truncated the capture). It trips on the INTENDED stops only: `stop` / `lstop` (the
     // seconds-timer + Caps release) and shutdown (stdin EOF).
-    // MUTE: silence output WITHOUT stopping — the queue/playback still drains (timing
-    // preserved), only the audio is zeroed. Toggled by the `mute` op (Caps-tap when dictation
-    // is off, or the tray checkbox). Read by the paced VPIO feeder below (zeroes each small
-    // chunk) and applied instantly to the sounding rodio player on toggle.
+    // MUTE: speech keeps draining silently, while one-shot cues are suppressed or stopped.
+    // Read by the paced VPIO feeder and applied instantly to the sounding rodio player.
     let muted = Arc::new(AtomicBool::new(false));
 
     // Reader thread: parse JSON requests. speak/preview enqueue (newest wins) and
@@ -610,6 +787,7 @@ pub(crate) fn serve() -> ! {
         let listen_sig = listen_sig.clone();
         let muted = muted.clone();
         let cue_mixer = cue_mixer.clone();
+        let cue_playback = cue_playback.clone();
         let full_duplex_listening = full_duplex_listening.clone();
         std::thread::spawn(move || {
             let stdin = std::io::stdin();
@@ -643,6 +821,7 @@ pub(crate) fn serve() -> ! {
                     if let Some(f) = &duplex_barge {
                         f.store(true, Ordering::SeqCst);
                     }
+                    cue_playback.cancel();
                 };
                 // Graceful variant: ramp the rodio player's volume to zero over a SHORT
                 // window so NO explicit barge is a hard cut/click — used by every user-
@@ -655,6 +834,7 @@ pub(crate) fn serve() -> ! {
                 // on a record-barge, yet long enough to de-click.
                 let cancel_current_fade = || {
                     cancel.store(true, Ordering::SeqCst);
+                    cue_playback.cancel();
                     // Clone the Arc out so the ramp does NOT hold the `cur_player` lock
                     // (the playback loop touches it too).
                     let player = cur_player
@@ -693,15 +873,15 @@ pub(crate) fn serve() -> ! {
                         }
                     }
                     "mute" => {
-                        // Toggle global mute (text "on"/"off"). Does NOT cancel — playback keeps
-                        // draining; the audio is just silenced. Apply instantly to the sounding
-                        // rodio player so already-queued audio goes quiet immediately; VPIO's
-                        // paced feeder observes the flag between small render chunks.
+                        // Speech keeps draining silently. Cues are one-shot signals, so mute
+                        // stops an active one and suppresses later ones rather than resurrecting
+                        // them on unmute.
                         let on = matches!(
                             req.text.trim().to_ascii_lowercase().as_str(),
                             "on" | "true" | "1" | "yes"
                         );
                         muted.store(on, Ordering::SeqCst);
+                        cue_playback.set_muted(on);
                         if let Some(p) = cur_player
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -712,34 +892,59 @@ pub(crate) fn serve() -> ! {
                     }
                     "stopfade" => cancel_current_fade(), // graceful per-window barge (fade then stop)
                     "cue" => {
-                        // One-shot EARCON (turn-done ding / needs-input cue): decode + play the
-                        // resolved sound file on the SAME rodio mixer that renders TTS, so the OS
-                        // mixes it over any in-flight speech. Does NOT cancel and does NOT emit a
-                        // DONE — it rides alongside the queue. Fire-and-forget on its own thread;
-                        // fail-quiet. In macOS VPIO full-duplex there is no rodio mixer (the duplex
-                        // owns render), so fall back to `afplay`. Skipped while muted (the engine
-                        // also gates on mute, but a toggle can race the send).
+                        // Cue playback stays off the stdin reader so mute/stop remain live, but
+                        // its CUEDONE terminal makes the engine queue wait before starting the
+                        // next action. The tracked handle lets mute stop an already-sounding cue.
                         let path = req.text.clone();
-                        if muted.load(Ordering::SeqCst) {
-                            // muted → no cue
-                        } else if let Some(mixer) = cue_mixer.clone() {
+                        let Some(generation) = cue_playback.begin() else {
+                            emit_cue_done();
+                            continue;
+                        };
+                        if let Some(mixer) = cue_mixer.clone() {
+                            let cue_playback = cue_playback.clone();
                             std::thread::spawn(move || {
                                 let Ok(file) = std::fs::File::open(&path) else {
+                                    cue_playback.finish(generation);
+                                    emit_cue_done();
                                     return;
                                 };
                                 let Ok(decoder) =
                                     rodio::Decoder::new(std::io::BufReader::new(file))
                                 else {
+                                    cue_playback.finish(generation);
+                                    emit_cue_done();
                                     return;
                                 };
-                                let player = rodio::Player::connect_new(&mixer);
+                                let player = Arc::new(rodio::Player::connect_new(&mixer));
+                                if !cue_playback.install_player(generation, player.clone()) {
+                                    cue_playback.finish(generation);
+                                    emit_cue_done();
+                                    return;
+                                }
                                 player.append(decoder);
                                 player.sleep_until_end();
+                                cue_playback.finish(generation);
+                                emit_cue_done();
                             });
                         } else {
                             #[cfg(target_os = "macos")]
                             {
-                                let _ = std::process::Command::new("afplay").arg(&path).spawn();
+                                let cue_playback = cue_playback.clone();
+                                std::thread::spawn(move || {
+                                    if let Ok(child) =
+                                        std::process::Command::new("afplay").arg(&path).spawn()
+                                        && cue_playback.install_afplay(generation, child)
+                                    {
+                                        cue_playback.wait_afplay(generation);
+                                    }
+                                    cue_playback.finish(generation);
+                                    emit_cue_done();
+                                });
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                cue_playback.finish(generation);
+                                emit_cue_done();
                             }
                         }
                     }
@@ -841,6 +1046,7 @@ pub(crate) fn serve() -> ! {
             // cleared on kill" bug. Nothing here survives the process, so there is
             // no stale queue to replay on the next engine start.
             cancel.store(true, Ordering::SeqCst);
+            cue_playback.cancel();
             // End an in-flight diarize/enroll capture AND a half-duplex listen too (both
             // ignore the TTS `cancel`).
             capture_cancel.store(true, Ordering::SeqCst);
@@ -1497,6 +1703,45 @@ mod request_order_tests {
         );
 
         assert!(*shared.0.lock().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod cue_gate_tests {
+    use super::CueGate;
+
+    #[test]
+    fn mute_cancels_the_active_generation_without_resurrection() {
+        let mut gate = CueGate::default();
+        let (old, previous) = gate.begin().unwrap();
+        assert_eq!(previous, None);
+        assert!(gate.accepts_handle(old));
+
+        assert_eq!(gate.set_muted(true), Some(old));
+        assert!(!gate.accepts_handle(old));
+        assert!(
+            gate.begin().is_none(),
+            "new cues are suppressed while muted"
+        );
+
+        assert_eq!(gate.set_muted(false), None);
+        assert!(
+            !gate.accepts_handle(old),
+            "unmute must not revive the old cue"
+        );
+        let (later, previous) = gate.begin().unwrap();
+        assert!(later > old);
+        assert_eq!(previous, None);
+        assert!(gate.accepts_handle(later));
+    }
+
+    #[test]
+    fn explicit_cancel_only_removes_the_current_cue() {
+        let mut gate = CueGate::default();
+        let (first, _) = gate.begin().unwrap();
+        assert_eq!(gate.cancel(), Some(first));
+        assert!(!gate.accepts_handle(first));
+        assert!(gate.begin().is_some(), "later cues remain playable");
     }
 }
 

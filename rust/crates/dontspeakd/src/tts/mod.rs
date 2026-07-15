@@ -186,6 +186,8 @@ pub struct TtsManager {
     /// Filled by the reader: a `speak`/`preview` waits here for its terminal DONE
     /// (or ERR/EOF). Reset at the start of each `play()`.
     speak_slot: Arc<(Mutex<SpeakSlot>, Condvar)>,
+    /// Filled by the reader when an ordered cue finishes, is suppressed, or is cancelled.
+    cue_slot: Arc<(Mutex<CueSlot>, Condvar)>,
     /// Filled by the reader: a `listen` drains LISTENING/PARTIAL/FINAL/STTERR/LDONE
     /// events here. Cleared at the start of each `listen()`. Demuxing the one
     /// stdout into separate slots is what lets a speak and a listen coexist.
@@ -351,6 +353,7 @@ impl TtsManager {
             stdin: Mutex::new(None),
             reader: Mutex::new(None),
             speak_slot: Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new())),
+            cue_slot: Arc::new((Mutex::new(CueSlot::default()), Condvar::new())),
             listen_slot: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
             listen_lease: Mutex::new(()),
             next_listen_generation: AtomicU64::new(1),
@@ -1018,6 +1021,7 @@ impl TtsManager {
         // flight at once (full-duplex coexist). It exits on EOF (child killed).
         let handle = {
             let speak_slot = self.speak_slot.clone();
+            let cue_slot = self.cue_slot.clone();
             let listen_slot = self.listen_slot.clone();
             let diarize_slot = self.diarize_slot.clone();
             let enroll_slot = self.enroll_slot.clone();
@@ -1044,6 +1048,7 @@ impl TtsManager {
                     stdout,
                     ReaderSlots {
                         speak: speak_slot,
+                        cue: cue_slot,
                         listen: listen_slot,
                         diarize: diarize_slot,
                         enroll: enroll_slot,
@@ -1596,8 +1601,8 @@ impl TtsManager {
         self.muted.load(Ordering::Relaxed)
     }
 
-    /// Set global mute. Records it AND pushes the `mute` op to the warm child so the change
-    /// is live (the child silences playback without stopping — the queue keeps draining).
+    /// Set global mute. Records it and pushes the `mute` op to the warm child so speech is
+    /// silenced live and an active or later cue is stopped/suppressed.
     /// Idempotent. macOS full-duplex has no VPIO volume control, so its helper paces small
     /// chunks to a bounded lookahead and observes mute between pushes; already-buffered audio
     /// can still sound for that short lookahead rather than stopping instantaneously.
@@ -1628,18 +1633,49 @@ impl TtsManager {
         }
     }
 
-    /// Play a one-shot EARCON on the warm child's audio output — fire-and-forget, OUTSIDE
-    /// the TTS queue, so a turn-end ding is mixed over any in-flight speech rather than
-    /// queued behind it. No-op when the child isn't running or the path escapes the platform
-    /// sound directories. Revalidating here keeps the helper protocol safe if another caller
-    /// is added without going through `resolve_cue`.
-    pub fn cue(&self, path: &std::path::Path) {
+    /// Play one ordered EARCON on the warm child and block until it finishes, is muted, or is
+    /// explicitly cancelled. Revalidating the path here keeps the helper protocol safe.
+    pub fn cue(&self, path: &std::path::Path) -> std::io::Result<()> {
         let Some(path) = ds_earcon::canonical_sound_path(path) else {
-            return;
+            return Ok(());
         };
-        let _ = self.write_request(
+        let Some(my_gen) = self.child.running_gen() else {
+            return Err(std::io::Error::other("TTS child not running"));
+        };
+        {
+            let (m, _) = &*self.cue_slot;
+            *m.lock().unwrap() = CueSlot::default();
+        }
+        if let Err(error) = self.write_request(
             &serde_json::json!({ "op": "cue", "text": path.to_string_lossy() }).to_string(),
-        );
+        ) {
+            self.mark_dead();
+            return Err(error);
+        }
+
+        let (m, cv) = &*self.cue_slot;
+        let mut state = m.lock().unwrap();
+        let deadline = std::time::Instant::now() + SPEAK_TERMINAL_TIMEOUT;
+        while !state.done && !state.dead {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                drop(state);
+                self.mark_dead_if_current(my_gen);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "TTS helper did not finish the cue request",
+                ));
+            }
+            let (next, _) = cv.wait_timeout(state, deadline - now).unwrap();
+            state = next;
+        }
+        let dead = state.dead;
+        drop(state);
+        if dead {
+            self.mark_dead_if_current(my_gen);
+            return Err(std::io::Error::other("TTS child closed mid-cue"));
+        }
+        Ok(())
     }
 
     /// End an in-flight `listen` WITHOUT cancelling a concurrent `speak` (the

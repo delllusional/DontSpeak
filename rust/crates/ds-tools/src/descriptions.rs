@@ -17,9 +17,9 @@ pub const SPEAK_RATE: &str = "Speed multiplier 0.5–2.0 (default: from config).
 pub const STOP_SPEECH: &str = "Stop any in-progress speech immediately.";
 
 // ── mute ─────────────────────────────────────────────────────────────────────────────
-pub const MUTE: &str = "Silence or restore ALL spoken output — the app's global mute. Muted \
-    replies and narration still queue but play silently. Persists, unlike the one-shot \
-    stop_speech; get_status shows the muted state.";
+pub const MUTE: &str = "Silence or restore ALL audio output — the app's global mute. Muted \
+    replies and narration drain silently; queued earcons are suppressed and an active cue \
+    stops without replaying on unmute. Persists, unlike stop_speech; get_status shows mute.";
 pub const MUTE_ON: &str = "true = mute; false = unmute.";
 
 // ── list_voices ──────────────────────────────────────────────────────────────────────

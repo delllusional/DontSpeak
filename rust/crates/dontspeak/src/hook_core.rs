@@ -129,11 +129,11 @@ pub(crate) fn notify_at(
         //    on the session witness to avoid repeating the final reply.
         //  • Grok Stop is metadata-only; speak_reply now falls back to the `transcriptPath`
         //    file (chat_history.jsonl etc.) to obtain the final assistant text (#49).
-        // The reply-done earcon then rings for every client (engine self-gates on `earcon_enabled` +
-        // mute), so a finished turn is signalled whether or not the reply was just voiced.
+        // The reply-done earcon then queues behind this session's admitted narration, so it
+        // never mixes over speech already waiting in the engine.
         "Stop" => {
             hook_narrate::speak_reply(paths, payload, client);
-            hook_speak::engine_earcon(paths, "reply_done", client);
+            hook_speak::engine_earcon(paths, "reply_done", payload, client);
         }
         // A permission prompt / idle notification → the needs-input earcon (the handler filters
         // to just the "waiting on you" notification types).

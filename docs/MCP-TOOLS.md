@@ -42,9 +42,9 @@ Stop any in-progress speech immediately. No parameters.
 
 ## mute
 
-Silence or restore ALL spoken output — the app's global mute. Muted replies and
-narration still queue but play silently. Persists, unlike the one-shot `stop_speech`;
-`get_status` shows the muted state.
+Silence or restore ALL audio output — the app's global mute. Muted replies and narration
+drain silently; queued earcons are suppressed and an active cue stops without replaying on
+unmute. Persists, unlike `stop_speech`; `get_status` shows mute.
 
 | Param | Type | Required | Description |
 |---|---|---|---|

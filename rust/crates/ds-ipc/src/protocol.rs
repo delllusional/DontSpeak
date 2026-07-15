@@ -50,8 +50,8 @@ pub enum Request {
     /// coordinates the managed Unix daemon. → [`Response::CodexStreamReady`] or
     /// [`Response::Error`].
     EnsureCodexStream,
-    /// Set global MUTE (the tray checkbox; the Caps-tap toggles it engine-side). Muting
-    /// silences playback WITHOUT stopping it — the queue keeps draining. → [`Response::Done`].
+    /// Set global MUTE (the tray checkbox; the Caps-tap toggles it engine-side). Speech keeps
+    /// draining silently; queued cues are suppressed and an active cue stops. → [`Response::Done`].
     SetMuted { on: bool },
     /// A terminal/session just opened (SessionStart hook). If `greet_on_open` is set,
     /// the engine claims this session's pool voice and speaks a short greeting in it.
@@ -217,13 +217,18 @@ pub enum Request {
     /// for the mtime poll. Same effect as an mtime-triggered reload; debounced with it.
     /// → [`Response::Done`].
     Reload,
-    /// Play an audible EARCON now (fire-and-forget). `event` is `"reply_done"` (the Stop
+    /// Enqueue an audible EARCON. `event` is `"reply_done"` (the Stop
     /// hook — Claude finished its turn) or `"needs_input"` (the Notification hook — a
     /// permission prompt / idle). The engine resolves the configured-or-introspected sound
-    /// and plays it on the warm helper's audio output, honoring the `earcon_enabled` config
-    /// and global mute. Unknown/disabled ⇒ silent no-op. → [`Response::Done`].
+    /// and plays it on the warm helper's audio output after earlier queue actions for this
+    /// session, honoring the configured sound and global mute. Unknown/disabled ⇒ silent
+    /// no-op. → [`Response::Done`].
     Earcon {
         event: String,
+        /// The session whose ordered speech stream this cue terminates. Optional for backward
+        /// compatibility with hook binaries that predate queued earcons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
         /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED.
         source: ClientSource,
     },
@@ -394,6 +399,7 @@ mod tests {
             Request::AuthorizeSystemStt,
             Request::Earcon {
                 event: "reply_done".into(),
+                session: Some("sess-1".into()),
                 source: ClientSource::Grok,
             },
             Request::Shutdown,
@@ -541,6 +547,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn earcon_session_roundtrips_and_old_lines_default_to_global() {
+        let with_session = Request::Earcon {
+            event: "needs_input".into(),
+            session: Some("sess-1".into()),
+            source: ClientSource::ClaudeCode,
+        };
+        let line = serde_json::to_string(&with_session).unwrap();
+        assert!(line.contains(r#""session":"sess-1""#));
+        assert!(matches!(
+            serde_json::from_str::<Request>(&line).unwrap(),
+            Request::Earcon {
+                session: Some(ref session),
+                ..
+            } if session == "sess-1"
+        ));
+
+        let old: Request =
+            serde_json::from_str(r#"{"cmd":"earcon","event":"reply_done","source":"codex"}"#)
+                .unwrap();
+        assert!(matches!(old, Request::Earcon { session: None, .. }));
     }
 
     /// Version-skew regression guard: a future response variant this build
