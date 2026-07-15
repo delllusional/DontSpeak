@@ -158,11 +158,10 @@ impl CuePlayback {
             if afplay
                 .as_ref()
                 .is_some_and(|(active_generation, _)| *active_generation == generation)
+                && let Some((_, mut child)) = afplay.take()
             {
-                if let Some((_, mut child)) = afplay.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
+                let _ = child.kill();
+                let _ = child.wait();
             }
         }
     }
@@ -916,12 +915,16 @@ pub(crate) fn serve() -> ! {
                                     return;
                                 };
                                 let player = Arc::new(rodio::Player::connect_new(&mixer));
+                                // Append BEFORE install: install_player's rejection path stops
+                                // the player, so a mute/cancel racing this thread kills the
+                                // appended source instead of stopping an empty player and
+                                // letting the later append play in full.
+                                player.append(decoder);
                                 if !cue_playback.install_player(generation, player.clone()) {
                                     cue_playback.finish(generation);
                                     emit_cue_done();
                                     return;
                                 }
-                                player.append(decoder);
                                 player.sleep_until_end();
                                 cue_playback.finish(generation);
                                 emit_cue_done();
