@@ -495,17 +495,17 @@ private let legacyResetLog = Logger(subsystem: "app.dontspeak.org", category: "l
 /// nothing else keeps them alive. `finish` is single-shot: a trailing error after the
 /// final result (or a post-timeout callback) must not clobber the outcome.
 ///
-/// `committedText`/`latestPartial` are used ONLY by the streaming entry points
-/// (`sysStreamStartLegacy` and friends) — `legacyTranscribe`'s one-shot batch use never
-/// touches them, so they just sit at their empty default there. They're owned by THIS run
-/// object rather than `SysStreamState` (finding #2 follow-up) so a stale/replaced run's own
-/// callback can only ever read/write ITS OWN copy — no cross-run corruption is possible by
-/// construction, and `smk_sys_stream_finish`'s own `isFinal` callback can still read them
-/// correctly even after `SysStreamState`'s shared `legacyRun`/`legacyRequest` pointers have
-/// already been cleared (which happens as soon as `finish` starts waiting — a check against
-/// those shared pointers at that point would incorrectly read this, the CORRECT run, as
-/// stale).
-private final class LegacyRun: @unchecked Sendable {
+/// `committedText`/`latestPartial`/`settledPartial` are used ONLY by the streaming
+/// entry points (`sysStreamStartLegacy` and friends) — `legacyTranscribe`'s one-shot
+/// batch use never touches them, so they just sit at their empty default there. They're
+/// owned by THIS run object rather than `SysStreamState` (finding #2 follow-up) so a
+/// stale/replaced run's own callback can only ever read/write ITS OWN copy — no cross-run
+/// corruption is possible by construction, and `smk_sys_stream_finish`'s own `isFinal`
+/// callback can still read them correctly even after `SysStreamState`'s shared
+/// `legacyRun`/`legacyRequest` pointers have already been cleared (which happens as soon
+/// as `finish` starts waiting — a check against those shared pointers at that point would
+/// incorrectly read this, the CORRECT run, as stale).
+final class LegacyRun: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
     var text: String?
@@ -516,7 +516,10 @@ private final class LegacyRun: @unchecked Sendable {
 
     private let textLock = NSLock()
     private var committedText: String = ""
+    /// The raw newest callback, retained for phrase-reset detection.
     private var latestPartial: String = ""
+    /// The popup/final candidate, protected from empty or strict-prefix callback regressions.
+    private var settledPartial: String = ""
     private var lastPartialChangedAt: TimeInterval?
 
     func finish(text: String?, error: Error?) {
@@ -529,17 +532,22 @@ private final class LegacyRun: @unchecked Sendable {
         sem.signal()
     }
 
-    /// `committedText + " " + latestPartial` (whichever half is non-empty) — same shape as
+    /// `committedText + " " + settledPartial` (whichever half is non-empty) — same shape as
     /// `SysModernSession.hypothesis()`.
     func hypothesis() -> String {
         textLock.lock()
         defer { textLock.unlock() }
-        return legacyJoin(committedText, latestPartial)
+        return legacyJoin(committedText, settledPartial)
+    }
+
+    /// A no-speech terminal after a valid partial still finalizes to that popup-visible text.
+    func finishNoSpeech() {
+        finish(text: finalJoined(""), error: nil)
     }
 
     /// Record one non-final result's `bestTranscription`. Detects a phrase-segment boundary
     /// (`legacySegmentDidReset` — see its doc comment) and, if one just happened, commits the
-    /// pre-reset `latestPartial` into `committedText` (finding #7's pattern: skip an empty
+    /// pre-reset settled partial into `committedText` (finding #7's pattern: skip an empty
     /// segment so it can't bake in a stray separator) before starting the new segment.
     func recordPartial(_ newText: String) {
         textLock.lock()
@@ -560,7 +568,11 @@ private final class LegacyRun: @unchecked Sendable {
             } else {
                 legacyResetLog.debug("legacy STT phrase reset: gapSeconds=nil")
             }
-            committedText = legacyJoin(committedText, latestPartial)
+            committedText = legacyJoin(committedText, settledPartial)
+            settledPartial = newText
+        } else {
+            settledPartial = systemSettledSegment(
+                latestPartial: settledPartial, finalSegment: newText)
         }
         latestPartial = newText
         lastPartialChangedAt = timing.lastChangedAt
@@ -571,7 +583,9 @@ private final class LegacyRun: @unchecked Sendable {
     func finalJoined(_ finalSegment: String) -> String {
         textLock.lock()
         defer { textLock.unlock() }
-        return legacyJoin(committedText, finalSegment)
+        let settled = systemSettledSegment(
+            latestPartial: settledPartial, finalSegment: finalSegment)
+        return legacyJoin(committedText, settled)
     }
 }
 
@@ -779,9 +793,9 @@ private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) thr
 //   • macOS 26+: ONE persistent `SpeechAnalyzer` + `AsyncStream<AnalyzerInput>` for the whole
 //     utterance. A detached `Task` drains `transcriber.results` WITHOUT the `where
 //     result.isFinal` filter `sysTranscribe` uses, so we see volatile (non-final) results too:
-//     `committedText` accumulates each finalized result, `latestVolatileText` holds the newest
-//     in-flight (non-final) hypothesis. It runs independently of whichever thread is currently
-//     inside a push/finish call — those only read the two fields under the session's lock.
+//     `committedText` accumulates each finalized result, `latestVolatileText` holds the most
+//     complete in-flight (non-final) hypothesis. It runs independently of whichever thread is
+//     currently inside a push/finish call — those only read the two fields under the session's lock.
 //   • Legacy (<26): a FRESH `SFSpeechAudioBufferRecognitionRequest` per utterance (like
 //     `legacyTranscribe`), but with `shouldReportPartialResults = true` — today's batch path
 //     sets it `false`, which is the actual bug this streaming path fixes.
@@ -795,12 +809,12 @@ private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) thr
 //     whole utterance (no restart needed), but its `bestTranscription` only ever covers the
 //     CURRENT phrase segment — mirroring `SysModernSession`, `LegacyRun` (see its doc
 //     comment for why it lives THERE and not on `SysStreamState`) accumulates each
-//     completed segment in `committedText` and tracks the CURRENT segment's in-flight
-//     hypothesis in `latestPartial` (not the whole utterance's, as before). A segment
-//     boundary is inferred from the text itself in `legacySegmentDidReset` (see its doc
+//     completed segment in `committedText`, tracks the CURRENT segment's raw callback in
+//     `latestPartial`, and preserves its popup-visible candidate in `settledPartial`. A
+//     segment boundary is inferred from the text itself in `legacySegmentDidReset` (see its doc
 //     comment for the exact heuristic and why a naive word/length check false-positives on
 //     ordinary in-phrase revisions like digit re-grouping); when detected,
-//     `LegacyRun.recordPartial` commits the pre-reset `latestPartial` into `committedText`
+//     `LegacyRun.recordPartial` commits the pre-reset `settledPartial` into `committedText`
 //     before overwriting it. `run.finish` only fires once, on `isFinal` (mirrors
 //     `LegacyRun`'s guard-against-double-signal), and its text is
 //     `LegacyRun.finalJoined(_:)` — `committedText + " " + <final segment>`, the same
@@ -809,6 +823,27 @@ private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) thr
 // Both tiers reuse the existing per-tier helpers (`sysEnsureModel`/`sysConvert`/`sysMakeBuffer`,
 // `legacyRecognizer`/`legacyQueue`/`LegacyRun`/`legacyIsNoSpeech`) — no duplicated auth/model
 // logic. `smk_sys_transcribe`/`legacyTranscribe`/`sysTranscribe` (batch) are untouched.
+
+private func systemSpeechWords(_ text: String) -> [String] {
+    text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+}
+
+/// Keep the live hypothesis when Apple's final callback is empty or only a word-prefix of it.
+/// macOS 15 was observed returning a strict-prefix final after the popup had already shown the
+/// complete partial, which made the subsequent Caps submit look like a paste truncation. Other
+/// final revisions still win, including same-length punctuation and recognition corrections.
+func systemSettledSegment(latestPartial: String, finalSegment: String) -> String {
+    let partialWords = systemSpeechWords(latestPartial)
+    guard !partialWords.isEmpty else { return finalSegment }
+
+    let finalWords = systemSpeechWords(finalSegment)
+    if finalWords.isEmpty
+        || (partialWords.count > finalWords.count && partialWords.starts(with: finalWords))
+    {
+        return latestPartial
+    }
+    return finalSegment
+}
 
 /// Modern-tier (26+) per-utterance session. Held as a plain (non-`@available`) `Any?` on
 /// `SysStreamState` so the OUTER state class itself needs no availability gate; every site that
@@ -858,14 +893,18 @@ private final class SysModernSession: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if isFinal {
+            let settled = systemSettledSegment(
+                latestPartial: latestVolatileText, finalSegment: text)
             // An empty final (e.g. a silent segment) must NOT bake a permanent trailing
             // separator into committedText — only append when there's real text.
-            if !text.isEmpty {
-                committedText = committedText.isEmpty ? text : "\(committedText) \(text)"
+            if !settled.isEmpty {
+                committedText =
+                    committedText.isEmpty ? settled : "\(committedText) \(settled)"
             }
             latestVolatileText = ""
         } else {
-            latestVolatileText = text
+            latestVolatileText = systemSettledSegment(
+                latestPartial: latestVolatileText, finalSegment: text)
         }
     }
 }
@@ -1147,9 +1186,14 @@ private func sysStreamStartLegacy() -> Int32 {
                 }
             }
         } else if let error {
-            run.finish(
-                text: legacyIsNoSpeech(error) ? "" : nil,
-                error: legacyIsNoSpeech(error) ? nil : error)
+            let noSpeech = legacyIsNoSpeech(error)
+            // macOS 15 can report no-speech after already publishing a valid partial.
+            // Preserve that popup-visible hypothesis instead of finalizing to empty.
+            if noSpeech {
+                run.finishNoSpeech()
+            } else {
+                run.finish(text: nil, error: error)
+            }
         }
     }
     return 0
