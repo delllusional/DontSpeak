@@ -301,7 +301,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 // Apple-native Kokoro / Parakeet Core ML sets — the SAME standard download path as
                 // every other target (single-flight, real %, error surfaced, warm child restarted
                 // on completion), NOT a helper-side self-fetch. One byte-weighted bar per set;
-                // FluidAudio then only LOADS them (enforceOffline). macOS-only (ANE shim).
+                // FluidAudio then only LOADS them (`offlineMode`). macOS-only (ANE shim).
                 #[cfg(target_os = "macos")]
                 DownloadTarget::KokoroCoreml => ds_model::coreml_repo::ensure_coreml_repos(
                     &ds_model::coreml_repo::KOKORO_COREML_SET,
@@ -468,7 +468,7 @@ fn fetch_plan(prefetch_cuda: bool, need: &DownloadNeeds) -> Vec<DownloadTarget> 
 /// (file-presence gated here; [`start_download`] attaches to a target already in flight).
 /// Covers EVERY DontSpeak-managed model set the warm child hosts: the
 /// ONNX models, the apple-native Core ML sets (Kokoro chain + G2P, Parakeet EOU + fallback —
-/// the warm child no longer self-fetches; FluidAudio only LOADS, enforceOffline), and the
+/// the warm child no longer self-fetches; FluidAudio only LOADS in `offlineMode`), and the
 /// Kokoro frontend assets on the ANE path (see [`ane_needs_frontend_assets`]). Called on startup, on
 /// every config reload, and on a slow poll-loop tick (so a download that failed — e.g. no
 /// network at launch — retries without any user action).

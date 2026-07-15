@@ -5,7 +5,7 @@
 //! several hardcoded cache roots. Instead we now fetch EVERY FluidAudio model file ourselves
 //! (reusing the same HTTP + retry + SHA + atomic-rename + progress machinery as the ONNX
 //! path) and then run FluidAudio in OFFLINE mode (the Swift shim sets
-//! `DownloadUtils.enforceOffline = true`), so it only ever LOADS from the dirs we populated.
+//! `ModelHub.offlineMode = true`), so it only ever LOADS from the dirs we populated.
 //!
 //! Each model set is pinned to an IMMUTABLE HuggingFace revision (a commit SHA). At download
 //! time we enumerate that revision's file tree via the HF tree API and fetch each blob into

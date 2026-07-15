@@ -176,7 +176,7 @@ pub(crate) fn model_status_json(
     // The Kokoro row reflects the ACTIVE TTS backend (mirrors the Parakeet row below):
     //   * apple-native → gated on the shim (the loader) + the downloaded Core ML sets (the
     //                    engine's download manager fetches them — target `kokoro_coreml` —
-    //                    and FluidAudio only LOADS, enforceOffline). Presence reads the SAME
+    //                    and FluidAudio only LOADS in `offlineMode`). Presence reads the SAME
     //                    revision-pinned completion markers the downloader writes, so a
     //                    partial fetch reads MISSING here exactly as it does to the fetcher.
     //   * onnx (cpu/coreml/cuda) → gated on synth, voices, G2P graphs, and ORT.

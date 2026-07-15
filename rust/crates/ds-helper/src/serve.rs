@@ -205,7 +205,7 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
 // platform that needs a blanket "unsupported" stub.
 //
 // NOTE: the helper does NOT download models — not even the apple-native Core ML sets it
-// loads (FluidAudio runs enforceOffline). EVERY model fetch goes through the engine's
+// loads (FluidAudio runs in `offlineMode`). EVERY model fetch goes through the engine's
 // single-flight download manager (`dontspeakd::downloads`, targets `kokoro_coreml` /
 // `parakeet_coreml` / …), which owns progress, failure surfacing, and the warm-child
 // restart once the files land. A load attempted while the files are still absent simply

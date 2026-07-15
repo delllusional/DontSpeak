@@ -68,7 +68,7 @@ pub(crate) fn apple_native_shim_available() -> bool {
 
 /// Is the apple-native Parakeet STT backend usable right now? The shim dylib must be
 /// loadable AND its Core ML model sets on disk (the ENGINE's download manager fetches them —
-/// target `parakeet_coreml` — and FluidAudio only LOADS, enforceOffline; so "shim present"
+/// target `parakeet_coreml` — and FluidAudio only LOADS in `offlineMode`; so "shim present"
 /// alone no longer implies runnable). Presence uses the SAME revision-pinned completion
 /// markers the downloader writes, so this gate and the fetch can never disagree.
 pub(crate) fn parakeet_available() -> bool {

@@ -88,9 +88,9 @@ public func smk_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -
     state.lock.lock()
     defer { state.lock.unlock() }
     // DontSpeak pre-downloads EVERY FluidAudio model itself (so it owns integrity + shows real
-    // %); FluidAudio must only LOAD from the dirs we populated, never fetch. enforceOffline
+    // %); FluidAudio must only LOAD from the dirs we populated, never fetch. offlineMode
     // turns any gap into a typed `modelMissing` instead of a silent download.
-    DownloadUtils.enforceOffline = true
+    ModelHub.offlineMode = true
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     let mgr = KokoroAneManager(
         variant: .english,
@@ -169,7 +169,7 @@ private let asr = AsrState()
 public func smk_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
     asr.lock.lock()
     defer { asr.lock.unlock() }
-    DownloadUtils.enforceOffline = true  // load-only: DontSpeak pre-downloads the Parakeet set
+    ModelHub.offlineMode = true  // load-only: DontSpeak pre-downloads the Parakeet set
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     switch runBlocking({ () -> AsrManager in
         // `load(from:)` (not `downloadAndLoad`) reads the already-present models — it resolves
@@ -265,7 +265,7 @@ private let streamAsr = StreamAsrState()
 public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
     streamAsr.lock.lock()
     defer { streamAsr.lock.unlock() }
-    DownloadUtils.enforceOffline = true  // DontSpeak pre-downloads the streaming model set
+    ModelHub.offlineMode = true  // DontSpeak pre-downloads the streaming model set
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     switch runBlocking({ () -> StreamingEouAsrManager in
         if let mgr = streamAsr.manager {
@@ -1299,7 +1299,7 @@ public func smk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThresho
     // in `ds-model/src/coreml_repo.rs` (which is where they're downloaded). Keep them
     // byte-identical — a mismatch makes this offline load fail with `modelMissing`. The Rust
     // `diarization_model_names_match_prefixes` test pins the Rust half.
-    DownloadUtils.enforceOffline = true
+    ModelHub.offlineMode = true
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     switch runBlocking({ () -> DiarizerManager in
         guard let dir else { throw SmkError.nilDir }

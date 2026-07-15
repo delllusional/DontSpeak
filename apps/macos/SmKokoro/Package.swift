@@ -17,7 +17,7 @@ let package = Package(
         .library(name: "smkokoro", type: .dynamic, targets: ["smkokoro"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.5"),
     ],
     targets: [
         .executableTarget(
