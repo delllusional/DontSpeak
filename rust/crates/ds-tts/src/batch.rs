@@ -3,8 +3,8 @@
 //! [`split_phonemes`](crate::batch::split_phonemes) packs a long phoneme string at sentence
 //! marks under `MAX_PHONEME_LENGTH` (port of `splitPhonemes`);
 //! [`stream_batches`](crate::batch::stream_batches) is the ramped variant used by the shared
-//! frontend. The helper now prepares its complete sequence transactionally before playback;
-//! the API name records the earlier concurrent-playback design. Both share `pack_batches`.
+//! frontend. The helper fully prepares each batch transactionally, then commits it while later
+//! batches synthesize. Both paths share `pack_batches`.
 
 use crate::vocab::MAX_PHONEME_LENGTH;
 
@@ -224,7 +224,7 @@ fn pack_batches(
 
 /// First ramped batch budget (phonemes). Subsequent synthesis units grow geometrically up to
 /// `MAX_PHONEME_LENGTH`; retaining these boundaries avoids changing established style-row and
-/// short-tail behavior while the helper's playback commit is transactional.
+/// short-tail behavior while giving the helper an early transactional playback boundary.
 pub const STREAM_FIRST_BUDGET: usize = 80;
 /// Per-batch growth factor retained from the original streaming sequence.
 const STREAM_GROWTH_NUM: usize = 7; // 1.4 = 7/5

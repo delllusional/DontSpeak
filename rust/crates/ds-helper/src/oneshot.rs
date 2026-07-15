@@ -79,7 +79,8 @@ pub(crate) fn load_backend() -> Result<Backend, String> {
     Ok(Backend::Ort(load_synth()?))
 }
 
-/// One-shot: stage the utterance in bounded groups, playing each through `AudioPlayer`.
+/// One-shot: offer each validated phoneme batch to `AudioPlayer` as soon as it is ready.
+/// Non-macOS playback starts incrementally; macOS accumulates for reliable `afplay` teardown.
 pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
     // Keep the cold path aligned with `serve`: both backends consume the same normalized,
     // model-bounded Rust phoneme batches.
@@ -90,17 +91,16 @@ pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
     if phoneme_batches.is_empty() {
         return Ok(());
     }
-    // Commit to playback only after a full group succeeds. Opening the device earlier allowed
-    // initial chunks to become audible before a later synthesis error was known.
+    // Open the player only after the first full batch succeeds. This keeps a failure in the
+    // first batch silent; the platform player decides whether enqueue starts playback or safely
+    // accumulates until `wait`.
     let mut player: Option<AudioPlayer> = None;
     let mut commit = |audio: crate::prepare::PreparedAudio| -> Result<(), String> {
         if player.is_none() {
             player = Some(AudioPlayer::open()?);
         }
         let player = player.as_ref().expect("opened above");
-        for pcm in audio.pieces {
-            player.enqueue(pcm);
-        }
+        player.enqueue(audio.pcm);
         Ok(())
     };
     match load_backend()? {

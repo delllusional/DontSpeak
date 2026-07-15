@@ -95,7 +95,7 @@ letter spelling. This keeps advertised unknown-word quality consistent across ba
 
 The helper converts each typed chunk to Kokoro token IDs, chooses the voice-style row from the
 unpadded token count, pads the model input, and runs the shared dynamically loaded ORT instance.
-Returned PCM is trimmed and staged behind the helper's utterance-level commit point.
+Returned PCM is trimmed and committed at the helper's per-batch playback boundary.
 
 ### Apple Core ML synthesis
 
@@ -145,23 +145,22 @@ The one-shot and warm-server routes share the frontend and chunk contract:
 - a backend load error returns an error (`TTSLOADERR` plus terminal `ERR` in warm mode);
 - a piece that fails synthesis, produces empty PCM, or leaves the request with no audio returns
   `ERR`;
-- a multi-piece failure discards already prepared partial audio rather than playing an incomplete
-  utterance and reporting success;
+- a failed batch never commits partial PCM; if a later batch fails, the helper stops any already
+  committed prefix before reporting `ERR`;
 - successful synthesis returns `DONE` only after the request produced valid audio.
 
-Preparation stages consecutive transactional groups, each capped at 90 seconds of 24 kHz mono
-PCM to match the macOS VPIO render-ring capacity. An utterance at or under the cap is staged
-whole (all-or-nothing) at the cost of delaying first audio until every phoneme chunk has
-synthesized. A longer utterance — queue admission accepts up to 10 KiB of text, several minutes
-of speech — commits and plays group by group instead of failing outright; a later group's
-failure stops playback and returns `ERR`, losing only audio that had not yet been committed.
-The per-group cap bounds staging memory and prevents backend-specific tail loss.
+The shared frontend creates model-bounded, sentence-aware phoneme batches with a small first
+budget and a ramp toward the model limit. Preparation synthesizes and validates one complete
+batch, commits it immediately, then synthesizes the next batch while playback drains the already
+committed PCM. This keeps the failing batch transactional while making time-to-first-audio depend
+on the first batch rather than the entire utterance. It also bounds preparation memory to one
+phoneme batch, including for queue items near the 10 KiB admission limit. The default warm helper
+commits into a persistent output stream and starts incrementally. The short-lived macOS one-shot
+route still accumulates committed batches for reliable `afplay` teardown.
 
-On macOS full-duplex, a committed group is paced into VPIO in small chunks with about two
+On macOS full-duplex, a committed phoneme batch is paced into VPIO in small chunks with about two
 seconds of normal render lookahead. The feeder rechecks cancellation and global mute between
-chunks, using a shorter lookahead for muted silence so unmute also responds promptly. This keeps
-the group-level transactional guarantee without making a live mute wait for as much as the full
-90-second staging cap.
+chunks, using a shorter lookahead for muted silence so unmute also responds promptly.
 
 Queue logs preserve disabled, unavailable, cancelled, timeout, load-error, synthesis-error, and
 played outcomes even though those terminal states are not yet propagated back to the original

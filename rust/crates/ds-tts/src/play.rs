@@ -4,9 +4,10 @@
 //! `afplay`. `rodio`/`cpal`'s CoreAudio backend aborts on teardown on macOS 26
 //! ("mutex lock failed: Invalid argument"), so for this short-lived one-shot
 //! helper we avoid cpal entirely — `afplay` is blocking, reliable, and has no
-//! teardown crash. The helper prepares all groups before constructing this player.
+//! teardown crash. The one-shot player accumulates committed batches before `wait`;
+//! the default warm helper uses its persistent output path for incremental playback.
 //!
-//! Other platforms: play the prepared groups via `rodio` (enqueue is non-blocking;
+//! Other platforms: play the prepared batches via `rodio` (enqueue is non-blocking;
 //! rodio's audio thread plays them continuously and `wait` drains them).
 //!
 //! NO-AUDIO DISCIPLINE: opening a device / spawning afplay is a real side effect,
@@ -34,7 +35,7 @@ mod imp {
             })
         }
 
-        /// Append one group of 24 kHz mono f32 samples (played in order on `wait`).
+        /// Append one batch of 24 kHz mono f32 samples (played in order on `wait`).
         pub fn enqueue(&self, mut samples: Vec<f32>) {
             if !samples.is_empty() {
                 self.samples.borrow_mut().append(&mut samples);

@@ -396,7 +396,7 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
 const LEAD_SILENCE_MS: u32 = 80;
 
 /// Feed VPIO in 100 ms source-rate chunks so mute/cancel state is observed throughout a
-/// staged group instead of only once per synthesized phoneme piece.
+/// committed phoneme batch instead of only once for its synthesized PCM.
 const DUPLEX_RENDER_CHUNK_SAMPLES: usize = ds_tts::SAMPLE_RATE as usize / 10;
 /// Normal VPIO lookahead: enough to absorb scheduler jitter without buffering a whole reply.
 const DUPLEX_RENDER_AHEAD: Duration = Duration::from_secs(2);
@@ -411,38 +411,36 @@ struct DuplexRenderState {
     buffered: Duration,
 }
 
-/// Pace one already-transactional group into VPIO while re-reading live mute/cancel state.
-/// Returns `false` when cancellation stops the group before every chunk is pushed.
-fn push_duplex_pieces(
-    pieces: Vec<Vec<f32>>,
+/// Pace one already-transactional phoneme batch into VPIO while re-reading live mute/cancel
+/// state. Returns `false` when cancellation stops the batch before every chunk is pushed.
+fn push_duplex_pcm(
+    pcm: Vec<f32>,
     mut read_state: impl FnMut() -> DuplexRenderState,
     mut push: impl FnMut(&[f32]),
     mut wait: impl FnMut(),
 ) -> bool {
     let silence = vec![0.0; DUPLEX_RENDER_CHUNK_SAMPLES];
-    for piece in pieces {
-        for chunk in piece.chunks(DUPLEX_RENDER_CHUNK_SAMPLES) {
-            let state = loop {
-                let state = read_state();
-                if state.cancelled {
-                    return false;
-                }
-                let limit = if state.muted {
-                    DUPLEX_MUTED_RENDER_AHEAD
-                } else {
-                    DUPLEX_RENDER_AHEAD
-                };
-                if state.buffered < limit {
-                    break state;
-                }
-                wait();
-            };
-            push(if state.muted {
-                &silence[..chunk.len()]
+    for chunk in pcm.chunks(DUPLEX_RENDER_CHUNK_SAMPLES) {
+        let state = loop {
+            let state = read_state();
+            if state.cancelled {
+                return false;
+            }
+            let limit = if state.muted {
+                DUPLEX_MUTED_RENDER_AHEAD
             } else {
-                chunk
-            });
-        }
+                DUPLEX_RENDER_AHEAD
+            };
+            if state.buffered < limit {
+                break state;
+            }
+            wait();
+        };
+        push(if state.muted {
+            &silence[..chunk.len()]
+        } else {
+            chunk
+        });
     }
     true
 }
@@ -1398,10 +1396,9 @@ pub(crate) fn serve() -> ! {
         let synth = synth.as_mut().expect("synth loaded above");
 
         // ONE Rust frontend normalizes, phonemizes, and bounds the request before the backend
-        // split. ONNX and Core ML consume these exact IPA batches. Stage every PCM piece of a
-        // bounded group before opening a per-request player or touching VPIO: a later synthesis
-        // error otherwise cannot retract an earlier piece the audio device has already rendered.
-        // An over-cap utterance commits in consecutive groups — see `prepare`.
+        // split. ONNX and Core ML consume these exact IPA batches. Each complete IPA batch is
+        // synthesized and validated before it is committed, then playback can overlap inference
+        // for the remaining batches — see `prepare`.
         let t_req = std::time::Instant::now();
         let channels = std::num::NonZero::new(1u16).expect("1 channel");
         let srate = std::num::NonZero::new(24_000u32).expect("24 kHz");
@@ -1429,7 +1426,7 @@ pub(crate) fn serve() -> ! {
                     }
                     None => None,
                 };
-                // Prepend a brief silence only after the first group commits. It absorbs an
+                // Prepend a brief silence only after the first batch commits. It absorbs an
                 // idle rodio stream's resume latency without making a failed transaction touch
                 // the player.
                 if let Some(p) = &player {
@@ -1443,8 +1440,8 @@ pub(crate) fn serve() -> ! {
             total_samples = total_samples.saturating_add(audio.total_samples);
             if render_via_duplex {
                 if let Some(dx) = &duplex {
-                    let _ = push_duplex_pieces(
-                        audio.pieces,
+                    let _ = push_duplex_pcm(
+                        audio.pcm,
                         || DuplexRenderState {
                             cancelled: cancel.load(Ordering::SeqCst),
                             muted: muted.load(Ordering::SeqCst),
@@ -1454,13 +1451,12 @@ pub(crate) fn serve() -> ! {
                         || std::thread::sleep(DUPLEX_RENDER_POLL),
                     );
                 }
-            } else if let Some(p) = &player {
-                for pcm in audio.pieces {
-                    if cancel.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    p.append(rodio::buffer::SamplesBuffer::new(channels, srate, pcm));
-                }
+            } else if let Some(p) = &player
+                && !cancel.load(Ordering::SeqCst)
+            {
+                p.append(rodio::buffer::SamplesBuffer::new(
+                    channels, srate, audio.pcm,
+                ));
             }
             Ok(())
         };
@@ -1482,8 +1478,8 @@ pub(crate) fn serve() -> ! {
         match outcome {
             Ok(PrepareOutcome::Finished) => {}
             Ok(PrepareOutcome::Cancelled) => {
-                // Committed groups were already stopped by the reader's barge (`cur_player` /
-                // `duplex_barge`); clear defensively for the between-groups window and reset.
+                // Committed batches were already stopped by the reader's barge (`cur_player` /
+                // `duplex_barge`); clear defensively for the between-batches window and reset.
                 if render_via_duplex {
                     if let Some(dx) = &duplex {
                         dx.render_clear();
@@ -1497,9 +1493,8 @@ pub(crate) fn serve() -> ! {
                 continue;
             }
             Err(e) => {
-                // A failed group must not leave earlier committed groups speaking under an ERR
-                // reply — match the pre-transactional behavior: audio stops once the failure is
-                // known.
+                // A failed batch must not leave the already-committed prefix speaking under an
+                // ERR reply: stop playback as soon as the failure is known.
                 if render_via_duplex {
                     if let Some(dx) = &duplex {
                         dx.render_clear();
@@ -1508,7 +1503,7 @@ pub(crate) fn serve() -> ! {
                     p.stop();
                 }
                 *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                log::warn!(target: "helper", "transactional synthesis failed: {e}");
+                log::warn!(target: "helper", "batch synthesis failed: {e}");
                 println!("{} {}", proto::ERR, one_line(&e));
                 let _ = std::io::stdout().flush();
                 continue;
@@ -1570,7 +1565,7 @@ mod audio_tests {
 
     use super::{
         DUPLEX_RENDER_AHEAD, DUPLEX_RENDER_CHUNK_SAMPLES, DuplexRenderState, LEAD_SILENCE_MS,
-        leading_silence_pcm, push_duplex_pieces, tts_output_available,
+        leading_silence_pcm, push_duplex_pcm, tts_output_available,
     };
 
     #[test]
@@ -1614,8 +1609,8 @@ mod audio_tests {
     fn duplex_feeder_rechecks_mute_between_bounded_chunks() {
         let reads = Cell::new(0usize);
         let pushed = RefCell::new(Vec::<Vec<f32>>::new());
-        let finished = push_duplex_pieces(
-            vec![vec![1.0; DUPLEX_RENDER_CHUNK_SAMPLES * 2 + 1]],
+        let finished = push_duplex_pcm(
+            vec![1.0; DUPLEX_RENDER_CHUNK_SAMPLES * 2 + 1],
             || {
                 let read = reads.get();
                 reads.set(read + 1);
@@ -1646,8 +1641,8 @@ mod audio_tests {
         let buffered = Cell::new(DUPLEX_RENDER_AHEAD);
         let waits = Cell::new(0usize);
         let pushed = Cell::new(0usize);
-        let finished = push_duplex_pieces(
-            vec![vec![1.0]],
+        let finished = push_duplex_pcm(
+            vec![1.0],
             || DuplexRenderState {
                 cancelled: false,
                 muted: false,
@@ -1665,8 +1660,8 @@ mod audio_tests {
 
         let cancelled = Cell::new(false);
         let pushed = Cell::new(false);
-        let finished = push_duplex_pieces(
-            vec![vec![1.0]],
+        let finished = push_duplex_pcm(
+            vec![1.0],
             || DuplexRenderState {
                 cancelled: cancelled.get(),
                 muted: false,

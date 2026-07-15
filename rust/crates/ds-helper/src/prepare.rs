@@ -1,28 +1,17 @@
-//! Transactional PCM preparation shared by the one-shot and warm helper paths.
+//! Low-latency transactional PCM preparation shared by the one-shot and warm helper paths.
 //!
-//! Synthesis may span several model-bounded phoneme chunks. Playback of staged audio must not
-//! begin until every chunk behind it succeeds: once samples reach an audio device they cannot
-//! be retracted if a later chunk fails. Staging the WHOLE utterance behind one commit point was
-//! the first shape here, but it turned any utterance longer than the staging cap into total
-//! silence + ERR — queue admission accepts ~10 KiB of text, several minutes of speech, while
-//! the cap allows 90 seconds. Utterances now stage into consecutive bounded groups: each group
-//! is all-or-nothing, an utterance at or under the cap keeps the original single-transaction
-//! guarantee, and a later failure discards only the staged-but-uncommitted group — it can never
-//! leave a half-played group.
+//! The shared frontend already splits an utterance into model-bounded, sentence-aware phoneme
+//! batches. Each batch is the transaction boundary here: synthesize and validate its complete
+//! PCM before committing it to playback. Committing the first batch immediately lets playback
+//! overlap synthesis of the remaining batches instead of making time-to-first-audio grow with
+//! the whole utterance. If a later batch fails, its uncommitted PCM stays silent and the caller
+//! stops any already-committed prefix before reporting the error.
 
 use std::time::Instant;
 
-use ds_tts::SAMPLE_RATE;
-
-/// Bound each staged group to the macOS VPIO render ring's 90-second capacity. Applying the
-/// same cap on every backend prevents platform-dependent truncation and bounds staged mono f32
-/// PCM to about 8.2 MiB per group before the 24→48 kHz VPIO resample. A single chunk whose PCM
-/// alone exceeds the cap forms its own group rather than failing the utterance.
-const MAX_PREPARED_SAMPLES: usize = SAMPLE_RATE as usize * 90;
-
-/// One fully staged, committable group of PCM pieces.
+/// One fully synthesized and validated phoneme batch, ready to commit to playback.
 pub(crate) struct PreparedAudio {
-    pub(crate) pieces: Vec<Vec<f32>>,
+    pub(crate) pcm: Vec<f32>,
     pub(crate) synth_nanos: u128,
     pub(crate) total_samples: usize,
 }
@@ -32,30 +21,16 @@ pub(crate) enum PrepareOutcome {
     Finished,
 }
 
-/// Synthesize `batches` into bounded groups, handing each FULLY staged group to `commit`
-/// (which plays or enqueues it). A synthesis failure or empty PCM discards the current
-/// uncommitted group and returns `Err` without calling `commit` for it; a cancellation
-/// (checked before, after, and between chunks) discards it and returns `Cancelled`.
+/// Synthesize and commit each FULL phoneme batch before starting the next one. A synthesis
+/// failure or empty PCM discards the current uncommitted batch and returns `Err` without
+/// calling `commit` for it. Cancellation is checked before and after inference, between
+/// batches, and after the final commit.
 pub(crate) fn prepare_audio<T>(
-    batches: &[T],
-    cancelled: impl Fn() -> bool,
-    synthesize: impl FnMut(&T) -> Result<Vec<f32>, String>,
-    commit: impl FnMut(PreparedAudio) -> Result<(), String>,
-) -> Result<PrepareOutcome, String> {
-    prepare_audio_with_limit(batches, cancelled, synthesize, commit, MAX_PREPARED_SAMPLES)
-}
-
-fn prepare_audio_with_limit<T>(
     batches: &[T],
     cancelled: impl Fn() -> bool,
     mut synthesize: impl FnMut(&T) -> Result<Vec<f32>, String>,
     mut commit: impl FnMut(PreparedAudio) -> Result<(), String>,
-    max_samples: usize,
 ) -> Result<PrepareOutcome, String> {
-    let mut pieces: Vec<Vec<f32>> = Vec::new();
-    let mut synth_nanos = 0u128;
-    let mut total_samples = 0usize;
-
     for batch in batches {
         if cancelled() {
             return Ok(PrepareOutcome::Cancelled);
@@ -72,100 +47,97 @@ fn prepare_audio_with_limit<T>(
         if pcm.is_empty() {
             return Err("synthesis produced no audio for a phoneme chunk".to_string());
         }
-        // Group boundary: this piece would overflow the staging cap, so commit the group staged
-        // so far and start the next one with it.
-        if total_samples > 0
-            && !matches!(total_samples.checked_add(pcm.len()), Some(t) if t <= max_samples)
-        {
-            commit(PreparedAudio {
-                pieces: std::mem::take(&mut pieces),
-                synth_nanos,
-                total_samples,
-            })?;
-            synth_nanos = 0;
-            total_samples = 0;
-        }
-        synth_nanos = synth_nanos.saturating_add(elapsed);
-        total_samples = total_samples.saturating_add(pcm.len());
-        pieces.push(pcm);
-    }
-
-    if cancelled() {
-        return Ok(PrepareOutcome::Cancelled);
-    }
-    if !pieces.is_empty() {
+        let total_samples = pcm.len();
         commit(PreparedAudio {
-            pieces,
-            synth_nanos,
+            pcm,
+            synth_nanos: elapsed,
             total_samples,
         })?;
     }
-    Ok(PrepareOutcome::Finished)
+
+    Ok(if cancelled() {
+        PrepareOutcome::Cancelled
+    } else {
+        PrepareOutcome::Finished
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
 
-    use super::{PrepareOutcome, PreparedAudio, prepare_audio_with_limit};
+    use super::{PrepareOutcome, PreparedAudio, prepare_audio};
 
-    /// A `commit` that records each committed group's piece layout.
-    fn collect(
-        groups: &RefCell<Vec<Vec<Vec<f32>>>>,
-    ) -> impl FnMut(PreparedAudio) -> Result<(), String> {
+    /// A `commit` that records each committed batch.
+    fn collect(groups: &RefCell<Vec<Vec<f32>>>) -> impl FnMut(PreparedAudio) -> Result<(), String> {
         |audio| {
-            groups.borrow_mut().push(audio.pieces);
+            groups.borrow_mut().push(audio.pcm);
             Ok(())
         }
     }
 
     #[test]
-    fn later_failure_commits_no_partial_group() {
+    fn failure_before_first_commit_is_silent() {
         let groups = RefCell::new(Vec::new());
-        let err = prepare_audio_with_limit(
-            &[1, 2, 3],
+        let err = prepare_audio(
+            &[1, 2],
             || false,
-            |batch| {
-                if *batch == 2 {
-                    Err("second chunk failed".to_string())
-                } else {
-                    Ok(vec![*batch as f32])
-                }
-            },
+            |_| Err("first chunk failed".to_string()),
             collect(&groups),
-            10,
         )
         .err()
         .expect("the transaction must fail");
 
-        assert_eq!(err, "second chunk failed");
-        assert!(
-            groups.borrow().is_empty(),
-            "a failed group must never reach commit"
-        );
+        assert_eq!(err, "first chunk failed");
+        assert!(groups.borrow().is_empty());
     }
 
     #[test]
-    fn successful_preparation_preserves_piece_order() {
+    fn successful_preparation_commits_each_batch_in_order() {
         let groups = RefCell::new(Vec::new());
-        let outcome = prepare_audio_with_limit(
+        let outcome = prepare_audio(
             &[1, 2],
             || false,
             |batch| Ok(vec![*batch as f32]),
             collect(&groups),
-            10,
         )
         .expect("preparation succeeds");
         assert!(matches!(outcome, PrepareOutcome::Finished));
 
-        assert_eq!(*groups.borrow(), vec![vec![vec![1.0], vec![2.0]]]);
+        assert_eq!(*groups.borrow(), vec![vec![1.0], vec![2.0]]);
+    }
+
+    /// Regression (#82): the first completed phoneme batch must become playable before
+    /// inference for the rest of a long blockquote-less reply begins.
+    #[test]
+    fn first_batch_commits_before_later_synthesis() {
+        let groups = RefCell::new(Vec::new());
+        let outcome = prepare_audio(
+            &[1, 2],
+            || false,
+            |batch| {
+                if *batch == 2 {
+                    assert_eq!(
+                        groups.borrow().len(),
+                        1,
+                        "the first batch must be committed before the second is synthesized"
+                    );
+                }
+                Ok(vec![*batch as f32])
+            },
+            collect(&groups),
+        )
+        .expect("preparation succeeds");
+
+        assert!(matches!(outcome, PrepareOutcome::Finished));
+        assert_eq!(groups.borrow().len(), 2);
     }
 
     #[test]
-    fn empty_pcm_from_any_chunk_is_a_transaction_failure() {
+    fn empty_pcm_discards_only_the_failing_batch() {
         let groups = RefCell::new(Vec::new());
         let calls = Cell::new(0usize);
-        let err = prepare_audio_with_limit(
+        let err = prepare_audio(
             &[1, 2, 3],
             || false,
             |_| {
@@ -177,33 +149,31 @@ mod tests {
                 })
             },
             collect(&groups),
-            10,
         )
         .err()
         .expect("empty output must fail");
         assert_eq!(err, "synthesis produced no audio for a phoneme chunk");
         assert_eq!(calls.get(), 2);
-        assert!(groups.borrow().is_empty());
+        assert_eq!(groups.borrow().len(), 1);
     }
 
     #[test]
-    fn cancellation_discards_staged_pieces_before_commit() {
+    fn cancellation_before_inference_is_silent() {
         let groups = RefCell::new(Vec::new());
         let calls = Cell::new(0usize);
-        let outcome = prepare_audio_with_limit(
+        let outcome = prepare_audio(
             &[1, 2, 3],
-            || calls.get() == 1,
+            || true,
             |_| {
                 calls.set(calls.get() + 1);
                 Ok(vec![1.0])
             },
             collect(&groups),
-            10,
         )
         .expect("cancellation is not a synthesis error");
 
         assert!(matches!(outcome, PrepareOutcome::Cancelled));
-        assert_eq!(calls.get(), 1);
+        assert_eq!(calls.get(), 0);
         assert!(groups.borrow().is_empty());
     }
 
@@ -211,7 +181,7 @@ mod tests {
     fn cancellation_during_inference_wins_over_pcm_or_backend_error() {
         for result in [Ok(vec![1.0]), Err("incidental failure".to_string())] {
             let finished = Cell::new(false);
-            let outcome = prepare_audio_with_limit(
+            let outcome = prepare_audio(
                 &[1],
                 || finished.get(),
                 |_| {
@@ -219,92 +189,38 @@ mod tests {
                     result.clone()
                 },
                 |_| Ok(()),
-                10,
             )
             .expect("cancellation is not a synthesis error");
             assert!(matches!(outcome, PrepareOutcome::Cancelled));
         }
     }
 
-    /// Regression (audit F02): an utterance longer than the staging cap used to fail outright —
-    /// fully synthesized, then discarded as one over-limit transaction, so a long accepted
-    /// queue item produced total silence plus ERR. It must instead split into bounded groups
-    /// that each commit whole.
     #[test]
-    fn over_cap_utterance_splits_into_bounded_groups_instead_of_failing() {
+    fn later_failure_preserves_only_the_committed_prefix() {
         let groups = RefCell::new(Vec::new());
-        let outcome = prepare_audio_with_limit(
+        let err = prepare_audio(
             &[1, 2, 3],
             || false,
-            |_| Ok(vec![1.0, 2.0]),
-            collect(&groups),
-            3,
-        )
-        .expect("an over-cap utterance still plays");
-        assert!(matches!(outcome, PrepareOutcome::Finished));
-
-        let committed = groups.borrow();
-        assert_eq!(
-            committed.len(),
-            3,
-            "each 2-sample piece fills a 3-sample group"
-        );
-        assert!(committed.iter().all(|group| group.len() == 1));
-    }
-
-    #[test]
-    fn oversized_single_piece_forms_its_own_group() {
-        let groups = RefCell::new(Vec::new());
-        prepare_audio_with_limit(
-            &[5usize, 1],
-            || false,
-            |samples| Ok(vec![0.0; *samples]),
-            collect(&groups),
-            3,
-        )
-        .expect("a single over-cap piece cannot be split, so it commits alone");
-
-        let committed = groups.borrow();
-        assert_eq!(committed.len(), 2);
-        assert_eq!(committed[0][0].len(), 5);
-        assert_eq!(committed[1][0].len(), 1);
-    }
-
-    /// The grouped-transaction guarantee: a failure discards only the group staged since the
-    /// last commit — already-committed groups have played, uncommitted pieces never do.
-    #[test]
-    fn later_group_failure_loses_only_the_uncommitted_group() {
-        let groups = RefCell::new(Vec::new());
-        let calls = Cell::new(0usize);
-        let err = prepare_audio_with_limit(
-            &[2usize, 2, 2],
-            || false,
-            |samples| {
-                calls.set(calls.get() + 1);
-                if calls.get() == 3 {
+            |batch| {
+                if *batch == 3 {
                     Err("third chunk failed".to_string())
                 } else {
-                    Ok(vec![0.0; *samples])
+                    Ok(vec![*batch as f32])
                 }
             },
             collect(&groups),
-            2,
         )
         .err()
-        .expect("the failing group must fail");
+        .expect("the failing batch must fail");
 
         assert_eq!(err, "third chunk failed");
-        assert_eq!(
-            groups.borrow().len(),
-            1,
-            "only the first, complete group was committed before the failure"
-        );
+        assert_eq!(groups.borrow().len(), 2);
     }
 
     #[test]
     fn commit_failure_aborts_preparation() {
         let calls = Cell::new(0usize);
-        let err = prepare_audio_with_limit(
+        let err = prepare_audio(
             &[2usize, 2, 2],
             || false,
             |samples| {
@@ -312,32 +228,48 @@ mod tests {
                 Ok(vec![0.0; *samples])
             },
             |_| Err("sink failed".to_string()),
-            2,
         )
         .err()
         .expect("a commit failure is terminal");
 
         assert_eq!(err, "sink failed");
-        assert_eq!(calls.get(), 2, "no further synthesis after a failed commit");
+        assert_eq!(calls.get(), 1, "no further synthesis after a failed commit");
     }
 
     #[test]
-    fn cancellation_between_groups_stops_before_the_next_chunk() {
+    fn cancellation_between_batches_stops_before_the_next_inference() {
         let groups = RefCell::new(Vec::new());
-        let outcome = prepare_audio_with_limit(
+        let calls = Cell::new(0usize);
+        let outcome = prepare_audio(
             &[2usize, 2, 2],
             || !groups.borrow().is_empty(),
-            |samples| Ok(vec![0.0; *samples]),
+            |samples| {
+                calls.set(calls.get() + 1);
+                Ok(vec![0.0; *samples])
+            },
             collect(&groups),
-            2,
         )
         .expect("cancellation is not a synthesis error");
 
         assert!(matches!(outcome, PrepareOutcome::Cancelled));
-        assert_eq!(
-            groups.borrow().len(),
-            1,
-            "the committed group stands; nothing further stages"
-        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(groups.borrow().len(), 1);
+    }
+
+    #[test]
+    fn cancellation_after_final_commit_reports_cancelled() {
+        let committed = Cell::new(false);
+        let outcome = prepare_audio(
+            &[1],
+            || committed.get(),
+            |_| Ok(vec![1.0]),
+            |_| {
+                committed.set(true);
+                Ok(())
+            },
+        )
+        .expect("cancellation is not a synthesis error");
+
+        assert!(matches!(outcome, PrepareOutcome::Cancelled));
     }
 }
