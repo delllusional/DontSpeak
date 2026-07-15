@@ -50,6 +50,10 @@ impl RenderHandle {
     pub fn buffered(&self) -> std::time::Duration {
         std::time::Duration::ZERO
     }
+
+    /// Render-time mute is macOS-only (VPIO owns render there); these capture-side
+    /// backends keep rodio output, muted via the player's volume instead.
+    pub fn set_muted(&self, _on: bool) {}
 }
 
 /// Append `samples` to the shared capture buffer, dropping the oldest f32 once it grows past

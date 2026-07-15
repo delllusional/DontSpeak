@@ -1644,9 +1644,11 @@ impl TtsManager {
 
     /// Set global mute. Records it and pushes the `mute` op to the warm child so speech is
     /// silenced live and an active or later cue is stopped/suppressed.
-    /// Idempotent. macOS full-duplex has no VPIO volume control, so its helper paces small
-    /// chunks to a bounded lookahead and observes mute between pushes; already-buffered audio
-    /// can still sound for that short lookahead rather than stopping instantaneously.
+    /// Idempotent. macOS full-duplex mutes at RENDER time: the VPIO callback keeps
+    /// consuming the ring at wall rate but zero-fills the output (the ring holds real
+    /// audio), so mute lands within one audio quantum, unmute resumes at the playhead
+    /// instantly, and audio elapsed while muted is still skipped — the same
+    /// mute-consumes-speech semantics as the rodio volume path.
     pub fn set_muted(&self, on: bool) {
         let changed = self.muted.swap(on, Ordering::Relaxed) != on;
         let _ = self.write_request(if on {

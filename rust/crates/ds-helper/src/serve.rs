@@ -396,23 +396,22 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
 // restart once the files land. A load attempted while the files are still absent simply
 // fails; the engine restarts this helper after the fetch completes (the shared self-heal).
 
-/// Feed VPIO in 100 ms source-rate chunks so mute/cancel state is observed throughout a
-/// committed phoneme batch instead of only once for its synthesized PCM.
+/// Feed VPIO in 100 ms source-rate chunks: chunking keeps cancellation responsive
+/// throughout a committed phoneme batch (state is re-read per chunk) and keeps the
+/// live `buffered` re-reads fine-grained for pure backpressure. Mute is applied at
+/// RENDER time in the VPIO callback (`ds_aec::RenderHandle::set_muted`), not here.
 const DUPLEX_RENDER_CHUNK_SAMPLES: usize = ds_tts::SAMPLE_RATE as usize / 10;
-/// Normal VPIO lookahead: enough to absorb scheduler jitter without buffering a whole reply.
+/// VPIO lookahead: enough to absorb scheduler jitter without buffering a whole reply.
 const DUPLEX_RENDER_AHEAD: Duration = Duration::from_secs(2);
-/// Keep muted silence shallow so unmuting resumes real audio promptly.
-const DUPLEX_MUTED_RENDER_AHEAD: Duration = Duration::from_millis(100);
 const DUPLEX_RENDER_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy)]
 struct DuplexRenderState {
     cancelled: bool,
-    muted: bool,
     buffered: Duration,
 }
 
-/// Pace one already-transactional phoneme batch into VPIO while re-reading live mute/cancel
+/// Pace one already-transactional phoneme batch into VPIO while re-reading live cancel
 /// state. Returns `false` when cancellation stops the batch before every chunk is pushed.
 fn push_duplex_pcm(
     pcm: &[f32],
@@ -420,28 +419,18 @@ fn push_duplex_pcm(
     mut push: impl FnMut(&[f32]),
     mut wait: impl FnMut(),
 ) -> bool {
-    let silence = vec![0.0; DUPLEX_RENDER_CHUNK_SAMPLES];
     for chunk in pcm.chunks(DUPLEX_RENDER_CHUNK_SAMPLES) {
-        let state = loop {
+        loop {
             let state = read_state();
             if state.cancelled {
                 return false;
             }
-            let limit = if state.muted {
-                DUPLEX_MUTED_RENDER_AHEAD
-            } else {
-                DUPLEX_RENDER_AHEAD
-            };
-            if state.buffered < limit {
-                break state;
+            if state.buffered < DUPLEX_RENDER_AHEAD {
+                break;
             }
             wait();
-        };
-        push(if state.muted {
-            &silence[..chunk.len()]
-        } else {
-            chunk
-        });
+        }
+        push(chunk);
     }
     true
 }
@@ -715,6 +704,9 @@ pub(crate) fn serve() -> ! {
     // A `Send` handle so the stdin reader can barge the VPIO render from its thread
     // (the unit itself is !Send and lives here on the playback thread).
     let duplex_barge: Option<std::sync::Arc<AtomicBool>> = duplex.as_ref().map(|d| d.barge_flag());
+    // A `Send` render handle so the stdin reader's `mute` op can mute at RENDER time
+    // (macOS VPIO owns render; the capture-side backends hand back a no-op handle).
+    let duplex_render: Option<ds_aec::RenderHandle> = duplex.as_ref().map(|d| d.render_handle());
     let full_duplex_listening = Arc::new(AtomicBool::new(false));
     let capturing_diarize = Arc::new(AtomicBool::new(false));
     let listen_stopped_through = Arc::new(AtomicU64::new(0));
@@ -790,7 +782,8 @@ pub(crate) fn serve() -> ! {
     // truncated the capture). It trips on the INTENDED stops only: `stop` / `lstop` (the
     // seconds-timer + Caps release) and shutdown (stdin EOF).
     // MUTE: speech keeps draining silently, while one-shot cues are suppressed or stopped.
-    // Read by the paced VPIO feeder and applied instantly to the sounding rodio player.
+    // Applied instantly to the sounding rodio player; the VPIO render path mutes at
+    // render time via `duplex_render.set_muted` (the reader's `mute` op) instead.
     let muted = Arc::new(AtomicBool::new(false));
 
     // Reader thread: parse JSON requests. speak/preview enqueue (newest wins) and
@@ -804,6 +797,7 @@ pub(crate) fn serve() -> ! {
         let listen_stopped_through = listen_stopped_through.clone();
         let listen_latest_generation = listen_latest_generation.clone();
         let duplex_barge = duplex_barge.clone();
+        let duplex_render = duplex_render.clone();
         let listen_sig = listen_sig.clone();
         let muted = muted.clone();
         let cue_mixer = cue_mixer.clone();
@@ -915,6 +909,12 @@ pub(crate) fn serve() -> ! {
                         );
                         muted.store(on, Ordering::SeqCst);
                         cue_playback.set_muted(on);
+                        // Full-duplex renders through VPIO (no rodio volume): zero the
+                        // output at render time, so buffered speech drains silently and
+                        // unmute resumes real audio at the playhead instantly.
+                        if let Some(r) = &duplex_render {
+                            r.set_muted(on);
+                        }
                         if let Some(p) = cur_player
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -1474,7 +1474,6 @@ pub(crate) fn serve() -> ! {
             let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
             let handle = dx.render_handle();
             let cancel = cancel.clone();
-            let muted = muted.clone();
             let feed_abort = feed_abort.clone();
             match std::thread::Builder::new()
                 .name("ds-duplex-feed".into())
@@ -1485,7 +1484,6 @@ pub(crate) fn serve() -> ! {
                             || DuplexRenderState {
                                 cancelled: cancel.load(Ordering::SeqCst)
                                     || feed_abort.load(Ordering::SeqCst),
-                                muted: muted.load(Ordering::SeqCst),
                                 buffered: handle.buffered(),
                             },
                             |chunk| handle.push(chunk),
@@ -1536,7 +1534,6 @@ pub(crate) fn serve() -> ! {
                         &audio.pcm,
                         || DuplexRenderState {
                             cancelled: cancel.load(Ordering::SeqCst),
-                            muted: muted.load(Ordering::SeqCst),
                             buffered: dx.render_buffered(),
                         },
                         |pcm| dx.render_push(pcm),
@@ -1718,8 +1715,12 @@ mod audio_tests {
         assert!(tts_output_available(false, true));
     }
 
+    /// Chunked pacing pins CANCEL responsiveness: the state is re-read per chunk, so
+    /// a cancel landing mid-batch stops the remaining chunks — and every push stays
+    /// chunk-bounded, keeping the live `buffered` re-reads fine-grained. (Mute is no
+    /// longer applied here: the VPIO render callback zero-fills at render time.)
     #[test]
-    fn duplex_feeder_rechecks_mute_between_bounded_chunks() {
+    fn duplex_feeder_rechecks_cancel_between_bounded_chunks() {
         let reads = Cell::new(0usize);
         let pushed = RefCell::new(Vec::<Vec<f32>>::new());
         let finished = push_duplex_pcm(
@@ -1728,8 +1729,7 @@ mod audio_tests {
                 let read = reads.get();
                 reads.set(read + 1);
                 DuplexRenderState {
-                    cancelled: false,
-                    muted: read > 0,
+                    cancelled: read > 0,
                     buffered: Duration::ZERO,
                 }
             },
@@ -1737,11 +1737,10 @@ mod audio_tests {
             || panic!("an empty render ring must not wait"),
         );
 
-        assert!(finished);
+        assert!(!finished, "a mid-batch cancel must report unfinished");
         let pushed = pushed.borrow();
-        assert_eq!(pushed.len(), 3);
+        assert_eq!(pushed.len(), 1, "no chunk is pushed after the cancel");
         assert!(pushed[0].iter().all(|sample| *sample == 1.0));
-        assert!(pushed[1..].iter().flatten().all(|sample| *sample == 0.0));
         assert!(
             pushed
                 .iter()
@@ -1758,7 +1757,6 @@ mod audio_tests {
             &[1.0],
             || DuplexRenderState {
                 cancelled: false,
-                muted: false,
                 buffered: buffered.get(),
             },
             |_| pushed.set(pushed.get() + 1),
@@ -1777,7 +1775,6 @@ mod audio_tests {
             &[1.0],
             || DuplexRenderState {
                 cancelled: cancelled.get(),
-                muted: false,
                 buffered: DUPLEX_RENDER_AHEAD,
             },
             |_| pushed.set(true),

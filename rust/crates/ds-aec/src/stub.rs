@@ -38,6 +38,8 @@ impl DuplexAudio {
 
     pub fn render_clear(&self) {}
 
+    pub fn set_muted(&self, _on: bool) {}
+
     pub fn barge_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
     }
@@ -77,4 +79,5 @@ impl RenderHandle {
     pub fn buffered(&self) -> std::time::Duration {
         std::time::Duration::ZERO
     }
+    pub fn set_muted(&self, _on: bool) {}
 }

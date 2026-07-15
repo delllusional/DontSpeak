@@ -66,6 +66,9 @@ pub struct DuplexAudio {
     /// callback advances it once before clearing `flush` and once after the drain,
     /// so `render_push` cannot mistake "flush claimed" for "flush completed".
     render_gen: Arc<AtomicU64>,
+    /// Render-time mute: the callback keeps consuming the ring at wall rate but
+    /// zero-fills the output while set. See [`set_muted`](Self::set_muted).
+    mute: Arc<AtomicBool>,
 }
 
 impl DuplexAudio {
@@ -125,11 +128,13 @@ impl DuplexAudio {
         let (mut cap_prod, cap_cons) = HeapRb::<f32>::new(CAPTURE_CAP).split();
         let flush = Arc::new(AtomicBool::new(false));
         let render_gen = Arc::new(AtomicU64::new(0));
+        let mute = Arc::new(AtomicBool::new(false));
 
         // Render callback (RT thread): drain the play ring into the speaker; fill
         // any shortfall with silence. Honour a pending `render_clear` first.
         let render_flush = flush.clone();
         let callback_render_gen = render_gen.clone();
+        let render_mute = mute.clone();
         unit.set_render_callback(move |args: Args<data::NonInterleaved<f32>>| {
             let Args { mut data, .. } = args;
             if render_flush.load(Ordering::Acquire) {
@@ -144,10 +149,21 @@ impl DuplexAudio {
                 }
                 callback_render_gen.fetch_add(1, Ordering::Release);
             }
+            // Mute at RENDER time, pop-then-zero: buffered audio keeps draining at
+            // wall rate (unmute resumes at the playhead; audio elapsed while muted
+            // is skipped), and VPIO's far-end reference IS this output buffer (see
+            // the module doc), so zeroing the ENTIRE buffer keeps the reference
+            // equal to the actual speaker output. RT-safe: one Relaxed atomic load,
+            // no alloc/lock — mirrors the shortfall zero-fill.
+            let muted = render_mute.load(Ordering::Relaxed);
             for channel in data.channels_mut() {
                 let got = play_cons.pop_slice(channel);
-                for s in channel[got..].iter_mut() {
-                    *s = 0.0;
+                if muted {
+                    channel.fill(0.0);
+                } else {
+                    for s in channel[got..].iter_mut() {
+                        *s = 0.0;
+                    }
                 }
             }
             Ok(())
@@ -196,6 +212,7 @@ impl DuplexAudio {
             cap: Arc::new(Mutex::new(cap_cons)),
             flush,
             render_gen,
+            mute,
         })
     }
 
@@ -235,7 +252,13 @@ impl DuplexAudio {
             play: self.play.clone(),
             flush: self.flush.clone(),
             render_gen: self.render_gen.clone(),
+            mute: self.mute.clone(),
         }
+    }
+
+    /// See [`RenderHandle::set_muted`].
+    pub fn set_muted(&self, on: bool) {
+        self.mute.store(on, Ordering::Relaxed);
     }
 
     /// Drain the echo-cancelled mono f32 captured since the last call (at
@@ -323,9 +346,19 @@ pub struct RenderHandle {
     play: Arc<Mutex<(HeapProd<f32>, LinearResampler)>>,
     flush: Arc<AtomicBool>,
     render_gen: Arc<AtomicU64>,
+    mute: Arc<AtomicBool>,
 }
 
 impl RenderHandle {
+    /// Mute/unmute at render time: the callback keeps consuming the ring at wall
+    /// rate but zero-fills the ENTIRE output buffer while set — the ring holds real
+    /// audio, so unmute resumes at the playhead instantly, and audio elapsed while
+    /// muted is still skipped (mute consumes speech). `Relaxed` on purpose: an
+    /// independent flag with no ordering dependency on ring contents.
+    pub fn set_muted(&self, on: bool) {
+        self.mute.store(on, Ordering::Relaxed);
+    }
+
     /// Push 24 kHz mono f32 TTS PCM to be rendered (and used as the AEC reference).
     /// Resamples to the unit rate and writes the play ring. Non-blocking; if the
     /// ring is full the overflow is dropped (a full ring indicates a pacing bug in

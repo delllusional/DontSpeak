@@ -149,6 +149,9 @@ impl DuplexAudio {
     /// No-op (no render ring to flush; the helper stops the rodio player on barge).
     pub fn render_clear(&self) {}
 
+    /// No-op: render-time mute is macOS-only (rodio's player volume mutes here).
+    pub fn set_muted(&self, _on: bool) {}
+
     /// No-op render handle (rodio owns output; parity with macOS keeps the helper's
     /// feeder path cfg-free).
     pub fn render_handle(&self) -> RenderHandle {

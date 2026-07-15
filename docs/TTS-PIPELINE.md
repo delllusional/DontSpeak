@@ -171,10 +171,12 @@ older helper never emits it. Full-duplex reports no mark — it never pauses/res
 
 On macOS full-duplex, committed batches are handed to a dedicated feeder thread, so committing
 returns immediately and the next batch's inference overlaps pacing. The feeder paces small chunks
-into VPIO with about two seconds of render lookahead, rechecking cancellation and global mute
-between chunks and using a shorter lookahead for muted silence so unmute also responds promptly.
-On failure the helper aborts the feeder before clearing the render ring, so a committed prefix
-never plays under an error reply.
+into VPIO with about two seconds of render lookahead, rechecking cancellation between chunks.
+Global mute is applied at render time in the VPIO callback: the ring keeps real audio and drains
+at wall rate while the callback zero-fills the output (keeping the AEC far-end reference equal to
+the actual speaker output), so unmute resumes at the playhead instantly and audio elapsed while
+muted is still skipped. On failure the helper aborts the feeder before clearing the render ring,
+so a committed prefix never plays under an error reply.
 
 Queue logs preserve disabled, unavailable, cancelled, timeout, load-error, synthesis-error, and
 played outcomes even though those terminal states are not yet propagated back to the original
