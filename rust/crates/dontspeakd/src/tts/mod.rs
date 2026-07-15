@@ -212,7 +212,7 @@ pub struct TtsManager {
     /// Filled by the reader: a `speak`/`preview` waits here for its terminal DONE
     /// (or ERR/EOF). Reset at the start of each `play()`.
     speak_slot: Arc<(Mutex<SpeakSlot>, Condvar)>,
-    /// Filled by the reader when an ordered cue finishes, is suppressed, or is cancelled.
+    /// Filled by the reader when a cue finishes, is suppressed, or is cancelled.
     cue_slot: Arc<(Mutex<CueSlot>, Condvar)>,
     /// Filled by the reader: a `listen` drains LISTENING/PARTIAL/FINAL/STTERR/LDONE
     /// events here. Cleared at the start of each `listen()`. Demuxing the one
@@ -1668,7 +1668,7 @@ impl TtsManager {
         }
     }
 
-    /// Play one ordered EARCON on the warm child and block until it finishes, is muted, or is
+    /// Play one EARCON on the warm child and block until it finishes, is muted, or is
     /// explicitly cancelled. Revalidating the path here keeps the helper protocol safe.
     pub fn cue(&self, path: &std::path::Path) -> std::io::Result<()> {
         let Some(path) = ds_earcon::canonical_sound_path(path) else {
@@ -1689,7 +1689,10 @@ impl TtsManager {
         // times out, its late CUEDONE lands after op B resets the slot) is closed
         // because the timeout/dead arms call mark_dead_if_current, which kills the
         // child and joins its reader. Worst-case queue-worker wait behind an
-        // out-of-band cue: one cue duration, bounded by CUE_TERMINAL_TIMEOUT.
+        // out-of-band cue: one cue duration, bounded by CUE_TERMINAL_TIMEOUT — plus,
+        // pathologically, when the timeout arm's mark_dead_if_current (still holding
+        // this lease) contends with a concurrent restart's lifecycle hold, the READY
+        // handshake.
         let _lease = self.cue_lease.lock().unwrap();
         let Some(my_gen) = self.child.running_gen() else {
             return Err(std::io::Error::other("TTS child not running"));
