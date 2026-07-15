@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|shell_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/scripts/capture-agent-attribution.mjs\" codex",
+            "commandWindows": "node \"$(git rev-parse --show-toplevel)/scripts/capture-agent-attribution.mjs\" codex",
+            "timeout": 30,
+            "statusMessage": "Capturing exact commit attribution"
+          }
+        ]
+      }
+    ]
+  }
+}

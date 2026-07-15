@@ -64,6 +64,8 @@ lost.
 
 [`docs/COMMIT-ATTRIBUTION.md`](docs/COMMIT-ATTRIBUTION.md) is the single source of
 truth. Read it in full before creating or rewriting a commit and again before pushing.
+Let the runtime hook write the exact model and effort; never infer either value from the
+agent's self-description.
 Do not copy its rules into agent- or tool-specific files; those workflows must point
 to the canonical policy so updates cannot drift.
 

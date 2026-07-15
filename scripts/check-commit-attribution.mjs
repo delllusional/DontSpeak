@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { validateCommitMessage } from "./agent-attribution.mjs";
 
 const args = process.argv.slice(2);
 if (args.length > 1 || args.includes("--help")) {
@@ -22,31 +23,10 @@ if (commits.length === 0) {
   process.exit(0);
 }
 
-const prohibited = /^(?:Co-Authored-By|Assisted-by|Generated-by|AI):/i;
 let failed = false;
 for (const commit of commits) {
   const message = git("show", "-s", "--format=%B", commit).trimEnd();
-  const lines = message.split(/\r?\n/);
-  const trailers = [];
-  while (lines.length > 0 && lines.at(-1).startsWith("Agent:")) {
-    trailers.unshift(lines.pop());
-  }
-
-  const errors = [];
-  if (trailers.length === 0) errors.push("missing final Agent trailer");
-  const seen = new Set();
-  for (const trailer of trailers) {
-    if (!/^Agent: \S+ \S+$/.test(trailer)) {
-      errors.push(`malformed trailer: ${trailer}`);
-    } else if (seen.has(trailer)) {
-      errors.push(`duplicate trailer: ${trailer}`);
-    }
-    seen.add(trailer);
-  }
-  for (const line of lines) {
-    if (line.startsWith("Agent:")) errors.push(`Agent trailer is not final: ${line}`);
-    if (prohibited.test(line)) errors.push(`prohibited attribution: ${line}`);
-  }
+  const errors = validateCommitMessage(message);
 
   const short = commit.slice(0, 12);
   if (errors.length === 0) {
