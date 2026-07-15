@@ -564,6 +564,54 @@ impl TtsQueue {
         self.enqueue_action(QueueAction::Earcon(event), session)
     }
 
+    /// Route one earcon: an ordered queue action by default (77f9266 / #78), with ONE
+    /// narrow exception — a needs-input cue arriving while the `pause_in_background`
+    /// focus hold is silencing the queue AND playback is idle plays immediately on a
+    /// detached thread. The cue's whole purpose is alerting a user who is NOT looking
+    /// at the terminal; queued, it was held exactly when it mattered.
+    ///
+    /// The idle gate (`!tts_active`) is required: the focus gate holds at item
+    /// boundaries only, so an utterance already in flight when the user tabs away
+    /// keeps sounding — without the check the out-of-band cue would mix over it,
+    /// violating the earcon contract (ARCHITECTURE.md). Race analysis: while
+    /// `hold.focus` is true the worker cannot START new playback (`gate_item`
+    /// re-checks the hold), so `tts_active` can only decay to false here; the
+    /// refocus-concurrent TOCTOU is bounded by the helper's speak-op `cancel_current`
+    /// stopping an in-flight cue.
+    ///
+    /// Deliberate properties of the bypass:
+    /// * it does NOT set `tts_active`/`in_flight` around the cue — during a focus hold
+    ///   `is_busy()` must stay false, or the always-listening capture would close
+    ///   mid-dictation for a one-second ding;
+    /// * out-of-band cues are not queue items, so `clear_session`/StopSpeech won't
+    ///   prune them — helper-side mute/cancel/stopfade still stop a sounding cue;
+    /// * with no warm child the bypass fails with "TTS child not running", identical
+    ///   to the queued path (`cue_one` never calls `ensure_started`) — parity, not a
+    ///   regression.
+    pub fn dispatch_earcon(
+        self: &Arc<Self>,
+        event: ds_earcon::EarconEvent,
+        session: Option<String>,
+    ) -> Result<(), String> {
+        if earcon_bypasses_queue(event, self.worker_hold_state())
+            && !self.tts_active.load(Ordering::SeqCst)
+        {
+            let worker = self.clone();
+            if let Err(e) = std::thread::Builder::new()
+                .name("ds-cue-oob".into())
+                .spawn(move || {
+                    if let Err(e) = worker.cue_one(event) {
+                        log::warn!(target: "ttsq", "out-of-band cue failed: {e}");
+                    }
+                })
+            {
+                log::error!(target: "ttsq", "failed to spawn out-of-band cue thread: {e}");
+            }
+            return Ok(());
+        }
+        self.enqueue_earcon(event, session)
+    }
+
     fn enqueue_action(&self, action: QueueAction, session: Option<String>) -> Result<(), String> {
         let mut q = self.items.lock().unwrap();
         let is_cue = matches!(&action, QueueAction::Earcon(_));
@@ -1601,6 +1649,13 @@ fn hold_state(
     }
 }
 
+/// Only needs_input escapes the ordered queue, only while the focus hold is actively
+/// silencing it (the cue's whole purpose is alerting a user who is NOT looking), and
+/// never while a half-duplex mic is live (never play into a recording).
+fn earcon_bypasses_queue(event: ds_earcon::EarconEvent, hold: HoldState) -> bool {
+    matches!(event, ds_earcon::EarconEvent::NeedsInput) && hold.focus && !hold.mic
+}
+
 /// How recently a voice submit must have happened for the next UserPromptSubmit hook to be
 /// its echo (rather than a real text submit). The hook fires sub-second after the voice
 /// submit's auto-Enter, so the window is generous.
@@ -2087,6 +2142,89 @@ mod tests {
             items[2].action,
             QueueAction::Speech { ref text, .. } if text == "later"
         ));
+    }
+
+    #[test]
+    fn earcon_bypasses_queue_only_for_needs_input_under_a_focus_only_hold() {
+        // Truth table for the PURE predicate — the tts_active idle gate lives in
+        // `dispatch_earcon` (it is live state, not hold state) and is tested there.
+        let focus_only = HoldState {
+            mic: false,
+            focus: true,
+        };
+        let focus_and_mic = HoldState {
+            mic: true,
+            focus: true,
+        };
+        let no_hold = HoldState {
+            mic: false,
+            focus: false,
+        };
+        assert!(earcon_bypasses_queue(
+            ds_earcon::EarconEvent::NeedsInput,
+            focus_only
+        ));
+        assert!(
+            !earcon_bypasses_queue(ds_earcon::EarconEvent::NeedsInput, focus_and_mic),
+            "never play into a half-duplex recording"
+        );
+        assert!(
+            !earcon_bypasses_queue(ds_earcon::EarconEvent::NeedsInput, no_hold),
+            "no hold silencing the queue → ordered like everything else"
+        );
+        assert!(
+            !earcon_bypasses_queue(ds_earcon::EarconEvent::ReplyDone, focus_only),
+            "only needs_input escapes"
+        );
+    }
+
+    #[test]
+    fn dispatch_earcon_bypasses_the_held_queue_only_for_idle_needs_input() {
+        // Construct with full-duplex pre-set: `mic_holds(full_duplex=true, …)` is always
+        // false, so a dev machine's genuinely live microphone can't turn the focus-only
+        // hold under test into focus+mic and silently defeat the bypass.
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("ds-test-nonexistent-helper");
+        let q = TtsQueue::test_stub_with_helper(
+            dir.path(),
+            helper,
+            crate::tts::TtsManagerTestOptions::default().with_full_duplex_active(true),
+        );
+        let s = Some("term-1".to_string());
+
+        // Engage the focus hold: config on, terminal seen frontmost once, then backgrounded.
+        q.set_pause_in_background(true);
+        q.set_terminal_front(true);
+        q.set_terminal_front(false);
+
+        // needs_input under the hold with playback idle → bypass. The branch never touches
+        // `items`, so the empty assertion is synchronous; the detached thread resolves the
+        // default EMPTY needs_input sound and returns before any helper contact.
+        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, s.clone())
+            .unwrap();
+        assert!(
+            q.items.lock().unwrap().is_empty(),
+            "a bypassed cue is never queued"
+        );
+
+        // reply_done never escapes the ordered queue.
+        q.dispatch_earcon(ds_earcon::EarconEvent::ReplyDone, s.clone())
+            .unwrap();
+        assert_eq!(q.items.lock().unwrap().len(), 1);
+
+        // An utterance already sounding: the idle gate routes needs_input to the queue
+        // instead of mixing the cue over it.
+        q.tts_active.store(true, Ordering::SeqCst);
+        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, s.clone())
+            .unwrap();
+        assert_eq!(q.items.lock().unwrap().len(), 2);
+        q.tts_active.store(false, Ordering::SeqCst);
+
+        // Hold cleared (terminal refocused) → ordered queue again.
+        q.set_terminal_front(true);
+        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, s)
+            .unwrap();
+        assert_eq!(q.items.lock().unwrap().len(), 3);
     }
 
     #[test]

@@ -348,7 +348,9 @@ pub(crate) fn spawn_ipc_server(
                     source,
                 } => {
                     // Completion cues share the session FIFO with speech, so Stop/Notification
-                    // can never overtake narration already admitted for that turn.
+                    // can never overtake narration already admitted for that turn — except the
+                    // needs-input bypass while the background focus hold has playback idle
+                    // (see `TtsQueue::dispatch_earcon`).
                     let session = earcon_session(&ttsq, session);
                     log_client(
                         &paths,
@@ -359,7 +361,7 @@ pub(crate) fn spawn_ipc_server(
                         ),
                     );
                     if let Some(ev) = ds_earcon::EarconEvent::parse(&event) {
-                        match ttsq.enqueue_earcon(ev, session) {
+                        match ttsq.dispatch_earcon(ev, session) {
                             Ok(()) => emit(&ds_ipc::Response::Done),
                             Err(e) => emit(&ds_ipc::Response::error(format!("earcon: {e}"))),
                         }

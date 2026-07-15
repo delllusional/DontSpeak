@@ -70,7 +70,10 @@ Kokoro model loaded. What gets spoken is decided upstream by the `narrate` setti
 Barge-in (starting to record while speech is playing) pauses the queue and resumes on
 cancel. Short audible earcons — a reply-done cue and a needs-input cue, each independently
 configurable — are session-scoped queue actions, ordered after narration already admitted for
-their hook event. They never mix over in-flight speech.
+their hook event. They never mix over in-flight speech, with one exception: a needs-input cue
+arriving while the pause-in-background focus hold has playback idle sounds immediately (it
+alerts a user who is not looking at the terminal). It starts only when nothing is playing,
+and any speech that starts mid-cue cancels it.
 
 The shared Markdown-to-phoneme frontend, backend parity contract, helper outcomes,
 queue/listener interaction, and planned delivery-state evolution are specified in

@@ -130,6 +130,7 @@ pub(crate) struct TtsManagerTestOptions {
     finalize_timeout: Option<std::time::Duration>,
     ready_timeout: Option<std::time::Duration>,
     cue_timeout: Option<std::time::Duration>,
+    full_duplex_active: bool,
     /// Extra env vars consumed by the first spawn. This lets the READY-wedge regression prove
     /// recovery on the same manager without mutating either the manager or process-global env.
     first_spawn_env: Mutex<Option<Vec<(String, String)>>>,
@@ -149,6 +150,14 @@ impl TtsManagerTestOptions {
 
     pub(crate) fn with_cue_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.cue_timeout = Some(timeout);
+        self
+    }
+
+    /// Pre-set the manager's private `full_duplex_active` state at construction. `ttsq.rs`'s
+    /// dispatch test can't reach the field and needs `mic_holds` neutralized (the full-duplex
+    /// arm ignores the mic) so a dev machine's genuinely live microphone can't skew its hold.
+    pub(crate) fn with_full_duplex_active(mut self, on: bool) -> Self {
+        self.full_duplex_active = on;
         self
     }
 
@@ -206,6 +215,8 @@ pub struct TtsManager {
     /// Exactly one logical caller may own the helper's untagged listen event stream. A test
     /// recognition request now fails busy instead of clearing/stealing Caps dictation events.
     listen_lease: Mutex<()>,
+    /// At most one cue op in flight — see `cue_validated` for the CueSlot race this closes.
+    cue_lease: Mutex<()>,
     /// Monotonic helper listen generation. Stop is expressed as "cancel through generation N"
     /// so an early stop can never be erased by delayed start processing.
     next_listen_generation: AtomicU64,
@@ -355,6 +366,12 @@ impl TtsManager {
         lifetime: Arc<crate::stats::LifetimeSeconds>,
         #[cfg(test)] test_options: TtsManagerTestOptions,
     ) -> Self {
+        // Both `new` entry points funnel here, so a test seam consumed at construction
+        // (the options struct's contract) applies regardless of which one built the manager.
+        #[cfg(test)]
+        let full_duplex_active = test_options.full_duplex_active;
+        #[cfg(not(test))]
+        let full_duplex_active = false;
         Self {
             bin,
             helper_log_file,
@@ -367,6 +384,7 @@ impl TtsManager {
             cue_slot: Arc::new((Mutex::new(CueSlot::default()), Condvar::new())),
             listen_slot: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
             listen_lease: Mutex::new(()),
+            cue_lease: Mutex::new(()),
             next_listen_generation: AtomicU64::new(1),
             active_listen_generation: AtomicU64::new(0),
             listen_stopped_through: AtomicU64::new(0),
@@ -389,7 +407,7 @@ impl TtsManager {
                 stt_preload: false,
                 tts_preload: false,
             }),
-            full_duplex_active: Mutex::new(false),
+            full_duplex_active: Mutex::new(full_duplex_active),
             stt_provider_active: Mutex::new(String::new()),
             tts_wanted_active: Mutex::new(false),
             tts_model: Arc::new(ModelSlot::new()),
@@ -1656,6 +1674,17 @@ impl TtsManager {
     /// [`cue`](Self::cue) past its `canonical_sound_path` trust-boundary check — split out so
     /// tests can drive the helper protocol with a tempdir path that can never pass that check.
     fn cue_validated(&self, path: &std::path::Path) -> std::io::Result<()> {
+        // At most ONE cue op in flight (the queue worker plus ttsq's out-of-band
+        // needs-input path can now call concurrently): two waiters on the one CueSlot
+        // race — the second caller's slot reset can erase a `done` the first waiter
+        // hasn't consumed, and CUEDONE↔waiter pairing turns ambiguous. Holding the
+        // lease across reset-slot → write-request → wait keeps the helper's
+        // one-CUEDONE-per-op mapping 1:1. The dangerous cross-satisfaction path (op A
+        // times out, its late CUEDONE lands after op B resets the slot) is closed
+        // because the timeout/dead arms call mark_dead_if_current, which kills the
+        // child and joins its reader. Worst-case queue-worker wait behind an
+        // out-of-band cue: one cue duration, bounded by CUE_TERMINAL_TIMEOUT.
+        let _lease = self.cue_lease.lock().unwrap();
         let Some(my_gen) = self.child.running_gen() else {
             return Err(std::io::Error::other("TTS child not running"));
         };
