@@ -9,79 +9,27 @@
 //! (`cli_dispatch.rs` runs fine, proving `patch`/`dispatch` is NOT a trigger — only those
 //! three words are.) The Linux per-commit CI is unaffected; this is a Windows-local trap.
 //!
-//! The uninstall logic lives ONCE in `scripts/uninstall.sh` and reaches users two ways:
-//! repo checkouts run it (`apps/linux/uninstall.sh` execs it), and the one-command
-//! installer embeds it verbatim as `~/.local/bin/dontspeak-uninstall` (heredoc in
-//! `web/install.sh`). The site serves only the install scripts — every install already
-//! carries its own uninstaller. These tests fail CI the moment any copy drifts, and pin
-//! the install-side invariant that macOS has ONE per-user install layout
+//! Uninstall logic lives only in `scripts/uninstall.sh` (macOS/Linux) and
+//! `scripts/uninstall.ps1` (Windows). Platform packages copy those canonical files as
+//! payloads; installers require and place/register the payload instead of embedding a
+//! second script body. These tests pin that three-platform route and the install-side
+//! invariant that macOS has ONE per-user install layout
 //! (`~/Applications/DontSpeak.app`, shared by the release and dev flows) — never the
 //! system `/Applications` folder, which needs an admin account.
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 
-/// Reads a repo file with line endings normalized to LF — Windows checkouts
-/// (core.autocrlf) materialize text files with CRLF, which must not fail the
-/// byte-for-byte embed comparisons.
+/// Reads a repo file with line endings normalized to LF.
 fn repo_file(rel: &str) -> String {
     let path = repo_root().join(rel);
     fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
         .replace("\r\n", "\n")
-}
-
-/// Like repo_file, but falls back to the git INDEX when the working-tree copy is
-/// missing. Endpoint-security tools (Bitdefender) quarantine web/install.ps1 from the
-/// working tree on some dev machines — the staged content is still the real content.
-fn repo_file_or_staged(rel: &str) -> String {
-    let path = repo_root().join(rel);
-    if let Ok(s) = fs::read_to_string(&path) {
-        return s;
-    }
-    let out = Command::new("git")
-        .args(["show", &format!(":{rel}")])
-        .current_dir(repo_root())
-        .output()
-        .unwrap_or_else(|e| panic!("git show :{rel}: {e}"));
-    assert!(
-        out.status.success(),
-        "{rel}: missing on disk AND not in the git index"
-    );
-    String::from_utf8(out.stdout)
-        .expect("utf8")
-        .replace("\r\n", "\n")
-}
-
-/// The `<<'UNINSTALL'` heredoc body in web/install.sh.
-fn embedded_uninstaller() -> String {
-    let install = repo_file("web/install.sh");
-    let lines: Vec<&str> = install.lines().collect();
-    let start = lines
-        .iter()
-        .position(|l| l.trim_end().ends_with("<<'UNINSTALL'"))
-        .expect("web/install.sh: no <<'UNINSTALL' heredoc");
-    let end = lines[start + 1..]
-        .iter()
-        .position(|l| *l == "UNINSTALL")
-        .map(|i| i + start + 1)
-        .expect("web/install.sh: UNINSTALL heredoc never terminated");
-    lines[start + 1..end].join("\n") + "\n"
-}
-
-#[test]
-fn embedded_uninstaller_matches_canonical() {
-    assert_eq!(
-        embedded_uninstaller(),
-        repo_file("scripts/uninstall.sh"),
-        "the uninstaller heredoc in web/install.sh has drifted from scripts/uninstall.sh — \
-         edit scripts/uninstall.sh (the single source of truth) and re-embed it verbatim"
-    );
 }
 
 #[test]
@@ -116,27 +64,84 @@ fn uninstaller_removes_the_macos_app_bundle() {
 }
 
 #[test]
-fn windows_embedded_uninstaller_matches_canonical() {
-    // install.ps1 writes the placed uninstaller from a single-quoted here-string
-    // (@' … '@). That body must BE scripts/uninstall.ps1, byte-for-byte.
-    let install = repo_file_or_staged("web/install.ps1");
-    let lines: Vec<&str> = install.lines().collect();
-    let start = lines
-        .iter()
-        .position(|l| l.trim() == "@'")
-        .expect("web/install.ps1: no @' here-string");
-    let end = lines[start + 1..]
-        .iter()
-        .position(|l| l.starts_with("'@"))
-        .map(|i| i + start + 1)
-        .expect("web/install.ps1: @' here-string never terminated");
-    let embedded = lines[start + 1..end].join("\n") + "\n";
-    assert_eq!(
-        embedded,
-        repo_file("scripts/uninstall.ps1"),
-        "the uninstaller here-string in web/install.ps1 has drifted from scripts/uninstall.ps1 — \
-         edit scripts/uninstall.ps1 (the single source of truth) and re-embed it verbatim"
-    );
+fn every_platform_package_ships_its_canonical_uninstaller_file() {
+    let routes = [
+        (
+            "Windows",
+            "apps/windows/installer/build-portable.ps1",
+            r#"Copy-Item "$repo\scripts\uninstall.ps1" "$stage\uninstall.ps1""#,
+        ),
+        (
+            "macOS",
+            "apps/macos/bundle-lib.sh",
+            r#"install -m0755 "$repo/scripts/uninstall.sh" "$app/Contents/Resources/uninstall.sh""#,
+        ),
+        (
+            "Linux",
+            "apps/linux/package.sh",
+            r#"install -m0755 "$REPO/scripts/uninstall.sh" "$ROOT/uninstall.sh""#,
+        ),
+    ];
+    for (platform, packager, canonical_copy) in routes {
+        assert!(
+            repo_file(packager).contains(canonical_copy),
+            "{platform} package must copy its canonical uninstaller file as payload ({packager})"
+        );
+    }
+}
+
+#[test]
+fn every_platform_installer_requires_the_packaged_uninstaller() {
+    let checks = [
+        (
+            "Windows",
+            "web/install.ps1",
+            r#"Test-Path -LiteralPath (Join-Path $stagedApp 'uninstall.ps1') -PathType Leaf"#,
+            "incomplete archive: missing canonical uninstall.ps1 payload",
+        ),
+        (
+            "macOS",
+            "web/install.sh",
+            r#"[ -f "$out/DontSpeak.app/Contents/Resources/uninstall.sh" ]"#,
+            "incomplete archive (no canonical uninstall.sh payload)",
+        ),
+        (
+            "Linux",
+            "apps/linux/tarball-install.sh",
+            r#"[ -f "$HERE/uninstall.sh" ]"#,
+            "install: package is missing uninstall.sh",
+        ),
+    ];
+    for (platform, installer, payload_check, missing_payload_error) in checks {
+        let body = repo_file(installer);
+        assert!(
+            body.contains(payload_check) && body.contains(missing_payload_error),
+            "{platform} installer must reject an artifact missing its canonical uninstaller ({installer})"
+        );
+    }
+}
+
+#[test]
+fn web_installers_do_not_embed_uninstaller_script_bodies() {
+    for (installer, old_embed_delimiter) in [
+        ("web/install.sh", "<<'UNINSTALL'"),
+        ("web/install.ps1", "@'\n# uninstall.ps1"),
+    ] {
+        let body = repo_file(installer);
+        assert!(
+            !body.contains(old_embed_delimiter),
+            "{installer} contains its old embedded-uninstaller delimiter"
+        );
+        for canonical_header in [
+            "# uninstall.sh — THE DontSpeak uninstaller",
+            "# uninstall.ps1 — THE DontSpeak uninstaller",
+        ] {
+            assert!(
+                !body.contains(canonical_header),
+                "{installer} embeds an uninstaller body; packages must copy the canonical file instead"
+            );
+        }
+    }
 }
 
 #[test]
@@ -213,12 +218,23 @@ fn uninstaller_honors_the_app_dir_override() {
 
 #[test]
 fn dev_installs_place_the_standalone_uninstaller() {
-    // Parity with the release installer: install-daemon.sh (shared by bundle.sh and
-    // scripts/install.sh) copies scripts/uninstall.sh onto PATH as dontspeak-uninstall.
+    // macOS/Linux share install-daemon.sh; Windows runs the exact public installer against
+    // its local archive instead of recreating registration as skill documentation.
     assert!(
         repo_file("scripts/install-daemon.sh")
             .contains("scripts/uninstall.sh\" \"$INSTALL_DIR/dontspeak-uninstall\""),
         "scripts/install-daemon.sh must place scripts/uninstall.sh as $INSTALL_DIR/dontspeak-uninstall"
+    );
+    let windows_skill = repo_file(".agents/skills/build-windows/SKILL.md");
+    for needle in ["DONTSPEAK_ARCHIVE", r#"& .\web\install.ps1"#] {
+        assert!(
+            windows_skill.contains(needle),
+            "Windows dev install must route its local archive through web/install.ps1 ({needle})"
+        );
+    }
+    assert!(
+        !windows_skill.contains("Expand-Archive"),
+        "Windows dev skill must not reimplement archive installation outside web/install.ps1"
     );
 }
 

@@ -3,8 +3,8 @@ build-portable.ps1 — produce the SELF-CONTAINED, no-install DontSpeak portable
 
 Bundles EVERYTHING needed to run with zero install: the WinUI app + the .NET 10 runtime +
 the Windows App SDK (all self-contained) + the native engine DLL/helper + the merged
-dontspeak bin + ALL voice models (Kokoro + Parakeet + onnxruntime) under a sibling `models\`
-dir. The app auto-detects that dir on launch (App.EnablePortableModelDir → DONTSPEAK_MODEL_DIR),
+dontspeak bin + canonical uninstaller + ALL voice models (Kokoro + Parakeet + onnxruntime)
+under a sibling `models\` dir. The app auto-detects that dir on launch (App.EnablePortableModelDir → DONTSPEAK_MODEL_DIR),
 so an EXTRACTED copy runs fully offline — no .NET / Windows App Runtime install, no model
 download.
 
@@ -60,6 +60,9 @@ $publishOut = dotnet publish "$repo\apps\windows\winui\DontSpeak.WinUI.csproj" -
 if ($LASTEXITCODE) { $publishOut | Write-Host; throw "dotnet publish failed" }
 Copy-Item "$rel\dontspeak.exe" "$stage\" -Force
 Copy-Item "$repo\apps\windows\winui\AppIcon.ico" "$stage\" -Force
+# Ship the canonical standalone uninstaller as payload, just like the Linux tarball and
+# macOS app bundle. web/install.ps1 registers this file; it must never embed another copy.
+Copy-Item "$repo\scripts\uninstall.ps1" "$stage\uninstall.ps1" -Force
 # The binary embeds Apache-licensed Misaki dictionary data through voice-g2p. Keep the product
 # license, third-party notice, and referenced license copies together in every release archive.
 Copy-Item "$repo\LICENSE" "$stage\LICENSE" -Force

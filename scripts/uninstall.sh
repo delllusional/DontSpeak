@@ -10,10 +10,10 @@
 # ALL app data / downloaded models / caches / logs / state, the launchers / login
 # item, and the placed standalone uninstaller itself.
 #
-# It runs from two places — the SAME bytes in both, pinned by
-# rust/crates/dontspeakd/tests/packaging_sync.rs (cargo test fails on any drift):
-#   1. repo checkout:  this file (apps/linux/uninstall.sh execs it)
-#   2. installed box:  web/install.sh embeds it verbatim as ~/.local/bin/dontspeak-uninstall
+# It runs from two places, with packaging pinned by packaging_sync.rs:
+#   1. repo checkout: this file (apps/linux/uninstall.sh execs it)
+#   2. installed box: each OS package carries this file and its installer places it
+#      as ~/.local/bin/dontspeak-uninstall
 #
 # Always resets THIS app's own TCC grants (Accessibility + Microphone + Speech Recognition) on
 # macOS, so a reinstall re-prompts cleanly instead of inheriting a stale, pre-selected (and,

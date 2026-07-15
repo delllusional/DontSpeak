@@ -11,6 +11,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="${DONTSPEAK_INSTALL_DIR:-$HOME/.local/bin}"
 APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 ICONS="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+# Refuse an incomplete package before changing the machine. Every platform package carries
+# its canonical uninstaller as payload; a missing one is a broken artifact, not optional.
+[ -f "$HERE/uninstall.sh" ] || { echo "install: package is missing uninstall.sh" >&2; exit 1; }
 # Stop a running host/helper first — `install` over a live binary is unguarded
 # (mirrors the macOS clean step, which quits the app before replacing it).
 pkill -x ds-gtk 2>/dev/null || true
@@ -33,11 +36,9 @@ if [ "${DONTSPEAK_NO_AUTOSTART:-0}" != "1" ]; then
   install -d "$AUTOSTART"
   cp "$APPS/dontspeak.desktop" "$AUTOSTART/dontspeak.desktop"
 fi
-# Standalone uninstaller onto PATH (parity with web/install.sh and install-daemon.sh) —
-# once the extracted tarball dir is deleted, this is the only removal path left.
-if [ -f "$HERE/uninstall.sh" ]; then
-  install -m0755 "$HERE/uninstall.sh" "$BIN/dontspeak-uninstall"
-fi
+# Standalone uninstaller onto PATH (parity with the other platform installers) — once
+# the extracted tarball dir is deleted, this is the only removal path left.
+install -m0755 "$HERE/uninstall.sh" "$BIN/dontspeak-uninstall"
 "$BIN/dontspeak" wire --reconcile 2>/dev/null || echo "(wire skipped)"
 echo
 echo "Installed to $BIN. To grant /dev/uinput (synthetic keys), once:"

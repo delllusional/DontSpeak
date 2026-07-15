@@ -9,7 +9,7 @@
 #
 # Payload: the GTK host ds-gtk (hosts the engine in-process) + the MCP/hook bin
 # dontspeak + the warm-synth helper ds-helper + dontspeak.desktop + app-icon.svg +
-# the /dev/uinput udev rule.
+# the /dev/uinput udev rule + the canonical standalone uninstaller.
 #
 #   apps/linux/package.sh
 #   OUTDIR=~/Desktop apps/linux/package.sh

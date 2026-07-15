@@ -188,6 +188,9 @@ assemble_app() {
   plutil -replace CFBundleDisplayName -string "$app_name" "$app/Contents/Info.plist"
   cp "$car"  "$app/Contents/Resources/Assets.car"
   cp "$icns" "$app/Contents/Resources/AppIcon.icns"
+  # The release installer places this canonical payload on PATH. Keeping it in the app
+  # archive avoids an embedded script body in web/install.sh and matches the other OSes.
+  install -m0755 "$repo/scripts/uninstall.sh" "$app/Contents/Resources/uninstall.sh"
   # The helper embeds Apache-licensed Misaki dictionary data through voice-g2p. Bundle the
   # product license, attribution notice, and referenced license copies as readable resources.
   mkdir -p "$app/Contents/Resources/licenses"

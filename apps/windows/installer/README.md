@@ -5,12 +5,13 @@ elevation, no runtime prerequisites. The one-command installer at
 [dontspeak.org](https://dontspeak.org) (`web/install.ps1`) downloads it, extracts it to
 `%LOCALAPPDATA%\Programs\DontSpeak`, adds that directory to the per-user `PATH`, wires
 the client integrations (`dontspeak wire --reconcile`), adds a Start-menu shortcut, and
-launches the app.
+launches the app. Local development archives go through that same script by setting
+`DONTSPEAK_ARCHIVE`, so they produce the same registered install as release archives.
 
 ## What the zip contains
 - The WinUI app (`ds-winui.exe`) + the in-process engine `ds_core.dll` + the warm-synth
   `ds-helper.exe` + the `dontspeak.exe` client launcher / MCP server / hook executor +
-  `AppIcon.ico`.
+  `AppIcon.ico` + the canonical `uninstall.ps1` registered by the install script.
 - The **.NET 10 runtime and the Windows App SDK, bundled** (self-contained publish), so the
   extracted app runs with nothing else installed.
 - The voice models download on first launch (into the per-user model dir), the same as
@@ -26,6 +27,14 @@ pwsh apps/windows/installer/build-portable.ps1 -Arch x64 -SkipModels
 # → apps/windows/installer/Output/dontspeak-<version>-windows-x86_64.zip
 ```
 
+Install that exact local artifact through the normal registration path:
+
+```powershell
+$env:DONTSPEAK_ARCHIVE = Get-Item apps\windows\installer\Output\dontspeak-*-windows-x86_64.zip |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+try { & .\web\install.ps1 } finally { Remove-Item Env:\DONTSPEAK_ARCHIVE }
+```
+
 - `-Arch arm64` cross-compiles (needs the arm64 MSVC tools + clang).
 - Drop `-SkipModels` to bundle Kokoro + Parakeet + onnxruntime into the zip for a fully
   offline archive (~1 GB larger).
@@ -33,7 +42,7 @@ pwsh apps/windows/installer/build-portable.ps1 -Arch x64 -SkipModels
 `build-portable.ps1` does: `cargo build --release` (core + helper + `dontspeak`) →
 `dotnet publish` the WinUI app **self-contained** (`--self-contained` +
 `WindowsAppSDKSelfContained`; the `StripUnusedWindowsAI` csproj target trims the unused
-Windows-ML DLLs) → optional model prefetch into `models\` → `Compress-Archive`. It shares
+Windows-ML DLLs) → canonical uninstaller payload → optional model prefetch into `models\` → `Compress-Archive`. It shares
 `build-common.ps1` with the rest of the Windows build. The `payload/` and `Output/` folders
 are build artifacts (git-ignored).
 

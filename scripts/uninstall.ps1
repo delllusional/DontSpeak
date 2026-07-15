@@ -1,6 +1,6 @@
 # uninstall.ps1 — THE DontSpeak uninstaller (Windows): the single source of truth.
-# web/install.ps1 embeds it verbatim into the install dir and registers it as the
-# Settings > Apps UninstallString. packaging_sync.rs pins the copies in sync.
+# build-portable.ps1 ships this file in the archive; web/install.ps1 registers that
+# payload as the Settings > Apps UninstallString. packaging_sync.rs pins the route.
 # Removes everything the one-command installer created.
 $ErrorActionPreference = 'SilentlyContinue'
 # Only the PLACED copy sits next to dontspeak.exe — any other copy (repo checkout,
