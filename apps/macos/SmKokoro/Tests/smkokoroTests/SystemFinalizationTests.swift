@@ -5,17 +5,30 @@ import XCTest
 final class SystemFinalizationTests: XCTestCase {
     /// Regression from the macOS 15 live repro: the final callback dropped a real suffix that
     /// the last partial (and therefore the popup) had already shown.
-    func testStrictPrefixFinalKeepsCompletePartial() {
+    func testMacOS15StrictPrefixWorkaroundKeepsCompletePartial() {
         XCTAssertEqual(
             systemSettledSegment(
                 latestPartial: "Recognition produces the correct text Submitted",
-                finalSegment: "Recognition produces the correct text"),
+                incomingSegment: "Recognition produces the correct text",
+                preserveStrictPrefix: true),
             "Recognition produces the correct text Submitted")
+    }
+
+    func testStrictPrefixFinalCorrectionWinsWithoutWorkaround() {
+        XCTAssertEqual(
+            systemSettledSegment(
+                latestPartial: "Open the report tomorrow",
+                incomingSegment: "Open the report",
+                preserveStrictPrefix: false),
+            "Open the report")
     }
 
     func testEmptyFinalKeepsNonemptyPartial() {
         XCTAssertEqual(
-            systemSettledSegment(latestPartial: "Keep the whole sentence", finalSegment: ""),
+            systemSettledSegment(
+                latestPartial: "Keep the whole sentence",
+                incomingSegment: "",
+                preserveStrictPrefix: false),
             "Keep the whole sentence")
     }
 
@@ -31,7 +44,8 @@ final class SystemFinalizationTests: XCTestCase {
         XCTAssertEqual(
             systemSettledSegment(
                 latestPartial: "verify the entire sentence and fix it",
-                finalSegment: "Verify the entire sentence."),
+                incomingSegment: "Verify the entire sentence.",
+                preserveStrictPrefix: true),
             "verify the entire sentence and fix it")
     }
 
@@ -39,7 +53,8 @@ final class SystemFinalizationTests: XCTestCase {
         XCTAssertEqual(
             systemSettledSegment(
                 latestPartial: "open the get repository",
-                finalSegment: "Open the Git repository."),
+                incomingSegment: "Open the Git repository.",
+                preserveStrictPrefix: true),
             "Open the Git repository.")
     }
 
@@ -47,7 +62,15 @@ final class SystemFinalizationTests: XCTestCase {
         XCTAssertEqual(
             systemSettledSegment(
                 latestPartial: "incorrect speculative ending",
-                finalSegment: "Correct ending"),
+                incomingSegment: "Correct ending",
+                preserveStrictPrefix: true),
             "Correct ending")
+    }
+
+    func testStrictPrefixPartialCorrectionReplacesSpeculation() {
+        let run = LegacyRun()
+        run.recordPartial("Open the report tomorrow")
+        run.recordPartial("Open the report")
+        XCTAssertEqual(run.hypothesis(), "Open the report")
     }
 }

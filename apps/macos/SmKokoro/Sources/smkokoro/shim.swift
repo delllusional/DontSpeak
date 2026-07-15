@@ -518,7 +518,7 @@ final class LegacyRun: @unchecked Sendable {
     private var committedText: String = ""
     /// The raw newest callback, retained for phrase-reset detection.
     private var latestPartial: String = ""
-    /// The popup/final candidate, protected from empty or strict-prefix callback regressions.
+    /// The popup/final candidate, protected from empty callback regressions.
     private var settledPartial: String = ""
     private var lastPartialChangedAt: TimeInterval?
 
@@ -542,7 +542,7 @@ final class LegacyRun: @unchecked Sendable {
 
     /// A no-speech terminal after a valid partial still finalizes to that popup-visible text.
     func finishNoSpeech() {
-        finish(text: finalJoined(""), error: nil)
+        finish(text: finalJoined("", preserveStrictPrefix: false), error: nil)
     }
 
     /// Record one non-final result's `bestTranscription`. Detects a phrase-segment boundary
@@ -572,7 +572,9 @@ final class LegacyRun: @unchecked Sendable {
             settledPartial = newText
         } else {
             settledPartial = systemSettledSegment(
-                latestPartial: settledPartial, finalSegment: newText)
+                latestPartial: settledPartial,
+                incomingSegment: newText,
+                preserveStrictPrefix: false)
         }
         latestPartial = newText
         lastPartialChangedAt = timing.lastChangedAt
@@ -580,11 +582,13 @@ final class LegacyRun: @unchecked Sendable {
 
     /// `committedText + " " + finalSegment` — the shape `isFinal`'s callback hands to
     /// `finish`, joining whatever was already committed with the last (final) segment.
-    func finalJoined(_ finalSegment: String) -> String {
+    func finalJoined(_ finalSegment: String, preserveStrictPrefix: Bool) -> String {
         textLock.lock()
         defer { textLock.unlock() }
         let settled = systemSettledSegment(
-            latestPartial: settledPartial, finalSegment: finalSegment)
+            latestPartial: settledPartial,
+            incomingSegment: finalSegment,
+            preserveStrictPrefix: preserveStrictPrefix)
         return legacyJoin(committedText, settled)
     }
 }
@@ -793,8 +797,8 @@ private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) thr
 //   • macOS 26+: ONE persistent `SpeechAnalyzer` + `AsyncStream<AnalyzerInput>` for the whole
 //     utterance. A detached `Task` drains `transcriber.results` WITHOUT the `where
 //     result.isFinal` filter `sysTranscribe` uses, so we see volatile (non-final) results too:
-//     `committedText` accumulates each finalized result, `latestVolatileText` holds the most
-//     complete in-flight (non-final) hypothesis. It runs independently of whichever thread is
+//     `committedText` accumulates each finalized result, `latestVolatileText` holds the latest
+//     nonempty in-flight hypothesis. It runs independently of whichever thread is
 //     currently inside a push/finish call — those only read the two fields under the session's lock.
 //   • Legacy (<26): a FRESH `SFSpeechAudioBufferRecognitionRequest` per utterance (like
 //     `legacyTranscribe`), but with `shouldReportPartialResults = true` — today's batch path
@@ -810,7 +814,7 @@ private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) thr
 //     CURRENT phrase segment — mirroring `SysModernSession`, `LegacyRun` (see its doc
 //     comment for why it lives THERE and not on `SysStreamState`) accumulates each
 //     completed segment in `committedText`, tracks the CURRENT segment's raw callback in
-//     `latestPartial`, and preserves its popup-visible candidate in `settledPartial`. A
+//     `latestPartial`, and preserves its last nonempty candidate in `settledPartial`. A
 //     segment boundary is inferred from the text itself in `legacySegmentDidReset` (see its doc
 //     comment for the exact heuristic and why a naive word/length check false-positives on
 //     ordinary in-phrase revisions like digit re-grouping); when detected,
@@ -828,21 +832,31 @@ private func systemSpeechWords(_ text: String) -> [String] {
     text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
 }
 
-/// Keep the live hypothesis when Apple's final callback is empty or only a word-prefix of it.
-/// macOS 15 was observed returning a strict-prefix final after the popup had already shown the
-/// complete partial, which made the subsequent Caps submit look like a paste truncation. Other
-/// final revisions still win, including same-length punctuation and recognition corrections.
-func systemSettledSegment(latestPartial: String, finalSegment: String) -> String {
+/// Keep the live hypothesis for empty callbacks and, only when requested, strict word prefixes.
+/// The latter is a macOS 15 legacy-recognizer workaround; modern finalized results and ordinary
+/// partial refinements remain authoritative so they can retract a speculative suffix.
+func systemSettledSegment(
+    latestPartial: String,
+    incomingSegment: String,
+    preserveStrictPrefix: Bool
+) -> String {
     let partialWords = systemSpeechWords(latestPartial)
-    guard !partialWords.isEmpty else { return finalSegment }
+    guard !partialWords.isEmpty else { return incomingSegment }
 
-    let finalWords = systemSpeechWords(finalSegment)
-    if finalWords.isEmpty
-        || (partialWords.count > finalWords.count && partialWords.starts(with: finalWords))
+    let incomingWords = systemSpeechWords(incomingSegment)
+    if incomingWords.isEmpty
+        || (preserveStrictPrefix
+            && partialWords.count > incomingWords.count
+            && partialWords.starts(with: incomingWords))
     {
         return latestPartial
     }
-    return finalSegment
+    return incomingSegment
+}
+
+/// macOS 15's legacy recognizer can finalize with a strict prefix of its last complete partial.
+private var legacyNeedsStrictPrefixFinalWorkaround: Bool {
+    ProcessInfo.processInfo.operatingSystemVersion.majorVersion == 15
 }
 
 /// Modern-tier (26+) per-utterance session. Held as a plain (non-`@available`) `Any?` on
@@ -894,7 +908,9 @@ private final class SysModernSession: @unchecked Sendable {
         defer { lock.unlock() }
         if isFinal {
             let settled = systemSettledSegment(
-                latestPartial: latestVolatileText, finalSegment: text)
+                latestPartial: latestVolatileText,
+                incomingSegment: text,
+                preserveStrictPrefix: false)
             // An empty final (e.g. a silent segment) must NOT bake a permanent trailing
             // separator into committedText — only append when there's real text.
             if !settled.isEmpty {
@@ -904,7 +920,9 @@ private final class SysModernSession: @unchecked Sendable {
             latestVolatileText = ""
         } else {
             latestVolatileText = systemSettledSegment(
-                latestPartial: latestVolatileText, finalSegment: text)
+                latestPartial: latestVolatileText,
+                incomingSegment: text,
+                preserveStrictPrefix: false)
         }
     }
 }
@@ -1171,7 +1189,11 @@ private func sysStreamStartLegacy() -> Int32 {
                 // `SysModernSession.hypothesis()`. Reads `run`'s OWN committed text (not
                 // `SysStreamState`'s shared pointers, which `smk_sys_stream_finish` already
                 // clears before this callback can fire) — see `LegacyRun`'s doc comment.
-                run.finish(text: run.finalJoined(result.bestTranscription.formattedString), error: nil)
+                run.finish(
+                    text: run.finalJoined(
+                        result.bestTranscription.formattedString,
+                        preserveStrictPrefix: legacyNeedsStrictPrefixFinalWorkaround),
+                    error: nil)
             } else {
                 // Finding #3: a straggler callback from a cancelled/replaced run must not
                 // clobber the CURRENTLY installed run's partial — check identity under the
