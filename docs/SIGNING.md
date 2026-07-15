@@ -1,12 +1,10 @@
 # Release signing
 
 The release workflow (`.github/workflows/release.yml`) signs artifacts when the relevant
-repository secrets are present, and otherwise still builds and publishes ad-hoc/unsigned —
-no workflow edits needed either way. Signing replaces the OS's "unknown publisher" warning
-with a verified name; on macOS, notarization additionally gives a clean Gatekeeper launch
-with no warning at all. (Windows SmartScreen has no equivalent instant-clean state since
-Microsoft dropped EV's instant-reputation perk in March 2024 — only the Microsoft Store
-gets that there.)
+repository secrets are present, and otherwise still builds and publishes ad-hoc/unsigned.
+Signing identifies the publisher; macOS notarization lets Gatekeeper verify Apple's ticket.
+For non-Store Windows downloads, SmartScreen reputation is still per file hash even when the
+binary is signed; Store distribution avoids that download warning.
 
 ## Windows — unsigned portable zip
 
@@ -25,7 +23,7 @@ runtime + entitlements, then notarizes and staples the `.app` and zips it
 the same job builds ad-hoc instead — same layout, just unsigned.
 
 ### Prerequisites
-- An **Apple Developer Program** membership ($99/yr).
+- An **Apple Developer Program** membership.
 - A **Developer ID Application** certificate exported as a `.p12` (cert + private key).
 - An **app-specific password** for notarization (appleid.apple.com → Sign-In & Security).
 

@@ -23,8 +23,7 @@ Build host: cargo (Homebrew), `aarch64-apple-darwin`; the full OS matrix runs in
 ```
 rust/
   crates/
-    ds-config/    # paths (data dir, pidfile, socket) + config.toml + the Claude Code
-                  #   settings.json hooks/voice merge + config enums + changes_since diff
+    ds-config/    # paths + config.toml + client-integration shapers + config enums
     ds-client/    # the ONE client-identity enum (ClientSource: claude_code | codex |
                   #   qwen_code | grok | dontspeak | unknown), shared by the wiring, the
                   #   hook `--client` verb, the ds-ipc `source` field, the MCP
@@ -94,7 +93,7 @@ routing internally on `hook_event_name`. See
 [../claude/hooks/HOOKS-README.md](../claude/hooks/HOOKS-README.md) for the full
 event→verb table.
 
-`dontspeak wire claude_code` writes the exec-form hooks into `settings.json` via
+`dontspeak wire claude_code` writes inline command hooks into `settings.json` via
 `ds-config`'s safe merge, touching only the `hooks` object and
 `preferredNotifChannel`. DontSpeak's own settings (voice pool, engine selectors,
 `caps_enabled`, …) live in `config.toml`, set via the `set_config` MCP tool —

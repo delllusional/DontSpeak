@@ -27,9 +27,8 @@ time-aligned on a common clock; drift or a wrong delay estimate keeps the filter
 from converging. Native OS AEC owns both the render and capture streams in one
 clock domain, so that alignment is free — which is why each platform prefers its
 native path over a userspace canceller that would have to feed both streams,
-estimate delay, resample, and track drift itself. That userspace option
-(`webrtc-audio-processing`) exists as the cross-platform fallback, not the first
-choice.
+estimate delay, resample, and track drift itself. An in-process WebRTC audio-processing
+fallback is possible, but DontSpeak does not currently bundle or implement one.
 
 ## Per-platform approach
 

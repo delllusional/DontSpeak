@@ -36,14 +36,9 @@
     <true/>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
-    <!-- The MCP `listen` tool (rust/crates/dontspeakd/src/stt_test.rs) records a few
-         seconds of mic and transcribes it via the engine's in-process Parakeet STT
-         (the same engine used for dictation). -->
     <key>NSMicrophoneUsageDescription</key>
-    <string>DontSpeak records a few seconds of microphone audio to test speech recognition.</string>
-    <!-- Required to request Speech Recognition authorization for the `system` STT engine
-         (macOS on-device SFSpeechRecognizer). Without this key the authorization request
-         is denied outright. On-device only — audio never leaves the machine. -->
+    <string>DontSpeak uses the microphone to transcribe your dictation locally.</string>
+    <!-- Required for the on-device system speech-to-text engine. -->
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>DontSpeak uses on-device speech recognition to transcribe your dictation locally when the System speech-to-text engine is selected.</string>
 </dict>

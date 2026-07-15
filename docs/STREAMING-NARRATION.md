@@ -8,7 +8,7 @@ crate — `ds-narrate` — and every client feeds it through a thin adapter:
 | Client       | Transport                                     | Payload shape                                        | Adapter |
 |--------------|-----------------------------------------------|------------------------------------------------------|---------|
 | Claude Code  | `MessageDisplay` hook, one process per batch  | incremental `delta` keyed by content-block `index`   | `dontspeak::hook_narrate` |
-| Qwen Code    | same hook route (present on main, not in 0.19.9) | cumulative `displayed_text` + `is_final` (snake_case)| `dontspeak::hook_narrate` (serde aliases; registry-gated) |
+| Qwen Code    | `MessageDisplay` hook (0.19.10+)              | cumulative `displayed_text` + `is_final` (snake_case)| `dontspeak::hook_narrate` |
 | OpenAI Codex | the engine's **app-server subscriber**        | `item/agentMessage/delta` + `item/completed`         | `dontspeakd::codex_stream` |
 
 All three build a client-neutral `StreamBatch` and call the same file-backed delivery step,
@@ -32,7 +32,8 @@ simultaneously:
 Who seeds the witness:
 
 * Claude Code — `SessionStart` (plain `notify`).
-* Qwen Code / plain-TUI Codex — never (`notify --greet-only`); `Stop` is their path.
+* Qwen Code — `SessionStart`, like Claude Code.
+* Plain-TUI Codex — never (`notify --greet-only`); `Stop` is its path.
 * Codex on the shared app-server — **the engine**, immediately on a successful
   `thread/resume` (closing the race where a short turn's `Stop` could beat the first
   coalesced flush).
@@ -122,16 +123,14 @@ deduplication, foreign-thread isolation, cleanup, and recovery when either
   `dontspeak codex` launch starts and owns the direct listener without changing the
   persistent auto-start preference. The child runs in a kill-on-close Job Object, so
   normal exit, host crash, and force-termination all tear down the listener.
-* The Stop fallback is untouched on all three OSes for any unwired/unstreamed session.
+* The Stop fallback remains available on all three OSes for any session without a streaming witness.
 
-## Qwen Code: the pending flip
+## Qwen Code
 
-Qwen's main-branch `MessageDisplay` documentation sends debounced cumulative snapshots —
-`{hook_event_name, message_id, displayed_text, is_final}` — but the latest 0.19.9 release
-documentation does not contain that contract. The handler already parses the future shape,
-and the wiring for `hook_streaming: true` + `InlineShell` is pinned by test. After a release
-ships and verifies the event, the whole flip is the registry gate + a version-pin bump via
-the `verify-wiring` skill — zero core or handler edits.
+Qwen 0.19.10 sends debounced cumulative `MessageDisplay` snapshots:
+`{hook_event_name, message_id, displayed_text, is_final}`. The registry enables streaming
+with Qwen's inline-shell command dialect and millisecond timeouts; the shared adapter handles
+the cumulative payload.
 
 ## Deploy routes (all three apply — see docs/BUILD-DEPLOY.md)
 

@@ -1,5 +1,4 @@
-//! Narration mode (§G.5) — extracting the spoken blockquote digests Claude leads
-//! each section with, plus the default narration spec.
+//! Spoken-summary extraction and the prompt that requests those summaries.
 
 /// Finalize one accumulated blockquote run into the output list. Joins the run's lines
 /// into one spoken line, collapses whitespace, and drops empties. `complete` records
@@ -19,8 +18,7 @@ fn push_blockquote_run(cur: &mut Vec<String>, out: &mut Vec<(String, bool)>, com
     }
 }
 
-/// Extract EVERY top-level blockquote of a message, in document order — the per-block
-/// spoken digest Claude is instructed (by the narration spec) to lead each section with.
+/// Extract every top-level blockquote of a message in document order.
 /// Returns one `(text, complete)` pair per blockquote run, markers stripped and lines
 /// joined; the body prose between runs is skipped (we never read raw replies). This is
 /// what the narration paths speak VERBATIM, one utterance per run, in order.
@@ -74,15 +72,10 @@ pub fn all_blockquotes(msg: &str) -> Vec<String> {
         .collect()
 }
 
-/// The BUILT-IN narration spec — injected into Claude every turn by the `UserPromptSubmit`
-/// `provide` hook (when `narrate` includes `digests`). It lives in the binary and is used
-/// directly; nothing is written to disk at install. A [`crate::Paths::narration_spec`] file is
-/// an OPTIONAL OVERRIDE — create/edit `narration-spec.md` to reshape the spoken voice; an
-/// absent or empty file falls back to this. It instructs Claude to lead each reply with a
-/// spoken-line blockquote digest; the narrator reads EVERY top-level blockquote aloud, in order
-/// (see [`all_blockquotes`]).
+/// The built-in narration spec injected by the `UserPromptSubmit` `provide` hook when
+/// `narrate` includes `digests`. See [`all_blockquotes`] for its extraction contract.
 pub const DEFAULT_NARRATION_SPEC: &str = r#"# Narrate
-Start every reply with a concise plain-speech summary of the full response, one `>` line per point; omit markdown, code, URLs, and paths. Put pick-one options in the final `>` lines.
+Start every reply with a concise spoken summary of the full response. Write each point on its own `>` line in plain text, without other Markdown, code, URLs, or paths. End the summary with any choices the user must make.
 "#;
 
 #[cfg(test)]

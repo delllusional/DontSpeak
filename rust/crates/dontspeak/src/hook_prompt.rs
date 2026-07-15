@@ -1,5 +1,4 @@
-//! The `prompt-context` subcommand — the Claude Code UserPromptSubmit hook. Lives
-//! beside the other `hook_*` modules; invoked from the front-door dispatch in `main`.
+//! The `prompt-context` subcommand for hook clients' `UserPromptSubmit` event.
 
 use ds_ipc::{Request, Response};
 use serde_json::{Value, json};
@@ -14,11 +13,9 @@ const MUTED_NOTICE: &str = "\n\n## Voice state\nThe app is currently MUTED: your
     important in your TEXT response (not only in the spoken blockquote) until they unmute.";
 
 /// The narration-context QUERY (UserPromptSubmit `provide`): when "digests" narration is ON,
-/// return the narration spec as `hookSpecificOutput.additionalContext` so Claude leads every
-/// reply with spoken-line blockquotes the narrator reads verbatim. The spec is the built-in
-/// [`ds_config::DEFAULT_NARRATION_SPEC`]; an optional `narration-spec.md` on disk overrides
-/// it (empty file falls back to the default). `None` when "digests" is off → no blockquote
-/// (silence, no wasted tokens). Re-reads config + file every call, so edits take effect next prompt.
+/// return the narration spec as `hookSpecificOutput.additionalContext` so the client leads every
+/// reply with spoken-line blockquotes the narrator reads verbatim. `None` when "digests" is
+/// off, so no instruction or blockquote consumes tokens.
 ///
 /// When narration is on we ALSO fold in a live voice-state notice (currently: muted) probed
 /// from the engine — a PUSH of the one signal the model can't infer, since the speaking path
@@ -29,13 +26,9 @@ const MUTED_NOTICE: &str = "\n\n## Voice state\nThe app is currently MUTED: your
 pub(crate) fn narration_context() -> Option<Value> {
     let paths = ds_config::Paths::resolve()?;
     if !ds_config::VoiceConfig::load(&paths).narrates(ds_config::NarrateKind::Digests) {
-        return None; // "digests" off → inject nothing so Claude stops emitting the blockquote
+        return None; // "digests" off → inject no blockquote instruction
     }
-    // Built-in default unless a non-empty override file exists.
-    let spec = std::fs::read_to_string(&paths.narration_spec)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| ds_config::DEFAULT_NARRATION_SPEC.to_string());
+    let spec = ds_config::DEFAULT_NARRATION_SPEC.to_string();
     let context = with_voice_state(spec, engine_muted(&paths));
     Some(json!({
         "hookSpecificOutput": {

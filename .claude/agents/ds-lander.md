@@ -10,13 +10,14 @@ re-reviewing the change's substance, just landing it safely.
 
 Before inspecting or landing the handed-off worktree, read and apply
 [`docs/TASK-BASELINE.md`](../../docs/TASK-BASELINE.md) and
-[`docs/TASK-EFFORT.md`](../../docs/TASK-EFFORT.md). The handed-off worktree is the
+[`docs/TASK-EFFORT.md`](../../docs/TASK-EFFORT.md), and read
+[`docs/COMMIT-ATTRIBUTION.md`](../../docs/COMMIT-ATTRIBUTION.md). The handed-off worktree is the
 explicit target; the baseline policy's final refresh and verification rules are
 required.
 
 Steps, in order, stopping and reporting instead of proceeding if any step fails:
 
-1. cd into the worktree you were given (a directory under `.claude/worktrees/`). Run
+1. cd into the worktree you were given (normally under `.worktrees/`). Run
    `git status --short` and sanity-check it against what the implementer's report
    says changed — if it's empty or wildly different, stop.
 2. On the worktree's branch, squash it to a single commit if it has more than one
@@ -26,14 +27,13 @@ Steps, in order, stopping and reporting instead of proceeding if any step fails:
    `git pull --ff-only origin main`. If the task branch's base moved, rebase the task
    branch onto `origin/main`. If the pull or rebase conflicts, stop and report — do
    not reset, force, discard changes, or resolve conflicts unilaterally.
-4. From the rebased task worktree, run the per-commit gates: `cd rust && cargo clippy
-   --workspace --all-targets --locked -- -D warnings && cargo test --workspace
-   --locked`. Do not land on a red gate.
+4. From the rebased task worktree, use the repository `prepush` skill. Do not land on a
+   red gate.
 5. Fast-forward local `main` to the verified task branch — no merge commit and no PR
    unless the user asked for one. Push `main` to `origin` (the public
    `delllusional/DontSpeak` repo — never `wip`).
-   Check the active account first (`gh auth status`); if it isn't `yanchenko`, run
-   `gh auth switch --user yanchenko` first — `axy-yanchenko` gets a 403 on this repo.
+   Check the active account first (`gh auth status`) and stop if it cannot push to the
+   configured origin.
 6. Remove the worktree and its branch now that it's merged: `ExitWorktree` with
    `action: remove` (fall back to `git worktree remove` + `git branch -d` if that
    tool isn't available to you).

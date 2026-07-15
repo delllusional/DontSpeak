@@ -21,7 +21,7 @@ description: Re-verify the client-wiring registry against the CURRENT client ver
    - Claude Code: `claude --version`
    - Codex CLI: `codex --version` if installed, else `npm view @openai/codex version`
      (not installed ⇒ the pin means "docs read while X was current", note it as such)
-   - Qwen Code: `qwen-code --version` if installed, else `npm view @qwenlm/qwen-code version` (or check package metadata)
+   - Qwen Code: `qwen --version` if installed, else `npm view @qwenlm/qwen-code version` (or check package metadata)
 
 2. **Re-read the entry's own `DocRef` URLs** (they are the source-of-truth list — don't
    search) and check the exact contract points the wiring depends on:
@@ -30,9 +30,8 @@ description: Re-verify the client-wiring registry against the CURRENT client ver
      honouring `hookSpecificOutput.additionalContext`; the config schema (`hooks.<Event>`
      groups in `~/.claude/settings.json` / `~/.qwen/settings.json` or `[[hooks.<Event>]]` tables in Codex's
      `~/.codex/config.toml`). Registered events — full table in
-     `claude/hooks/HOOKS-README.md` — are Claude Code's six (`MessageDisplay`, `SessionStart`,
-     `SessionEnd`, `UserPromptSubmit` ×2, `Stop`, `Notification`) vs Qwen Code's five (`SessionStart`,
-     `SessionEnd`, `UserPromptSubmit` ×2, `Stop`, `Notification`) vs Codex's three (`SessionStart`,
+     `claude/hooks/HOOKS-README.md` — are Claude Code's and Qwen Code's six (`MessageDisplay`,
+     `SessionStart`, `SessionEnd`, `UserPromptSubmit` ×2, `Stop`, `Notification`) vs Codex's three (`SessionStart`,
      `UserPromptSubmit`, `Stop` — no `MessageDisplay` stream, so `Stop` also voices the reply
      and `SessionStart` is greet-only; shaped in
      `ds-config/src/wire/hooks.rs` for Claude/Qwen, or `ds-config/src/wire/codex.rs` for Codex).

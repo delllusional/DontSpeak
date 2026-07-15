@@ -2,7 +2,7 @@
 # install-daemon.sh — build + install the dontspeak ENGINE BINARIES + hooks with a
 # BUILD_ID. (Name kept for compatibility; there is no standalone daemon any more —
 # DontSpeak.app hosts the engine in-process.) Called by BOTH:
-#   • scripts/install.sh  (first-time / full CLI install + the settings.json snippet), and
+#   • scripts/install.sh  (first-time / full CLI install), and
 #   • apps/macos/bundle.sh (so building the app ALWAYS rebuilds+installs matching binaries).
 #
 # IMPORTANT (see docs/BUILD-DEPLOY.md): this installs to ~/.local/bin only. The RUNNING APP

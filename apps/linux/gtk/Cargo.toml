@@ -23,11 +23,8 @@ description = "DontSpeak Linux GUI host (GTK4 + libadwaita): tray, health panel,
 # This standalone workspace's own lint policy — there's no rust/ workspace to inherit
 # from (this crate IS its own implicit one-package workspace; see the top-of-file
 # note above). Mirrors rust/Cargo.toml's `undocumented_unsafe_blocks` entry so this
-# out-of-tree crate's unsafe code can't drift from the main workspace's
-# SAFETY-comment discipline. Not run by ANY CI job, per-commit or release (ci.yml's
-# clippy job only covers rust/; only this crate's `cargo fmt --check` runs, and only
-# in the release-only hygiene job) — local `cargo clippy` is the sole enforcement
-# point, permanently. See issue #9.
+# out-of-tree crate's unsafe code follows the main workspace's SAFETY-comment
+# discipline. Release CI runs its formatting and tests; clippy remains a local check.
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"
 

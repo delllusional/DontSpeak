@@ -12,14 +12,14 @@ distributed as a tarball (`apps/linux/package.sh`).
   injection, x11rb for window/focus queries.
 - `ds-aec` — echo cancellation via PipeWire's `module-echo-cancel`; if that module
   isn't available, the capture path falls back to a half-duplex gate. An in-process
-  WebRTC-APM alternative, matching the macOS VPIO shape, is noted as a future option
-  in [docs/AEC.md](AEC.md)'s "Why native OS AEC" section.
+  in-process WebRTC audio-processing fallback is possible but not implemented; see
+  [docs/AEC.md](AEC.md)'s "Why native OS AEC" section.
 
 ## CI
 
-Per-commit clippy+test runs on `ubuntu-latest`. The release-only tarball build runs on
-`ubuntu-26.04`/`ubuntu-26.04-arm` with `continue-on-error: true` and no test step, so a
-runner-availability hiccup there doesn't block a release.
+Per-commit clippy and tests run on `ubuntu-latest`. Release jobs on
+`ubuntu-26.04`/`ubuntu-26.04-arm` require the GTK tests to pass; only tarball creation and
+artifact upload are best-effort.
 
 ## Developing under WSL2
 

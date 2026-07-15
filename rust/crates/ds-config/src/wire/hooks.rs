@@ -144,8 +144,8 @@ fn canonical_hook_groups(spec: &HookSpec) -> Vec<(&'static str, Value)> {
     let notify = |timeout: u64| hook_entry(spec, &["notify"], timeout, true);
     // One group per event (ours, so merge stays idempotent + strip stays clean). `notify` on
     // every fire-and-forget event; `MessageDisplay` is the streaming narration pipeline
-    // (Claude Code ≥ 2.1.x streams it per batch) — omitted for non-streaming clients
-    // (Qwen Code, Codex) where the reply is voiced whole from `Stop`. SessionStart greets
+    // (Claude Code and Qwen Code stream it per batch) — omitted for non-streaming clients,
+    // where the reply is voiced whole from `Stop`. SessionStart greets
     // (and, for streaming clients only, seeds the streaming witness); SessionEnd barges this
     // window's playback; UserPromptSubmit marks THIS terminal active so narration follows it
     // AND carries the synchronous `provide` (the narration spec as `additionalContext`).
@@ -321,12 +321,12 @@ mod tests {
         }
     }
 
-    /// The Qwen Code combination: inline-shell commands, no `MessageDisplay` stream.
+    /// The Qwen Code combination: inline-shell commands with `MessageDisplay` streaming.
     fn inline_spec() -> HookSpec<'static> {
         HookSpec {
             bin: "/bin/dontspeak",
             notif_channel: None,
-            streaming: false,
+            streaming: true,
             command_style: HookCommandStyle::InlineShell,
             client: ClientSource::QwenCode,
         }
@@ -542,10 +542,8 @@ mod tests {
 
     #[test]
     fn non_streaming_client_omits_messagedisplay_keeps_stop_provide() {
-        // Qwen Code (and Codex) have no MessageDisplay stream — the reply is voiced whole
-        // from Stop's last_assistant_message. A non-streaming wire must omit MessageDisplay
-        // (a dead hook for an event the client never fires) while keeping the events that
-        // DO fire: SessionStart, SessionEnd, Stop, Notification, UserPromptSubmit.
+        // A non-streaming wire omits MessageDisplay and voices the reply from Stop while
+        // retaining the other lifecycle and prompt events.
         let spec_ns = HookSpec {
             bin: "/bin/dontspeak",
             notif_channel: None,
@@ -734,7 +732,10 @@ mod tests {
         // preserved on notify entries, and `provide` never async (its stdout is read).
         let out = merge_hooks(json!({}), &inline_spec()).expect("merge ok");
         let hooks = out["hooks"].as_object().expect("hooks object");
-        assert!(hooks.get("MessageDisplay").is_none(), "non-streaming");
+        assert!(
+            hooks.get("MessageDisplay").is_some(),
+            "streaming hook present"
+        );
         for (evt, groups) in hooks {
             for g in groups.as_array().expect("array of groups") {
                 for h in g["hooks"].as_array().expect("hooks array") {
@@ -751,13 +752,13 @@ mod tests {
                 }
             }
         }
-        // SessionStart carries the greet-only flag (no witness seed on a non-streaming client).
+        // Streaming SessionStart is plain notify so it seeds the stream witness too.
         let ss = out["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
         assert!(
-            ss.ends_with(&tail(ClientSource::QwenCode, "notify --greet-only")),
-            "non-streaming SessionStart is greet-only (and carries the client token), got {ss}"
+            ss.ends_with(&tail(ClientSource::QwenCode, "notify")),
+            "streaming SessionStart carries the client token without greet-only, got {ss}"
         );
         // Zero-timeout events omit the field entirely.
         for evt in ["SessionStart", "SessionEnd", "Stop", "Notification"] {
@@ -845,10 +846,7 @@ mod tests {
 
     #[test]
     fn inline_streaming_wires_messagedisplay_with_ms_timeout_and_plain_sessionstart() {
-        // The FUTURE Qwen Code streaming flip (QwenLM/qwen-code#6488), pinned NOW: once the
-        // upstream MessageDisplay hook lands, the whole flip is the registry's
-        // `hook_streaming: true` (+ version-pin bump) — no core or handler edits. This test
-        // proves the wiring side is already correct for that combination: streaming +
+        // Qwen Code 0.19.10 ships MessageDisplay. This test pins the streaming +
         // InlineShell emits the `MessageDisplay` group with the INLINED `notify` command
         // (no `args` key — Qwen drops it silently) and the MILLISECOND-scaled timeout
         // (10 s → 10000 ms; an unscaled 10 would be a 10 ms SIGTERM), and SessionStart

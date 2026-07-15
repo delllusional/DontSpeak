@@ -1,8 +1,8 @@
 # Claude Code voice hooks (DontSpeak)
 
-The voice hooks are **exec-form** entries in `~/.claude/settings.json`: each one
-runs the Rust binary directly (`command` = the binary, `args` = the subcommand)
-and lets it read the hook JSON from stdin. There are no shell wrappers — the single
+The voice hooks are inline command entries in `~/.claude/settings.json`: each one
+runs the Rust binary with a subcommand and reads the hook JSON from stdin. There are no
+wrapper scripts — the single
 `dontspeak` binary (installed to `~/.local/bin`) is the hook executor, dispatched by
 ONE of two subcommands split by CONTRACT, not by event:
 
@@ -29,7 +29,7 @@ repo [README](../../README.md).
 
 | Event | Verb | What it does |
 |-------|------|--------------|
-| `MessageDisplay` | `notify` | The **single narration pipeline**. Speaks EVERY top-level blockquote of EVERY assistant message AS it streams — the prose, the lines Claude leads each tool step with, and the final reply all flow through here. Accumulates the streamed `delta` chunks per `message_id` (or a cumulative `displayedText` if a CC version sends one) and enqueues each newly-completed blockquote on the warm engine. |
+| `MessageDisplay` | `notify` | The **single narration pipeline**. Speaks every top-level blockquote of every assistant message as it streams, including tool-step summaries and the final reply. Accumulates `delta` chunks per `message_id` (or cumulative `displayedText`) and enqueues each newly completed blockquote on the warm engine. |
 | `SessionStart` | `notify` | A new terminal opened → tells the engine to greet in this session's assigned pool voice (only if `greet_on_open` is set); claims the terminal's voice at open. |
 | `SessionEnd` | `notify` | Session-scoped `StopSpeech` → barges THIS session's playback so a closing terminal silences its own queued/playing speech (without touching another window's). |
 | `UserPromptSubmit` | `notify` | You just prompted HERE → marks this the active terminal so narration follows the window you're working in (the engine holds the others). |

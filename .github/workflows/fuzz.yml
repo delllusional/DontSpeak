@@ -1,11 +1,7 @@
 name: Fuzz (scheduled)
 
-# Fuzzes ds-ipc's wire-protocol parsers against arbitrary/adversarial byte input — the
-# untrusted-input boundary where any local process talking to the engine's socket can
-# send bytes. Requires nightly (libFuzzer/cargo-fuzz's hard requirement) — confined
-# entirely to this scheduled, non-blocking job; never touches the stable per-commit
-# build (the fuzz/ crate is its own independent Cargo workspace, invisible to
-# `cargo build/clippy/test --workspace`). Linux-only: libFuzzer doesn't support Windows.
+# Fuzzes ds-ipc's untrusted wire-protocol parsers. The independent fuzz workspace uses
+# nightly only in this scheduled Linux job, leaving the main workspace on stable.
 on:
   schedule:
     - cron: '43 5 * * 1'   # weekly, Monday

@@ -1,6 +1,6 @@
 # Contributing to DontSpeak
 
-The engine and CLI are Rust (`rust/`, 22 crates, one workspace); each OS gets a thin native
+The engine and CLI are Rust (`rust/`, 23 crates, one workspace); each OS gets a thin native
 host — SwiftUI (`apps/macos/`), WinUI 3 (`apps/windows/winui/`), GTK4 (`apps/linux/gtk/`).
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit, and
 [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md) before testing a change against the *running*
@@ -55,23 +55,23 @@ cd rust && cargo test --workspace --locked
 ```
 
 The macOS host has SwiftPM logic tests (`cd apps/macos && swift test` — needs the Rust
-FFI staticlib built first; `build.sh` does that). The WinUI app has no test projects yet.
-CI runs Linux per commit and the full ubuntu + windows + macOS matrix on release tags
-(`.github/workflows/ci.yml`).
+FFI staticlib built first; `build.sh` does that). WinUI xunit tests live in
+`apps/windows/winui.tests`. CI runs the Rust clippy and test gates on Linux per commit,
+with the wider platform and hygiene matrix on release tags (`.github/workflows/ci.yml`).
 
-## Gates (run these before pushing)
+## Gates
 
 CI rejects anything that fails:
 
 ```sh
 cd rust
-cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
-cargo deny check   # advisories + bans + licenses + sources; needs `cargo install cargo-deny --locked`
-cd ../apps/macos
-swift format lint --strict --recursive Sources SmKokoro/Sources Tests   # config: apps/macos/.swift-format
+cargo test --workspace --locked
 ```
+
+Use the `prepush` skill for the exact per-commit procedure. Formatting, rustdoc,
+dependency policy, and platform-host checks are release gates; use `make-release` before
+tagging rather than duplicating that matrix here.
 
 Shell scripts should stay clean under `bash -n` and `shellcheck`; workflows under
 `actionlint` (config: `.github/actionlint.yaml`). C# analyzers run in the path-filtered

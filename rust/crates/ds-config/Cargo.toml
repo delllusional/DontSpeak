@@ -22,9 +22,7 @@ toml = { workspace = true }
 # primitives live in ds-proc; read_engine_pid / is_pid_alive / evict_stale_engine
 # delegate to it. ds-proc does NOT depend on ds-config, so no cycle.
 ds-proc = { workspace = true }
-# Atomic settings.json write (temp file in the SAME dir + rename) — mirrors the
-# proven ds_proc::write_speaker pattern so a crash never leaves a half-written
-# settings.json (the file Claude Code itself also reads).
+# Crash-safe writes for config.toml and client integration files.
 tempfile = { workspace = true }
 # The unified activity log (issue #6 split): VoiceConfig::load logs a warning on
 # bad/unknown config.toml keys via this crate's log()/LogLevel.

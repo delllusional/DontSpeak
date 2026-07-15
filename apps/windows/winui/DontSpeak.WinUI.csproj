@@ -3,8 +3,8 @@
   <!--
     DontSpeak — the Windows WinUI 3 app: the Fluent analogue of the macOS SwiftUI
     menu-bar app, and now the single resident host (the Rust ds-tray was
-    merged in — see TrayIcon.cs). Unpackaged + framework-dependent: the Windows App
-    Runtime is already on the machine, so this is a plain .exe (no MSIX). It HOSTS
+    merged in — see TrayIcon.cs). Development builds are unpackaged and
+    framework-dependent; release packaging publishes a self-contained portable app. It hosts
     the engine in-process by P/Invoking ds_core.dll (the same C ABI SwiftUI
     links) and shows the tray icon + modern context flyout via H.NotifyIcon (TrayIcon.cs).
   -->
@@ -81,8 +81,7 @@
     <!-- Modern tray icon + context MenuFlyout (the de-facto WinUI tray library; Microsoft
          ships no first-party NotifyIcon for WinUI 3). Gives the translucent flyout +
          efficiency mode. -->
-    <!-- 2.4.2-dev: 2.4.1 placed the tray flyout BELOW a bottom taskbar; the dev build adds
-         the bottom-taskbar placement fix (opens upward). Pin to the stable 2.4.2 once it ships. -->
+    <!-- This prerelease contains the bottom-taskbar flyout fix absent from stable 2.4.1. -->
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.4.2-dev.22" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" />
     <!-- GDI+ (System.Drawing) renders the brand SVG glyph into the tray icon's DIB

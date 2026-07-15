@@ -33,11 +33,11 @@ adds the install directory to the per-user `PATH`; use a new terminal after firs
 |---|---|---|---|---|
 | Claude Code | Yes, through `MessageDisplay` | Not needed; `Stop` is the reply earcon | Yes | Direct `claude` |
 | OpenAI Codex | Yes for interactive sessions started by `dontspeak codex` | Yes for a plain local TUI | Yes | Engine-managed app-server plus `codex --remote` |
-| Qwen Code 0.19.9 | No released `MessageDisplay` hook | Yes, from `Stop.last_assistant_message` | Yes | Direct `qwen` |
+| Qwen Code 0.19.10 | Yes, through `MessageDisplay` | No; the session witness suppresses duplicate `Stop` narration | Yes | Direct `qwen` |
 | Grok 0.2.99 | No message stream | Yes, from the final assistant entry in `Stop.transcriptPath` | Yes | Direct `grok` |
 
 The launcher surface is uniform, but only clients exposing a message stream can narrate
-mid-turn. Qwen Code and Grok use end-of-turn fallbacks instead.
+mid-turn. Grok uses an end-of-turn fallback instead.
 
 ## Client-specific behavior
 
@@ -73,16 +73,14 @@ the wrapper: use `codex` directly for a custom remote endpoint, or set DontSpeak
 
 ### Qwen Code
 
-The executable is `qwen`, not `qwen-code`. Released version 0.19.9 uses Claude-compatible
+The executable is `qwen`, not `qwen-code`. Version 0.19.10 uses Claude-compatible
 hooks, but its hook runner accepts one inline shell command and millisecond timeouts rather
 than Claude's command-plus-arguments shape and second timeouts. The registry therefore emits
 a Qwen-specific execution shape while reusing the same hook handlers.
 
-Qwen's main-branch documentation now describes a cumulative `MessageDisplay` payload
-(`displayed_text` and `is_final`), but the 0.19.9 release documentation does not contain that
-contract. DontSpeak keeps the released client on the honest `Stop` fallback until a shipped
-version can be verified. The runtime already accepts the documented future payload, so that
-upgrade is a registry gate rather than a second narration implementation.
+Qwen 0.19.10 ships a cumulative `MessageDisplay` payload (`displayed_text` and `is_final`).
+DontSpeak wires it for mid-turn narration. `Stop` remains wired for completion handling, but
+the session witness suppresses duplicate reply narration.
 
 Qwen's `--safe-mode` and `--bare` modes disable hooks, MCP servers, and customization. The
 launcher forwards them unchanged and therefore cannot provide automatic integration in those
@@ -125,14 +123,13 @@ dontspeak wire <client> --print-only
 
 ## Verified upstream contracts
 
-The registry version pins were rechecked on 2026-07-13 against the installed releases and
-official documentation:
+Current registry pins and official contract sources:
 
 | Client | Verified version | Official contracts |
 |---|---:|---|
-| Claude Code | 2.1.207 | [hooks](https://code.claude.com/docs/en/hooks), [MCP](https://code.claude.com/docs/en/mcp) |
-| OpenAI Codex | 0.144.1 | [hooks](https://developers.openai.com/codex/hooks), [app server](https://developers.openai.com/codex/app-server), [MCP](https://developers.openai.com/codex/mcp) |
-| Qwen Code | 0.19.9 | [current hooks](https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/hooks.md), [0.19.9 hooks](https://github.com/QwenLM/qwen-code/blob/v0.19.9/docs/users/features/hooks.md), [MCP](https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/mcp.md) |
+| Claude Code | 2.1.209 | [hooks](https://code.claude.com/docs/en/hooks), [MCP](https://code.claude.com/docs/en/mcp) |
+| OpenAI Codex | 0.144.4 | [hooks](https://developers.openai.com/codex/hooks), [app server](https://developers.openai.com/codex/app-server), [MCP](https://developers.openai.com/codex/mcp) |
+| Qwen Code | 0.19.10 | [release hooks](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/hooks.md), [MCP](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/mcp.md) |
 | Grok | 0.2.99 | [CLI](https://docs.x.ai/build/cli/reference), [hooks](https://docs.x.ai/build/features/hooks), [MCP](https://docs.x.ai/build/features/mcp-servers) |
 
 The version pin records when a contract was checked; it is not a minimum-version claim.

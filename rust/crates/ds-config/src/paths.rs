@@ -43,7 +43,7 @@ pub struct Paths {
     /// each utterance.
     pub stats_toml: PathBuf,
     /// OUR roaming SETTINGS root — see [`data_dir`]. Holds the user-portable config
-    /// (`config.toml`, `speakers.json`, `narration-spec.md`). Per-OS idiomatic:
+    /// (`config.toml`, `speakers.json`). Per-OS idiomatic:
     /// `%APPDATA%\DontSpeak` (Windows), `~/Library/Application Support/DontSpeak` (macOS),
     /// `$XDG_CONFIG_HOME`/`~/.config/dontspeak` (Linux). A neutral home, NOT tied to any
     /// one client, so a user's config doesn't squat in `~/.claude`.
@@ -56,18 +56,13 @@ pub struct Paths {
     pub state_dir: PathBuf,
     /// `config.toml` in [`data_dir`] — the single source of truth for DontSpeak's own
     /// settings (voice, narration, engines, MCP-HTTP). Replaces the old `dontspeak`
-    /// block in `~/.claude/settings.json`. The engine hot-reloads on its mtime.
+    /// block in `~/.claude/settings.json`. The engine watches it for changes, with an
+    /// mtime backstop.
     pub config_toml: PathBuf,
     /// `speakers.json` in the roaming `config_dir` ([`data_dir`]) — enrolled speaker
     /// voiceprints (name → WeSpeaker embedding) used to label diarization output by name.
     /// Written atomically on each `enroll`/`forget_speaker`. See [`crate::speakers`].
     pub speakers_json: PathBuf,
-    /// `narration-spec.md` in [`data_dir`] — the USER-EDITABLE markdown spec injected into
-    /// Claude every turn (via the `UserPromptSubmit` `provide` hook, when `narrate` includes
-    /// `digests`) telling it to lead each reply with a plain-text spoken line in a blockquote. The engine
-    /// writes [`crate::DEFAULT_NARRATION_SPEC`] here on startup if it's absent; edit it to shape how
-    /// replies are narrated.
-    pub narration_spec: PathBuf,
     /// OpenAI Codex CLI's config dir (`~/.codex`). Its existence is how `wire codex`
     /// presence-gates the narration-hook wiring (a clean skip when Codex isn't installed).
     pub codex_dir: PathBuf,
@@ -103,7 +98,7 @@ impl Paths {
         let qwen_dir = home.join(".qwen");
         let grok_dir = home.join(".grok");
         // Two roots, each idiomatic per OS (see [`data_dir`] / [`model_dir`] / `state_root`):
-        //   config (roaming, user SETTINGS): config.toml, speakers.json, narration-spec.md
+        //   config (roaming, user settings): config.toml, speakers.json
         //   state  (local, machine RUNTIME): stats.toml, pidfiles, the IPC socket, logs
         // On Windows/Linux these resolve to distinct OS dirs (roaming vs local / config vs
         // state); on macOS both are Application Support. The engine create_dir_all's both on
@@ -124,7 +119,6 @@ impl Paths {
             stats_toml: state_dir.join("stats.toml"),
             config_toml: config_dir.join("config.toml"),
             speakers_json: config_dir.join("speakers.json"),
-            narration_spec: config_dir.join("narration-spec.md"),
             config_dir,
             state_dir,
             codex_config: codex_dir.join("config.toml"),
@@ -167,7 +161,6 @@ impl Paths {
             stats_toml: ds_dir.join("stats.toml"),
             config_toml: ds_dir.join("config.toml"),
             speakers_json: ds_dir.join("speakers.json"),
-            narration_spec: ds_dir.join("narration-spec.md"),
             // The inert fallback uses ONE dir for both roots (layout is immaterial here).
             config_dir: ds_dir.clone(),
             state_dir: ds_dir,
@@ -199,7 +192,7 @@ const APP_DIR: &str = "DontSpeak";
 #[cfg(target_os = "linux")]
 const APP_DIR: &str = "dontspeak";
 
-/// Our roaming/user SETTINGS root — `config.toml`, `speakers.json`, `narration-spec.md`.
+/// Our roaming user-settings root — `config.toml` and `speakers.json`.
 /// Idiomatic, no vendor/`data` leaf, per platform:
 ///   Windows: `%APPDATA%\DontSpeak`                       (Roaming — settings follow the user)
 ///   macOS:   `~/Library/Application Support/DontSpeak`

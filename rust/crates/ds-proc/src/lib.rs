@@ -10,9 +10,8 @@
 //!   * The pidfile is written **atomically** (tempfile in the same dir + rename)
 //!     so a reader never sees a half-written value.
 //!
-//! Windows has no POSIX process groups; the cfg'd impl single-PID
-//! `OpenProcess`/`TerminateProcess`es the recorded leaf PID (details in the
-//! `cfg(windows)` mod). UNCOMPILED on the macOS build host.
+//! Windows has no POSIX process groups; its implementation uses
+//! `OpenProcess`/`TerminateProcess` on the recorded leaf PID.
 
 use std::fs;
 use std::io::Write;
@@ -121,8 +120,6 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    // UNCOMPILED on the macOS build host.
-    //
     // Windows has no killpg. The "pgid" stored in the pidfile is the speaker's
     // leaf PID; barge-in does a single-PID OpenProcess/TerminateProcess on it.
     // Current Windows speakers (inline PowerShell System.Speech; native

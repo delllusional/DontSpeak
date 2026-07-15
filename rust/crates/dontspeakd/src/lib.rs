@@ -22,11 +22,10 @@
 //!   (A sub-poll tap too fast for the ~POLL_MS sampler to see the key-down is missed —
 //!   tap again. The LED is never read back, so there's no latch/LED desync.)
 //!
-//! Phase 2: the Caps-Lock state machine is UNCHANGED; only what each edge DOES is
-//! now behind `Box<dyn Stt>`, selected by config via the `ds-engines` factory.
-//! `ClaudeNative` reproduces the Phase-1 emit bodies byte-for-byte.
+//! Each edge delegates to a config-selected `Box<dyn Stt>` from the `ds-engines`
+//! factory. `ClaudeNative` preserves the original Ctrl+G behavior.
 //!
-//! Phase 4 (§E.4 hot-reload): the engine writes its own pid to its
+//! For hot reload, the engine writes its own pid to its
 //! `dontspeakd.pid` on startup (removed on clean exit) and watches `config.toml`
 //! by mtime each tick. EITHER an mtime change OR an explicit reload (the host
 //! app's `engine_reload()` over the C ABI, or the Reload RPC) re-runs
@@ -36,7 +35,7 @@
 //! debounce window collapses a write+reload into one.
 //!
 //! The platform surface (caps read / key inject / frontmost) is behind the
-//! ds-platform traits; only the macOS impl is compiled on the build host.
+//! ds-platform traits.
 //!
 //! ## Module layout
 //! The engine was split out of one god-file into focused modules; this `lib.rs` is

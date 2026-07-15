@@ -51,7 +51,7 @@ fn warn(msg: &str) {
 // STT factory
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Build the STT engine from config, degrading to the Phase-1 ClaudeNative
+/// Build the STT engine from config, degrading to ClaudeNative
 /// default whenever the selected engine is unavailable.
 ///
 /// Generic over the engine's platform `P`; takes the shared `Rc<P>` the engine

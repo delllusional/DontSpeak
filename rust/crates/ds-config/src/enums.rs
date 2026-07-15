@@ -1,4 +1,4 @@
-//! Phase-2 engine-selection token enums + their fail-open / strict / serialize
+//! Engine-selection token enums and their fail-open, strict, and serialization
 //! plumbing.
 //!
 //! This module is declared FIRST in `lib.rs` so the declarative macros it defines
@@ -10,7 +10,7 @@ use ds_client::ClientSource;
 use serde::{Deserialize, Deserializer};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase-2 engine selection enums (§A, Config Schema)
+// Engine selection enums
 //
 // The scalar engine enums (`SttEngine`, `TtsEngine`, `ListenMode`) are `#[default]`-tagged
 // and parsed through a fail-open `de_*` deserializer so an absent OR typo'd value degrades
@@ -569,8 +569,8 @@ impl CancelSpeechScope {
 }
 
 /// What narration speaks — a SET (config `narrate = ["shorts", "digests"]`), not a single
-/// mode. Two INDEPENDENT options that combine: `Digests` voices the spoken blockquotes Claude
-/// writes (and injects the narration spec asking for them, so long replies get a spoken digest);
+/// mode. Two INDEPENDENT options that combine: `Digests` voices the model's spoken-summary
+/// blockquotes (and injects the narration spec asking for them, so long replies get a digest);
 /// `Shorts` voices a SHORT reply that has NO blockquote — on its own, lightly cleaned — so brief
 /// one-liners are heard even when there's no digest. Both ⇒ everything is spoken. An EMPTY set
 /// means narrate nothing (the old "off"). `Digests` is also what gates the injected spec —

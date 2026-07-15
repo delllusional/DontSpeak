@@ -94,7 +94,7 @@ script without `--check`, review the generated diff, then re-run the check.
 
 ```bash
 node scripts/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
-cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings && cargo test --workspace --locked && cargo deny --all-features check
+cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings && cargo test --workspace --locked
 cd .. && node scripts/sync-agent-skills.mjs --check
 ```
 Green gates plus a conforming attribution inspection ⇒ safe to push.

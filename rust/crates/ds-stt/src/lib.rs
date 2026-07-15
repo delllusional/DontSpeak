@@ -120,7 +120,7 @@ pub trait Stt {
     }
 
     /// Whether this engine is usable right now (model present, supported OS).
-    /// The factory probes this and degrades to the Phase-1 default when false.
+    /// The factory probes this and degrades to the default engine when false.
     fn is_available(&self) -> bool {
         true
     }

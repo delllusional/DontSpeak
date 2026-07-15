@@ -46,4 +46,7 @@ apps/linux/package.sh                 # tarball → ./dist  (OUTDIR=~/Desktop to
 
 ## Notes
 
-- The tarball path (`package.sh`) is CI-exercised on every release: `release.yml`'s per-arch `linux` matrix (ubuntu-26.04 + ubuntu-26.04-arm) runs it with the real GTK/libadwaita/layer-shell deps and uploads `linux-packages-<arch>` artifacts (`if-no-files-found: error`). That job is `continue-on-error` and best-effort — a runner or libadwaita hiccup there does NOT block the Windows/macOS release; the Linux tarballs are just silently absent from that release. `uninstall.sh` remains unexercised in CI — **verify it on Linux**.
+- Release CI runs the GTK tests before packaging on both Linux architectures. Test or setup
+  failures block the release; only tarball creation and upload are best-effort, so either
+  Linux asset may be absent after a packaging-only failure. `uninstall.sh` remains
+  unexercised in CI — **verify it on Linux**.

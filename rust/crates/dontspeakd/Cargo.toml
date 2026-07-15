@@ -68,7 +68,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # TOML (de)serialize for the persisted lifetime stats file (our stats.toml).
 toml = { workspace = true }
-# Push-based settings.json watch (FSEvents/inotify/ReadDirectoryChangesW) — replaces
+# Push-based config.toml watch (FSEvents/inotify/ReadDirectoryChangesW) — replaces
 # the per-tick stat() poll for hot-reload; a coarse stat backstop remains.
 notify = { workspace = true }
 

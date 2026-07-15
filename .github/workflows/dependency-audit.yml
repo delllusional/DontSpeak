@@ -1,12 +1,7 @@
 name: Dependency audit (scheduled)
 
-# Catches newly-disclosed RustSec advisories against dependencies that HAVEN'T changed —
-# the cargo-deny job in ci.yml is release-only (see AGENTS.md's Gates section) and only
-# re-evaluates when a commit touches the dependency graph AND a release gets cut; a new
-# CVE against either already-resolved Cargo.lock, with no release imminent, has nothing to
-# attach to otherwise, so it needs a timer. Advisories-only (bans/licenses/sources only
-# change with a Cargo.lock edit, already covered at release time — re-running them here
-# is pure duplication).
+# Finds new RustSec advisories in the locked dependency graphs between releases. Other
+# cargo-deny policy depends on repository changes and remains a release gate.
 #
 # Caveat: GitHub auto-disables scheduled workflows after 60 days with no repo commits
 # (public-repo cost control) — not a concern at this repo's commit cadence, but if this

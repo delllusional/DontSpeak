@@ -465,7 +465,7 @@ pub fn seed_witness(paths: &Paths, session: &str) {
 /// Witness that a streaming pass ran (or was seeded) for this session: its per-session
 /// state file exists. The deterministic client-discriminator the `Stop` path needs —
 /// present ⇒ the reply was (or will be) narrated mid-turn, so `Stop` must not re-speak
-/// it; absent ⇒ `Stop` is this session's only narration path (plain-TUI Codex, Qwen Code).
+/// it; absent ⇒ `Stop` is this session's only narration path (for example, plain-TUI Codex).
 pub fn witness_exists(paths: &Paths, session: &str) -> bool {
     display_state_path(paths, session).exists()
 }

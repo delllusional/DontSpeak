@@ -1,4 +1,4 @@
-// Phase 1 ABI check: dlopen libsmkokoro.dylib and drive it like the Rust helper will.
+// ABI check: dlopen libsmkokoro.dylib and drive it like the Rust helper.
 // Buffer results are BORROWED to a callback fired synchronously during the call (see
 // include/smkokoro.h) — we copy them out there; nothing to free.
 #include <dlfcn.h>

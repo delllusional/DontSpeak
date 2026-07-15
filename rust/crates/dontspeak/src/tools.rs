@@ -42,13 +42,13 @@ pub(crate) fn tools_call(
             Some(paths) => call_list_voices(&paths, &args),
             None => Err("cannot resolve ~/.claude paths".into()),
         },
-        // Persistent config write to settings.json; the engine applies it via its mtime-watch
+        // Persistent config write to config.toml; the engine applies it via its mtime-watch
         // (or the best-effort Reload nudge). Doesn't require the engine to be up.
         "set_config" => match Paths::resolve() {
             Some(paths) => call_set_config(&paths, &args),
             None => Err("cannot resolve ~/.claude paths".into()),
         },
-        // Read-only introspection: config (settings.json) + live engine state.
+        // Read-only introspection: config.toml + live engine state.
         // Does NOT spawn the engine — a status check must not start playback.
         "get_status" => match Paths::resolve() {
             Some(paths) => call_status(&paths, sock, &args),
@@ -173,7 +173,7 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<String, String> {
 
 // ── Status (config read + read-only engine probe) ────────────────────────────
 
-/// Report configured engine/voice/rate (from settings.json) plus live engine
+/// Report configured engine/voice/rate (from config.toml) plus live engine
 /// playback state. With `detail`, ALSO fold in the deep
 /// per-engine model lifecycle + stats (the former `model_status` tool). Probes the
 /// engine read-only — never spawns it, so a status check can't start the warm child
@@ -227,7 +227,7 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<St
     Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
 }
 
-// ── Persistent config writes (settings.json is the source of truth; the engine is
+// ── Persistent config writes (config.toml is the source of truth; the engine is
 //    nudged to apply NOW, falling back to its mtime-watch if it's down) ──────────
 
 fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
@@ -288,7 +288,7 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
     }
 
     // Persist VoiceConfig and nudge the engine to Reload NOW (it falls back to its
-    // mtime-watch if down). settings.json stays the source of truth; the nudge only
+    // mtime-watch if down). config.toml stays the source of truth; the nudge only
     // removes the poll latency.
     ds_config::write_settings(paths, &cfg)
         .map_err(|e| format!("could not write config.toml: {e}"))?;
@@ -974,17 +974,14 @@ mod set_config_tests {
     }
 
     #[test]
-    fn a_single_field_change_writes_settings_and_reports_it() {
+    fn a_single_field_change_writes_config_and_reports_it() {
         let (_dir, paths) = rooted_paths();
         assert!(!paths.config_toml.exists());
 
         let msg =
             call_set_config(&paths, &json!({ "tts_rate": 1.2 })).expect("a valid change applies");
         assert_eq!(msg, "Set tts_rate=1.2.");
-        assert!(
-            paths.config_toml.exists(),
-            "settings.json/config.toml was written"
-        );
+        assert!(paths.config_toml.exists(), "config.toml was written");
 
         // The write actually persisted the new rate (round-trip through VoiceConfig::load).
         let cfg = VoiceConfig::load(&paths);

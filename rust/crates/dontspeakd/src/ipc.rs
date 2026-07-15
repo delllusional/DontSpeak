@@ -82,7 +82,7 @@ fn handle_mark_active(
     // (the voice path already applied `input_clears` directly), so skip. Read config
     // live so a runtime `set_config` change takes effect without an engine restart.
     let was_voice = ttsq.take_recent_voice_submit();
-    // Short-circuit: skip the settings.json read entirely when `was_voice` already
+    // Short-circuit: skip the config.toml read entirely when `was_voice` already
     // decides it (`should_cancel_on_submit` would read `false` either way, but
     // there's no reason to load config to learn that).
     if !was_voice {
@@ -102,7 +102,7 @@ fn handle_mark_active(
 }
 
 /// Host the RPC socket on a dedicated thread (blocking accept loop), dispatching
-/// each request inline. A `Reload` (the MCP/GUI wrote settings.json and asks us to
+/// each request inline. A `Reload` (the MCP/GUI wrote config.toml and asks us to
 /// apply it) flips `reload_requested` so the poll loop reloads config surgically
 /// via `Engine::reload`; the other arms drive the TTS queue, model status, the STT
 /// test, the provider switch, and speaker enroll/diarize.
@@ -330,9 +330,9 @@ pub(crate) fn spawn_ipc_server(
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::Reload => {
-                    // The MCP/GUI wrote settings.json and asks us to apply it NOW.
+                    // The MCP/GUI wrote config.toml and asks us to apply it now.
                     // Flip the same flag SIGHUP uses; the poll loop reloads next tick
-                    // (debounced, re-reading config from settings.json). No mtime wait.
+                    // (debounced, re-reading config.toml). No mtime wait.
                     reload_requested.store(true, Ordering::Relaxed);
                     emit(&ds_ipc::Response::Done);
                 }

@@ -85,7 +85,7 @@ pub fn session_id_from_payload(payload: &str) -> Option<String> {
 /// COMMAND: run the side effect for `event` from its `payload`; no reply. Unknown events are
 /// ignored (forward-compatible — a newly-wired event we don't handle yet is a no-op).
 /// `greet_only` is the `dontspeak notify --greet-only` flag, wired on SessionStart for
-/// NON-streaming clients (Qwen Code, OpenAI Codex): greet, but skip the streaming-witness seed — see
+/// non-streaming hook clients (currently OpenAI Codex): greet, but skip the streaming-witness seed — see
 /// [`notify_at`]. `client` is the `--client <token>` the wiring stamped (see
 /// `client_from_argv`): it rides onto every `ds-ipc` request this dispatch sends, so the engine
 /// and its activity log know WHICH client caused the event. Resolves the real `Paths` and
@@ -110,12 +110,8 @@ pub(crate) fn notify_at(
     match event {
         "SessionStart" => {
             hook_speak::engine_ping(paths, hook_speak::Ping::Greet, payload, client);
-            // Seed this session's streaming witness so the Stop handler reliably knows Claude
-            // Code narrates via MessageDisplay (closing the only timing gap in the double-
-            // narration guard). ONLY for streaming clients: `--greet-only` (Qwen Code and
-            // OpenAI Codex, which wire SessionStart but have NO MessageDisplay stream) skips
-            // the seed — seeding would mark every session "already narrated" and silence
-            // each Stop reply.
+            // Seed the witness before a streaming client's first batch. `--greet-only`
+            // skips it for clients that depend on Stop narration.
             if !greet_only {
                 hook_narrate::mark_streaming_session(paths, payload);
             }
@@ -127,11 +123,10 @@ pub(crate) fn notify_at(
         "SessionEnd" => hook_narrate::barge_session(paths, payload, client),
         "MessageDisplay" => hook_narrate::message_display(paths, payload, client),
         // Multiple clients send Stop, handled by ONE arm:
-        //  • Codex / Qwen Code (no MessageDisplay stream) → speak_reply voices
+        //  • Plain-TUI Codex has no MessageDisplay stream, so speak_reply voices
         //    `last_assistant_message`.
-        //  • Claude Code streams via MessageDisplay but ALSO delivers `last_assistant_message`
-        //    on Stop, so speak_reply self-gates on this session's MessageDisplay state file
-        //    (present ⇒ already narrated ⇒ silent); CC wires Stop for the turn-done ding.
+        //  • Claude Code and Qwen Code stream via MessageDisplay, so speak_reply self-gates
+        //    on the session witness to avoid repeating the final reply.
         //  • Grok Stop is metadata-only; speak_reply now falls back to the `transcriptPath`
         //    file (chat_history.jsonl etc.) to obtain the final assistant text (#49).
         // The reply-done earcon then rings for every client (engine self-gates on `earcon_enabled` +
@@ -188,9 +183,8 @@ mod tests {
 
     #[test]
     fn greet_only_session_start_skips_witness_so_stop_still_voices() {
-        // The non-streaming-client fix: `notify --greet-only` on SessionStart (Qwen Code)
-        // greets but must NOT seed the streaming witness — Stop is that client's ONLY
-        // narration path, and a seeded witness silences every reply. Driven against a
+        // A non-streaming client's `notify --greet-only` greets without seeding the witness;
+        // otherwise Stop, its only narration path, would be silenced. Driven against a
         // tempdir-rooted `Paths`: the SessionStart engine ping is a best-effort no-op on the
         // tempdir's nonexistent socket (see hook_speak's engine_ping_with_no_socket test).
         let dir = tempfile::tempdir().unwrap();

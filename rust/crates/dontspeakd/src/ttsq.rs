@@ -2404,12 +2404,8 @@ mod tests {
 
     #[test]
     fn resume_if_barge_speculative_never_clears_a_real_dictation_pause() {
-        // Round 3's planned regression test (not yet in the tree — add it here): a
-        // Dictation-tagged pause is untouched by the barge watcher's auto-resume no
-        // matter when it's called, since nothing else re-tags it BargeSpeculative
-        // (this test doesn't rely on the round-4 pause-side guard — it pauses via
-        // pause_for_record directly, so it also acts as a standalone check that the
-        // resume-side guard alone is correct).
+        // A Dictation-tagged pause must survive the barge watcher's auto-resume. Drive
+        // pause_for_record directly so this isolates the resume-side guard.
         let q = mk_queue();
         q.pause_for_record();
         q.resume_if_barge_speculative();

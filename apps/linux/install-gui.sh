@@ -7,7 +7,7 @@
 # GTK host is the ONLY engine host on Linux — the engine has no standalone/headless mode.
 #
 # Run scripts/install.sh FIRST: it installs the engine/helper binaries (dontspeak,
-# ds-helper) + the Claude Code voice hooks this host relies on. This script then adds
+# ds-helper) and wires installed clients. This script then adds
 # the GUI binary, its .desktop launcher, optional autostart, and the input-device permissions.
 #
 # Flags:  --autostart   also install ~/.config/autostart/dontspeak.desktop (launch at login)

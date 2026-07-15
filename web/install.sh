@@ -182,7 +182,7 @@ case "$(uname -s)" in
     for b in dontspeak ds-helper; do rm -f "$INSTALL_DIR/$b"; done
 
     echo "==> 4. remove app data, downloaded models, caches, logs, state"
-    # data_dir (config/state) + the legacy ProjectDirs layout; the ONNX model cache; the
+    # Current config/state roots + the legacy ProjectDirs layout; the ONNX model cache; the
     # FluidAudio Core ML / ANE model cache (Kokoro/Parakeet/diarization — its OWN ~900 MB
     # dir, separate from our model_dir); OS app caches.
     rm -rf \
@@ -313,7 +313,7 @@ case "$(uname -s)" in
     fi
 
     echo "==> 5. remove app data, downloaded models, caches, state"
-    # config_dir (settings/speakers/narration spec) + state + the model/onnxruntime cache.
+    # config + state + model/onnxruntime cache.
     rm -rf "$CONFIG_DIR" "$STATE_DIR" "$CACHE_DIR"
 
     if [ "$RM_UDEV" = "1" ]; then

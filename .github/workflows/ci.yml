@@ -53,13 +53,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Hygiene gate — RELEASE-ONLY (runs when full-matrix is requested, i.e. from
-  # release.yml): rustfmt across both workspaces + rustdoc -D warnings. Deliberately
-  # SKIPPED per-commit — the fast loop enforces only the essentials (clippy + tests);
-  # the release enforces every optional checker too, so drift gets cleaned up at least
-  # once per release instead of nagging every commit. Fix drift locally BEFORE tagging
-  # (see .claude/skills/make-release): `cargo fmt` in rust/ and apps/linux/gtk/, then
-  # `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`.
+  # Release-only hygiene: per-commit CI intentionally runs only clippy and tests.
   hygiene:
     name: hygiene (rustfmt + rustdoc)
     if: inputs.full-matrix
@@ -221,14 +215,6 @@ jobs:
             exit 1
           fi
 
-      # Swift formatting gate — DELIBERATELY DISABLED, same policy as the Rust lint
-      # gates above: CI runs unit tests only. (Config: apps/macos/.swift-format.)
-      # - name: swift format lint (macOS app)
-      #   if: runner.os == 'macOS'
-      #   run: >
-      #     swift format lint --strict --recursive
-      #     apps/macos/Sources apps/macos/SmKokoro/Sources apps/macos/Tests
-
       # macOS SwiftUI app: run swift test only if the package declares test targets.
       - name: swift test (macOS app, if any)
         if: runner.os == 'macOS'
@@ -247,9 +233,7 @@ jobs:
             echo "no Swift test targets in apps/macos/Package.swift — skipping"
           fi
 
-      # WinUI app: the xunit pure-seam tests (apps/windows/winui.tests). Shared composite
-      # (also used by csharp.yml) — see .github/actions/dotnet-test-winui for the TODO
-      # on the hosted-runner testhost crash this works around.
+      # WinUI xunit tests; the composite is shared with csharp.yml.
       - name: dotnet test (WinUI app)
         if: runner.os == 'Windows'
         uses: ./.github/actions/dotnet-test-winui

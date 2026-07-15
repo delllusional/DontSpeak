@@ -1,5 +1,5 @@
 //! Push-based logs-dir watch — the client-side analogue of
-//! `dontspeakd::config_watch` (that one watches settings.json's parent dir; this
+//! `dontspeakd::config_watch` (that one watches config.toml's parent dir; this
 //! one watches the logs dir), but with no persistent state: `wait_logs_changed`
 //! spawns an EPHEMERAL watcher per call, blocks up to `timeout`, and returns.
 //! Callers loop: call → re-read `combined_log_json` → render → call again
@@ -18,7 +18,7 @@ use notify::{Event, EventKind, RecursiveMode, Watcher};
 /// Trailing-edge quiet window: once the first relevant event lands, keep
 /// draining for this long before returning, so a burst of rapid appends (many
 /// log lines in one flush) settles into one wake instead of one per line. Short
-/// on purpose — this is a live log view, not settings.json (whose own
+/// on purpose — this is a live log view, not config.toml (whose own
 /// `RELOAD_QUIET_WINDOW` is 750ms); logs should feel closer to instant.
 const LOG_WAIT_DEBOUNCE: Duration = Duration::from_millis(150);
 

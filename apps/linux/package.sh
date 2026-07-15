@@ -2,8 +2,8 @@
 # package.sh — build DontSpeak Linux distributables (the Linux analogue of the Windows
 # portable-zip and the macOS .app.zip). Closes the "no Linux package" gap.
 #
-# Produces a self-contained PORTABLE TARBALL (works on any distro, no packaging
-# toolchain) — the ONE and ONLY Linux package, mirroring the single Windows zip.
+# Produces a portable tarball with no packaging toolchain. The target still needs the
+# compatible GTK/libadwaita and audio runtime libraries documented by the installer.
 #
 #   .tar.gz — bin/ + .desktop + udev rule + an install.sh; extract & run install.sh
 #

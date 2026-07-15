@@ -24,8 +24,8 @@
 //! ONLY for the one-member ORT `.tgz` extraction (model paths come from ds-config).
 //! No async runtime in the engine.
 //!
-//! TODO: HTTP Range-resume on a stalled download (§D, here we full re-download on
-//! failure); a `DownloadStatus` progress channel for the GUI. The pure fns below
+//! A stalled download restarts from the beginning; HTTP Range resume is tracked in issue
+//! #76. Download progress is exposed by the engine. The pure fns below
 //! are network-free and unit-tested; `ensure` is exercised by a localhost-
 //! TcpListener fixture (no real CDN).
 //!

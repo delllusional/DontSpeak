@@ -3,7 +3,7 @@
 //! The native modern-GNOME analogue of the macOS SwiftUI app and the Windows WinUI app: it
 //! HOSTS the engine in-process via the `ds-core` C ABI (`engine_start` on launch,
 //! `engine_stop` on quit) and renders the engine's pushed status as a tray icon, a health
-//! panel, and (in a later increment) a focus-safe dictation overlay. Control lives in the MCP.
+//! panel, and focus-safe dictation overlay. Control lives in the MCP.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

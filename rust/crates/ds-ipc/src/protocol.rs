@@ -2,9 +2,9 @@
 //! [`Response`] lines out. A streaming request (STT test-recognition) emits several
 //! non-terminal `Response` lines and ends with a terminal one.
 //!
-//! Config is carried as a `serde_json::Value` — the `voice` object in the exact
-//! shape `settings.json` uses (`ds_config::voice_to_value` / `voice_from_value`),
-//! so neither side needs a parallel serializable mirror of `VoiceConfig`.
+//! Config is carried as the `serde_json::Value` produced by
+//! `ds_config::voice_to_value` / `voice_from_value`, so neither side needs a
+//! parallel serializable mirror of `VoiceConfig`.
 
 use ds_client::ClientSource;
 use serde::{Deserialize, Serialize};
@@ -211,8 +211,8 @@ pub enum Request {
     /// the run flag, joins the thread) — no current client sends this request; the
     /// handler is kept for an out-of-process / socket-driven stop.
     Shutdown,
-    /// Apply `settings.json` NOW — the explicit "reload" nudge. The MCP/GUI writes
-    /// settings.json (still the source of truth), then sends this so the engine
+    /// Apply `config.toml` now — the explicit reload nudge. The MCP/GUI writes
+    /// config.toml (the source of truth), then sends this so the engine
     /// reloads immediately and surgically via `Engine::reload` instead of waiting
     /// for the mtime poll. Same effect as an mtime-triggered reload; debounced with it.
     /// → [`Response::Done`].

@@ -66,9 +66,9 @@ Install = extract the portable zip to the per-user folder (the same thing `web/i
 ## 3 — Build the package
 
 ```powershell
-pwsh -NoProfile -File apps\windows\installer\build-portable.ps1 -Arch x64    # or -Arch arm64
+pwsh -NoProfile -File apps\windows\installer\build-portable.ps1 -Arch x64 -SkipModels    # or -Arch arm64
 ```
-- Output: `Output\dontspeak-<version>-windows-<x86_64|aarch64>.zip` — self-contained (bundles .NET + Windows App SDK). Models download on first launch; drop `-SkipModels` to bundle them.
+- Output: `Output\dontspeak-<version>-windows-<x86_64|aarch64>.zip` — self-contained (bundles .NET + Windows App SDK). With `-SkipModels`, models download on first launch; omit it to bundle them.
 - **Signing:** none — the app runs from an extracted folder, nothing to code-sign; first launch may hit SmartScreen until download reputation accrues.
 
 ## Notes

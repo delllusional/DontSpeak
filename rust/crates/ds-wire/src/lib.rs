@@ -159,7 +159,7 @@ pub fn run(args: &[String]) -> i32 {
 
 /// Converge each registry client's wiring to config.toml's declared `exclude_clients` (absent
 /// or empty ⇒ exclude nothing ⇒ all wired). ONLY per-client wiring — it never prunes/deletes
-/// binaries and does NOT seed config (the engine seeds narration-spec separately). Called
+/// binaries and does not seed config. Called
 /// in-process by the engine at boot / on config change, and by `wire --reconcile`. A client
 /// LISTED in `exclude_clients` is `--remove`d (a clean no-op when its config was never
 /// created); every other client is wired (self-skipping when the client isn't installed).
@@ -556,11 +556,11 @@ mod tests {
         assert_eq!(wire_client(ClientSource::QwenCode, &paths, false, false), 0);
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
-        // Hooks group present (non-streaming: MessageDisplay omitted, Stop/UserPromptSubmit/etc. present)…
+        // Qwen's lifecycle and streaming hooks are both present.
         assert!(v["hooks"]["Stop"].as_array().is_some(), "hooks wired");
         assert!(
-            v["hooks"].get("MessageDisplay").is_none(),
-            "non-streaming: no MessageDisplay"
+            v["hooks"]["MessageDisplay"].as_array().is_some(),
+            "streaming hook wired"
         );
         // …in Qwen's INLINE dialect: its hook runner passes only `command` to a shell and its
         // config has no `args` field, so the verb must live in the command string and no

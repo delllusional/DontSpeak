@@ -1,4 +1,4 @@
-//! TtsManager — the engine's warm Kokoro owner (Phase 2).
+//! TtsManager — the engine's warm Kokoro owner.
 //!
 //! The engine supervises ONE long-lived `ds-helper --serve` child that holds
 //! the ~325 MB model warm, so no reply pays the cold model-load cost. Enabling TTS
@@ -1357,10 +1357,8 @@ impl TtsManager {
         }
     }
 
-    /// Other platforms (Linux): the System path isn't wired up yet. Returns Unsupported
-    /// so callers fall back / record last_error. TODO (Linux): route through
-    /// ds_tts::SystemTts (Speech Dispatcher), and/or have the engine selector fall back
-    /// to Kokoro when SystemTts::available() is false, so this never reaches the user.
+    /// Linux has no warm System-TTS path yet (issue #74). Return `Unsupported` so callers
+    /// can fall back or record the error.
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     pub fn speak_system(&self, _text: &str, _voice: &str, _rate: f32) -> std::io::Result<()> {
         Err(std::io::Error::new(

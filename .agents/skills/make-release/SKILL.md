@@ -10,14 +10,8 @@ description: Cut a DontSpeak release — tag the single-source version, push the
 > [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
 
 > A release is **tag-triggered CI**: pushing `v<version>` runs `.github/workflows/release.yml`,
-> which gates, builds all platforms, and publishes the GitHub Release with binaries. Nothing
-> builds locally. The run takes **~25-30 minutes even on a warm cache**. A same-
-> `Cargo.lock` cache hit does make the gate materially faster (Linux clippy 2m2s→35s, tests
-> 2m32s→50s), but that's a small slice of the critical path — the `macos` build job (signing +
-> notarization + both Apple targets, ~18-19 min) and the slowest `tests` matrix legs (macos-26 /
-> windows-2025, ~9-10 min each) dominate total wall time regardless of Rust cache warmth, so
-> don't expect a warm cache alone to pull the total toward 20 min. Can fail — treat "tag pushed"
-> as the start, not the end: monitor it to completion and verify the assets.
+> which gates, builds all platforms, and publishes the GitHub Release with binaries. Treat
+> "tag pushed" as the start: monitor the run to completion and verify every asset.
 
 ## 1 — Preconditions
 
@@ -32,10 +26,7 @@ description: Cut a DontSpeak release — tag the single-source version, push the
   the release re-runs); the tagged commit must be on `origin/main`. **This is a fail-fast
   optimization, not the actual correctness gate** — `release.yml`'s own `tests` job
   (full-matrix) reruns clippy + tests + hygiene regardless, and IS the real gate. Running it
-  locally first only exists to catch a broken `main` in ~1-2 minutes instead of burning the
-  full ~25-30 minute CI round-trip. Skipping it is a legitimate choice when the toolchain to
-  run it isn't available where the release is being triggered from — just budget for an
-  occasional wasted CI run (and a re-cut, step 7) as the cost of that trade.
+  locally catches a broken `main` before starting the slower release matrix.
 - **Hygiene clean — run `cargo fmt` + `cargo deny --all-features check` locally before
   tagging.** The
   release (unlike per-commit CI and `prepush`) also gates on rustfmt + rustdoc AND
@@ -58,12 +49,9 @@ description: Cut a DontSpeak release — tag the single-source version, push the
   (cd rust && cargo build --profile release-ffi --locked -p ds-core)
   (cd apps/macos && MACOSX_DEPLOYMENT_TARGET=14.0 swift test)   # must pass, 0 failures
   ```
-  (Windows also runs `dotnet test` in the release, but it's `continue-on-error` — non-blocking.)
-- **`--locked` catches Cargo.lock drift — in BOTH workspaces.** CI runs every cargo gate with
-  `--locked`; `prepush` and the fmt commands above don't, so a `Cargo.toml` dep bump with a stale
-  `Cargo.lock` passes locally but fails the release. Re-run the two prepush gates locked before
-  tagging:
-  `(cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings && cargo test --workspace --locked)`.
+  The release matrix also runs the WinUI xunit tests on Windows.
+- **`--locked` catches Cargo.lock drift — in BOTH workspaces.** The prepush gates are locked;
+  formatting is not. A dependency or version change must also refresh the separate GTK lock.
   **Also regenerate the GTK workspace lock** after bumping the version: the version bump changes
   every workspace crate's version string, so `apps/linux/gtk/Cargo.lock` (a SEPARATE workspace
   that depends on the shared crates by path) must be regenerated too, or the Linux CI leg fails
@@ -97,11 +85,8 @@ git push origin main "v$ver"
    - `windows` — self-contained portable zips, x64 + arm64 (unsigned; SmartScreen note).
    - `macos` — `DontSpeak.app` zips, arm64 + x86_64; Developer-ID sign + notarize + staple when
      the `APPLE_*` secrets exist, else ad-hoc (first launch hits Gatekeeper).
-   - `linux` — per-arch tarballs (ubuntu-26.04 + -arm). **`continue-on-error` at the step
-     level** — but in practice a failed Linux *job* still blocks the `publish release` step
-     (which `needs` all build jobs to succeed). Don't assume a Linux failure will silently
-     ship a release without Linux assets; it usually blocks the whole publish. Fix the cause
-     and re-cut (step 7).
+   - `linux` — per-arch tarballs (ubuntu-26.04 + -arm). Setup and tests must pass; tarball
+     creation and upload are best-effort, so a packaging failure may leave an asset absent.
 4. **`publish release`** — `gh release create` with all artifacts + `checksums.txt` +
    `--generate-notes`. That flag only lists merged PULL REQUESTS — this repo pushes straight
    to `main` with no PRs, so it has nothing to draw from and renders as a bare compare link

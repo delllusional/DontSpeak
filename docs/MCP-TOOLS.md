@@ -4,7 +4,7 @@ DontSpeak exposes 7 tools over MCP by default (`speak`, `listen`, `stop_speech`,
 `get_status`, `list_voices`, `set_config`), in the order below — the
 same order the SwiftUI Tools window lists them in. Names, descriptions, and parameters
 are generated from one source, `ds-tools` (`rust/crates/ds-tools/src/lib.rs` +
-`descriptions.rs`), so this table can't drift from what Claude actually sees; if you
+`descriptions.rs`). A parity test pins tool names and descriptions; if you
 change the catalog, update this file too.
 
 Client wiring is no longer an MCP tool: the engine keeps each AI client wired
@@ -14,8 +14,8 @@ automatically (at boot and on config change), converging to `config.toml`'s `exc
 
 `diarize` and `manage_speakers` (documented below for completeness), plus `set_config`'s
 4 diarization params (`diarizer_provider`, `clustering_threshold`, `speaker_threshold`,
-`stt_speaker_lock`), are implemented but currently hidden from every user-facing surface
-pending more testing — see `ds_tools::DIARIZATION_ENABLED`.
+`stt_speaker_lock`), are implemented but hidden from user-facing surfaces pending the
+validation tracked in issue #77 — see `ds_tools::DIARIZATION_ENABLED`.
 
 ## speak
 

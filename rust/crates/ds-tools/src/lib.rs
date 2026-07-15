@@ -25,8 +25,8 @@ use descriptions::*;
 pub use set_config::SetConfigArgs;
 
 /// Diarization (`diarize`/`manage_speakers` + set_config's 4 diarization params) is
-/// implemented but not ready for general users yet — flip to `true` when it's tested
-/// enough to ship. The ONE toggle that hides it from every user-facing surface (MCP
+/// implemented but hidden pending the validation tracked in issue #77. This is the one
+/// toggle that hides it from every user-facing surface (MCP
 /// tools/list, the set_config schema, and — via ds_tools_json — the macOS/Windows Tools
 /// windows). Dispatch/config/engine keep working end-to-end when called directly
 /// regardless of this flag (see dontspeak::tools::tools_call) — this is a VISIBILITY

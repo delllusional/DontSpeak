@@ -4,7 +4,6 @@ use serde_json::Value;
 
 use crate::Paths;
 
-/// Claude Code's voice-dictation config, READ from its own files — never written.
 /// The `claude_code` STT engine uses it to (a) synthesize the right key and (b) report
 /// status (is CC voice on? which key?). All fields fail-open to Claude Code's documented
 /// defaults.

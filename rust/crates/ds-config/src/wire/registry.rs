@@ -112,8 +112,8 @@ pub struct Surface {
     /// they carry no hint.
     pub load_hint: Option<&'static str>,
     /// For [`WireMechanism::ClaudeJsonHooks`]: whether the client streams assistant messages
-    /// via `MessageDisplay` (Claude Code → `true`). Non-streaming clients (Qwen Code → `false`)
-    /// omit the `MessageDisplay` hook — the reply is voiced whole from `Stop`. Ignored by
+    /// via `MessageDisplay` (Claude Code and Qwen Code → `true`). Non-streaming clients
+    /// omit the hook and voice the reply whole from `Stop`. Ignored by
     /// [`WireMechanism::JsonMcp`] and [`WireMechanism::ClaudeTomlHooks`] (Codex's streaming-ness
     /// is baked into its own TOML shaper's fixed hook set).
     pub hook_streaming: bool,
@@ -222,8 +222,8 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 url: "https://code.claude.com/docs/en/mcp",
             },
         ],
-        verified_client_version: "2.1.207",
-        verified_on: "2026-07-13",
+        verified_client_version: "2.1.209",
+        verified_on: "2026-07-15",
     },
     ClientSpec {
         target: ClientSource::Codex,
@@ -298,8 +298,8 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 url: "https://developers.openai.com/codex/mcp",
             },
         ],
-        verified_client_version: "0.144.1",
-        verified_on: "2026-07-13",
+        verified_client_version: "0.144.4",
+        verified_on: "2026-07-15",
     },
     ClientSpec {
         target: ClientSource::QwenCode,
@@ -324,19 +324,11 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         // passes ONLY the `command` string to a shell (no `args` field exists in its
         // `CommandHookConfig`, `timeout` is milliseconds), so the surface is
         // `HookCommandStyle::InlineShell` — verbs inlined into the command string, timeouts
-        // scaled. It has NO `MessageDisplay` stream TODAY, so `hook_streaming: false` and the
-        // reply is voiced whole from `Stop` (the non-streaming path the binary already serves
-        // plain-TUI Codex through). Hooks + MCP both live in the ONE `~/.qwen/settings.json`,
-        // so the two surfaces share a config_file.
-        //
-        // FUTURE FLIP (QwenLM/qwen-code#6488): Qwen's main-branch docs now describe the
-        // MessageDisplay hook, but the latest released 0.19.9 docs do not. When a release
-        // actually includes it (snake_case cumulative payload — `displayed_text` +
-        // `is_final`, already accepted by the handler's serde aliases), the WHOLE change is
-        // `hook_streaming: true` here + a version-pin bump via the `verify-wiring` skill.
-        // The wiring side of that combination (InlineShell + streaming: MessageDisplay
-        // group with the inlined notify command, ms-scaled timeout, plain-notify
-        // SessionStart witness seed) is pinned NOW by
+        // scaled. Version 0.19.10 ships `MessageDisplay` with a cumulative snake_case payload
+        // (`displayed_text` + `is_final`), so the streaming hook is enabled. Hooks + MCP both
+        // live in the ONE `~/.qwen/settings.json`, so the two surfaces share a config_file.
+        // The InlineShell + streaming combination (inlined notify command, ms-scaled timeout,
+        // and plain-notify SessionStart witness seed) is pinned by
         // `inline_streaming_wires_messagedisplay_with_ms_timeout_and_plain_sessionstart`
         // in wire/hooks.rs.
         surfaces: &[
@@ -344,7 +336,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 mechanism: WireMechanism::ClaudeJsonHooks,
                 config_file: |p| &p.qwen_settings, // ~/.qwen/settings.json
                 load_hint: None,
-                hook_streaming: false,
+                hook_streaming: true,
                 hook_command_style: HookCommandStyle::InlineShell,
             },
             Surface {
@@ -358,15 +350,15 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         docs: &[
             DocRef {
                 topic: "hooks",
-                url: "https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/hooks.md",
+                url: "https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/hooks.md",
             },
             DocRef {
                 topic: "mcp",
-                url: "https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/mcp.md",
+                url: "https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/mcp.md",
             },
         ],
-        verified_client_version: "0.19.9",
-        verified_on: "2026-07-13",
+        verified_client_version: "0.19.10",
+        verified_on: "2026-07-15",
     },
     ClientSpec {
         target: ClientSource::Grok,

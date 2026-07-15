@@ -75,8 +75,8 @@ fn helper_command() -> std::ffi::OsString {
 /// takeover loop) and the pgid. Shared by [`KokoroTts::speak`], `ds-speak`,
 /// and `ds-narrate` so the spawn logic lives in exactly one place.
 ///
-/// Replaces the Phase-1 `uv run ~/kokoro-tts/speak.py` shell-out: no uv, no
-/// speak.py, no `~/kokoro-tts` guard. The helper itself fail-quiets if the model
+/// Replaces the former `uv run ~/kokoro-tts/speak.py` shell-out: no uv, no
+/// speak.py, and no `~/kokoro-tts` guard. The helper fail-quiets if the model
 /// or onnxruntime aren't available yet.
 pub fn spawn(paths: &Paths, txt: &str, voice: &str, rate: f32) -> std::io::Result<(Child, i32)> {
     let mut cmd = Command::new(helper_command());

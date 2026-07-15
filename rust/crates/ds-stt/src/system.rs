@@ -1,5 +1,5 @@
-//! System STT — Apple's on-device `SFSpeechRecognizer` on macOS (the deferred Windows
-//! `Windows.Media.SpeechRecognition` / Linux paths remain TODO). The REAL recognition
+//! System STT — Apple's on-device speech recognition on macOS. Windows and Linux support
+//! is tracked in issue #75. The real recognition
 //! runs through the warm helper (mic capture → `crate::sysspeech::SystemTranscriber`),
 //! exactly like Parakeet; this `SystemStt` is the INERT in-process placeholder the
 //! `ds-engines` factory returns for the helper-less / unavailable case.

@@ -5,10 +5,8 @@ name: C#
 # unnoticed on main until the next tag. Path-filtered so the Windows runner only spins up
 # when the C# tree (or this workflow) changes; Rust/Swift-only commits stay cheap.
 #
-# Compile-only, no Rust build: the csproj's ds_core.dll / ds-helper.exe items are
-# Exists()-guarded, so the app compiles without the engine artifacts. This is also where
-# the .NET analyzers (AnalysisLevel in the csproj) first run in CI — once this job shows
-# the build is warning-clean, flip TreatWarningsAsErrors in the csproj.
+# No Rust build is needed: native artifact items are Exists()-guarded. The project runs
+# its analyzers with warnings treated as errors.
 
 on:
   push:
@@ -51,9 +49,6 @@ jobs:
       # exercised by build-portable.ps1); x64 matches the csproj's default RuntimeIdentifier.
       - name: dotnet build (x64, Release)
         run: dotnet build apps/windows/winui/DontSpeak.WinUI.csproj -c Release -p:Platform=x64
-      # The xunit pure-seam tests (HealthSnapshot parse, tray indicator mapping) — they run
-      # without ds_core.dll or the Windows App Runtime, so no Rust build is needed here either.
-      # Shared composite (also used by ci.yml) — see .github/actions/dotnet-test-winui for
-      # the TODO on the hosted-runner testhost crash this works around.
+      # Pure-seam xunit tests run without the native engine artifacts.
       - name: dotnet test (x64, Release)
         uses: ./.github/actions/dotnet-test-winui

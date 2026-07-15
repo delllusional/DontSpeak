@@ -38,8 +38,7 @@ pub fn merge_settings(mut root: Value, voice: &VoiceConfig) -> Value {
     root
 }
 
-/// Our `dontspeak` block as a JSON object, in the EXACT shape `settings.json` uses
-/// (so `serde_json::from_value::<VoiceConfig>` round-trips it). This is the IPC
+/// `VoiceConfig` as a JSON object for the IPC wire. This
 /// wire form for config: reuses [`merge_settings`]'s field-by-field discipline,
 /// then extracts just the `dontspeak` sub-object.
 pub fn voice_to_value(voice: &VoiceConfig) -> Value {
@@ -152,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn ds_block_parsed_from_settings() {
+    fn ds_block_parses_from_json_wrapper() {
         let r: SettingsRoot =
             serde_json::from_str(r#"{"dontspeak":{"tts_built_in_voices":["am_adam"]}}"#).unwrap();
         let v = r.dontspeak.unwrap();
@@ -160,13 +159,11 @@ mod tests {
         assert_eq!(v.tts_rate, 1.0); // defaulted
     }
 
-    // ── Atomic settings.json writer (PURE merge, NO disk, NO network) ────────
+    // ── JSON wire-shape tests ───────────────────────────────────────────────
 
     #[test]
     fn merge_preserves_unrelated_keys_and_cc_voice() {
-        // A realistic Claude Code settings.json with hooks/permissions/model + Claude
-        // Code's OWN `voice` block: setting our `dontspeak` block must leave all of them
-        // untouched (the dontspeak block itself is replaced wholesale from the typed config).
+        // The pure merge preserves unrelated keys and replaces only `dontspeak`.
         let root = serde_json::json!({
             "model": "claude-opus-4",
             "permissions": { "allow": ["Bash(ls:*)"], "deny": [] },
@@ -308,8 +305,7 @@ mod tests {
 
     #[test]
     fn merge_emits_canonical_default_tokens() {
-        // A defaulted config must emit the canonical Phase-1 tokens so a write of
-        // the defaults round-trips to the defaults (no surprise enum drift).
+        // Defaults must emit canonical tokens so a wire round-trip preserves them.
         let merged = merge_settings(Value::Null, &VoiceConfig::default());
         assert_eq!(
             merged["dontspeak"]["stt_engine_ladder"],
@@ -330,7 +326,7 @@ mod tests {
 
     #[test]
     fn bad_enum_degrades_then_writes_back_canonical() {
-        // A settings.json with a bogus stt_engine_ladder loads as the DEFAULT ladder
+        // A bogus stt_engine_ladder loads as the default ladder
         // (fail-open); merging that loaded config writes back the canonical
         // tokens (the degrade is persisted as a clean default, never the
         // bogus string).
@@ -360,7 +356,7 @@ mod tests {
 
     #[test]
     fn bad_preference_degrades_to_unset_not_the_default_ladder() {
-        // A settings.json with a bogus `stt_engine`/`tts_engine` PREFERENCE (distinct from the
+        // A bogus `stt_engine`/`tts_engine` preference (distinct from the
         // ladder above) fails open to `None` (unset — defer to the ladder), never a silently
         // wrong single-engine choice.
         let on_disk = r#"{"dontspeak":{"stt_engine":"deepgram","tts_engine":"festival"}}"#;

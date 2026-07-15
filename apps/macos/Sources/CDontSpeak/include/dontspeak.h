@@ -1,8 +1,7 @@
 /*
  * dontspeak.h — the stable C ABI for ds-core.
  *
- * Bind this header from ANY native UI: SwiftUI (macOS) today; C#/WinRT
- * (Windows) or GTK/C (Linux) later — all call the SAME functions.
+ * SwiftUI, WinUI, and GTK hosts all call this same API.
  *
  * The app is an informational menu-bar + health panel, so this surface is
  * intentionally TINY and HANDLE-FREE: a few read-only probes, the in-process
@@ -66,21 +65,18 @@ uint8_t ds_engine_reload(void);
 // status read uses); returns 1 if the request was delivered, 0 if the engine is down.
 uint8_t ds_set_muted(uint8_t on);
 
-// Open the OS's system-voice settings page — Spoken Content (macOS) / Time & language ▸
-// Speech (Windows) / TODO (Linux). The cross-platform seam behind every UI's System-TTS
-// "Manage voices" affordance, so each platform launches the same per-OS page from one call.
-// Returns 1 if a page was launched, 0 if unsupported/failed. HANDLE-FREE — no engine needed.
+// Open the OS's system-voice settings page (macOS Spoken Content / Windows Speech).
+// Returns false on Linux, which has no portable settings page (issue #74).
+// Cross-platform seam for the UI "Manage voices" button. Returns 1 if launched, 0 otherwise. HANDLE-FREE.
 uint8_t ds_open_voice_settings(void);
 
-// Is the Kokoro (TTS) model set present + valid? HANDLE-FREE (probes disk only),
-// so the UI can poll it off the main thread.
+// Kokoro (TTS) model set present + valid? (disk probe only). HANDLE-FREE.
 uint8_t ds_kokoro_present_global(void);
 
 // Is the FULL Parakeet-ONNX (STT) asset set present + valid? HANDLE-FREE.
 uint8_t ds_parakeet_onnx_present_global(void);
 
-// Is the engine running? HANDLE-FREE (pidfile probe), safe off the
-// main thread.
+// Engine running? (pidfile probe). HANDLE-FREE, safe off main thread.
 uint8_t ds_engine_running_global(void);
 
 // The engine's model-status JSON (presence + per-subsystem running map). Owned

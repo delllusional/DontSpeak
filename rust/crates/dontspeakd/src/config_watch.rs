@@ -1,4 +1,4 @@
-//! Push-based settings.json watch. Replaces the per-tick `stat()` poll with a native
+//! Push-based config-file watch. Replaces the per-tick `stat()` poll with a native
 //! filesystem watcher — FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW on
 //! Windows (selected per-OS by the `notify` crate) — that flips `reload_requested` the
 //! instant the config changes. The boot loop keeps a COARSE `stat()` backstop (see
@@ -18,7 +18,7 @@ use notify::{Event, EventKind, RecursiveMode, Watcher};
 /// MUST keep it alive (dropping it stops the watch). `None` if the watcher can't start,
 /// in which case the boot loop's `stat()` backstop is the sole reload trigger.
 ///
-/// We watch the PARENT DIRECTORY, not the file itself: settings.json is written
+/// We watch the PARENT DIRECTORY, not the file itself: config.toml is written
 /// atomically (temp + rename), which replaces the inode, so a watch bound to the original
 /// file would go deaf after the first save. Watching the dir and filtering by file name
 /// survives the rename. Coalescing of the burst an editor/atomic-save emits is left to the
@@ -104,30 +104,30 @@ mod tests {
         // Atomic-save events report both the temp/staging path and the real target path;
         // matching should succeed on the real target name regardless of what else is listed.
         let paths = vec![
-            PathBuf::from("/home/user/.config/dontspeak/settings.json.tmp12345"),
-            PathBuf::from("/home/user/.config/dontspeak/settings.json"),
+            PathBuf::from("/home/user/.config/dontspeak/config.toml.tmp12345"),
+            PathBuf::from("/home/user/.config/dontspeak/config.toml"),
         ];
-        assert!(event_touches_config(&paths, OsStr::new("settings.json")));
+        assert!(event_touches_config(&paths, OsStr::new("config.toml")));
     }
 
     #[test]
     fn sibling_file_write_does_not_match() {
         let paths = vec![PathBuf::from("/home/user/.config/dontspeak/other.json")];
-        assert!(!event_touches_config(&paths, OsStr::new("settings.json")));
+        assert!(!event_touches_config(&paths, OsStr::new("config.toml")));
     }
 
     #[test]
     fn only_one_matching_path_among_several_still_matches() {
         let paths = vec![
             PathBuf::from("/home/user/.config/dontspeak/other.json"),
-            PathBuf::from("/home/user/.config/dontspeak/settings.json"),
+            PathBuf::from("/home/user/.config/dontspeak/config.toml"),
             PathBuf::from("/home/user/.config/dontspeak/another.json"),
         ];
-        assert!(event_touches_config(&paths, OsStr::new("settings.json")));
+        assert!(event_touches_config(&paths, OsStr::new("config.toml")));
     }
 
     #[test]
     fn empty_paths_does_not_match() {
-        assert!(!event_touches_config(&[], OsStr::new("settings.json")));
+        assert!(!event_touches_config(&[], OsStr::new("config.toml")));
     }
 }

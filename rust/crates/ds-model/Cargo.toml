@@ -14,7 +14,7 @@ ds-config = { workspace = true }
 # Tiny BLOCKING HTTP client (attohttpc) — deliberately NOT reqwest/tokio (no async
 # runtime in the engine; "minimal deps"). Chosen for its socket `read_timeout`
 # (per-read inactivity guard) — see the timeout note in lib.rs. TLS = rustls + ring
-# (workspace dep): pure-Rust crypto that cross-compiles everywhere, incl. win-arm64.
+# (workspace dep), including the supported Windows ARM64 toolchain.
 attohttpc = { workspace = true }
 # OS trust store for TLS. attohttpc's `tls-rustls-webpki-roots-ring` feature pulls the
 # webpki-roots CRATE but NOT the `tls-rustls-webpki-roots` feature flag its root-loading code

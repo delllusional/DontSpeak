@@ -1,6 +1,6 @@
 # DontSpeak
 
-A local voice layer for Claude Code, Codex, and Qwen Code: the agent speaks its
+A local voice layer for Claude Code, Codex, Qwen Code, and Grok: the agent speaks its
 replies aloud, the user dictates back with one key (Caps Lock). One native app per OS
 (macOS SwiftUI, Windows WinUI, Linux GTK4) hosts the same Rust engine **in-process**
 over a C ABI (`ds-core`) — there is no separate daemon. The Claude Code hooks and the
@@ -100,7 +100,7 @@ the three runtime pieces (CLI, engine, host app) need different rebuild routes.
   `~/.claude/settings.json` — that file stays purely Claude Code's own (hooks + its
   own `voice` block).
 - **No codegen for the FFI boundary.** uniffi was evaluated and deliberately rejected
-  for the ~29-function `ds-core` surface — see
+  for the 32-function `ds-core` surface — see
   [ARCHITECTURE.md § FFI boundary](ARCHITECTURE.md#ffi-boundary).
   If you touch `model_status`, edit the Rust source of truth in `ds-status` then
   hand-update the two mirrors (`apps/windows/winui/Native.cs`,

@@ -16,7 +16,7 @@ worktree named in the audit handoff is the explicit target under the baseline
 policy.
 
 If this audit follows a `ds-implementer` run, the change likely lives in an isolated
-git worktree under `.claude/worktrees/`, not the main working tree — check
+git worktree under `.worktrees/`, not the main working tree — check
 `git worktree list` (or the handoff) and read files / run `git diff` from inside that
 worktree rather than assuming `main` already reflects the change. You only read —
 never edit, in the worktree or the main tree.

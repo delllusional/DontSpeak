@@ -13,8 +13,8 @@ description = "DontSpeak's stable C-ABI FFI that each platform app binds to host
 # a native UI can link them:
 #   - staticlib (libds_core.a) — what the macOS SwiftPM app links (single
 #     binary, no dylib loader fuss).
-#   - cdylib (libds_core.dylib/.so/.dll) — for a future Windows/Linux UI
-#     that prefers dynamic linking against the SAME header.
+#   - cdylib (libds_core.dylib/.so/.dll) — used by the Windows host and available
+#     to other dynamically linked native hosts through the same header.
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
 

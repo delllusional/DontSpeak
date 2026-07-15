@@ -19,7 +19,7 @@
   <rect x="64" y="64" width="896" height="448" rx="208" ry="208" fill="#ffffff" opacity="0.08"/>
 
   <g filter="url(#sh)">
-    <!-- gemini glyph: speech bubble + </> , recentred onto the tile -->
+    <!-- Speech-and-code glyph, centered on the tile. -->
     <svg x="162" y="162" width="700" height="700" viewBox="47 67 446 391" preserveAspectRatio="xMidYMid meet">
       <path d="M 270,90 C 390,90 470,165 470,250 C 470,335 390,410 270,410
                C 238,410 205,404 178,392 L 115,425 C 102,432 90,420 96,406

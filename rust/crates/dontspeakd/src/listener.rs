@@ -288,8 +288,7 @@ pub struct Listener<P: KeyInjector + FrontmostWindow> {
     plat: Rc<P>,
     worker: Option<ListenerWorker>,
     turn: TurnLogic,
-    /// Shared dictation buffer + the recording flag — driven so the SAME confirm pill
-    /// shows the live hands-free transcript (start word → pill → submit/cancel).
+    /// See [`ListenerShared::paste`].
     paste: PasteState,
     stt_active: Arc<AtomicBool>,
     /// Parakeet model present at construction — false ⇒ the loop no-ops (logged).
@@ -303,12 +302,9 @@ pub struct Listener<P: KeyInjector + FrontmostWindow> {
     /// once per [`tick`] via [`crate::timer::deferred_ready`] instead of blocking
     /// this thread with `std::thread::sleep` — mirrors `Engine::pending_enter_at`.
     pending_enter_at: Option<Instant>,
-    /// The engine TTS queue, so a hands-free SUBMIT can drop this window's pending
-    /// speech per `input_clears`. `None` in tests.
+    /// See [`ListenerShared::ttsq`].
     ttsq: Option<Arc<TtsQueue>>,
-    /// The shared status-push gate: a hands-free recording start/stop bumps it so a
-    /// blocked `WaitModelStatus` sees `stt_active` flip immediately (the confirm pill
-    /// follows the same signal the engine's PTT path publishes). `None` in tests.
+    /// See [`ListenerShared::gate`].
     gate: Option<Arc<StatusGate>>,
     /// The resolved STT provider token this listener was built with (see
     /// `config_gate::helper_stt_provider`) — retained ONLY so `Engine::reload`'s

@@ -24,7 +24,7 @@ ds-model = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# ── Phase-2b native Kokoro synth ─────────────────────────────────────────────
+# ── Native Kokoro synthesis ─────────────────────────────────────────────────
 # The pure modules (vocab/trim) need NONE of these; the synth path does. `voices`/`say`/
 # `enumerate` moved to `ds-voices` (issue #5) — reached here via the re-export shim in
 # lib.rs — so they're no longer pure modules of THIS crate. Pinned once in the workspace.

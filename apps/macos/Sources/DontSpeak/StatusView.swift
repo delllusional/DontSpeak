@@ -163,9 +163,8 @@ struct StatusView: View {
                     PlatterDivider()
                     sttEngineRow
                     // Speaker diarization (on-demand) — same lifecycle dot as STT/TTS;
-                    // gray/idle when disabled, green when enabled+ready. Hidden for now:
-                    // implemented but not yet tested enough to show (see
-                    // `diarizationUIEnabled` above).
+                    // gray/idle when disabled, green when enabled+ready. Visibility follows
+                    // the shared validation gate tracked in issue #77.
                     if diarizationUIEnabled {
                         PlatterDivider()
                         EngineStatRow(

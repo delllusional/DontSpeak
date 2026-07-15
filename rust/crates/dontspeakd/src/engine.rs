@@ -278,8 +278,7 @@ enum PressState {
 /// non-`Send`, driven only from this single poll thread.
 pub(crate) struct Engine<P: Platform + 'static> {
     pub(crate) plat: Rc<P>,
-    /// The selected STT engine. Caps edges route through this (§A.2). Default
-    /// (ClaudeNative) reproduces Phase-1 Ctrl+G dictation exactly.
+    /// The selected STT engine. Caps edges route through this (§A.2).
     pub(crate) stt: Box<dyn Stt>,
     pidfile: std::path::PathBuf,
 
@@ -337,7 +336,7 @@ pub(crate) struct Engine<P: Platform + 'static> {
     /// Whether the Caps-Lock dictation loop is live (from `caps_enabled`). When
     /// false, `tick()` is a no-op (no poll, no emit).
     pub(crate) caps_enabled: bool,
-    /// The warm-Kokoro owner (Phase 2). `None` in tests; set in `main`. Used to
+    /// The warm-Kokoro owner. `None` in tests; set in `main`. Used to
     /// barge-in on the caps OFF→ON edge and to start/stop on the tts toggle.
     pub(crate) tts: Option<Arc<TtsManager>>,
     /// The engine TTS queue. `None` in tests; set in `main`. The caps start-tap
@@ -390,7 +389,7 @@ pub(crate) struct Engine<P: Platform + 'static> {
 }
 
 impl<P: Platform + 'static> Engine<P> {
-    /// Construct with the Phase-1 default ClaudeNative STT engine (used by the
+    /// Construct with the default ClaudeNative STT engine (used by the
     /// §F tests and as the fallback). `main` uses [`Engine::with_config`] to
     /// honor the configured engine via the `ds-engines` factory.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -2118,6 +2117,15 @@ mod tests {
         d
     }
 
+    /// Arm ClaudeNative's paired toggle and reset the setup taps so assertions measure only
+    /// the tested abort or stop.
+    fn arm_claude_native(d: &mut Engine<MockPlatform>) {
+        d.plat.terminal_frontmost.set(true);
+        d.stt.start();
+        d.plat.tap_down_calls.set(0);
+        d.plat.tap_up_calls.set(0);
+    }
+
     impl MockPlatform {
         /// One physical Caps TAP: a DOWN tick (press) then an UP tick (release), with no
         /// hold in between — the gesture toggles dictation on the RELEASE. The LED is a
@@ -2183,15 +2191,7 @@ mod tests {
     fn cancel_all_clears_state_silences_and_drives_led_off() {
         // The HOLD action: discard the active dictation (abort), silence the voice, LED off.
         let mut d = mk(600);
-        d.plat.terminal_frontmost.set(true);
-        // ClaudeNative's abort()/stop() now pair against its own remembered `toggled_on`
-        // (set only by a real start()) rather than a fresh frontmost check — start() here
-        // arms that pairing so the simulated in-flight HOLD below actually aborts. start()
-        // itself taps the chord once, so reset the mock's tap counters afterward — the
-        // assertions below measure only the abort/stop tap, not this setup tap.
-        d.stt.start();
-        d.plat.tap_down_calls.set(0);
-        d.plat.tap_up_calls.set(0);
+        arm_claude_native(&mut d);
         d.gesture = GestureState::Recording;
         d.plat.lock_state.set(true);
         d.cancel_all();
@@ -3011,15 +3011,7 @@ mod tests {
     #[test]
     fn reload_clears_state_aborts_inflight_and_drives_led_off() {
         let mut d = mk(600);
-        d.plat.terminal_frontmost.set(true);
-        // ClaudeNative's abort()/stop() now pair against its own remembered `toggled_on`
-        // (set only by a real start()) rather than a fresh frontmost check — start() here
-        // arms that pairing so the simulated in-flight HOLD below actually aborts. start()
-        // itself taps the chord once, so reset the mock's tap counters afterward — the
-        // assertions below measure only the abort/stop tap, not this setup tap.
-        d.stt.start();
-        d.plat.tap_down_calls.set(0);
-        d.plat.tap_up_calls.set(0);
+        arm_claude_native(&mut d);
         // Simulate an in-flight dictation on the outgoing engine.
         d.gesture = GestureState::Recording;
         // Ignore the acquisition-time OFF normalization; this assertion measures only
@@ -3094,15 +3086,7 @@ mod tests {
     fn reload_caps_toggle_off_ends_hold() {
         // Flipping caps_enabled OFF mid-hold must end the HOLD cleanly (abort).
         let mut d = mk(600);
-        d.plat.terminal_frontmost.set(true);
-        // ClaudeNative's abort()/stop() now pair against its own remembered `toggled_on`
-        // (set only by a real start()) rather than a fresh frontmost check — start() here
-        // arms that pairing so the simulated in-flight HOLD below actually aborts. start()
-        // itself taps the chord once, so reset the mock's tap counters afterward — the
-        // assertions below measure only the abort/stop tap, not this setup tap.
-        d.stt.start();
-        d.plat.tap_down_calls.set(0);
-        d.plat.tap_up_calls.set(0);
+        arm_claude_native(&mut d);
         d.gesture = GestureState::Recording;
         let cfg = VoiceConfig {
             caps_enabled: false,

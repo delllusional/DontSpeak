@@ -106,18 +106,15 @@ pub(crate) fn seed_and_prune(paths: &Paths) {
             ds_log::log(&paths.log_file, ds_log::LogLevel::Info, "hook", &msg);
         }
     }
-    // NOTE: we deliberately do NOT seed `narration-spec.md`. The spec lives in the binary
-    // (`DEFAULT_NARRATION_SPEC`), which the `provide` hook injects directly; a file on disk is
-    // an OPTIONAL override only.
     prune_stale_bins();
 }
 
 /// Wire (or strip / print) the DontSpeak voice hooks into `cfg`, a JSON settings file using
 /// Claude Code's hook contract (`WireMechanism::ClaudeJsonHooks` — today Claude Code's
 /// `~/.claude/settings.json` and Qwen Code's `~/.qwen/settings.json`; the registry names the
-/// file per client). `streaming` selects the hook SET: `true` (Claude Code) wires
-/// `MessageDisplay` for per-batch narration; `false` (Qwen Code) omits it, so the reply is
-/// voiced whole from `Stop`. `command_style` selects the command DIALECT: `ArgsArray`
+/// file per client). `streaming` selects the hook set: `true` wires `MessageDisplay` for
+/// per-batch narration; `false` omits it, so the reply is voiced whole from `Stop`.
+/// `command_style` selects the command dialect: `ArgsArray`
 /// (Claude Code — bin + `args`, timeout in seconds) or `InlineShell` (Qwen Code — verbs
 /// inlined into the one command string its shell runner executes, timeout in ms). `client` is
 /// the client whose file this is — stamped into every wired verb slice as `--client <token>`,
@@ -610,10 +607,8 @@ mod tests {
         );
     }
 
-    /// Non-streaming inline-shell wire (Qwen Code): `MessageDisplay` is omitted AND the
-    /// on-disk entries are the INLINED dialect — no `args` key (Qwen's runner silently drops
-    /// it), the verb inside the one `command` string — with the same idempotent + additive +
-    /// clean-strip guarantees.
+    /// The mechanism also supports a non-streaming inline-shell client: `MessageDisplay` is
+    /// omitted while commands remain inlined, with the usual merge and strip guarantees.
     #[test]
     fn claude_json_hooks_non_streaming_omits_messagedisplay() {
         let dir = tempfile::tempdir().unwrap();

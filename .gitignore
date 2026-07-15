@@ -2,10 +2,6 @@
 claude/hooks/capslock
 claude/hooks/mic-active
 
-# dontspeakd daemon — compiled binary (arch-specific, AX-grantee; rebuilt by scripts/build.sh)
-scripts/dontspeakd
-scripts/dontspeakd.test
-
 .DS_Store
 __pycache__/
 *.log

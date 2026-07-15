@@ -16,7 +16,7 @@ tempfile = { workspace = true }
 nix = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-# Single-PID OpenProcess/TerminateProcess. Behind cfg; UNCOMPILED on this host.
+# Single-PID OpenProcess/TerminateProcess.
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Threading",

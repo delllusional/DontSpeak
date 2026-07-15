@@ -85,7 +85,7 @@ toml_edit = "0.25"
 toml = "1"
 # unix-only process-group kill
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
-# Cross-platform filesystem watch (settings.json hot-reload): FSEvents on macOS,
+# Cross-platform filesystem watch (config.toml hot-reload): FSEvents on macOS,
 # inotify on Linux, ReadDirectoryChangesW on Windows — a push notification in place of
 # stat() polling. Default features select the native backend per OS.
 notify = "8"
@@ -112,7 +112,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # to a direct workspace dep so ds-log can implement `log::Log` as a sink over log_cached.
 log = "0.4"
 
-# ── Phase-2 engine deps (pinned once) ────────────────────────────────────────
+# ── Engine dependencies ──────────────────────────────────────────────────────
 # Model download (ds-model): tiny blocking HTTP, checksum, atomic rename. We use
 # attohttpc (not ureq) because it exposes a socket-level `read_timeout` — a per-
 # read INACTIVITY timeout that aborts a stalled CDN mid-download while letting a
@@ -120,7 +120,7 @@ log = "0.4"
 # timeouts only), which is why we moved off it. rustls + bundled webpki roots, no
 # native-tls/openssl, no tokio. Crypto provider = `ring` (the `-ring` feature variant),
 # NOT the default aws-lc-rs: aws-lc-sys's native crypto won't cross-compile to
-# aarch64-pc-windows-msvc, whereas ring is pure-Rust and builds on every target.
+# aarch64-pc-windows-msvc, whereas ring supports that target with the configured toolchain.
 attohttpc = { version = "0.31", default-features = false, features = ["tls-rustls-webpki-roots-ring"] }
 sha2 = "0.11"
 # Parse GitHub release tags + the running version for the startup update check
@@ -134,7 +134,7 @@ rubato = "4.0"
 # Clipboard for the paste-based text injection (ds-platform, macOS target).
 arboard = "3"
 
-# ── Phase-2b: native Kokoro TTS (ds-tts) ─────────────────────────────────────
+# ── Native Kokoro TTS ────────────────────────────────────────────────────────
 # ONNX inference. `load-dynamic` resolves libonnxruntime at RUNTIME (via
 # ORT_DYLIB_PATH), so the HOST build compiles with NO onnxruntime present and the
 # binary is not statically baked. default-features=false drops the bundled

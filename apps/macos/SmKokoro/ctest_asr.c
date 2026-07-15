@@ -1,4 +1,4 @@
-// Phase STT-1 ABI check: dlopen libsmkokoro.dylib, load a 16 kHz mono int16 WAV,
+// STT ABI check: dlopen libsmkokoro.dylib, load a 16 kHz mono int16 WAV,
 // and transcribe it through the C ABI (smk_asr_init + smk_transcribe).
 // The transcript is BORROWED to a callback fired synchronously during the call (see
 // include/smkokoro.h) — we copy it out there; nothing to free.
@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
     printf("loaded %s: %zu samples (%.2fs @16k)\n", wav, n, n / 16000.0);
 
     int32_t r = smk_asr_init("", 0);
-    printf("smk_asr_init = %d (downloads Parakeet on first run)\n", r);
+    printf("smk_asr_init = %d (loads Parakeet from the default cache)\n", r);
     if (r != 0) return 4;
 
     char text[4096] = {0};

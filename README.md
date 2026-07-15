@@ -46,11 +46,11 @@ Settings › Apps › DontSpeak. To keep the app but exclude a client, add it to
 ## What it does
 
 - **Speaks the agent's replies** aloud through a local neural voice, or the OS system voice.
-- **Turn digests** — a per-turn instruction has the agent lead each reply with short `> ` lines; only those are spoken verbatim, so a long reply gets a short spoken summary instead of the whole wall of text read aloud.
+- **Turn digests** — a per-turn instruction has the agent summarize the full reply in short `> ` lines, which are spoken verbatim. Blockquote-free short replies can be spoken whole.
 - **Caps Lock to talk** — tap to start/stop, double tap skips speech (or pastes without Enter after dictation), long press cancels.
 - **Hands-free mode** — an optional always-listening mode that dictates continuously without the key (see [docs/ALWAYS-LISTENING.md](docs/ALWAYS-LISTENING.md)).
 - **Driven over MCP** — voices, language, engine, rate, and toggles are all tools your agent can call.
-- (Speaker diarization/speaker-lock — labeling enrolled voices and restricting dictation to yours — is implemented but hidden behind an internal flag pending more testing; not yet available.)
+- Speaker diarization and speaker-lock are implemented but hidden pending the validation tracked in issue #77.
 
 ## Caps Lock gestures
 
@@ -74,7 +74,7 @@ does not use Caps Lock.
 - **STT** — a built-in streaming recognizer (NeMo FastConformer 80ms across platforms;
   Parakeet TDT 0.6b v2 via Core ML on macOS), the macOS system recognizer, or Claude Code's
   dictation. See [the STT pipeline](docs/STT-PIPELINE.md) for capture and recovery behavior.
-- (Diarization / speaker-lock — pyannote segmentation + WeSpeaker embeddings, with SepFormer separation — implemented, hidden behind an internal flag pending more testing.)
+- Diarization uses pyannote segmentation, WeSpeaker embeddings, and SepFormer separation; its public rollout is tracked in issue #77.
 
 Each model runs on the fastest backend available, picked by the `provider` ladder (`["ane", "cuda", "cpu"]`):
 
@@ -86,7 +86,7 @@ Each model runs on the fastest backend available, picked by the `provider` ladde
 
 ## MCP tools
 
-`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `list_voices` · `set_config` — full descriptions and parameters in [docs/MCP-TOOLS.md](docs/MCP-TOOLS.md). (Diarization tools `diarize`/`manage_speakers` exist but are hidden pending more testing.) Client wiring is automatic (the engine converges each client to `config.toml`'s `exclude_clients` at boot); inspect or change it with `dontspeak wire --list` and `dontspeak wire <client>`.
+`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `list_voices` · `set_config` — full descriptions and parameters in [docs/MCP-TOOLS.md](docs/MCP-TOOLS.md). The implemented `diarize` and `manage_speakers` tools remain hidden under issue #77. Client wiring is automatic (the engine converges each client to `config.toml`'s `exclude_clients` at boot); inspect or change it with `dontspeak wire --list` and `dontspeak wire <client>`.
 
 ## License
 

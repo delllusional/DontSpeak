@@ -40,7 +40,7 @@ Feature frames windowed `window_size=65`, advance `chunk_shift=56` (9-frame over
 zero-init (`cache_last_channel_len=0`) and threaded output→input each step. Batch is always 1.
 
 ## Oracle
-`test_wavs/0.wav` (LibriSpeech 1089) → exactly:
+`test_wavs/0.wav` (LibriSpeech 1089) begins:
 `after early nightfall the yellow lamps would light up here and there the squalid quarter of the bros...`
 Confirmed identical from (a) sherpa-onnx itself and (b) `reference_prototype.py` (scale=1.0, RAW).
 

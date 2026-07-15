@@ -6,7 +6,7 @@
 //!
 //! [`message_display`] (`MessageDisplay`): runs once per streaming batch. Claude Code
 //! sends an incremental `delta` chunk keyed by content-block `index` (+ a sticky `final`
-//! flag); Qwen Code's sketched hook (QwenLM/qwen-code#6488) sends CUMULATIVE
+//! flag); Qwen Code sends CUMULATIVE
 //! `displayed_text` snapshots + `is_final` — BOTH parse through the same
 //! [`MessageDisplayHook`] (serde aliases) and the same core. When `narrate` contains
 //! "digests", every top-level blockquote is spoken (verbatim, each once, in document
@@ -17,7 +17,7 @@
 //! guarded by the streaming WITNESS so it never double-speaks what a streaming pass
 //! (MessageDisplay here, or the engine's Codex app-server subscriber —
 //! `dontspeakd::codex_stream`) already narrated. [`mark_streaming_session`]
-//! (`SessionStart`) seeds that witness for streaming hook clients (Claude Code);
+//! (`SessionStart`) seeds that witness for streaming hook clients (Claude Code and Qwen Code);
 //! non-streaming clients pass `--greet-only` to skip it. A Codex session gets its
 //! witness seeded BY THE ENGINE on a successful app-server `thread/resume` instead — a
 //! plain-TUI Codex session (not on the shared app-server) never seeds, so its `Stop`
@@ -62,9 +62,7 @@ pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
 /// state file so [`speak_reply`]'s `streamed` guard is reliably true before the first
 /// `Stop`, closing the only timing gap in the double-narration fix. The discriminator is
 /// the event wiring + the `--greet-only` flag (see [`crate::hook_core::notify`]):
-///   • Claude Code (streaming) wires `SessionStart` with plain `notify` → seeds the witness.
-///   • Qwen Code (non-streaming) wires `SessionStart` with `--greet-only` → greet runs but the
-///     seed is SKIPPED — otherwise the witness would suppress Qwen Code's only narration path.
+///   • Claude Code and Qwen Code wire `SessionStart` with plain `notify` and seed the witness.
 ///   • OpenAI Codex likewise wires `SessionStart` with `--greet-only` (see `wire/codex.rs`):
 ///     greet runs, seed skipped — its witness is instead seeded by the ENGINE on a successful
 ///     app-server `thread/resume` (`dontspeakd::codex_stream`), so only sessions that are
@@ -170,16 +168,13 @@ fn read_last_assistant_from_transcript(path: &str) -> Option<String> {
 /// Witness that a streaming pass ran for this session: its per-session state file exists
 /// (delegates to [`ds_narrate::witness_exists`]). The deterministic client-discriminator
 /// the `Stop` path needs (see [`speak_reply`]):
-///   • Claude Code (streaming) wires `MessageDisplay` and streams every turn, so the file is
-///     present when `Stop` fires ⇒ the reply was ALREADY narrated; `Stop` must not re-speak it.
-///   • Qwen Code (non-streaming) wires `SessionStart` with `--greet-only` (no witness seed)
-///     and NO `MessageDisplay` hook, so the file is NEVER written ⇒ `streamed = false`, and
-///     `Stop` is Qwen Code's only narration path.
+///   • Claude Code and Qwen Code wire `MessageDisplay` and seed the file at SessionStart, so
+///     `Stop` must not repeat the streamed reply.
 ///   • OpenAI Codex wires NO `MessageDisplay` hook; its file appears ONLY when the engine's
 ///     app-server subscriber resumed this session's thread (mid-turn narration active) —
 ///     otherwise `streamed = false` and `Stop` is its narration path, exactly as before.
 /// [`mark_streaming_session`] also SEEDS this file at `SessionStart` for STREAMING hook
-/// clients (Claude Code), so the witness is present from session open — closing the timing
+/// clients, so the witness is present from session open — closing the timing
 /// edge of a `Stop` racing the first batch's write.
 /// `pub(crate)` so `hook_core`'s greet-only tests can probe the witness directly.
 pub(crate) fn streamed_via_message_display(paths: &Paths, session: &str) -> bool {
@@ -191,10 +186,10 @@ pub(crate) fn streamed_via_message_display(paths: &Paths, session: &str) -> bool
 pub(crate) use ds_narrate::stop_utterances;
 
 /// Stop notify: speak the FINAL assistant reply, once — the NON-STREAMING analogue of
-/// [`message_display`] for clients whose replies weren't streamed this session (Qwen Code,
+/// [`message_display`] for clients whose replies weren't streamed this session (notably
 /// plain-TUI Codex), whose hooks fire only at end-of-turn with the whole
-/// `last_assistant_message`. Claude Code ALSO wires `Stop` and delivers
-/// `last_assistant_message` on it, so without a guard we'd re-voice every reply the
+/// `last_assistant_message`. Claude Code and Qwen Code also wire `Stop`, so without a guard
+/// we'd re-voice every reply the
 /// streaming path already narrated (heard twice). Guard: [`streamed_via_message_display`]
 /// — a session with a streaming state file already narrated ⇒ stay silent. Pure decision
 /// in [`stop_utterances`]; this is the IO wrapper (config load, mic probe, witness,
@@ -253,14 +248,13 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) {
 ///   • Claude Code ≥ 2.1.x fires repeatedly while a message streams: an incremental
 ///     `delta` chunk per batch (2.1.183, verified against a live payload), with some
 ///     versions documented to send a cumulative `displayedText` instead — we accept either.
-///   • Qwen Code's sketched hook (QwenLM/qwen-code#6488) sends snake_case CUMULATIVE
+///   • Qwen Code sends snake_case CUMULATIVE
 ///     snapshots — `displayed_text` + `is_final` — which the serde ALIASES below parse
-///     through the SAME fields, so the whole future Qwen flip is registry gating
-///     (`hook_streaming: true`), zero handler changes.
+///     through the SAME fields.
 #[derive(Debug, Deserialize, Default, Clone)]
 struct MessageDisplayHook {
     // Cumulative whole-text snapshot. CC's documented camelCase name, plus Qwen's
-    // sketched snake_case alias.
+    // snake_case alias.
     #[serde(default, rename = "displayedText", alias = "displayed_text")]
     displayed_text: Option<String>,
     // The incremental text chunk for THIS streaming batch (what CC actually sends).
@@ -277,7 +271,7 @@ struct MessageDisplayHook {
     // a process per batch and they race, so they can reach us out of order.
     #[serde(default)]
     index: Option<u64>,
-    // True on the last batch of a message. CC's name is `final`; Qwen's sketch says
+    // True on the last batch of a message. CC's name is `final`; Qwen uses
     // `is_final` — both accepted.
     #[serde(default, rename = "final", alias = "is_final")]
     is_final: Option<bool>,
@@ -330,7 +324,7 @@ fn batch_from_hook(hook: &MessageDisplayHook) -> StreamBatch {
 /// terminal is active + frontmost. Fast + fire-and-forget so it never delays the display.
 pub fn message_display(paths: &Paths, payload: &str, client: ClientSource) {
     let cfg = VoiceConfig::load(paths);
-    let messages_on = cfg.narrates(NarrateKind::Digests); // voice the blockquotes Claude writes
+    let messages_on = cfg.narrates(NarrateKind::Digests); // voice model-written summaries
     let short_on = cfg.narrates(NarrateKind::Shorts); // voice a short blockquote-less reply whole
     if !messages_on && !short_on {
         return; // narration off for messages ⇒ stay silent
@@ -680,9 +674,9 @@ mod tests {
         );
     }
 
-    // ── Qwen Code payload seam (QwenLM/qwen-code#6488) ────────────────────────────────
+    // ── Qwen Code payload seam ───────────────────────────────────────────────────────
     //
-    // Qwen's sketched MessageDisplay payload is snake_case and CUMULATIVE:
+    // Qwen's MessageDisplay payload is snake_case and cumulative:
     // `{hook_event_name, message_id, displayed_text, is_final}` — debounced whole-text
     // snapshots from ONE sequential in-process loop (no cross-process races; the lock
     // idles). The serde aliases on `displayed_text` AND `is_final` route it through the

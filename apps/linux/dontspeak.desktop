@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=DontSpeak
-GenericName=Voice for Claude Code
-Comment=Hands-free voice loop for Claude Code — tap Caps Lock to dictate, hear replies spoken back
+GenericName=Voice for coding agents
+Comment=Tap Caps Lock to dictate and hear agent replies spoken aloud
 Exec=ds-gtk
 Icon=dontspeak
 Terminal=false

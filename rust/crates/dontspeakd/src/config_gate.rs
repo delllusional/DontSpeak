@@ -297,7 +297,7 @@ pub(crate) fn refusal_cue_on_refused_start(resolved: Option<ds_config::SttEngine
     )
 }
 
-/// §E.4 reload-tick decision (PURE): a TRAILING-EDGE debounce — apply a config change
+/// Trailing-edge reload debounce: apply a config change
 /// only once `window` has passed with NO NEW trigger, rather than merely `window` since
 /// the last reload that actually ran. Every `set_config` write fires TWO triggers for the
 /// SAME edit: an immediate IPC `Reload` nudge (the fast path) and a slower filesystem-watch
@@ -346,7 +346,7 @@ pub(crate) fn reload_tick(
     }
 }
 
-/// §E.4 mtime-watch decision (PURE). Returns true iff settings.json should be
+/// Mtime-watch decision. Returns true iff config.toml should be
 /// treated as changed since `last_seen`: a file that newly appeared OR whose
 /// mtime advanced triggers a reload; a file that DISAPPEARED does NOT (we keep
 /// the last-loaded config rather than reloading to defaults on a transient
@@ -370,7 +370,7 @@ pub(crate) fn config_mtime(config_toml: &std::path::Path) -> Option<SystemTime> 
         .ok()
 }
 
-/// §E.4 mtime watermark after a reload (PURE-ish; `stat_now` is the only side channel).
+/// Mtime watermark after a reload (`stat_now` is the only side channel).
 /// On a STAT-tick reload (`mtime_changed`) `current` is the value we just statted, so reuse
 /// it. On a HUP-only reload (push watcher / SIGHUP / Reload RPC, which did NOT stat this
 /// tick) `current` is stale (== `last_seen`), so take a fresh reading via `stat_now` —

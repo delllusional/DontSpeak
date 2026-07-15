@@ -59,7 +59,7 @@ pub(crate) fn set_new_pgroup(cmd: &mut Command) {
 ///   per-language packs live): the modern anchor, then the legacy one.
 /// - Windows → Settings ▸ Time & language ▸ Speech (`ms-settings:speech` — the only Settings
 ///   deep link Windows exposes for TTS voices; its "Manage voices" adds voices).
-/// - Linux → TODO: no portable system-voice settings page yet (Speech Dispatcher is a CLI).
+/// - Linux → unavailable; Speech Dispatcher has no portable settings page (issue #74).
 #[cfg(target_os = "macos")]
 pub fn open_voice_settings() -> bool {
     for uri in [
@@ -91,7 +91,7 @@ pub fn open_voice_settings() -> bool {
 
 #[cfg(target_os = "linux")]
 pub fn open_voice_settings() -> bool {
-    false // TODO(linux): wire a settings deep link when the system-voice path lands.
+    false
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]

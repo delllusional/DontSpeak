@@ -1,4 +1,4 @@
-// Phase 0 smoke test: prove FluidAudio's ANE Kokoro works on this Mac.
+// Smoke test for FluidAudio's ANE Kokoro path.
 // Text -> KokoroAneManager.synthesize -> 24 kHz mono WAV. Reports init/synth
 // timing + RTFx so we can confirm it's worth wiring into DontSpeak.
 import FluidAudio

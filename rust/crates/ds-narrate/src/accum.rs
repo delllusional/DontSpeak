@@ -10,7 +10,7 @@
 //! each completed blockquote run EXACTLY ONCE, in document order (a high-water mark, not a
 //! one-shot latch), so a later run — e.g. a closing question — is still voiced and a re-fed or
 //! duplicate batch emits nothing. The cumulative (`displayed_text`) mode serves clients
-//! that send whole-text snapshots instead of deltas (Qwen Code's sketched hook; Codex's
+//! that send whole-text snapshots instead of deltas (Qwen Code's hook; Codex's
 //! authoritative `item/completed` final text).
 
 use std::collections::BTreeMap;

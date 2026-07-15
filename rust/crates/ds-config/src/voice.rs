@@ -84,11 +84,11 @@ pub struct VoiceConfig {
     #[serde(default = "default_enabled")]
     pub greet_on_open: bool,
 
-    // ── Phase-1.5: narration (§G.5) ─────────────────────────────────────────
+    // ── Narration ───────────────────────────────────────────────────────────
     /// What gets narrated — a SET, `narrate = ["shorts", "digests"]` (default: both on).
     /// `digests` speaks each assistant message's top-level blockquotes as they STREAM (prose,
-    /// the lines Claude leads each tool step with, and the final reply, all through the one
-    /// `MessageDisplay` pipeline) AND injects the narration spec that asks Claude to write those
+    /// the lines the model leads each tool step with, and the final reply, all through the one
+    /// `MessageDisplay` pipeline) AND injects the narration spec that asks the model to write those
     /// blockquotes — so a long reply is heard as its spoken digest. `shorts` speaks a SHORT reply
     /// that carries NO blockquote, lightly cleaned and voiced whole, so brief one-liners are heard
     /// even when there's no digest. An EMPTY array narrates nothing (the old "off"). The other mute
@@ -96,12 +96,12 @@ pub struct VoiceConfig {
     #[serde(default = "default_narrate", deserialize_with = "de_narrate")]
     pub narrate: Vec<NarrateKind>,
 
-    // ── Phase-1.5: long-press reset (§F) ────────────────────────────────────
+    // ── Long-press reset ────────────────────────────────────────────────────
     /// Physical Caps hold ≥ this (ms) → force-reset to idle, LED off.
     #[serde(default = "default_long_press_ms")]
     pub long_press_ms: u64,
 
-    // ── Phase-2: speech-to-text (§A.2 / Config Schema) ──────────────────────
+    // ── Speech-to-text ──────────────────────────────────────────────────────
     /// Dictation engine — a USER PREFERENCE, tri-state: unset (`None`) defers to
     /// [`Self::stt_engine_ladder`]; `Some(vec![])` forces dictation OFF; `Some(vec![engine])`
     /// forces exactly that engine — NO automatic substitution, an unusable choice resolves to
@@ -155,7 +155,7 @@ pub struct VoiceConfig {
     #[serde(default)]
     pub stt_speaker_lock: bool,
 
-    // ── Phase-2: text-to-speech (§A.1 / Config Schema) ──────────────────────
+    // ── Text-to-speech ──────────────────────────────────────────────────────
     /// Spoken-reply engine — a USER PREFERENCE, tri-state: unset (`None`) defers to
     /// [`Self::tts_engine_ladder`]; `Some(vec![])` forces spoken replies OFF;
     /// `Some(vec![engine])` forces exactly that engine — NO automatic substitution, an
@@ -1315,7 +1315,7 @@ pub(crate) mod tests {
         assert_eq!(back.endpoint_silence_ms, v.endpoint_silence_ms);
     }
 
-    // ── Phase-2 engine enum parsing ─────────────────────────────────────────
+    // ── Engine enum parsing ─────────────────────────────────────────────────
 
     #[test]
     fn stt_engine_ladder_is_an_ordered_ladder() {
@@ -1577,7 +1577,7 @@ pub(crate) mod tests {
         assert_eq!(explicit_claude.resolved_stt(), Some(SttEngine::ClaudeCode));
     }
 
-    // ── Phase-1.5 config parsing ────────────────────────────────────────────
+    // ── Config parsing ──────────────────────────────────────────────────────
 
     #[test]
     fn double_tap_submits_is_a_plain_bool() {

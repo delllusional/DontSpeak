@@ -3,7 +3,7 @@
 All user-facing UI strings live in one shared Rust catalog (`ds-i18n`) and are
 rendered by every platform UI over the `ds-core` C ABI — one key, one English value,
 read by all three apps. English is the source of truth and the fallback; macOS
-wording is canonical where the two platforms had drifted. Keeping the catalog in Rust
+wording is canonical where the native hosts had drifted. Keeping the catalog in Rust
 rather than per-platform resource files means a translation is written once and
 guaranteed to match across macOS, Windows, and Linux.
 

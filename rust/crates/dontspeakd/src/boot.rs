@@ -28,11 +28,11 @@ use crate::stt_test::TestSession;
 use crate::tts::TtsManager;
 use crate::ttsq::TtsQueue;
 
-// ── Tunables (match the original Swift daemon) ──────────────────────────────
+// ── Tunables ────────────────────────────────────────────────────────────────
 pub(crate) const POLL_MS: u64 = 30; // caps-state poll interval
-/// §E.4 hot-reload quiet window: a TRAILING-EDGE debounce (see
+/// Hot-reload quiet window: a trailing-edge debounce (see
 /// [`config_gate::reload_tick`]) that collapses a flurry of triggers — the host's atomic
-/// settings.json write AND the explicit `engine_reload()` nudge that follows it, plus
+/// config.toml write and the explicit `engine_reload()` nudge that follows it, plus
 /// whatever an editor's write-twice-on-save adds — into a SINGLE reload, by waiting for
 /// this long of silence after the LAST trigger rather than a fixed gap after the last
 /// reload that ran. Sized with headroom over a measured 581 ms production gap between the
@@ -50,7 +50,7 @@ const AUTO_DL_RETRY_INTERVAL: Duration = Duration::from_secs(20);
 /// seq-gated status push would show a FROZEN "Downloading N%" that looks stuck. ~2.5 Hz is
 /// smooth for the ring/percent without being a repaint storm; only fires while a fetch is active.
 const DL_PROGRESS_BUMP_INTERVAL: Duration = Duration::from_millis(400);
-/// Coarse `stat()` BACKSTOP for an out-of-band settings.json edit. The primary trigger is
+/// Coarse `stat()` backstop for an out-of-band config.toml edit. The primary trigger is
 /// the push-based [`config_watch`](crate::config_watch) filesystem watcher; this slow stat
 /// only covers the rare case the watcher can't start or a filesystem drops an event. Kept
 /// well under any human re-edit cadence. The explicit reload path (`engine_reload()` / the
@@ -59,7 +59,7 @@ const MTIME_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Run the engine to completion on the CURRENT thread. The host owns the two
 /// control flags: `running` (clear it → graceful stop) and `reload_requested`
-/// (set it → re-read settings.json). The in-process host (the SwiftUI/Win/Linux app
+/// (set it → re-read config.toml). The in-process host (the SwiftUI/Win/Linux app
 /// via the `ds-core` C ABI) drives them from `engine_stop()` / `engine_reload()` —
 /// this is the ONLY way the engine runs (there is no headless binary). The caps loop,
 /// RPC server, and TTS queue all run from here, so whichever process calls this is
@@ -114,9 +114,9 @@ pub fn engine_run(
         );
     }
 
-    // §F: read the physical-hold threshold from settings.json. Fail-open:
+    // Read the physical-hold threshold from config.toml. Fail-open:
     // `VoiceConfig::load` already defaults long_press_ms=600 on any error, so a
-    // missing / bad settings.json still yields a working engine.
+    // missing or invalid config.toml still yields a working engine.
     let cfg = VoiceConfig::load(&paths);
     let long_press_ms = cfg.long_press_ms;
 
@@ -145,32 +145,6 @@ pub fn engine_run(
     // the same dir. (Individual writers also create_dir_all their own parents.)
     let _ = std::fs::create_dir_all(&paths.config_dir);
     let _ = std::fs::create_dir_all(&paths.state_dir);
-
-    // Seed the user-editable narration spec on first run (never overwrite the user's edits).
-    // The SessionStart hook injects this file's contents into Claude so replies lead with a
-    // spoken-line blockquote.
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&paths.narration_spec)
-    {
-        Ok(mut file) => {
-            use std::io::Write as _;
-            if let Err(e) = file.write_all(ds_config::DEFAULT_NARRATION_SPEC.as_bytes()) {
-                log::warn!(
-                    target: "engine",
-                    "cannot write default narration spec {}: {e}",
-                    paths.narration_spec.display()
-                );
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => log::warn!(
-            target: "engine",
-            "cannot create default narration spec {}: {e}",
-            paths.narration_spec.display()
-        ),
-    }
 
     // Converge each AI client's wiring to config.toml's declared `exclude_clients` (absent ⇒ all
     // supported). Runs OFF the boot thread so a slow client-file write never delays engine
@@ -366,8 +340,8 @@ pub fn engine_run(
 
     // Select the STT engine from config. The factory has no silent substitution:
     // an unavailable chosen engine degrades to the same inert placeholder off/None
-    // uses, never to a different engine. §E.4 below hot-reloads this box on SIGHUP
-    // or a settings.json mtime change.
+    // uses, never to a different engine. The reload path below rebuilds this box after an
+    // explicit nudge or config.toml change.
     let mut daemon = Engine::with_config(
         plat,
         &cfg,
@@ -422,7 +396,7 @@ pub fn engine_run(
     // blocked on `WaitModelStatus` across a restart re-reads a fresh, live snapshot.
     status_gate.bump();
 
-    // §E.4 hot-reload watch state. SIGHUP (reload_requested) is the explicit
+    // Hot-reload watch state. SIGHUP (reload_requested) is the explicit
     // "reload now" nudge; the mtime-watch makes a plain our config.toml write
     // auto-apply. `pending_reload_since` is the trailing-edge debounce's own memory of
     // an outstanding, not-yet-applied trigger (see `config_gate::reload_tick`) — `None`
@@ -441,7 +415,7 @@ pub fn engine_run(
         .checked_sub(MTIME_CHECK_INTERVAL)
         .unwrap_or_else(Instant::now);
     // Push-based config watch (FSEvents/inotify/ReadDirectoryChangesW): flips
-    // `reload_requested` the instant settings.json changes, so the `stat()` below is only a
+    // `reload_requested` when config.toml changes, so the `stat()` below is only a
     // coarse backstop. Held for the loop's lifetime — dropping the handle stops the watch.
     let _config_watcher = crate::config_watch::spawn(&paths.config_toml, reload_requested.clone());
     // Set when the platform reports its caps-HID monitor stuck (see
@@ -524,7 +498,7 @@ pub fn engine_run(
         }
 
         let hup = reload_requested.swap(false, Ordering::Relaxed);
-        // Throttle the settings.json stat to MTIME_CHECK_INTERVAL instead of every 30 ms
+        // Throttle the config.toml stat to MTIME_CHECK_INTERVAL instead of every 30 ms
         // tick. `current` defaults to `last_seen` on a non-check tick so a SIGHUP/RPC reload
         // (which doesn't stat) leaves `last_seen` unchanged — the next stat tick re-detects
         // any real edit normally.

@@ -13,7 +13,7 @@
 ///   `ds_tts::system::say_command` speaks through, so the name always matches what's heard).
 /// * macOS   → the System Voice from Spoken Content (`SelectedVoiceName`, else a name
 ///   derived from the `SelectedVoiceID` identifier — see [`default_voice_name`]).
-/// * Linux   → TODO (not wired yet — falls back to a name-less greeting).
+/// * Linux   → unresolved, so the greeting omits the voice name (issue #74).
 #[cfg(target_os = "windows")]
 pub fn default_voice_name() -> Option<String> {
     use std::os::windows::process::CommandExt;
@@ -88,7 +88,7 @@ fn name_from_voice_identifier(id: &str) -> Option<String> {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn default_voice_name() -> Option<String> {
-    None // TODO(linux): resolve the Speech Dispatcher default voice name.
+    None
 }
 
 #[cfg(all(test, target_os = "macos"))]

@@ -59,12 +59,9 @@ BUILD_ID="$("$DIR/../../scripts/install-daemon.sh" | tail -1)"
 [ -n "$BUILD_ID" ] || { echo "install-daemon.sh produced no BUILD_ID" >&2; exit 1; }
 echo "   binaries installed; BUILD_ID=$BUILD_ID"
 
-# ==> 0b. Wire each client's DontSpeak integration (Claude Code = hooks + MCP, Desktop = MCP,
-# Codex = hooks). install-daemon.sh installs binaries only (its stated contract); the config
-# merges live in the `dontspeak` binary — SAFE, additive, idempotent, backed-up — and must be
-# invoked here so an app build/deploy wires them too (mirrors scripts/install.sh). Each
-# `wire <client>` self-skips if that client isn't installed.
-echo "==> 0b. wire client integrations (Claude Code hooks + MCP, Desktop MCP, Codex hooks)"
+# install-daemon.sh installs binaries only; reconcile applies the configured client
+# integrations during app deployment too (mirrors scripts/install.sh).
+echo "==> 0b. wire configured client integrations"
 _bin_dir="${DONTSPEAK_INSTALL_DIR:-$HOME/.local/bin}"
 # `wire --reconcile` converges each client to config.toml's `exclude_clients` (absent ⇒ all) —
 # identical to `--all` on a fresh machine, but a reinstall over a user-narrowed set won't thrash.

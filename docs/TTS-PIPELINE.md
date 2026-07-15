@@ -169,21 +169,10 @@ narration record.
 
 ## Known limitations and planned evolution
 
-The current pipeline cannot promise exactly-once end-to-end narration. The next architecture step
-is identified delivery state rather than another text-frontend rewrite:
-
-1. Adapters emit `NarrationEvent { narration_id, session, message_id, sequence, final, text }`.
-2. A bounded per-message reducer selects digest/short runs and emits identified `SpokenText` work.
-3. The engine accepts or rejects each narration ID, deduplicates streaming/final races, and owns
-   microphone, focus, readiness, overflow, and cancellation policy.
-4. The helper reports a terminal `DONE`, `SKIPPED`, or `ERR`, which the queue records against the
-   same narration ID.
-5. The final `Stop` route submits the same IDs as streaming, so fallback and deduplication no
-   longer depend on witness-file timing.
-
-Queue-admission identity, deduplication, and producer-side pending retries implement the first
-admission-level slice of this design. Terminal helper outcomes and a bounded multi-message state
-map remain future work.
+The pipeline has stable admission IDs, engine-side deduplication, and producer retries, but it
+cannot yet promise exactly-once delivery through terminal playback. Remaining work is to retain
+bounded state for interleaved messages and correlate helper terminal outcomes with the admitted
+narration ID.
 
 The concrete gaps are:
 

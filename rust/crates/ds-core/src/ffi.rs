@@ -79,7 +79,8 @@ pub extern "C" fn ds_set_muted(on: u8) -> u8 {
     })
 }
 
-/// Open the OS's system-voice settings page (macOS Spoken Content / Windows Speech / TODO Linux).
+/// Open the OS's system-voice settings page (macOS Spoken Content / Windows Speech).
+/// Returns false on Linux, which has no portable settings page (issue #74).
 /// Cross-platform seam for the UI "Manage voices" button. Returns 1 if launched, 0 otherwise. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_open_voice_settings() -> u8 {

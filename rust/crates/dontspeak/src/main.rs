@@ -166,7 +166,7 @@ fn main() {
     match subcommand {
         Subcommand::Notify => {
             let payload = read_stdin();
-            // `--greet-only` (wired on SessionStart for NON-streaming clients like Qwen Code):
+            // `--greet-only` (wired on SessionStart for non-streaming hook clients):
             // greet, but skip the streaming-witness seed — on a client with no MessageDisplay
             // stream the seed would mark every session "already narrated" and silence each
             // Stop reply. Rides at argv[2+]; `resolve_subcommand` matches argv[1] only.

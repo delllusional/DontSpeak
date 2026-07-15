@@ -23,8 +23,7 @@ header = """
 /*
  * dontspeak.h — the stable C ABI for ds-core.
  *
- * Bind this header from ANY native UI: SwiftUI (macOS) today; C#/WinRT
- * (Windows) or GTK/C (Linux) later — all call the SAME functions.
+ * SwiftUI, WinUI, and GTK hosts all call this same API.
  *
  * The app is an informational menu-bar + health panel, so this surface is
  * intentionally TINY and HANDLE-FREE: a few read-only probes, the in-process
