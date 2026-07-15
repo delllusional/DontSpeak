@@ -33,6 +33,11 @@ pub(super) struct SpeakSlot {
     pub(super) done: bool,
     pub(super) err: Option<String>,
     pub(super) fatal: bool,
+    /// The helper's ABSOLUTE played-batch high-water mark for THIS request
+    /// (`PROGRESS` lines — see `ds_helper_proto::PROGRESS_PREFIX`). 0 = no mark seen
+    /// (older helper, duplex path, or nothing played) ⇒ resume falls back to the top.
+    /// Monotone within a request; reset with the whole slot by `play()`.
+    pub(super) progress: usize,
 }
 
 /// What an ordered earcon waits for: the reader sets `done` on `CUEDONE`; `dead` wakes the
@@ -256,6 +261,15 @@ pub(super) fn reader_loop(
                     log::debug!(target: "engine", "TTS speak {rest}");
                     if let Some(secs) = stats.record_stats_line(rest) {
                         lifetime.add_tts(secs);
+                    }
+                } else if let Some(rest) = l.strip_prefix(proto::PROGRESS_PREFIX) {
+                    // Batch-granular resume mark: intermediate, never terminal (no
+                    // done/condvar). Malformed values are ignored — protocol chatter
+                    // must never fail a speak — and the max() keeps the mark monotone
+                    // even if lines somehow arrive out of order.
+                    if let Ok(v) = rest.trim().parse::<usize>() {
+                        let mut s = speak_slot.0.lock().unwrap();
+                        s.progress = s.progress.max(v);
                     }
                 } else if let Some(msg) = l.strip_prefix(proto::ERR) {
                     let (m, cv) = &*speak_slot;
@@ -739,6 +753,69 @@ mod reader_eof_tests {
             "a soft ERR (child stays alive) must not mark the speak fatal"
         );
         assert!(loaded_ok, "a soft ERR must not touch the loaded flags");
+    }
+
+    /// PROGRESS is an INTERMEDIATE resume mark, not a terminal: the slot's high-water
+    /// mark must accumulate monotonically (a backwards value can't lower it) with
+    /// malformed values ignored, none of which may set `err` or `fatal` — only the
+    /// later `DONE` terminates the request. Skew guard: an older helper never emits
+    /// the line, so the mark simply stays 0. Uses [`BlockThenClose`] so the trailing
+    /// EOF's unconditional `err`/`fatal` can't mask what the PROGRESS lines set.
+    #[test]
+    fn progress_lines_accumulate_monotonically_without_erring() {
+        let dir = tempfile::tempdir().unwrap();
+        let close = Arc::new(AtomicBool::new(false));
+        let stdout = BufReader::new(BlockThenClose {
+            data: b"PROGRESS 3\nPROGRESS 2\nPROGRESS x\nDONE\n".to_vec(),
+            pos: 0,
+            close: close.clone(),
+        });
+        let speak_slot = Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new()));
+        let reader_speak = speak_slot.clone();
+        let handle = std::thread::spawn(move || {
+            reader_loop(
+                stdout,
+                ReaderSlots {
+                    speak: reader_speak,
+                    cue: Arc::new((Mutex::new(CueSlot::default()), Condvar::new())),
+                    listen: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
+                    diarize: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
+                    enroll: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
+                },
+                ReaderStats {
+                    tts: Arc::new(crate::stats::TtsStats::new()),
+                    stt: Arc::new(crate::stats::SttStats::new()),
+                    lifetime: Arc::new(crate::stats::LifetimeSeconds::load(
+                        dir.path().join("ds-stats-reader-progress-test.json"),
+                    )),
+                },
+                ReaderModelState {
+                    tts_model: loaded_slot(),
+                    stt_model: loaded_slot(),
+                    stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                    gate: None,
+                    child: canned_slot(true),
+                },
+            );
+        });
+
+        // Wait for DONE; the reader is then still blocked pre-EOF (see BlockThenClose).
+        let (m, cv) = &*speak_slot;
+        let mut s = m.lock().unwrap();
+        while !s.done {
+            s = cv.wait(s).unwrap();
+        }
+        let progress = s.progress;
+        let err = s.err.clone();
+        let fatal = s.fatal;
+        drop(s);
+
+        close.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        assert_eq!(progress, 3, "monotone max; backwards/malformed ignored");
+        assert_eq!(err, None, "an intermediate mark must never set err");
+        assert!(!fatal, "an intermediate mark must never be fatal");
     }
 
     /// Drained results from a `run_reader_slots` call: the `listen_slot` events (in order),

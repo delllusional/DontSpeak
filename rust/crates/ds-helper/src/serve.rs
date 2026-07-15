@@ -8,7 +8,7 @@ use ds_helper_proto as proto;
 use ds_tts::g2p::{self, PhonemeBatchesOutcome};
 use ds_tts::sink::IncrementalSink;
 use serde::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::_exit;
 use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
@@ -241,6 +241,12 @@ struct ServeReq {
     /// generation even when it reaches the helper before the queued start runs.
     #[serde(default)]
     session: Option<u64>,
+    /// For `op:"speak"` — frontend batches an earlier run of this exact text already
+    /// PLAYED (the engine echoes our `PROGRESS` mark back), for batch-granular resume.
+    /// `#[serde(default)]` + no `deny_unknown_fields` on this struct = skew-safe both
+    /// ways: an older engine omits it (0 = from the top) and an older helper ignores it.
+    #[serde(default)]
+    skip: usize,
 }
 fn default_rate() -> f32 {
     1.0
@@ -448,6 +454,14 @@ fn run_duplex_feeder(rx: std::sync::mpsc::Receiver<Vec<f32>>, mut push_batch: im
     }
 }
 
+/// The frontend batches left to synthesize after `skip` already-played ones (see
+/// `ServeReq::skip`). CLAMPED: an oversized skip — e.g. a residual voice/rate change
+/// between the runs shifted the batch count — yields an empty remainder, never a
+/// panic. PURE.
+fn batches_after_skip<T>(batches: &[T], skip: usize) -> &[T] {
+    &batches[skip.min(batches.len())..]
+}
+
 /// Block until a full-duplex dictation session releases the mic (`full_duplex_listening`
 /// clears) OR shutdown fires (`capture_cancel`) — the full-duplex mutual exclusion between
 /// dictation (the concurrent listen thread, reading the VPIO capture handle) and a
@@ -595,6 +609,8 @@ pub(crate) fn serve() -> ! {
         voice: String,
         rate: f32,
         text: String,
+        /// Already-played batches to drop before synthesis (see `ServeReq::skip`).
+        skip: usize,
     }
     struct State {
         req: Option<PlayReq>,
@@ -753,6 +769,14 @@ pub(crate) fn serve() -> ! {
     // between phoneme batches and during afplay polling so a barge-in interrupts
     // even mid-synthesis. Reset to false when the loop dequeues a fresh request.
     let cancel = Arc::new(AtomicBool::new(false));
+    // The INSTANT the current barge's AUDIBLE stop landed (the reader's `stop()` /
+    // fade start) — `None` while no barge is in flight; cleared with `cancel` when a
+    // fresh request dequeues. The playback loop computes its resume `PROGRESS` mark
+    // at `min(now, stamp)`: it runs up to a batch-synthesis latency AFTER the reader
+    // stopped the player, and wall time kept advancing over batch boundaries nobody
+    // heard — an uncapped count would over-skip (lost words). The earliest stamp wins
+    // if a second barge lands. Under-skip of the ~60 ms fade tail is acceptable.
+    let cancel_stamp: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     // A SEPARATE cancel for the one-shot CAPTURE jobs (diarize/enroll). Unlike `cancel`,
     // it is NOT tripped by a TTS barge (`speak`/`stop`/`stopfade`) — those routinely
     // arrive mid-recording (warm-engine pings, narration, record-barges) and must NOT
@@ -775,6 +799,7 @@ pub(crate) fn serve() -> ! {
         let shared = shared.clone();
         let cur_player = cur_player.clone();
         let cancel = cancel.clone();
+        let cancel_stamp = cancel_stamp.clone();
         let capture_cancel = capture_cancel.clone();
         let listen_stopped_through = listen_stopped_through.clone();
         let listen_latest_generation = listen_latest_generation.clone();
@@ -806,6 +831,12 @@ pub(crate) fn serve() -> ! {
                     // full-duplex mode there is no rodio player — drain the VPIO
                     // render ring via its barge flag instead.
                     cancel.store(true, Ordering::SeqCst);
+                    // Stamp the audible-stop instant for the resume `PROGRESS` cap
+                    // (just before the stop = conservative). See `cancel_stamp`.
+                    cancel_stamp
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get_or_insert_with(Instant::now);
                     if let Some(p) = cur_player
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -829,6 +860,13 @@ pub(crate) fn serve() -> ! {
                 // on a record-barge, yet long enough to de-click.
                 let cancel_current_fade = || {
                     cancel.store(true, Ordering::SeqCst);
+                    // Stamp at FADE START, not fade end: from here the audio is
+                    // ramping to silence, so counting any later batch boundary as
+                    // "played" would over-skip. See `cancel_stamp`.
+                    cancel_stamp
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get_or_insert_with(Instant::now);
                     cue_playback.cancel();
                     // Clone the Arc out so the ramp does NOT hold the `cur_player` lock
                     // (the playback loop touches it too).
@@ -954,6 +992,7 @@ pub(crate) fn serve() -> ! {
                                 voice,
                                 rate: req.rate,
                                 text,
+                                skip: req.skip,
                             });
                         });
                     }
@@ -1045,6 +1084,10 @@ pub(crate) fn serve() -> ! {
             // cleared on kill" bug. Nothing here survives the process, so there is
             // no stale queue to replay on the next engine start.
             cancel.store(true, Ordering::SeqCst);
+            cancel_stamp
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert_with(Instant::now);
             cue_playback.cancel();
             // End an in-flight diarize/enroll capture AND a half-duplex listen too (both
             // ignore the TTS `cancel`).
@@ -1151,13 +1194,21 @@ pub(crate) fn serve() -> ! {
                 unsafe { _exit(0) };
             }
         };
-        // A fresh playback job clears playback barge state. Listen cancellation is
-        // generation-based and deliberately never reset here: an early lstop must survive
-        // queueing and prevent the matching capture from opening.
+        // A fresh playback job clears playback barge state (the cancel flag AND the
+        // audible-stop stamp — a stale stamp would cap the next request's resume mark
+        // at a long-gone instant). Listen cancellation is generation-based and
+        // deliberately never reset here: an early lstop must survive queueing and
+        // prevent the matching capture from opening.
         cancel.store(false, Ordering::SeqCst);
+        *cancel_stamp.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
         // STT job: capture + stream partials + final, then back to waiting.
-        let PlayReq { voice, rate, text } = match job {
+        let PlayReq {
+            voice,
+            rate,
+            text,
+            skip,
+        } = match job {
             Job::Speak(r) => r,
             Job::Listen(generation) => {
                 // Half-duplex only (full-duplex routes to the concurrent thread, so
@@ -1370,6 +1421,18 @@ pub(crate) fn serve() -> ! {
             continue;
         }
 
+        // Batch-granular resume: drop the batches an earlier run of this exact text
+        // already played (the engine echoes our `PROGRESS` mark back as `skip`). Same
+        // item + deterministic frontend ⇒ stable batch indices across runs. Applied
+        // AFTER the frontend/empty/frontend-cancel checks and BEFORE the lazy synth
+        // reload, so a fully-played remainder is a cheap no-op (no reload, no PROGRESS).
+        let remainder = batches_after_skip(&phoneme_batches, skip);
+        if remainder.is_empty() {
+            println!("{}", proto::DONE);
+            let _ = std::io::stdout().flush();
+            continue;
+        }
+
         // Lazily (re)load the Kokoro synth if a prior `unload tts` freed it.
         if synth.is_none() {
             match load_backend() {
@@ -1493,14 +1556,14 @@ pub(crate) fn serve() -> ! {
         };
         let outcome = match synth {
             Backend::Ort(synth) => prepare_audio(
-                &phoneme_batches,
+                remainder,
                 || cancel.load(Ordering::SeqCst),
                 |batch| synth.synthesize(batch.as_str(), &voice, rate),
                 &mut commit,
             ),
             #[cfg(target_os = "macos")]
             Backend::Coreml(c) => prepare_audio(
-                &phoneme_batches,
+                remainder,
                 || cancel.load(Ordering::SeqCst),
                 |batch| c.synthesize_phonemes(batch.as_str(), &voice, rate),
                 &mut commit,
@@ -1518,6 +1581,22 @@ pub(crate) fn serve() -> ! {
             // After this join no push can race the render_clear/render_pending below.
             let _ = j.join();
         }
+        // The resume mark for a CANCELLED request: batches PLAYED (not committed —
+        // commits race ahead of the playhead), capped at the barge's audible-stop
+        // stamp. See `cancel_stamp` for why the cap matters; ABSOLUTE = `skip` + this
+        // run's played count, so the engine's high-water max stays monotone.
+        let played_at_stop = |sink: &Option<IncrementalSink>| -> usize {
+            let now = Instant::now();
+            let capped = cancel_stamp
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .map_or(now, |stamp| stamp.min(now));
+            skip + sink.as_ref().map_or(0, |s| s.played_batches(capped))
+        };
+        let emit_progress = |absolute_batches: usize| {
+            println!("{}{absolute_batches}", proto::PROGRESS_PREFIX);
+            let _ = std::io::stdout().flush();
+        };
         match outcome {
             Ok(PrepareOutcome::Finished) => {}
             Ok(PrepareOutcome::Cancelled) => {
@@ -1527,8 +1606,13 @@ pub(crate) fn serve() -> ! {
                     if let Some(dx) = &duplex {
                         dx.render_clear();
                     }
-                } else if let Some(s) = &sink {
-                    s.stop();
+                } else {
+                    // Rodio path only: full-duplex never pauses/resumes, so it gets
+                    // no resume mark. Emitted before the defensive stop.
+                    emit_progress(played_at_stop(&sink));
+                    if let Some(s) = &sink {
+                        s.stop();
+                    }
                 }
                 *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 println!("{}", proto::DONE);
@@ -1580,13 +1664,26 @@ pub(crate) fn serve() -> ! {
                 if let Some(dx) = &duplex {
                     dx.render_clear(); // barge: drop queued render audio
                 }
-            } else if let Some(s) = &sink {
-                s.stop(); // barge: drop anything still queued/playing
+            } else {
+                // A barge landed during/after the playback wait: same capped resume
+                // mark as the Cancelled arm, before the defensive stop.
+                emit_progress(played_at_stop(&sink));
+                if let Some(s) = &sink {
+                    s.stop(); // barge: drop anything still queued/playing
+                }
             }
         }
         *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
         // Stats BEFORE DONE (skip cancelled/empty utterances — they'd skew the RTF).
         if !cancel.load(Ordering::SeqCst) {
+            if !render_via_duplex {
+                // Finished uncancelled: the whole remainder played — publish the
+                // absolute high-water mark so a LATER barge of a requeued item can't
+                // fall back to the top.
+                emit_progress(skip + remainder.len());
+            }
+            // STATS covers the RESUMED TAIL only: synth_ms/audio_ms/first_ms account
+            // solely for the post-`skip` batches this request actually synthesized.
             let synth_ms = synth_nanos as f64 / 1e6;
             let audio_ms = total_samples as f64 / 24_000.0 * 1000.0;
             println!(
@@ -1728,6 +1825,24 @@ mod audio_tests {
             offered.set(offered.get() + 1);
         });
         assert_eq!(offered.get(), 4, "every queued batch must still be offered");
+    }
+}
+
+#[cfg(test)]
+mod skip_tests {
+    use super::batches_after_skip;
+
+    /// The batch-granular resume slice: 0 = the whole request, a mid value drops the
+    /// played prefix, and an at/over-length skip (voice/rate change shifted batch
+    /// counts between runs) CLAMPS to an empty remainder instead of panicking.
+    #[test]
+    fn batches_after_skip_slices_and_clamps() {
+        let batches = ["a", "b", "c"];
+        assert_eq!(batches_after_skip(&batches, 0), &["a", "b", "c"]);
+        assert_eq!(batches_after_skip(&batches, 2), &["c"]);
+        assert!(batches_after_skip(&batches, 3).is_empty());
+        assert!(batches_after_skip(&batches, usize::MAX).is_empty());
+        assert!(batches_after_skip::<&str>(&[], 1).is_empty());
     }
 }
 

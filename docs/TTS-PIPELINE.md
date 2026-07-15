@@ -161,6 +161,14 @@ phoneme batch, including for queue items near the 10 KiB admission limit. The de
 commits into a persistent output stream and starts incrementally. The short-lived macOS one-shot
 route still accumulates committed batches for reliable `afplay` teardown.
 
+Record-barge resume is batch-granular. On the rodio path the warm helper reports a `PROGRESS`
+high-water mark — the absolute count of batches estimated fully played, capped at the barge's
+audible-stop instant so committed-but-unheard audio is never counted — and the engine echoes the
+mark back as `skip` on the requeued item's next run, so the helper drops the already-played prefix
+instead of re-speaking the block from the top. `STATS` then covers the resumed tail only. Version
+skew degrades to replay-from-top in both directions: an older engine ignores `PROGRESS`, and an
+older helper never emits it. Full-duplex reports no mark — it never pauses/resumes.
+
 On macOS full-duplex, committed batches are handed to a dedicated feeder thread, so committing
 returns immediately and the next batch's inference overlaps pacing. The feeder paces small chunks
 into VPIO with about two seconds of render lookahead, rechecking cancellation and global mute

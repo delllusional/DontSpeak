@@ -242,6 +242,12 @@ struct Item {
     /// The client session this action belongs to (`None` = default/global), used for
     /// voice resolution, active-terminal selection, and scoped cancellation.
     session: Option<String>,
+    /// Batch-granular resume point: frontend batches an earlier run of this item
+    /// already PLAYED (the helper's `PROGRESS` high-water mark, merged in [`run`]
+    /// after a Kokoro speak). 0 = play from the top. Sent as `skip` on the next run,
+    /// so a record-barge resume drops the already-heard prefix instead of re-speaking
+    /// the whole block.
+    resume_skip: usize,
 }
 
 /// Which terminal (session) the worker is allowed to speak for. The portable focus
@@ -727,7 +733,11 @@ impl TtsQueue {
             ));
         }
         self.note_recent(&session);
-        q.push_back(Item { action, session });
+        q.push_back(Item {
+            action,
+            session,
+            resume_skip: 0,
+        });
         self.cv.notify_one();
         Ok(())
     }
@@ -1304,7 +1314,7 @@ impl TtsQueue {
             // Wait for a PLAYABLE item (see [`select_pos`]) while not paused: items for
             // other terminals are held in place until their terminal becomes active.
             // Lock order: `items` then `active`.
-            let (item, gen0) = {
+            let (mut item, gen0) = {
                 let mut q = self.items.lock().unwrap();
                 loop {
                     if !self.is_paused() {
@@ -1319,6 +1329,11 @@ impl TtsQueue {
             let _in_flight = InFlightGuard(&self.in_flight);
             let _playing = PlayingGuard(&self.playing_session);
 
+            // The helper's played-batch mark for THIS dequeue — `Some` ONLY when the
+            // Kokoro warm-child speak actually ran. A System item (or a requeued/
+            // dropped one) never touches the speak slot, and reading it anyway would
+            // poison `resume_skip` with the PREVIOUS Kokoro request's progress.
+            let mut kokoro_mark: Option<usize> = None;
             match &item.action {
                 QueueAction::Speech { text, voice, rate } => {
                     let (engine, voice, rate) = match self.gate_item(
@@ -1343,7 +1358,11 @@ impl TtsQueue {
                     };
 
                     self.set_tts_active(true);
-                    if let Err(e) = self.speak_one(engine, text, &voice, rate) {
+                    let result = self.speak_one(engine, text, &voice, rate, item.resume_skip);
+                    if matches!(engine, Some(ds_config::TtsEngine::Kokoro)) {
+                        kokoro_mark = Some(self.tts.last_speak_progress());
+                    }
+                    if let Err(e) = result {
                         log::warn!(target: "ttsq", "queued speak failed: {e}");
                     }
                 }
@@ -1357,6 +1376,11 @@ impl TtsQueue {
                         log::warn!(target: "ttsq", "queued earcon failed: {e}");
                     }
                 }
+            }
+            // max(): a 0 mark (older helper, cancel before any audio, or version skew)
+            // must never erase an earlier resume point.
+            if let Some(mark) = kokoro_mark {
+                item.resume_skip = item.resume_skip.max(mark);
             }
             if self.generation.load(Ordering::SeqCst) != gen0 {
                 self.requeue_if_resuming(item, gen0);
@@ -1491,19 +1515,28 @@ impl TtsQueue {
     /// Play one queued block on the warm child using the resolved `engine` (config or a
     /// session override) and `voice`. `None` = TTS off — never speak (defensive; items
     /// shouldn't be enqueued when off).
+    ///
+    /// RESUME SAFETY: `skip` is the item's [`Item::resume_skip`] — a requeued item is
+    /// the SAME item (same text), and the helper's frontend is deterministic, so batch
+    /// indices are stable across the runs of one item. The helper clamps `skip`, so a
+    /// residual voice/rate change between runs (shifting batch counts) degrades to an
+    /// empty remainder — never a panic, at worst a dropped tail. Muted-but-draining
+    /// batches count as played (mute consumes speech — today's semantics). System TTS
+    /// has no batch granularity; its `skip` is ignored by `speak_system`.
     fn speak_one(
         &self,
         engine: Option<ds_config::TtsEngine>,
         text: &str,
         voice: &str,
         rate: f32,
+        skip: usize,
     ) -> Result<(), String> {
         let result = match engine {
             None => return Err("TTS is disabled".to_string()),
             Some(ds_config::TtsEngine::System) => self.tts.speak_system(text, voice, rate),
             Some(ds_config::TtsEngine::Kokoro) => {
                 self.tts.ensure_started();
-                self.tts.speak(text, voice, rate)
+                self.tts.speak(text, voice, rate, skip)
             }
         };
         result.map_err(|e| e.to_string())
@@ -1611,10 +1644,12 @@ impl TtsQueue {
     /// On a cancel: if the SPECIFIC cancellation that interrupted THIS item (recorded
     /// against its own `gen0` in `cancel_kind`, at the moment that bump fired) was a
     /// record-barge pause, re-enqueue the interrupted item (narration OR reply) at the
-    /// front so the worker resumes the whole queue from there. A block is one synth unit
-    /// (the warm child prepares it before playback), so we re-speak it from the top rather than
-    /// from a sentence offset. A hard cancel re-enqueues nothing — it dropped the item on
-    /// purpose.
+    /// front so the worker resumes the whole queue from there. The resume is
+    /// batch-granular: [`run`](Self::run) merged the helper's played-batch `PROGRESS`
+    /// mark into the item's [`Item::resume_skip`] before requeueing, so the next run
+    /// skips the already-heard prefix; from-the-top is the no-mark fallback (mark 0 —
+    /// older helper, full-duplex, or nothing played). A hard cancel re-enqueues
+    /// nothing — it dropped the item on purpose.
     ///
     /// Deliberately does NOT just re-read the CURRENT `paused` flag: by the time playback
     /// actually unwinds, an unrelated LATER event may have moved `paused` on — e.g. an
@@ -1928,6 +1963,7 @@ mod tests {
                 rate: None,
             },
             session: session.map(str::to_string),
+            resume_skip: 0,
         }
     }
 
@@ -2070,6 +2106,7 @@ mod tests {
                 rate: None,
             },
             session: None,
+            resume_skip: 0,
         }
     }
 
@@ -2098,13 +2135,34 @@ mod tests {
     #[test]
     fn requeue_if_resuming_drops_the_item_when_marked_a_hard_cancel() {
         // A hard cancel (clear/skip/clear_session/cancel_for_submit) records `false` — the
-        // interrupted item must be dropped, not resurrected.
+        // interrupted item must be dropped, not resurrected — resume mark and all (the
+        // played prefix of a deliberately dropped block is not coming back).
         let q = mk_queue();
         q.record_cancel_kind(9, false);
-        q.requeue_if_resuming(item("dropped"), 9);
+        let mut dropped = item("dropped");
+        dropped.resume_skip = 4;
+        q.requeue_if_resuming(dropped, 9);
         assert!(
             q.items.lock().unwrap().is_empty(),
             "a hard-cancel-marked generation must not requeue its item"
+        );
+    }
+
+    /// The batch-granular resume contract at the queue layer: a record-barge requeue
+    /// keeps the item's `resume_skip` (merged from the helper's PROGRESS mark by the
+    /// worker), so the next run starts past the already-heard prefix.
+    #[test]
+    fn requeue_if_resuming_preserves_the_items_resume_skip() {
+        let q = mk_queue();
+        q.record_cancel_kind(7, true);
+        let mut interrupted = item("interrupted");
+        interrupted.resume_skip = 3;
+        q.requeue_if_resuming(interrupted, 7);
+        let items = q.items.lock().unwrap();
+        assert_eq!(
+            items.front().map(|it| it.resume_skip),
+            Some(3),
+            "the requeued item must carry its resume point"
         );
     }
 

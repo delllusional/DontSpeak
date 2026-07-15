@@ -30,6 +30,8 @@
 //!   A failed request terminates with `ERR <msg>` instead.
 //! * `CUEDONE` — the terminal for a played, suppressed, or cancelled earcon.
 //! * `STATS <k=v …>` — per-utterance synth timing, just before `DONE`.
+//! * `PROGRESS <n>` — the current speak's played-batch high-water mark, for
+//!   batch-granular resume ([`PROGRESS_PREFIX`]). Intermediate, never terminal.
 //! * `TTSLOADED` / `STTLOADED` — model-residency confirmations (load/preload/lazy
 //!   reload succeeded; the model is genuinely resident + warm).
 //! * `TTSLOADERR <msg>` / `STTLOADERR <msg>` — a model (re)load failed.
@@ -68,6 +70,13 @@ pub const ERR: &str = "ERR";
 pub const DONE: &str = "DONE";
 /// Per-utterance synth timing (`k=v` pairs), just before [`DONE`].
 pub const STATS_PREFIX: &str = "STATS ";
+/// The current speak's ABSOLUTE played-batch high-water mark (`skip` included), for
+/// batch-granular resume after a record-barge. INTERMEDIATE, never terminal — the
+/// request still ends in [`DONE`]/[`ERR`]. Emitted on the rodio path only (full-duplex
+/// never pauses/resumes, so it reports no mark). Version skew degrades to
+/// replay-from-top in BOTH directions: an older engine's reader has no arm for the
+/// line and drops it; an older helper never emits it, so the engine's mark stays 0.
+pub const PROGRESS_PREFIX: &str = "PROGRESS ";
 
 // ── earcon ────────────────────────────────────────────────────────────────────────────
 
@@ -154,6 +163,7 @@ mod tests {
         assert_eq!(WARMING_PREFIX, "WARMING ");
         assert_eq!(PROVIDER_PREFIX, "PROVIDER ");
         assert_eq!(STATS_PREFIX, "STATS ");
+        assert_eq!(PROGRESS_PREFIX, "PROGRESS ");
         assert_eq!(TTSLOADERR_PREFIX, "TTSLOADERR ");
         assert_eq!(STTLOADERR_PREFIX, "STTLOADERR ");
         assert_eq!(STT_PROVIDER_PREFIX, "STT_PROVIDER ");

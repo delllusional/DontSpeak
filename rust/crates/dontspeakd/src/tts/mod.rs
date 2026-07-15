@@ -1304,8 +1304,21 @@ impl TtsManager {
     /// reaped) or the helper reported a per-request `ERR` (frontend or transactional
     /// synthesis failure — soft, the child stays alive). There is no fallback: the
     /// queue worker logs the Err and the utterance is dropped.
-    pub fn speak(&self, text: &str, voice: &str, rate: f32) -> std::io::Result<()> {
-        self.play("speak", text, voice, rate)
+    ///
+    /// `skip` = frontend batches an earlier run of this exact text already played
+    /// (0 = from the top); the helper clamps it, so a stale value degrades to an
+    /// empty no-op request, never a panic. See [`last_speak_progress`](Self::last_speak_progress).
+    pub fn speak(&self, text: &str, voice: &str, rate: f32, skip: usize) -> std::io::Result<()> {
+        self.play("speak", text, voice, rate, skip)
+    }
+
+    /// The helper's ABSOLUTE played-batch high-water mark for the most recent speak
+    /// request (`PROGRESS` lines; 0 = none seen — older helper, full-duplex path, or
+    /// nothing played ⇒ resume from the top). Coherent once `speak` returns: PROGRESS
+    /// demuxes on the same reader thread BEFORE the terminal `DONE`, and `play()`
+    /// resets the slot per request.
+    pub fn last_speak_progress(&self) -> usize {
+        self.speak_slot.0.lock().unwrap().progress
     }
 
     /// Speak `text` via the macOS System engine (`say`) and block until it
@@ -1392,7 +1405,14 @@ impl TtsManager {
         ))
     }
 
-    fn play(&self, op: &str, text: &str, voice: &str, rate: f32) -> std::io::Result<()> {
+    fn play(
+        &self,
+        op: &str,
+        text: &str,
+        voice: &str,
+        rate: f32,
+        skip: usize,
+    ) -> std::io::Result<()> {
         // Snapshot the child's generation for THIS request (one acquisition also serves
         // as the is-running gate) — if the reader only wakes us (fatal) after a
         // concurrent restart has ALREADY installed a new child, this lets us tell "our
@@ -1406,7 +1426,8 @@ impl TtsManager {
             *m.lock().unwrap() = SpeakSlot::default();
         }
 
-        let req = serde_json::json!({"op": op, "voice": voice, "rate": rate, "text": text});
+        let req =
+            serde_json::json!({"op": op, "voice": voice, "rate": rate, "text": text, "skip": skip});
         if let Err(e) = self.write_request(&req.to_string()) {
             self.mark_dead();
             self.stats.record_failure();
@@ -1989,6 +2010,7 @@ mod coexist_it {
             "Testing coexistence. I am speaking while you dictate. This is the end.",
             "af_sarah",
             1.0,
+            0,
         );
         eprintln!("[speak] returned {r:?} after {:?}", t0.elapsed());
         assert!(r.is_ok(), "speak failed: {r:?}");
@@ -2134,7 +2156,8 @@ pub(crate) mod wedge_recovery_tests {
 
         // A speak queued RIGHT BEHIND the wedge, on the same (about-to-be-reaped) child.
         let speak_mgr = mgr.clone();
-        let speak_attempt_1 = std::thread::spawn(move || speak_mgr.speak("hello", "af_sarah", 1.0));
+        let speak_attempt_1 =
+            std::thread::spawn(move || speak_mgr.speak("hello", "af_sarah", 1.0, 0));
 
         let t0 = std::time::Instant::now();
         let listen_result = listen.join().expect("listen thread panicked");
@@ -2157,7 +2180,7 @@ pub(crate) mod wedge_recovery_tests {
         );
 
         mgr.ensure_started();
-        let speak_2_result = mgr.speak("hello again", "af_sarah", 1.0);
+        let speak_2_result = mgr.speak("hello again", "af_sarah", 1.0, 0);
         assert!(
             speak_2_result.is_ok(),
             "speak after the wedge is killed must succeed: {speak_2_result:?}"
