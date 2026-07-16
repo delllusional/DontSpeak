@@ -45,10 +45,17 @@ conforms. Re-run both commands after any operation that rewrites commit messages
    `--keep-going` surfaces lints from every crate in one run — fix any warning rather
    than `#[allow]`-ing it away unless the user agrees. `--locked` matches CI: fail on
    `Cargo.lock` drift instead of silently updating it.
-3. **Rust tests**
+3. **Rust tests** (match `ci.yml`: fetch first, then offline test so Cargo and
+   HTTP clients cannot reach the network; loopback stays available for httpmock)
    ```bash
-   cargo test --workspace --locked
+   cargo fetch --locked
+   CARGO_NET_OFFLINE=true \
+   HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 \
+   NO_PROXY=127.0.0.1,localhost,::1 HF_HUB_OFFLINE=1 \
+     cargo test --workspace --locked --offline
    ```
+   On PowerShell, set the same env vars then run
+   `cargo test --workspace --locked --offline` after `cargo fetch --locked`.
 
 If all three pass, push. If any fails, fix it and re-run.
 
@@ -101,7 +108,12 @@ script without `--check`, review the generated diff, then re-run the check.
 ```bash
 node scripts/agents/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
 node --test scripts/agents/agent-attribution.test.mjs scripts/ci/merge-crate-coverage.test.js
-cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings && cargo test --workspace --locked
+cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings
+cargo fetch --locked
+CARGO_NET_OFFLINE=true \
+HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 \
+NO_PROXY=127.0.0.1,localhost,::1 HF_HUB_OFFLINE=1 \
+  cargo test --workspace --locked --offline
 cd .. && node scripts/agents/sync-agent-skills.mjs --check
 ```
 Green gates plus a conforming attribution inspection ⇒ safe to push.
