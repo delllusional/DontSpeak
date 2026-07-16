@@ -123,6 +123,25 @@ pub fn engine_earcon(paths: &Paths, event: &str, payload: &str, client: ClientSo
     let _ = ds_ipc::request(&paths.engine_sock, &earcon_request(payload, event, client));
 }
 
+/// Like [`engine_earcon`], but the session is supplied by the caller (e.g. Grok Stop uses the
+/// sticky `grok-stop:<session>` tag so reply_done queues behind sticky digests under the same
+/// `select_pos` preference key).
+pub fn engine_earcon_for_session(
+    paths: &Paths,
+    event: &str,
+    session: Option<String>,
+    client: ClientSource,
+) {
+    let _ = ds_ipc::request(
+        &paths.engine_sock,
+        &ds_ipc::Request::Earcon {
+            event: event.to_string(),
+            session,
+            source: client,
+        },
+    );
+}
+
 /// The `Notification` hook payload (subset): which kind of notification Claude Code surfaced.
 #[derive(Debug, Deserialize, Default)]
 struct NotificationHook {
