@@ -5,48 +5,45 @@ description: Uninstall / build+install / package DontSpeak on Linux (GTK4 deskto
 
 # DontSpeak — Linux (uninstall / install / package)
 
-> **Task setup:** Before starting, read and apply
-> [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
+> Apply [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
 > [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
 
-> **Runs on:** Linux only (native, WSL, or a VM — bash + GTK4/libadwaita). **Working dir:** repo root. Same three flows as `build-macos` / `build-windows`.
+Linux only (native/WSL/VM), repo root. Host: GTK4 + libadwaita `ds-gtk` (in-process
+engine). Scripts: `scripts/install/local/install.sh`, `apps/linux/*.sh` — edit those,
+don't duplicate.
 
-The host is the **GTK4 + libadwaita desktop app** (`ds-gtk`) — tray, health panel, dictation overlay; it hosts the engine in-process. No separate daemon. Scripts: `scripts/install/local/install.sh` + `apps/linux/*.sh`, factored via `scripts/install/lib/common.sh` — **don't duplicate build logic; edit the scripts**.
+**Prereqs:** Rust · GTK 4.12+ · **libadwaita ≥ 1.7** · gtk4-layer-shell (Ubuntu 26.04 /
+Fedora 42 era; 24.04 too old) · `/dev/uinput` write (udev + `input` group via
+`install-gui.sh` unless `--no-udev`). `install-gui.sh` checks pkg-config **presence**
+only — too-old libadwaita fails at compile.
 
-**Prereqs:** Rust · a recent GNOME stack — GTK 4.12+, **libadwaita >= 1.7**, gtk4-layer-shell (Ubuntu 26.04 / Fedora 42 era; **Ubuntu 24.04 is too old**) · write access to `/dev/uinput` (udev rule + `input` group, handled by `install-gui.sh` unless `--no-udev`). `install-gui.sh` checks the three `pkg-config` names (`gtk4`, `libadwaita-1`, `gtk4-layer-shell-0`) and prints the exact `apt`/`dnf` install command for whatever's missing — but only for *presence*, not version, so a too-old libadwaita passes that check and fails later at compile time instead.
-
-## 1 — Uninstall / clean
+## 1 — Uninstall
 
 ```bash
-apps/linux/uninstall.sh           # full removal (thin wrapper over scripts/install/bundle/uninstall.sh)
-apps/linux/uninstall.sh --udev    # ALSO remove the /dev/uinput udev rule (sudo)
+apps/linux/uninstall.sh           # full removal
+apps/linux/uninstall.sh --udev    # also drop uinput udev rule (sudo)
 ```
-Execs `scripts/install/bundle/uninstall.sh` — the canonical uninstaller (same bytes the release installer places as `dontspeak-uninstall`; `packaging_sync.rs` pins the copies): stops the host, un-wires all clients, removes the binaries, launchers, icon, the `--aec` drop-in, and all data/state/cache. `input`-group membership is left intact. Stop the running host first for a clean reinstall.
+
+Wraps `scripts/install/bundle/uninstall.sh` (same as release `dontspeak-uninstall`).
+Leaves `input` group membership.
 
 ## 2 — Build + install (dev)
 
-Two builds, then launch:
+```bash
+scripts/install/local/install.sh   # engine + helper + hooks → ~/.local/bin
+apps/linux/install-gui.sh          # flags: --autostart  --aec  --no-udev
+# launch: app menu or ~/.local/bin/ds-gtk  (log out/in if udev just ran)
+```
 
-1. **Engine + helper + hooks** → `~/.local/bin` (`DONTSPEAK_INSTALL_DIR` overrides):
-   ```bash
-   scripts/install/local/install.sh
-   ```
-2. **GTK desktop host** (builds `apps/linux/gtk` release → installs `ds-gtk` + `.desktop` + udev/input perms):
-   ```bash
-   apps/linux/install-gui.sh           # flags: --autostart  --aec  --no-udev
-   ```
-3. **Launch** from the app menu ("DontSpeak") or `~/.local/bin/ds-gtk`. (If the udev/`input`-group step just ran, log out/in once so the membership takes effect.)
-
-## 3 — Build the package
+## 3 — Package
 
 ```bash
-apps/linux/package.sh                 # tarball → ./dist  (OUTDIR=~/Desktop to change)
+apps/linux/package.sh              # OUTDIR overrides; default ./dist
 ```
-- Output: **`dontspeak-<ver>-linux-<arch>.tar.gz`** — the ONE Linux package. Self-contained portable bundle (binaries + `.desktop` + icon + udev rule + `install.sh`, shipped verbatim from `apps/linux/tarball-install.sh`). Extract and run `./install.sh`.
+
+Output: `dontspeak-<ver>-linux-<arch>.tar.gz` only Linux package. Extract → `./install.sh`.
 
 ## Notes
 
-- Release CI runs the GTK tests before packaging on both Linux architectures. Test or setup
-  failures block the release; only tarball creation and upload are best-effort, so either
-  Linux asset may be absent after a packaging-only failure. `uninstall.sh` remains
-  unexercised in CI — **verify it on Linux**.
+Release CI: GTK tests block; tarball upload best-effort. `uninstall.sh` not in CI —
+verify on Linux.

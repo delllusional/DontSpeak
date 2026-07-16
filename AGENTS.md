@@ -1,198 +1,119 @@
 # DontSpeak
 
-A local voice layer for Claude Code, Codex, Qwen Code, and Grok: the agent speaks its
-replies aloud, the user dictates back with one key (Caps Lock). One native app per OS
-(macOS SwiftUI, Windows WinUI, Linux GTK4) hosts the same Rust engine **in-process**
-over a C ABI (`ds-core`) — there is no separate daemon. The Claude Code hooks and the
-MCP server are thin clients that talk to the engine over a Unix-domain socket.
+Local voice layer for Claude Code, Codex, Qwen Code, and Grok: the agent speaks
+replies aloud; the user dictates with Caps Lock. One native app per OS (macOS
+SwiftUI, Windows WinUI, Linux GTK4) hosts the same Rust engine **in-process** via
+`ds-core` C ABI — no separate daemon. Hooks and the MCP server are thin clients
+over a Unix-domain socket.
 
-Full design: [ARCHITECTURE.md](ARCHITECTURE.md). Crate-by-crate roles: [rust/README.md](rust/README.md).
-Build prerequisites per OS: [CONTRIBUTING.md](CONTRIBUTING.md).
+- Design: [ARCHITECTURE.md](ARCHITECTURE.md)
+- Crates: [rust/README.md](rust/README.md)
+- Build prereqs: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Workspace layout
 
-- `rust/crates/` — 23 single-purpose crates (Rust workspace, `rust-version = 1.97`).
-  Notable ones: `ds-core` (the stable C ABI the apps link), `dontspeakd` (the engine
-  library), `dontspeak` (the one CLI: MCP server + hook entries + installers),
-  `ds-tools` (the single MCP tool catalog), `ds-config` (paths + `config.toml` +
-  `~/.claude/settings.json` merge).
-- `apps/macos/` (SwiftUI, most polished host), `apps/windows/winui/` (.NET 10),
-  `apps/linux/gtk/` (GTK4 + libadwaita) — each a thin menu-bar/health/permissions UI
-  that hosts the engine and is the login item. Voice/engine control is via MCP, not
-  the app UI.
+- `rust/crates/` — 23 crates (`rust-version = 1.97`). Key: `ds-core` (C ABI),
+  `dontspeakd` (engine lib), `dontspeak` (CLI: MCP + hooks + installers),
+  `ds-tools` (MCP catalog), `ds-config` (paths + `config.toml` + client wiring).
+- `apps/macos/` (SwiftUI), `apps/windows/winui/` (.NET 10), `apps/linux/gtk/`
+  (GTK4 + libadwaita) — thin host UIs; engine control is via MCP.
 
-The website and its `llms.txt` live in the separate `delllusional/dontspeak.org`
-repository. Deploy them from that checkout; this repository only publishes the fixed-name
-installer assets referenced by the site.
+Website/`llms.txt`: separate repo `delllusional/dontspeak.org`. This repo only
+publishes installer assets the site references.
 
-## Agent and skill portability
+## Canonical policies (read, don't restate)
 
-[`docs/AGENT-SKILLS.md`](docs/AGENT-SKILLS.md) is the single source of truth for
-instruction wrappers, cross-CLI skill discovery, and skill mirror maintenance. Read
-it before changing any of those surfaces. Shared repository rules belong here;
-vendor-specific files must reference them rather than restate them.
+| Topic | Doc |
+| --- | --- |
+| Instruction wrappers + skill mirrors | [docs/AGENT-SKILLS.md](docs/AGENT-SKILLS.md) |
+| Fresh `main` + task worktrees | [docs/TASK-BASELINE.md](docs/TASK-BASELINE.md) |
+| Reasoning effort | [docs/TASK-EFFORT.md](docs/TASK-EFFORT.md) |
+| `Agent:` commit trailer | [docs/COMMIT-ATTRIBUTION.md](docs/COMMIT-ATTRIBUTION.md) |
 
-## Fresh main and task worktrees
+Shared rules live here; vendor files import them rather than duplicating.
 
-[`docs/TASK-BASELINE.md`](docs/TASK-BASELINE.md) is the canonical policy for
-repository baselines and task worktrees. Before the default repository workflow,
-fast-forward local `main` from `origin/main`, then create or reuse the appropriate
-isolated task worktree. Every edit session must enter that worktree before modifying
-files. Read the canonical policy for explicit-target exceptions and the required
-refresh before final verification and landing.
+## Out-of-scope findings
 
-## Task effort
+Small obvious fixes: do inline and note in the report. Otherwise file an issue —
+don't drop it and don't expand scope:
 
-[`docs/TASK-EFFORT.md`](docs/TASK-EFFORT.md) is the canonical cross-agent policy for
-matching reasoning effort to a task. Apply it before starting a task or materially
-different phase. Honor explicit effort choices, never silently lower them, and do
-not substitute effort for required verification.
+```sh
+gh issue create --repo delllusional/DontSpeak --title "..." --body "..."
+```
 
-## Out-of-scope findings: file a GitHub issue
-
-Working a task often turns up a second real problem — a bug, a missing test, a
-stale doc, a gap in one of the invariants below. If it's small and obviously
-correct, fix it inline and say so in your report. If it isn't part of what you were
-actually asked to do, don't silently drop it and don't silently expand scope to fix
-it anyway: file it as a GitHub issue instead —
-`gh issue create --repo delllusional/DontSpeak --title "..." --body "..."`, with a
-label if one fits (`bug`, `enhancement`, `documentation`, `question` are in use —
-`gh label list --repo delllusional/DontSpeak` for the full set). Check
-`gh issue list --repo delllusional/DontSpeak` first so you don't file a duplicate of
-something already open. Mention the issue number in your final report so it isn't
-lost.
-
-## Commit attribution
-
-[`docs/COMMIT-ATTRIBUTION.md`](docs/COMMIT-ATTRIBUTION.md) is the single source of
-truth. Read it in full before creating or rewriting a commit and again before pushing.
-Let the runtime hook write the exact model and effort; never infer either value from the
-agent's self-description.
-Do not copy its rules into agent- or tool-specific files; those workflows must point
-to the canonical policy so updates cannot drift.
+Labels in use: `bug`, `enhancement`, `documentation`, `question`
+(`gh label list --repo delllusional/DontSpeak`). Check open issues first; cite the
+issue number in the final report.
 
 ## Commands
 
-All Rust commands run from `rust/` (the workspace root — not the repo root).
+Run from `rust/` (workspace root, not repo root):
 
 ```sh
 cd rust
-cargo build --workspace --locked                 # build everything
-cargo test --workspace --locked                  # run the real test suite (this is what CI runs)
-cargo test -p ds-config --locked                 # test one crate
-cargo test -p ds-config wire::registry --locked  # run tests matching a name/path in one crate
-cargo clippy --workspace --all-targets --locked -- -D warnings   # the per-commit lint gate
-cargo fmt --all --check                          # release-only gate — not enforced per commit
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked  # release-only gate
+cargo build --workspace --locked
+cargo test --workspace --locked
+cargo test -p ds-config --locked
+cargo test -p ds-config wire::registry --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo fmt --all --check                          # release-only
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked  # release-only
 ```
 
-The GTK host is a separate workspace and needs its own fmt check:
-`cd apps/linux/gtk && cargo fmt --all --check`.
+GTK fmt: `cd apps/linux/gtk && cargo fmt --all --check`.
 
-The macOS SwiftPM tests need the FFI staticlib built first (`apps/macos/build.sh` does
-this): `cd rust && cargo build --profile release-ffi --locked -p ds-core && cd ../apps/macos && swift test`.
-The WinUI app's xunit tests: `dotnet test apps/windows/winui.tests` (has no runnable
-`dotnet build`/`test` shortcut outside CI otherwise — see `.github/actions/dotnet-test-winui`).
+macOS Swift tests need the FFI staticlib first:
+`cd rust && cargo build --profile release-ffi --locked -p ds-core && cd ../apps/macos && swift test`.
 
-Use the `build-linux` / `build-macos` / `build-windows` skills rather than raw
-build/package commands per OS — see [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md) for why
-the three runtime pieces (CLI, engine, host app) need different rebuild routes.
+WinUI: `dotnet test apps/windows/winui.tests` (see `.github/actions/dotnet-test-winui`).
 
-## Invariants worth knowing before you touch things
+Prefer `build-linux` / `build-macos` / `build-windows` skills over raw package
+commands — [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
 
-- **Config lives in `config.toml`** under the OS data dir, never in
-  `~/.claude/settings.json` — that file stays purely Claude Code's own (hooks + its
-  own `voice` block).
-- **No codegen for the FFI boundary.** uniffi was evaluated and deliberately rejected
-  for the 32-function `ds-core` surface — see
-  [ARCHITECTURE.md § FFI boundary](ARCHITECTURE.md#ffi-boundary).
-  If you touch `model_status`, edit the Rust source of truth in `ds-status` then
-  hand-update the two mirrors (`apps/windows/winui/Native.cs`,
-  `apps/macos/Sources/DontSpeak/DontSpeakCore.swift`) and run its round-trip test.
-  Don't reintroduce a generated-bindings toolchain here.
-- **Three runtime pieces deploy by three different routes** — see
-  [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md). Rebuilding the wrong piece (e.g. just
-  the CLI when you changed the engine or helper) leaves the running app on stale code
-  that *looks* installed. Always check that doc before concluding a fix works.
-- **No statically linked/bundled GPL or LGPL code.** The released `voice-g2p` crate's
-  optional `espeak-ng` process fallback is disabled (`ds-tts::g2p` hands it an empty
-  `espeak_path`, which can never resolve through `PATH`); dictionary misses go to a
-  checksum-pinned ONNX model run through the ONNX Runtime that ds-tts already loads — **not** a
-  pure-Rust path, and on macOS it is why the Apple/Core ML backend now needs the ORT dylib too.
-  Never link or bundle GPL speech code. As a deliberately stricter project policy, also never
-  bundle data *generated by* GPL speech tooling without an explicit provenance review — generated
-  output is not automatically GPL-covered, but an espeak-produced pronunciation dictionary
-  compiled into the binary is the unreviewed risk this rule exists to stop, and `cargo deny`
-  reads the crate's manifest as MIT and sees nothing.
-  The Linux build *dynamically*
-  links a small, disclosed set of LGPL system libraries (GTK4, libadwaita, ALSA,
-  PulseAudio) — allowed under LGPL's dynamic-linking exception — see
-  [NOTICE.md](NOTICE.md)'s "Linux build: LGPL system libraries" section before
-  changing how any of those are linked, and before adding any new native dependency.
-- **Cargo cannot consume a Git-LFS dependency.** Cargo checks git dependencies out with
-  libgit2, which does not run LFS smudge filters, so an LFS-tracked file arrives as a
-  ~132-byte pointer and the dependency's build fails — on every machine and in CI. Installing
-  `git-lfs` does not help, and neither does `CARGO_NET_GIT_FETCH_WITH_CLI=true` (that changes
-  the *fetch*, not the *checkout*). The same crate published to crates.io is fine, because
-  `cargo package` materializes the working tree. If you ever need `{ git = ..., rev = ... }`,
-  check the repo's `.gitattributes` first; a dependency whose model/data files are in LFS
-  cannot be pinned this way at all.
-- **No hardcoded UI strings.** Every new user-facing string goes in the shared
-  `ds-i18n` catalog (`rust/crates/ds-i18n/locales/en.yml`), rendered through the FFI
-  — never literal text in Swift/C#/XAML — see [docs/LOCALIZATION.md](docs/LOCALIZATION.md).
-- **Tests never touch ambient or live resources.** Tests may use tempdir-owned files,
-  loopback-only sockets/mock servers, and deterministic fake child processes. They must
-  never read or write the user's real config/cache/logs, inspect installed user assets,
-  mutate hardware or global OS state, require credentials, play/capture audio, or contact
-  a real network endpoint. `#[ignore]` is not an escape hatch for a live-resource test;
-  keep intentional live validation in an explicit script/example outside the test harness.
-  Any code that makes an outbound HTTP call (model downloads in `ds-model`, the GitHub
-  releases update-check) must be structured so its tests point at a local mock instead —
-  `httpmock` is already a dev-dependency of `ds-model` for exactly this; parameterize
-  the function under test by base URL (see `ds-model`'s `download.rs`/`update_check.rs`
-  for the pattern: a `pub(crate)`/`pub` `..._at(base_url, ...)` inner function the
-  public entry point calls with the real URL, and tests call directly with a
-  `MockServer`'s URL). A test that hits the live internet is a CI-flake and
-  rate-limit risk, not just a style nit — code review should treat it as a bug.
-- **Error handling is `Result<_, String>` at the boundaries.** Error messages cross
-  the IPC/FFI/MCP-tool boundaries as text (NDJSON lines, the C ABI, tool replies), so
-  `String` is the boundary error type. Typed error enums exist only where a caller
-  actually branches on the failure kind — currently four: `EngineError`
-  (`dontspeakd::boot`), `HooksMergeError` / `CodexMergeError` (`ds-config::wire`),
-  and `PreflightError` (`ds-platform`). `ds-model`'s download engine instead encodes
-  its retry classification in `io::ErrorKind` (`InvalidData` = checksum mismatch and
-  `NotFound` = HTTP 4xx, both permanent/fail-fast; `TimedOut` = transport/5xx/
-  truncation, transient/retried). No anyhow/thiserror — follow the layer's existing
-  style.
+## Invariants
 
-## Gates — per-commit vs release (deliberate split, not an oversight)
+- **Config:** `config.toml` under the OS data dir. Never put DontSpeak settings in
+  `~/.claude/settings.json` (Claude's hooks + `voice` block only).
+- **No FFI codegen.** uniffi rejected for the 32-fn `ds-core` surface — see
+  [ARCHITECTURE.md § FFI](ARCHITECTURE.md#ffi-boundary). For `model_status`: edit
+  `ds-status`, hand-update both mirrors (`apps/windows/winui/Native.cs`,
+  `apps/macos/Sources/DontSpeak/DontSpeakCore.swift`), run the round-trip test.
+- **Three deploy routes.** CLI, engine, and host app update separately — wrong
+  rebuild = stale running code. See [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
+- **No static GPL/LGPL.** `voice-g2p`'s optional `espeak-ng` fallback is disabled
+  (empty `espeak_path`); dictionary misses use a checksum-pinned ONNX G2P model via
+  ORT (so Apple Core ML TTS still needs the ORT dylib). Never link/bundle GPL speech
+  code. Also never bundle data *generated by* GPL speech tooling without provenance
+  review (`cargo deny` only sees the crate's MIT manifest). Linux may **dynamically**
+  link disclosed LGPL system libs (GTK4, libadwaita, ALSA, PulseAudio) — see
+  [NOTICE.md](NOTICE.md).
+- **No Cargo + Git-LFS deps.** libgit2 checkout skips LFS smudge (~132-byte pointer).
+  `git-lfs` and `CARGO_NET_GIT_FETCH_WITH_CLI` do not fix checkout. crates.io is fine;
+  check `.gitattributes` before any `{ git = ..., rev = ... }`.
+- **No hardcoded UI strings.** New user-facing text → `ds-i18n` catalog
+  (`rust/crates/ds-i18n/locales/en.yml`) via FFI — [docs/LOCALIZATION.md](docs/LOCALIZATION.md).
+- **Tests never touch live resources.** Tempdir, loopback mocks, fake children only —
+  not real config/cache/logs, hardware, credentials, audio, or network. `#[ignore]` is
+  not an escape hatch. HTTP callers (`ds-model` downloads, update-check) take a base URL
+  so tests use `httpmock` (`download.rs` / `update_check.rs` pattern: public entry with
+  real URL, `..._at(base_url, ...)` for tests). Live-network tests are bugs.
+- **Boundary errors are `Result<_, String>`.** IPC/FFI/MCP carry text. Typed enums only
+  where callers branch: `EngineError`, `HooksMergeError` / `CodexMergeError`,
+  `PreflightError`. `ds-model` retries via `io::ErrorKind` (`InvalidData` /
+  `NotFound` = permanent; `TimedOut` = transient). No anyhow/thiserror.
 
-`.github/workflows/ci.yml` is the source of truth. Use the `prepush` skill for the
-intentionally small per-commit gate and `make-release` for the wider release-only
-matrix and hygiene gates; don't silently move checks between those workflows. The
-scheduled dependency audit remains separate because advisories can appear without a
-repository change.
+## Gates
 
-## Code Comments
+`.github/workflows/ci.yml` is source of truth. `prepush` = per-commit gate;
+`make-release` = release/hygiene matrix. Don't move checks between them. Scheduled
+dependency audit stays separate.
 
-Comments must be **valuable and concise**. They exist to record what the code + names do not make obvious to a careful reader.
+## Code comments
 
-**Keep (high value):**
-- `//!` module docs that capture design rationale, historical bugs fixed, invariants, "why this shape", and non-obvious decisions.
-- `///` docs on public APIs that pin exact contracts (wire tokens, error modes, version-skew fallbacks with `#[serde(default)]`, session scoping, "HANDLE-FREE").
-- SAFETY comments that justify the precise preconditions making an `unsafe` block sound (lifetimes of data, app-signed ABI, Once serialization, intentional leaks for in-flight callbacks, etc.).
-- Notes on "single source of truth", drift/parity guards, cross-crate sharing, "LOAD-BEARING" behavior, and gotchas/races/ordering.
-- Test comments that explain *why the test exists* (the regression or invariant it pins).
+**Keep:** design rationale; public contracts (wire tokens, error modes, defaults);
+SAFETY preconditions; single-source / drift / race notes; why a test exists.
 
-**Strip or shorten (low or no value):**
-- Restatements of the obvious ("Returns the X", "increments the counter", "The foo pidfile", repeating the function signature).
-- Duplicated boilerplate across files or sites (centralize once + cross-reference).
-- Verbose re-explanations of the same concept when one canonical location + links suffices.
-- Pure "what" docs on leaf accessors, simple consts, or data variants when the name + surrounding context is clear.
+**Strip:** restating the signature; duplicated boilerplate; pure "what" on clear names.
 
-**Practical rules:**
-- One canonical explanation per concept. Use "see X" or cross-refs liberally.
-- Module `//!` for big picture + evolution. Public `///` for contracts.
-- Explicitly document non-obvious choices and the bugs they prevent.
-- Update or delete notes when the underlying behavior or rationale changes.
-- These rules were produced by a full-crate comment audit (see commit history).
+One canonical explanation per concept; cross-ref liberally. Update or delete when
+behavior changes.

@@ -3,50 +3,39 @@ name: prepush
 description: Run the exact CI gates locally, then push to origin only if they pass — so the per-commit CI on GitHub never goes red. Mirrors .github/workflows/ci.yml (script tests + clippy + Rust tests). Use when asked to push, prepush, "run CI locally", or verify a change before pushing to main.
 ---
 
-# DontSpeak — prepush (local CI gate, then push)
+# DontSpeak — prepush
 
-> **Task setup:** Before starting, read and apply
-> [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
+> Apply [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
 > [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
 
-**Source of truth:** `.github/workflows/ci.yml` — if a gate changes there, update this
-skill. Runs on any dev machine; all cargo commands run in `rust/`.
+Source of truth: `.github/workflows/ci.yml`. Cargo from `rust/`. rustfmt/rustdoc/deny
+are release-only (`make-release`).
 
-Per-commit CI runs three Linux jobs. Run the same three locally, in order, and push only
-once all are green. (rustfmt + rustdoc + cargo-deny are release-only — `ci.yml`'s
-full-matrix `hygiene` and `cargo-deny` jobs, cleaned up / cleared by `make-release`
-before tagging. swift-format is not enforced anywhere.)
+## Attribution (before commit rewrite and before push)
 
-## Commit attribution gate (run first and again immediately before push)
+Read [`docs/COMMIT-ATTRIBUTION.md`](../../../docs/COMMIT-ATTRIBUTION.md). After any
+squash/rebase/amend:
 
-Read the canonical [commit-attribution policy](../../../docs/COMMIT-ATTRIBUTION.md)
-in full before creating or rewriting a commit. This is a required pre-push gate, not
-a commit-style reminder; the policy lives only in that shared file.
-
-After the final squash, rebase, cherry-pick, or amend, inspect every outgoing commit:
 ```bash
 node scripts/agents/check-commit-attribution.mjs origin/main
 git log --format=full origin/main..HEAD
 ```
-The script enforces the mechanical trailer rules; compare the displayed model and
-effort values against the canonical policy as well. Do not push until every message
-conforms. Re-run both commands after any operation that rewrites commit messages.
 
-## The three gates
+Don't push until both pass; re-run after message rewrites.
 
-1. **Repository script tests**
+## Three gates
+
+1. **Script tests**
    ```bash
    node --test scripts/agents/agent-attribution.test.mjs scripts/ci/merge-crate-coverage.test.js
    ```
-2. **Clippy (deny warnings)**
+2. **Clippy**
    ```bash
    cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings
    ```
-   `--keep-going` surfaces lints from every crate in one run — fix any warning rather
-   than `#[allow]`-ing it away unless the user agrees. `--locked` matches CI: fail on
-   `Cargo.lock` drift instead of silently updating it.
-3. **Rust tests** (match `ci.yml`: fetch first, then offline test so Cargo and
-   HTTP clients cannot reach the network; loopback stays available for httpmock)
+   Fix warnings; don't `#[allow]` without agreement. `--locked` fails on lock drift.
+3. **Tests** (match `ci.yml`: fetch, then offline so Cargo/HTTP cannot reach the net;
+   loopback stays up for httpmock)
    ```bash
    cargo fetch --locked
    CARGO_NET_OFFLINE=true \
@@ -54,54 +43,42 @@ conforms. Re-run both commands after any operation that rewrites commit messages
    NO_PROXY=127.0.0.1,localhost,::1 HF_HUB_OFFLINE=1 \
      cargo test --workspace --locked --offline
    ```
-   On PowerShell, set the same env vars then run
-   `cargo test --workspace --locked --offline` after `cargo fetch --locked`.
+   PowerShell: set the same env vars, then `cargo test --workspace --locked --offline`
+   after `cargo fetch --locked`.
 
-If all three pass, push. If any fails, fix it and re-run.
+All green → push. Any fail → fix and re-run.
 
-## cargo-deny (release-only, not a per-commit gate)
+## cargo-deny (optional here; required at release)
 
-The two all-feature cargo-deny graphs (advisories + bans + licenses + sources against
-`deny.toml` / both lockfiles) only run in the release pipeline now — see the
-`make-release` skill.
-It's still worth running here if you touched `Cargo.toml`/`Cargo.lock` or `deny.toml`,
-so a new advisory or license doesn't surface for the first time at tag time:
+If you touched `Cargo.toml` / lock / `deny.toml`:
+
 ```bash
 cargo deny --manifest-path rust/Cargo.toml --all-features check --config rust/deny.toml
 cargo deny --manifest-path apps/linux/gtk/Cargo.toml --all-features check --config rust/deny.toml
 ```
-Install once with `cargo install cargo-deny --locked` (not part of the default
-toolchain). A new advisory or a new license entering the graph needs a considered
-`deny.toml` change (dated reason, scoped exception), not a reflexive `#[allow]`-style
-widening — see `rust/deny.toml`'s existing entries for the expected rigor.
 
-## Skill duplication check
+`cargo install cargo-deny --locked`. New advisories/licenses need a dated scoped
+exception in `deny.toml`, not a reflexive widen.
 
-The canonical and vendor-discovery skill trees must be byte-identical; see
-[`docs/AGENT-SKILLS.md`](../../../docs/AGENT-SKILLS.md). Run before every push:
+## Skill mirrors
+
 ```bash
 node scripts/agents/sync-agent-skills.mjs --check
 ```
-Drift means the canonical tree changed without regenerating every mirror. Run the
-script without `--check`, review the generated diff, then re-run the check.
+
+Drift → run without `--check`, review, re-check. See [AGENT-SKILLS.md](../../../docs/AGENT-SKILLS.md).
 
 ## Push
 
-- Confirm there's something to push (`git status`, `git log origin/main..HEAD`); stage
-  and commit per the user's intent first if there are uncommitted changes. The required
-  attribution inspection above must be clean before continuing.
-- `git push origin <branch>` (default `main`). `origin` is `delllusional/DontSpeak`.
+Confirm commits to push; attribution clean; `git push origin <branch>` (default `main`)
+to `delllusional/DontSpeak`.
 
 ## Caveats
 
-- **Linux-only gate.** Per-commit CI runs only on `ubuntu-latest`. On Windows/macOS,
-  clippy + tests compile *that host's* cfg, so Linux-only code (evdev, PipeWire,
-  uinput) isn't exercised locally. For an exact match, run both gates in a Linux
-  environment (WSL/VM/container; needs `libasound2-dev libpulse-dev pkg-config`). For
-  changes to shared/platform-agnostic code, the local run on any OS is sufficient.
-- **Per-commit scope only.** A tagged release also runs the full ubuntu+windows+macOS
-  matrix (`release.yml` → `ci.yml` with `full-matrix: true`) plus the hygiene gate;
-  that's out of scope here — use `build-*` / `make-release` for releases.
+- Per-commit CI is **Linux-only**. Local Windows/macOS won't exercise Linux cfg
+  (evdev, PipeWire, uinput). Exact match: WSL/VM with `libasound2-dev libpulse-dev
+  pkg-config`. Shared code: local OS is fine.
+- Full OS matrix + hygiene = release only (`make-release` / `build-*`).
 
 ## One-liner
 
@@ -116,4 +93,3 @@ NO_PROXY=127.0.0.1,localhost,::1 HF_HUB_OFFLINE=1 \
   cargo test --workspace --locked --offline
 cd .. && node scripts/agents/sync-agent-skills.mjs --check
 ```
-Green gates plus a conforming attribution inspection ⇒ safe to push.

@@ -1,25 +1,27 @@
 # DontSpeak
 
-A local voice layer for Claude Code, Codex, Qwen Code, and Grok CLI: your agent speaks its replies aloud, and you dictate back with one key.
+Local voice layer for Claude Code, Codex, Qwen Code, and Grok: the agent speaks
+replies aloud; you dictate back with Caps Lock.
 
 ## Install
 
-One command — it downloads the prebuilt app for your OS, wires the MCP server + voice hooks into every supported client, and launches it (the voice models download themselves on first run):
+Downloads the prebuilt app, wires MCP + hooks into supported clients, launches
+(models download on first run):
 
 ```sh
 # macOS / Linux
 curl -fsSL https://github.com/delllusional/DontSpeak/releases/latest/download/install.sh | sh
 ```
 ```powershell
-# Windows (PowerShell)
+# Windows
 irm https://github.com/delllusional/DontSpeak/releases/latest/download/install.ps1 | iex
 ```
 
-Or just tell your agent: **"Install DontSpeak.org app."** — it reads [dontspeak.org/llms.txt](https://dontspeak.org/llms.txt) and does it. Start a new session afterwards so the MCP server loads.
+Or: **"Install DontSpeak.org app."** — agent reads
+[dontspeak.org/llms.txt](https://dontspeak.org/llms.txt). Start a new session so MCP loads.
 
-**After installing:** macOS grants Accessibility + Microphone on first launch; Linux prints a one-time `sudo` udev step for Caps-Lock capture.
-
-Start any supported client through the shared launcher:
+**After install:** macOS prompts Accessibility + Microphone; Linux may need a one-time
+`sudo` udev step for Caps Lock.
 
 ```sh
 dontspeak claude
@@ -28,66 +30,62 @@ dontspeak qwen
 dontspeak grok
 ```
 
-The command preserves normal client arguments and exit status. Codex interactive launches
-also prepare its app-server stream so `shorts` and digest narration work mid-turn. Client
-capabilities and upstream-specific flags are documented in
-[Client integrations and launchers](docs/CLIENT-INTEGRATIONS.md).
+Preserves client args and exit status. Codex interactive launches also prep app-server
+streaming. Details: [docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md).
 
-**Update:** re-run the install command. It stops and replaces the app, re-wires clients,
-and relaunches. The in-app version pill only signals an available update.
+**Update:** re-run install (stop/replace/re-wire/relaunch). In-app version pill only
+signals availability.
 
-**Build from source (developers):** `git clone https://github.com/delllusional/DontSpeak && cd DontSpeak && ./scripts/install/local/install.sh` (needs a Rust toolchain).
+**From source:** `git clone … && ./scripts/install/local/install.sh` (Rust toolchain).
 
-**Uninstall** (app, integrations, data, and models): macOS/Linux —
-`~/.local/bin/dontspeak-uninstall` (or `scripts/install/bundle/uninstall.sh` from a checkout); Windows —
-Settings › Apps › DontSpeak. To keep the app but exclude a client, add it to
-`exclude_clients` in `config.toml`; boot reconciliation restores the configured wiring.
+**Uninstall:** macOS/Linux `~/.local/bin/dontspeak-uninstall` (or
+`scripts/install/bundle/uninstall.sh`); Windows Settings › Apps › DontSpeak. Keep app
+but drop a client: `exclude_clients` in `config.toml`.
 
 ## What it does
 
-- **Speaks the agent's replies** aloud through a local neural voice, or the OS system voice.
-- **Turn digests** — a per-turn instruction has the agent summarize the full reply in short `> ` lines, which are spoken verbatim. Blockquote-free short replies can be spoken whole.
-- **Caps Lock to talk** — tap to start/stop, double tap skips speech (or pastes without Enter after dictation), long press cancels.
-- **Hands-free mode** — an optional always-listening mode that dictates continuously without the key (see [docs/ALWAYS-LISTENING.md](docs/ALWAYS-LISTENING.md)).
-- **Driven over MCP** — voices, language, engine, rate, and toggles are all tools your agent can call.
-- Speaker diarization and speaker-lock are implemented but hidden pending the validation tracked in issue #77.
+- Speaks replies (neural or OS voice)
+- Turn digests — agent summarizes in short `>` lines, spoken verbatim; short non-quote
+  replies can speak whole
+- Caps Lock talk — tap start/stop; double-tap skip/paste-without-Enter; long-press cancel
+- Optional always-listening: [docs/ALWAYS-LISTENING.md](docs/ALWAYS-LISTENING.md)
+- MCP tools for voice/engine/rate/toggles
+- Diarization implemented but hidden (issue #77)
 
 ## Caps Lock gestures
 
-The Caps-Lock LED is the state light: **lit = recording, dark = idle.**
+LED: **lit = recording, dark = idle.**
 
 | Gesture | Dark (idle) | Lit (recording) |
 |---|---|---|
-| **Single tap** | Start recording (or pause the voice if dictation is off) | Stop and submit (paste + Enter) |
-| **Long press** | Silence the voice | Discard dictation and silence the voice |
-| **Double tap** | Skip the current spoken message | Stop and paste **without** Enter |
+| **Single tap** | Start recording (or pause voice if dictation off) | Stop + submit (paste + Enter) |
+| **Long press** | Silence | Discard + silence |
+| **Double tap** | Skip current spoken message | Stop + paste **without** Enter |
 
-An idle double tap only applies while speech is playing; otherwise the first tap starts
-recording immediately. A second stop tap flips submit and insert-only for local transcription
-(Parakeet or system). `double_tap_submits` (default `false`) swaps those gestures, and
-`long_press_ms` sets the long-press threshold. [Always-listening mode](docs/ALWAYS-LISTENING.md)
-does not use Caps Lock.
+Idle double-tap only while speech plays; else first tap starts recording.
+`double_tap_submits` (default false) swaps stop gestures; `long_press_ms` sets threshold.
+Always-listening does not use Caps Lock.
 
 ## Models & runtimes
 
-- **TTS** — Kokoro-82M, or the OS system voice.
-- **STT** — a built-in streaming recognizer (NeMo FastConformer 80ms across platforms;
-  Parakeet TDT 0.6b v2 via Core ML on macOS), the macOS system recognizer, or Claude Code's
-  dictation. See [the STT pipeline](docs/STT-PIPELINE.md) for capture and recovery behavior.
-- Diarization uses pyannote segmentation, WeSpeaker embeddings, and SepFormer separation; its public rollout is tracked in issue #77.
+- **TTS** — Kokoro-82M or OS voice
+- **STT** — streaming FastConformer (80 ms); Parakeet TDT via Core ML on macOS; macOS
+  system recognizer; Claude Code dictation. See [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md)
+- Diarization (pyannote / WeSpeaker / SepFormer) — issue #77
 
-Each model runs on the fastest backend available, picked by the `provider` ladder (`["ane", "cuda", "cpu"]`):
+`provider` ladder default `["ane", "cuda", "cpu"]`:
 
 | Platform | Backend |
 |---|---|
-| macOS (Apple Silicon) | Apple Neural Engine via FluidAudio Core ML → ONNX Runtime CPU |
-| Windows (x86_64) | ONNX Runtime CUDA (NVIDIA GPU) → CPU |
-| Linux (x86_64) | ONNX Runtime CUDA (NVIDIA GPU) → CPU |
+| macOS Apple Silicon | ANE (FluidAudio Core ML) → ORT CPU |
+| Windows / Linux x86_64 | ORT CUDA → CPU |
 
 ## MCP tools
 
-`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `list_voices` · `set_config` — full descriptions and parameters in [docs/MCP-TOOLS.md](docs/MCP-TOOLS.md). The implemented `diarize` and `manage_speakers` tools remain hidden under issue #77. Client wiring is automatic (the engine converges each client to `config.toml`'s `exclude_clients` at boot); inspect or change it with `dontspeak wire --list` and `dontspeak wire <client>`.
+`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `list_voices` · `set_config` —
+[docs/MCP-TOOLS.md](docs/MCP-TOOLS.md). Wiring automatic (`exclude_clients`); inspect with
+`dontspeak wire --list` / `wire <client>`.
 
 ## License
 
-[MIT](LICENSE). Third-party model and dependency attributions are in [NOTICE.md](NOTICE.md).
+[MIT](LICENSE). Third-party: [NOTICE.md](NOTICE.md).

@@ -1,49 +1,37 @@
 # Speech-to-text pipeline
 
-This document describes the built-in dictation path: streaming FastConformer on
-Windows/Linux, Core ML Parakeet on Apple Silicon, and macOS System Speech. The selected
-provider is used for both Caps-Lock dictation and always-listening mode.
+Built-in dictation: streaming FastConformer (Windows/Linux), Core ML Parakeet
+(Apple Silicon), macOS System Speech. Same provider for Caps-Lock and always-listening.
 
-## Flow and ownership
+## Ownership
 
-The engine owns capture lifecycle and delivery. `ds-helper` owns the warm local
-recognizer, and delivers partial and final transcripts over its stdout protocol. Capture,
-inference, and always-listening work run off the app UI and engine poll threads.
+Engine owns capture lifecycle and delivery. `ds-helper` owns the warm recognizer and
+partial/final transcripts on stdout. Capture/inference run off UI and poll threads.
 
-Only one logical helper listen session may run at a time. Sessions use generations and an
-early-cancel flag, so a stop that arrives before a worker begins cannot be lost. After a
-stop, finalization is bounded: 10 seconds for Parakeet and 35 seconds for System Speech.
-A wedged helper is terminated and restarted rather than leaving dictation unavailable.
+One logical helper listen session at a time (generations + early-cancel). Finalization
+timeouts: 10 s Parakeet, 35 s System Speech. Wedged helper is killed and restarted.
+Helper can start STT without loading TTS or opening an output device.
 
-The helper can start for STT without loading TTS or opening an output device. It keeps only
-the selected streaming backend resident, avoiding a second steady-state recognizer.
+## Capture and delivery
 
-## Capture and transcript delivery
+Resample to 16 kHz + configured gain. Half-duplex CPAL callback → bounded lock-free
+ring (no alloc/wait). Speaker-lock filter on finals when that mode is on.
 
-Streaming capture is incrementally resampled to 16 kHz and applies configured gain. The
-half-duplex CPAL callback writes to a bounded lock-free ring, so it neither allocates nor
-waits for the consumer. The speaker-lock fallback is applied to finals when that hidden mode
-is enabled.
-
-Partials are newest-value updates, not an unbounded queue: a slow platform UI receives the
-latest state rather than replaying stale transcript work. Final transcripts keep their
-session association until the engine completes the dictation action.
+Partials: newest-value only (slow UI gets latest, not backlog). Finals keep session
+association until the engine finishes the action.
 
 ## Platform recovery
 
-- Linux reconnects the PulseAudio/PipeWire echo-cancelled source after a read failure.
-  Reconnect retries every 500 ms; it currently has no UI-facing terminal-failure state.
-- Windows reconnects WASAPI capture and resamples a changed device rate back to the stable
-  published rate. Its capture state exposes a recoverable error while reconnecting.
-- macOS detects a System Speech phrase reset from either a shorter hypothesis or a 0.65-second
-  gap before an unrelated replacement phrase. Hardware telemetry showed that System Speech can
-  repeat an unchanged partial at the boundary, so duplicates do not refresh the last-change
-  clock. Measuring from the last actual text change preserves the threshold's separation from
-  ordinary low-prefix revisions, which were observed at gaps up to 0.306 seconds.
+- **Linux** — reconnect Pulse/PipeWire echo-cancelled source every 500 ms after read
+  failure; no UI terminal-failure state yet.
+- **Windows** — reconnect WASAPI; resample device rate changes to published rate;
+  recoverable error while reconnecting.
+- **macOS System Speech** — phrase reset from shorter hypothesis or 0.65 s gap before
+  replacement. Unchanged partials don't refresh the last-change clock (duplicates at
+  boundary). Threshold stays above ordinary low-prefix revisions (≤ ~0.306 s observed).
 
-## Verification boundaries
+## Verification
 
-Regression coverage protects incremental resampling and gain, cancellation before listen
-startup, exclusive listen ownership, bounded finalization recovery, provider changes while
-always-listening, capture reconnect-rate continuity, and newest-only UI delivery. Hardware
-latency measurements remain release-platform work; unit tests do not claim timing percentiles.
+Covered: resampling/gain, cancel-before-listen, exclusive listen, finalization recovery,
+provider change while always-listening, reconnect rate continuity, newest-only UI.
+Hardware latency percentiles are release-platform work, not unit tests.

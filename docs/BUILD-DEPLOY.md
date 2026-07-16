@@ -1,116 +1,86 @@
-# Build & deploy — what a code change actually deploys to
+# Build & deploy
 
-Each of the three OS hosts **hosts the engine in-process** and spawns a **warm
-child** for synthesis, so one repo has three runtime pieces per OS that deploy by
-three different routes. Rebuilding the wrong one leaves the app running stale code
-that *looks* installed — always check which route a change needs before concluding
-it works. The three pieces are the same shape on every OS; only the build/install
-mechanics differ, so pick your OS's table below.
+Each OS host runs the engine in-process and spawns a warm synth child. Three runtime
+pieces, three deploy routes — wrong rebuild = stale code that *looks* installed.
 
-## The three pieces and how each reaches the running app
+## Pieces per OS
 
 ### macOS
 
-| Piece | What it is | Built+installed by | What the RUNNING APP actually executes |
-|---|---|---|---|
-| `dontspeak` | the CLI: client launcher, MCP server, and hook entries (`notify`/`provide`) | `install-engine.sh` → `~/.local/bin/dontspeak` | **`~/.local/bin/dontspeak`** — launch commands and wired hooks execute this copy, so this IS live after install-engine |
-| `ds-helper` | the warm TTS/STT synthesis child | `install-engine.sh` → `~/.local/bin/ds-helper` **AND** `bundle.sh` → `DontSpeak.app/Contents/MacOS/ds-helper` | **the BUNDLED copy** — the app spawns `Contents/MacOS/ds-helper`; the `~/.local/bin` copy is not what the app uses |
-| engine (`dontspeakd` logic) | the in-process engine (queue, IPC, playback, `ds_wire::reconcile` at boot) | `bundle.sh` → linked into the `DontSpeak.app` binary | **the app binary** — the engine is linked in and runs in-process |
+| Piece | Built+installed by | Running app uses |
+|---|---|---|
+| `dontspeak` (CLI / MCP / hooks) | `install-engine.sh` → `~/.local/bin/dontspeak` | that path (live after install) |
+| `ds-helper` | `install-engine.sh` **and** `bundle.sh` → app bundle | **bundled** `Contents/MacOS/ds-helper` |
+| engine (`dontspeakd`) | `bundle.sh` → linked into app | **app binary** |
 
-Use the `build-macos` skill rather than hand-rolling `install-engine.sh`/`bundle.sh`.
+Use `build-macos` skill.
 
 ### Windows
 
-| Piece | What it is | Built+installed by | What the RUNNING APP actually executes |
-|---|---|---|---|
-| `dontspeak.exe` | the CLI: client launcher, MCP server, and hook entries | `build-portable.ps1` → local archive → `scripts/install/web/install.ps1` → `%LOCALAPPDATA%\Programs\DontSpeak\dontspeak.exe` | **the installed `dontspeak.exe`** — launch commands and wired hooks execute this copy, so a reinstall is live immediately |
-| `ds-helper.exe` | the warm TTS/STT synthesis child | `build-portable.ps1` (`dotnet publish` output dir), extracted alongside `ds-winui.exe` | **the extracted copy** — `ds-winui.exe` spawns it from its own install dir |
-| engine (`dontspeakd` logic) + `ds_core.dll` | the in-process engine, hosted via P/Invoke, `ds_wire::reconcile` at boot | `build-portable.ps1` (`dotnet publish` of `DontSpeak.WinUI.csproj`) → `ds-winui.exe` + `ds_core.dll` | **`ds-winui.exe`** with the extracted `ds_core.dll` — the engine is linked in and runs in-process |
+| Piece | Built+installed by | Running app uses |
+|---|---|---|
+| `dontspeak.exe` | `build-portable.ps1` → `install.ps1` → `%LOCALAPPDATA%\Programs\DontSpeak\` | installed `dontspeak.exe` |
+| `ds-helper.exe` | `build-portable.ps1` next to `ds-winui.exe` | install-dir copy |
+| engine + `ds_core.dll` | `dotnet publish` WinUI | `ds-winui.exe` + extracted DLL |
 
-Use the `build-windows` skill's flow 2 (build + run `scripts/install/web/install.ps1` against the local
-archive) so the dev deployment receives the same registration, wiring, and teardown
-surface as a release install.
+Use `build-windows` flow 2 (local archive + `scripts/install/web/install.ps1`) so
+registration matches release.
 
 ### Linux
 
-| Piece | What it is | Built+installed by | What the RUNNING APP actually executes |
-|---|---|---|---|
-| `dontspeak` | the CLI: client launcher, MCP server, and hook entries | `scripts/install/local/install.sh` → `~/.local/bin/dontspeak` | **`~/.local/bin/dontspeak`** — launch commands and wired hooks execute this copy, so this IS live after `install.sh` |
-| `ds-helper` | the warm TTS/STT synthesis child | `scripts/install/local/install.sh` → `~/.local/bin/ds-helper` | **the installed copy** — spawned from `~/.local/bin` |
-| engine (`dontspeakd` logic) | the in-process engine (queue, IPC, playback, `ds_wire::reconcile` at boot) | `apps/linux/install-gui.sh` (`cargo build --release` in `apps/linux/gtk`) → `~/.local/bin/ds-gtk` | **`~/.local/bin/ds-gtk`** — the engine is linked in and runs in-process |
+| Piece | Built+installed by | Running app uses |
+|---|---|---|
+| `dontspeak` | `scripts/install/local/install.sh` → `~/.local/bin/dontspeak` | that path |
+| `ds-helper` | same install.sh | `~/.local/bin/ds-helper` |
+| engine | `apps/linux/install-gui.sh` → `~/.local/bin/ds-gtk` | `ds-gtk` |
 
-Use the `build-linux` skill (flow 2: `scripts/install/local/install.sh` then
-`apps/linux/install-gui.sh`) rather than hand-rolling the two installs.
+Use `build-linux` flow 2 (`install.sh` then `install-gui.sh`).
 
-## The rule
+## Which route for which change
 
-- **Hook / MCP-surface change** (the `notify`/`provide` hook routing, `mcp`/`tools`,
-  config parsing read by the hook): the CLI-only rebuild is enough — hooks invoke
-  the installed `dontspeak`/`dontspeak.exe` fresh each time, so it's live
-  immediately (re-run `wire claude_code` only if the hook set changed). macOS:
-  `install-engine.sh`. Windows: install the local `build-portable.ps1` archive. Linux:
-  `scripts/install/local/install.sh`. **Unless the change touches the IPC wire protocol** — see the
-  lockstep rule below.
-- **Engine or helper change** (`dontspeakd`, `ds-tts`/`ds-stt`, the TTS
-  queue/synth/chunking, IPC handlers): rebuild the OS host app, then relaunch it.
-  The CLI-only rebuild does not update the bundled helper or the in-process engine.
-  macOS: `./apps/macos/bundle.sh`. Windows: `build-portable.ps1` (or the manual
-  `ds_core.dll`/`ds-helper.exe` copy below). Linux: `apps/linux/install-gui.sh`.
-- **Wiring-shaper change** (`ds-config::wire::*`, `ds-wire` — the code that decides
-  *what* gets written to each client's hook/MCP config): rebuilding just the CLI is
-  **not** enough, even though the CLI is what writes the wiring. The host app links
-  the same wiring code and calls `ds_wire::reconcile` at boot (and again on config
-  change) — a stale host app rewrites the OLD wiring at its next launch and silently
-  reverts the fix. Rebuild the host app too (same route as an engine change, above),
-  not just the CLI.
+- **Hook / MCP surface only** (notify/provide routing, tools, config the hook reads):
+  CLI rebuild is enough. macOS `install-engine.sh`; Windows portable install; Linux
+  `install.sh`. Re-wire only if the hook set changed. **Exception:** IPC schema
+  change → lockstep below.
+- **Engine or helper** (`dontspeakd`, `ds-tts`/`ds-stt`, queue/synth, IPC handlers):
+  rebuild host app + relaunch. CLI-only does not update engine or bundled helper.
+  macOS `bundle.sh`; Windows `build-portable.ps1`; Linux `install-gui.sh`.
+- **Wiring shapers** (`ds-config::wire::*`, `ds-wire`): host app also links this and
+  runs `ds_wire::reconcile` at boot — stale host rewrites old wiring. Rebuild host
+  too, not just CLI.
 
-### The CLI and the engine deploy TOGETHER — the wire protocol is not versioned
+### CLI + engine lockstep (unversioned wire protocol)
 
-`ds-ipc`'s `Request` schema is **strict in both directions**: an unknown field is an
-error, and a *missing* required field is an error. There is no negotiated version, no
-`#[serde(default)]` escape hatch, and backward compatibility across a skew is
-explicitly not a goal. So the CLI (`~/.local/bin/dontspeak`, which is what every hook
-and the MCP server execute) and the engine (linked into the running host app) are ONE
-deployable, even though they reach the machine by two different routes above.
+`ds-ipc` `Request` is strict both ways: unknown or missing required fields error. No
+negotiated version. CLI and engine are one deployable despite two install routes.
 
-The live example: every client-originated request carries a **required
-`source: ClientSource`** naming which client sent it (the hook's `--client <token>`
-verb; the MCP `initialize` handshake's `clientInfo`). Reinstall only the CLI and the
-old app keeps running an engine that has never heard of `source` — or, the way it
-actually bites, rebuild only the app and the stale CLI keeps sending lines without one.
-The engine then rejects **every** greet / mark_active / session_end / stop_speech /
-speak / narration / earcon with ``bad request: missing field `source` ``.
-
-**How you'd notice** — and the reason this section exists: you mostly *wouldn't*. The
-hooks discard the engine's reply and exit 0, so nothing appears at the terminal; the
-voice loop just goes quiet with no error anywhere the user looks. The one diagnostic is
-engine-side, in the activity log (the app's Logs tab):
+Example: required `source: ClientSource` on every client request. Partial reinstall →
+engine rejects greet/speak/etc. with ``missing field `source` ``. Hooks discard the
+reply and exit 0 — voice goes quiet with no terminal error. Activity log:
 
 ```
-WARN engine rejected request (cmd=greet_session): missing field `source` … — caller and engine are out of sync; reinstall the CLI and restart the app (docs/BUILD-DEPLOY.md)
+WARN engine rejected request (cmd=greet_session): missing field `source` …
 ```
 
-Seeing that line means exactly one thing: **rebuild and redeploy both pieces** (the
-per-OS `build-*` skill does both), then relaunch the app. Treat "voice silently stopped
-working after I reinstalled one piece" as this until the log says otherwise.
+Fix: redeploy **both** CLI and host (`build-*` skill), relaunch app.
 
-For fast iteration, a manual copy-and-relaunch can stand in for a full host rebuild:
+### Fast iteration (manual copy)
 
-**macOS** — the copied binary must be re-signed or the app SIGKILLs it:
+**macOS** — re-sign or the app SIGKILLs the helper:
+
 ```sh
 cargo build --release -p ds-helper --manifest-path rust/Cargo.toml
 osascript -e 'quit app "DontSpeak"'; pkill -9 -f dontspeak
 cp rust/target/release/ds-helper "$HOME/Applications/DontSpeak.app/Contents/MacOS/ds-helper"
-codesign --force --sign - "$HOME/Applications/DontSpeak.app/Contents/MacOS/ds-helper"  # required — a copied binary is SIGKILLed until re-signed
+codesign --force --sign - "$HOME/Applications/DontSpeak.app/Contents/MacOS/ds-helper"
 open "$HOME/Applications/DontSpeak.app"
 ```
 
-**Windows** — stop processes before copying, or the copy fails with a file-in-use error.
-`ds-core` (the FFI cdylib) must build under the `release-ffi` profile, not plain
-`release` — see `DontSpeak.WinUI.csproj`'s comment on `CargoFfiOutDir`:
+**Windows** — stop processes first; `ds-core` needs `release-ffi`:
+
 ```powershell
-cargo build --release -p ds-helper --manifest-path rust\Cargo.toml           # helper
-cargo build --profile release-ffi -p ds-core --manifest-path rust\Cargo.toml # engine/FFI surface
+cargo build --release -p ds-helper --manifest-path rust\Cargo.toml
+cargo build --profile release-ffi -p ds-core --manifest-path rust\Cargo.toml
 $dest = Join-Path $env:LOCALAPPDATA 'Programs\DontSpeak'
 $destPrefix = [IO.Path]::GetFullPath($dest).TrimEnd('\') + '\'
 $installed = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
@@ -126,23 +96,16 @@ Copy-Item rust\target\release-ffi\ds_core.dll "$dest\ds_core.dll" -Force
 Start-Process "$dest\ds-winui.exe"
 ```
 
-**Linux** — `install-gui.sh` already IS the fast path (release build + install in one step):
-```sh
-apps/linux/install-gui.sh
-```
+**Linux:** `apps/linux/install-gui.sh`
 
 ### Symptom → diagnosis
 
-Voice gone *entirely* quiet (no greet, no speech, no earcons) right after a partial
-reinstall is the CLI/engine skew above — check the activity log for a `rejected request`
-WARN before debugging anything else.
+Voice fully quiet after partial reinstall → check activity log for `rejected request`
+before anything else.
 
-A source fix that "has no effect" on synthesis/queue/IPC while the binary and tests
-are clearly updated means the app is running its stale bundled helper or engine.
-Confirm with a functional probe rather than `strings` (release binaries are stripped,
-so grepping for a symbol gives false negatives) — e.g. fire a long `speak` and check
-the per-OS `ds-helper.log` (a sibling of the main activity log, same directory) for
-`phonemeSequenceTooLong` to catch a stale helper:
+"Fix has no effect" on synth/queue/IPC while binaries look updated → stale helper or
+engine. Probe functionally (release bins are stripped — `strings` false-negatives).
+e.g. long `speak` + `ds-helper.log` for `phonemeSequenceTooLong`:
 
 | OS | `ds-helper.log` |
 |---|---|
@@ -150,42 +113,30 @@ the per-OS `ds-helper.log` (a sibling of the main activity log, same directory) 
 | Windows | `%LOCALAPPDATA%\DontSpeak\logs\ds-helper.log` |
 | Linux | `${XDG_STATE_HOME:-~/.local/state}/dontspeak/logs/ds-helper.log` |
 
-## Debugging Claude Code hooks
+## Debugging hooks
 
-When a hook payload seems to be missing a field, capture the raw event instead of
-guessing the schema — temporarily log it at the top of the `notify` entry in
-`main.rs`, before `hook_core::notify(...)` runs, then install and trigger a tool.
-
-Ground truths from doing this: `PostToolUse` fires with a rich payload —
-`{ hook_event_name, session_id, tool_name, tool_input{...}, tool_response{...},
-permission_mode, cwd, ... }` (for Bash, `tool_input.description` is the best spoken
-cue). The hook itself is a fresh short-lived process that loads `VoiceConfig` from
-`Paths::resolve().config_toml`, i.e.:
+Missing hook field: log raw stdin at top of `notify` in `main.rs` before
+`hook_core::notify`, reinstall, trigger. `PostToolUse` carries rich payload
+(`tool_name`, `tool_input`, …). Hook process loads `VoiceConfig` from
+`Paths::resolve().config_toml`:
 
 | OS | `config.toml` |
 |---|---|
-| macOS | `~/Library/Application Support/DontSpeak/config.toml` (the live directory is `DontSpeak/`, not the older `org.dontspeak.DontSpeak/`) |
+| macOS | `~/Library/Application Support/DontSpeak/config.toml` |
 | Windows | `%APPDATA%\DontSpeak\config.toml` |
 | Linux | `${XDG_CONFIG_HOME:-~/.config}/dontspeak/config.toml` |
 
-## Config defaults can mask a deploy/read bug
+## Config defaults can mask deploy bugs
 
-`narrate` defaults to both kinds on (`["shorts", "digests"]`), and `greet_on_open`
-also defaults on; most other flags (`full_duplex`, the needs-input earcon, …) default off. A config read
-from the wrong path can leave default-on narration working while a default-off opt-in
-stays silently off — reading as "the new feature is broken" when the real fault is
-the config path or a stale deploy. When an opt-in stays silent, confirm the reader
-sees it set (log `cfg.<field>` and `paths.config_toml`) before touching feature logic.
+`narrate` and `greet_on_open` default on; many opt-ins default off. Wrong config path
+→ default-on still "works", opt-in stays silent. Log `cfg.<field>` and
+`paths.config_toml` before debugging feature logic.
 
-## TTS phoneme cap — both engines share one frontend
+## TTS phoneme cap
 
-Route text through `ds_tts::g2p::phoneme_batches_for` before selecting a synthesis
-backend. It parses spoken prose (as GitHub-flavored Markdown), normalizes English numbers,
-runs the contextual G2P once, drops any character outside Kokoro's phoneme vocabulary (with a
-warning — a stray character must not silence the reply), and returns typed batches no longer
-than 509 phoneme characters. Vocabulary filtering maps each retained character to one token, so
-the token count is no greater. An empty batch list means "nothing speakable", which is a
-successful no-op, not a synthesis failure.
-The effective limit is 509 rather than the advertised 510 because the ONNX voice-style table
-has rows zero through 509 and is indexed by token count. ONNX and the FluidAudio Core ML shim
-must consume those exact IPA batches; do not add a backend-local text splitter or G2P path.
+Route text through `ds_tts::g2p::phoneme_batches_for` before backend selection. It
+parses spoken prose (GFM Markdown), normalizes English numbers, runs G2P once, drops
+out-of-vocab phonemes (warn; don't fail the utterance), returns batches ≤ 509 phoneme
+chars. Empty list = successful no-op. Cap is 509 (not 510) because style table rows
+are `0..=509` indexed by token count. Both ONNX and Core ML consume those IPA batches
+— no backend-local G2P/splitter.

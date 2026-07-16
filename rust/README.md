@@ -1,136 +1,74 @@
 # dontspeak — Rust workspace
 
-The all-Rust engine: synthesis is in-process native Kokoro (`ort` + `voice-g2p` +
-`rodio`), no Python at runtime. Under the single-process model (see
-[../ARCHITECTURE.md](../ARCHITECTURE.md)), `dontspeakd`'s `engine_run` is a library
-that each OS app hosts in-process via the `ds-core` C ABI — there is no standalone
-engine binary or daemon. The Claude Code hooks and the MCP server are both the one
-merged `dontspeak` binary, talking to the hosted engine over a Unix-domain socket
-(`dontspeak.sock`, NDJSON) and never loading a model themselves.
+In-process Kokoro TTS (`ort` + `voice-g2p` + `rodio`); no Python runtime.
+`dontspeakd::engine_run` is a library each OS app hosts via `ds-core` C ABI — no
+standalone daemon. Hooks and MCP are the `dontspeak` binary over `dontspeak.sock`
+(NDJSON); they never load models. Design: [../ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## Status
 
-| Target | `ds-platform` impl | Built + tested in CI |
+| Target | `ds-platform` | CI |
 | --- | --- | --- |
-| macOS (Apple Silicon) | IOKit lock-state FFI, core-graphics CGEventPost, NSWorkspace | **YES — `macos-26`** |
-| Windows | `windows` crate: GetKeyState / SendInput / GetForegroundWindow | **YES — `windows-2025`** |
-| Linux | evdev (LED) + uinput + x11rb (Wayland degraded) | **YES — `ubuntu-latest`** |
-
-Build host: cargo (Homebrew), `aarch64-apple-darwin`; the full OS matrix runs in CI.
+| macOS Apple Silicon | IOKit, CGEventPost, NSWorkspace | `macos-26` |
+| Windows | GetKeyState / SendInput / GetForegroundWindow | `windows-2025` |
+| Linux | evdev + uinput + x11rb (Wayland degraded) | `ubuntu-latest` |
 
 ## Crates
 
 ```
-rust/
-  crates/
-    ds-config/    # paths + config.toml + client-integration shapers + config enums
-    ds-client/    # the ONE client-identity enum (ClientSource: claude_code | codex |
-                  #   qwen_code | grok | dontspeak | unknown), shared by the wiring, the
-                  #   hook `--client` verb, the ds-ipc `source` field, the MCP
-                  #   `clientInfo` mapping and the log's `client=` suffix. A leaf (serde
-                  #   only) so it can sit BELOW ds-log and ds-ipc without a cycle
-    ds-log/       # the workspace-wide unified activity log (engine/hooks/mcp/helper
-                  #   share one file) — split out of ds-config (issue #6)
-    ds-earcon/    # audible earcons (OS bundled-sound introspection + cue resolution)
-                  #   — split out of ds-config (issue #6)
-    ds-ipc/       # NDJSON RPC over dontspeak.sock — protocol + server + client
-                  #   (engine is the server; app/hooks are clients). Its own
-                  #   independent cargo-fuzz workspace lives at fuzz/ — see
-                  #   fuzz/README.md (Unix/nightly-only, scheduled CI, not part of
-                  #   this workspace's build/clippy/test)
-    ds-proc/      # pidfile single-speaker (atomic tempfile) + process-group kill
-    ds-platform/  # KeyInjector / FrontmostWindow / CapsKeyMonitor traits, one impl
-                  #   per OS (macos.rs, windows.rs, linux.rs)
-    ds-model/     # download + checksum-verify Kokoro/onnx/Parakeet assets; the shared
-                  #   ORT session builder; the macOS FluidAudio shim loader
-    ds-voices/    # voice/language enumeration (Kokoro voices bin + `say -v ?`), split out
-                  #   of ds-tts so the CLI can list voices without the synth stack
-    ds-tts/       # native Kokoro TTS pipeline (the Tts trait)
-    ds-stt/       # STT engines: streaming FastConformer Parakeet, ClaudeNative
-                  #   (delegates to Claude Code's own push-to-talk), SystemStt
-    ds-aec/       # echo-cancelled duplex-audio primitive (macOS VPIO, Windows WASAPI)
-    ds-helper/    # bin: the warm native-media child process — unions ds-tts + ds-stt +
-                  #   ds-aec, one-shot (cold) and --serve (warm) modes
-    ds-helper-proto/ # the helper's stdout reply-token vocabulary (shared emit/parse consts)
-    ds-engines/   # make_stt engine factory (config → boxed STT engine)
-    ds-tools/     # the MCP tool catalog — single source for MCP and the app's Tools view
-    ds-i18n/      # the shared UI string catalog (locales/en.yml), rendered over the FFI
-    ds-status/    # the model_status engine→UI contract (serde source of truth)
-    ds-narrate/   # the shared streaming-narration core (accumulation, digests, the
-                  #   per-session streaming witness) behind the CC/Qwen hook adapters
-                  #   and the engine's Codex app-server subscriber
-    ds-core/      # cdylib/staticlib FFI each app links; engine-client calls
-    dontspeakd/   # the engine itself (Caps loop, warm TTS+STT helper, IPC server) —
-                  #   a library, hosted in-process via ds-core
-    dontspeak/    # bin: the one multi-call client — no args runs the stdio MCP server;
-                  #   `notify` is the command hook sink; `provide` is the query hook;
-                  #   `wire <client>` installs integrations; `<client>` launches them
+rust/crates/
+  ds-config/       # paths, config.toml, client wiring, config enums
+  ds-client/       # ClientSource enum (leaf: wiring, hooks, IPC, MCP, logs)
+  ds-log/          # unified activity log
+  ds-earcon/       # OS sound introspection + cue resolution
+  ds-ipc/          # NDJSON RPC (server=engine; fuzz workspace under fuzz/)
+  ds-proc/         # pidfile + process-group kill
+  ds-platform/     # KeyInjector / FrontmostWindow / CapsKeyMonitor per OS
+  ds-model/        # download + checksum; ORT session; FluidAudio shim loader
+  ds-voices/       # voice/language enum (no full synth stack)
+  ds-tts/          # Kokoro TTS (Tts trait)
+  ds-stt/          # Parakeet / ClaudeNative / SystemStt
+  ds-aec/          # echo-cancelled duplex (VPIO / WASAPI / Pulse)
+  ds-helper/       # warm TTS+STT child (one-shot + --serve)
+  ds-helper-proto/ # stdout reply tokens
+  ds-engines/      # STT factory
+  ds-tools/        # MCP tool catalog
+  ds-i18n/         # UI strings (locales/en.yml)
+  ds-status/       # model_status contract
+  ds-narrate/      # streaming narration core
+  ds-core/         # cdylib/staticlib FFI
+  dontspeakd/      # engine library (Caps, helper, IPC)
+  dontspeak/       # multi-call CLI: MCP / notify / provide / wire / launch
 ```
 
-See [../ARCHITECTURE.md](../ARCHITECTURE.md) for the cross-cutting roles (engine, hooks,
-FFI surface, pluggable engines); this file is the crate-level map.
+## macOS platform
 
-## macOS platform impl
-
-Caps-Lock input and output stay independent: the physical key (`iohid.rs`, via
-`IOHIDManager`) publishes down/up edges that drive the engine's tap / long-press gesture
-machine, gated on the Accessibility grant; the LED (`macos.rs` / `iokit.rs`) is an
-output the engine lights on each gesture edge. The shared cross-platform acquisition
-sequence clears any logical Caps state left on before DontSpeak owns the key; runtime
-gesture state never comes from the logical toggle or LED. Dictation's push-to-talk tap
-is a `CGEvent` posted at the session level for the configured `voice:pushToTalk` chord.
-`AXIsProcessTrusted()` gates only the caps loop — TTS/STT keep working without
-Accessibility, and trust granted later is picked up on the next reload.
+Physical Caps (`iohid.rs`) drives gestures; LED is pure output. Acquisition clears
+pre-existing logical Caps. `CGEvent` posts `voice:pushToTalk`. Accessibility gates only
+the caps loop — TTS/STT work without it; late trust picked up on reload.
 
 ## Hook protocol
 
-Every voice hook reads one hook JSON object from stdin for its ambient `session_id`
-and talks to the warm engine over the socket; none of them synthesize themselves — the
-engine owns playback — and all are best-effort (engine down means no-op, never
-blocking Claude). The two entries split by contract: `dontspeak notify` (fire-and-forget
-command sink) and `dontspeak provide` (query, returns `hookSpecificOutput`), both
-routing internally on `hook_event_name`. See
-[the hook executor document](../docs/HOOKS.md) for the full
-event→verb table.
+Hooks read session JSON from stdin, talk to engine over the socket, never synthesize.
+`dontspeak notify` (fire-and-forget) vs `dontspeak provide` (query). Event table:
+[../docs/HOOKS.md](../docs/HOOKS.md).
 
-`dontspeak wire claude_code` writes inline command hooks into `settings.json` via
-`ds-config`'s safe merge, touching only the `hooks` object and
-`preferredNotifChannel`. DontSpeak's own settings (voice pool, engine selectors,
-`caps_enabled`, …) live in `config.toml`, set via the `set_config` MCP tool —
-`settings.json` stays purely Claude Code's own.
+`wire claude_code` merges only `hooks` + `preferredNotifChannel` in `settings.json`.
+DontSpeak settings stay in `config.toml` via MCP `set_config`.
 
-## Build / test / run
+## Build / test
 
 ```sh
-cargo build --release            # all binaries, lto + codegen-units=1
-cargo test                       # whole workspace
+cargo build --release
+cargo test
 ```
 
-See the "Code Comments" section in `../AGENTS.md` for guidelines on keeping Rust comments valuable and concise. The audit that produced those rules is in recent git history.
+Comment style: [../AGENTS.md](../AGENTS.md) § Code comments. Hosting:
+[../docs/BUILD-DEPLOY.md](../docs/BUILD-DEPLOY.md).
 
-On macOS the engine runs in-process inside `DontSpeak.app`
-(`../apps/macos/bundle.sh`); Caps-Lock dictation needs the Accessibility grant. See
-[../README.md](../README.md) for install + the smoke test, and
-[../docs/BUILD-DEPLOY.md](../docs/BUILD-DEPLOY.md) for which change deploys by which
-route.
+## Synthesis
 
-## Synthesis pipeline
-
-Synthesis is fully in-process, with no runtime Python call. Inference runs on
-[`ort`](https://crates.io/crates/ort) with the `load-dynamic` strategy, so
-`libonnxruntime` resolves at runtime via `ORT_DYLIB_PATH` rather than being baked into
-the binary; the same runtime instance is shared by Kokoro TTS and Parakeet STT.
-English G2P uses the released [`voice-g2p`](https://crates.io/crates/voice-g2p),
-a pure-Rust Misaki port with contextual tagging and an embedded dictionary. Its optional
-external eSpeak fallback is disabled; dictionary misses use the checksum-pinned tiny BART
-ONNX model downloaded by `ds-model` — which is why the Apple Core ML path also needs the
-ONNX Runtime dylib, even though its synthesis never touches `ort`. Emitted characters
-Kokoro's vocabulary doesn't contain are dropped with a warning, not rejected: failing the
-utterance meant one stray character silenced a whole reply.
-Both ONNX and Apple Core ML consume the same typed, 509-phoneme-character-bounded IPA
-batches. Playback is [`rodio`](https://crates.io/crates/rodio), streaming 24 kHz mono PCM
-per phoneme batch. The engine's download manager fetches missing model assets and a
-version-matched `libonnxruntime` before first use
-(`ds-model`: pinned SHA-256 checksums, atomic rename into the data dir). Because
-in-process audio can't hand back a child pgid, `ds-helper` runs synth + playback in
-its own process group so barge-in and pidfile-takeover still work as designed.
+Dynamic `ort` (`ORT_DYLIB_PATH`); shared by Kokoro + Parakeet. G2P: released
+`voice-g2p` (eSpeak fallback disabled; BART ONNX for misses — Core ML path needs ORT
+dylib too). OOV phonemes dropped with warning. Batches ≤ 509 IPA chars. Playback:
+`rodio` 24 kHz mono. `ds-helper` process group for barge-in/pidfile takeover.

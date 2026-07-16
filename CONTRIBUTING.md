@@ -1,67 +1,54 @@
 # Contributing to DontSpeak
 
-The engine and CLI are Rust (`rust/`, 23 crates, one workspace); each OS gets a thin native
-host — SwiftUI (`apps/macos/`), WinUI 3 (`apps/windows/winui/`), GTK4 (`apps/linux/gtk/`).
-Read [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit, and
-[docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md) before testing a change against the *running*
-app — the three runtime pieces deploy by different routes, and using the wrong one leaves
-the app running stale code.
+Rust engine/CLI in `rust/` (23 crates, one workspace); thin hosts: SwiftUI
+(`apps/macos/`), WinUI 3 (`apps/windows/winui/`), GTK4 (`apps/linux/gtk/`). See
+[ARCHITECTURE.md](ARCHITECTURE.md) and [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md)
+before testing against a running app — wrong rebuild leaves stale code.
 
 ## Build prerequisites
 
-**Everywhere:** a Rust toolchain via [rustup](https://rustup.rs) (workspace pins
-`rust-version = 1.97`; plain `rustup default stable` is fine). Build with `--locked` —
-`Cargo.lock` is committed and CI rejects drift.
+**Everywhere:** [rustup](https://rustup.rs) (`rust-version = 1.97`). Build with
+`--locked` — CI rejects lock drift.
 
-**macOS** — the SwiftUI host needs the **full Xcode**, not just the Command Line Tools
-(asset-catalog compilation crashes under bare CLT), and Xcode must have completed its
-first-launch setup:
+**macOS** — full Xcode (not CLT only); first-launch setup:
 
 ```sh
 xcode-select -s /Applications/Xcode.app
 sudo xcodebuild -runFirstLaunch
 ```
 
-Then `./apps/macos/build.sh` (dev build) or `./apps/macos/bundle.sh` (full app bundle).
-If the very first `swift build` fails with a module-cache error after moving/cloning the
-repo, `rm -rf apps/macos/.build` and retry.
+`./apps/macos/build.sh` (dev) or `./apps/macos/bundle.sh` (app bundle). Module-cache
+error after clone: `rm -rf apps/macos/.build` and retry.
 
-**Linux** — the Rust workspace links ALSA (`cpal`) and PulseAudio (`ds-aec`):
+**Linux** — ALSA + Pulse for the workspace:
 
 ```sh
 sudo apt-get install -y build-essential pkg-config libasound2-dev libpulse-dev
 ```
 
-The GTK host additionally needs a recent GNOME stack — GTK 4.12+, **libadwaita >= 1.7**,
-gtk4-layer-shell (Ubuntu 26.04 / Fedora 42 era; Ubuntu 24.04 is too old):
+GTK host needs GTK 4.12+, **libadwaita ≥ 1.7**, gtk4-layer-shell (Ubuntu 26.04 /
+Fedora 42 era; 24.04 too old):
 
 ```sh
 sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev
 ```
 
-**Windows** — `ring` (rustls' crypto) assembles via NASM on x64 and clang on arm64; the
-WinUI app targets .NET 10:
+**Windows** — NASM (x64) or clang (arm64) for `ring`; .NET 10 SDK:
 
-- NASM (`choco install nasm`) and LLVM on `PATH`
-- .NET 10 SDK
+- `choco install nasm`, LLVM on `PATH`
 - `dotnet build apps/windows/winui/DontSpeak.WinUI.csproj -c Release -p:Platform=x64`
 
 ## Tests
-
-The real test suite lives in the Rust workspace:
 
 ```sh
 cd rust && cargo test --workspace --locked
 ```
 
-The macOS host has SwiftPM logic tests (`cd apps/macos && swift test` — needs the Rust
-FFI staticlib built first; `build.sh` does that). WinUI xunit tests live in
-`apps/windows/winui.tests`. CI runs the Rust clippy and test gates on Linux per commit,
-with the wider platform and hygiene matrix on release tags (`.github/workflows/ci.yml`).
+macOS: `cd apps/macos && swift test` (needs FFI staticlib; `build.sh` builds it).
+WinUI: `apps/windows/winui.tests`. CI: clippy + Rust tests per commit; wider matrix
+on release tags (`.github/workflows/ci.yml`).
 
 ## Gates
-
-CI rejects anything that fails:
 
 ```sh
 cd rust
@@ -69,14 +56,9 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Use the `prepush` skill for the exact per-commit procedure. Formatting, rustdoc,
-dependency policy, and platform-host checks are release gates; use `make-release` before
-tagging rather than duplicating that matrix here.
+`prepush` skill = per-commit procedure. fmt, rustdoc, deny, platform hosts = release
+gates (`make-release`). Shell: `bash -n` + `shellcheck`; workflows: `actionlint`
+(`.github/actionlint.yaml`). C#: `csharp.yml` path-filtered, keep warning-clean.
 
-Shell scripts should stay clean under `bash -n` and `shellcheck`; workflows under
-`actionlint` (config: `.github/actionlint.yaml`). C# analyzers run in the path-filtered
-`csharp.yml` job — keep the build warning-clean.
-
-Lint policy is centralized: Rust lints live in `[workspace.lints]` in `rust/Cargo.toml`
-(don't add per-crate `#[allow]`s without a comment saying why), Swift formatting in
-`apps/macos/.swift-format`.
+Lint policy: Rust in `[workspace.lints]` (`rust/Cargo.toml`); don't add bare
+`#[allow]` without why. Swift: `apps/macos/.swift-format`.

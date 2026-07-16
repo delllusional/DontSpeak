@@ -1,49 +1,37 @@
 # Commit attribution
 
-This file is the single source of truth for DontSpeak commit attribution. Agent
-instructions and push workflows must reference it instead of copying its rules.
+Canonical rules for DontSpeak commit attribution. Point here; don't copy.
 
-End every commit message with a single `Agent:` trailer instead of any built-in
-AI-attribution line — no `Co-Authored-By`, `Assisted-by`, `Generated-by`, or similar,
-and no other attribution beyond this one line. Format:
+End every commit with one `Agent:` trailer — no `Co-Authored-By`, `Assisted-by`,
+`Generated-by`, or other AI lines:
 
 ```text
 Agent: <model-id> <effort-level>
 ```
 
-Use the full active model slug for every provider, not a family shorthand or generic
-product name. Examples: `Agent: claude-sonnet-5 xhigh` and
-`Agent: gpt-5.6-sol xhigh`. The repository hooks capture the active model and the
-CLI's named reasoning-effort level immediately before `git commit`; the private
-`commit-msg` hook then replaces a lone hand-written trailer with those values. Do not
-guess from the model's self-description, the UI's family label, or a configured default.
-`unknown`, `default`, and explanatory prose are not effort levels.
+Full model slug + named effort (e.g. `Agent: claude-sonnet-5 xhigh`,
+`Agent: gpt-5.6-sol xhigh`). Hooks capture both at commit time; the private
+`commit-msg` hook rewrites a lone hand-written trailer to those values. Never guess
+from self-description, UI family label, or defaults. `unknown` / `default` / prose
+are not effort levels.
 
-The project hook must be trusted in each client before it can install the private Git
-hook for that worktree. Claude Code and Grok load `.claude/settings.json`, Codex loads
-`.codex/hooks.json`, and Qwen Code loads `.qwen/settings.json`. If either runtime value
-is unavailable, the commit is blocked; select an explicit model and effort in the CLI
-and retry. This fail-closed behavior is deliberate because CI can validate the trailer's
-shape after the fact, but cannot reconstruct which runtime produced a commit.
+Trust the project hook per client so it can install the private Git hook:
+Claude/Grok → `.claude/settings.json`; Codex → `.codex/hooks.json`; Qwen →
+`.qwen/settings.json`. Missing model or effort **blocks** the commit (CI can check
+shape later but can't recover which runtime produced it).
 
-The capture sources are client-specific:
+Capture sources:
 
-- Codex supplies the exact model slug to hooks; the current turn context supplies effort.
-- Claude Code supplies applied effort to tool hooks; its current transcript supplies model.
-- Qwen Code's current transcript supplies model and its settings supply the persisted
-  `/effort` selection. Qwen's hook payload does not expose a separate post-provider value.
-- Grok's current session supplies model and effort. `none` is used only when the model
-  catalog explicitly says reasoning effort is unsupported; otherwise absent effort blocks.
+- **Codex** — hook model slug; turn context for effort.
+- **Claude** — transcript for model; tool hooks for applied effort.
+- **Qwen** — transcript for model; settings for `/effort` (no separate post-provider field).
+- **Grok** — session model + effort. `none` only when the catalog says effort is unsupported.
 
-Claude Code's own automatic `Co-Authored-By` trailer is disabled repo-wide via
-`.claude/settings.json`'s `attribution` key so it can't duplicate this line. Codex and
-Qwen Code don't read that file, so if either tool's automatic attribution can't be
-suppressed from here, the commit hook removes it before finishing the commit message.
+Claude auto-`Co-Authored-By` is disabled via `.claude/settings.json` `attribution`.
+If Codex/Qwen still emit auto-attribution, the commit hook strips it.
 
 ## Squashing
 
-When combining several commits into one (interactive rebase or squash-merge), carry
-forward every distinct `Agent: <model-id> <effort-level>` pair from the commits being
-combined — one line per distinct pair, inherited into the result. Don't drop a
-contributor's line just because its commit wasn't the last one before the squash;
-don't repeat a pair that already appears.
+On squash/rebase: keep every distinct `Agent: <model-id> <effort-level>` pair from
+combined commits (one line each). Don't drop non-final contributors; don't duplicate
+pairs.

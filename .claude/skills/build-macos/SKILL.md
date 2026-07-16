@@ -5,54 +5,63 @@ description: Uninstall / build+install / package DontSpeak on macOS. Three flows
 
 # DontSpeak — macOS (uninstall / install / package)
 
-> **Task setup:** Before starting, read and apply
-> [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
+> Apply [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
 > [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
 
-> **Runs on:** macOS only (bash + Xcode + `codesign`/`notarytool`; Apple Silicon for the arm64 slice). **Working dir:** repo root. Same three flows as `build-windows` / `build-linux`.
+macOS only, repo root. In-process engine via `ds-core`; TCC on `DontSpeak.app`.
+Scripts under `apps/macos/` + `scripts/` — edit those, don't duplicate.
 
-The app **hosts the engine in-process** (`ds-core` C ABI) — no separate daemon. TCC grants (Accessibility / Mic / Speech Recognition) attach to `DontSpeak.app`. Scripts live under `apps/macos/` + `scripts/`, factored via `apps/macos/bundle-lib.sh` + `scripts/install/lib/common.sh` — **don't duplicate build logic; edit the scripts**.
+**Prereqs:** Xcode + CLT (Xcode 26 for `AppIcon.icon` / SDK 26) · Rust
+`aarch64-apple-darwin` (+ `x86_64-apple-darwin` for Intel) · **`librsvg`**
+(`brew install librsvg`) for menu-bar glyph + legacy `.icns`. Signing: [SIGNING.md](../../../docs/SIGNING.md).
 
-**Prereqs:** Xcode + CLT (Xcode 26 — `AppIcon.icon` needs SDK 26 to compile) · Rust with `aarch64-apple-darwin` (+ `x86_64-apple-darwin` for the Intel slice) · **`librsvg`** (`brew install librsvg`) for the `rsvg-convert` used to render the menu-bar glyph AND the legacy app-icon `.icns` (see **App icon** below — without it the icon degrades on macOS < 26). Signing/notarization needs a Developer ID cert + app-specific password (`docs/SIGNING.md`); without them builds fall back to ad-hoc/unsigned.
+### App icon (dual path)
 
-### App icon — dual path (macOS 26 Liquid Glass + everything older)
+`bundle-lib.sh:compile_icon` ships both:
 
-`bundle-lib.sh:compile_icon` compiles `apps/macos/AppIcon.icon` (Icon Composer) into **two** representations, and the app ships **both**:
+- **`Assets.car`** — Liquid Glass (macOS 26+)
+- **`AppIcon.icns`** — complete 10-size fallback for ≤25 (actool's `.icns` is a stub;
+  `legacy_icns()` rebuilds from `assets/app-icon.svg` via `rsvg-convert` → `iconutil`)
 
-- **`Assets.car`** (`CFBundleIconName=AppIcon`) — `actool`'s macOS-26 Liquid Glass rendition. Only macOS 26+ can read it.
-- **`AppIcon.icns`** (`CFBundleIconFile=AppIcon`) — the fallback for macOS ≤ 25. `actool`'s own `.icns` is a **stub** (16px + 128px only), so `legacy_icns()` overwrites it with a **complete 10-size** `.icns` rendered from the master `assets/app-icon.svg` via `rsvg-convert` → `iconutil`.
+Missing `rsvg-convert` → warn + keep stub (bad Finder icon). `LSUIElement=true` =
+menu-bar agent (no Dock icon by design).
 
-Ship only `actool`'s output and macOS 14/15 get no readable Assets.car AppIcon *and* a near-empty `.icns` → Finder/Dock fall back to a blurry/generic icon (this shipped in v0.1.0 on Intel/Sequoia). If `rsvg-convert` is missing, the build **warns and keeps the stub** (degraded icon) rather than failing — so `librsvg` is a real prereq for a correct release. `LSUIElement=true` means DontSpeak is a menu-bar agent with no Dock icon by design; the Finder/Get-Info icon is what this fixes.
-
-## 1 — Uninstall / clean
+## 1 — Uninstall
 
 ```bash
-scripts/install/bundle/uninstall.sh   # remove app + data; ALWAYS resets this app's TCC grants
+scripts/install/bundle/uninstall.sh
 ```
-Quits the app + engine, un-wires all clients, deletes the app bundle (`~/Applications` — the ONE per-user layout both the dev and release flows install to; `DONTSPEAK_APP_DIR` honored) + `~/.local/bin` engine bins + all data/caches/logs. Always resets this app's TCC grants — Accessibility, Microphone, and Speech Recognition (the three it actually requests) — via `tccutil reset <svc> app.dontspeak.org`, so a reinstall re-prompts cleanly instead of inheriting a stale, pre-selected Privacy & Security entry, which after a signature change shows enabled but silently fails. The self-signed `DontSpeak Local Dev` cert is left in place (keeps the signature stable so the re-granted permission sticks across rebuilds). This is the canonical uninstaller; the app package carries this file and `packaging_sync.rs` pins that route without an embedded copy. Quit the app first so files aren't in use.
+
+Quits app, un-wires clients, removes `~/Applications/DontSpeak.app` (or
+`DONTSPEAK_APP_DIR`), `~/.local/bin` bins, data/caches/logs. **Always** resets this
+app's TCC (Accessibility, Microphone, Speech Recognition) via `tccutil` so reinstall
+re-prompts cleanly after signature change. Keeps `DontSpeak Local Dev` cert.
 
 ## 2 — Build + install (dev)
 
 ```bash
 apps/macos/bundle.sh
-open "$HOME/Applications/DontSpeak.app"    # launch: registers login item, starts the engine
+open "$HOME/Applications/DontSpeak.app"
 ```
-`bundle.sh` does the whole dev install: `scripts/install/local/install-engine.sh` (engine + helper bins → `~/.local/bin`, stable-signed, places `dontspeak-uninstall`) → `dontspeak wire --reconcile` (converges every registry client to config.toml's `exclude_clients`, absent ⇒ all four: Claude Code hooks + MCP, Codex hooks + MCP, Qwen Code hooks + MCP, Grok hooks + MCP) → `build.sh` (Rust `release-ffi` staticlib + `swift build`) → icon compile → assemble + codesign **`~/Applications/DontSpeak.app`** (`DONTSPEAK_APP_DIR` overrides; the uninstaller honors the same). The host app also re-runs reconcile at boot. Release installs (`scripts/install/web/install.sh`) use the SAME per-user location — one layout, no `/Applications` copy to fight over the login item, the wire target, or TCC.
 
-- **Gotcha:** a helper or engine change is NOT live until a full `bundle.sh` — the app spawns its OWN bundled `ds-helper` and runs the engine in-process. Only hook/MCP changes in the `dontspeak` bin go live via `install-engine.sh` alone.
-- `scripts/install/local/install.sh` is the CLI-only path (engine bins, then `dontspeak wire --reconcile`; no `.app`) — normal dev uses `bundle.sh`.
+`bundle.sh`: install-engine → `dontspeak wire --reconcile` (all four clients unless
+`exclude_clients`: Claude, Codex, Qwen, Grok — hooks + MCP as registered) → build +
+icon + codesign app. Host also re-reconciles at boot. Same layout as release
+(`~/Applications`).
 
-## 3 — Build the package
+- Engine/helper changes need full `bundle.sh` (app uses bundled helper + in-process engine).
+- CLI-only: `scripts/install/local/install.sh` (no `.app`).
+
+## 3 — Package
 
 ```bash
 apps/macos/dist-apps.sh
 ```
-- Output: **`~/Desktop/dontspeak-<version>-macos-<aarch64|x86_64>.app.zip`** (`OUTDIR` overrides) — a signed `DontSpeak.app` zip per arch (notarized + stapled when notary creds are set); `scripts/install/web/install.sh` unzips it into `~/Applications`.
-- `DONTSPEAK_ARCHES` — default `arm64`; `"arm64 x86_64"` for both (the Intel slice ships without the Apple-Silicon-only Core ML shim).
-- `DONTSPEAK_DIST` — default `1`: requires a Developer ID Application identity and hardened-runtime-signs with it (fails fast without one). `0` = local ad-hoc unsigned zip (first launch hits Gatekeeper).
-- Notarization is gated separately on credentials: set `DONTSPEAK_NOTARY_PROFILE` or the `DONTSPEAK_APPLE_ID`/`DONTSPEAK_TEAM_ID`/`DONTSPEAK_APP_PASSWORD` trio, else the zip ships signed but un-notarized.
-- Notarize a pre-built app separately: `DONTSPEAK_NOTARY_PROFILE=<profile> apps/macos/notarize.sh <path>/DontSpeak.app`.
 
-## Notes
+- Output: `~/Desktop/dontspeak-<version>-macos-<arch>.app.zip` (`OUTDIR` overrides)
+- `DONTSPEAK_ARCHES` default `arm64`; `"arm64 x86_64"` for both (Intel without Core ML shim)
+- `DONTSPEAK_DIST=1` (default): requires Developer ID + hardened runtime; `0` = ad-hoc
+- Notarize if `DONTSPEAK_NOTARY_PROFILE` or Apple ID/team/password trio set
+- Standalone: `DONTSPEAK_NOTARY_PROFILE=… apps/macos/notarize.sh <path>/DontSpeak.app`
 
-- The full multi-arch signed release is tag-triggered CI (`release.yml`, `macos-26` runner) — this skill is the fast local path.
+Full multi-arch release = tag CI (`macos-26`).

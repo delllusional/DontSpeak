@@ -1,33 +1,26 @@
 # DontSpeak Windows package
 
-DontSpeak ships on Windows as a **self-contained portable zip** — no installer, no
-elevation, no runtime prerequisites. The one-command installer at
-[dontspeak.org](https://dontspeak.org) (`scripts/install/web/install.ps1`) downloads it, extracts it to
-`%LOCALAPPDATA%\Programs\DontSpeak`, adds that directory to the per-user `PATH`, wires
-the client integrations (`dontspeak wire --reconcile`), adds a Start-menu shortcut, and
-launches the app. Local development archives go through that same script by setting
-`DONTSPEAK_ARCHIVE`, so they produce the same registered install as release archives.
+Self-contained portable zip — no installer elevation, no runtime prereqs.
+[dontspeak.org](https://dontspeak.org) (`scripts/install/web/install.ps1`) extracts to
+`%LOCALAPPDATA%\Programs\DontSpeak`, updates per-user PATH, runs
+`dontspeak wire --reconcile`, Start-menu shortcut, launches. Local archives use the same
+script with `DONTSPEAK_ARCHIVE`.
 
-## What the zip contains
-- The WinUI app (`ds-winui.exe`) + the in-process engine `ds_core.dll` + the warm-synth
-  `ds-helper.exe` + the `dontspeak.exe` client launcher / MCP server / hook executor +
-  `AppIcon.ico` + the canonical `uninstall.ps1` registered by the install script.
-- The **.NET 10 runtime and the Windows App SDK, bundled** (self-contained publish), so the
-  extracted app runs with nothing else installed.
-- The voice models download on first launch (into the per-user model dir), the same as
-  macOS/Linux — so the shipped zip stays small. (A fully-offline zip that also bundles the
-  models is possible by dropping `-SkipModels`; see below.)
+## Zip contents
 
-## Build it
-Prereqs (one-time on the build machine): Rust (MSVC) · the repo's `~/.dotnet` .NET 10 SDK ·
-NASM + LLVM on PATH (ring's crypto assembles with them).
+- `ds-winui.exe` + `ds_core.dll` + `ds-helper.exe` + `dontspeak.exe` + icon +
+  `uninstall.ps1`
+- Self-contained .NET 10 + Windows App SDK
+- Models download on first launch (or bundle with build without `-SkipModels`)
+
+## Build
+
+Prereqs: Rust (MSVC), repo `.NET 10` SDK, NASM + LLVM on PATH.
 
 ```powershell
 pwsh apps/windows/installer/build-portable.ps1 -Arch x64 -SkipModels
 # → apps/windows/installer/Output/dontspeak-<version>-windows-x86_64.zip
 ```
-
-Install that exact local artifact through the normal registration path:
 
 ```powershell
 $env:DONTSPEAK_ARCHIVE = Get-Item apps\windows\installer\Output\dontspeak-*-windows-x86_64.zip |
@@ -35,16 +28,10 @@ $env:DONTSPEAK_ARCHIVE = Get-Item apps\windows\installer\Output\dontspeak-*-wind
 try { & .\scripts\install\web\install.ps1 } finally { Remove-Item Env:\DONTSPEAK_ARCHIVE }
 ```
 
-- `-Arch arm64` cross-compiles (needs the arm64 MSVC tools + clang).
-- Drop `-SkipModels` to bundle Kokoro + Parakeet + onnxruntime into the zip for a fully
-  offline archive (~1 GB larger).
+- `-Arch arm64` needs arm64 MSVC + clang
+- Drop `-SkipModels` for offline zip (~1 GB larger)
 
-`build-portable.ps1` does: `cargo build --release` (core + helper + `dontspeak`) →
-`dotnet publish` the WinUI app **self-contained** (`--self-contained` +
-`WindowsAppSDKSelfContained`; the `StripUnusedWindowsAI` csproj target trims the unused
-Windows-ML DLLs) → canonical uninstaller payload → optional model prefetch into `models\` → `Compress-Archive`. It shares
-`build-common.ps1` with the rest of the Windows build. The `payload/` and `Output/` folders
-are build artifacts (git-ignored).
-
-The full multi-arch release is built by tag-triggered CI (`.github/workflows/release.yml`),
-which publishes `dontspeak-<version>-windows-<x86_64|aarch64>.zip` alongside a `checksums.txt`.
+Pipeline: `cargo build --release` → self-contained `dotnet publish` (strips unused
+Windows-ML DLLs) → uninstaller payload → optional models → `Compress-Archive`.
+`payload/` and `Output/` are gitignored. Release CI publishes multi-arch zips +
+`checksums.txt`.

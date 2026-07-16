@@ -1,45 +1,36 @@
 # Fresh task baseline
 
-This file is the single source of truth for starting and landing repository work
-from a current baseline.
+Start and land work from a current baseline.
 
 ## Default workflow
 
-Use this workflow before planning, checking, reviewing, building, testing,
-implementing, auditing, releasing, or landing repository work:
+Before planning, checking, reviewing, building, testing, implementing, auditing,
+releasing, or landing:
 
-1. Inspect `git worktree list` and the repository's task-worktree directory. Reuse
-   an existing worktree only when it belongs to the same task.
-2. In the worktree where `main` is checked out, confirm that `main` has no tracked
-   changes that would interfere with an update.
-3. Run `git pull --ff-only origin main`. This must update local `main` without a
-   merge commit.
-4. Create a named task branch and worktree from the refreshed `main`. Use the
-   repository's `EnterWorktree` helper when it is available; otherwise use
-   `git worktree add -b <task-branch> <task-worktree> main`.
-5. Perform the entire task, including its checks and commits, in that task
-   worktree.
+1. Inspect `git worktree list` and the task-worktree directory. Reuse only for the
+   same task.
+2. Where `main` is checked out, confirm no tracked changes would block an update.
+3. `git pull --ff-only origin main` (no merge commit).
+4. Create a named task branch + worktree from refreshed `main`
+   (`EnterWorktree` if available, else
+   `git worktree add -b <task-branch> <task-worktree> main`).
+5. Do all work, checks, and commits in that worktree.
 
-If `main` has conflicting tracked changes, has diverged, or cannot be
-fast-forwarded, stop and report the condition. Do not reset, force, discard, or
-overwrite another person's work.
+If `main` has conflicting changes, has diverged, or can't fast-forward: stop and
+report. Don't reset, force, discard, or overwrite others' work.
 
 ## Explicit-target exceptions
 
-When the task explicitly targets a pull request, branch, tag, commit, existing task
-worktree, or current uncommitted changes, inspect or work from that target instead
-of silently switching to `main`. Fetch `origin/main` first so comparisons use the
-current upstream baseline. A handed-off task worktree is an explicit target.
+Task names a PR, branch, tag, commit, existing worktree, or uncommitted changes →
+work that target. Still fetch `origin/main` for comparisons. Handed-off worktree =
+explicit target.
 
-A conversational or documentation-only answer that does not inspect repository
-state does not require a worktree.
+Pure Q&A that doesn't inspect the repo needs no worktree.
 
 ## Before final verification and landing
 
 1. Fetch `origin/main` again.
-2. If upstream `main` moved, rebase the clean task branch onto `origin/main`. Stop
-   and report conflicts instead of forcing a result.
-3. Rerun every applicable verification step after the rebase.
-4. Fast-forward local `main` to the verified task branch, then push `main`
-   normally. Never force-push.
-5. Remove the completed task worktree and branch when cleanup is safe.
+2. If upstream moved, rebase the clean task branch onto `origin/main`. Stop on conflict.
+3. Re-run every applicable verification after rebase.
+4. Fast-forward local `main` to the verified branch; push `main` normally (never force).
+5. Remove completed worktree/branch when safe.

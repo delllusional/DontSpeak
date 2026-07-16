@@ -1,92 +1,45 @@
-# Claude Code voice hooks (DontSpeak)
+# Claude Code voice hooks
 
-The voice hooks are inline command entries in `~/.claude/settings.json`: each one
-runs the Rust binary with a subcommand and reads the hook JSON from stdin. There are no
-wrapper scripts — the single
-`dontspeak` binary (installed to `~/.local/bin`) is the hook executor, dispatched by
-ONE of two subcommands split by CONTRACT, not by event:
+Inline command entries in `~/.claude/settings.json` run the `dontspeak` binary with
+stdin hook JSON. No wrapper scripts. Two subcommands by **contract**, not by event:
 
-- `dontspeak notify` — a COMMAND sink: the client tells us an event happened, we run the
-  side effect and reply with NOTHING. Async fire-and-forget; never blocks. It routes
-  internally on the payload's `hook_event_name`, so every fire-and-forget event is the
-  SAME `notify` command — only the event list and per-entry flags differ.
-- `dontspeak provide` — a QUERY: the client asks us for input and WAITS for our stdout
-  JSON (`hookSpecificOutput`). The only hook the client blocks on.
+- `dontspeak notify` — fire-and-forget command sink; no stdout reply; routes on
+  `hook_event_name`.
+- `dontspeak provide` — query; client waits for `hookSpecificOutput` on stdout.
 
-Every wired verb also carries a trailing **`--client <token>`** (`claude_code` | `codex` |
-`qwen_code` | `grok`) — so the entries below are really `notify --client claude_code`,
-`provide --client claude_code`, `notify --greet-only --client codex`, and so on. The token is
-what the binary puts on every `ds-ipc` request it sends, so the engine and its activity log
-always know WHICH client caused a line (a log line from a client ends in `client=<token>`).
-It is stamped uniformly by the wiring for every client and every event; a missing or
-unrecognised token degrades to `unknown` and never fails the hook. The MCP half of the same
-identity comes from the `initialize` handshake's `clientInfo.name`, not from a flag.
+Every verb includes `--client <token>` (`claude_code` | `codex` | `qwen_code` |
+`grok`) so IPC/logs know the source (`client=<token>`). Missing/unknown → `unknown`,
+never fails the hook. MCP identity comes from `initialize` `clientInfo.name`.
 
-The shipped stack (in-process native Kokoro, no Python/`uv`) is described in the
-repo [README](../README.md).
+## Wiring
 
-## Hook wiring (settings.json)
+| Event | Verb | Role |
+|-------|------|------|
+| `MessageDisplay` | `notify` | Streaming narration: top-level blockquotes as they complete |
+| `SessionStart` | `notify` | Greet + claim pool voice (`greet_on_open`) |
+| `SessionEnd` | `notify` | Session-scoped `StopSpeech` |
+| `UserPromptSubmit` | `notify` | `MarkActive` — this terminal is foreground for narration |
+| `UserPromptSubmit` | `provide` | Sync: inject narrate spec as `additionalContext` when on |
+| `Stop` | `notify` | Reply-done earcon; non-streaming clients also voice final reply |
+| `Notification` | `notify` | Needs-input earcon (`permission_prompt` / `idle_prompt` only) |
 
-| Event | Verb | What it does |
-|-------|------|--------------|
-| `MessageDisplay` | `notify` | The **single narration pipeline**. Speaks every top-level blockquote of every assistant message as it streams, including tool-step summaries and the final reply. Accumulates `delta` chunks per `message_id` (or cumulative `displayedText`) and enqueues each newly completed blockquote on the warm engine. |
-| `SessionStart` | `notify` | A new terminal opened → tells the engine to greet in this session's assigned pool voice (only if `greet_on_open` is set); claims the terminal's voice at open. |
-| `SessionEnd` | `notify` | Session-scoped `StopSpeech` → barges THIS session's playback so a closing terminal silences its own queued/playing speech (without touching another window's). |
-| `UserPromptSubmit` | `notify` | You just prompted HERE → marks this the active terminal so narration follows the window you're working in (the engine holds the others). |
-| `UserPromptSubmit` | `provide` | The ONE synchronous hook: re-reads the `narrate` setting every turn and returns the narration spec as `hookSpecificOutput.additionalContext` when ON (so flipping narration takes effect next prompt, no reload); returns nothing when off. |
-| `Stop` | `notify` | Turn finished → queues the reply-done **"ding"** earcon (`Earcon{reply_done}`) behind narration already admitted for that session. Non-streaming clients also voice the final reply: Codex/Qwen use `last_assistant_message`, while Grok reads the final assistant entry from `transcriptPath`. Claude's streamed-session witness suppresses duplicate end-of-turn speech. |
-| `Notification` | `notify` | A `permission_prompt` / `idle_prompt` notification → the **needs-input** earcon (`Earcon{needs_input}`). Other notification types are ignored. |
+`notify` is async (except Codex: no `async` flag — Codex skips `async: true` hooks,
+so Codex runs sync with tight timeouts). `provide` is always sync.
 
-Every `notify` entry is `async` fire-and-forget; the lone `provide` entry is synchronous —
-Claude Code reads its stdout for the injected context, so it cannot be async. (Exception:
-Codex's TOML entries carry no `async` flag at all — Codex *skips* `async: true` hooks
-outright, so its entries run synchronously, with tight explicit timeouts instead.)
+Claude final reply is not special-cased: streamed via `MessageDisplay`; `Stop`
+witness suppresses re-speech, still queues the earcon. Narration gated by `narrate`
+(`shorts`/`digests`) and `tts_engine != off`. Earcons independent of `narrate`
+(empty sound = off; honor mute). Reply ding defaults to OS chime; needs-input off.
 
-For **Claude Code** the final reply and tool-step narration are **not** special-cased — they
-are just streamed assistant messages handled by `MessageDisplay` (no per-reply mode, no
-final-reply dedup). The `Stop` hook carries `last_assistant_message`, but Claude's
-streamed-session witness keeps that fallback from re-speaking the streamed reply; it still
-queues the turn-done earcon. `Notification`
-only for the needs-input earcon. Narration is gated on the `narrate` setting (a set of
-`shorts` and/or `digests`); an empty set, or `tts_engine = off`, silences it. The earcons are
-independent of `narrate`: each plays only when its sound (`earcon_reply_sound` /
-`earcon_needs_input_sound`) is set and resolves — empty = off — and honors global mute. The
-reply ding defaults to the OS chime (`ding`/`Tink`/`message` on Windows/macOS/Linux); the
-needs-input cue ships off.
+Other clients reuse this executor with different events/formats — see
+[CLIENT-INTEGRATIONS.md](CLIENT-INTEGRATIONS.md).
 
-Codex, Qwen Code, and Grok reuse this executor with different event sets, config formats,
-and upstream capabilities. Their launch commands, exact wiring locations, payload quirks,
-and narration limits are maintained in the canonical
-[client integrations document](CLIENT-INTEGRATIONS.md).
+Hooks talk to the warm engine over `dontspeak.sock`. Engine down → best-effort no-op
+(never block the client).
 
-The narration / greet / mark-active hooks talk to the **warm engine** over the Unix
-socket (`dontspeak.sock` in our data dir), so speech is synthesized by the engine's
-resident Kokoro with no per-reply model reload. The engine runs in-process inside the
-platform's host app (macOS `DontSpeak.app`, Windows `ds-winui`, Linux `ds-gtk`); if it is
-down the hooks are best-effort no-ops (they never block Claude).
+## Setup
 
-## Shell helpers
-
-There are no hook shell helpers anymore. The old `term-focused` focus gate (it backed a
-removed mid-turn message hook) has been deleted on every platform; the active terminal is
-now signalled by the `UserPromptSubmit` → `notify` (mark-active routing) and resolved
-engine-side. Caps-lock reading and mic-active probing also run in-process in the engine.
-
-## Setup on a new machine
-
-Run `./scripts/install/local/install.sh` from the repo root. It builds the Rust workspace, installs the
-binaries into `~/.local/bin` (override with `DONTSPEAK_INSTALL_DIR`), and reconciles every
-detected client through the shared registry. See
-[Client integrations and launchers](CLIENT-INTEGRATIONS.md) for the supported
-commands, config locations, preview/removal commands, and upstream-specific limits.
-There is no launchd/systemd agent: the engine runs in-process inside the platform's host
-app (macOS `DontSpeak.app`, built by `apps/macos/bundle.sh`; Windows `ds-winui`; Linux
-`ds-gtk`).
-
-The `MessageDisplay` narrate entry is only meaningful when the `narrate` setting is
-non-empty (it defaults to `shorts` + `digests`); it's harmless (the bin self-gates) when
-off. It needs a Claude Code version that supports the `MessageDisplay` hook event.
-
-Logs land in `~/Library/Logs/DontSpeak/dontspeak.log` on macOS (one line per reply;
-other OSes use their own state-dir `logs/dontspeak.log`) — check it first when speech
-seems silent.
+`./scripts/install/local/install.sh` builds, installs to `~/.local/bin` (or
+`DONTSPEAK_INSTALL_DIR`), reconciles clients. No launchd/systemd — engine is in-process
+in the host app. Logs: macOS `~/Library/Logs/DontSpeak/dontspeak.log`; other OSes
+state-dir `logs/dontspeak.log`.

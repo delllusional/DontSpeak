@@ -1,56 +1,36 @@
-# Always-listening mode (hands-free voice loop)
+# Always-listening mode
 
-An opt-in alternative to Caps-Lock record-and-submit. Set
-`listen_mode = "always"` in `config.toml` (default `record_submit`); the modes are
-exclusive and hot-reload.
+Opt-in alternative to Caps-Lock PTT. `listen_mode = "always"` in `config.toml`
+(default `record_submit`); exclusive; hot-reloads.
 
-## How it works
+## Behavior
 
-Say the **start word** (default `computer`) to open the dictation pill. It shows the
-live transcript. **Submit** (default `submit`) pastes it and presses Enter; **cancel**
-(default `cancel`) discards it. The mic closes during Kokoro speech and reopens when
-the queue is quiet. The mode uses Kokoro (TTS) and Parakeet (STT).
+**Start word** (default `computer`) opens the dictation pill with live transcript.
+**Submit** / **cancel** (defaults `submit` / `cancel`) paste+Enter or discard. Mic
+closes during Kokoro speech and reopens when the queue is quiet. Uses Kokoro + Parakeet.
 
-Two design decisions shape it:
+Design:
 
-1. **Half-duplex gating.** The mic stays closed while the TTS queue is busy. A future
-   AEC/full-duplex layer can replace this gate.
-2. **Stop word + trailing-silence confirmation.** Submit/cancel fire only when the
-   configured word is the **final token** of an utterance *and* is followed by a
-   confirmation window of silence — so "I want to submit the message to a client"
-   never fires, while saying "submit" and going quiet pastes-and-sends. Matching is
-   fuzzy (small Levenshtein tolerance) since it runs on live STT output. This is
-   Dragon's "pause-bracketing": words run together = dictation, bracketed by pauses
-   = command.
+1. **Half-duplex** — mic closed while TTS busy (AEC/full-duplex can replace later).
+2. **Stop word + trailing silence** — submit/cancel only when the word is the **final
+   token** *and* followed by `submit_confirm_ms` silence. Fuzzy match (small Levenshtein)
+   for live STT noise. Pause-bracketed = command; continuous speech keeps the word as
+   content.
 
 ## Config
 
-The `dontspeak` block adds `listen_mode`, `hands_free.{start,submit,cancel}`, plus
-`submit_confirm_ms` (silence before submit/cancel) and `endpoint_silence_ms` (silence
-that closes an utterance). Defaults preserve the normal mode.
+`listen_mode`, `hands_free.{start,submit,cancel}`, `submit_confirm_ms`,
+`endpoint_silence_ms`. Defaults preserve record-submit mode.
 
 ## Implementation
 
-Three layers, bottom two pure and unit-tested (`crate::listen`), top layer thin
-glue on the engine's poll thread (`crate::listener`):
+- **Endpointer** — RMS VAD → `SpeechOnset` / `SegmentClosed` (`crate::listen`, unit-tested).
+- **`TurnLogic`** — idle until start word; segments append until submit/cancel arms
+  confirm timer; fires paste-once or treats word as content if speech resumes first.
+- **Engine poll glue** (`crate::listener`) — gate mic on TTS; drain → endpointer →
+  Parakeet helper → `TurnLogic` → same confirm pill / injector as Caps path. Armed
+  submit always pastes into focused window (no silent refuse).
 
-- **Endpointer** — energy-based (RMS) VAD; turns per-frame audio into
-  `SpeechOnset` / `SegmentClosed` events.
-- **`TurnLogic`** — turns text + timing into actions. Idle until the start word
-  opens the pill; further segments append to the live buffer until a
-  submit/cancel-terminated segment arms the confirm timer on that word, which
-  either fires the action (paste-once, never incremental) or, if new speech comes
-  first, treats the word as content and keeps accumulating.
-- **Engine integration** — on each poll tick: mic stays closed while TTS is
-  playing, otherwise drains mic samples through the Endpointer, transcribes closed
-  segments via the warm Parakeet helper, feeds `TurnLogic`, mirrors its state into
-  the same confirm pill the Caps-Lock PTT path uses, and pastes/discards through
-  the same injector — the stop-word confirm (like the Caps confirm tap) is itself
-  the deliberate gate, so once armed a submit always pastes into whatever is
-  focused, never silently refused.
+## Later
 
-## Later upgrades
-
-Wiring always-listening onto the AEC/full-duplex layer for true barge-in; Silero
-VAD for more robust endpointing; a pre-roll leading buffer; a GUI control for the
-mode toggle.
+AEC barge-in; Silero VAD; pre-roll buffer; GUI mode toggle.

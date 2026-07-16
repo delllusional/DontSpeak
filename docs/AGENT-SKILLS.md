@@ -1,71 +1,61 @@
 # Agent and skill portability
 
-This file is the single source of truth for how DontSpeak shares repository
-instructions and Agent Skills across terminal coding agents.
+How DontSpeak shares instructions and Agent Skills across CLIs.
 
 ## Repository instructions
 
-`AGENTS.md` is the canonical repository instruction file.
+`AGENTS.md` is canonical.
 
-- Codex, Qwen Code, and Grok Build read `AGENTS.md` directly.
-- Claude Code loads it through `CLAUDE.md`'s `@AGENTS.md` import. `CLAUDE.md` may
-  additionally contain Claude-only workflows that do not belong in the shared file.
-- Gemini CLI loads it through `GEMINI.md`'s `@AGENTS.md` import.
-- `QWEN.md` keeps the same import for older Qwen Code versions even though current
-  Qwen Code also reads `AGENTS.md` directly.
+| CLI | How it loads |
+| --- | --- |
+| Codex, Qwen Code, Grok Build | Read `AGENTS.md` directly |
+| Claude Code | `@AGENTS.md` in `CLAUDE.md` (+ Claude-only extras there) |
+| Gemini CLI | `@AGENTS.md` in `GEMINI.md` |
+| Older Qwen | `@AGENTS.md` in `QWEN.md` (current Qwen also reads `AGENTS.md`) |
 
-Edit shared instructions in `AGENTS.md`, not in a vendor wrapper. Keep a wrapper's
-additional content specific to that agent.
+Edit shared rules in `AGENTS.md` only. Wrappers hold vendor-specific content.
 
 ## Agent Skills
 
-The skill contents follow the open Agent Skills format, but project discovery paths
-differ by CLI. The canonical authoring tree is `.agents/skills/`:
+Canonical tree: `.agents/skills/` (open Agent Skills format).
 
-| CLI | Discovered tree |
+| CLI | Discovery path |
 | --- | --- |
 | Codex | `.agents/skills/` |
-| Gemini CLI | `.agents/skills/` compatibility alias |
+| Gemini CLI | `.agents/skills/` (compat alias) |
 | Claude Code | `.claude/skills/` |
-| Grok Build | `.agents/skills/` in current builds, with `.claude/skills/` as the documented Claude-compatibility path |
+| Grok Build | `.agents/skills/` (also accepts `.claude/skills/`) |
 | Qwen Code | `.qwen/skills/` |
 
-`.claude/skills/` and `.qwen/skills/` are generated mirrors. Git symlinks are not
-used because Windows checkouts silently turn them into plain placeholder files unless
-Developer Mode or administrator privileges and `core.symlinks` are all enabled.
+`.claude/skills/` and `.qwen/skills/` are **generated mirrors** (no git symlinks —
+Windows checkouts break them without Developer Mode + `core.symlinks`).
 
-After editing `.agents/skills/`, regenerate the mirrors:
+After editing `.agents/skills/`:
 
 ```bash
 node scripts/agents/sync-agent-skills.mjs
+node scripts/agents/sync-agent-skills.mjs --check   # before push
 ```
 
-Before every push, verify that no mirror drift remains:
+Claude subagents/workflows stay under `.claude/agents/` and `.claude/workflows/`
+(no portable discovery).
 
-```bash
-node scripts/agents/sync-agent-skills.mjs --check
-```
-
-Claude-specific subagents and workflows remain under `.claude/agents/` and
-`.claude/workflows/`; there is no verified portable discovery path for those files.
-
-Any skill or specialist agent that plans, checks, reviews, builds, tests, implements,
-audits, releases, or lands repository work must link to and apply
-[`TASK-BASELINE.md`](TASK-BASELINE.md) and [`TASK-EFFORT.md`](TASK-EFFORT.md). Keep
-the workflows in those shared files rather than copying them into each skill.
+Skills that plan/check/review/build/test/implement/audit/release/land must apply
+[TASK-BASELINE.md](TASK-BASELINE.md) and [TASK-EFFORT.md](TASK-EFFORT.md) — link them,
+don't copy.
 
 ## Compatibility references
 
-- [Codex skills](https://learn.chatgpt.com/docs/build-skills)
-- [Codex reasoning-effort configuration](https://developers.openai.com/codex/config-reference)
-- [Claude Code skills](https://code.claude.com/docs/en/skills) and
-  [instruction imports](https://code.claude.com/docs/en/memory#import-additional-files)
-- [Claude Code effort levels](https://code.claude.com/docs/en/model-config#adjust-effort-level)
-- [Gemini CLI skill discovery](https://geminicli.com/docs/cli/using-agent-skills/) and
-  [instruction imports](https://geminicli.com/docs/cli/gemini-md/#modularize-context-with-imports)
-- [Gemini CLI model thinking configuration](https://geminicli.com/docs/get-started/configuration-v1/)
-- [Qwen Code skills](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/) and
-  [repository instructions](https://qwenlm.github.io/qwen-code-docs/en/users/features/memory/)
-- [Qwen Code unified reasoning effort](https://qwenlm.github.io/qwen-code-docs/en/design/2026-06-30-unified-reasoning-effort-cli/)
-- [Grok Build skills and compatibility](https://docs.x.ai/build/features/skills-plugins-marketplaces)
-- [Grok Build effort controls](https://docs.x.ai/build/modes-and-commands)
+- [Codex skills](https://learn.chatgpt.com/docs/build-skills) ·
+  [effort config](https://developers.openai.com/codex/config-reference)
+- [Claude skills](https://code.claude.com/docs/en/skills) ·
+  [imports](https://code.claude.com/docs/en/memory#import-additional-files) ·
+  [effort](https://code.claude.com/docs/en/model-config#adjust-effort-level)
+- [Gemini skills](https://geminicli.com/docs/cli/using-agent-skills/) ·
+  [imports](https://geminicli.com/docs/cli/gemini-md/#modularize-context-with-imports) ·
+  [thinking](https://geminicli.com/docs/get-started/configuration-v1/)
+- [Qwen skills](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/) ·
+  [memory](https://qwenlm.github.io/qwen-code-docs/en/users/features/memory/) ·
+  [effort](https://qwenlm.github.io/qwen-code-docs/en/design/2026-06-30-unified-reasoning-effort-cli/)
+- [Grok skills](https://docs.x.ai/build/features/skills-plugins-marketplaces) ·
+  [effort](https://docs.x.ai/build/modes-and-commands)
