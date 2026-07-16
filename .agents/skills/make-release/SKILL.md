@@ -16,12 +16,20 @@ description: Cut a DontSpeak release — tag the single-source version, push the
 ## 1 — Preconditions
 
 - **Version**: the single source is `rust/Cargo.toml` → `[workspace.package] version` (read by
-  `scripts/release/version.sh`). The tag must be `v` + exactly that version — the `check` job fails the
-  run fast otherwise. Bump it (+ commit) for a new release. Going from a `-dev` suffix to a
-  real release version needs no judgment call — the version number was already decided
-  whenever `main` was last bumped (step 9) — it's a mechanical strip of the suffix, not a
-  version choice, unless you're deliberately overriding the preset bump size (e.g. escalating
-  a preset patch to a minor/major release because more accumulated on `main` than expected).
+  `scripts/release/version.sh` / `scripts/release/sync-workspace-version.py`). The tag must be
+  `v` + exactly that version — the `check` job fails the run fast otherwise. Bump it (+ commit)
+  for a new release. Going from a `-dev` suffix to a real release version needs no judgment
+  call — the version number was already decided whenever `main` was last bumped (step 9) — it's
+  a mechanical strip of the suffix, not a version choice, unless you're deliberately overriding
+  the preset bump size (e.g. escalating a preset patch to a minor/major release because more
+  accumulated on `main` than expected). **Do the strip + lock sync with the portable script**
+  (not a hand edit of four files, and not `cargo generate-lockfile` — see lockfile note below):
+  ```bash
+  python3 scripts/release/sync-workspace-version.py --strip-dev
+  # verify locks still resolve without rewriting registry pins:
+  (cd rust && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
+  (cd apps/linux/gtk && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
+  ```
 - **Green main, pushed**: run the `prepush` skill first (clippy + tests — the same suite
   the release re-runs); the tagged commit must be on `origin/main`. **This is a fail-fast
   optimization, not the actual correctness gate** — `release.yml`'s own `tests` job
@@ -55,20 +63,22 @@ description: Cut a DontSpeak release — tag the single-source version, push the
   ```
   The release matrix also runs the WinUI xunit tests on Windows.
 - **`--locked` catches Cargo.lock drift — in BOTH workspaces.** The prepush gates are locked;
-  formatting is not. A dependency or version change must also refresh the separate GTK lock.
-  **Also regenerate the GTK workspace lock** after bumping the version: the version bump changes
-  every workspace crate's version string, so `apps/linux/gtk/Cargo.lock` (a SEPARATE workspace
-  that depends on the shared crates by path) must be regenerated too, or the Linux CI leg fails
-  with a `--locked` lock-file-out-of-date error. **You MUST run `cargo generate-lockfile` (not a
-  string replace)** — Cargo tracks checksums and resolution metadata that a sed/replace will
-  leave stale:
-  ```bash
-  (cd apps/linux/gtk && cargo generate-lockfile)
-  ```
-  Verify no `-dev` suffix lingers: `grep -rn "0\.2\.X-dev" rust/Cargo.lock apps/linux/gtk/Cargo.lock`
-  (must return nothing). Also diff the lock to confirm Cargo actually changed entries beyond the
-  version string — if the diff shows zero changes, the lock was already current and something
-  else is wrong.
+  formatting is not. A marketing-version bump changes every workspace crate's version string in
+  `rust/Cargo.lock` **and** `apps/linux/gtk/Cargo.lock` (the GTK host is a SEPARATE workspace
+  that path-depends on the shared crates). **Do not run `cargo generate-lockfile` for a version
+  bump.** That command re-resolves every registry dependency to the latest compatible version and
+  has produced ~300-line unrelated lock churn on Windows release cuts; path packages have no
+  registry checksum tied to the marketing version — only their `version =` field must match
+  `Cargo.toml`. `scripts/release/sync-workspace-version.py` updates those fields surgically
+  (workspace members only; never a third-party crate that happens to share a semver like
+  `dispatch2 0.3.1`). After it runs, both `cargo metadata --locked` checks above must pass, and
+  `grep -R -- '-dev"' rust/Cargo.lock apps/linux/gtk/Cargo.lock` must return nothing for a
+  non-dev release. Diff the locks: expect only workspace package `version =` lines to change
+  (~one line per crate), matching prior release commits — not a full re-resolve.
+- **Shell scripts on Windows:** `scripts/release/*.sh` need a real Bash. Prefer Git for Windows
+  (`"C:/Program Files/Git/bin/bash.exe"`) over the Windows Store/WSL `bash` shim when WSL is
+  not installed — the shim fails with `HCS_E_HYPERV_NOT_INSTALLED` and looks like a broken
+  script. The Python sync script needs no Bash.
 - Push with a GitHub account that has write access to `delllusional/DontSpeak`.
 
 ## 2 — Tag and trigger
@@ -125,9 +135,10 @@ release exists — the tag sits there without one.
 
 **`gh run watch` network reliability:** the watcher polls GitHub every ~3s for 25+ minutes and
 can drop mid-run with `wsarecv: An existing connection was forcibly closed by the remote host`
-on long-haul connections. If the background watcher exits with a network error (not a build
-failure), just restart it or poll manually with `gh run view "$run_id" --json status,conclusion`
-— the CI run itself is unaffected.
+on long-haul connections, or with intermittent `HTTP 503` from the Actions API. If the
+background watcher exits with a network/5xx error (not a build failure), restart it or poll
+manually with `gh run view "$run_id" --json status,conclusion` on a 30–60s interval — the CI
+run itself is unaffected.
 
 ## 5 — Verify
 
@@ -211,24 +222,29 @@ run time, so a brief site lag degrades gracefully — but don't skip the deploy.
 
 ## 9 — Bump to the next dev version
 
-Immediately after the release publishes (step 5), bump `rust/Cargo.toml`'s
-`[workspace.package] version` to the next version with a `-dev` suffix — e.g.
-`0.1.0` → `0.1.1-dev` for a patch-level next release, or `0.2.0-dev` if you already know
-the next release is minor-sized — then run `bash scripts/release/sync-gtk-version.sh` to propagate
-it into `apps/linux/gtk/Cargo.toml`'s `version` (it can't inherit — see its own header
-comment) instead of hand-editing that file. Skipping the sync script doesn't fail fast: the
-tag/version guard (step 3.1) only compares them at the NEXT tag push, so a missed sync here
-silently sits stale for a whole release cycle. Regenerate both lock files — `cargo build
---offline` in `rust/` and **`cargo generate-lockfile`** in `apps/linux/gtk/` (same lesson as
-step 1: a string replace is not enough — this is why the sync script only rewrites
-`Cargo.toml`, never `Cargo.lock`) — and commit all four (`rust/Cargo.toml`, `rust/Cargo.lock`,
-`apps/linux/gtk/Cargo.toml`, `apps/linux/gtk/Cargo.lock`). This is a small, code-free commit
-whose only job is to make `main` visibly "ahead of the last release" — the exact-string
-tag/version guard (step 3.1) never sees this suffix since nothing ever tags a `-dev`
-version. When it's time to cut the NEXT release, first replace `-dev` with the real next
-version in `rust/Cargo.toml` (bumping further to `minor`/`major` instead of `patch` if what
-accumulated warrants it), run `bash scripts/release/sync-gtk-version.sh` again, commit, then tag as
-usual (step 2).
+Immediately after the release publishes (step 5), bump to the next patch with a `-dev`
+suffix (e.g. `0.3.1` → `0.3.2-dev`), or choose a higher minor/major `-dev` if you already
+know the next release is larger. **One command does Cargo.toml + both locks** (GTK can't
+inherit `version.workspace` — see its header; locks must not be full-re-resolved — see
+step 1):
+```bash
+python3 scripts/release/sync-workspace-version.py --bump-dev
+# or an explicit target:  python3 scripts/release/sync-workspace-version.py --set 0.4.0-dev
+(cd rust && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
+(cd apps/linux/gtk && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
+```
+Commit all four files (`rust/Cargo.toml`, `rust/Cargo.lock`, `apps/linux/gtk/Cargo.toml`,
+`apps/linux/gtk/Cargo.lock`). Skipping the sync doesn't fail fast: the tag/version guard
+(step 3.1) only compares them at the NEXT tag push, so a missed sync here silently sits
+stale for a whole release cycle. This is a small, code-free commit whose only job is to
+make `main` visibly "ahead of the last release" — the exact-string tag/version guard never
+sees this suffix since nothing ever tags a `-dev` version. When it's time to cut the NEXT
+release, run `python3 scripts/release/sync-workspace-version.py --strip-dev` (or `--set`
+with a higher non-dev version if what accumulated warrants minor/major), commit, then tag
+as usual (step 2).
+
+The older `bash scripts/release/sync-gtk-version.sh` only rewrites the GTK `Cargo.toml` and
+is kept for callers that already use it; prefer the Python script for full four-file sync.
 
 ## 10 — Cut (or replace) an on-demand `-dev` draft release
 

@@ -2,7 +2,11 @@
 # sync-gtk-version.sh — propagate rust/Cargo.toml's [workspace.package] version into
 # apps/linux/gtk/Cargo.toml's standalone `version = "..."`, which can't use
 # `version.workspace = true` since that's a separate Cargo workspace (see its own
-# header comment). Called by make-release step 9 instead of a hand edit.
+# header comment).
+#
+# Prefer scripts/release/sync-workspace-version.py for release cuts: it also rewrites
+# both Cargo.lock files' workspace package versions without a full re-resolve. This
+# shell helper only touches the GTK Cargo.toml (kept for callers that already use it).
 #
 # Portability: no GNU-only `sed -i` (BSD/macOS sed requires a backup-suffix arg) and
 # no GNU-only `0,/re/` first-match address (BSD/macOS sed errors on it) — the target
