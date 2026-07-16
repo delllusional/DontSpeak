@@ -150,6 +150,28 @@ impl SessionRegistry {
         g.epoch
     }
 
+    /// Pace one failed attachment without hiding a new synchronous launch request behind the
+    /// background reconnect backoff. Unrelated session nudges leave the wait armed; shutdown is
+    /// polled in bounded slices because it has no registry notification of its own.
+    fn wait_retry(&self, running: &AtomicBool, timeout: Duration, launch_was_requested: bool) {
+        const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
+
+        let deadline = Instant::now() + timeout;
+        let mut g = self.inner.lock().unwrap();
+        loop {
+            let now = Instant::now();
+            if !running.load(Ordering::Relaxed)
+                || now >= deadline
+                || (!launch_was_requested && g.launch_waiters > 0)
+            {
+                return;
+            }
+            let wait = (deadline - now).min(SHUTDOWN_POLL);
+            let (next, _) = self.cv.wait_timeout(g, wait).unwrap();
+            g = next;
+        }
+    }
+
     fn remove(&self, session: &str) {
         self.inner.lock().unwrap().sessions.remove(session);
     }
@@ -1145,6 +1167,9 @@ fn flush(
 /// Reconnect backoff bounds (1 s → 30 s, doubling).
 const BACKOFF_FLOOR: Duration = Duration::from_secs(1);
 const BACKOFF_CEIL: Duration = Duration::from_secs(30);
+/// A launcher is synchronously waiting for the observer endpoint, so retry quickly while the
+/// newly started app-server binds. The normal exponential backoff resumes without a waiter.
+const LAUNCH_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// An attachment must have held this long for its loss to earn the prompt floor retry;
 /// anything shorter is treated like an attach failure (doubling backoff). Gates the
 /// hot-loop where a peer keeps accepting handshake+initialize and then dropping us
@@ -1153,13 +1178,21 @@ const STABLE_ATTACH: Duration = Duration::from_secs(60);
 
 /// PURE backoff step for the reconnect loop (unit-tested): a STABLE attachment's loss
 /// resets to the floor; an unstable one (or a plain attach failure) doubles toward the
-/// ceiling. The caller always sleeps the RETURNED delay before the next attempt — there
-/// is no zero-sleep path, so no failure mode can spin the loop hot.
+/// ceiling. Background retries sleep the returned delay; a synchronous launcher uses
+/// [`retry_delay`] to poll the endpoint promptly without creating a zero-sleep hot loop.
 fn next_backoff(stable_attachment: bool, backoff: Duration) -> Duration {
     if stable_attachment {
         BACKOFF_FLOOR
     } else {
         (backoff * 2).min(BACKOFF_CEIL)
+    }
+}
+
+fn retry_delay(backoff: Duration, launch_requested: bool) -> Duration {
+    if launch_requested {
+        backoff.min(LAUNCH_RETRY_DELAY)
+    } else {
+        backoff
     }
 }
 
@@ -1511,31 +1544,35 @@ fn supervise(
                 // writes this log line per iteration.
                 let stable = attempt_started.elapsed() >= STABLE_ATTACH;
                 backoff = next_backoff(stable, backoff);
+                let delay = retry_delay(backoff, launch_requested);
                 log::info!(
                     target: "engine",
-                    "codex-stream: connection lost: {e}; reconnecting in {backoff:?}"
+                    "codex-stream: connection lost: {e}; reconnecting in {delay:?}"
                 );
-                pace(running, backoff);
+                pace(running, registry, delay, launch_requested);
             }
             Err(e) => {
                 // Could not attach at all — quiet, common case (no daemon running).
                 backoff = next_backoff(false, backoff);
+                let delay = retry_delay(backoff, launch_requested);
                 log::debug!(
                     target: "codex-stream",
-                    "attach failed: {e}; next try in {backoff:?}"
+                    "attach failed: {e}; next try in {delay:?}"
                 );
-                pace(running, backoff);
+                pace(running, registry, delay, launch_requested);
             }
         }
     }
 }
 
-/// Bounded inter-attempt sleep that still observes shutdown.
-fn pace(running: &AtomicBool, delay: Duration) {
-    let deadline = Instant::now() + delay;
-    while running.load(Ordering::Relaxed) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(100));
-    }
+/// Bounded inter-attempt wait that also yields immediately to a newly waiting launcher.
+fn pace(
+    running: &AtomicBool,
+    registry: &SessionRegistry,
+    delay: Duration,
+    launch_was_requested: bool,
+) {
+    registry.wait_retry(running, delay, launch_was_requested);
 }
 
 #[cfg(test)]

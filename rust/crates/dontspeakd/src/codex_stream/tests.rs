@@ -293,6 +293,20 @@ fn next_backoff_paces_every_failure_path() {
 }
 
 #[test]
+fn launch_waiter_uses_short_retries_during_background_backoff() {
+    assert_eq!(
+        retry_delay(BACKOFF_CEIL, true),
+        LAUNCH_RETRY_DELAY,
+        "a synchronous launcher must not inherit the background ceiling"
+    );
+    assert_eq!(
+        retry_delay(BACKOFF_CEIL, false),
+        BACKOFF_CEIL,
+        "background retries retain their capped backoff"
+    );
+}
+
+#[test]
 fn auto_start_bypasses_the_no_session_bootstrap_park() {
     assert!(should_park_supervisor(true, true, false, false));
     assert!(
@@ -462,6 +476,77 @@ fn launcher_receives_a_supervisor_failure_without_waiting_for_timeout() {
     }
     reg.launch_failed("codex binary missing");
     assert_eq!(thread.join().unwrap().unwrap_err(), "codex binary missing");
+}
+
+#[test]
+fn launcher_interrupts_an_in_flight_background_retry_wait() {
+    use std::sync::mpsc;
+
+    let reg = SessionRegistry::new();
+    let running = Arc::new(AtomicBool::new(true));
+    let paced_reg = reg.clone();
+    let paced_running = running.clone();
+    let (started_tx, started_rx) = mpsc::sync_channel(0);
+    let pace_thread = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let started = Instant::now();
+        pace(&paced_running, &paced_reg, Duration::from_secs(5), false);
+        started.elapsed()
+    });
+
+    started_rx.recv().unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let waiter = reg.clone();
+    let launch_thread = std::thread::spawn(move || waiter.ensure_remote(Duration::from_secs(2)));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !reg.launch_requested() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(reg.launch_requested(), "launcher did not register its wait");
+
+    let elapsed = pace_thread.join().unwrap();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "new launch request remained hidden behind retry backoff for {elapsed:?}"
+    );
+    reg.launch_failed("test complete");
+    assert_eq!(launch_thread.join().unwrap().unwrap_err(), "test complete");
+}
+
+#[test]
+fn session_nudge_does_not_interrupt_retry_backoff() {
+    let reg = SessionRegistry::new();
+    let running = AtomicBool::new(true);
+    let nudger = reg.clone();
+    let nudge_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(25));
+        nudger.nudge("unrelated-session");
+    });
+    let started = Instant::now();
+    pace(&running, &reg, Duration::from_millis(150), false);
+    nudge_thread.join().unwrap();
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "ordinary session activity must not create a hot reconnect loop"
+    );
+}
+
+#[test]
+fn retry_wait_still_observes_shutdown() {
+    let reg = SessionRegistry::new();
+    let running = Arc::new(AtomicBool::new(true));
+    let stopper = running.clone();
+    let stop_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(25));
+        stopper.store(false, Ordering::Relaxed);
+    });
+    let started = Instant::now();
+    pace(&running, &reg, Duration::from_secs(5), false);
+    stop_thread.join().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "shutdown remained hidden behind retry backoff"
+    );
 }
 
 #[cfg(unix)]
