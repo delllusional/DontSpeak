@@ -8,9 +8,8 @@ use serde_json::{Value, json};
 /// playback is SILENT — and no tool call sits on the speaking path to report it — so without
 /// this the model narrates into a void and the user silently misses the reply. Injected as
 /// context (not spoken), so it survives the mute it is warning about.
-const MUTED_NOTICE: &str = "\n\n## Voice state\nThe app is currently MUTED: your spoken reply \
-    and the narrator both play SILENTLY right now — the user will NOT hear them. Put anything \
-    important in your TEXT response (not only in the spoken blockquote) until they unmute.";
+const MUTED_NOTICE: &str = "\n\n## Voice state\nMUTED: speech and narration play silently. \
+    Put anything important in text until unmuted.";
 
 /// The narration-context QUERY (UserPromptSubmit `provide`): when "digests" narration is ON,
 /// return the narration spec as `hookSpecificOutput.additionalContext` so the client leads every

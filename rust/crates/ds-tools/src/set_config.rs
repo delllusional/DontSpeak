@@ -91,9 +91,7 @@ impl SetConfigArgs {
         }
         if let Some(vs) = tts_built_in_voices {
             if vs.is_empty() || vs.iter().any(|s| s.trim().is_empty()) {
-                return Err(
-                    "`tts_built_in_voices` must be a non-empty array of non-empty voice ids".into(),
-                );
+                return Err("`tts_built_in_voices` needs non-empty voice ids".into());
             }
             // English-only build: Kokoro encodes the language family in the id's leading char
             // (`a` American + `b` British English). Reject any non-English id here — this is the
@@ -103,7 +101,7 @@ impl SetConfigArgs {
                 .find(|s| !matches!(s.chars().next(), Some('a') | Some('b')))
             {
                 return Err(format!(
-                    "`{bad}` is not an English Kokoro voice. This version supports English only (ids starting `a`/`b`); see list_voices."
+                    "`{bad}` is not English (ids start with a/b); see list_voices"
                 ));
             }
             changes.push(format!("tts_built_in_voices=[{}]", vs.join(", ")));
@@ -124,7 +122,7 @@ impl SetConfigArgs {
             if let Some(engine) = pref.first().copied() {
                 if !engine.is_tts_usable() {
                     return Err(format!(
-                        "`{}` isn't usable on this platform/build — see get_status for what is",
+                        "`{}` not usable here — see get_status",
                         engine.as_str()
                     ));
                 }
@@ -163,7 +161,7 @@ impl SetConfigArgs {
             if let Some(engine) = pref.first().copied() {
                 if !engine.is_stt_usable() {
                     return Err(format!(
-                        "`{}` isn't usable on this platform/build — see get_status for what is",
+                        "`{}` not usable here — see get_status",
                         engine.as_str()
                     ));
                 }
@@ -482,7 +480,7 @@ mod tests {
             let args: SetConfigArgs =
                 serde_json::from_value(serde_json::json!({ "stt_engine": "system" })).unwrap();
             let err = args.apply(&mut cfg).unwrap_err();
-            assert!(err.contains("isn't usable"), "got: {err}");
+            assert!(err.contains("not usable"), "got: {err}");
             // Rejected before persisting — the config is untouched.
             assert_eq!(cfg.stt_engine, None);
         }
