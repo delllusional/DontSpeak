@@ -387,9 +387,10 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         //
         // Live 0.2.93 captures on 2026-07-13 showed camelCase data keys and lowercase-snake
         // `hookEventName` values, which the runtime normalizes mechanically. Stop is
-        // metadata-only and carries no final assistant text, so it signals completion but
-        // cannot drive full-reply narration. The MCP handshake identified itself as
-        // `grok-shell-DontSpeak`, normalized to the alias above.
+        // metadata-only (no final assistant text field); narration falls back to the last
+        // assistant entry in `transcriptPath`. Grok ignores passive-hook stdout, so digest
+        // instructions are also written to `~/.grok/AGENTS.md` (issue #95). The MCP handshake
+        // identified itself as `grok-shell-DontSpeak`, normalized to the alias above.
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::GrokJsonHooks,

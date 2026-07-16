@@ -552,11 +552,29 @@ fn initialize(message: &Value) -> Value {
     let version = requested
         .filter(|version| *version == PROTOCOL_VERSION)
         .unwrap_or(PROTOCOL_VERSION);
-    json!({
+    let mut result = json!({
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-    })
+    });
+    // Grok ignores passive-hook `additionalContext` (issue #95). Clients that honor MCP
+    // `initialize.instructions` still get the digest contract at connect when digests are on.
+    if digests_narration_on() {
+        result.as_object_mut().expect("object").insert(
+            "instructions".into(),
+            json!(ds_config::DEFAULT_NARRATION_SPEC.trim_end()),
+        );
+    }
+    result
+}
+
+/// Whether digests narration is enabled in the live config. Best-effort: missing paths /
+/// config fail open to `false` so initialize never depends on a writable home.
+fn digests_narration_on() -> bool {
+    let Some(paths) = ds_config::Paths::resolve() else {
+        return false;
+    };
+    ds_config::VoiceConfig::load(&paths).narrates(ds_config::NarrateKind::Digests)
 }
 
 fn tools() -> Value {

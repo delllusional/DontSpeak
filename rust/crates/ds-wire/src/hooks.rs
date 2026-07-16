@@ -310,6 +310,11 @@ pub(crate) fn grok_json_hooks(
     paths: &Paths,
 ) -> i32 {
     if remove {
+        // Always clear the managed narrate rules section (issue #95), even when the hooks
+        // file was never created — digests injection must not linger after unwire.
+        if !print_only {
+            sync_grok_narrate_rules(paths, /*digests_on*/ false);
+        }
         if !cfg.exists() {
             return 0; // nothing of ours on disk → clean no-op
         }
@@ -345,8 +350,23 @@ pub(crate) fn grok_json_hooks(
             cfg.display(),
             serde_json::to_string_pretty(&v).unwrap_or_default()
         );
+        // Preview the managed AGENTS.md inject path too (no write).
+        let digests_on =
+            ds_config::VoiceConfig::load(paths).narrates(ds_config::NarrateKind::Digests);
+        if digests_on {
+            let preview = ds_config::apply_grok_narrate_section(
+                &std::fs::read_to_string(&paths.grok_agents_md).unwrap_or_default(),
+                Some(ds_config::DEFAULT_NARRATION_SPEC),
+            );
+            println!("// {}\n{preview}", paths.grok_agents_md.display());
+        }
         return 0;
     }
+
+    // Grok ignores passive-hook `additionalContext`; keep global AGENTS.md in sync so digests
+    // actually reach the model (issue #95). Best-effort: hook wiring still succeeds if this fails.
+    let digests_on = ds_config::VoiceConfig::load(paths).narrates(ds_config::NarrateKind::Digests);
+    sync_grok_narrate_rules(paths, digests_on);
 
     // Steady state (already wired, shape-identical): write NOTHING and create NO `.bak`.
     // LOAD-BEARING — the engine runs this every boot. A missing/malformed file compares
@@ -367,6 +387,32 @@ pub(crate) fn grok_json_hooks(
         &WriteBody::Json(&v),
         hook_action(false),
     )
+}
+
+/// Best-effort write/clear of the managed `~/.grok/AGENTS.md` narrate section. Never fails the
+/// caller: missing dirs, permission errors, etc. are reported on stderr only.
+fn sync_grok_narrate_rules(paths: &Paths, digests_on: bool) {
+    match ds_config::sync_grok_narrate_agents_md(&paths.grok_agents_md, digests_on) {
+        Ok(true) if digests_on => {
+            eprintln!(
+                "wire: synced Grok narrate digests -> {}",
+                paths.grok_agents_md.display()
+            );
+        }
+        Ok(true) => {
+            eprintln!(
+                "wire: cleared Grok narrate digests from {}",
+                paths.grok_agents_md.display()
+            );
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!(
+                "wire: WARNING: could not sync Grok narrate digests in {} ({e})",
+                paths.grok_agents_md.display()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

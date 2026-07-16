@@ -100,6 +100,20 @@ end-of-turn narration core as Qwen Code. This provides final-reply narration, no
 streaming; an absent, unreadable, or unexpected transcript stays silent and still permits the
 reply-done earcon.
 
+**Digest instruction (issue #95):** Grok treats `UserPromptSubmit` as a passive event and
+**ignores hook stdout**, so the Claude/Codex `hookSpecificOutput.additionalContext` path
+never reaches the model. DontSpeak still prints that JSON for forward compatibility, and
+additionally:
+
+1. Maintains a marker-bounded narrate section in `~/.grok/AGENTS.md` (synced on `wire grok`,
+   unwire, and every Grok hook) so Grok loads the digest contract as global project rules at
+   session start.
+2. Returns the same text as MCP `initialize.instructions` when digests are on, for clients
+   that apply server instructions at connect.
+
+A new Grok session is required after first wire (or after flipping digests) so AGENTS.md is
+reloaded.
+
 ## Wiring and reconciliation
 
 The installer runs `dontspeak wire --reconcile`. The resident engine repeats reconciliation
@@ -111,7 +125,7 @@ idempotent, backed up before write, and scoped to DontSpeak's own entries.
 | Claude Code | `~/.claude/settings.json` | `~/.claude.json` |
 | OpenAI Codex | `~/.codex/config.toml` | Same TOML file |
 | Qwen Code | `~/.qwen/settings.json` | Same JSON file |
-| Grok | `~/.grok/hooks/dontspeak.json` | `~/.grok/config.toml` |
+| Grok | `~/.grok/hooks/dontspeak.json` (+ managed narrate section in `~/.grok/AGENTS.md`) | `~/.grok/config.toml` |
 
 Useful diagnostics:
 

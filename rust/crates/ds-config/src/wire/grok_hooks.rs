@@ -28,7 +28,8 @@
 //!     streaming witness, which would incorrectly mark a non-streaming session narrated.
 //!   * `SessionEnd` → `notify` — barge this session's playback on close.
 //!   * `UserPromptSubmit` → notify + compatibility provide output in one process. Native
-//!     passive-hook stdout is ignored by Grok, but imported Claude-hook compatibility may use it.
+//!     passive-hook stdout is ignored by Grok (issue #95), so digests also sync into
+//!     `~/.grok/AGENTS.md`; imported Claude-hook compatibility may still consume provide stdout.
 //!   * `Stop` → `notify` — narrate from `transcriptPath`, then play the reply-done earcon.
 //!   * `Notification` → `notify` — the needs-input earcon.
 //!

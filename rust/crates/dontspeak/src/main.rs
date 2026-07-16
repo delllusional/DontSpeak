@@ -129,12 +129,25 @@ fn is_grok_hook_launch(marker: Option<&std::ffi::OsStr>) -> bool {
 /// hooks ignore stdout; its imported Claude-hook compatibility path may still consume it.
 /// `greet_only=true` matters only for SessionStart and keeps this non-streaming client from
 /// seeding Claude's MessageDisplay witness.
+///
+/// Because Grok ignores provide stdout, we also refresh the managed `~/.grok/AGENTS.md`
+/// narrate section on every hook (issue #95) so digests reach the model at the next session
+/// start (and so a mid-session digests toggle is ready for the next session).
 fn run_grok_hook() {
     let payload = read_stdin();
     let event = hook_core::event_name(&payload);
     hook_core::notify(&event, &payload, true, ClientSource::Grok);
     if let Some(out) = hook_core::provide(&event, &payload) {
         println!("{out}");
+    }
+    // Best-effort: keep global Grok rules aligned with the live `narrate` set.
+    if let Some(paths) = ds_config::Paths::resolve()
+        && let Err(e) = ds_config::sync_grok_narrate_from_config(&paths)
+    {
+        eprintln!(
+            "dontspeak: WARNING: could not sync Grok narrate digests in {} ({e})",
+            paths.grok_agents_md.display()
+        );
     }
 }
 

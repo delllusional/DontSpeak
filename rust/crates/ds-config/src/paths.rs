@@ -85,6 +85,10 @@ pub struct Paths {
     /// Grok's `~/.grok/hooks/dontspeak.json` — the dedicated file `wire grok` owns for
     /// native voice hooks; unwire deletes it.
     pub grok_hooks_json: PathBuf,
+    /// Grok's global rules file (`~/.grok/AGENTS.md`). Loaded at session start as project
+    /// instructions. DontSpeak maintains a marker-bounded narrate section here because Grok
+    /// ignores passive-hook stdout (`UserPromptSubmit` provide → `additionalContext`).
+    pub grok_agents_md: PathBuf,
 }
 
 impl Paths {
@@ -127,6 +131,7 @@ impl Paths {
             qwen_dir,
             grok_config: grok_dir.join("config.toml"),
             grok_hooks_json: grok_dir.join("hooks").join("dontspeak.json"),
+            grok_agents_md: grok_dir.join("AGENTS.md"),
             grok_dir,
             home,
             claude_dir,
@@ -170,6 +175,7 @@ impl Paths {
             qwen_dir,
             grok_config: grok_dir.join("config.toml"),
             grok_hooks_json: grok_dir.join("hooks").join("dontspeak.json"),
+            grok_agents_md: grok_dir.join("AGENTS.md"),
             grok_dir,
             home,
             claude_dir,

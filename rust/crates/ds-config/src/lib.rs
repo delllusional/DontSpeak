@@ -41,6 +41,7 @@
 mod enums;
 mod brand;
 mod claude_code;
+mod grok_rules;
 mod narration;
 mod paths;
 mod pidfile;
@@ -63,6 +64,10 @@ pub use enums::{
     SttEngine, TrayKind, TtsEngine, de_opt_pref_stt_engine, de_opt_pref_tts_engine,
     default_provider, intel_mac_builtin_ort_available, normalize_tray_indicator,
     provider_pref_wants_gpu,
+};
+pub use grok_rules::{
+    GROK_NARRATE_BEGIN, GROK_NARRATE_END, apply_grok_narrate_section, clear_grok_narrate_agents_md,
+    sync_grok_narrate_agents_md, sync_grok_narrate_from_config,
 };
 pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
 pub use paths::{
