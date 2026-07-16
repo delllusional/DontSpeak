@@ -89,6 +89,15 @@ impl StatusGate {
         *self.seq.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Capture the sequence BEFORE reading the fields for one status snapshot. If a
+    /// transition lands during the reads, the returned sequence stays old so the
+    /// client's next wait returns immediately instead of acknowledging state it did
+    /// not receive.
+    pub(crate) fn snapshot<T>(&self, read: impl FnOnce() -> T) -> (T, u64) {
+        let seq = self.seq();
+        (read(), seq)
+    }
+
     /// Block until the sequence differs from `since` (a status change landed) or
     /// `timeout` elapses, then return the current sequence. Returns immediately if
     /// the state already advanced past `since` while the caller was away.
@@ -132,15 +141,19 @@ pub(crate) struct EngineShared {
 }
 
 /// Build the model presence + removability report (the engine is the authority:
-/// it knows what it has loaded). A model is `removable` only if present AND not
-/// currently running in the engine — for Kokoro/onnx that means the warm TTS
-/// child is NOT alive; Parakeet shares the onnx dylib, so it's removable
-/// whenever present unless the warm Kokoro child is holding that dylib.
+/// it knows what it has loaded). `read_tts_active` is deliberately deferred until
+/// after the status sequence is captured: a transition during this comparatively
+/// expensive report must remain unacknowledged so the client's next wait refreshes
+/// immediately. A model is `removable` only if present AND not currently running in
+/// the engine — for Kokoro/onnx that means the warm TTS child is NOT alive; Parakeet
+/// shares the onnx dylib, so it's removable whenever present unless the warm Kokoro
+/// child is holding that dylib.
 pub(crate) fn model_status_json(
     shared: &EngineShared,
     paths: &Paths,
-    tts_active: bool,
+    read_tts_active: impl FnOnce() -> bool,
 ) -> serde_json::Value {
+    let (tts_active, seq) = shared.gate.snapshot(read_tts_active);
     let EngineShared {
         tts,
         caps_active,
@@ -151,7 +164,7 @@ pub(crate) fn model_status_json(
         tts_stats,
         stt_stats,
         lifetime,
-        gate,
+        gate: _,
     } = shared;
     let cfg = VoiceConfig::load(paths);
     // The engines the preference ladders RESOLVE to on this build — every "is engine X
@@ -681,7 +694,7 @@ pub(crate) fn model_status_json(
         build_id: env!("DONTSPEAK_BUILD_ID").to_string(),
         // Push sequence: the app echoes this back as `since` on the next
         // `WaitModelStatus` so it blocks until the NEXT change (see `StatusGate`).
-        seq: gate.seq(),
+        seq,
     };
     serde_json::to_value(status).unwrap_or(serde_json::Value::Null)
 }
@@ -1013,7 +1026,7 @@ mod tests {
             gate,
         };
 
-        let value = model_status_json(&shared, &paths, true);
+        let value = model_status_json(&shared, &paths, || true);
         // SAFETY: restore the three values while ENV_LOCK is still held.
         unsafe {
             match previous_model_dir {
@@ -1102,6 +1115,26 @@ mod tests {
         );
         assert_eq!(woken, since.wrapping_add(1));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn snapshot_does_not_acknowledge_a_transition_during_its_reads() {
+        let gate = StatusGate::new();
+        let (speaking, snapshot_seq) = gate.snapshot(|| {
+            // Reproduce the queue boundary: the waiter woke for `speaking=false`, then
+            // playback restarted before the status builder finished. The snapshot may
+            // include either state, but its epoch must predate this transition.
+            gate.bump();
+            true
+        });
+
+        assert!(speaking);
+        assert_ne!(snapshot_seq, gate.seq());
+        assert_eq!(
+            gate.wait_changed(snapshot_seq, Duration::from_secs(5)),
+            gate.seq(),
+            "the next wait must return immediately for the unacknowledged transition"
+        );
     }
 
     /// Each model row picks ITS OWN target's fraction from the parallel-download map:

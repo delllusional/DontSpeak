@@ -313,7 +313,7 @@ pub(crate) fn spawn_ipc_server(
                 }
                 ds_ipc::Request::ModelStatus => {
                     emit(&ds_ipc::Response::ModelStatus {
-                        status: model_status_json(&shared, &paths, ttsq.is_tts_active()),
+                        status: model_status_json(&shared, &paths, || ttsq.is_tts_active()),
                     });
                 }
                 ds_ipc::Request::WaitModelStatus { since, timeout_ms } => {
@@ -324,7 +324,7 @@ pub(crate) fn spawn_ipc_server(
                     let timeout = std::time::Duration::from_millis(timeout_ms.clamp(1, 60_000));
                     shared.gate.wait_changed(since, timeout);
                     emit(&ds_ipc::Response::ModelStatus {
-                        status: model_status_json(&shared, &paths, ttsq.is_tts_active()),
+                        status: model_status_json(&shared, &paths, || ttsq.is_tts_active()),
                     });
                 }
                 ds_ipc::Request::SetProvider { provider } => {
