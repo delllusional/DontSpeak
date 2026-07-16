@@ -288,19 +288,38 @@ fn retain_only_session(q: &mut VecDeque<Item>, keep: &Option<String>) {
     q.retain(|it| &it.session == keep);
 }
 
+/// Whether a queued item's session tag is preferred under the active terminal.
+///
+/// Preferred tags:
+/// - untagged / global (`None`) — MCP `speak`, etc.
+/// - exact match with the active session id
+/// - Grok Stop sticky `grok-stop:<active>` — digests/earcons admitted under a sticky tag so
+///   MarkActive `input_clears=[current]` on the real id cannot prune them, but they must
+///   still play with the active terminal's priority (not lose to FIFO from another session)
+fn session_preferred_for_active(item_session: &Option<String>, active: &str) -> bool {
+    match item_session {
+        None => true,
+        Some(s) if s == active => true,
+        Some(s) => s
+            .strip_prefix("grok-stop:")
+            .is_some_and(|real| real == active),
+    }
+}
+
 /// Index of the first item the worker may play given the active terminal. `None`
 /// active → strict FIFO (back-compat single-terminal). `Some(s)` → PREFER the first
-/// item tagged `s` OR untagged (`None` = global audio like the MCP `speak` tool); but
-/// if the active terminal has NOTHING queued, fall back to plain FIFO so another
+/// item tagged `s`, untagged (`None` = global audio like the MCP `speak` tool), or the
+/// Grok sticky `grok-stop:<s>` sibling (see [`session_preferred_for_active`]); but
+/// if the active terminal has NOTHING preferred queued, fall back to plain FIFO so another
 /// terminal's reply is never starved forever (the active `explicit` session persists
 /// until the next MarkActive, so without this fallback a backgrounded window's reply
 /// is held indefinitely — the cross-window "one window goes silent" bug). PURE.
 fn select_pos(q: &VecDeque<Item>, active: &Option<String>) -> Option<usize> {
     match active {
         None => (!q.is_empty()).then_some(0),
-        Some(_) => q
+        Some(active_id) => q
             .iter()
-            .position(|it| it.session.is_none() || &it.session == active)
+            .position(|it| session_preferred_for_active(&it.session, active_id))
             // No item for the active terminal → don't starve the others: play FIFO.
             .or_else(|| (!q.is_empty()).then_some(0)),
     }
@@ -2003,6 +2022,25 @@ mod tests {
         // plays even when another terminal is active.
         let q = deque(&[Some("a"), None, Some("a")]);
         assert_eq!(select_pos(&q, &Some("b".into())), Some(1));
+    }
+
+    #[test]
+    fn grok_stop_sticky_tag_is_preferred_with_active_session() {
+        // Grok Stop digests admit under `grok-stop:<real>` so MarkActive current-clear
+        // cannot prune them. They must still win active-session priority over another
+        // terminal's FIFO items (not fall through to "no preferred → play front").
+        let q = deque(&[Some("other"), Some("grok-stop:active"), Some("active")]);
+        assert_eq!(
+            select_pos(&q, &Some("active".into())),
+            Some(1),
+            "sticky digests for the active terminal must not wait behind other sessions"
+        );
+        // Real session id still preferred when it appears first among preferred tags.
+        let q2 = deque(&[Some("active"), Some("grok-stop:active")]);
+        assert_eq!(select_pos(&q2, &Some("active".into())), Some(0));
+        // Sticky for a different session is not preferred.
+        let q3 = deque(&[Some("grok-stop:other"), Some("active")]);
+        assert_eq!(select_pos(&q3, &Some("active".into())), Some(1));
     }
 
     #[test]

@@ -125,7 +125,9 @@ pub fn engine_earcon(paths: &Paths, event: &str, payload: &str, client: ClientSo
 
 /// Like [`engine_earcon`], but the session is supplied by the caller (e.g. Grok Stop uses the
 /// sticky `grok-stop:<session>` tag so reply_done queues behind sticky digests under the same
-/// `select_pos` preference key).
+/// session tag — ordered relative to each other; the tag is not the real session id so
+/// MarkActive current-clear cannot prune them, while `select_pos` still prefers
+/// `grok-stop:<active>` with the active terminal).
 pub fn engine_earcon_for_session(
     paths: &Paths,
     event: &str,

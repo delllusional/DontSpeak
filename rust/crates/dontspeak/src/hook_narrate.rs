@@ -50,10 +50,11 @@ pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
     // Grok Stop digests are admitted under a sticky session tag (see `grok_stop_session_tag`)
     // so MarkActive `input_clears=[current]` cannot prune them. SessionEnd must still barge
     // that sticky queue — plain `SessionEnd{session}` only clears the real session id.
-    if client == ClientSource::Grok
-        && let Some(s) = &session
-    {
-        let sticky = grok_stop_session_tag(s);
+    if client == ClientSource::Grok {
+        let sticky = session
+            .as_deref()
+            .map(grok_stop_session_tag)
+            .unwrap_or_else(|| "grok-stop".into());
         // SessionEnd (not only StopSpeech) so sticky tags reclaim pool assignment /
         // forget_narration_session state the same way the real session does.
         let _ = ds_ipc::request(
@@ -63,7 +64,9 @@ pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
                 source: client,
             },
         );
-        let _ = std::fs::remove_file(last_spoken_fingerprint_path(paths, s));
+        if let Some(s) = &session {
+            let _ = std::fs::remove_file(last_spoken_fingerprint_path(paths, s));
+        }
     }
     // SessionEnd is terminal for this session (this path fires ONLY on SessionEnd — a
     // mid-session barge uses `StopSpeech`), so the engine reclaims this session's voice
@@ -170,9 +173,12 @@ impl StopHook {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or("-");
+            // Digests preferred when enabled; this helper is used by tests and non-`speak_reply`
+            // paths that do not load VoiceConfig — assume digests on (live default).
             // Re-resolves the transcript path on every retry attempt (updates.jsonl may
             // exist before sibling chat_history.jsonl appears).
-            return select_grok_stop_text(self, paths, session).map(|(text, _fp)| Cow::Owned(text));
+            return select_grok_stop_text(self, paths, session, true)
+                .map(|(text, _fp)| Cow::Owned(text));
         }
         None
     }
@@ -288,13 +294,18 @@ fn has_digest_blockquote(text: &str) -> bool {
     !ds_config::all_blockquotes(text).is_empty()
 }
 
-/// Stable fingerprint of spoken digest text so a late Stop cannot re-voice the previous
-/// turn when the current digests have not flushed yet.
-fn digest_fingerprint(text: &str) -> u64 {
+/// Fingerprint of a spoken digest for this turn so a re-fired Stop cannot re-voice the
+/// same digests while they remain on disk after a successful enqueue.
+///
+/// Includes the last user text and its position in the transcript tail so a **later**
+/// turn that happens to emit identical digest body is not treated as already spoken.
+fn digest_fingerprint(last_user_text: &str, last_user_pos: Option<usize>, digest_text: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
-    text.trim().hash(&mut h);
+    last_user_text.trim().hash(&mut h);
+    last_user_pos.hash(&mut h);
+    digest_text.trim().hash(&mut h);
     h.finish()
 }
 
@@ -337,10 +348,11 @@ fn store_last_spoken_fingerprint(paths: &Paths, session: &str, fp: u64) {
     }
 }
 
-/// One JSONL chat entry we care about for turn scoping.
+/// One JSONL chat entry we care about for turn scoping and turn-keyed fingerprints.
 #[derive(Debug)]
 enum ChatRole {
-    User,
+    /// User message text (may be empty after trim if the line had no usable content).
+    User(String),
     Assistant(String),
 }
 
@@ -383,7 +395,12 @@ fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
             continue;
         };
         match entry.r#type.as_deref() {
-            Some("user") => out.push(ChatRole::User),
+            Some("user") => {
+                // Keep the role even when text is empty so the turn boundary still moves.
+                out.push(ChatRole::User(
+                    entry.text_content().unwrap_or_default(),
+                ));
+            }
             Some("assistant") => {
                 if let Some(text) = entry.text_content() {
                     out.push(ChatRole::Assistant(text));
@@ -395,28 +412,49 @@ fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
     out
 }
 
-/// Non-empty assistant texts for the CURRENT turn only (after the last user message),
-/// newest first. Never crosses into a previous user turn — that was the "played previous
-/// digests" live bug when Stop fired before the current assistant line was flushed.
-fn assistants_this_turn_newest_first(path: &std::path::Path) -> Vec<String> {
+/// Assistants after the last user message (newest first) plus turn identity for fingerprints.
+#[derive(Debug, Default)]
+struct CurrentTurn {
+    /// Text of the last user message in the scanned tail (empty if none).
+    last_user_text: String,
+    /// Index of that user role in the chronological tail, when present.
+    last_user_pos: Option<usize>,
+    /// Non-empty assistant texts for this turn only, newest first.
+    assistants_newest_first: Vec<String>,
+}
+
+/// Current-turn assistants only (after the last user message), newest first.
+/// Never crosses into a previous user turn — that was the "played previous digests" live
+/// bug when Stop fired before the current assistant line was flushed.
+fn current_turn_from_path(path: &std::path::Path) -> CurrentTurn {
     let roles = chat_roles_chronological(path);
-    let last_user = roles
+    let last_user_pos = roles
         .iter()
-        .rposition(|r| matches!(r, ChatRole::User))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    roles[last_user..]
+        .rposition(|r| matches!(r, ChatRole::User(_)));
+    let after = last_user_pos.map(|i| i + 1).unwrap_or(0);
+    let last_user_text = last_user_pos
+        .and_then(|i| match &roles[i] {
+            ChatRole::User(t) => Some(t.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let assistants_newest_first = roles[after..]
         .iter()
         .rev()
         .filter_map(|r| match r {
             ChatRole::Assistant(t) => Some(t.clone()),
-            ChatRole::User => None,
+            ChatRole::User(_) => None,
         })
-        .collect()
+        .collect();
+    CurrentTurn {
+        last_user_text,
+        last_user_pos,
+        assistants_newest_first,
+    }
 }
 
-/// Retry budget for Grok Stop transcript selection. Production waits for a late
-/// `chat_history` flush; tests use zero delay so unit tests stay fast.
+/// Full retry budget while the path is missing or the current turn has no assistant yet
+/// (waiting for a late `chat_history` flush). Tests use a small count so they stay fast.
 fn stop_retry_attempts() -> usize {
     #[cfg(test)]
     {
@@ -425,6 +463,20 @@ fn stop_retry_attempts() -> usize {
     #[cfg(not(test))]
     {
         20
+    }
+}
+
+/// Extra attempts after a non-digest current-turn assistant is already visible. Waiting the
+/// full budget always would delay shorts-only Stop (and the ding) by ~2s even when digests
+/// will never appear. Digests that land shortly after a status line still get a short window.
+fn stop_retry_after_shorts_seen() -> usize {
+    #[cfg(test)]
+    {
+        1
+    }
+    #[cfg(not(test))]
+    {
+        3
     }
 }
 
@@ -456,19 +508,23 @@ struct GrokStopSelection {
 ///      chat_history.jsonl appears).
 ///   2. Only consider assistants after the last user message (current turn). Never re-voice
 ///      a previous turn's digests when Stop races the chat_history flush.
-///   3. Prefer the newest current-turn assistant with a top-level `>` digest (skip tool-status
-///      lines that follow digests in agentic turns).
-///   4. Skip digests whose fingerprint matches the last *successfully spoken* Stop for this
-///      session; retry for a newer flush rather than re-playing.
+///   3. When digests mode is on, prefer the newest current-turn assistant with a top-level
+///      `>` digest (skip tool-status lines that follow digests in agentic turns).
+///   4. Skip digests whose *turn-scoped* fingerprint matches the last *successfully spoken*
+///      Stop for this session; retry for a newer flush rather than re-playing.
 ///   5. Fall back to the newest non-empty current-turn assistant for shorts-only replies.
+///   6. Full retry budget only while the path/turn is empty; once a non-digest assistant is
+///      visible, use a short secondary budget (or return immediately when digests are off).
 ///
 /// Does **not** persist fingerprints — the caller commits after enqueue success.
 fn select_grok_stop_text(
     hook: &StopHook,
     paths: &Paths,
     session: &str,
+    messages_on: bool,
 ) -> Option<(String, Option<u64>)> {
-    select_grok_stop_text_detailed(hook, paths, session).map(|s| (s.text, s.digest_fp))
+    select_grok_stop_text_detailed(hook, paths, session, messages_on)
+        .map(|s| (s.text, s.digest_fp))
 }
 
 /// Cheap (len, mtime) signature so fingerprint-match retries stop once the file is stable.
@@ -477,15 +533,32 @@ fn transcript_file_sig(path: &std::path::Path) -> Option<(u64, std::time::System
     Some((meta.len(), meta.modified().ok()?))
 }
 
+/// Pick the best shorts-fallback assistant body for the current turn.
+/// When digests mode is off, prefer a non-digest line so a status/short body wins over a
+/// digest-bearing final that would yield silence under shorts-only `stop_utterances`.
+fn shorts_fallback_text(turn: &CurrentTurn, messages_on: bool) -> Option<String> {
+    if messages_on {
+        return turn.assistants_newest_first.first().cloned();
+    }
+    turn.assistants_newest_first
+        .iter()
+        .find(|t| !has_digest_blockquote(t))
+        .cloned()
+        .or_else(|| turn.assistants_newest_first.first().cloned())
+}
+
 fn select_grok_stop_text_detailed(
     hook: &StopHook,
     paths: &Paths,
     session: &str,
+    messages_on: bool,
 ) -> Option<GrokStopSelection> {
     let last_fp = load_last_spoken_fingerprint(paths, session);
     let mut shorts_fallback: Option<GrokStopSelection> = None;
     let mut prev_fp_match_sig: Option<(u64, std::time::SystemTime)> = None;
+    let mut shorts_seen_at: Option<usize> = None;
     let attempts = stop_retry_attempts();
+    let shorts_extra = stop_retry_after_shorts_seen();
     let delay = stop_retry_delay();
 
     for attempt in 0..attempts {
@@ -495,9 +568,17 @@ fn select_grok_stop_text_detailed(
             }
             continue;
         };
-        let turn = assistants_this_turn_newest_first(&path);
-        if let Some(digest) = turn.iter().find(|t| has_digest_blockquote(t)) {
-            let fp = digest_fingerprint(digest);
+        let turn = current_turn_from_path(&path);
+
+        // Digests mode: prefer newest digest-bearing assistant in the current turn.
+        if messages_on
+            && let Some(digest) = turn
+                .assistants_newest_first
+                .iter()
+                .find(|t| has_digest_blockquote(t))
+        {
+            let fp =
+                digest_fingerprint(&turn.last_user_text, turn.last_user_pos, digest);
             if last_fp != Some(fp) {
                 return Some(GrokStopSelection {
                     text: digest.clone(),
@@ -505,22 +586,33 @@ fn select_grok_stop_text_detailed(
                     path,
                 });
             }
-            // Same digests as last spoken: only keep waiting if the transcript is still
-            // changing (a newer flush may replace them). Stable file → give up immediately.
+            // Same digests as last spoken for this turn: only keep waiting if the transcript
+            // is still changing (a newer flush may replace them). Stable file → give up.
             let sig = transcript_file_sig(&path);
             if sig.is_some() && sig == prev_fp_match_sig {
                 return None;
             }
             prev_fp_match_sig = sig;
-        } else if shorts_fallback.is_none()
-            && let Some(text) = turn.into_iter().next()
-        {
-            shorts_fallback = Some(GrokStopSelection {
-                text,
-                digest_fp: None,
-                path: path.clone(),
-            });
+        } else if let Some(text) = shorts_fallback_text(&turn, messages_on) {
+            if shorts_fallback.is_none() {
+                shorts_fallback = Some(GrokStopSelection {
+                    text,
+                    digest_fp: None,
+                    path: path.clone(),
+                });
+                shorts_seen_at = Some(attempt);
+                // Digests disabled: no reason to wait for a `>` line we would ignore.
+                if !messages_on {
+                    return shorts_fallback;
+                }
+            }
+            if let Some(seen_at) = shorts_seen_at
+                && attempt.saturating_sub(seen_at) >= shorts_extra
+            {
+                return shorts_fallback;
+            }
         }
+
         if attempt + 1 < attempts {
             std::thread::sleep(delay);
         }
@@ -588,14 +680,24 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
 
     let mic_active = ds_platform::is_mic_active();
 
-    // Grok: re-resolve path + turn-scoped selection with deferred fingerprint commit.
+    // Grok: prefer a direct lastAssistantMessage when present (forward-compat); otherwise
+    // re-resolve path + turn-scoped selection with deferred fingerprint commit.
     // Other clients: last_assistant_message (or None).
     let (assistant_text, grok_selection): (Option<String>, Option<GrokStopSelection>) =
         if client == ClientSource::Grok {
-            let sess = session.as_deref().unwrap_or("-");
-            match select_grok_stop_text_detailed(&hook, paths, sess) {
-                Some(sel) => (Some(sel.text.clone()), Some(sel)),
-                None => (None, None),
+            if let Some(direct) = hook
+                .last_assistant_message
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                (Some(direct.to_owned()), None)
+            } else {
+                let sess = session.as_deref().unwrap_or("-");
+                match select_grok_stop_text_detailed(&hook, paths, sess, messages_on) {
+                    Some(sel) => (Some(sel.text.clone()), Some(sel)),
+                    None => (None, None),
+                }
             }
         } else {
             (
@@ -1457,7 +1559,7 @@ mod tests {
             transcript_path: Some(tx_path.to_string_lossy().into_owned()),
             ..StopHook::default()
         };
-        let (text, _) = select_grok_stop_text(&hook, &paths, "sess")
+        let (text, _) = select_grok_stop_text(&hook, &paths, "sess", true)
             .expect("must find the digest-bearing assistant");
         assert!(
             text.contains("> This is a DontSpeak digest check."),
@@ -1492,7 +1594,7 @@ mod tests {
             transcript_path: Some(tx_path.to_string_lossy().into_owned()),
             ..StopHook::default()
         };
-        let text = select_grok_stop_text(&hook, &paths, "sess-prev");
+        let text = select_grok_stop_text(&hook, &paths, "sess-prev", true);
         assert_eq!(
             text.as_ref().map(|(t, _)| t.as_str()),
             Some("tool status without digests yet"),
@@ -1510,7 +1612,7 @@ mod tests {
 {"type":"assistant","content":"> Current turn digests."}
 "#;
         std::fs::write(&tx_path, transcript2).unwrap();
-        let text2 = select_grok_stop_text(&hook, &paths, "sess-prev");
+        let text2 = select_grok_stop_text(&hook, &paths, "sess-prev", true);
         assert_eq!(
             text2.as_ref().map(|(t, _)| t.as_str()),
             Some("> Current turn digests.")
@@ -1535,7 +1637,7 @@ mod tests {
             transcript_path: Some(tx_path.to_string_lossy().into_owned()),
             ..StopHook::default()
         };
-        let (text, fp) = select_grok_stop_text(&hook, &paths, "fp-sess").expect("select");
+        let (text, fp) = select_grok_stop_text(&hook, &paths, "fp-sess", true).expect("select");
         assert!(text.contains("Fingerprint gate"));
         assert!(fp.is_some());
         assert!(
@@ -1544,7 +1646,7 @@ mod tests {
         );
         store_last_spoken_fingerprint(&paths, "fp-sess", fp.unwrap());
         // After commit, same digests are skipped (shorts fallback empty / wait then status).
-        let again = select_grok_stop_text(&hook, &paths, "fp-sess");
+        let again = select_grok_stop_text(&hook, &paths, "fp-sess", true);
         // Only digests in the turn; after fingerprint match, shorts_fallback stays None
         // when the only assistant is digest-bearing (no non-digest fallback).
         assert!(
@@ -1553,6 +1655,97 @@ mod tests {
                     .as_ref()
                     .is_some_and(|(t, _)| !t.contains("Fingerprint gate")),
             "committed fingerprint must not re-select the same digests: {again:?}"
+        );
+    }
+
+    #[test]
+    fn grok_stop_fingerprint_allows_identical_digests_on_a_new_turn() {
+        // Same digest body on a later user turn must still speak (turn-scoped fingerprint).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let tx_path = dir.path().join("chat_history.jsonl");
+        std::fs::write(
+            &tx_path,
+            r#"{"type":"user","content":"first prompt"}
+{"type":"assistant","content":"> Done."}
+"#,
+        )
+        .unwrap();
+        let hook = StopHook {
+            session_id: Some("same-body".into()),
+            transcript_path: Some(tx_path.to_string_lossy().into_owned()),
+            ..StopHook::default()
+        };
+        let (_text, fp) =
+            select_grok_stop_text(&hook, &paths, "same-body", true).expect("first turn");
+        store_last_spoken_fingerprint(&paths, "same-body", fp.unwrap());
+
+        std::fs::write(
+            &tx_path,
+            r#"{"type":"user","content":"first prompt"}
+{"type":"assistant","content":"> Done."}
+{"type":"user","content":"second prompt"}
+{"type":"assistant","content":"> Done."}
+"#,
+        )
+        .unwrap();
+        let (text2, fp2) =
+            select_grok_stop_text(&hook, &paths, "same-body", true).expect("second turn");
+        assert_eq!(text2, "> Done.");
+        assert_ne!(
+            fp2, fp,
+            "new turn with identical digest body must not reuse the prior fingerprint"
+        );
+    }
+
+    #[test]
+    fn grok_stop_shorts_only_does_not_wait_for_digests_when_digests_off() {
+        // With digests mode off, a non-digest status line is returned immediately
+        // (production otherwise used a short secondary budget; digests-off is zero wait).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let tx_path = dir.path().join("chat_history.jsonl");
+        std::fs::write(
+            &tx_path,
+            r#"{"type":"user","content":"q"}
+{"type":"assistant","content":"plain short reply without digests"}
+"#,
+        )
+        .unwrap();
+        let hook = StopHook {
+            session_id: Some("shorts-sess".into()),
+            transcript_path: Some(tx_path.to_string_lossy().into_owned()),
+            ..StopHook::default()
+        };
+        let (text, fp) =
+            select_grok_stop_text(&hook, &paths, "shorts-sess", false).expect("shorts");
+        assert_eq!(text, "plain short reply without digests");
+        assert!(fp.is_none());
+    }
+
+    #[test]
+    fn grok_stop_prefers_non_digest_when_digests_mode_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let tx_path = dir.path().join("chat_history.jsonl");
+        std::fs::write(
+            &tx_path,
+            r#"{"type":"user","content":"q"}
+{"type":"assistant","content":"> Digest only."}
+{"type":"assistant","content":"status without digests"}
+"#,
+        )
+        .unwrap();
+        let hook = StopHook {
+            session_id: Some("shorts-pref".into()),
+            transcript_path: Some(tx_path.to_string_lossy().into_owned()),
+            ..StopHook::default()
+        };
+        let (text, _) =
+            select_grok_stop_text(&hook, &paths, "shorts-pref", false).expect("status");
+        assert_eq!(
+            text, "status without digests",
+            "digests-off must prefer non-digest body over a digest-bearing final"
         );
     }
 
@@ -1638,7 +1831,7 @@ mod tests {
             ..StopHook::default()
         };
         assert_eq!(
-            select_grok_stop_text(&hook, &paths, "utf8")
+            select_grok_stop_text(&hook, &paths, "utf8", true)
                 .as_ref()
                 .map(|(t, _)| t.as_str()),
             Some("> Final digest.")
