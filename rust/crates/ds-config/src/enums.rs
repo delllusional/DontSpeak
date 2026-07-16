@@ -89,12 +89,27 @@ impl SttEngine {
         // Intel macOS: built-in (Parakeet) ONNX STT is a RUNTIME capability (an onnxruntime dylib —
         // Homebrew keg / ORT_DYLIB_PATH), invisible to the static `(os, arch)` matrix. Absent ⇒ this
         // rung is skipped and the ladder falls through to `claude_code`.
-        if matches!(self, SttEngine::BuiltIn)
-            && cfg!(all(target_os = "macos", target_arch = "x86_64"))
-        {
-            return intel_mac_builtin_ort_available();
+        let intel_mac_ort_available = cfg!(all(target_os = "macos", target_arch = "x86_64"))
+            && matches!(self, SttEngine::BuiltIn)
+            && intel_mac_builtin_ort_available();
+        self.stt_usable_with_intel_mac_ort(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            intel_mac_ort_available,
+        )
+    }
+
+    fn stt_usable_with_intel_mac_ort(
+        self,
+        os: &str,
+        arch: &str,
+        intel_mac_ort_available: bool,
+    ) -> bool {
+        if matches!(self, SttEngine::BuiltIn) && os == "macos" && arch == "x86_64" {
+            intel_mac_ort_available
+        } else {
+            self.stt_usable_on(os, arch)
         }
-        self.stt_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
     /// [`is_stt_usable`](SttEngine::is_stt_usable) as a pure function of the target `(os, arch)` —
@@ -155,12 +170,27 @@ impl TtsEngine {
         // Intel macOS: built-in (Kokoro) ONNX TTS is a RUNTIME capability (an onnxruntime dylib —
         // Homebrew keg / ORT_DYLIB_PATH), invisible to the static `(os, arch)` matrix. Absent ⇒ this
         // rung is skipped and the ladder falls through to `system` (`say`).
-        if matches!(self, TtsEngine::Kokoro)
-            && cfg!(all(target_os = "macos", target_arch = "x86_64"))
-        {
-            return intel_mac_builtin_ort_available();
+        let intel_mac_ort_available = cfg!(all(target_os = "macos", target_arch = "x86_64"))
+            && matches!(self, TtsEngine::Kokoro)
+            && intel_mac_builtin_ort_available();
+        self.tts_usable_with_intel_mac_ort(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            intel_mac_ort_available,
+        )
+    }
+
+    fn tts_usable_with_intel_mac_ort(
+        self,
+        os: &str,
+        arch: &str,
+        intel_mac_ort_available: bool,
+    ) -> bool {
+        if matches!(self, TtsEngine::Kokoro) && os == "macos" && arch == "x86_64" {
+            intel_mac_ort_available
+        } else {
+            self.tts_usable_on(os, arch)
         }
-        self.tts_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
     /// [`is_tts_usable`](TtsEngine::is_tts_usable) as a pure function of the target `(os, arch)` —
@@ -1109,28 +1139,22 @@ mod tests {
     }
 
     #[test]
-    fn engine_usability_matches_host_target() {
-        // The host build's `*_usable()` must agree with the pure `_on(OS, ARCH)` it delegates
-        // to (the cross-platform table below pins every OTHER target on this one host) — EXCEPT the
-        // built-in engines on Intel macOS, whose runtime usability tracks the onnxruntime dylib
-        // probe (Homebrew keg / ORT_DYLIB_PATH), a runtime fact the static matrix can't see.
+    fn engine_usability_uses_mocked_intel_mac_ort_availability() {
+        // Exercise both Intel-macOS runtime branches without reading ORT_DYLIB_PATH or scanning
+        // Homebrew. Other targets ignore that injected capability and follow the static matrix.
+        assert!(!TtsEngine::Kokoro.tts_usable_with_intel_mac_ort("macos", "x86_64", false));
+        assert!(TtsEngine::Kokoro.tts_usable_with_intel_mac_ort("macos", "x86_64", true));
+        assert!(!SttEngine::BuiltIn.stt_usable_with_intel_mac_ort("macos", "x86_64", false));
+        assert!(SttEngine::BuiltIn.stt_usable_with_intel_mac_ort("macos", "x86_64", true));
+
         let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
-        let intel_mac = os == "macos" && arch == "x86_64";
-        for e in TtsEngine::ALL.iter().copied() {
-            let want = if intel_mac && matches!(e, TtsEngine::Kokoro) {
-                intel_mac_builtin_ort_available()
-            } else {
-                e.tts_usable_on(os, arch)
-            };
-            assert_eq!(e.is_tts_usable(), want, "{e:?}");
-        }
-        for e in SttEngine::ALL.iter().copied() {
-            let want = if intel_mac && matches!(e, SttEngine::BuiltIn) {
-                intel_mac_builtin_ort_available()
-            } else {
-                e.stt_usable_on(os, arch)
-            };
-            assert_eq!(e.is_stt_usable(), want, "{e:?}");
+        if !(os == "macos" && arch == "x86_64") {
+            for e in TtsEngine::ALL.iter().copied() {
+                assert_eq!(e.is_tts_usable(), e.tts_usable_on(os, arch), "{e:?}");
+            }
+            for e in SttEngine::ALL.iter().copied() {
+                assert_eq!(e.is_stt_usable(), e.stt_usable_on(os, arch), "{e:?}");
+            }
         }
     }
 

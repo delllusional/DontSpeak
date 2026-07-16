@@ -2,7 +2,8 @@
 # uninstall.sh — THE DontSpeak uninstaller (macOS + Linux): the single source of truth.
 #
 # Removes the whole install, whichever flow created it:
-#   • the app bundle: ~/Applications/DontSpeak.app (macOS) — release (web/install.sh)
+#   • the app bundle: ~/Applications/DontSpeak.app (macOS) — release
+#     (scripts/install/web/install.sh)
 #     and dev (apps/macos/bundle.sh) share this ONE per-user layout; DONTSPEAK_APP_DIR
 #     overrides it in both
 #   • CLI/engine binaries in ~/.local/bin (all flows, and the whole Linux install)
@@ -104,14 +105,6 @@ case "$(uname -s)" in
       "$H"/Library/Logs/DiagnosticReports/ds-*.ips \
       "$H"/Library/Logs/DiagnosticReports/Retired/ds-*.ips
 
-    echo "==> 4b. remove the DontSpeak hook helpers (install-daemon.sh seeds these into the"
-    echo "        SHARED ~/.claude/hooks — so delete only OUR files, never the whole dir)"
-    # Mirror install-daemon.sh: it copies/compiles mic-active + capslock (each .swift + the
-    # built binary) and copies HOOKS-README.md → README.md into ~/.claude/hooks.
-    for f in mic-active mic-active.swift capslock capslock.swift README.md; do
-      rm -f "$H/.claude/hooks/$f"
-    done
-
     echo "==> 5. forget the login item (best-effort; SMAppService also reaps it once the app is gone)"
     osascript -e 'tell application "System Events" to delete login item "DontSpeak"' 2>/dev/null || true
 
@@ -124,7 +117,7 @@ case "$(uname -s)" in
     tccutil reset Accessibility "$BUNDLE_ID" 2>/dev/null || true
     tccutil reset Microphone "$BUNDLE_ID" 2>/dev/null || true
     tccutil reset SpeechRecognition "$BUNDLE_ID" 2>/dev/null || true
-    # The dev "DontSpeak Local Dev" self-signed cert (scripts/lib/common.sh
+    # The dev "DontSpeak Local Dev" self-signed cert (scripts/install/lib/common.sh
     # ensure_local_sign_identity) is LEFT in place: it's auto-managed by the build and keeps
     # the app signature stable, so the freshly re-granted permission sticks across local
     # rebuilds. TCC is reset above regardless, so no stale grant survives the uninstall.
@@ -165,11 +158,7 @@ case "$(uname -s)" in
     # leftover would silently rebuild the AEC graph on every PipeWire restart.
     rm -f "$CFG_ROOT/pipewire/pipewire.conf.d/99-ds-aec.conf"
 
-    echo "==> 4b. remove the DontSpeak hook README (install-daemon.sh seeds it into the"
-    echo "        SHARED ~/.claude/hooks — delete only OUR file, never the whole dir)"
-    rm -f "$H/.claude/hooks/README.md"
-
-    echo "==> 4c. hand the Caps key back (drop OUR caps:none XKB option, marker-gated)"
+    echo "==> 4b. hand the Caps key back (drop OUR caps:none XKB option, marker-gated)"
     # The engine neutralizes the caps-lock TOGGLE at the keymap level while installed
     # (ds-platform linux/capskey.rs adds `caps:none`; the marker records that WE did).
     # GNOME/KDE options are PERSISTENT and step 5 deletes the marker — so strip the
@@ -235,5 +224,5 @@ esac
 rm -f "$INSTALL_DIR/dontspeak-uninstall"
 
 echo
-echo "Done. DontSpeak removed. Reinstall: curl -fsSL https://dontspeak.org/install.sh | sh"
-echo "(or from a repo checkout: apps/macos/bundle.sh on macOS, scripts/install.sh + apps/linux/install-gui.sh on Linux)"
+echo "Done. DontSpeak removed. Reinstall: curl -fsSL https://github.com/delllusional/DontSpeak/releases/latest/download/install.sh | sh"
+echo "(or from a repo checkout: apps/macos/bundle.sh on macOS, scripts/install/local/install.sh + apps/linux/install-gui.sh on Linux)"

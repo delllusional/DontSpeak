@@ -23,7 +23,7 @@ RUST_DIR="$(cd "$HERE/../../rust" && pwd)"
 
 # Shared helpers (swift_build_resilient — self-heals a stale .build module cache; also
 # normalizes PATH for cargo/swift). ../../scripts/lib from apps/macos.
-. "$HERE/../../scripts/lib/common.sh"
+. "$HERE/../../scripts/install/lib/common.sh"
 
 echo "==> [1/2] Building Rust FFI staticlib (release-ffi profile)…"
 # Pin the staticlib's deployment target to the app's floor (Package.swift .macOS(.v14),

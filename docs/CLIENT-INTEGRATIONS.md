@@ -6,7 +6,7 @@ the `dontspeak <client>` commands then start the installed client without replac
 normal configuration or arguments.
 
 This page is the source of truth for client capabilities and launch quirks. Hook internals
-live in [the hook executor document](../claude/hooks/HOOKS-README.md), and the shared
+live in [the hook executor document](HOOKS.md), and the shared
 narration state machine lives in [the streaming narration document](STREAMING-NARRATION.md).
 
 ## Launch commands

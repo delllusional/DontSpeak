@@ -11,23 +11,23 @@ description: Uninstall / build+install / package DontSpeak on Windows. Three flo
 
 > **Runs on:** Windows only (PowerShell). **Working dir:** repo root. Same three flows as `build-macos` / `build-linux`.
 
-DontSpeak ships on Windows as a **self-contained portable zip** installed by `web/install.ps1`. The WinUI app (`ds-winui.exe`) hosts the engine in-process via `ds_core.dll` (P/Invoke) + a warm `ds-helper.exe` synth child; no separate daemon. Scripts under `apps/windows/installer/` (`build-portable.ps1`, shared `build-common.ps1`) are the source of truth — **don't duplicate build logic; edit the scripts**.
+DontSpeak ships on Windows as a **self-contained portable zip** installed by `scripts/install/web/install.ps1`. The WinUI app (`ds-winui.exe`) hosts the engine in-process via `ds_core.dll` (P/Invoke) + a warm `ds-helper.exe` synth child; no separate daemon. Scripts under `apps/windows/installer/` (`build-portable.ps1`, shared `build-common.ps1`) are the source of truth — **don't duplicate build logic; edit the scripts**.
 
 **Prereqs (one-time):** Rust (MSVC, via rustup) · .NET 10 SDK in `~/.dotnet` · NASM + LLVM on PATH (ring's crypto). A missing-tool error → install that one tool and re-run.
 
 ## 1 — Uninstall / clean
 
-Run the canonical uninstaller — do NOT hand-roll the teardown (a partial copy drifts; the full one also removes the Run key, the Settings > Apps entry, and both data dirs). `scripts/uninstall.ps1` is the single source; an installed box carries the same bytes at `%LOCALAPPDATA%\Programs\DontSpeak\uninstall.ps1` (also reachable via Settings > Apps > DontSpeak > Uninstall):
+Run the canonical uninstaller — do NOT hand-roll the teardown (a partial copy drifts; the full one also removes the Run key, the Settings > Apps entry, and both data dirs). `scripts/install/bundle/uninstall.ps1` is the single source; an installed box carries the same bytes at `%LOCALAPPDATA%\Programs\DontSpeak\uninstall.ps1` (also reachable via Settings > Apps > DontSpeak > Uninstall):
 ```powershell
 # from a repo checkout
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install\bundle\uninstall.ps1
 # or on any installed box
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\DontSpeak\uninstall.ps1"
 ```
 
 ## 2 — Build + install (dev)
 
-Build the portable zip, then give that local artifact to `web/install.ps1`. This is the same installer end users run, so the dev install also gets PATH registration, client wiring, shortcut, startup, canonical uninstaller, and Settings > Apps registration.
+Build the portable zip, then give that local artifact to `scripts/install/web/install.ps1`. This is the same installer end users run, so the dev install also gets PATH registration, client wiring, shortcut, startup, canonical uninstaller, and Settings > Apps registration.
 
 1. **Build** the zip (fast dev loop: `-SkipModels`; `-Arch arm64` cross-compiles — needs an ARM64 host to also prefetch models, so pair `arm64` with `-SkipModels` on an x64 box). Takes a few minutes (cargo release build + `dotnet publish`); success ends with `DONE → …windows-x86_64.zip`:
    ```powershell
@@ -42,7 +42,7 @@ Build the portable zip, then give that local artifact to `web/install.ps1`. This
    $previousArchive = $env:DONTSPEAK_ARCHIVE
    try {
      $env:DONTSPEAK_ARCHIVE = $archive
-     & .\web\install.ps1
+     & .\scripts\install\web\install.ps1
    } finally {
      if ($null -eq $previousArchive) { Remove-Item Env:\DONTSPEAK_ARCHIVE -ErrorAction SilentlyContinue }
      else { $env:DONTSPEAK_ARCHIVE = $previousArchive }

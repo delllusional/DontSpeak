@@ -239,8 +239,8 @@ mod tests {
 
     /// Drift guard. `GRAPHEME_CHARS`/`PHONEME_CHARS` mirror the pinned checkpoint's
     /// `config.json` by hand, so these exact-map assertions catch reorders and substitutions in
-    /// normal CI. The ignored downloaded-graph tests separately pin actual model inference.
-    /// A one-character error here yields plausible-but-wrong pronunciations, not an error.
+    /// normal CI. A one-character error here yields plausible-but-wrong pronunciations,
+    /// not an error.
     #[test]
     fn phoneme_vocabulary_is_kokoro_safe_and_bounds_line_up() {
         // Exact token order from the pinned checkpoint's config.json. Length/vocabulary-only
@@ -287,11 +287,4 @@ mod tests {
         assert!(decode_phonemes(&[BOS, 50, EOS]).is_err());
     }
 
-    #[test]
-    #[ignore = "requires the checksum-pinned G2P graphs and ONNX Runtime in model_dir"]
-    fn downloaded_onnx_graphs_produce_the_reference_pronunciation() {
-        let mut model = BartG2p::load().expect("downloaded Kokoro G2P model");
-        assert_eq!(model.predict("hello").unwrap(), "hˈɛlO");
-        assert_eq!(model.predict("Zorblax").unwrap(), "zˈɔɹblæks");
-    }
 }

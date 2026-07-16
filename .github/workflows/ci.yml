@@ -5,8 +5,8 @@ name: CI
 # the WinUI app adds winui.tests (xunit) — each on its own OS leg.
 #
 # Cost/coverage split:
-#   • Per commit / PR  → Linux only, essentials only (clippy + tests — fast; covers the
-#     platform-agnostic majority).
+#   • Per commit / PR  → Linux only, essentials only (script tests + clippy + Rust tests;
+#     covers the platform-agnostic majority).
 #   • Release pipeline → clippy + tests on the FULL ubuntu + windows-2025 + macos-26
 #     matrix, PLUS the hygiene gate (rustfmt + rustdoc) AND cargo-deny
 #     (advisories/bans/licenses/sources), so the macOS Core ML/ANE and Windows CUDA paths
@@ -147,6 +147,17 @@ jobs:
           manifest-path: ${{ matrix.manifest }}
           arguments: --all-features --config rust/deny.toml
 
+  # Repository automation has its own focused tests. Keep this separate from the Rust
+  # matrix: the scripts are platform-agnostic, and one Linux run catches hook/coverage
+  # regressions without repeating the same Node suite on every release OS.
+  script-tests:
+    name: script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: node script tests
+        run: node --test scripts/agents/agent-attribution.test.mjs scripts/ci/merge-crate-coverage.test.js
+
   # Pick the shared clippy/test OS matrix: Linux-only by default, all three when
   # full-matrix is requested (the release gate). push/PR events have no `inputs`, so
   # they fall to Linux-only.
@@ -189,12 +200,37 @@ jobs:
         with:
           workspaces: rust -> target
 
+      # A skipped-by-default live test is still part of the test harness: `cargo test
+      # -- --ignored` can run it on a developer machine with real credentials, devices,
+      # or user data. Live validation belongs in explicit scripts/examples; the Rust test
+      # harness stays hermetic on every invocation (see AGENTS.md).
+      - name: reject ignored Rust tests
+        shell: bash
+        run: |
+          if git grep -n -F '#[ignore' -- 'rust/**/*.rs'; then
+            echo "::error::Rust test harness contains #[ignore]; replace live-resource tests with mocks or move manual validation outside cargo test"
+            exit 1
+          fi
+
       # cfg-gated platform code (macOS Core ML / ANE, Windows CUDA EP) compiles on its
       # own OS via the matrix, so on the full-matrix release run every test executes
       # somewhere. --locked: build exactly the committed Cargo.lock, fail on drift.
+      - name: fetch Rust dependencies
+        working-directory: rust
+        run: cargo fetch --locked
+
       - name: cargo test (workspace)
         working-directory: rust
-        run: cargo test --workspace --locked
+        env:
+          # Fetch first, then keep Cargo and test HTTP clients offline. Loopback remains
+          # available for httpmock and local protocol fixtures.
+          CARGO_NET_OFFLINE: 'true'
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          NO_PROXY: 127.0.0.1,localhost,::1
+          HF_HUB_OFFLINE: '1'
+        run: cargo test --workspace --locked --offline
 
       # Gate for issue #26: ds_log::log_cached (the log::Log facade sink) always resolves
       # the REAL per-OS log path and writes there unconditionally, bypassing test

@@ -3,7 +3,7 @@
 # runnable, signed DontSpeak.app. The app HOSTS the engine in-process (no daemon).
 #
 # Steps:
-#   0. install-daemon.sh — build+install+stable-sign the engine binaries + hooks with
+#   0. install-engine.sh — build+install+stable-sign the engine binaries + hooks with
 #                 a BUILD_ID (name kept for compat; installs no daemon).
 #   1. build.sh — Rust FFI staticlib (release-ffi) + `swift build` the app.
 #   2. actool   — compile AppIcon.icon (Icon Composer) into Assets.car (macOS 26
@@ -45,22 +45,22 @@ require_xcode() {
 }
 require_xcode
 
-# Release (web/install.sh) and dev (this script) installs share the ONE per-user
+# Release (scripts/install/web/install.sh) and dev (this script) installs share the ONE per-user
 # layout at $APP — there is no other location to clean up; assemble_app replaces
 # $APP itself.
 
-# ==> 0. Build + install the engine BINARIES + hooks FIRST. install-daemon.sh
+# ==> 0. Build + install the engine BINARIES + hooks FIRST. install-engine.sh
 # computes the BUILD_ID (git), builds+installs+stable-signs the CLI bins (incl. the
 # ds-helper that step 3 bundles), installs the hooks, and echoes the id as its
 # LAST stdout line (all progress → stderr). We bake that SAME id into the app's
 # Info.plist (step 3). There is no standalone daemon — the app hosts the engine.
 echo "==> 0. build + install engine binaries + hooks"
-BUILD_ID="$("$DIR/../../scripts/install-daemon.sh" | tail -1)"
-[ -n "$BUILD_ID" ] || { echo "install-daemon.sh produced no BUILD_ID" >&2; exit 1; }
+BUILD_ID="$("$DIR/../../scripts/install/local/install-engine.sh" | tail -1)"
+[ -n "$BUILD_ID" ] || { echo "install-engine.sh produced no BUILD_ID" >&2; exit 1; }
 echo "   binaries installed; BUILD_ID=$BUILD_ID"
 
-# install-daemon.sh installs binaries only; reconcile applies the configured client
-# integrations during app deployment too (mirrors scripts/install.sh).
+# install-engine.sh installs binaries only; reconcile applies the configured client
+# integrations during app deployment too (mirrors scripts/install/local/install.sh).
 echo "==> 0b. wire configured client integrations"
 _bin_dir="${DONTSPEAK_INSTALL_DIR:-$HOME/.local/bin}"
 # `wire --reconcile` converges each client to config.toml's `exclude_clients` (absent ⇒ all) —
@@ -78,7 +78,7 @@ ICONOUT="$(mktemp -d)"; trap 'rm -rf "$ICONOUT"' EXIT
 compile_icon "$ICONOUT"
 
 echo "==> 3. assemble + sign $APP"
-# The host-arch helper installed by install-daemon.sh (step 0) goes into the bundle.
+# The host-arch helper installed by install-engine.sh (step 0) goes into the bundle.
 SIGN="$(resolve_sign_identity)"
 # Build the apple-native Kokoro shim (Apple-Silicon only); bundled by assemble_app and
 # pointed at via SMKOKORO_DYLIB_PATH at app launch. Keyed off the BUILT APP's arch, not
@@ -89,7 +89,7 @@ export DONTSPEAK_SMKOKORO_DYLIB
 # menubar-icon.svg lives at the REPO ROOT under assets/ (../../assets from apps/macos).
 # The apps/ reorg (8d326a5) moved macos/ → apps/macos/ but left this as $DIR/.. (=apps/),
 # so the file silently went missing and the menu bar fell back to the waveform SF Symbol.
-# The helper comes from the SAME dir install-daemon.sh (step 0) installed into — a
+# The helper comes from the SAME dir install-engine.sh (step 0) installed into — a
 # custom DONTSPEAK_INSTALL_DIR must not fall back to a stale ~/.local/bin copy (that
 # drifts the app/helper BUILD_ID pair).
 assemble_app "$APP" "$EXE" "$_bin_dir/ds-helper" \

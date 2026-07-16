@@ -41,7 +41,7 @@ the same job builds ad-hoc instead — same layout, just unsigned.
 
 Ad-hoc local builds get a fresh cdhash each rebuild, which would otherwise break every
 Accessibility / Input Monitoring grant on every `bundle.sh`. To keep grants stable across
-rebuilds, `resolve_sign_identity` (in `scripts/lib/common.sh`) mints and imports a
+rebuilds, `resolve_sign_identity` (in `scripts/install/lib/common.sh`) mints and imports a
 self-signed `DontSpeak Local Dev` cert once, the first time no other identity is present;
 `find_codesign_id` then auto-detects it on every later build. Just run
 `./apps/macos/bundle.sh`, grant each permission once, and it sticks.

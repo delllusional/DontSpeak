@@ -1169,10 +1169,14 @@ mod caps_key_ownership {
                 at: std::time::Instant::now(),
             });
         }
-        let plat = WindowsPlatform::new().unwrap();
-        plat.release_caps_key();
+        // Exercise the exact helper `release_caps_key` delegates to. Constructing a real
+        // `WindowsPlatform` here would run its production Drop path after the assertion,
+        // which drives the physical Caps-Lock LED off through the keyboard class driver.
+        // No hook is installed in this test process, so this call is state-only.
+        assert_eq!(HOOK_THREAD_ID.load(Ordering::SeqCst), 0);
+        shutdown_caps_hook();
         assert!(
-            plat.drain_caps_events().is_empty(),
+            CAPS_EDGES.lock().unwrap().is_empty(),
             "release_caps_key must discard any events queued before it ran"
         );
     }

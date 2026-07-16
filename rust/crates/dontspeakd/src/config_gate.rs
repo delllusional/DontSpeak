@@ -768,19 +768,11 @@ mod tests {
             ..c.clone()
         }));
 
-        // A built_in ladder drives the helper + AEC wherever the on-device stack resolves — every
-        // platform EXCEPT Intel macOS with NO onnxruntime dylib, where built_in is unusable and the
-        // ladder falls through to off (no helper). With the Homebrew keg / ORT_DYLIB_PATH present,
-        // Intel macOS resolves to built_in like everywhere else (see
-        // `ds_config::intel_mac_builtin_ort_available`).
-        let c2 = cfg(vec![TtsEngine::Kokoro], vec![SttEngine::BuiltIn]);
-        let builtin_off = cfg!(all(target_os = "macos", target_arch = "x86_64"))
-            && !ds_config::intel_mac_builtin_ort_available();
-        if builtin_off {
-            assert!(!helper_uses_tts(&c2));
-            assert!(!helper_uses_stt(&c2));
-            assert!(!helper_needed(&c2));
-        } else {
+        // Intel macOS resolves built_in from a runtime ORT capability; its two deterministic
+        // branches are tested with an injected value in ds-config instead of scanning Homebrew.
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            let c2 = cfg(vec![TtsEngine::Kokoro], vec![SttEngine::BuiltIn]);
             assert!(helper_uses_tts(&c2));
             assert!(helper_uses_stt(&c2));
             assert!(helper_needed(&c2));

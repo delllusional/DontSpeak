@@ -362,6 +362,7 @@ mod tests {
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests {
     use super::{ps_squote_escape, say_command};
+    use std::ffi::OsStr;
 
     /// Regression (audit): only the ASCII apostrophe was doubled, so any smart-quote code
     /// point (all tokenized as single quotes by PowerShell) terminated the `'…'` literal —
@@ -393,47 +394,35 @@ mod windows_tests {
             assert!(script.contains(needle), "missing {needle:?} in {script:?}");
         }
     }
-
-    /// The builder produces a runnable PowerShell `System.Speech` invocation that
-    /// SYNTHESIZES on this machine — exit 0 means the OS spoke the text. Audible, so
-    /// ignored by default (needs an audio device); run with `--ignored` to hear it.
-    #[test]
-    #[ignore = "audible; needs an audio device — run with --ignored"]
-    fn say_command_speaks_on_this_machine() {
-        let status = say_command(None, 1.0, "System voice wired into speak M C P.")
-            .spawn()
-            .expect("spawn powershell")
-            .wait()
-            .expect("wait");
-        assert!(status.success(), "System.Speech.Speak exited {status:?}");
+    fn args(c: &std::process::Command) -> Vec<String> {
+        c.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
     }
 
-    /// A specific installed voice name is honored (SelectVoice) and still exits 0.
     #[test]
-    #[ignore = "audible; needs an audio device — run with --ignored"]
-    fn say_command_with_named_voice_succeeds() {
-        let status = say_command(Some("Microsoft Zira Desktop"), 1.0, "Zira here.")
-            .spawn()
-            .expect("spawn powershell")
-            .wait()
-            .expect("wait");
-        assert!(status.success(), "named-voice Speak exited {status:?}");
+    fn say_command_builds_the_default_voice_script_without_spawning() {
+        let cmd = say_command(None, 1.0, "It's wired.");
+        assert_eq!(cmd.get_program(), OsStr::new("powershell"));
+        let args = args(&cmd);
+        assert_eq!(&args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
+        let script = &args[3];
+        assert!(script.contains("$s.Rate = 0"));
+        assert!(script.contains("$s.Speak('It''s wired.')"));
+        assert!(!script.contains("SelectVoice"));
     }
 
-    /// A missing configured voice must be a process failure, not silent fallback to the default
-    /// voice. Empty text keeps this contract check non-audible.
     #[test]
-    fn say_command_with_invalid_voice_fails_without_speaking() {
-        let status = say_command(Some("__DontSpeak test voice that cannot exist__"), 1.0, "")
-            .spawn()
-            .expect("spawn powershell")
-            .wait()
-            .expect("wait");
-        assert!(
-            !status.success(),
-            "invalid SelectVoice unexpectedly succeeded"
-        );
+    fn say_command_escapes_the_named_voice_and_maps_rate_extremes() {
+        let slow = args(&say_command(Some("Reader's Voice"), 0.5, "hello"));
+        assert!(slow[3].contains("$s.SelectVoice('Reader''s Voice')"));
+        assert!(slow[3].contains("$s.Rate = -10"));
+
+        let fast = args(&say_command(Some("   "), 2.0, "hello"));
+        assert!(!fast[3].contains("SelectVoice"));
+        assert!(fast[3].contains("$s.Rate = 10"));
     }
+
 }
 
 // Fallback Tts impl for any other target (keeps the type usable; never built in

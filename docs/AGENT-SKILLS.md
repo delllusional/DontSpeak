@@ -37,13 +37,13 @@ Developer Mode or administrator privileges and `core.symlinks` are all enabled.
 After editing `.agents/skills/`, regenerate the mirrors:
 
 ```bash
-node scripts/sync-agent-skills.mjs
+node scripts/agents/sync-agent-skills.mjs
 ```
 
 Before every push, verify that no mirror drift remains:
 
 ```bash
-node scripts/sync-agent-skills.mjs --check
+node scripts/agents/sync-agent-skills.mjs --check
 ```
 
 Claude-specific subagents and workflows remain under `.claude/agents/` and

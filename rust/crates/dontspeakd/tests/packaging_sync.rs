@@ -9,8 +9,8 @@
 //! (`cli_dispatch.rs` runs fine, proving `patch`/`dispatch` is NOT a trigger — only those
 //! three words are.) The Linux per-commit CI is unaffected; this is a Windows-local trap.
 //!
-//! Uninstall logic lives only in `scripts/uninstall.sh` (macOS/Linux) and
-//! `scripts/uninstall.ps1` (Windows). Platform packages copy those canonical files as
+//! Uninstall logic lives only in `scripts/install/bundle/uninstall.sh` (macOS/Linux) and
+//! `scripts/install/bundle/uninstall.ps1` (Windows). Platform packages copy those canonical files as
 //! payloads; installers require and place/register the payload instead of embedding a
 //! second script body. These tests pin that three-platform route and the install-side
 //! invariant that macOS has ONE per-user install layout
@@ -38,27 +38,27 @@ fn repo_uninstall_entry_points_exec_the_canonical_script() {
     // Require BOTH substrings on the SAME line, with `exec` as that line's first token —
     // i.e. `exec` must actually prefix the canonical-script invocation. Checking the two
     // substrings independently (old behavior) would still pass if the script ran
-    // scripts/uninstall.sh as a plain subprocess (changing exit-code/signal semantics)
+    // scripts/install/bundle/uninstall.sh as a plain subprocess (changing exit-code/signal semantics)
     // and `exec`'d something unrelated elsewhere as a fallback.
     let execs_canonical_script = body.lines().any(|line| {
         let trimmed = line.trim_start();
         trimmed.starts_with("exec ")
-            && trimmed.contains("/../..\" && pwd)/scripts/uninstall.sh\" \"$@\"")
+            && trimmed.contains("/../..\" && pwd)/scripts/install/bundle/uninstall.sh\" \"$@\"")
     });
     assert!(
         execs_canonical_script,
         "apps/linux/uninstall.sh must stay a thin wrapper whose `exec` line directly \
-         invokes …scripts/uninstall.sh \"$@\" (found no line starting with `exec` that \
-         also contains that invocation) — put logic in scripts/uninstall.sh only"
+         invokes …scripts/install/bundle/uninstall.sh \"$@\" (found no line starting with `exec` that \
+         also contains that invocation) — put logic in scripts/install/bundle/uninstall.sh only"
     );
 }
 
 #[test]
 fn uninstaller_removes_the_macos_app_bundle() {
-    let canon = repo_file("scripts/uninstall.sh");
+    let canon = repo_file("scripts/install/bundle/uninstall.sh");
     assert!(
         canon.contains(r#"rm -rf "$H/Applications/DontSpeak.app""#),
-        "scripts/uninstall.sh must remove the per-user app bundle \
+        "scripts/install/bundle/uninstall.sh must remove the per-user app bundle \
          (~/Applications/DontSpeak.app) — the ONE macOS install layout"
     );
 }
@@ -69,17 +69,17 @@ fn every_platform_package_ships_its_canonical_uninstaller_file() {
         (
             "Windows",
             "apps/windows/installer/build-portable.ps1",
-            r#"Copy-Item "$repo\scripts\uninstall.ps1" "$stage\uninstall.ps1""#,
+            r#"Copy-Item "$repo\scripts\install\bundle\uninstall.ps1" "$stage\uninstall.ps1""#,
         ),
         (
             "macOS",
             "apps/macos/bundle-lib.sh",
-            r#"install -m0755 "$repo/scripts/uninstall.sh" "$app/Contents/Resources/uninstall.sh""#,
+            r#"install -m0755 "$repo/scripts/install/bundle/uninstall.sh" "$app/Contents/Resources/uninstall.sh""#,
         ),
         (
             "Linux",
             "apps/linux/package.sh",
-            r#"install -m0755 "$REPO/scripts/uninstall.sh" "$ROOT/uninstall.sh""#,
+            r#"install -m0755 "$REPO/scripts/install/bundle/uninstall.sh" "$ROOT/uninstall.sh""#,
         ),
     ];
     for (platform, packager, canonical_copy) in routes {
@@ -95,13 +95,13 @@ fn every_platform_installer_requires_the_packaged_uninstaller() {
     let checks = [
         (
             "Windows",
-            "web/install.ps1",
+            "scripts/install/web/install.ps1",
             r#"Test-Path -LiteralPath (Join-Path $stagedApp 'uninstall.ps1') -PathType Leaf"#,
             "incomplete archive: missing canonical uninstall.ps1 payload",
         ),
         (
             "macOS",
-            "web/install.sh",
+            "scripts/install/web/install.sh",
             r#"[ -f "$out/DontSpeak.app/Contents/Resources/uninstall.sh" ]"#,
             "incomplete archive (no canonical uninstall.sh payload)",
         ),
@@ -124,8 +124,8 @@ fn every_platform_installer_requires_the_packaged_uninstaller() {
 #[test]
 fn web_installers_do_not_embed_uninstaller_script_bodies() {
     for (installer, old_embed_delimiter) in [
-        ("web/install.sh", "<<'UNINSTALL'"),
-        ("web/install.ps1", "@'\n# uninstall.ps1"),
+        ("scripts/install/web/install.sh", "<<'UNINSTALL'"),
+        ("scripts/install/web/install.ps1", "@'\n# uninstall.ps1"),
     ] {
         let body = repo_file(installer);
         assert!(
@@ -142,6 +142,77 @@ fn web_installers_do_not_embed_uninstaller_script_bodies() {
             );
         }
     }
+}
+
+#[test]
+fn release_publishes_fixed_name_web_installers() {
+    let workflow = repo_file(".github/workflows/release.yml");
+    for needle in [
+        "actions/checkout@v7",
+        "scripts/install/web/install.sh",
+        "scripts/install/web/install.ps1",
+        r#""${FILES[@]}" "${INSTALLERS[@]}" checksums.txt"#,
+    ] {
+        assert!(
+            workflow.contains(needle),
+            "release workflow must publish fixed-name web installers from the tagged commit ({needle})"
+        );
+    }
+}
+
+#[test]
+fn downloaded_installers_require_published_checksums() {
+    let unix = repo_file("scripts/install/web/install.sh");
+    for required in [
+        "release is missing checksums.txt",
+        "is not listed in checksums.txt",
+        "need sha256sum or shasum",
+    ] {
+        assert!(
+            unix.contains(required),
+            "Unix web installer must fail closed when checksum verification is unavailable ({required})"
+        );
+    }
+    assert!(
+        !unix.contains("skipping integrity check"),
+        "Unix web installer must not install an unverified download"
+    );
+
+    let windows = repo_file("scripts/install/web/install.ps1");
+    for required in [
+        "release is missing checksums.txt",
+        "is not listed in checksums.txt",
+        "Get-FileHash -Algorithm SHA256",
+    ] {
+        assert!(
+            windows.contains(required),
+            "Windows web installer must fail closed when checksum verification is unavailable ({required})"
+        );
+    }
+    assert!(
+        !windows.contains("skipping integrity check") && !windows.contains("checksum step skipped"),
+        "Windows web installer must not install an unverified download"
+    );
+}
+
+#[test]
+fn windows_uninstaller_reports_partial_cleanup() {
+    let uninstaller = repo_file("scripts/install/bundle/uninstall.ps1");
+    for required in [
+        "$ErrorActionPreference = 'Stop'",
+        "Invoke-CleanupStep",
+        "DontSpeak was only partially removed",
+        "exit 1",
+    ] {
+        assert!(
+            uninstaller.contains(required),
+            "Windows uninstaller must report rather than hide cleanup failures ({required})"
+        );
+    }
+    assert!(
+        !uninstaller.contains("$ErrorActionPreference = 'SilentlyContinue'"),
+        "Windows uninstaller must not globally suppress cleanup failures"
+    );
 }
 
 #[test]
@@ -195,14 +266,14 @@ fn release_bundles_ship_the_legal_notice_and_embedded_data_license() {
 
 #[test]
 fn uninstaller_covers_the_linux_residue() {
-    let canon = repo_file("scripts/uninstall.sh");
+    let canon = repo_file("scripts/install/bundle/uninstall.sh");
     for needle in [
         "icons/hicolor/scalable/apps/dontspeak.svg", // menu icon (dev + tarball installs)
         "pipewire.conf.d/99-ds-aec.conf",            // --aec echo-cancel drop-in
     ] {
         assert!(
             canon.contains(needle),
-            "scripts/uninstall.sh no longer removes {needle} — a Linux install leaves it behind"
+            "scripts/install/bundle/uninstall.sh no longer removes {needle} — a Linux install leaves it behind"
         );
     }
 }
@@ -210,41 +281,44 @@ fn uninstaller_covers_the_linux_residue() {
 #[test]
 fn uninstaller_honors_the_app_dir_override() {
     assert!(
-        repo_file("scripts/uninstall.sh").contains("DONTSPEAK_APP_DIR"),
-        "scripts/uninstall.sh must honor DONTSPEAK_APP_DIR — bundle.sh installs there, so a \
+        repo_file("scripts/install/bundle/uninstall.sh").contains("DONTSPEAK_APP_DIR"),
+        "scripts/install/bundle/uninstall.sh must honor DONTSPEAK_APP_DIR — bundle.sh installs there, so a \
          custom-dir bundle would otherwise never be removed"
     );
 }
 
 #[test]
 fn dev_installs_place_the_standalone_uninstaller() {
-    // macOS/Linux share install-daemon.sh; Windows runs the exact public installer against
+    // macOS/Linux share install-engine.sh; Windows runs the exact public installer against
     // its local archive instead of recreating registration as skill documentation.
     assert!(
-        repo_file("scripts/install-daemon.sh")
-            .contains("scripts/uninstall.sh\" \"$INSTALL_DIR/dontspeak-uninstall\""),
-        "scripts/install-daemon.sh must place scripts/uninstall.sh as $INSTALL_DIR/dontspeak-uninstall"
+        repo_file("scripts/install/local/install-engine.sh")
+            .contains("scripts/install/bundle/uninstall.sh\" \"$INSTALL_DIR/dontspeak-uninstall\""),
+        "scripts/install/local/install-engine.sh must place scripts/install/bundle/uninstall.sh as $INSTALL_DIR/dontspeak-uninstall"
     );
     let windows_skill = repo_file(".agents/skills/build-windows/SKILL.md");
-    for needle in ["DONTSPEAK_ARCHIVE", r#"& .\web\install.ps1"#] {
+    for needle in [
+        "DONTSPEAK_ARCHIVE",
+        r#"& .\scripts\install\web\install.ps1"#,
+    ] {
         assert!(
             windows_skill.contains(needle),
-            "Windows dev install must route its local archive through web/install.ps1 ({needle})"
+            "Windows dev install must route its local archive through scripts/install/web/install.ps1 ({needle})"
         );
     }
     assert!(
         !windows_skill.contains("Expand-Archive"),
-        "Windows dev skill must not reimplement archive installation outside web/install.ps1"
+        "Windows dev skill must not reimplement archive installation outside scripts/install/web/install.ps1"
     );
 }
 
 #[test]
 fn macos_installs_share_the_single_per_user_layout() {
     // Both flows lay down ~/Applications/DontSpeak.app — the ONE install location.
-    let web = repo_file("web/install.sh");
+    let web = repo_file("scripts/install/web/install.sh");
     assert!(
         web.contains(r#"APP="$HOME/Applications/DontSpeak.app""#),
-        "web/install.sh must install into ~/Applications/DontSpeak.app — the single \
+        "scripts/install/web/install.sh must install into ~/Applications/DontSpeak.app — the single \
          per-user macOS layout (no admin account, and it matches the dev flow)"
     );
     let bundle = repo_file("apps/macos/bundle.sh");
@@ -265,9 +339,9 @@ fn macos_installs_share_the_single_per_user_layout() {
         s.chars().filter(|c| *c != '"' && *c != '\'').collect()
     }
     for rel in [
-        "web/install.sh",
+        "scripts/install/web/install.sh",
         "apps/macos/bundle.sh",
-        "scripts/uninstall.sh",
+        "scripts/install/bundle/uninstall.sh",
     ] {
         let normalized = strip_quotes(&repo_file(rel));
         for (at, _) in normalized.match_indices("/Applications/DontSpeak.app") {

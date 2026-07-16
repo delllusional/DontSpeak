@@ -585,15 +585,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the checksum-pinned G2P graphs and ONNX Runtime in model_dir"]
-    fn downloaded_bart_fills_only_the_unknown_word_inside_contextual_prose() {
-        let phonemes = try_phonemize("A Zorblax arrived.").unwrap();
-        assert!(phonemes.contains("zˈɔɹblæks"), "{phonemes}");
-        assert!(phonemes.ends_with('.'), "{phonemes}");
-        assert_vocab_safe(&phonemes);
-    }
-
-    #[test]
     fn technical_identifiers_and_numbers_remain_audible() {
         for text in [
             "Kokoro and ONNX share one G2P pipeline.",

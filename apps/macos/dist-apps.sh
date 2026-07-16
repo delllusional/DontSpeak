@@ -3,7 +3,7 @@
 #
 # Produces a signed + notarized + stapled DontSpeak.app packaged as
 # dontspeak-<version>-macos-<aarch64|x86_64>.app.zip.
-# The one-command installer (web/install.sh) unzips it straight into ~/Applications.
+# The one-command installer (scripts/install/web/install.sh) unzips it straight into ~/Applications.
 #
 # Builds the arch slices named in $DONTSPEAK_ARCHES (default "arm64"; "x86_64" for the
 # Intel slice, or "arm64 x86_64" for both). The apple-native Kokoro/Parakeet/diarization

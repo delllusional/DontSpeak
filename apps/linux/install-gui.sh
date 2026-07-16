@@ -6,7 +6,7 @@
 # macOS/Windows apps use) and provides the tray, health panel, and dictation overlay. This
 # GTK host is the ONLY engine host on Linux — the engine has no standalone/headless mode.
 #
-# Run scripts/install.sh FIRST: it installs the engine/helper binaries (dontspeak,
+# Run scripts/install/local/install.sh FIRST: it installs the engine/helper binaries (dontspeak,
 # ds-helper) and wires installed clients. This script then adds
 # the GUI binary, its .desktop launcher, optional autostart, and the input-device permissions.
 #
@@ -17,7 +17,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${DONTSPEAK_INSTALL_DIR:-$HOME/.local/bin}"
-# XDG-aware like ICONS_DIR below, tarball-install.sh, and scripts/uninstall.sh — a
+# XDG-aware like ICONS_DIR below, tarball-install.sh, and scripts/install/bundle/uninstall.sh — a
 # hardcoded ~/.local/share here would strand the launcher where the uninstaller
 # (which honors XDG_DATA_HOME) never looks.
 APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"

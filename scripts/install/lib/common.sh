@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # common.sh — shared helpers for the DontSpeak build/install scripts. SOURCE this file
-# (`. scripts/lib/common.sh`); do NOT execute it.
+# (`. scripts/install/lib/common.sh`); do NOT execute it.
 #
 # It is the SINGLE source of truth for the two pieces of logic that the engine
-# installer (scripts/install-daemon.sh) and the macOS app bundler
+# installer (scripts/install/local/install-engine.sh) and the macOS app bundler
 # (apps/macos/bundle-lib.sh) MUST agree on:
 #   • compute_build_id   — the lockstep BUILD_ID stamped into BOTH the engine and the
 #                          app; the app compares them at runtime, so a hand-maintained

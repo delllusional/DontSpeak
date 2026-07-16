@@ -471,15 +471,18 @@ mod tests {
         // A single-rung ladder names that engine's voice WHERE the rung is usable here, else
         // resolves to off → None. Asserting against `resolved_tts()` keeps this platform-robust
         // (Kokoro isn't usable on x86_64 macOS; System isn't wired on Linux).
-        let kokoro = VoiceConfig {
-            tts_engine_ladder: vec![TtsEngine::Kokoro],
-            tts_built_in_voices: vec!["am_michael".into()],
-            ..Default::default()
-        };
-        assert_eq!(
-            current_voice_name(&kokoro),
-            kokoro.resolved_tts().map(|_| "Michael".into())
-        );
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            let kokoro = VoiceConfig {
+                tts_engine_ladder: vec![TtsEngine::Kokoro],
+                tts_built_in_voices: vec!["am_michael".into()],
+                ..Default::default()
+            };
+            assert_eq!(
+                current_voice_name(&kokoro),
+                kokoro.resolved_tts().map(|_| "Michael".into())
+            );
+        }
 
         let system = VoiceConfig {
             tts_engine_ladder: vec![TtsEngine::System],

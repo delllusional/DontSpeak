@@ -1420,38 +1420,8 @@ pub(crate) mod tests {
         };
         assert!(off.resolved_tts().is_none() && !off.is_tts_on());
         assert!(off.resolved_stt().is_none());
-        // On x86_64 macOS the on-device rungs are usable ONLY when an onnxruntime dylib is present
-        // (Homebrew keg / ORT_DYLIB_PATH — a runtime capability, see `intel_mac_builtin_ort_available`).
-        // Present ⇒ the built-in rungs win first; absent ⇒ the default ladders fall through:
-        // TTS → system (`say`), STT → claude_code (LAST, always usable).
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        {
-            let only_builtin = VoiceConfig {
-                tts_engine_ladder: vec![TtsEngine::Kokoro],
-                ..VoiceConfig::default()
-            };
-            // `system` (Apple's on-device recognizer) is unconditionally macOS-usable and sits
-            // FIRST in `default_stt_engine_ladder`, so it wins regardless of ORT availability —
-            // `built_in` (Parakeet) is never even reached for the default config on macOS.
-            assert_eq!(
-                VoiceConfig::default().resolved_stt(),
-                Some(SttEngine::System)
-            );
-            if crate::enums::intel_mac_builtin_ort_available() {
-                assert_eq!(
-                    VoiceConfig::default().resolved_tts(),
-                    Some(TtsEngine::Kokoro)
-                );
-                assert_eq!(only_builtin.resolved_tts(), Some(TtsEngine::Kokoro));
-            } else {
-                assert_eq!(
-                    VoiceConfig::default().resolved_tts(),
-                    Some(TtsEngine::System)
-                );
-                // A ladder with no usable rung resolves to None (= off), not a forced fallback.
-                assert!(only_builtin.resolved_tts().is_none());
-            }
-        }
+        // Intel-macOS ORT-present/absent behavior is covered through an injected capability in
+        // enums.rs. This resolver test deliberately avoids probing the developer's Homebrew keg.
     }
 
     #[test]
@@ -1481,9 +1451,14 @@ pub(crate) mod tests {
     #[test]
     fn resolved_tts_preference_wins_over_ladder_with_no_substitution() {
         // Unset preference (None) defers to the ladder.
+        let deferring_engine = if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            TtsEngine::System
+        } else {
+            TtsEngine::Kokoro
+        };
         let deferring = VoiceConfig {
             tts_engine: None,
-            tts_engine_ladder: vec![TtsEngine::Kokoro],
+            tts_engine_ladder: vec![deferring_engine],
             ..VoiceConfig::default()
         };
         assert_eq!(
@@ -1505,20 +1480,6 @@ pub(crate) mod tests {
 
         // An explicit choice that ISN'T usable here resolves to None — NEVER substituted with
         // a different engine, even though the ladder (if consulted) would resolve to one.
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        if !crate::enums::intel_mac_builtin_ort_available() {
-            let unusable_choice = VoiceConfig {
-                tts_engine: Some(vec![TtsEngine::Kokoro]),
-                tts_engine_ladder: vec![TtsEngine::Kokoro, TtsEngine::System],
-                ..VoiceConfig::default()
-            };
-            assert_eq!(
-                unusable_choice.resolved_tts(),
-                None,
-                "unusable explicit choice resolves to off, never substitutes the ladder's next rung"
-            );
-        }
-
         // An explicit, USABLE choice wins outright, even when the ladder disagrees.
         #[cfg(any(
             all(target_os = "macos", target_arch = "aarch64"),

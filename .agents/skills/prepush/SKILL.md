@@ -1,6 +1,6 @@
 ---
 name: prepush
-description: Run the exact CI gates locally, then push to origin only if they pass — so the per-commit CI on GitHub never goes red. Mirrors .github/workflows/ci.yml (clippy + test). Use when asked to push, prepush, "run CI locally", or verify a change before pushing to main.
+description: Run the exact CI gates locally, then push to origin only if they pass — so the per-commit CI on GitHub never goes red. Mirrors .github/workflows/ci.yml (script tests + clippy + Rust tests). Use when asked to push, prepush, "run CI locally", or verify a change before pushing to main.
 ---
 
 # DontSpeak — prepush (local CI gate, then push)
@@ -12,8 +12,8 @@ description: Run the exact CI gates locally, then push to origin only if they pa
 **Source of truth:** `.github/workflows/ci.yml` — if a gate changes there, update this
 skill. Runs on any dev machine; all cargo commands run in `rust/`.
 
-Per-commit CI runs two Linux jobs. Run the same two locally, in order, and push only
-once both are green. (rustfmt + rustdoc + cargo-deny are release-only — `ci.yml`'s
+Per-commit CI runs three Linux jobs. Run the same three locally, in order, and push only
+once all are green. (rustfmt + rustdoc + cargo-deny are release-only — `ci.yml`'s
 full-matrix `hygiene` and `cargo-deny` jobs, cleaned up / cleared by `make-release`
 before tagging. swift-format is not enforced anywhere.)
 
@@ -25,28 +25,32 @@ a commit-style reminder; the policy lives only in that shared file.
 
 After the final squash, rebase, cherry-pick, or amend, inspect every outgoing commit:
 ```bash
-node scripts/check-commit-attribution.mjs origin/main
+node scripts/agents/check-commit-attribution.mjs origin/main
 git log --format=full origin/main..HEAD
 ```
 The script enforces the mechanical trailer rules; compare the displayed model and
 effort values against the canonical policy as well. Do not push until every message
 conforms. Re-run both commands after any operation that rewrites commit messages.
 
-## The two gates
+## The three gates
 
-1. **Clippy (deny warnings)**
+1. **Repository script tests**
+   ```bash
+   node --test scripts/agents/agent-attribution.test.mjs scripts/ci/merge-crate-coverage.test.js
+   ```
+2. **Clippy (deny warnings)**
    ```bash
    cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings
    ```
    `--keep-going` surfaces lints from every crate in one run — fix any warning rather
    than `#[allow]`-ing it away unless the user agrees. `--locked` matches CI: fail on
    `Cargo.lock` drift instead of silently updating it.
-2. **Tests**
+3. **Rust tests**
    ```bash
    cargo test --workspace --locked
    ```
 
-If both pass, push. If either fails, fix it and re-run.
+If all three pass, push. If any fails, fix it and re-run.
 
 ## cargo-deny (release-only, not a per-commit gate)
 
@@ -69,7 +73,7 @@ widening — see `rust/deny.toml`'s existing entries for the expected rigor.
 The canonical and vendor-discovery skill trees must be byte-identical; see
 [`docs/AGENT-SKILLS.md`](../../../docs/AGENT-SKILLS.md). Run before every push:
 ```bash
-node scripts/sync-agent-skills.mjs --check
+node scripts/agents/sync-agent-skills.mjs --check
 ```
 Drift means the canonical tree changed without regenerating every mirror. Run the
 script without `--check`, review the generated diff, then re-run the check.
@@ -95,8 +99,9 @@ script without `--check`, review the generated diff, then re-run the check.
 ## One-liner
 
 ```bash
-node scripts/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
+node scripts/agents/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
+node --test scripts/agents/agent-attribution.test.mjs scripts/ci/merge-crate-coverage.test.js
 cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings && cargo test --workspace --locked
-cd .. && node scripts/sync-agent-skills.mjs --check
+cd .. && node scripts/agents/sync-agent-skills.mjs --check
 ```
 Green gates plus a conforming attribution inspection ⇒ safe to push.

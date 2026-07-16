@@ -16,7 +16,7 @@ description: Cut a DontSpeak release — tag the single-source version, push the
 ## 1 — Preconditions
 
 - **Version**: the single source is `rust/Cargo.toml` → `[workspace.package] version` (read by
-  `scripts/version.sh`). The tag must be `v` + exactly that version — the `check` job fails the
+  `scripts/release/version.sh`). The tag must be `v` + exactly that version — the `check` job fails the
   run fast otherwise. Bump it (+ commit) for a new release. Going from a `-dev` suffix to a
   real release version needs no judgment call — the version number was already decided
   whenever `main` was last bumped (step 9) — it's a mechanical strip of the suffix, not a
@@ -74,7 +74,7 @@ description: Cut a DontSpeak release — tag the single-source version, push the
 ## 2 — Tag and trigger
 
 ```bash
-ver="$(bash scripts/version.sh)"
+ver="$(bash scripts/release/version.sh)"
 git tag "v$ver"
 git push origin main "v$ver"
 ```
@@ -104,8 +104,10 @@ done
      the `APPLE_*` secrets exist, else ad-hoc (first launch hits Gatekeeper).
    - `linux` — per-arch tarballs (ubuntu-26.04 + -arm). Setup and tests must pass; tarball
      creation and upload are best-effort, so a packaging failure may leave an asset absent.
-4. **`publish release`** — `gh release create` with all artifacts + `checksums.txt` +
-   `--generate-notes`. That flag only lists merged PULL REQUESTS — this repo pushes straight
+4. **`publish release`** — `gh release create` with all artifacts, fixed-name
+   `install.sh` / `install.ps1`, and `checksums.txt` + `--generate-notes`. The installer
+   assets come from the tagged commit and power the stable `releases/latest/download/...`
+   one-liners. That flag only lists merged PULL REQUESTS — this repo pushes straight
    to `main` with no PRs, so it has nothing to draw from and renders as a bare compare link
    with no real content. Write the actual notes yourself (step 6).
 
@@ -132,9 +134,29 @@ failure), just restart it or poll manually with `gh run view "$run_id" --json st
 ```bash
 gh release view "v$ver" --repo delllusional/DontSpeak --json assets --jq '[.assets[].name]'
 ```
-Expect **7 assets**: `checksums.txt` + linux `{x86_64,aarch64}.tar.gz` + macos
-`{aarch64,x86_64}.app.zip` + windows `{x86_64,aarch64}.zip`. Missing Linux assets means the
-best-effort Linux job failed — decide whether to re-cut or ship without.
+Expect **9 assets**: `checksums.txt` + `install.sh` + `install.ps1` + linux
+`{x86_64,aarch64}.tar.gz` + macos `{aarch64,x86_64}.app.zip` + windows
+`{x86_64,aarch64}.zip`. Missing Linux assets means the best-effort Linux job failed — decide
+whether to re-cut or ship without. Missing either installer is a release failure: the README
+and site use the fixed-name latest-release URLs.
+
+Verify the installer assets are byte-identical to the tagged sources:
+```bash
+tmp="$(mktemp -d)"
+gh release download "v$ver" --repo delllusional/DontSpeak \
+  --pattern install.sh --pattern install.ps1 --dir "$tmp"
+cmp "$tmp/install.sh" scripts/install/web/install.sh
+cmp "$tmp/install.ps1" scripts/install/web/install.ps1
+rm -rf "$tmp"
+```
+
+For a published release, also verify the stable latest-release endpoints resolve:
+```bash
+curl -fsSLI https://github.com/delllusional/DontSpeak/releases/latest/download/install.sh
+curl -fsSLI https://github.com/delllusional/DontSpeak/releases/latest/download/install.ps1
+```
+Skip this endpoint check for a dev draft: drafts deliberately do not change
+`releases/latest`, but still require both installer assets in their nine-asset set.
 
 ## 6 — Write real release notes
 
@@ -154,7 +176,7 @@ scripted, since it's arithmetic, not judgment:
 3. Append the change-stats table under its own `## Lines` heading — same level as the summary
    sections above, not a `---` divider — so it reads as one more section, not an appendix.
    The diff link (step 4) goes first, bare (no `**Diff**:` label), then the table under it:
-   `scripts/release-stats.py <prev-tag> v$ver` prints the ready-to-paste markdown table
+   `scripts/release/release-stats.py <prev-tag> v$ver` prints the ready-to-paste markdown table
    splitting code vs. test vs. comment-only line changes across the `rust` (shared) /
    `apps/macos` / `apps/windows` / `apps/linux` buckets.
    ```
@@ -192,7 +214,7 @@ run time, so a brief site lag degrades gracefully — but don't skip the deploy.
 Immediately after the release publishes (step 5), bump `rust/Cargo.toml`'s
 `[workspace.package] version` to the next version with a `-dev` suffix — e.g.
 `0.1.0` → `0.1.1-dev` for a patch-level next release, or `0.2.0-dev` if you already know
-the next release is minor-sized — then run `bash scripts/sync-gtk-version.sh` to propagate
+the next release is minor-sized — then run `bash scripts/release/sync-gtk-version.sh` to propagate
 it into `apps/linux/gtk/Cargo.toml`'s `version` (it can't inherit — see its own header
 comment) instead of hand-editing that file. Skipping the sync script doesn't fail fast: the
 tag/version guard (step 3.1) only compares them at the NEXT tag push, so a missed sync here
@@ -205,7 +227,7 @@ whose only job is to make `main` visibly "ahead of the last release" — the exa
 tag/version guard (step 3.1) never sees this suffix since nothing ever tags a `-dev`
 version. When it's time to cut the NEXT release, first replace `-dev` with the real next
 version in `rust/Cargo.toml` (bumping further to `minor`/`major` instead of `patch` if what
-accumulated warrants it), run `bash scripts/sync-gtk-version.sh` again, commit, then tag as
+accumulated warrants it), run `bash scripts/release/sync-gtk-version.sh` again, commit, then tag as
 usual (step 2).
 
 ## 10 — Cut (or replace) an on-demand `-dev` draft release
@@ -221,7 +243,7 @@ Safe to run repeatedly as `main` moves, on the same `-dev` string: **replaces th
 draft's tag and release object in place**, mirroring step 7's re-cut recipe — delete the remote
 tag first, or GitHub keeps the old tag object and Actions may not re-trigger:
 ```bash
-ver="$(bash scripts/version.sh)"
+ver="$(bash scripts/release/version.sh)"
 case "$ver" in
   *-dev*) ;;
   *) echo "current version '$ver' has no -dev suffix — this is for on-demand DEV drafts only; use step 2 for a real release" >&2; exit 1 ;;

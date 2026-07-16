@@ -12,6 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { createHash } = require('crypto');
 
 const [, , htmlDir, crateNamesArg, outFile] = process.argv;
 if (!htmlDir || !crateNamesArg || !outFile) {
@@ -39,6 +40,29 @@ const needlesPosix = crateNames.map((c) => `crates/${c}/src/`);
 function matchedCrate(fullPath) {
   const normalized = fullPath.split(path.sep).join('/');
   return needlesPosix.find((n) => normalized.includes(n));
+}
+
+function sourceIdentity(fullPath) {
+  const normalized = fullPath.replaceAll('\\', '/');
+  const needle = matchedCrate(normalized);
+  if (!needle) throw new Error(`path is outside the requested crates: ${fullPath}`);
+  return normalized.slice(normalized.indexOf(needle)).replace(/\.html$/, '');
+}
+
+function anchorFor(fullPath) {
+  const digest = createHash('sha256').update(sourceIdentity(fullPath)).digest('hex').slice(0, 16);
+  return `file-${digest}`;
+}
+
+function escapeHtml(value) {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+function prefixFragmentIds(html, prefix) {
+  return html
+    .replace(/\bid=(['"])([^'"]+)\1/g, (_match, quote, id) => `id=${quote}${prefix}-${id}${quote}`)
+    .replace(/\bhref=(['"])#([^'"]+)\1/g, (_match, quote, id) => `href=${quote}#${prefix}-${id}${quote}`);
 }
 
 const matches = [];
@@ -70,20 +94,21 @@ for (const row of indexBody.match(rowRe) || []) {
   if (!hrefMatch) continue;
   const href = hrefMatch[1];
   if (!matchedCrate(href)) continue;
-  const fileName = path.basename(href).replace(/\.html$/, '');
-  keptRows.push(row.replace(/href='[^']+'/, `href='#file-${fileName}'`));
+  keptRows.push(row.replace(/href='[^']+'/, `href='#${anchorFor(href)}'`));
 }
 const table = `<div class='centered'><table><tr><td class='column-entry-bold'>Filename</td><td class='column-entry-bold'>Function Coverage</td><td class='column-entry-bold'>Line Coverage</td><td class='column-entry-bold'>Region Coverage</td><td class='column-entry-bold'>Branch Coverage</td></tr>${keptRows.join('')}</table></div>`;
 
 let sections = '';
 for (const file of matches) {
-  const fileName = path.basename(file).replace(/\.html$/, '');
+  const identity = sourceIdentity(file);
+  const anchor = anchorFor(file);
   let body = extractBody(fs.readFileSync(file, 'utf8'));
   body = body.replace(/<h2>Coverage Report<\/h2><h4>Created:[^<]*<\/h4>/, '');
-  sections += `<details id="file-${fileName}" class="file-section"><summary>${fileName}</summary>${body}</details>\n`;
+  body = prefixFragmentIds(body, anchor);
+  sections += `<details id="${anchor}" class="file-section"><summary>${escapeHtml(identity)}</summary>${body}</details>\n`;
 }
 
-const title = crateNames.join(', ');
+const title = escapeHtml(crateNames.join(', '));
 const out = `<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><meta charset='UTF-8'>
 <title>${title} coverage report</title>
 <style>

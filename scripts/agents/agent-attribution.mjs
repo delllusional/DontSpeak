@@ -210,7 +210,6 @@ function resolveCodex(input) {
   return {
     model: firstString(hookModel, context?.model),
     effort: normalizedEffort(firstString(hookEffort, context?.effort)),
-    sources: { model: hookModel ? "hook" : "transcript", effort: hookEffort ? "hook" : "transcript" },
   };
 }
 
@@ -220,7 +219,6 @@ function resolveClaude(input, env) {
   return {
     model: firstString(hookModel, assistantModelFromTranscript(transcriptPath(input))),
     effort: firstString(hookEffort, normalizedEffort(env.CLAUDE_EFFORT)),
-    sources: { model: hookModel ? "hook" : "transcript", effort: hookEffort ? "hook" : "environment" },
   };
 }
 
@@ -235,7 +233,6 @@ function resolveQwen(input, root, home) {
       assistantModelFromTranscript(transcriptPath(input)),
     ),
     effort: normalizedEffort(firstString(direct, settings.reasoningEffort)),
-    sources: { model: input?.model ? "hook" : "transcript", effort: direct ? "hook" : "settings selection" },
   };
 }
 
@@ -245,15 +242,12 @@ function resolveGrok(input, env, home) {
   const model = firstString(input?.modelId, input?.model_id, input?.model, session.model);
   const hookEffort = directEffort(input);
   let effort = hookEffort ?? session.effort;
-  let effortSource = hookEffort ? "hook" : "session";
   if (!effort && modelDoesNotReason(home, model)) {
     effort = "none";
-    effortSource = "model catalog";
   }
   return {
     model,
     effort,
-    sources: { model: input?.modelId || input?.model_id || input?.model ? "hook" : "session", effort: effortSource },
   };
 }
 
@@ -355,10 +349,6 @@ export function gitCommitWorkingDirectory(command, baseCwd = process.cwd()) {
   return undefined;
 }
 
-export function containsGitCommit(command) {
-  return gitCommitWorkingDirectory(command) !== undefined;
-}
-
 export function commandFromHookInput(input) {
   return firstString(
     input?.tool_input?.command,
@@ -422,7 +412,7 @@ export function ensureCommitMessageHook(root) {
     );
   }
   contents.push(
-    "exec node \"$(git rev-parse --show-toplevel)/scripts/commit-agent-attribution.mjs\" \"$1\"",
+    "exec node \"$(git rev-parse --show-toplevel)/scripts/agents/commit-agent-attribution.mjs\" \"$1\"",
     "",
   );
   writeFileSync(hook, contents.join("\n"), { encoding: "utf8", mode: 0o755 });

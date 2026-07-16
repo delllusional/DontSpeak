@@ -1,4 +1,4 @@
-# Compiled Swift helpers — arch-specific; rebuilt by scripts/install.sh
+# Compiled Swift helpers — arch-specific; rebuilt by scripts/install/local/install.sh
 claude/hooks/capslock
 claude/hooks/mic-active
 

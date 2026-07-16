@@ -1,11 +1,11 @@
 #!/bin/bash
 # install.sh — first-time / full CLI install of the DontSpeak RUST stack (macOS-first).
 #
-# The binary build+install is delegated to scripts/install-daemon.sh (the SINGLE
+# The binary build+install is delegated to scripts/install/local/install-engine.sh (the SINGLE
 # source of truth, ALSO called by apps/macos/bundle.sh). It builds + installs the CLI
 # binaries (dontspeak MCP/hooks + ds-helper) into $INSTALL_DIR (default ~/.local/bin),
-# stable-signs them (so the TCC grants survive rebuilds), and installs the thin hook
-# wrappers. Logging is ~/Library/Logs/DontSpeak/ (macOS) / $XDG_STATE_HOME/dontspeak/logs/
+# stable-signs them so the TCC grants survive rebuilds. Logging is
+# ~/Library/Logs/DontSpeak/ (macOS) / $XDG_STATE_HOME/dontspeak/logs/
 # (Linux) with in-process rotation (no conf needed).
 #
 # This wrapper adds the things specific to a fresh CLI install: reconciling every registry
@@ -19,15 +19,15 @@
 # is NO standalone daemon. The hooks work without the app up (warm socket if it is, else a
 # cold one-shot synth).
 #
-# SAFETY: idempotent. Touches ~/.claude/hooks (backed up), $INSTALL_DIR, and wires each client's
+# SAFETY: idempotent. Touches $INSTALL_DIR and wires each client's
 # integration via `dontspeak wire <client>` — additive, backed-up, malformed-safe merges that
 # never clobber your other keys.
 set -euo pipefail
 
-# This installer lives in scripts/; the repo root is one level up. The shared helpers
-# (PATH setup, etc.) live in scripts/lib/common.sh.
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$REPO/scripts/lib/common.sh"
+# This installer lives three levels below the repo root. Shared installer helpers live
+# alongside the install categories in scripts/install/lib/.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+. "$REPO/scripts/install/lib/common.sh"
 H="$HOME"
 INSTALL_DIR="${DONTSPEAK_INSTALL_DIR:-$H/.local/bin}"
 UNAME="$(uname -s)"
@@ -38,7 +38,7 @@ need cargo
 
 # ==> 1-4. Build + install the engine binaries + hooks (shared with apps/macos/bundle.sh).
 # Echoes the BUILD_ID it baked in as its last line.
-BUILD_ID="$(DONTSPEAK_INSTALL_DIR="$INSTALL_DIR" bash "$REPO/scripts/install-daemon.sh")"
+BUILD_ID="$(DONTSPEAK_INSTALL_DIR="$INSTALL_DIR" bash "$REPO/scripts/install/local/install-engine.sh")"
 echo "==> binaries + hooks installed (BUILD_ID=$BUILD_ID)"
 
 # ==> 5. Wire every installed client declared by the registry.

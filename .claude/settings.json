@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/capture-agent-attribution.mjs\" auto",
+            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/agents/capture-agent-attribution.mjs\" auto",
             "shell": "bash",
             "timeout": 30
           }

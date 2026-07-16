@@ -4,7 +4,6 @@
 //! pidfile is the single-speaker contract shared between the engine's barge-in
 //! and the hook executor):
 //!   speak-hook.pid (in the per-OS state dir)  process-GROUP id of the current speaker
-//!   ~/.claude/hooks/                          hook helpers (mic-active, ...)
 //!
 //! The unified activity log lives in the per-OS logs dir (macOS:
 //! `~/Library/Logs/DontSpeak/dontspeak.log`) with lean, sudo-free in-process

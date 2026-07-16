@@ -90,7 +90,7 @@ engine owns playback — and all are best-effort (engine down means no-op, never
 blocking Claude). The two entries split by contract: `dontspeak notify` (fire-and-forget
 command sink) and `dontspeak provide` (query, returns `hookSpecificOutput`), both
 routing internally on `hook_event_name`. See
-[../claude/hooks/HOOKS-README.md](../claude/hooks/HOOKS-README.md) for the full
+[the hook executor document](../docs/HOOKS.md) for the full
 event→verb table.
 
 `dontspeak wire claude_code` writes inline command hooks into `settings.json` via

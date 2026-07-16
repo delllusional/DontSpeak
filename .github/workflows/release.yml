@@ -2,8 +2,9 @@ name: Release
 
 # Build the Windows portable zips (self-contained — x64 + ARM64) and the macOS app zips
 # (signed + notarized DontSpeak.app — Apple silicon AND Intel/x86_64) on a version tag,
-# then publish them to a GitHub Release alongside the Linux tarballs + a checksums.txt.
-# The one-command installers at dontspeak.org download + verify these assets.
+# then publish them to a GitHub Release alongside the Linux tarballs, fixed-name
+# one-command installers, and checksums.txt. The installers download + verify the
+# platform packages from that same release.
 # Trigger by pushing a tag:  git tag v0.1.0 && git push origin v0.1.0
 #
 # Runner labels are pinned to the current images (mid-2026): windows-2025 (Windows
@@ -42,7 +43,7 @@ concurrency:
 jobs:
   # ── Guard: the pushed tag must equal the single-source version ───────────────
   # The one place of truth is rust/Cargo.toml ([workspace.package] version), read via
-  # scripts/version.sh. Fail fast (before the long platform builds) if a tag like
+  # scripts/release/version.sh. Fail fast (before the long platform builds) if a tag like
   # v0.1.0 doesn't match it, so the app zip / portable zip / About string / tag never drift.
   check:
     name: tag = version guard
@@ -53,7 +54,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
-          ver="$(bash scripts/version.sh)"
+          ver="$(bash scripts/release/version.sh)"
           tag="${GITHUB_REF_NAME#v}"
           echo "single-source version=$ver  tag=$tag"
           [ "$ver" = "$tag" ] || { echo "::error::tag v$tag != rust/Cargo.toml version $ver — bump the workspace version or fix the tag"; exit 1; }
@@ -63,7 +64,7 @@ jobs:
         # kept in lockstep by hand, so catch drift here rather than shipping it silently.
         run: |
           set -euo pipefail
-          ver="$(bash scripts/version.sh)"
+          ver="$(bash scripts/release/version.sh)"
           gtk_ver="$(grep -m1 '^version = "' apps/linux/gtk/Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
           echo "rust/Cargo.toml version=$ver  apps/linux/gtk/Cargo.toml version=$gtk_ver"
           [ "$ver" = "$gtk_ver" ] || { echo "::error::apps/linux/gtk/Cargo.toml version ($gtk_ver) != rust/Cargo.toml version ($ver) — bump it to match"; exit 1; }
@@ -123,7 +124,8 @@ jobs:
 
       # Self-contained portable zip (bundles .NET + Windows App SDK + engine DLL/helper +
       # dontspeak.exe). -SkipModels keeps it lean — the app downloads the voice models on
-      # first launch, the same as macOS/Linux. The one-command installer (web/install.ps1)
+      # first launch, the same as macOS/Linux. The one-command installer
+      # (scripts/install/web/install.ps1)
       # unzips it and runs `dontspeak wire --reconcile`. Unsigned (runs from an extracted folder).
       - name: Build portable zip (${{ matrix.arch }})
         shell: pwsh
@@ -190,7 +192,7 @@ jobs:
       # this job. Route around it: openssl's `-passin env:` reads the passphrase from
       # the environment (never argv) to decrypt the p12 into an unencrypted PEM, which
       # `security import` then takes with no -P needed at all. The -legacy/no-legacy
-      # fallback mirrors ensure_local_sign_identity in scripts/lib/common.sh (OpenSSL 3
+      # fallback mirrors ensure_local_sign_identity in scripts/install/lib/common.sh (OpenSSL 3
       # needs -legacy for older RC2/3DES-encrypted p12s; LibreSSL, macOS's system
       # openssl, has no such flag). The decrypted PEM is as sensitive as the .p12 and
       # is removed immediately after import, same as the .p12 already was.
@@ -328,6 +330,9 @@ jobs:
     # Only publish a release for an actual tag push (workflow_dispatch just builds).
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      # The fixed-name web installers are release assets sourced from the tagged commit.
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -369,9 +374,16 @@ jobs:
             artifacts/macos-apps/*.app.zip
             artifacts/linux-packages-*/*
           )
-          # checksums.txt — sha256 of every published asset, by basename, so the
-          # dontspeak.org install scripts can verify each download. Built from the SAME
-          # FILES list, then shipped alongside them as one more release asset.
+          INSTALLERS=(
+            scripts/install/web/install.sh
+            scripts/install/web/install.ps1
+          )
+          for installer in "${INSTALLERS[@]}"; do
+            [ -f "$installer" ] || { echo "missing release installer: $installer" >&2; exit 1; }
+          done
+          # checksums.txt — sha256 of every platform package, by basename, so the
+          # installers can verify each download. The fixed-name installers and checksum
+          # manifest are bootstrap assets shipped alongside those packages.
           : > checksums.txt
           for f in "${FILES[@]}"; do
             [ -f "$f" ] || continue
@@ -386,4 +398,4 @@ jobs:
             --title "$TITLE" \
             --generate-notes \
             "${DRAFT_ARGS[@]}" \
-            "${FILES[@]}" checksums.txt
+            "${FILES[@]}" "${INSTALLERS[@]}" checksums.txt

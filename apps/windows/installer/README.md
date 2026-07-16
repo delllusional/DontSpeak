@@ -2,7 +2,7 @@
 
 DontSpeak ships on Windows as a **self-contained portable zip** — no installer, no
 elevation, no runtime prerequisites. The one-command installer at
-[dontspeak.org](https://dontspeak.org) (`web/install.ps1`) downloads it, extracts it to
+[dontspeak.org](https://dontspeak.org) (`scripts/install/web/install.ps1`) downloads it, extracts it to
 `%LOCALAPPDATA%\Programs\DontSpeak`, adds that directory to the per-user `PATH`, wires
 the client integrations (`dontspeak wire --reconcile`), adds a Start-menu shortcut, and
 launches the app. Local development archives go through that same script by setting
@@ -32,7 +32,7 @@ Install that exact local artifact through the normal registration path:
 ```powershell
 $env:DONTSPEAK_ARCHIVE = Get-Item apps\windows\installer\Output\dontspeak-*-windows-x86_64.zip |
   Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
-try { & .\web\install.ps1 } finally { Remove-Item Env:\DONTSPEAK_ARCHIVE }
+try { & .\scripts\install\web\install.ps1 } finally { Remove-Item Env:\DONTSPEAK_ARCHIVE }
 ```
 
 - `-Arch arm64` cross-compiles (needs the arm64 MSVC tools + clang).

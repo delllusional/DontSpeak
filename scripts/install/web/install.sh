@@ -1,7 +1,7 @@
 #!/bin/sh
 # DontSpeak one-command installer — macOS + Linux.
 #
-#   curl -fsSL https://dontspeak.org/install.sh | sh
+#   curl -fsSL https://github.com/delllusional/DontSpeak/releases/latest/download/install.sh | sh
 #
 # Downloads the prebuilt app for this OS/arch from the latest GitHub Release,
 # verifies its SHA-256, installs it, wires the MCP server + voice hooks into every
@@ -9,7 +9,7 @@
 # models download themselves on first boot. No compiler required.
 #
 # Programmers who want a from-source build should instead clone the repo and run
-# scripts/install.sh (this script never builds).
+# scripts/install/local/install.sh (this script never builds).
 #
 # Env overrides:
 #   DONTSPEAK_REPO         owner/repo to fetch releases from (default delllusional/DontSpeak)
@@ -71,17 +71,18 @@ asset_url() {  # $1 = extended-regex matching the asset filename
 }
 
 # Verify $1 against the sha256 line for its basename in the checksums.txt at $2 (a URL).
-verify_sha() {  # $1 = file, $2 = checksums url  (skips cleanly if unavailable)
+verify_sha() {  # $1 = file, $2 = checksums url
   file="$1"; sums_url="$2"; base=$(basename "$file")
-  sums=$(http_get "$sums_url" 2>/dev/null || true)
-  [ -n "$sums" ] || { warn "no checksums.txt on the release — skipping integrity check"; return 0; }
+  [ -n "$sums_url" ] || die "release is missing checksums.txt"
+  sums=$(http_get "$sums_url") || die "cannot download checksums.txt"
+  [ -n "$sums" ] || die "checksums.txt is empty"
   # Match either sha256sum format: text "<hash>  name" or binary "<hash> *name" — i.e. the
   # separator right before the basename is a space or a '*'.
   want=$(printf '%s\n' "$sums" | grep -E "[ *]$base\$" | awk '{print $1}' | head -n1)
-  [ -n "$want" ] || { warn "$base not listed in checksums.txt — skipping integrity check"; return 0; }
+  [ -n "$want" ] || die "$base is not listed in checksums.txt"
   if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$file" | awk '{print $1}')
   elif command -v shasum   >/dev/null 2>&1; then got=$(shasum -a 256 "$file" | awk '{print $1}')
-  else warn "no sha256sum/shasum — skipping integrity check"; return 0; fi
+  else die "need sha256sum or shasum to verify $base"; fi
   [ "$want" = "$got" ] || die "checksum mismatch for $base (want $want, got $got)"
   say "verified $base (sha256 ok)"
 }

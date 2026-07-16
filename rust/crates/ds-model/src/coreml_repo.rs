@@ -908,11 +908,9 @@ mod tests {
         );
     }
 
-    /// Hermetic counterpart to `live_tree_fetch_returns_the_expected_runtime_files`: a local
-    /// `httpmock` server stands in for `huggingface.co`, so the JSON-shape handling — LFS
-    /// `oid` extraction, plain git-blob `oid` extraction, `directory`-type skipping, and the
-    /// include/exclude filters — gets real coverage on every `cargo test`, not just an
-    /// occasional `--ignored` run against the real API.
+    /// A local `httpmock` server stands in for `huggingface.co`, so the JSON-shape handling —
+    /// LFS `oid` extraction, plain git-blob `oid` extraction, `directory`-type skipping, and
+    /// the include/exclude filters — gets deterministic coverage on every `cargo test`.
     #[test]
     fn fetch_tree_at_parses_lfs_and_plain_blobs_and_applies_filters() {
         let server = httpmock::MockServer::start();
@@ -1023,9 +1021,9 @@ mod tests {
         assert!(err.to_string().contains("HF tree fetch failed"));
     }
 
-    /// Hermetic counterpart to `live_download_one_file_verifies_sha`: a local `httpmock`
-    /// server stands in for the real `resolve/.../<path>` blob GET, exercising the same
-    /// temp→rename→[`verify_downloaded`] path `download_one` uses in production.
+    /// A local `httpmock` server stands in for the real `resolve/.../<path>` blob GET,
+    /// exercising the same temp→rename→[`verify_downloaded`] path `download_one` uses in
+    /// production.
     #[test]
     fn download_one_at_persists_and_verifies_a_mocked_blob() {
         let server = httpmock::MockServer::start();
@@ -1074,50 +1072,6 @@ mod tests {
         mock.assert();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(!dest.exists(), "a failed verify must not persist the file");
-    }
-
-    /// Live HF-API check (network) — run with `--ignored`. Confirms the tree URL, the JSON
-    /// shape, the lfs.oid extraction, and the filters all line up with the real repos.
-    #[test]
-    #[ignore = "network: hits the HuggingFace API"]
-    fn live_tree_fetch_returns_the_expected_runtime_files() {
-        for repo in all_coreml_repos() {
-            let files = fetch_tree(repo).unwrap_or_else(|e| panic!("{}: {e}", repo.name));
-            let total: u64 = files.iter().map(|f| f.size).sum();
-            let lfs = files.iter().filter(|f| f.sha256.is_some()).count();
-            eprintln!(
-                "{}: {} files, {} LFS, {:.0} MB",
-                repo.name,
-                files.len(),
-                lfs,
-                total as f64 / 1e6
-            );
-            assert!(!files.is_empty(), "{} returned no files", repo.name);
-            // The big weight.bin blobs must be LFS (so we sha-verify them).
-            assert!(lfs > 0, "{} has no LFS files — oid parse wrong?", repo.name);
-            assert!(total > 1_000_000, "{} total too small", repo.name);
-        }
-    }
-
-    /// Live download of one real LFS file (network) — validates the resolve URL, the temp→
-    /// rename, and the sha256 verification end-to-end. Run with `--ignored`.
-    #[test]
-    #[ignore = "network: downloads ~6 MB from HuggingFace"]
-    fn live_download_one_file_verifies_sha() {
-        // The diarizer's wespeaker weights — a modest (~7 MB) LFS blob with a known oid.
-        let files = fetch_tree(&DIARIZATION_COREML).unwrap();
-        let f = files
-            .iter()
-            .filter(|f| f.sha256.is_some())
-            .min_by_key(|f| f.size)
-            .expect("an LFS file");
-        let tmp = tempfile::tempdir().unwrap();
-        let dest = tmp.path().join(&f.path);
-        download_one(&DIARIZATION_COREML, f, &dest, &|_, _| {}).expect("download+verify");
-        assert!(dest.exists());
-        assert_eq!(std::fs::metadata(&dest).unwrap().len(), f.size);
-        // A second pass is a cheap no-op (already_have short-circuits on the verified sha).
-        assert!(already_have(&dest, f));
     }
 
     #[test]

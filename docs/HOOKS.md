@@ -23,7 +23,7 @@ unrecognised token degrades to `unknown` and never fails the hook. The MCP half 
 identity comes from the `initialize` handshake's `clientInfo.name`, not from a flag.
 
 The shipped stack (in-process native Kokoro, no Python/`uv`) is described in the
-repo [README](../../README.md).
+repo [README](../README.md).
 
 ## Hook wiring (settings.json)
 
@@ -57,7 +57,7 @@ needs-input cue ships off.
 Codex, Qwen Code, and Grok reuse this executor with different event sets, config formats,
 and upstream capabilities. Their launch commands, exact wiring locations, payload quirks,
 and narration limits are maintained in the canonical
-[client integrations document](../../docs/CLIENT-INTEGRATIONS.md).
+[client integrations document](CLIENT-INTEGRATIONS.md).
 
 The narration / greet / mark-active hooks talk to the **warm engine** over the Unix
 socket (`dontspeak.sock` in our data dir), so speech is synthesized by the engine's
@@ -71,14 +71,13 @@ There are no hook shell helpers anymore. The old `term-focused` focus gate (it b
 removed mid-turn message hook) has been deleted on every platform; the active terminal is
 now signalled by the `UserPromptSubmit` → `notify` (mark-active routing) and resolved
 engine-side. Caps-lock reading and mic-active probing also run in-process in the engine.
-(`mic-active.swift` / `capslock.swift`, if present, are likewise legacy.)
 
 ## Setup on a new machine
 
-Run `./scripts/install.sh` from the repo root. It builds the Rust workspace, installs the
+Run `./scripts/install/local/install.sh` from the repo root. It builds the Rust workspace, installs the
 binaries into `~/.local/bin` (override with `DONTSPEAK_INSTALL_DIR`), and reconciles every
 detected client through the shared registry. See
-[Client integrations and launchers](../../docs/CLIENT-INTEGRATIONS.md) for the supported
+[Client integrations and launchers](CLIENT-INTEGRATIONS.md) for the supported
 commands, config locations, preview/removal commands, and upstream-specific limits.
 There is no launchd/systemd agent: the engine runs in-process inside the platform's host
 app (macOS `DontSpeak.app`, built by `apps/macos/bundle.sh`; Windows `ds-winui`; Linux

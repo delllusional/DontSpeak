@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node scripts/capture-agent-attribution.mjs qwen",
+            "command": "node scripts/agents/capture-agent-attribution.mjs qwen",
             "timeout": 30000
           }
         ]

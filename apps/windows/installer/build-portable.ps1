@@ -61,8 +61,8 @@ if ($LASTEXITCODE) { $publishOut | Write-Host; throw "dotnet publish failed" }
 Copy-Item "$rel\dontspeak.exe" "$stage\" -Force
 Copy-Item "$repo\apps\windows\winui\AppIcon.ico" "$stage\" -Force
 # Ship the canonical standalone uninstaller as payload, just like the Linux tarball and
-# macOS app bundle. web/install.ps1 registers this file; it must never embed another copy.
-Copy-Item "$repo\scripts\uninstall.ps1" "$stage\uninstall.ps1" -Force
+# macOS app bundle. scripts/install/web/install.ps1 registers this file; it must never embed another copy.
+Copy-Item "$repo\scripts\install\bundle\uninstall.ps1" "$stage\uninstall.ps1" -Force
 # The binary embeds Apache-licensed Misaki dictionary data through voice-g2p. Keep the product
 # license, third-party notice, and referenced license copies together in every release archive.
 Copy-Item "$repo\LICENSE" "$stage\LICENSE" -Force

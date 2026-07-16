@@ -135,11 +135,17 @@ fn sound_ext() -> &'static str {
 /// de-duped by name (earlier dirs win) — so a bare-name sound resolves with NO hardcoded
 /// names, and a UI picker can list the shortest cues first.
 pub fn system_sounds() -> Vec<SystemSound> {
-    let ext = sound_ext();
+    system_sounds_in(&sound_dirs(), sound_ext())
+}
+
+/// Resource-explicit core of [`system_sounds`]. Production passes the platform sound
+/// directories; tests pass tempdir fixtures so the test harness never scans installed or
+/// user-owned sounds.
+fn system_sounds_in(sound_dirs: &[PathBuf], ext: &str) -> Vec<SystemSound> {
     let mut out: Vec<SystemSound> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for dir in sound_dirs() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+    for dir in sound_dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else {
             continue;
         };
         for entry in rd.flatten() {
@@ -185,19 +191,35 @@ pub fn resolve_cue(
     needs_input_sound: &str,
     event: EarconEvent,
 ) -> Option<PathBuf> {
+    resolve_cue_in(
+        reply_sound,
+        needs_input_sound,
+        event,
+        &sound_dirs(),
+        sound_ext(),
+    )
+}
+
+fn resolve_cue_in(
+    reply_sound: &str,
+    needs_input_sound: &str,
+    event: EarconEvent,
+    sound_dirs: &[PathBuf],
+    ext: &str,
+) -> Option<PathBuf> {
     let sound = event.sound_in(reply_sound, needs_input_sound);
     if sound.is_empty() {
         return None; // no sound set ⇒ this cue is off
     }
     let p = PathBuf::from(sound);
     if p.is_absolute() {
-        return canonical_sound_path(&p);
+        return canonical_sound_path_in(&p, sound_dirs);
     }
     // A bare name → the matching bundled sound (case-insensitive), else nothing (off).
-    system_sounds()
+    system_sounds_in(sound_dirs, ext)
         .into_iter()
         .find(|s| s.name.eq_ignore_ascii_case(sound))
-        .and_then(|s| canonical_sound_path(&s.path))
+        .and_then(|s| canonical_sound_path_in(&s.path, sound_dirs))
 }
 
 #[cfg(test)]
@@ -219,8 +241,14 @@ mod tests {
     #[test]
     fn empty_sound_is_off() {
         // An explicitly-empty sound ⇒ the cue is off, regardless of any installed OS sounds.
-        assert_eq!(resolve_cue("", "   ", EarconEvent::ReplyDone), None);
-        assert_eq!(resolve_cue("", "   ", EarconEvent::NeedsInput), None);
+        assert_eq!(
+            resolve_cue_in("", "   ", EarconEvent::ReplyDone, &[], sound_ext()),
+            None
+        );
+        assert_eq!(
+            resolve_cue_in("", "   ", EarconEvent::NeedsInput, &[], sound_ext()),
+            None
+        );
     }
 
     #[test]
@@ -239,28 +267,31 @@ mod tests {
             ""
         };
         assert_eq!(cfg.earcon_reply_sound, expected_name);
-        // The name resolves THROUGH system_sounds to the real file in the OS sounds folder — or
-        // None if that sound isn't installed. Assert it matches the introspected lookup so the
-        // test is deterministic wherever it runs.
-        let want = system_sounds()
-            .into_iter()
-            .find(|s| s.name.eq_ignore_ascii_case(expected_name))
-            .and_then(|s| canonical_sound_path(&s.path));
+        let dir = tempfile::tempdir().unwrap();
+        let sounds = dir.path().join("sounds");
+        std::fs::create_dir_all(&sounds).unwrap();
+        let want = sounds.join(format!("{expected_name}.{}", sound_ext()));
+        std::fs::write(&want, b"fixture").unwrap();
+        let want = want.canonicalize().ok();
         assert_eq!(
-            resolve_cue(
+            resolve_cue_in(
                 &cfg.earcon_reply_sound,
                 &cfg.earcon_needs_input_sound,
-                EarconEvent::ReplyDone
+                EarconEvent::ReplyDone,
+                std::slice::from_ref(&sounds),
+                sound_ext(),
             ),
             want
         );
         // The needs-input cue ships off (empty) — like the historically-unwired earcon.
         assert_eq!(cfg.earcon_needs_input_sound, "");
         assert_eq!(
-            resolve_cue(
+            resolve_cue_in(
                 &cfg.earcon_reply_sound,
                 &cfg.earcon_needs_input_sound,
-                EarconEvent::NeedsInput
+                EarconEvent::NeedsInput,
+                std::slice::from_ref(&sounds),
+                sound_ext(),
             ),
             None
         );
@@ -292,16 +323,40 @@ mod tests {
         std::fs::write(&snd, b"RIFF....").unwrap();
 
         assert_eq!(
-            resolve_cue(&snd.to_string_lossy(), "", EarconEvent::ReplyDone),
+            resolve_cue_in(
+                &snd.to_string_lossy(),
+                "",
+                EarconEvent::ReplyDone,
+                &[],
+                sound_ext(),
+            ),
             None
         );
     }
 
     #[test]
     fn system_sounds_are_size_sorted_and_deduped() {
-        // Pure invariant of the ordering (independent of which sounds the host has): sorted by
-        // (bytes, name) and unique by name.
-        let sounds = system_sounds();
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary");
+        let fallback = dir.path().join("fallback");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&fallback).unwrap();
+        std::fs::write(primary.join("large.wav"), b"12345").unwrap();
+        std::fs::write(primary.join("same.wav"), b"123").unwrap();
+        std::fs::write(fallback.join("small.wav"), b"1").unwrap();
+        std::fs::write(fallback.join("same.wav"), b"x").unwrap();
+        std::fs::write(fallback.join("ignored.txt"), b"").unwrap();
+
+        let sounds = system_sounds_in(&[primary.clone(), fallback], "wav");
+        assert_eq!(
+            sounds.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["small", "same", "large"]
+        );
+        assert_eq!(
+            sounds.iter().find(|s| s.name == "same").unwrap().path,
+            primary.join("same.wav"),
+            "the first directory wins when names collide"
+        );
         for w in sounds.windows(2) {
             assert!(
                 (w[0].bytes, &w[0].name) <= (w[1].bytes, &w[1].name),

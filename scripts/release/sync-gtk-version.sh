@@ -9,7 +9,7 @@
 # line is unique in the file, so a plain anchored substitution needs neither.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-gtk_cargo="$here/../apps/linux/gtk/Cargo.toml"
+gtk_cargo="$here/../../apps/linux/gtk/Cargo.toml"
 
 target="$(bash "$here/version.sh")"
 current="$(grep -m1 '^version = "' "$gtk_cargo" 2>/dev/null | sed -E 's/version = "([^"]+)"/\1/')" || current=""

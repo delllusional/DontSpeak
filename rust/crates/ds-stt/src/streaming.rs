@@ -3,11 +3,10 @@
 //! The offline [`crate::parakeet`] path re-encodes the whole buffer on every preview tick
 //! (`transcribe-rs` `ParakeetModel`, `supports_streaming: false`). This module instead feeds
 //! audio to a *cache-aware* NeMo FastConformer encoder in fixed chunks, threading the encoder
-//! cache so each frame is encoded EXACTLY ONCE — prototyped/validated in `scripts/streaming-stt/`.
+//! cache so each frame is encoded EXACTLY ONCE.
 //!
 //! Model: `sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-*` (encoder + decoder(LSTM) +
-//! joiner ONNX + `tokens.txt`). Tensor contract, metadata keys and the greedy-decode logic are
-//! mirrored from the validated Python reference; see `scripts/streaming-stt/README.md`.
+//! joiner ONNX + `tokens.txt`).
 //!
 //! Feature extraction is kaldi log-mel fbank (80 bins, 25/10 ms, dither 0, snip_edges false,
 //! `use_energy` off) over the waveform in [-1, 1] — NO 32768 scaling, NO CMVN. This exactly

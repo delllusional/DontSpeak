@@ -3,7 +3,7 @@ import { validateCommitMessage } from "./agent-attribution.mjs";
 
 const args = process.argv.slice(2);
 if (args.length > 1 || args.includes("--help")) {
-  console.error("usage: node scripts/check-commit-attribution.mjs [base-ref]");
+  console.error("usage: node scripts/agents/check-commit-attribution.mjs [base-ref]");
   process.exit(args.includes("--help") ? 0 : 2);
 }
 const base = args[0] ?? "origin/main";

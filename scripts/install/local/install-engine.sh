@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# install-daemon.sh — build + install the dontspeak ENGINE BINARIES + hooks with a
-# BUILD_ID. (Name kept for compatibility; there is no standalone daemon any more —
-# DontSpeak.app hosts the engine in-process.) Called by BOTH:
-#   • scripts/install.sh  (first-time / full CLI install), and
+# install-engine.sh — build + install the dontspeak ENGINE BINARIES with a
+# BUILD_ID. There is no standalone daemon; DontSpeak.app hosts the engine in-process.
+# Called by BOTH:
+#   • scripts/install/local/install.sh (first-time / full CLI install), and
 #   • apps/macos/bundle.sh (so building the app ALWAYS rebuilds+installs matching binaries).
 #
 # IMPORTANT (see docs/BUILD-DEPLOY.md): this installs to ~/.local/bin only. The RUNNING APP
@@ -19,23 +19,22 @@
 #   4. codesign ALL installed bins with a STABLE identity AND the app's signing
 #      identifier (app.dontspeak.org) so the Accessibility/Input-Monitoring grants
 #      survive rebuilds and are shared with the app bundle (ad-hoc only as fallback),
-#   5. install the optional swift hook helpers (macOS only).
 #   (logging is ~/Library/Logs/dontspeak.log with in-process rotation, no conf.)
 #
 # Inputs (env): DONTSPEAK_INSTALL_DIR, DONTSPEAK_BUILD_ID, DONTSPEAK_CODESIGN_ID.
 # Echoes the resolved BUILD_ID as its LAST line (callers capture it for Info.plist).
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # Shared helpers: PATH setup, compute_build_id, find_codesign_id, ensure_local_sign_identity.
-. "$REPO/scripts/lib/common.sh"
+. "$REPO/scripts/install/lib/common.sh"
 RUST_DIR="$REPO/rust"
 H="$HOME"
 INSTALL_DIR="${DONTSPEAK_INSTALL_DIR:-$H/.local/bin}"
 UNAME="$(uname -s)"
 
 # ── 1. BUILD_ID (git short hash + -dirty), unless the caller pinned one ───────────
-# compute_build_id (scripts/lib/common.sh) is the SAME id the macOS app stamps, so the
+# compute_build_id (scripts/install/lib/common.sh) is the SAME id the macOS app stamps, so the
 # engine and app stay in lockstep (the app's drift check compares them).
 DONTSPEAK_BUILD_ID="$(compute_build_id "$REPO")"; export DONTSPEAK_BUILD_ID
 echo "==> engine BUILD_ID = $DONTSPEAK_BUILD_ID" >&2
@@ -64,8 +63,8 @@ done
 # grants are shared and survive rebuilds. A stable cdhash is what makes them persist;
 # ad-hoc (no identity) rotates it and re-prompts every build, so it's only the fallback.
 if [ "$UNAME" = "Darwin" ]; then
-  ensure_local_sign_identity   # mint the self-signed local-dev cert ONCE if none exists (scripts/lib/common.sh). This runs in bundle.sh step 0, BEFORE step 3 signs the app — provisioning here means the bins get the STABLE signature on the very first clean install, not just on the second build. No-op when an identity already exists / in dist mode / when opted out.
-  STABLE_ID="$(find_codesign_id)"   # shared resolver (scripts/lib/common.sh); empty → the ad-hoc fallback below.
+  ensure_local_sign_identity   # mint the self-signed local-dev cert ONCE if none exists (scripts/install/lib/common.sh). This runs in bundle.sh step 0, BEFORE step 3 signs the app — provisioning here means the bins get the STABLE signature on the very first clean install, not just on the second build. No-op when an identity already exists / in dist mode / when opted out.
+  STABLE_ID="$(find_codesign_id)"   # shared resolver (scripts/install/lib/common.sh); empty → the ad-hoc fallback below.
   sign_stable() {
     codesign --force --identifier "app.dontspeak.org" --sign "$STABLE_ID" "$INSTALL_DIR/$1" 2>/dev/null \
       && echo "   signed $1 (stable: ${STABLE_ID%% (*}…, app.dontspeak.org)" >&2 \
@@ -78,28 +77,15 @@ if [ "$UNAME" = "Darwin" ]; then
   done
 fi
 
-# ── 4. hooks → ~/.claude/hooks (optional swift helpers; macOS only) ───────────────
-echo "==> hooks → ~/.claude/hooks" >&2
-mkdir -p "$H/.claude/hooks"
-if [ "$UNAME" = "Darwin" ] && command -v swiftc >/dev/null 2>&1; then
-  for s in mic-active capslock; do
-    if [ -f "$REPO/claude/hooks/$s.swift" ]; then
-      cp -f "$REPO/claude/hooks/$s.swift" "$H/.claude/hooks/$s.swift"
-      swiftc -O "$H/.claude/hooks/$s.swift" -o "$H/.claude/hooks/$s" \
-        && echo "   compiled $s" >&2 || echo "   !! swiftc $s failed (continuing)" >&2
-    fi
-  done
-fi
-cp -f "$REPO/claude/hooks/HOOKS-README.md" "$H/.claude/hooks/README.md" 2>/dev/null || true
 # The engine hosts in-process inside DontSpeak.app (ds_engine_start) and owns the RPC
 # socket; the MCP server launches the app (app.dontspeak.org) when the engine is needed.
 # Logging writes ~/Library/Logs/dontspeak.log with lean in-process size rotation
 # (rename-based, sudo-free) — there is no newsyslog conf to install.
 
-# ── 5. standalone uninstaller → $INSTALL_DIR (parity with the release installer,
-#      which places the SAME scripts/uninstall.sh bytes as dontspeak-uninstall) — so a
+# ── 4. standalone uninstaller → $INSTALL_DIR (parity with the release installer,
+#      which places the SAME scripts/install/bundle/uninstall.sh bytes as dontspeak-uninstall) — so a
 #      dev box can fully remove DontSpeak without a repo checkout. ────────────────
-install -m0755 "$REPO/scripts/uninstall.sh" "$INSTALL_DIR/dontspeak-uninstall"
+install -m0755 "$REPO/scripts/install/bundle/uninstall.sh" "$INSTALL_DIR/dontspeak-uninstall"
 echo "==> placed $INSTALL_DIR/dontspeak-uninstall (full removal any time)" >&2
 
 # LAST line: the resolved id, for callers (bundle.sh stamps Info.plist with it).

@@ -38,7 +38,6 @@ async function main() {
     root,
     model: resolved.model,
     effort: resolved.effort,
-    sources: resolved.sources,
     errors: resolved.errors,
     capturedAt: new Date().toISOString(),
   });

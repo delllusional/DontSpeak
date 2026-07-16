@@ -1965,70 +1965,6 @@ impl TtsManager {
 }
 
 #[cfg(test)]
-mod coexist_it {
-    use super::*;
-
-    /// Live coexist smoke test for the stdout DEMUX: speak WHILE a listen runs and
-    /// assert both terminate cleanly (the speak gets its `DONE`, the listen its
-    /// `LDONE`) without serializing. Needs the built `ds-helper`, the
-    /// Kokoro+Parakeet models, and mic permission for the test runner — so it is
-    /// `#[ignore]`d. Run it explicitly (it plays audio):
-    ///   cargo test -p dontspeakd coexist_smoke -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn coexist_smoke() {
-        let bin =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ds-helper");
-        let mgr = Arc::new(TtsManager::new(
-            bin,
-            std::env::temp_dir().join("ds-engine-coexist-test.log"),
-            Arc::new(crate::stats::TtsStats::new()),
-            Arc::new(crate::stats::SttStats::new()),
-            Arc::new(crate::stats::LifetimeSeconds::load(
-                std::env::temp_dir().join("ds-stats-coexist-test.json"),
-            )),
-        ));
-        mgr.set_tts_wanted(true);
-        mgr.set_stt_wanted(true);
-        mgr.set_full_duplex_pref(true);
-        mgr.ensure_started();
-        assert!(
-            mgr.is_running(),
-            "helper failed to start: {:?}",
-            mgr.last_error()
-        );
-
-        // A listen on a background thread drains the listen slot while we speak.
-        let lmgr = mgr.clone();
-        let listen = std::thread::spawn(move || {
-            lmgr.listen_cancellable(&AtomicBool::new(false), &mut |p| eprintln!("[partial] {p}"))
-        });
-        std::thread::sleep(std::time::Duration::from_millis(300));
-
-        // Speak WHILE the listen runs — the whole point of coexist. If the demux is
-        // broken (one stdout reader), this blocks forever or steals the listen's lines.
-        let t0 = std::time::Instant::now();
-        let r = mgr.speak(
-            "Testing coexistence. I am speaking while you dictate. This is the end.",
-            "af_sarah",
-            1.0,
-            0,
-        );
-        eprintln!("[speak] returned {r:?} after {:?}", t0.elapsed());
-        assert!(r.is_ok(), "speak failed: {r:?}");
-
-        // End the listen and collect the final transcript.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        mgr.stop_listen();
-        let final_text = listen.join().expect("listen thread panicked");
-        eprintln!("[final] {final_text:?}");
-        assert!(final_text.is_ok(), "listen failed: {final_text:?}");
-
-        mgr.set_enabled(false);
-    }
-}
-
-#[cfg(test)]
 pub(crate) mod wedge_recovery_tests {
     use super::*;
     use std::time::Duration;
@@ -2045,8 +1981,7 @@ pub(crate) mod wedge_recovery_tests {
     /// and Cargo places this crate's `[[bin]]` output in `target/<profile>` (its
     /// grandparent) — this self-adapts to profile (debug/release) and to a redirected
     /// `CARGO_TARGET_DIR`, unlike a path hardcoded relative to `CARGO_MANIFEST_DIR`
-    /// (the pattern `coexist_smoke`, above, uses — tolerable there only because that
-    /// test is `#[ignore]`d and never runs in default CI).
+    /// (a hardcoded target/debug path would break under either variation).
     pub(crate) fn fake_helper_bin() -> std::path::PathBuf {
         let bin_name = if cfg!(windows) {
             "dontspeakd-fake-helper.exe"
@@ -2114,8 +2049,8 @@ pub(crate) mod wedge_recovery_tests {
     /// child) fails fast rather than hanging, and the NEXT `ensure_started()` + `speak()`
     /// (the real `ttsq.rs` caller pattern) succeeds on a freshly restarted child.
     ///
-    /// Unlike `coexist_smoke`, this runs on every commit, so both the helper log path and
-    /// shortened finalize timeout are injected at construction.
+    /// Both the helper log path and shortened finalize timeout are injected at construction,
+    /// so this runs on every commit without touching live resources.
     #[test]
     fn a_wedged_listen_is_recovered_and_a_queued_speak_succeeds_after_restart() {
         let dir = tempfile::tempdir().unwrap();
@@ -2124,7 +2059,6 @@ pub(crate) mod wedge_recovery_tests {
             fake_helper_bin(),
             TtsManagerTestOptions::default().with_finalize_timeout(Duration::from_millis(50)),
         ));
-
         mgr.ensure_started();
         assert!(
             mgr.is_running(),

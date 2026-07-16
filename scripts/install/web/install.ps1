@@ -2,7 +2,7 @@
 <#
   DontSpeak one-command installer — Windows.
 
-      irm https://dontspeak.org/install.ps1 | iex
+      irm https://github.com/delllusional/DontSpeak/releases/latest/download/install.ps1 | iex
 
   Downloads the self-contained portable zip for this arch from the latest GitHub Release,
   verifies its SHA-256, extracts it to %LOCALAPPDATA%\Programs\DontSpeak (no elevation, no
@@ -94,21 +94,17 @@ try {
     # SHA-256 verify downloaded releases against checksums.txt (a local dev artifact has
     # no separately published checksum and was selected explicitly by the developer).
     $sumsUrl = Resolve-Asset 'checksums.txt'
-    if ($sumsUrl) {
-      try {
-        $sums = (Invoke-WebRequest -UseBasicParsing -Headers @{ 'User-Agent' = 'dontspeak-install' } -Uri $sumsUrl).Content
-        # GitHub serves checksums.txt as application/octet-stream, so PowerShell 7 hands back a
-        # byte[] (5.1 gives a string). Decode before splitting into checksum lines.
-        if ($sums -is [byte[]]) { $sums = [System.Text.Encoding]::UTF8.GetString($sums) }
-        $want = ($sums -split "`n" | Where-Object { $_ -match ("\*?" + [regex]::Escape($zipName) + '\s*$') } |
-                 Select-Object -First 1) -replace '\s.*$', ''
-        if ($want) {
-          $got = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
-          if ($got -ne $want.ToLower()) { throw "checksum mismatch for $zipName (want $want, got $got)" }
-          Say "verified $zipName (sha256 ok)"
-        } else { Warn "$zipName not listed in checksums.txt — skipping integrity check" }
-      } catch { if ($_.Exception.Message -match 'checksum mismatch') { throw } else { Warn "checksum step skipped: $($_.Exception.Message)" } }
-    } else { Warn "no checksums.txt on the release — skipping integrity check" }
+    if (-not $sumsUrl) { throw 'release is missing checksums.txt' }
+    $sums = (Invoke-WebRequest -UseBasicParsing -Headers @{ 'User-Agent' = 'dontspeak-install' } -Uri $sumsUrl).Content
+    # GitHub serves checksums.txt as application/octet-stream, so PowerShell 7 hands back a
+    # byte[] (5.1 gives a string). Decode before splitting into checksum lines.
+    if ($sums -is [byte[]]) { $sums = [System.Text.Encoding]::UTF8.GetString($sums) }
+    $want = ($sums -split "`n" | Where-Object { $_ -match ("\*?" + [regex]::Escape($zipName) + '\s*$') } |
+             Select-Object -First 1) -replace '\s.*$', ''
+    if (-not $want) { throw "$zipName is not listed in checksums.txt" }
+    $got = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+    if ($got -ne $want.ToLower()) { throw "checksum mismatch for $zipName (want $want, got $got)" }
+    Say "verified $zipName (sha256 ok)"
   }
 
   # Extract into the temp dir FIRST, swap after — a failed/partial extraction (corrupt
@@ -205,7 +201,7 @@ try {
   # downloaded models/config, and the uninstall key itself.
   $ver = if ($zipName -match 'dontspeak-(.+?)-windows') { $Matches[1] } else { '' }
   $unps = Join-Path $dest 'uninstall.ps1'
-  # build-portable.ps1 copied the canonical scripts/uninstall.ps1 file into the archive;
+  # build-portable.ps1 copied the canonical scripts/install/bundle/uninstall.ps1 file into the archive;
   # registering that payload keeps one source instead of embedding a second script body.
 
   $unkey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DontSpeak'

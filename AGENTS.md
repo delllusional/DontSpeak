@@ -20,8 +20,10 @@ Build prerequisites per OS: [CONTRIBUTING.md](CONTRIBUTING.md).
   `apps/linux/gtk/` (GTK4 + libadwaita) — each a thin menu-bar/health/permissions UI
   that hosts the engine and is the login item. Voice/engine control is via MCP, not
   the app UI.
-- `web/` — the dontspeak.org site (deployed locally via the `deploy-site` skill, not
-  CI — see git log for `site deploys run locally`).
+
+The website and its `llms.txt` live in the separate `delllusional/dontspeak.org`
+repository. Deploy them from that checkout; this repository only publishes the fixed-name
+installer assets referenced by the site.
 
 ## Agent and skill portability
 
@@ -138,9 +140,14 @@ the three runtime pieces (CLI, engine, host app) need different rebuild routes.
 - **No hardcoded UI strings.** Every new user-facing string goes in the shared
   `ds-i18n` catalog (`rust/crates/ds-i18n/locales/en.yml`), rendered through the FFI
   — never literal text in Swift/C#/XAML — see [docs/LOCALIZATION.md](docs/LOCALIZATION.md).
-- **Tests never touch a real network endpoint.** Any code that makes an outbound HTTP
-  call (model downloads in `ds-model`, the GitHub releases update-check) must be
-  structured so its tests point at a local mock instead of the real service —
+- **Tests never touch ambient or live resources.** Tests may use tempdir-owned files,
+  loopback-only sockets/mock servers, and deterministic fake child processes. They must
+  never read or write the user's real config/cache/logs, inspect installed user assets,
+  mutate hardware or global OS state, require credentials, play/capture audio, or contact
+  a real network endpoint. `#[ignore]` is not an escape hatch for a live-resource test;
+  keep intentional live validation in an explicit script/example outside the test harness.
+  Any code that makes an outbound HTTP call (model downloads in `ds-model`, the GitHub
+  releases update-check) must be structured so its tests point at a local mock instead —
   `httpmock` is already a dev-dependency of `ds-model` for exactly this; parameterize
   the function under test by base URL (see `ds-model`'s `download.rs`/`update_check.rs`
   for the pattern: a `pub(crate)`/`pub` `..._at(base_url, ...)` inner function the

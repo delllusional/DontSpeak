@@ -27,7 +27,7 @@ esac; done
 
 # Strip any stray CR (a CRLF Cargo.toml — e.g. a Windows-checkout working tree — would
 # otherwise put a carriage return into every artifact filename).
-VERSION="$(bash "$REPO/scripts/version.sh" 2>/dev/null | tr -d '\r\n')"
+VERSION="$(bash "$REPO/scripts/release/version.sh" 2>/dev/null | tr -d '\r\n')"
 [ -n "$VERSION" ] || VERSION=0.0.0
 ARCH="$(uname -m)"
 mkdir -p "$OUTDIR"
@@ -67,7 +67,7 @@ install -m0644 "$REPO/licenses/voice-g2p-MIT.txt" "$ROOT/licenses/voice-g2p-MIT.
 # along too: install.sh places it on PATH as dontspeak-uninstall, so removal still
 # works after the extracted dir is deleted.
 install -m0755 "$HERE/tarball-install.sh" "$ROOT/install.sh"
-install -m0755 "$REPO/scripts/uninstall.sh" "$ROOT/uninstall.sh"
+install -m0755 "$REPO/scripts/install/bundle/uninstall.sh" "$ROOT/uninstall.sh"
 printf 'DontSpeak %s (%s) portable bundle.\nRun ./install.sh to install into ~/.local/bin.\nUninstall later: dontspeak-uninstall\n' "$VERSION" "$ARCH" > "$ROOT/README.txt"
 
 TARBALL="$OUTDIR/$PKG.tar.gz"

@@ -42,7 +42,7 @@ public partial class App : Application
     private static EventWaitHandle? _activate;
     private const string ActivateEvent = "DontSpeak.WinUI.Activate";
     // The app's explicit AppUserModelID. The one-command installer creates a Start-menu
-    // shortcut named "DontSpeak" (web/install.ps1); keeping this id stable lets Windows group
+    // shortcut named "DontSpeak" (scripts/install/web/install.ps1); keeping this id stable lets Windows group
     // the taskbar + Task Manager "Apps" entry under that name instead of the "ds-winui"
     // exe-name fallback.
     private const string AppUserModelId = "DontSpeak";
@@ -106,7 +106,7 @@ public partial class App : Application
             // Add a case here only if a translation for THIS SPECIFIC message is ever produced;
             // there is no other mechanism to localize it (ds_core is unreachable at this point).
             _ => "ds_core.dll was not found next to the app, so the voice engine cannot start.\n\n" +
-                 "Reinstall DontSpeak (irm https://dontspeak.org/install.ps1 | iex). Building from " +
+                 "Reinstall DontSpeak (irm https://github.com/delllusional/DontSpeak/releases/latest/download/install.ps1 | iex). Building from " +
                  "source? Build the Rust engine first — see apps/windows/installer/build-portable.ps1.",
         };
 

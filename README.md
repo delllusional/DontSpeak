@@ -8,11 +8,11 @@ One command — it downloads the prebuilt app for your OS, wires the MCP server 
 
 ```sh
 # macOS / Linux
-curl -fsSL https://dontspeak.org/install.sh | sh
+curl -fsSL https://github.com/delllusional/DontSpeak/releases/latest/download/install.sh | sh
 ```
 ```powershell
 # Windows (PowerShell)
-irm https://dontspeak.org/install.ps1 | iex
+irm https://github.com/delllusional/DontSpeak/releases/latest/download/install.ps1 | iex
 ```
 
 Or just tell your agent: **"Install DontSpeak.org app."** — it reads [dontspeak.org/llms.txt](https://dontspeak.org/llms.txt) and does it. Start a new session afterwards so the MCP server loads.
@@ -36,10 +36,10 @@ capabilities and upstream-specific flags are documented in
 **Update:** re-run the install command. It stops and replaces the app, re-wires clients,
 and relaunches. The in-app version pill only signals an available update.
 
-**Build from source (developers):** `git clone https://github.com/delllusional/DontSpeak && cd DontSpeak && ./scripts/install.sh` (needs a Rust toolchain).
+**Build from source (developers):** `git clone https://github.com/delllusional/DontSpeak && cd DontSpeak && ./scripts/install/local/install.sh` (needs a Rust toolchain).
 
 **Uninstall** (app, integrations, data, and models): macOS/Linux —
-`~/.local/bin/dontspeak-uninstall` (or `scripts/uninstall.sh` from a checkout); Windows —
+`~/.local/bin/dontspeak-uninstall` (or `scripts/install/bundle/uninstall.sh` from a checkout); Windows —
 Settings › Apps › DontSpeak. To keep the app but exclude a client, add it to
 `exclude_clients` in `config.toml`; boot reconciliation restores the configured wiring.
 

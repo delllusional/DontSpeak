@@ -14,7 +14,6 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  containsGitCommit,
   ensureCommitMessageHook,
   gitCommitWorkingDirectory,
   privateHooksDirectory,
@@ -37,10 +36,10 @@ function jsonLines(file, rows) {
 }
 
 test("detects real git commit shell commands", () => {
-  assert.equal(containsGitCommit("git commit -m test"), true);
-  assert.equal(containsGitCommit("cd rust && git -C .. commit --amend"), true);
-  assert.equal(containsGitCommit("git status"), false);
-  assert.equal(containsGitCommit("Write-Output 'git commit'"), false);
+  assert.notEqual(gitCommitWorkingDirectory("git commit -m test"), undefined);
+  assert.notEqual(gitCommitWorkingDirectory("cd rust && git -C .. commit --amend"), undefined);
+  assert.equal(gitCommitWorkingDirectory("git status"), undefined);
+  assert.equal(gitCommitWorkingDirectory("Write-Output 'git commit'"), undefined);
 });
 
 test("resolves repeated git working-directory options for the target repository", () => {
@@ -63,7 +62,6 @@ test("Codex uses the hook model and matching turn effort", (t) => {
     {
       model: "gpt-5.6-sol",
       effort: "xhigh",
-      sources: { model: "hook", effort: "transcript" },
       errors: [],
     },
   );
@@ -216,9 +214,9 @@ test("hook installation is isolated to the current worktree config", (t) => {
 
 test("a captured Codex commit is rewritten end to end", (t) => {
   const root = temporaryDirectory(t);
-  const scripts = join(root, "scripts");
+  const scripts = join(root, "scripts", "agents");
   const sourceScripts = dirname(fileURLToPath(import.meta.url));
-  mkdirSync(scripts);
+  mkdirSync(scripts, { recursive: true });
   for (const file of ["agent-attribution.mjs", "capture-agent-attribution.mjs", "commit-agent-attribution.mjs"]) {
     copyFileSync(join(sourceScripts, file), join(scripts, file));
   }

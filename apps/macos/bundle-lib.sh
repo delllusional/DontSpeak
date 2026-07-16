@@ -10,19 +10,19 @@
 BUNDLE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Shared helpers — compute_build_id + resolve_sign_identity (the lockstep BUILD_ID and
-# codesign-identity resolution) live in scripts/lib/common.sh so the app bundler and the
-# engine installer (scripts/install-daemon.sh) can't drift. ../../scripts from apps/macos.
-. "$BUNDLE_LIB_DIR/../../scripts/lib/common.sh"
+# codesign-identity resolution) live in scripts/install/lib/common.sh so the app bundler and the
+# engine installer (scripts/install/local/install-engine.sh) can't drift.
+. "$BUNDLE_LIB_DIR/../../scripts/install/lib/common.sh"
 
 # product_version — the marketing version, from the SINGLE source of truth
-# (rust/Cargo.toml [workspace.package] version) via the shared scripts/version.sh, so
+# (rust/Cargo.toml [workspace.package] version) via the shared scripts/release/version.sh, so
 # the bundle's CFBundleShortVersionString matches ds-core's `ds_version()`
 # (CARGO_PKG_VERSION), the Windows installer, and the release tag. Falls back to
 # "0.0.0" if it can't be read.
 product_version() {
   local v=""
   # tr strips a stray CR a CRLF working tree would otherwise put into the version.
-  v="$(bash "$BUNDLE_LIB_DIR/../../scripts/version.sh" 2>/dev/null | tr -d '\r\n')"
+  v="$(bash "$BUNDLE_LIB_DIR/../../scripts/release/version.sh" 2>/dev/null | tr -d '\r\n')"
   printf '%s' "${v:-0.0.0}"
 }
 
@@ -189,8 +189,8 @@ assemble_app() {
   cp "$car"  "$app/Contents/Resources/Assets.car"
   cp "$icns" "$app/Contents/Resources/AppIcon.icns"
   # The release installer places this canonical payload on PATH. Keeping it in the app
-  # archive avoids an embedded script body in web/install.sh and matches the other OSes.
-  install -m0755 "$repo/scripts/uninstall.sh" "$app/Contents/Resources/uninstall.sh"
+  # archive avoids an embedded script body in scripts/install/web/install.sh and matches the other OSes.
+  install -m0755 "$repo/scripts/install/bundle/uninstall.sh" "$app/Contents/Resources/uninstall.sh"
   # The helper embeds Apache-licensed Misaki dictionary data through voice-g2p. Bundle the
   # product license, attribution notice, and referenced license copies as readable resources.
   mkdir -p "$app/Contents/Resources/licenses"

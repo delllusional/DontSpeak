@@ -30,7 +30,7 @@ description: Re-verify the client-wiring registry against the CURRENT client ver
      honouring `hookSpecificOutput.additionalContext`; the config schema (`hooks.<Event>`
      groups in `~/.claude/settings.json` / `~/.qwen/settings.json` or `[[hooks.<Event>]]` tables in Codex's
      `~/.codex/config.toml`). Registered events — full table in
-     `claude/hooks/HOOKS-README.md` — are Claude Code's and Qwen Code's six (`MessageDisplay`,
+     `docs/HOOKS.md` — are Claude Code's and Qwen Code's six (`MessageDisplay`,
      `SessionStart`, `SessionEnd`, `UserPromptSubmit` ×2, `Stop`, `Notification`) vs Codex's three (`SessionStart`,
      `UserPromptSubmit`, `Stop` — no `MessageDisplay` stream, so `Stop` also voices the reply
      and `SessionStart` is greet-only; shaped in

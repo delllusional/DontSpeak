@@ -9,7 +9,6 @@ use directories::BaseDirs;
 pub struct Paths {
     pub home: PathBuf,
     pub claude_dir: PathBuf,
-    pub hooks_dir: PathBuf,
     /// Speaker pidfile (`speak-hook.pid` in the local `state_dir`) — the TTS
     /// process-group id for the single-speaker barge-in contract.
     pub pidfile: PathBuf,
@@ -97,7 +96,6 @@ impl Paths {
         let base = BaseDirs::new()?;
         let home = base.home_dir().to_path_buf();
         let claude_dir = home.join(".claude");
-        let hooks_dir = claude_dir.join("hooks");
         let codex_dir = home.join(".codex");
         let qwen_dir = home.join(".qwen");
         let grok_dir = home.join(".grok");
@@ -135,7 +133,6 @@ impl Paths {
             grok_dir,
             home,
             claude_dir,
-            hooks_dir,
         })
     }
 
@@ -149,7 +146,6 @@ impl Paths {
     pub fn rooted_at(home: &Path) -> Self {
         let home = home.to_path_buf();
         let claude_dir = home.join(".claude");
-        let hooks_dir = claude_dir.join("hooks");
         let codex_dir = home.join(".codex");
         let qwen_dir = home.join(".qwen");
         let grok_dir = home.join(".grok");
@@ -179,14 +175,7 @@ impl Paths {
             grok_dir,
             home,
             claude_dir,
-            hooks_dir,
         }
-    }
-
-    /// `~/.claude/hooks/mic-active` — CoreAudio helper used to stop speech when
-    /// the user starts dictating (mic active edge).
-    pub fn mic_active(&self) -> PathBuf {
-        self.hooks_dir.join("mic-active")
     }
 }
 
@@ -230,7 +219,11 @@ pub fn model_dir() -> Option<PathBuf> {
             path.display()
         );
     }
-    Some(BaseDirs::new()?.cache_dir().join(APP_DIR).join("models"))
+    Some(model_dir_under(BaseDirs::new()?.cache_dir()))
+}
+
+fn model_dir_under(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(APP_DIR).join("models")
 }
 
 /// The Homebrew-installed onnxruntime dylib on **Intel macOS**, or `None` elsewhere / when no
@@ -397,21 +390,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_dir_resolves() {
-        // Clear any ambient override so this checks the real fallback shape (cache_dir/APP_DIR
-        // /models), not just "resolves to *something*" regardless of what that something is.
-        let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        // SAFETY: test-only env mutation, restored below before returning.
-        unsafe { std::env::remove_var("DONTSPEAK_MODEL_DIR") };
-        let dir = model_dir().expect("cache dir resolves");
-        assert!(dir.ends_with("models"), "expected .../models, got {dir:?}");
-        // SAFETY: restore the prior value (or clear it) so later tests see the real env again.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
-            }
-        }
+    fn default_model_dir_has_the_platform_app_and_models_suffix() {
+        let dir = model_dir_under(Path::new("cache-root"));
+        assert_eq!(dir, Path::new("cache-root").join(APP_DIR).join("models"));
     }
 
     /// The brew-probe version gate: full versions parse and compare against the 1.27 floor; the

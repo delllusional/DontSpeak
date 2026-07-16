@@ -13,7 +13,7 @@
 # Prints just the bare version (e.g. "0.1.0") to stdout; "0.0.0" if it can't be read.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cargo="$here/../rust/Cargo.toml"
+cargo="$here/../../rust/Cargo.toml"
 # `|| v=""` keeps the documented 0.0.0 fallback alive: under `set -e -o pipefail` a
 # missing file / no match would otherwise exit the script (status 2, empty output)
 # before the printf runs.

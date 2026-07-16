@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/scripts/capture-agent-attribution.mjs\" codex",
-            "commandWindows": "node \"$(git rev-parse --show-toplevel)/scripts/capture-agent-attribution.mjs\" codex",
+            "command": "node \"$(git rev-parse --show-toplevel)/scripts/agents/capture-agent-attribution.mjs\" codex",
+            "commandWindows": "node \"$(git rev-parse --show-toplevel)/scripts/agents/capture-agent-attribution.mjs\" codex",
             "timeout": 30,
             "statusMessage": "Capturing exact commit attribution"
           }

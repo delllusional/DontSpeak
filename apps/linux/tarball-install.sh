@@ -29,7 +29,7 @@ sed "s|^Exec=ds-gtk|Exec=\"$ESC_BIN/ds-gtk\"|" "$HERE/share/applications/dontspe
 install -m0644 "$HERE/share/icons/hicolor/scalable/apps/dontspeak.svg" "$ICONS/dontspeak.svg"
 # Start-at-login by default (parity with macOS SMAppService and the Windows Run key) —
 # dontspeak.desktop's own comment says the installer copies it into ~/.config/autostart/.
-# Opt out with DONTSPEAK_NO_AUTOSTART=1 (same env var web/install.sh honors for its own,
+# Opt out with DONTSPEAK_NO_AUTOSTART=1 (same env var scripts/install/web/install.sh honors for its own,
 # now-redundant copy of this step when it wraps this script).
 if [ "${DONTSPEAK_NO_AUTOSTART:-0}" != "1" ]; then
   AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"

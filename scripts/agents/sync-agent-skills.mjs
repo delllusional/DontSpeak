@@ -2,7 +2,7 @@ import { cp, readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const source = path.join(root, ".agents", "skills");
 const mirrors = [
   path.join(root, ".claude", "skills"),
@@ -11,7 +11,7 @@ const mirrors = [
 
 const args = process.argv.slice(2);
 if (args.some((arg) => arg !== "--check")) {
-  console.error("usage: node scripts/sync-agent-skills.mjs [--check]");
+  console.error("usage: node scripts/agents/sync-agent-skills.mjs [--check]");
   process.exit(2);
 }
 const checkOnly = args.includes("--check");

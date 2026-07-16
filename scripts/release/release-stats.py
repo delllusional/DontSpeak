@@ -15,7 +15,7 @@ of whether they fall in code or test regions.
 Used by the `make-release` skill's step 6 (write real release notes) to
 generate the change-stats table appended there. Run from the repo root:
 
-    scripts/release-stats.py v0.2.0 v0.2.1
+    scripts/release/release-stats.py v0.2.0 v0.2.1
 """
 import re
 import subprocess
