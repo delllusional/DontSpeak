@@ -1,6 +1,6 @@
 ---
 name: make-release
-description: Cut a DontSpeak release — tag the single-source version, push the tag to trigger release.yml on GitHub, MONITOR the ~25-30-min run (it can and does fail), verify the published assets, then bump the next `-dev` version. Also covers re-cutting a failed release, and cutting/replacing an on-demand DRAFT release of the current `-dev` version for real installable dev binaries without officially shipping. Site deploy is independent (dontspeak.org). Use when asked to release, cut/publish a version, re-release, cut a dev/preview/draft build, or when a release build failed.
+description: Cut a DontSpeak release — tag the single-source version, push the tag to trigger release.yml on GitHub, MONITOR the ~25-30-min run (it can and does fail), verify the published assets, then bump the next `-dev` version. Also covers re-cutting a failed release, and cutting/replacing an on-demand DRAFT release of the current `-dev` version for real installable dev binaries without officially shipping. Use when asked to release, cut/publish a version, re-release, cut a dev/preview/draft build, or when a release build failed.
 ---
 
 # DontSpeak — make a release
@@ -178,4 +178,3 @@ Web UI may show `untagged-<hash>` briefly — display-only; `tag_name` is correc
 - `workflow_dispatch` builds without publish.
 - Don't `git tag -f` without deleting remote first.
 - Don't skip step 8.
-- Site deploy is independent of this skill (dontspeak.org).
