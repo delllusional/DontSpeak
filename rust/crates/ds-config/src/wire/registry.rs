@@ -310,11 +310,15 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             aliases: &["qwen_code"],
             mode: LaunchMode::Direct,
         },
-        // UNVERIFIED — Qwen Code's own `clientInfo.name` is not published (the reachable docs
-        // describe MCP *server* names). It is a gemini-cli fork, so it may still send a
-        // gemini-derived name. The `mcp initialize clientInfo.name=…` capture line is what
-        // settles this from the field; correct this list from what it reports.
-        mcp_client_names: &["qwen-code", "qwen-code-mcp-client"],
+        // Live verified (2026-07-16): Qwen Code sends
+        // clientInfo.name="qwen-cli-mcp-client-DontSpeak", normalized to
+        // "qwen-cli-mcp-client-dontspeak". Keep the shorter aliases for version skew /
+        // forks that still use a gemini-cli-derived name.
+        mcp_client_names: &[
+            "qwen-code",
+            "qwen-code-mcp-client",
+            "qwen-cli-mcp-client-dontspeak",
+        ],
         present: |p| p.qwen_dir.exists(),
         detect_dir: |p| &p.qwen_dir,
         gate_on_presence: true,
@@ -621,6 +625,10 @@ mod tests {
         assert_eq!(
             client_from_mcp_name("grok-shell-DontSpeak"),
             ClientSource::Grok
+        );
+        assert_eq!(
+            client_from_mcp_name("qwen-cli-mcp-client-DontSpeak"),
+            ClientSource::QwenCode
         );
     }
 
