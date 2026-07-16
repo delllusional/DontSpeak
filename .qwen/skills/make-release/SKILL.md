@@ -1,6 +1,6 @@
 ---
 name: make-release
-description: Cut a DontSpeak release — tag the single-source version, push the tag to trigger release.yml on GitHub, MONITOR the ~25-30-min run (it can and does fail), verify the published assets, then deploy the site. Also covers re-cutting a failed release, and cutting/replacing an on-demand DRAFT release of the current `-dev` version for real installable dev binaries without officially shipping. Use when asked to release, cut/publish a version, re-release, cut a dev/preview/draft build, or when a release build failed.
+description: Cut a DontSpeak release — tag the single-source version, push the tag to trigger release.yml on GitHub, MONITOR the ~25-30-min run (it can and does fail), verify the published assets, then bump the next `-dev` version. Also covers re-cutting a failed release, and cutting/replacing an on-demand DRAFT release of the current `-dev` version for real installable dev binaries without officially shipping. Site deploy is independent (dontspeak.org). Use when asked to release, cut/publish a version, re-release, cut a dev/preview/draft build, or when a release build failed.
 ---
 
 # DontSpeak — make a release
@@ -138,12 +138,7 @@ git tag "v$ver" && git push origin main "v$ver"
 Monitor again. Move tag only to the **release** commit — not later main work still on
 the same version string.
 
-## 8 — Deploy site
-
-Mandatory: `deploy-site` skill in **dontspeak.org** checkout. Installers resolve latest
-via API, so brief lag is OK — still don't skip.
-
-## 9 — Bump next `-dev`
+## 8 — Bump next `-dev`
 
 After publish, one command updates Cargo.toml + both locks (no full re-resolve):
 
@@ -157,7 +152,7 @@ python3 scripts/release/sync-workspace-version.py --bump-dev
 Commit all four files. Next real release: `--strip-dev` (or `--set` higher non-dev),
 commit, tag. Missed sync fails only at **next** tag.
 
-## 10 — On-demand `-dev` draft
+## 9 — On-demand `-dev` draft
 
 Same full matrix, `--draft` so `releases/latest` ignores it. Replace prior draft tag
 in place:
@@ -174,7 +169,7 @@ git tag "v$ver"
 git push origin main "v$ver"
 ```
 
-Monitor + verify; confirm `isDraft == true`. Skip notes, site deploy, version bump.
+Monitor + verify; confirm `isDraft == true`. Skip notes and version bump.
 Web UI may show `untagged-<hash>` briefly — display-only; `tag_name` is correct.
 
 ## Caveats
@@ -182,4 +177,5 @@ Web UI may show `untagged-<hash>` briefly — display-only; `tag_name` is correc
 - Failed tests after tag → tag without release; clean with step 7 or next push rejects.
 - `workflow_dispatch` builds without publish.
 - Don't `git tag -f` without deleting remote first.
-- Don't skip step 9.
+- Don't skip step 8.
+- Site deploy is independent of this skill (dontspeak.org).
