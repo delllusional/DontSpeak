@@ -422,7 +422,6 @@ mod windows_tests {
         assert!(!fast[3].contains("SelectVoice"));
         assert!(fast[3].contains("$s.Rate = 10"));
     }
-
 }
 
 // Fallback Tts impl for any other target (keeps the type usable; never built in

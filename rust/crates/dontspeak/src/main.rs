@@ -28,7 +28,7 @@
 //!
 //! ## Module layout
 //! `main.rs` is just the front door (subcommand dispatch). The MCP server core lives in
-//! [`mcp`] (envelope helpers + [`mcp::dispatch`] + the `initialize`/`tools` methods),
+//! [`mcp`] (envelope helpers + `route` + the `initialize`/`tools` methods),
 //! the tool handlers in [`tools`], voice/language enumeration in [`voices`], the engine
 //! spawn lifecycle in [`engine_launch`], and the `prompt-context` hook in [`hook_prompt`].
 // This must remain a console-subsystem binary on Windows. Hook/MCP processes inherit their

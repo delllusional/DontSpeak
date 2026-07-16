@@ -295,10 +295,7 @@ fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::p
             .metadata()
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        let take = best
-            .as_ref()
-            .map(|(_, t)| modified > *t)
-            .unwrap_or(true);
+        let take = best.as_ref().map(|(_, t)| modified > *t).unwrap_or(true);
         if take {
             best = Some((candidate, modified));
         }
@@ -363,9 +360,7 @@ fn store_last_spoken_fingerprint(paths: &Paths, session: &str, fp: u64) {
     }
     // Atomic replace: concurrent Stop hooks may race; temp+rename is best-effort on Windows.
     let tmp = path.with_extension("fp.tmp");
-    if std::fs::write(&tmp, fp.to_string()).is_ok()
-        && std::fs::rename(&tmp, &path).is_err()
-    {
+    if std::fs::write(&tmp, fp.to_string()).is_ok() && std::fs::rename(&tmp, &path).is_err() {
         // Windows: rename over existing may fail; fall back to write-in-place.
         let _ = std::fs::write(&path, fp.to_string());
         let _ = std::fs::remove_file(&tmp);
@@ -481,10 +476,7 @@ fn current_turn_from_path(path: &std::path::Path) -> CurrentTurn {
     let after = last_user_idx.map(|i| i + 1).unwrap_or(0);
     let (last_user_text, last_user_byte_offset) = last_user_idx
         .and_then(|i| match &roles[i] {
-            ChatRole::User {
-                text,
-                byte_offset,
-            } => Some((text.clone(), Some(*byte_offset))),
+            ChatRole::User { text, byte_offset } => Some((text.clone(), Some(*byte_offset))),
             _ => None,
         })
         .unwrap_or_default();
@@ -562,8 +554,7 @@ fn select_grok_stop_text(
     session: &str,
     messages_on: bool,
 ) -> Option<(String, Option<u64>)> {
-    select_grok_stop_text_detailed(hook, paths, session, messages_on)
-        .map(|s| (s.text, s.digest_fp))
+    select_grok_stop_text_detailed(hook, paths, session, messages_on).map(|s| (s.text, s.digest_fp))
 }
 
 /// Pick the best shorts-fallback assistant body for the current turn.
@@ -1548,9 +1539,10 @@ mod tests {
             "Grok Stop carries no last* text"
         );
         // transcriptPath "..." does not exist → no text extracted
-        assert!(hook
-            .last_assistant_text(ClientSource::Grok, &paths)
-            .is_none());
+        assert!(
+            hook.last_assistant_text(ClientSource::Grok, &paths)
+                .is_none()
+        );
         // Consequently Stop contributes no narration text (earcon may still ring via the arm).
         assert!(
             stop_utterances(
@@ -1654,7 +1646,11 @@ mod tests {
             "must skip the newer status line, got: {text}"
         );
         let spoken = stop_utterances(Some(&text), true, true, false, false);
-        assert_eq!(spoken.len(), 1, "adjacent > lines form one digest run: {spoken:?}");
+        assert_eq!(
+            spoken.len(),
+            1,
+            "adjacent > lines form one digest run: {spoken:?}"
+        );
         assert!(
             spoken[0].contains("This is a DontSpeak digest check.")
                 && spoken[0].contains("If Stop narration works"),
@@ -1718,8 +1714,8 @@ mod tests {
             transcript_path: Some(tx_path.to_string_lossy().into_owned()),
             ..StopHook::default()
         };
-        let (_, first_fp) = select_grok_stop_text(&hook, &paths, "late-replacement", true)
-            .expect("initial digest");
+        let (_, first_fp) =
+            select_grok_stop_text(&hook, &paths, "late-replacement", true).expect("initial digest");
         store_last_spoken_fingerprint(&paths, "late-replacement", first_fp.unwrap());
 
         let selected = select_grok_stop_text_detailed_with_retry(
@@ -1924,8 +1920,8 @@ mod tests {
             transcript_path: Some(tx_path.to_string_lossy().into_owned()),
             ..StopHook::default()
         };
-        let (_, first_fp) = select_grok_stop_text(&hook, &paths, "tail-stability", true)
-            .expect("initial digest");
+        let (_, first_fp) =
+            select_grok_stop_text(&hook, &paths, "tail-stability", true).expect("initial digest");
         store_last_spoken_fingerprint(&paths, "tail-stability", first_fp.unwrap());
 
         // Grow the file until the tail begins inside the user line while the already-spoken
@@ -2009,8 +2005,7 @@ mod tests {
             transcript_path: Some(tx_path.to_string_lossy().into_owned()),
             ..StopHook::default()
         };
-        let (text, _) =
-            select_grok_stop_text(&hook, &paths, "shorts-pref", false).expect("status");
+        let (text, _) = select_grok_stop_text(&hook, &paths, "shorts-pref", false).expect("status");
         assert_eq!(
             text, "status without digests",
             "digests-off must prefer non-digest body over a digest-bearing final"
@@ -2144,10 +2139,7 @@ mod tests {
 
     #[test]
     fn grok_stop_session_tag_is_distinct_from_real_session() {
-        assert_eq!(
-            grok_stop_session_tag("abc-123"),
-            "grok-stop:abc-123"
-        );
+        assert_eq!(grok_stop_session_tag("abc-123"), "grok-stop:abc-123");
         assert_ne!(grok_stop_session_tag("abc-123"), "abc-123");
     }
 }

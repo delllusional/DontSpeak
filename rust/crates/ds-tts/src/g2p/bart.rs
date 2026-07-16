@@ -286,5 +286,4 @@ mod tests {
         assert!(decode_phonemes(&[BOS, EOS]).is_err());
         assert!(decode_phonemes(&[BOS, 50, EOS]).is_err());
     }
-
 }

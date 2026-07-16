@@ -2989,10 +2989,11 @@ mod tests {
 
         // Playing sticky digests for the target → also not "other".
         let q3 = mk_queue();
-        q3.items
-            .lock()
-            .unwrap()
-            .extend([narr(Some("a")), narr(Some("grok-stop:a")), narr(Some("b"))]);
+        q3.items.lock().unwrap().extend([
+            narr(Some("a")),
+            narr(Some("grok-stop:a")),
+            narr(Some("b")),
+        ]);
         q3.tts_active.store(true, Ordering::SeqCst);
         *q3.playing_session.lock().unwrap() = Some(Some("grok-stop:a".into()));
         let gen_before3 = q3.generation.load(Ordering::SeqCst);
@@ -3004,10 +3005,7 @@ mod tests {
             .iter()
             .map(|it| it.session.clone())
             .collect();
-        assert_eq!(
-            kept3,
-            vec![Some("a".into()), Some("grok-stop:a".into())]
-        );
+        assert_eq!(kept3, vec![Some("a".into()), Some("grok-stop:a".into())]);
         assert_eq!(
             q3.generation.load(Ordering::SeqCst),
             gen_before3,
@@ -3835,17 +3833,21 @@ mod tests {
             .resolve_engine_voice(&cfg, &Some("grok-stop:sess-1".to_string()))
             .expect("Kokoro sticky");
         assert_eq!(engine2, ds_config::TtsEngine::Kokoro);
-        assert_eq!(voice2, voice, "sticky must share the real session pool voice");
+        assert_eq!(
+            voice2, voice,
+            "sticky must share the real session pool voice"
+        );
         assert_eq!(
             q.pool_assignments.lock().unwrap().len(),
             1,
             "sticky must not create a second pool map key"
         );
-        assert!(!q
-            .pool_assignments
-            .lock()
-            .unwrap()
-            .contains_key("grok-stop:sess-1"));
+        assert!(
+            !q.pool_assignments
+                .lock()
+                .unwrap()
+                .contains_key("grok-stop:sess-1")
+        );
     }
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
