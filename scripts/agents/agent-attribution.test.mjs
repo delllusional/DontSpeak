@@ -212,6 +212,45 @@ test("hook installation is isolated to the current worktree config", (t) => {
   assert.match(readFileSync(join(hooks, "commit-msg"), "utf8"), /original-hooks/);
 });
 
+test("a linked worktree does not chain to the main worktree's managed hook", (t) => {
+  const base = temporaryDirectory(t);
+  const root = join(base, "main");
+  const linked = join(base, "linked");
+  const initialized = spawnSync("git", ["init", "-q", root], { encoding: "utf8" });
+  assert.equal(initialized.status, 0, initialized.stderr);
+  const committed = spawnSync("git", [
+    "-c", "user.name=Attribution Test",
+    "-c", "user.email=test@example.com",
+    "commit", "--allow-empty", "-qm", "Initial commit",
+  ], { cwd: root, encoding: "utf8" });
+  assert.equal(committed.status, 0, committed.stderr);
+
+  const mainHooks = ensureCommitMessageHook(root);
+  const added = spawnSync("git", ["worktree", "add", "-q", "--detach", linked], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  assert.equal(added.status, 0, added.stderr);
+  // New linked worktrees copy the main worktree's config, including its private hook path.
+  const inherited = spawnSync("git", ["config", "--path", "--get", "core.hooksPath"], {
+    cwd: linked,
+    encoding: "utf8",
+  });
+  assert.equal(inherited.stdout.trim(), mainHooks);
+
+  const linkedHooks = ensureCommitMessageHook(linked);
+  const hook = readFileSync(join(linkedHooks, "commit-msg"), "utf8");
+  assert.equal(hook.includes(mainHooks.replaceAll("\\", "/")), false);
+  const resolvedCommon = spawnSync(
+    "git",
+    ["rev-parse", "--git-common-dir"],
+    { cwd: linked, encoding: "utf8" },
+  );
+  assert.equal(resolvedCommon.status, 0, resolvedCommon.stderr);
+  const neutralHooks = resolve(linked, resolvedCommon.stdout.trim(), "hooks");
+  assert.equal(readFileSync(join(linkedHooks, "upstream-hooks-path"), "utf8").trim(), neutralHooks);
+});
+
 test("a captured Codex commit is rewritten end to end", (t) => {
   const root = temporaryDirectory(t);
   const scripts = join(root, "scripts", "agents");

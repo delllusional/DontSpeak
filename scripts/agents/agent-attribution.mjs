@@ -387,18 +387,28 @@ export function attributionCachePath(root) {
   return join(privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE);
 }
 
+function unwrapManagedHooksDirectory(root, directory, fallback) {
+  const seen = new Set();
+  let candidate = resolve(root, directory);
+  while (!seen.has(candidate)) {
+    seen.add(candidate);
+    const upstreamFile = join(candidate, UPSTREAM_HOOKS_FILE);
+    if (!existsSync(upstreamFile)) return candidate;
+    const recorded = cleanString(readFileSync(upstreamFile, "utf8"));
+    if (!recorded) return fallback;
+    candidate = resolve(root, recorded);
+  }
+  return fallback;
+}
+
 export function ensureCommitMessageHook(root) {
   const hooksDirectory = privateHooksDirectory(root);
   mkdirSync(hooksDirectory, { recursive: true });
   const upstreamFile = join(hooksDirectory, UPSTREAM_HOOKS_FILE);
   const configured = optionalGit(root, "config", "--path", "--get", "core.hooksPath");
-  let upstream;
-  if (configured && resolve(root, configured) === hooksDirectory && existsSync(upstreamFile)) {
-    upstream = cleanString(readFileSync(upstreamFile, "utf8"));
-  } else {
-    upstream = resolve(root, configured ?? git(root, "rev-parse", "--git-path", "hooks"));
-    writeFileSync(upstreamFile, `${upstream}\n`, "utf8");
-  }
+  const fallback = resolve(root, git(root, "rev-parse", "--git-common-dir"), "hooks");
+  const upstream = unwrapManagedHooksDirectory(root, configured ?? fallback, fallback);
+  writeFileSync(upstreamFile, `${upstream}\n`, "utf8");
   const hook = join(hooksDirectory, "commit-msg");
   const upstreamHook = upstream
     ? join(upstream, "commit-msg").replaceAll("\\", "/").replaceAll("'", "'\\''")
