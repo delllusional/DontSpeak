@@ -3,8 +3,8 @@
 //! implicitly, per client, in scattered `match` arms:
 //!
 //!   * WHO — the client ([`ClientSource`] token, display name, [`ClientKind`]: terminal CLI
-//!     vs desktop app, plus the `clientInfo.name` aliases it announces itself with over MCP —
-//!     [`ClientSpec::mcp_client_names`], the other half of the client-identity story the
+//!     vs desktop app, plus the `clientInfo.name` prefix it announces itself with over MCP —
+//!     [`ClientSpec::mcp_client_prefix`], the other half of the client-identity story the
 //!     hooks' `--client` token covers);
 //!   * WHERE — the platform surface it's installed on: the presence probe
 //!     ([`ClientSpec::present`]/[`ClientSpec::detect_dir`]) and each config file the wire
@@ -143,17 +143,23 @@ pub struct ClientSpec {
     pub kind: ClientKind,
     /// How the installed client is started through `dontspeak <client>`.
     pub launch: LaunchSpec,
-    /// The `clientInfo.name` values this client announces itself with in the MCP `initialize`
-    /// handshake — the MCP half of the client-identity story (the hooks' half is the
-    /// `--client <token>` verb the wiring stamps). Matched EXACTLY (after normalizing case /
-    /// `_`→`-`) by [`client_from_mcp_name`]; a prefix rule would mis-attribute a foreign
-    /// client, so there isn't one. Anything unmatched is [`ClientSource::Unknown`] — the
-    /// honest answer, not a fallback to a guess.
+    /// The prefix of the `clientInfo.name` this client announces itself with in the MCP
+    /// `initialize` handshake — the MCP half of the client-identity story (the hooks' half is
+    /// the `--client <token>` verb the wiring stamps). Matched by [`client_from_mcp_name`] as
+    /// `normalized_name.starts_with(mcp_client_prefix)` (after normalizing case / `_`→`-`), so
+    /// every observed variant (`qwen-code`, `qwen-code-mcp-client`,
+    /// `qwen-cli-mcp-client-DontSpeak`, …) is covered by one short token instead of a
+    /// hand-maintained exact-alias list. DELIBERATE TRADE-OFF: an unrelated client whose own
+    /// name happens to start with the same token (e.g. a `codex-community-fork`) is
+    /// misattributed to this client rather than landing on [`ClientSource::Unknown`] — accepted
+    /// because it eliminates the per-client-version alias-list upkeep (see git history prior to
+    /// this field for what that upkeep looked like). Anything not starting with any registered
+    /// prefix is [`ClientSource::Unknown`] — the honest answer, not a fallback to a guess.
     ///
-    /// Every `initialize` logs the RAW `clientInfo.name` it saw (see `dontspeak::mcp`), which
-    /// is how an UNVERIFIED alias below gets confirmed or corrected from the field — a
-    /// one-line edit here, then a `verified_on` bump via the `verify-wiring` skill.
-    pub mcp_client_names: &'static [&'static str],
+    /// Every `initialize` logs the RAW `clientInfo.name` it saw (see `dontspeak::mcp`), which is
+    /// how the `verify-wiring` skill confirms a client still sends a name starting with this
+    /// prefix (or corrects the prefix if it doesn't).
+    pub mcp_client_prefix: &'static str,
     /// Is the client installed? A REAL wire (not `--remove`, not `--print-only`) of a
     /// [`gate_on_presence`](Self::gate_on_presence) client is skipped when this is false,
     /// so we never scatter a stray config on a machine without the client.
@@ -192,7 +198,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         },
         // VERIFIED: Claude Code announces itself as `claude-code` in `initialize`'s
         // `clientInfo.name`.
-        mcp_client_names: &["claude-code"],
+        mcp_client_prefix: "claude",
         present: |p| p.claude_dir.exists(),
         detect_dir: |p| &p.claude_dir,
         gate_on_presence: false,
@@ -234,9 +240,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             aliases: &[],
             mode: LaunchMode::CodexRemote,
         },
-        // `codex-mcp-client` is the constant codex-rs sets in its MCP connection manager;
-        // the other two cover the plain CLI and the VS Code surface.
-        mcp_client_names: &["codex-mcp-client", "codex", "codex-vscode"],
+        // `codex-mcp-client` is the constant codex-rs sets in its MCP connection manager; the
+        // prefix also covers the plain CLI (`codex`) and the VS Code surface (`codex-vscode`).
+        mcp_client_prefix: "codex",
         present: |p| p.codex_dir.exists(),
         detect_dir: |p| &p.codex_dir,
         gate_on_presence: true,
@@ -312,13 +318,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         },
         // Live verified (2026-07-16): Qwen Code sends
         // clientInfo.name="qwen-cli-mcp-client-DontSpeak", normalized to
-        // "qwen-cli-mcp-client-dontspeak". Keep the shorter aliases for version skew /
-        // forks that still use a gemini-cli-derived name.
-        mcp_client_names: &[
-            "qwen-code",
-            "qwen-code-mcp-client",
-            "qwen-cli-mcp-client-dontspeak",
-        ],
+        // "qwen-cli-mcp-client-dontspeak" — starts with "qwen", same as the older
+        // "qwen-code"/"qwen-code-mcp-client" names it used previously.
+        mcp_client_prefix: "qwen",
         present: |p| p.qwen_dir.exists(),
         detect_dir: |p| &p.qwen_dir,
         gate_on_presence: true,
@@ -374,8 +376,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             mode: LaunchMode::Direct,
         },
         // Live verified (2026-07-13): Grok sends clientInfo.name="grok-shell-DontSpeak",
-        // normalized to "grok-shell-dontspeak". Keep the older aliases for version skew.
-        mcp_client_names: &["grok", "grok-cli", "grok-shell-dontspeak"],
+        // normalized to "grok-shell-dontspeak" — starts with "grok", same as the older
+        // "grok"/"grok-cli" names.
+        mcp_client_prefix: "grok",
         present: |p| p.grok_dir.exists(),
         detect_dir: |p| &p.grok_dir,
         gate_on_presence: true,
@@ -452,12 +455,13 @@ fn normalize_mcp_name(name: &str) -> String {
 
 /// Which client is this MCP caller? Maps the `initialize` handshake's `clientInfo.name`
 /// (free-form, per the MCP lifecycle spec) onto a [`ClientSource`] via the registry's
-/// [`ClientSpec::mcp_client_names`] alias lists.
+/// [`ClientSpec::mcp_client_prefix`].
 ///
-/// EXACT match after normalization — deliberately NOT a prefix/substring rule, which would
-/// happily attribute `codex-community-fork` (or any foreign client with a colliding prefix)
-/// to a client we wire. An unrecognised name is [`ClientSource::Unknown`]: the honest answer,
-/// and the thing the MCP server's raw-name capture line exists to turn into a new alias.
+/// PREFIX match after normalization: `starts_with`, not exact-equal. See
+/// [`ClientSpec::mcp_client_prefix`] for the accepted trade-off (a foreign client whose name
+/// happens to share the prefix, e.g. `codex-community-fork`, is misattributed rather than
+/// falling to `Unknown`). A name that matches no registered prefix is [`ClientSource::Unknown`]:
+/// the honest answer, and the thing the MCP server's raw-name capture line exists to catch.
 pub fn client_from_mcp_name(name: &str) -> ClientSource {
     let n = normalize_mcp_name(name);
     if n.is_empty() {
@@ -465,7 +469,7 @@ pub fn client_from_mcp_name(name: &str) -> ClientSource {
     }
     CLIENT_REGISTRY
         .iter()
-        .find(|s| s.mcp_client_names.contains(&n.as_str()))
+        .find(|s| n.starts_with(s.mcp_client_prefix))
         .map_or(ClientSource::Unknown, |s| s.target)
 }
 
@@ -572,80 +576,76 @@ mod tests {
         }
     }
 
-    /// The alias table's own hygiene: every entry declares at least one `clientInfo.name`,
-    /// and each is already in the NORMALIZED form `client_from_mcp_name` compares against
-    /// (lowercase, `-` not `_`, trimmed) — an alias written `Qwen_Code` would silently never
-    /// match, since only the incoming name is normalized.
+    /// The prefix table's own hygiene: every entry declares a nonempty prefix, already in the
+    /// NORMALIZED form `client_from_mcp_name` compares against (lowercase, `-` not `_`,
+    /// trimmed) — a prefix written `Qwen_Code` would silently never match, since only the
+    /// incoming name is normalized.
     #[test]
-    fn mcp_client_names_are_present_and_already_normalized() {
+    fn mcp_client_prefix_is_present_and_already_normalized() {
         for spec in CLIENT_REGISTRY {
             assert!(
-                !spec.mcp_client_names.is_empty(),
-                "{}: a client with no clientInfo.name alias can never be identified over MCP",
+                !spec.mcp_client_prefix.is_empty(),
+                "{}: a client with no clientInfo.name prefix can never be identified over MCP",
                 spec.display_name
             );
-            for alias in spec.mcp_client_names {
-                assert!(!alias.is_empty(), "{}: empty alias", spec.display_name);
-                assert_eq!(
-                    &normalize_mcp_name(alias),
-                    alias,
-                    "{}: alias {alias:?} must be written in normalized form",
-                    spec.display_name
-                );
-            }
+            assert_eq!(
+                normalize_mcp_name(spec.mcp_client_prefix),
+                spec.mcp_client_prefix,
+                "{}: prefix {:?} must be written in normalized form",
+                spec.display_name,
+                spec.mcp_client_prefix
+            );
         }
     }
 
-    /// Every declared alias maps back to its own client, case/underscore-tolerantly.
+    /// Every client's own `clientInfo.name` (as actually observed live) maps back to itself,
+    /// case/underscore-tolerantly.
     #[test]
-    fn every_declared_alias_maps_to_its_client() {
-        for spec in CLIENT_REGISTRY {
-            for alias in spec.mcp_client_names {
-                assert_eq!(client_from_mcp_name(alias), spec.target, "{alias}");
-                assert_eq!(
-                    client_from_mcp_name(&alias.to_ascii_uppercase().replace('-', "_")),
-                    spec.target,
-                    "{alias} (case + underscore variant)"
-                );
-                assert_eq!(
-                    client_from_mcp_name(&format!("  {alias}\n")),
-                    spec.target,
-                    "{alias} (padded)"
-                );
-            }
+    fn known_mcp_names_map_to_their_client() {
+        for (name, want) in [
+            ("claude-code", ClientSource::ClaudeCode),
+            ("codex-mcp-client", ClientSource::Codex),
+            ("codex", ClientSource::Codex),
+            ("codex-vscode", ClientSource::Codex),
+            ("qwen-code", ClientSource::QwenCode),
+            ("qwen-cli-mcp-client-DontSpeak", ClientSource::QwenCode),
+            ("grok-shell-DontSpeak", ClientSource::Grok),
+        ] {
+            assert_eq!(client_from_mcp_name(name), want, "{name}");
+            assert_eq!(
+                client_from_mcp_name(&name.to_ascii_uppercase().replace('-', "_")),
+                want,
+                "{name} (case + underscore variant)"
+            );
+            assert_eq!(
+                client_from_mcp_name(&format!("  {name}\n")),
+                want,
+                "{name} (padded)"
+            );
         }
+    }
+
+    /// A name that shares a REGISTERED prefix but is actually a foreign/forked client is
+    /// misattributed rather than falling to `Unknown` — the accepted trade-off documented on
+    /// [`ClientSpec::mcp_client_prefix`]. This test pins that this is intentional, not a
+    /// regression: if it starts failing because someone tightened the match back to exact, the
+    /// [`mcp_client_prefix`] docs need updating too, not just this test.
+    #[test]
+    fn prefix_match_accepts_the_foreign_client_collision_tradeoff() {
         assert_eq!(
-            client_from_mcp_name("claude-code"),
-            ClientSource::ClaudeCode
-        );
-        assert_eq!(
-            client_from_mcp_name("codex-mcp-client"),
+            client_from_mcp_name("codex-community-fork"),
             ClientSource::Codex
         );
         assert_eq!(
-            client_from_mcp_name("grok-shell-DontSpeak"),
-            ClientSource::Grok
-        );
-        assert_eq!(
-            client_from_mcp_name("qwen-cli-mcp-client-DontSpeak"),
-            ClientSource::QwenCode
+            client_from_mcp_name("claude-code-fork"),
+            ClientSource::ClaudeCode
         );
     }
 
-    /// An unrecognised / absent / near-miss name is `Unknown` — never guessed onto a client.
-    /// The near-miss cases are the reason matching is EXACT: a prefix rule would attribute
-    /// `codex-community-fork` (and `gemini-cli-mcp-client`, which shares nothing but shape)
-    /// to a client we wire, and every one of that client's tool calls would be mis-logged.
+    /// A name sharing NO registered prefix is `Unknown` — never guessed onto a client.
     #[test]
     fn unrecognised_mcp_names_are_unknown_not_guessed() {
-        for name in [
-            "gemini-cli-mcp-client",
-            "codex-community-fork",
-            "claude-code-fork",
-            "",
-            "   ",
-            "🙂",
-        ] {
+        for name in ["gemini-cli-mcp-client", "", "   ", "🙂"] {
             assert_eq!(
                 client_from_mcp_name(name),
                 ClientSource::Unknown,
