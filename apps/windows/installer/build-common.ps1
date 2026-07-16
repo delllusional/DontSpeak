@@ -9,7 +9,7 @@ ONE place (mirrors apps/macos/bundle-lib.sh + scripts/install/lib/common.sh).
 #>
 
 # The single-source workspace version (rust/Cargo.toml [workspace.package]) — the same
-# value scripts/release/version.sh reads; release asset names embed it.
+# value scripts/release/sync-workspace-version.py --print reports; release asset names embed it.
 function Get-DsVersion {
     param([Parameter(Mandatory)][string]$Repo)
     $inBlock = $false

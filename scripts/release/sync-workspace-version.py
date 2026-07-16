@@ -17,10 +17,13 @@ After running, verify with:
   (cd apps/linux/gtk && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
 
 Usage (from repo root):
+  scripts/release/sync-workspace-version.py --print      # bare marketing version on stdout
   scripts/release/sync-workspace-version.py              # sync gtk + locks to rust version
   scripts/release/sync-workspace-version.py --strip-dev  # 0.3.1-dev → 0.3.1 then sync
   scripts/release/sync-workspace-version.py --bump-dev   # 0.3.1 → 0.3.2-dev then sync
   scripts/release/sync-workspace-version.py --set 0.4.0  # set exact version then sync
+
+This is the only release version tool. There is no companion version.sh / sync-gtk-version.sh.
 """
 from __future__ import annotations
 
@@ -264,12 +267,21 @@ def apply_version(version: str) -> None:
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = p.add_mutually_exclusive_group()
+    g.add_argument(
+        "--print",
+        action="store_true",
+        help="print the current marketing version to stdout (no file writes)",
+    )
     g.add_argument("--set", metavar="VERSION", help="set this exact version, then sync")
     g.add_argument("--strip-dev", action="store_true", help="strip -dev suffix, then sync")
     g.add_argument("--bump-dev", action="store_true", help="patch+1 and append -dev, then sync")
     args = p.parse_args(argv)
 
     current = workspace_package_version(read_text(RUST_CARGO))
+    if args.print:
+        # Bare version only — packaging scripts capture stdout (macOS/Linux).
+        sys.stdout.write(current)
+        return 0
     if args.set is not None:
         target = args.set
     elif args.strip_dev:

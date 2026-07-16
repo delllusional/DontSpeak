@@ -43,8 +43,9 @@ concurrency:
 jobs:
   # ── Guard: the pushed tag must equal the single-source version ───────────────
   # The one place of truth is rust/Cargo.toml ([workspace.package] version), read via
-  # scripts/release/version.sh. Fail fast (before the long platform builds) if a tag like
-  # v0.1.0 doesn't match it, so the app zip / portable zip / About string / tag never drift.
+  # scripts/release/sync-workspace-version.py --print. Fail fast (before the long platform
+  # builds) if a tag like v0.1.0 doesn't match it, so the app zip / portable zip / About
+  # string / tag never drift.
   check:
     name: tag = version guard
     runs-on: ubuntu-latest
@@ -54,17 +55,18 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
-          ver="$(bash scripts/release/version.sh)"
+          ver="$(python3 scripts/release/sync-workspace-version.py --print)"
           tag="${GITHUB_REF_NAME#v}"
           echo "single-source version=$ver  tag=$tag"
           [ "$ver" = "$tag" ] || { echo "::error::tag v$tag != rust/Cargo.toml version $ver — bump the workspace version or fix the tag"; exit 1; }
       - name: apps/linux/gtk/Cargo.toml agrees with rust/Cargo.toml
         # A STANDALONE workspace (see its Cargo.toml header) can't use `version.workspace =
         # true` to inherit from rust/'s [workspace.package] — its own version literal is
-        # kept in lockstep by hand, so catch drift here rather than shipping it silently.
+        # kept in lockstep by sync-workspace-version.py, so catch drift here rather than
+        # shipping it silently.
         run: |
           set -euo pipefail
-          ver="$(bash scripts/release/version.sh)"
+          ver="$(python3 scripts/release/sync-workspace-version.py --print)"
           gtk_ver="$(grep -m1 '^version = "' apps/linux/gtk/Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
           echo "rust/Cargo.toml version=$ver  apps/linux/gtk/Cargo.toml version=$gtk_ver"
           [ "$ver" = "$gtk_ver" ] || { echo "::error::apps/linux/gtk/Cargo.toml version ($gtk_ver) != rust/Cargo.toml version ($ver) — bump it to match"; exit 1; }

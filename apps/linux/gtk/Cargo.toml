@@ -9,7 +9,7 @@
 # why apps/macos and apps/windows are separate builds too.
 [package]
 name = "ds-linux-gtk"
-# Kept in lockstep by running `scripts/release/sync-gtk-version.sh` after bumping rust/Cargo.toml's
+# Kept in lockstep by `scripts/release/sync-workspace-version.py` after bumping rust/Cargo.toml's
 # version — this is a STANDALONE workspace (see the note above), so Cargo's
 # `version.workspace = true` inheritance can't reach across to the other workspace.
 # release.yml's `check` job asserts the two agree so drift here fails fast instead of

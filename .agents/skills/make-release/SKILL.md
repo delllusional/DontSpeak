@@ -15,15 +15,15 @@ description: Cut a DontSpeak release — tag the single-source version, push the
 
 ## 1 — Preconditions
 
-- **Version**: the single source is `rust/Cargo.toml` → `[workspace.package] version` (read by
-  `scripts/release/version.sh` / `scripts/release/sync-workspace-version.py`). The tag must be
-  `v` + exactly that version — the `check` job fails the run fast otherwise. Bump it (+ commit)
-  for a new release. Going from a `-dev` suffix to a real release version needs no judgment
-  call — the version number was already decided whenever `main` was last bumped (step 9) — it's
-  a mechanical strip of the suffix, not a version choice, unless you're deliberately overriding
-  the preset bump size (e.g. escalating a preset patch to a minor/major release because more
-  accumulated on `main` than expected). **Do the strip + lock sync with the portable script**
-  (not a hand edit of four files, and not `cargo generate-lockfile` — see lockfile note below):
+- **Version**: the single source is `rust/Cargo.toml` → `[workspace.package] version` (read/written
+  by `scripts/release/sync-workspace-version.py`). The tag must be `v` + exactly that version —
+  the `check` job fails the run fast otherwise. Bump it (+ commit) for a new release. Going from
+  a `-dev` suffix to a real release version needs no judgment call — the version number was
+  already decided whenever `main` was last bumped (step 9) — it's a mechanical strip of the
+  suffix, not a version choice, unless you're deliberately overriding the preset bump size
+  (e.g. escalating a preset patch to a minor/major release because more accumulated on `main`
+  than expected). **Do the strip + lock sync with that script** (not a hand edit of four files,
+  and not `cargo generate-lockfile` — see lockfile note below):
   ```bash
   python3 scripts/release/sync-workspace-version.py --strip-dev
   # verify locks still resolve without rewriting registry pins:
@@ -75,16 +75,12 @@ description: Cut a DontSpeak release — tag the single-source version, push the
   `grep -R -- '-dev"' rust/Cargo.lock apps/linux/gtk/Cargo.lock` must return nothing for a
   non-dev release. Diff the locks: expect only workspace package `version =` lines to change
   (~one line per crate), matching prior release commits — not a full re-resolve.
-- **Shell scripts on Windows:** `scripts/release/*.sh` need a real Bash. Prefer Git for Windows
-  (`"C:/Program Files/Git/bin/bash.exe"`) over the Windows Store/WSL `bash` shim when WSL is
-  not installed — the shim fails with `HCS_E_HYPERV_NOT_INSTALLED` and looks like a broken
-  script. The Python sync script needs no Bash.
 - Push with a GitHub account that has write access to `delllusional/DontSpeak`.
 
 ## 2 — Tag and trigger
 
 ```bash
-ver="$(bash scripts/release/version.sh)"
+ver="$(python3 scripts/release/sync-workspace-version.py --print)"
 git tag "v$ver"
 git push origin main "v$ver"
 ```
@@ -243,9 +239,6 @@ release, run `python3 scripts/release/sync-workspace-version.py --strip-dev` (or
 with a higher non-dev version if what accumulated warrants minor/major), commit, then tag
 as usual (step 2).
 
-The older `bash scripts/release/sync-gtk-version.sh` only rewrites the GTK `Cargo.toml` and
-is kept for callers that already use it; prefer the Python script for full four-file sync.
-
 ## 10 — Cut (or replace) an on-demand `-dev` draft release
 
 For real installable dev binaries without officially shipping — e.g. someone needs to test a
@@ -259,7 +252,7 @@ Safe to run repeatedly as `main` moves, on the same `-dev` string: **replaces th
 draft's tag and release object in place**, mirroring step 7's re-cut recipe — delete the remote
 tag first, or GitHub keeps the old tag object and Actions may not re-trigger:
 ```bash
-ver="$(bash scripts/release/version.sh)"
+ver="$(python3 scripts/release/sync-workspace-version.py --print)"
 case "$ver" in
   *-dev*) ;;
   *) echo "current version '$ver' has no -dev suffix — this is for on-demand DEV drafts only; use step 2 for a real release" >&2; exit 1 ;;

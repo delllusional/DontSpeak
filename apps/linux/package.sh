@@ -27,7 +27,7 @@ esac; done
 
 # Strip any stray CR (a CRLF Cargo.toml — e.g. a Windows-checkout working tree — would
 # otherwise put a carriage return into every artifact filename).
-VERSION="$(bash "$REPO/scripts/release/version.sh" 2>/dev/null | tr -d '\r\n')"
+VERSION="$(python3 "$REPO/scripts/release/sync-workspace-version.py" --print 2>/dev/null | tr -d '\r\n')"
 [ -n "$VERSION" ] || VERSION=0.0.0
 ARCH="$(uname -m)"
 mkdir -p "$OUTDIR"

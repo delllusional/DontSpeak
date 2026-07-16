@@ -15,14 +15,14 @@ BUNDLE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$BUNDLE_LIB_DIR/../../scripts/install/lib/common.sh"
 
 # product_version — the marketing version, from the SINGLE source of truth
-# (rust/Cargo.toml [workspace.package] version) via the shared scripts/release/version.sh, so
+# (rust/Cargo.toml [workspace.package] version) via scripts/release/sync-workspace-version.py, so
 # the bundle's CFBundleShortVersionString matches ds-core's `ds_version()`
 # (CARGO_PKG_VERSION), the Windows installer, and the release tag. Falls back to
 # "0.0.0" if it can't be read.
 product_version() {
   local v=""
   # tr strips a stray CR a CRLF working tree would otherwise put into the version.
-  v="$(bash "$BUNDLE_LIB_DIR/../../scripts/release/version.sh" 2>/dev/null | tr -d '\r\n')"
+  v="$(python3 "$BUNDLE_LIB_DIR/../../scripts/release/sync-workspace-version.py" --print 2>/dev/null | tr -d '\r\n')"
   printf '%s' "${v:-0.0.0}"
 }
 
