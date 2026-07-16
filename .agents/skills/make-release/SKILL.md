@@ -1,6 +1,6 @@
 ---
 name: make-release
-description: Cut a DontSpeak release — tag the single-source version, push the tag to trigger release.yml on GitHub, MONITOR the ~25-30-min run (it can and does fail), verify the published assets, then bump the next `-dev` version. Also covers re-cutting a failed release, and cutting/replacing an on-demand DRAFT release of the current `-dev` version for real installable dev binaries without officially shipping. Use when asked to release, cut/publish a version, re-release, cut a dev/preview/draft build, or when a release build failed.
+description: Cut a DontSpeak release — tag the single-source version with annotated release notes, push the tag to trigger release.yml on GitHub, MONITOR the ~25-30-min run (it can and does fail), verify the published assets, then bump the next `-dev` version. Also covers re-cutting a failed release, and cutting/replacing an on-demand DRAFT release of the current `-dev` version for real installable dev binaries without officially shipping. Use when asked to release, cut/publish a version, re-release, cut a dev/preview/draft build, or when a release build failed.
 ---
 
 # DontSpeak — make a release
@@ -8,8 +8,10 @@ description: Cut a DontSpeak release — tag the single-source version, push the
 > Apply [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
 > [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
 
-Tag-triggered CI: push `v<version>` → `release.yml` gates, builds, publishes. Monitor
-to completion and verify assets.
+Tag-triggered CI: push annotated `v<version>` → `release.yml` gates, builds, publishes
+with the **tag annotation as the release body** (`gh release create --notes-from-tag`).
+Monitor to completion and verify assets. Notes are **not** committed to the tree and
+**not** pasted after publish.
 
 ## 1 — Preconditions
 
@@ -41,15 +43,34 @@ to completion and verify assets.
   (cd apps/macos && MACOSX_DEPLOYMENT_TARGET=14.0 swift test)
   ```
   Release also runs WinUI xunit on Windows.
+- **Release notes ready** (real releases only — before tagging). Write the body that
+  will become the GitHub Release description into a **local temp file** (never commit
+  it). See step 2 for format.
 - Push account with write to `delllusional/DontSpeak`.
 
-## 2 — Tag and trigger
+## 2 — Notes, annotated tag, and trigger
+
+1. Find previous release: `gh release list --limit 2`. Changes:
+   `git log <prev>..HEAD --oneline` (after the version commit is on main).
+2. Write notes to a temp file (e.g. `/tmp/dontspeak-v$ver-notes.md` or
+   `$env:TEMP\dontspeak-notes.md` on Windows). Sections that actually apply
+   (Bug fixes / Features / Shared / per-OS). One plain line per change + commit link:
+   `- <desc>. [`<sha>`](https://github.com/delllusional/DontSpeak/commit/<sha>)`
+3. Append `## Lines`: bare compare URL then the table from
+   `scripts/release/release-stats.py <prev> v$ver` (use the version string that will be
+   tagged; after the version commit lands, `v$ver` matches HEAD for stats against prev).
+4. **Annotated tag** (required for real releases — body is the release notes; not a
+   tree file). Then push:
 
 ```bash
 ver="$(python3 scripts/release/sync-workspace-version.py --print)"
-git tag "v$ver"
+# notes_file = path written above (local only; not in git)
+git tag -a "v$ver" -F "$notes_file"
 git push origin main "v$ver"
 ```
+
+Lightweight `git tag "v$ver"` is wrong for a real release: CI would fall back to the
+version-bump commit message as the body.
 
 Drop superseding `-dev` drafts (query, don't guess tags):
 
@@ -69,8 +90,8 @@ done
 2. **tests** — full OS matrix + hygiene (fmt both + rustdoc)
 3. **builds** (parallel): Windows portable zips (unsigned); macOS signed/notarized if
    `APPLE_*` secrets else ad-hoc; Linux tarballs (upload best-effort)
-4. **publish** — assets + fixed-name installers + checksums. `--generate-notes` is empty
-   here (no PRs) — write notes yourself (step 6).
+4. **publish** — assets + fixed-name installers + checksums + body from
+   `--notes-from-tag` (the annotation written in step 2)
 
 ## 4 — Monitor (mandatory)
 
@@ -89,13 +110,14 @@ Watcher can drop mid-run (`wsarecv` / intermittent `HTTP 503`); restart watch or
 ## 5 — Verify
 
 ```bash
-gh release view "v$ver" --repo delllusional/DontSpeak --json assets --jq '[.assets[].name]'
+gh release view "v$ver" --repo delllusional/DontSpeak --json assets,body --jq '{assets:[.assets[].name], body_preview:(.body[:200])}'
 ```
 
 Expect **9 assets**: `checksums.txt`, `install.sh`, `install.ps1`, linux
 `{x86_64,aarch64}.tar.gz`, macos `{aarch64,x86_64}.app.zip`, windows
 `{x86_64,aarch64}.zip`. Missing Linux = best-effort job fail (re-cut or ship without).
-Missing installer = release failure.
+Missing installer = release failure. Body should match the annotation (not empty
+auto-notes).
 
 ```bash
 tmp="$(mktemp -d)"
@@ -115,30 +137,20 @@ curl -fsSLI https://github.com/delllusional/DontSpeak/releases/latest/download/i
 
 Skip latest check for drafts (they don't move `releases/latest`).
 
-## 6 — Release notes
-
-Write summary prose by hand. Stats are scripted:
-
-1. Prev tag: `gh release list --limit 2`. Changes: `git log <prev>..v$ver --oneline`.
-2. Sections that actually apply (Bug fixes / Features / Shared / per-OS). One plain line
-   per change + commit link:
-   `- <desc>. [`<sha>`](https://github.com/delllusional/DontSpeak/commit/<sha>)`
-3. `## Lines` section: bare compare URL then
-   `scripts/release/release-stats.py <prev> v$ver` table.
-4. `gh release edit "v$ver" --repo delllusional/DontSpeak --notes-file <file>`
-
-## 7 — Re-cut (pre-1.0 or explicit)
+## 6 — Re-cut (pre-1.0 or explicit)
 
 ```bash
 gh release delete "v$ver" --repo delllusional/DontSpeak --yes   # if published
 git push origin ":refs/tags/v$ver" && git tag -d "v$ver"
-git tag "v$ver" && git push origin main "v$ver"
+# Re-apply the same notes file (or a fixed one), still annotated:
+git tag -a "v$ver" -F "$notes_file"
+git push origin main "v$ver"
 ```
 
 Monitor again. Move tag only to the **release** commit — not later main work still on
 the same version string.
 
-## 8 — Bump next `-dev`
+## 7 — Bump next `-dev`
 
 After publish, one command updates Cargo.toml + both locks (no full re-resolve):
 
@@ -150,12 +162,12 @@ python3 scripts/release/sync-workspace-version.py --bump-dev
 ```
 
 Commit all four files. Next real release: `--strip-dev` (or `--set` higher non-dev),
-commit, tag. Missed sync fails only at **next** tag.
+commit, annotated-tag, push. Missed sync fails only at **next** tag.
 
-## 9 — On-demand `-dev` draft
+## 8 — On-demand `-dev` draft
 
 Same full matrix, `--draft` so `releases/latest` ignores it. Replace prior draft tag
-in place:
+in place. Notes optional — lightweight is OK (body falls back to commit message):
 
 ```bash
 ver="$(python3 scripts/release/sync-workspace-version.py --print)"
@@ -165,16 +177,18 @@ case "$ver" in
 esac
 git push origin ":refs/tags/v$ver" 2>/dev/null || true
 git tag -d "v$ver" 2>/dev/null || true
-git tag "v$ver"
+git tag "v$ver"   # lightweight OK for disposable drafts
 git push origin main "v$ver"
 ```
 
-Monitor + verify; confirm `isDraft == true`. Skip notes and version bump.
+Monitor + verify; confirm `isDraft == true`. Skip version bump.
 Web UI may show `untagged-<hash>` briefly — display-only; `tag_name` is correct.
 
 ## Caveats
 
-- Failed tests after tag → tag without release; clean with step 7 or next push rejects.
+- Failed tests after tag → tag without release; clean with step 6 or next push rejects.
 - `workflow_dispatch` builds without publish.
-- Don't `git tag -f` without deleting remote first.
-- Don't skip step 8.
+- Don't `git tag -f` without deleting the remote tag first.
+- Don't skip step 7 after a real publish.
+- Real releases: always `git tag -a -F …`. Never commit release notes into the tree
+  for CI to read — the annotation is the transport.
