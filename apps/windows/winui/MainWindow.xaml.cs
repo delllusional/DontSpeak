@@ -16,93 +16,67 @@ using Windows.UI;
 namespace DontSpeak;
 
 /// <summary>
-/// The Fluent main window — mirrors the macOS SwiftUI StatusView (the "DontSpeak"
-/// row with lifetime usage + version, the TTS/STT engine rows, and the
-/// Caps-Lock row) and ToolsView (the MCP catalog). It polls the engine's
-/// model-status over the C ABI and shows it; runtime control is via DontSpeak,
-/// exactly as on macOS (the one in-window action is kicking off a model download). The
-/// engine + tray are owned by <see cref="App"/>; closing this window hides it to the tray.
+/// Fluent Status/Tools/Logs/Credits window (macOS StatusView + ToolsView parity). Status is
+/// push-driven by <see cref="App"/>; engine + tray live there. Close hides to tray.
 /// </summary>
 public sealed partial class MainWindow : Window
 {
-    // Green/Red are the standard status colors (as on macOS: Color.green / .red); the
-    // warming/downloading "Orange" dot is the shared brand WARNING tint (Brand.warning).
+    // Green/red standard; Orange = Brand.Warning (warming/download), matching macOS.
     private static readonly SolidColorBrush Green = new(Color.FromArgb(255, 46, 160, 67));
     private static readonly SolidColorBrush Orange = new(Brand.Warning);
     private static readonly SolidColorBrush Red = new(Color.FromArgb(255, 232, 70, 70));
     private static readonly SolidColorBrush Gray = new(Color.FromArgb(120, 150, 150, 155));
-    // Windows 11's modern monospaced UI font (shipped since Win11; falls back to Consolas) —
-    // for tool/param identifiers, the native analogue of macOS's SF Mono usage in ToolsView.
+    // Cascadia Mono (Win11) / Consolas — tools/params; macOS uses SF Mono.
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
-    // Mirrors ds_tools::DIARIZATION_ENABLED (rust/crates/ds-tools/src/lib.rs) — flip both together when diarization ships
+    // Mirrors ds_tools::DIARIZATION_ENABLED — flip both when diarization ships.
     private const bool DiarizationUiEnabled = false;
 
     public MainWindow()
     {
         InitializeComponent();
-        // Open at the COMPACT width (== the minimum the user can narrow it to — the snug, "right"
-        // width); the height is provisional and gets snugged to the content below.
+        // Compact width (= min); height provisional until CapHeightToStatusContent.
         AppWindow.Resize(new Windows.Graphics.SizeInt32(380, 620));
-        // Brand window/taskbar icon (the .ico is bundled next to the exe).
         var icoPath = System.IO.Path.Combine(AppContext.BaseDirectory, "AppIcon.ico");
         if (System.IO.File.Exists(icoPath)) AppWindow.SetIcon(icoPath);
-        // Only the CLOSE button — no minimize/maximize. The window is WIDTH-resizable (drag the
-        // side borders); the HEIGHT is LOCKED to the Status content (CapHeightToStatusContent), so
-        // it always wraps the cards and can't be cut short. IsMaximizable/IsMinimizable=false alone
-        // only GREY the buttons; StripMinMaxButtons() below clears the WS_*BOX styles to remove them.
+        // Close only; width-resizable; height locked to Status content.
+        // IsMaximizable/IsMinimizable=false greys buttons — StripMinMaxButtons removes WS_*BOX.
         if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter pr)
         {
-            pr.IsResizable = true;        // width resize via the border (height is locked to content)
+            pr.IsResizable = true;
             pr.IsMaximizable = false;
             pr.IsMinimizable = false;
             pr.PreferredMinimumWidth = 380;
-            pr.PreferredMinimumHeight = 240;   // provisional; CapHeightToStatusContent locks it to the content
+            pr.PreferredMinimumHeight = 240;
         }
         StripMinMaxButtons();
         HookTitleBarTheme();
-        // Match the overlaid state stripe's height to the top tab row once it's laid out,
-        // and keep it matched if the row ever re-measures.
         Nav.Loaded += (_, _) => SizeStateStripe();
         Nav.SizeChanged += (_, _) => SizeStateStripe();
         LoadTools();
         LoadLibraries();
         RefreshStatus();
 
-        // No poll timer: the status window is driven by App's status PUSH thread (the
-        // dedicated ModelStatusWait loop), which calls ApplyPushed() on every engine status
-        // change — the same ~0-jitter push that drives the tray + dictation overlay. This
-        // one-shot refreshes the instant the window becomes visible; pushes skip work while
-        // it's hidden (ApplyPushed early-returns), so a hidden window costs nothing and never
-        // strands on a stale frame when reopened.
+        // No poll timer — App's push calls ApplyPushed. One-shot on show; pushes no-op while hidden.
         AppWindow.Changed += (s, e) =>
         {
             if (e.DidVisibilityChange && s.IsVisible)
             {
                 RefreshStatus();
-                // Snug the height to the content once the window is shown + laid out. Low priority
-                // so it runs AFTER the arrange pass (ActualHeight valid) and the window has its real
-                // client size — at that point the provisional 620 is pulled down to the content.
+                // Low priority: after arrange so ActualHeight is valid.
                 DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, CapHeightToStatusContent);
             }
         };
 
-        // Re-cap on every later content/width change: the panel's ARRANGED size changing (a section
-        // expands/collapses, an empty-state message wraps, the user resizes the WIDTH so text
-        // re-wraps) fires SizeChanged post-arrange, so ActualHeight is valid (a manual Measure would
-        // corrupt the live layout — that blanks the window).
+        // SizeChanged is post-arrange — don't Measure manually (corrupts layout → blank window).
         if (StatusScroll?.Content is FrameworkElement statusPanel)
             statusPanel.SizeChanged += (_, _) => CapHeightToStatusContent();
     }
 
-    // The default WinUI 3 title bar does not follow the system dark/light theme on its
-    // own — in dark mode it stays light, with dark (unreadable) caption buttons. Color the
-    // title bar + caption buttons to match the window content's ActualTheme.
+    // WinUI 3 title bar ignores system theme by default (dark mode stays light/unreadable).
     private void HookTitleBarTheme()
     {
         if (Content is not FrameworkElement root) return;
-        // ActualTheme is unreliable until the element is loaded (it reads Light in the
-        // ctor even under system dark mode), so apply on Loaded — and again whenever the
-        // system theme flips at runtime.
+        // ActualTheme wrong until Loaded (reads Light under system dark).
         ApplyTitleBarTheme(root.ActualTheme);
         root.Loaded += (_, _) => ApplyTitleBarTheme(root.ActualTheme);
         root.ActualThemeChanged += (s, _) => ApplyTitleBarTheme(s.ActualTheme);
@@ -132,15 +106,12 @@ public sealed partial class MainWindow : Window
         tb.ButtonPressedForegroundColor = fg;
     }
 
-    // Remove the minimize/maximize caption buttons (leaving only close) by clearing
-    // WS_MINIMIZEBOX/WS_MAXIMIZEBOX and refreshing the frame. WS_THICKFRAME (the resize border)
-    // is left intact, so the window stays WIDTH-resizable.
+    // Drop WS_MINIMIZEBOX/MAXIMIZEBOX; keep WS_THICKFRAME for width resize.
     private void StripMinMaxButtons()
     {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         long style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
-        // checked: CA2020 — bit-clearing can't overflow, so this never throws; the keyword
-        // just makes the (IntPtr)Int64 conversion's intent explicit for the analyzer.
+        // checked: CA2020 — makes IntPtr conversion intent explicit for the analyzer.
         SetWindowLongPtr(hwnd, GWL_STYLE, checked((IntPtr)(style & ~(WS_MINIMIZEBOX | WS_MAXIMIZEBOX))));
         SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
@@ -156,7 +127,6 @@ public sealed partial class MainWindow : Window
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
-    /// <summary>Select the Status (false) or Tools (true) tab — called by the tray.</summary>
     public void SelectTab(bool tools)
     {
         int i = tools ? 1 : 0;
@@ -172,25 +142,19 @@ public sealed partial class MainWindow : Window
         if (ToolsScroll != null) ToolsScroll.Visibility = tag == "tools" ? Visibility.Visible : Visibility.Collapsed;
         if (CreditsScroll != null) CreditsScroll.Visibility = tag == "credits" ? Visibility.Visible : Visibility.Collapsed;
         if (LogTab != null) LogTab.Visibility = tag == "log" ? Visibility.Visible : Visibility.Collapsed;
-        if (tag == "log") await LoadLogsAsync(loadGeneration); // reload each time the tab is shown (no poll timer)
+        if (tag == "log") await LoadLogsAsync(loadGeneration); // reload on each select (no poll)
     }
 
-    // ── Logs tab: the COMBINED activity log with a top text-filter bar ───────────────────────
     private List<LogLine> _logLines = new();
-    private List<string> _logSources = new();                          // distinct sources (for stable per-source color)
+    private List<string> _logSources = new();
     private readonly Dictionary<string, SolidColorBrush> _sourceBrush = new();
     private readonly Dictionary<string, SolidColorBrush> _levelBrushCache = new();
-    private string _logFilter = "";                                    // free-text filter (case-insensitive substring)
+    private string _logFilter = "";
     private int _logLoadGeneration;
     private int _logRenderGeneration;
-    // The per-source palette + ERROR/WARN colors come from the SHARED Rust source via Brand
-    // (Brand.LogSourcePalette / Brand.LogLevelColor) — centralized beside the brand colors.
 
-    /// <summary>Load the COMBINED activity log (unified + aux logs, via <c>ds_logs_json</c>)
-    /// and render. File I/O + JSON parsing run off the UI thread; rendering resumes on the UI
-    /// dispatcher in small batches so a large log cannot hold up tab input. Called on every Logs
-    /// tab-select, so it's fresh without a poll timer. Lines stay color-coded (per source +
-    /// ERROR/WARN) and are narrowed live by the top filter bar.</summary>
+    /// <summary>Load combined log off UI thread; render in batches. Generation guard drops
+    /// stale results if user left/re-entered Logs mid-flight.</summary>
     private async System.Threading.Tasks.Task LoadLogsAsync(int loadGeneration)
     {
         if (LogText == null) return;
@@ -201,11 +165,8 @@ public sealed partial class MainWindow : Window
                 () => LogParser.ParseLogs(Native.LogsJson(64 * 1024)));
         }
         catch { return; }
-        // The user may have left and re-entered Logs while the read was in flight. Only the
-        // newest selection owns the view; an older result must not replace its fresher data.
         if (loadGeneration != _logLoadGeneration || LogTab.Visibility != Visibility.Visible) return;
         _logLines = lines;
-        // Distinct sources in first-appearance order → stable per-source colors.
         _logSources = new List<string>();
         foreach (var l in _logLines)
             if (l.Source.Length > 0 && !_logSources.Contains(l.Source)) _logSources.Add(l.Source);
@@ -218,17 +179,9 @@ public sealed partial class MainWindow : Window
         await RenderLogLinesAsync(++_logRenderGeneration);
     }
 
-    /// <summary>Clear-log trash button: confirms via a Fluent <see cref="ContentDialog"/> (the
-    /// destructive-action pattern — a plain neutral close button + one "do it" primary button),
-    /// then erases the on-disk log (<see cref="Native.LogsClear"/>) and reloads the (now empty)
-    /// tab. WinUI has no built-in "destructive" button style (unlike SwiftUI's role: .destructive
-    /// / libadwaita's ResponseAppearance::Destructive), so the primary button is explicitly given
-    /// AccentButtonStyle then recolored red — the SAME red the Logs tab already uses for ERROR
-    /// lines (Brand.LogLevelColor), not the app's purple/orange suggested-action accent. No
-    /// DefaultButton is set: WinUI ties its automatic "accent" visual to whichever button IS the
-    /// default, which would otherwise fight this override and (as seen live) paint Cancel instead
-    /// of Clear; leaving it unset also means Enter can't trigger the destructive action by
-    /// accident (only an explicit click can), while Esc still maps to the close button.</summary>
+    /// <summary>Confirm then <see cref="Native.LogsClear"/>. WinUI has no destructive button
+    /// style — AccentButtonStyle recolored to ERROR red (not brand accent). No DefaultButton:
+    /// that fights the red override and would make Enter trigger Clear.</summary>
     private async void LogClear_Click(object sender, RoutedEventArgs e)
     {
         var danger = new SolidColorBrush(Brand.LogLevelColor("ERROR") ?? Color.FromArgb(255, 0xE8, 0x46, 0x46));
@@ -253,10 +206,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>Render the lines matching the text filter into the RichTextBlock: a colored source
-    /// tag, the level token when it's not the ordinary INFO, and the message (red/amber for
-    /// ERROR/WARN). The filter is a case-insensitive substring over source/level/message.
-    /// Auto-scrolls to the newest line.</summary>
+    /// <summary>Filter + color-code lines; yield every 64 so large logs don't freeze input.</summary>
     private async System.Threading.Tasks.Task RenderLogLinesAsync(int renderGeneration)
     {
         LogText.Blocks.Clear();
@@ -283,12 +233,9 @@ public sealed partial class MainWindow : Window
             if (l.Level.Length > 0 && l.Level != "INFO")
                 para.Inlines.Add(new Run { Text = l.Level + " ", Foreground = msgBrush ?? Gray });
             var msg = new Run { Text = l.Text };
-            if (msgBrush != null) msg.Foreground = msgBrush; // ERROR/WARN tint the message; INFO stays default
+            if (msgBrush != null) msg.Foreground = msgBrush;
             para.Inlines.Add(msg);
             LogText.Blocks.Add(para);
-            // Paragraph layout is UI-thread-affine, but yielding between modest batches lets
-            // pointer/keyboard/navigation work run instead of freezing the window for the whole
-            // tail. A newer filter or tab selection invalidates this render at the next batch.
             if (++rendered % 64 == 0) await System.Threading.Tasks.Task.Yield();
         }
         if (renderGeneration != _logRenderGeneration || LogTab.Visibility != Visibility.Visible) return;
@@ -296,8 +243,6 @@ public sealed partial class MainWindow : Window
             () => LogScroll?.ChangeView(null, LogScroll.ScrollableHeight, null, true));
     }
 
-    // Level color from the shared source (Brand.LogLevelColor): ERROR/WARN → its color, INFO/
-    // unknown → null (inherit the default text color). Cached as brushes.
     private SolidColorBrush? LevelBrush(string level)
     {
         if (level.Length == 0) return null;
@@ -308,8 +253,7 @@ public sealed partial class MainWindow : Window
         return brush;
     }
 
-    // Stable per-source color from the SHARED palette (Brand.LogSourcePalette), keyed by the
-    // source's first-appearance index — identical on every platform reading the same lines.
+    // First-appearance index into Brand.LogSourcePalette — same mapping every platform.
     private SolidColorBrush SourceBrush(string source)
     {
         if (_sourceBrush.TryGetValue(source, out var b)) return b;
@@ -324,42 +268,29 @@ public sealed partial class MainWindow : Window
 
     private bool _refreshing;
 
-    /// <summary>Poll the engine status WITHOUT blocking the UI thread: the C-ABI
-    /// model-status read (which also probes NVML) runs on the thread pool; the await
-    /// resumes on the dispatcher to apply the UI updates.</summary>
+    /// <summary>Bounded off-UI probe (2500ms). Skip while hidden; never latch _refreshing on hang.</summary>
     private async void RefreshStatus()
     {
-        // Skip while hidden (the app sits in the tray most of the time): no point probing
-        // the engine or rebuilding UI nobody can see — App's own tray poll keeps running,
-        // and AppWindow.Changed (ctor) refreshes the instant the window is shown again, so
-        // it never strands on an old frame.
         if (!AppWindow.IsVisible) return;
-        if (_refreshing) return;          // never queue behind a slow read
+        if (_refreshing) return;
         _refreshing = true;
         HealthSnapshot? snap = null;
         try
         {
             var probe = System.Threading.Tasks.Task.Run(HealthSnapshot.Probe);
-            // Bound the in-process engine round-trip: a single status read that doesn't
-            // return must NOT keep `_refreshing` latched — that would skip every later
-            // tick and freeze the whole window (GPU row included), not just the stats.
+            // Cap so a stuck read can't keep _refreshing latched forever.
             var done = await System.Threading.Tasks.Task.WhenAny(
                 probe, System.Threading.Tasks.Task.Delay(2500));
             if (done == probe) snap = await probe;
         }
-        catch { /* probe threw this cycle — retry on the next tick */ }
+        catch { /* retry next cycle */ }
         finally { _refreshing = false; }
 
-        // Timed out / failed: keep the last frame and try again next tick. Wrap the
-        // render so one bad frame can never kill the poll loop.
         if (snap is null) return;
         try { ApplyStatus(snap); } catch { /* one bad frame must not kill the loop */ }
     }
 
-    /// <summary>Apply a status snapshot PUSHED by App's WaitModelStatus thread — already on the
-    /// UI thread (TryEnqueue) and already projected, so no probe here. Skipped while the window
-    /// is hidden (the usual tray state); the AppWindow.Changed one-shot re-renders on show, so a
-    /// hidden window costs nothing.</summary>
+    /// <summary>Push from App's WaitModelStatus thread (already on UI). No-op while hidden.</summary>
     internal void ApplyPushed(HealthSnapshot s)
     {
         if (!AppWindow.IsVisible) return;
@@ -368,17 +299,14 @@ public sealed partial class MainWindow : Window
 
     private void ApplyStatus(HealthSnapshot s)
     {
-        // ── 1. DontSpeak — dot + the expanded lifetime usage / version ──
         EngineDot.Fill = s.Activity.EngineRunning ? Green : Gray;
         TtsAllTime.Text = Native.DurationLive(s.Lifetime.TtsSecs);
         SttAllTime.Text = Native.DurationLive(s.Lifetime.SttSecs);
         var v = Native.Version();
         VersionText.Text = v.Length > 0 ? v : Loc.T("common.dash");
 
-        // ── 2. Engine rows — TTS / STT name the CONCRETE engine for the active token
-        // (mirrors the macOS ttsEngineRow/sttEngineRow). ──
         if (s.EngineSelection.TtsEngine == "off")
-        { TtsDetail.Text = ""; ApplyOff(TtsDot, TtsRing); }   // no label — the gray dot says "off"
+        { TtsDetail.Text = ""; ApplyOff(TtsDot, TtsRing); }
         else if (s.EngineSelection.TtsEngine == "system")
         { TtsDetail.Text = Loc.T("status.engine.system"); ApplyEngine(s.EngineDots.TtsSystem, TtsDot, TtsRing); }
         else
@@ -387,7 +315,7 @@ public sealed partial class MainWindow : Window
         switch (s.EngineSelection.SttEngine)
         {
             case "off":
-                SttDetail.Text = "";   // no label — the gray dot says "off"
+                SttDetail.Text = "";
                 ApplyOff(SttDot, SttRing); break;
             case "claude_code":
                 SttDetail.Text = Loc.T("status.engine.claude_code");
@@ -400,26 +328,18 @@ public sealed partial class MainWindow : Window
                 ApplyEngine(s.EngineDots.Parakeet, SttDot, SttRing); break;
         }
 
-        // TTS expansion. A not-ready engine (downloading/starting/failed) shows its state word
-        // as the note — the same slot the stats/empty-states use (replaces the dot tooltip).
-        // System `say` synthesizes in the OS (a pointer to the OS voices); else lead with the
-        // active runtime (ORT CPU/CUDA/Core ML · ANE) then no-data / the live Kokoro stats.
+        // Shared formatter returns "" for ready states — emptiness is note-vs-stats (all platforms).
+        // Runtime line only when ready (never stale "ORT CPU" under Downloading N%).
         bool ttsSystem = s.EngineSelection.TtsEngine == "system";
         var ttsInfo = s.ActiveTts;
-        // Not-ready → show the shared state-word note; the SHARED formatter returns "" for the
-        // ready states (running/idle), so its emptiness IS the note-vs-stats gate (macOS/Linux
-        // decide identically). No per-platform "is trouble" list to drift.
         bool ttsTrouble = !string.IsNullOrEmpty(ttsInfo.Word);
-        // Runtime line ONLY when ready — hidden while downloading/starting so a fetch shows just the
-        // "Downloading N%" note, never a stale "ORT CPU" (the realized runtime before the GPU
-        // runtime lands). Matches macOS, which shows the note OR the stats, never both.
         TtsRuntimeRow.Visibility = (!ttsSystem && !ttsTrouble && s.EngineSelection.TtsProvider.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
         if (!ttsSystem) TtsRuntimeText.Text = Native.RuntimeLabel(s.EngineSelection.TtsProvider);
-        TtsSystemSettingsRow.Visibility = Visibility.Collapsed;   // default; only the System branch shows it
+        TtsSystemSettingsRow.Visibility = Visibility.Collapsed;
         if (ttsTrouble)
             ShowMsg(TtsStatsMsg, TtsStatsGrid, ttsInfo.Word);
         else if (ttsSystem)
-            ShowSystemVoiceLink();   // OS does the synth — no local stats; offer "Manage voices" instead
+            ShowSystemVoiceLink();
         else if (s.Tts.Utterances == 0)
             ShowMsg(TtsStatsMsg, TtsStatsGrid, Loc.T("status.no_data"));
         else
@@ -433,9 +353,6 @@ public sealed partial class MainWindow : Window
                 TtsFailures.Text = s.Tts.Failures.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        // STT expansion. A not-ready engine shows its state word as the note (same slot as the
-        // stats). The runtime line shows for built_in (Parakeet) only; Claude Code does no local
-        // transcription, so when ready it names the key it delegates through instead of stats.
         bool sttBuiltIn = s.EngineSelection.SttEngine == "built_in";
         var sttInfo = s.ActiveStt;
         bool sttTrouble = !string.IsNullOrEmpty(sttInfo.Word);
@@ -457,15 +374,7 @@ public sealed partial class MainWindow : Window
                 SttFailures.Text = s.Stt.Failures.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        // Diarization row (on-demand speaker lock) — same lifecycle dot as STT/TTS; gray/idle
-        // when disabled, green when enabled+ready. The shared trouble-note gate comes first
-        // (covers the honest "missing"/"not installed" state — Windows has no diarizer
-        // provider yet, so this renders inert-but-correct until one ships), then disabled,
-        // then no-speakers-enrolled, then the real stats (mirrors macOS EngineStatRow/DiarStatsContent).
-        // DiarizationUiEnabled is a const false, so the compiler can prove the body below is
-        // unreachable (CS0162); the project treats warnings as errors, so that would otherwise
-        // break the build. Suppress just this block rather than lose the compile-time-constant
-        // flip semantics the plan calls for.
+        // CS0162: const false makes body unreachable; suppress so the flip remains a const bool.
 #pragma warning disable CS0162 // Unreachable code detected
         if (DiarizationUiEnabled)
         {
@@ -489,29 +398,20 @@ public sealed partial class MainWindow : Window
         }
 #pragma warning restore CS0162
 
-        // The top tab row reflects the live engine state — idle / recording (STT) /
-        // speaking (TTS) — washing the row in the same brand tints as the tray icon.
         ApplyStateAccent(s.IndicatorState());
-
-        // ── 3. Caps-Lock dictation ──
         CapsDot.Fill = s.Activity.Caps ? Green : Gray;
     }
 
     private TrayIcon.IconState _accentState = (TrayIcon.IconState)(-1);
 
-    /// <summary>Size the overlaid <c>StateStripe</c> to the top tab row's height (it's a
-    /// VerticalAlignment=Top overlay, so it needs an explicit height to fill the bar). Reads
-    /// the live height of the NavigationView's top-nav grid; falls back to the WinUI default
-    /// top-pane height if the template part can't be found.</summary>
     private void SizeStateStripe()
     {
-        double h = 48; // WinUI top NavigationView pane height (fallback)
+        double h = 48; // WinUI top-nav fallback
         if (FindDescendant(Nav, "TopNavGrid") is FrameworkElement bar && bar.ActualHeight > 0)
             h = bar.ActualHeight;
         StateStripe.Height = h;
     }
 
-    /// <summary>Depth-first search of the visual tree for a descendant with the given name.</summary>
     private static FrameworkElement? FindDescendant(DependencyObject root, string name)
     {
         int n = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
@@ -524,11 +424,7 @@ public sealed partial class MainWindow : Window
         return null;
     }
 
-    /// <summary>Highlight the WHOLE top bar with the brand tint for the current engine state —
-    /// idle = no fill, recording = orange STT, speaking = purple TTS. A uniform translucent
-    /// wash edge-to-edge (kept low so the Status / Tools tabs stay readable through it), so the
-    /// state reads as a consistent bar highlight. Reuses the SAME <see cref="Brand"/> tints as
-    /// the tray icon.</summary>
+    /// <summary>Top bar wash in tray Brand tints; idle clears. ~30% so tabs stay readable on Mica.</summary>
     private void ApplyStateAccent(TrayIcon.IconState state)
     {
         if (state == _accentState) return;
@@ -540,31 +436,21 @@ public sealed partial class MainWindow : Window
             TrayIcon.IconState.Speaking => Brand.SeedPurple,
             _ => (Windows.UI.Color?)null,
         };
-        // Idle: no stripe at all (clear the fill, leaving the bare tab row).
         if (tint is not Windows.UI.Color basis)
         {
             StateStripe.Background = null;
             return;
         }
-        // A uniform translucent tint across the whole top bar — low enough (~30%) that the
-        // Status / Tools tabs stay readable through it and it blends with the Mica, rather than
-        // a solid slab. Idle clears it (handled above).
         const double Tint = 0.30;
         StateStripe.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(
             Windows.UI.Color.FromArgb((byte)(255 * Tint), basis.R, basis.G, basis.B));
     }
 
-    /// <summary>Apply an engine's lifecycle to its dot (color only — no tooltip). A not-ready
-    /// engine surfaces its state word as a note in the expanded section instead. Models fetch
-    /// automatically on first activation, so there's no Download/Retry button — the dot conveys
-    /// missing → downloading → running by color, matching macOS.</summary>
+    /// <summary>Dot color only (trouble note lives in expansion). Download → orange progress ring
+    /// with 0.02 floor so 0% still shows a sliver (macOS parity).</summary>
     private static void ApplyEngine(EngineInfo e, Microsoft.UI.Xaml.Shapes.Ellipse dot,
                                     Microsoft.UI.Xaml.Controls.ProgressRing ring)
     {
-        // Downloading swaps the flat dot for an ORANGE determinate progress ring driven by the
-        // byte-weighted 0…1 percent — the macOS StatusView "orange progress ring" treatment, so a
-        // fetch reads as live progress, not a static blob (and never a silent gray). A tiny floor
-        // keeps a sliver of arc visible at 0%.
         if (e.State == EngineState.Downloading)
         {
             ring.Value = Math.Clamp(e.Progress, 0.02, 1.0);
@@ -577,15 +463,13 @@ public sealed partial class MainWindow : Window
         dot.Fill = e.State switch
         {
             EngineState.Running => Green,
-            EngineState.Warming => Orange,   // downloaded, loading — orange filled (macOS parity)
-            EngineState.Blocked => Orange,   // reserved warning/trouble state — orange (macOS/Linux parity)
+            EngineState.Warming => Orange,
+            EngineState.Blocked => Orange,
             EngineState.Failed => Red,
             _ => Gray,
         };
     }
 
-    /// <summary>An engine switched off (tts_engine/stt_engine = off): just a gray idle dot, no
-    /// label (mirrors the macOS offEngineRow). No tooltip — like every dot now.</summary>
     private static void ApplyOff(Microsoft.UI.Xaml.Shapes.Ellipse dot,
                                  Microsoft.UI.Xaml.Controls.ProgressRing ring)
     {
@@ -594,8 +478,7 @@ public sealed partial class MainWindow : Window
         dot.Fill = Gray;
     }
 
-    /// <summary>Claude Code does no local transcription (it delegates), so its ready STT row
-    /// names the synthesized key it sends through instead of stats.</summary>
+    /// <summary>Claude Code ready row names the delegated key instead of local STT stats.</summary>
     private static string ClaudeDelegationHint(HealthSnapshot s) =>
         s.EngineSelection.ClaudeCodeKey.Length > 0
             ? Loc.T("status.stt_claude_code", new Dictionary<string, string> { ["key"] = s.EngineSelection.ClaudeCodeKey })
@@ -609,8 +492,6 @@ public sealed partial class MainWindow : Window
     {
         msg.Visibility = Visibility.Collapsed; grid.Visibility = Visibility.Visible;
     }
-    // System TTS expansion: the OS synthesizes (no local stats), so show the clickable
-    // "Manage voices" link to the OS voice-settings page instead of the message/stats slots.
     private void ShowSystemVoiceLink()
     {
         TtsSystemSettingsText.Text = Loc.T("status.tts_system_settings");
@@ -618,13 +499,7 @@ public sealed partial class MainWindow : Window
         TtsStatsGrid.Visibility = Visibility.Collapsed;
         TtsSystemSettingsRow.Visibility = Visibility.Visible;
     }
-    // RTF/first-audio ranges and the count+seconds string are now the SHARED Rust formatters
-    // (Native.StatsRange / Native.StatsCount), so the assembly + catalog keys live in ONE place
-    // for all three hosts — see ds-core status_fmt. The old per-platform Range()/CountText()
-    // helpers were removed.
 
-    // The version label is a link to the product homepage (dontspeak.org) — the shared URL
-    // from the Rust core, same as the macOS app.
     private async void VersionLink_Click(object sender, RoutedEventArgs e)
     {
         var url = Native.HomepageUrl();
@@ -632,16 +507,8 @@ public sealed partial class MainWindow : Window
             await Windows.System.Launcher.LaunchUriAsync(uri);
     }
 
-    /// <summary>Turn the plain version into a "current → new" pill when a newer release is out —
-    /// the result of the ONE-SHOT startup check (App.OnLaunched's background thread, off the UI
-    /// thread since the check blocks on a real GitHub API call). <paramref name="latestVersion"/>
-    /// is null whenever <paramref name="available"/> is false, per Native.ParseLatestVersion's
-    /// contract — in that case VersionPill is left with no background and the arrow/new-version
-    /// text stay collapsed, so it reads exactly as the plain version did before this feature.
-    /// Deliberately does NOT touch VersionLink's click handler — the version keeps opening the
-    /// homepage either way. Brand-purple (Brand.SeedPurple) background only — the text keeps its
-    /// existing color (Opacity 0.55 / TextFillColorPrimaryBrush, same as VersionText always had):
-    /// a pending update isn't an error/warning condition, just something that should stand out.</summary>
+    /// <summary>Startup one-shot pill (latestVersion null when available is false). Does not
+    /// change VersionLink (still opens homepage). SeedPurple wash only — not error/warning.</summary>
     internal void ApplyUpdateCheck(bool available, string? latestVersion)
     {
         if (!available || latestVersion is null) return;
@@ -651,17 +518,11 @@ public sealed partial class MainWindow : Window
         VersionPill.Background = new SolidColorBrush(Color.FromArgb(40, purple.R, purple.G, purple.B));
     }
 
-    // HyperlinkButton.Click doesn't mark the underlying Tapped routed event Handled, so without
-    // this it bubbles up to DontSpeakHeader's own Tapped and expands the row on every version
-    // click. Stop it here instead of relying on the button to consume it implicitly.
+    // HyperlinkButton.Click doesn't mark Tapped Handled — without this, bubbles to header expand.
     private void VersionLink_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => e.Handled = true;
 
-    // Open the OS voice-settings page (Windows: Time & language ▸ Speech) through the SHARED
-    // Rust seam (ds_open_voice_settings) every platform UI calls — the macOS app routes
-    // its Spoken-Content row to the same function.
     private void TtsSystemSettings_Click(object sender, RoutedEventArgs e) => Native.OpenVoiceSettings();
 
-    // Tap a header row to expand/collapse its details (no chevron — the whole row toggles).
     private void DontSpeakHeader_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => ToggleStats(DontSpeakStats);
     private void TtsHeader_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => ToggleStats(TtsStats);
     private void SttHeader_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => ToggleStats(SttStats);
@@ -670,46 +531,27 @@ public sealed partial class MainWindow : Window
     private static void ToggleStats(FrameworkElement panel)
     {
         panel.Visibility = panel.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
-        // (The Status content panel's SizeChanged re-caps the window height after this re-layouts.)
     }
 
-    // Top tab strip + the Grid's top (12) and bottom (20 == the side padding) margins around the
-    // Status panel — the vertical chrome added to the measured content height to get the client
-    // height. (Bottom == sides, so the window's bottom gap matches its left/right gaps.)
+    // Tab strip + Status panel top/bottom margins → client height chrome (bottom == side pad).
     private const double StatusChromeDip = 84;
 
-    // The client height we last auto-fit the window to (-1 = never). If the window still matches it,
-    // the user hasn't manually resized, so we keep wrapping the content; otherwise we respect their
-    // (taller) size. See CapHeightToStatusContent.
+    // Last auto-fit client height (-1 = never). Match ⇒ still tracking content; else honor user taller size.
     private int _lastFitClientPx = -1;
 
-    /// <summary>Cap the window HEIGHT to the Status tab's content — all sections + a bottom padding
-    /// equal to the 20px sides. The window can shrink (the content then scrolls) but can't be
-    /// dragged TALLER than the content, so there's never empty space below the cards. WIDTH stays
-    /// freely resizable. Snugs the current height down when it exceeds the content (after a
-    /// collapse, or after widening the window so text re-wraps shorter). Measures at the current
-    /// width so wrapping matches what's shown.</summary>
+    /// <summary>Min height = Status content (no shorter cut-off); no max. Auto-fit unless user
+    /// dragged taller. Use arranged ActualHeight — manual Measure blanks the window.</summary>
     private void CapHeightToStatusContent()
     {
         if (AppWindow.Presenter is not Microsoft.UI.Windowing.OverlappedPresenter pr) return;
         if (StatusScroll?.Content is not FrameworkElement panel || Content?.XamlRoot is null) return;
         double scale = Content.XamlRoot.RasterizationScale;
-        // Use the panel's ALREADY-ARRANGED height (it's top-aligned, so it sizes to its content even
-        // when the ScrollViewer is scrolling it) — measuring it by hand corrupts the live layout.
-        // 0 while the Status tab is hidden (collapsed) or before first layout: nothing to cap yet.
         if (scale <= 0 || panel.ActualHeight <= 0) return;
         int clientPx = (int)Math.Ceiling((panel.ActualHeight + StatusChromeDip) * scale);
-        int nonClientPx = Math.Max(0, AppWindow.Size.Height - AppWindow.ClientSize.Height);   // title bar
-        // FLOOR the height at the content (min): the window can't be dragged SHORTER than the
-        // content, so sections never get cut off. NO ceiling (max = null): it's freely resizable
-        // TALLER. Width stays freely resizable too.
+        int nonClientPx = Math.Max(0, AppWindow.Size.Height - AppWindow.ClientSize.Height);
         pr.PreferredMinimumHeight = clientPx + nonClientPx;
         pr.PreferredMaximumHeight = null;
-        // Auto-fit the height to the content (grow on expand, shrink on collapse, re-wrap on a width
-        // change) UNLESS the user has dragged it taller — then keep their size, only growing if an
-        // expanded section would otherwise be cut. `_lastFitClientPx` is what we last auto-fit to; if
-        // the window still matches it, the user hasn't manually resized, so we keep tracking content.
-        // (Resizing only the height fires no SizeChanged — the panel width is unchanged — so no loop.)
+        // Height-only resize doesn't fire panel SizeChanged — no loop.
         int cur = AppWindow.ClientSize.Height;
         bool atAutoFit = _lastFitClientPx < 0 || Math.Abs(cur - _lastFitClientPx) <= 2;
         if (atAutoFit || cur < clientPx)
@@ -720,9 +562,6 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>Build the Tools list from the shared MCP catalog (mirrors ToolsView). The
-    /// catalog (`ds_tools_json` → the ds-tools crate's `catalog_ui`) is decoded
-    /// type-safely into <see cref="ToolDto"/> records, then rendered.</summary>
     private void LoadTools()
     {
         string json = Native.ToolsJson();
@@ -737,11 +576,7 @@ public sealed partial class MainWindow : Window
             var name = tool.Name ?? "";
             if (name.Length == 0) continue;
 
-            // One native Fluent Expander per tool — collapsed by default, with the system
-            // chevron + expand/collapse animation + card chrome. The Windows 11 analogue of
-            // the macOS ToolsView disclosure rows (header = the tool name; expanding reveals
-            // the summary + arguments). The catalog order is the authored display order (same
-            // source the macOS ToolsView reads), so render as-is.
+            // Fluent Expander per tool; catalog order is authored display order (macOS same source).
             var body = new StackPanel { Spacing = 10 };
             var desc = tool.Description ?? "";
             if (desc.Length > 0)
@@ -771,7 +606,7 @@ public sealed partial class MainWindow : Window
                     head.Children.Add(new TextBlock { Text = pname, FontFamily = Mono, FontSize = 13, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center });
                     head.Children.Add(new TextBlock { Text = string.IsNullOrEmpty(p.Type) ? Loc.T("tools.param.type_any") : p.Type, FontSize = 12, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center });
                     var req = new TextBlock { Text = p.Required ? Loc.T("tools.param.required") : Loc.T("tools.param.optional"), FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
-                    if (p.Required) req.Foreground = Orange; else req.Opacity = 0.6;   // required pops in the brand caution tint
+                    if (p.Required) req.Foreground = Orange; else req.Opacity = 0.6;
                     head.Children.Add(req);
                     var detail = p.Detail ?? "";
                     if (detail.Length > 0)
@@ -798,13 +633,7 @@ public sealed partial class MainWindow : Window
 
     private static readonly JsonSerializerOptions ToolsJsonOptions = new() { PropertyNameCaseInsensitive = true };
 
-    /// <summary>Build the Libraries list from the SHARED Rust libraries catalog
-    /// (<c>ds_libraries_json</c> → ds-model's <c>libraries::catalog</c>) — the
-    /// downloaded models + runtimes, each with its license, collected from the same registry
-    /// every platform fetches from, so the credits can't drift from what ships. One native
-    /// Fluent Expander per project (header = name; expanding reveals what it's for, a link to the
-    /// project, the license (its name links to the license page), and the files it fetches) — the
-    /// same "expander list" look as the Tools tab.</summary>
+    /// <summary>Libraries from shared ds-model catalog — credits can't drift from what ships.</summary>
     private void LoadLibraries()
     {
         string json = Native.LibrariesJson();
@@ -825,10 +654,6 @@ public sealed partial class MainWindow : Window
             if (usage.Length > 0)
                 body.Children.Add(new TextBlock { Text = usage, TextWrapping = TextWrapping.Wrap, Opacity = 0.75 });
 
-            // Project + license links — standard HyperlinkButtons (NavigateUri opens the default
-            // browser on click; no code-behind needed), inline/zero-padding so they read as
-            // links. The license link is LABELED with the license name itself (e.g. "MIT",
-            // "Apache-2.0") and opens its license page.
             var links = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16 };
             if (!string.IsNullOrEmpty(p.Homepage) && Uri.TryCreate(p.Homepage, UriKind.Absolute, out var hp))
                 links.Children.Add(new HyperlinkButton { Content = Loc.T("libraries.homepage"), NavigateUri = hp, Padding = new Thickness(0), MinWidth = 0, MinHeight = 0 });
@@ -837,7 +662,6 @@ public sealed partial class MainWindow : Window
                 links.Children.Add(new HyperlinkButton { Content = lic, NavigateUri = lu, Padding = new Thickness(0), MinWidth = 0, MinHeight = 0 });
             if (links.Children.Count > 0) body.Children.Add(links);
 
-            // The files this project downloads (name + size when known).
             var files = p.Files ?? new List<LicenseFileDto>();
             if (files.Count > 0)
             {
@@ -872,8 +696,6 @@ public sealed partial class MainWindow : Window
                 }
             }
 
-            // Header: just the project name — the license name links to its license page in the
-            // expanded body, so the collapsed header stays clean.
             var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
             header.Children.Add(new TextBlock { Text = name, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
 
@@ -887,9 +709,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    // Typed wire shape of the license catalog — mirrors the Rust ds-model
-    // `libraries::catalog` source of truth (an ordered array of projects, each with an
-    // ordered `files` array). Decoded case-insensitively; missing keys default.
+    // Wire: ds-model libraries::catalog (ordered projects/files).
     private sealed record LibraryDto(
         [property: JsonPropertyName("name")] string? Name,
         [property: JsonPropertyName("usage")] string? Usage,
@@ -903,9 +723,7 @@ public sealed partial class MainWindow : Window
         [property: JsonPropertyName("url")] string? Url,
         [property: JsonPropertyName("size_bytes")] long? SizeBytes);
 
-    // Typed wire shape of the tools catalog — mirrors the macOS ToolDTO/ParamDTO and the
-    // Rust ds-tools `catalog_ui` source of truth (an ordered array of tools, each
-    // with an ordered `params` array). Decoded case-insensitively; missing keys default.
+    // Wire: ds-tools catalog_ui (ordered tools/params); macOS ToolDTO parity.
     private sealed record ToolDto(
         [property: JsonPropertyName("name")] string? Name,
         [property: JsonPropertyName("description")] string? Description,
@@ -916,7 +734,6 @@ public sealed partial class MainWindow : Window
         [property: JsonPropertyName("type")] string? Type,
         [property: JsonPropertyName("required")] bool Required,
         [property: JsonPropertyName("description")] string? Description,
-        // The localized constraint qualifier (enum "one of: …" / numeric "lo–hi" / ""),
-        // pre-built by the shared status_fmt::tool_param_detail — no host-side derivation.
+        // Pre-built by status_fmt::tool_param_detail — no host-side derivation.
         [property: JsonPropertyName("detail")] string? Detail);
 }

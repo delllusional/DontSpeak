@@ -3,16 +3,12 @@ import XCTest
 
 @testable import DontSpeakLogic
 
-/// The `stats` wire decode + the `EngineStats.from(_:)` defaulting rules — the same
-/// seam the Windows app covers in winui.tests/HealthSnapshotTests, so the two UIs
-/// can't drift on how a partial payload reads.
+/// stats wire decode + `EngineStats.from` defaults — same seam as Windows HealthSnapshotTests.
 final class EngineStatsTests: XCTestCase {
     private func decode(_ json: String) throws -> StatsDTO {
         try JSONDecoder().decode(StatsDTO.self, from: Data(json.utf8))
     }
 
-    /// A nil DTO (stats absent from the payload) is every struct default — including
-    /// diarization's 0.7 clustering threshold.
     func testNilDtoIsAllDefaults() {
         let s = EngineStats.from(nil)
         XCTAssertEqual(s, EngineStats())
@@ -20,12 +16,10 @@ final class EngineStatsTests: XCTestCase {
         XCTAssertFalse(s.diarization.enabled)
     }
 
-    /// An empty stats object decodes (all blocks nil) and maps to the same defaults.
     func testEmptyStatsObjectIsAllDefaults() throws {
         XCTAssertEqual(EngineStats.from(try decode("{}")), EngineStats())
     }
 
-    /// The full happy path: every block maps snake_case wire keys onto its group.
     func testFullPayloadMapsEveryBlock() throws {
         let dto = try decode(
             """
@@ -53,24 +47,20 @@ final class EngineStatsTests: XCTestCase {
         XCTAssertEqual(s.lifetime.sttSecs, 50.25)
     }
 
-    /// A present block with missing leaves falls to the PER-FIELD defaults (numbers → 0,
-    /// flags → false, speakers → []) — not the struct defaults. The documented quirk:
-    /// `clusteringThreshold` lands on 0 (not 0.7) once a `diarization` block is present
-    /// but omits the key, matching the old `[String: Any]` walk exactly.
+    /// Present block + missing leaf → per-field 0 (not struct defaults).
+    /// Quirk: clusteringThreshold is 0 not 0.7 once diarization block is present.
     func testPresentBlockWithMissingLeavesFallsToZero() throws {
         let s = EngineStats.from(try decode(#"{"diarization": {"enabled": true}, "tts": {}}"#))
         XCTAssertEqual(s.diarization.clusteringThreshold, 0)  // NOT 0.7 — block present
         XCTAssertEqual(s.diarization.speakers, [])
         XCTAssertEqual(s.tts.utterances, 0)
         XCTAssertEqual(s.tts.rtfAvg, 0)
-        // Blocks that stayed absent keep their struct defaults.
+        // Absent blocks keep struct defaults.
         XCTAssertEqual(s.stt, EngineStats.Stt())
         XCTAssertEqual(s.lifetime, EngineStats.Lifetime())
     }
 
-    /// Unknown wire keys (a newer engine) never break the decode — `present`,
-    /// `speaker_threshold` and `loaded` are real keys the engine sends that this
-    /// app deliberately doesn't read.
+    /// Unknown wire keys (newer engine) must not break decode.
     func testUnknownKeysAreIgnored() throws {
         let dto = try decode(
             """
@@ -81,7 +71,7 @@ final class EngineStatsTests: XCTestCase {
         XCTAssertTrue(EngineStats.from(dto).diarization.enabled)
     }
 
-    /// Lifetime totals arrive as JSON integers (engine u64) and must decode into Double.
+    /// Lifetime u64 JSON integers must decode into Double.
     func testLifetimeIntegerSecondsDecode() throws {
         let s = EngineStats.from(try decode(#"{"lifetime": {"tts_secs": 12345, "stt_secs": 0}}"#))
         XCTAssertEqual(s.lifetime.ttsSecs, 12345)

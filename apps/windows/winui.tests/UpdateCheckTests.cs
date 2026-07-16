@@ -3,9 +3,8 @@ using Xunit;
 namespace DontSpeak.Tests;
 
 /// <summary>
-/// The pure parse half of the startup update check (<see cref="Native.ParseUpdateAvailable"/>) —
-/// exercises the "missing/malformed ⇒ false, never show the pill on ambiguity" contract from
-/// ds_update_check_json's JSON shape, without needing ds_core.dll or a network call.
+/// <see cref="Native.ParseUpdateAvailable"/> / ParseLatestVersion: missing/malformed ⇒ false/null
+/// (never show pill on ambiguity). No ds_core.dll or network.
 /// </summary>
 public class UpdateCheckTests
 {
@@ -23,19 +22,15 @@ public class UpdateCheckTests
             """{"update_available":false,"current_version":"0.1.0","latest_version":"0.1.0"}"""));
     }
 
-    // ── Every ambiguous/failure shape must resolve to false — never "show the pill anyway" ──
-
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
-    [InlineData("{}")]                                   // the documented failure sentinel
+    [InlineData("{}")]                                   // documented failure sentinel
     [InlineData("not json at all")]
     [InlineData("[1,2,3]")]
-    [InlineData("""{"current_version":"0.1.0","latest_version":"0.2.0"}""")]   // missing the key
+    [InlineData("""{"current_version":"0.1.0","latest_version":"0.2.0"}""")]   // missing key
     public void AmbiguousOrMalformedPayloadNeverShowsThePill(string json) =>
         Assert.False(Native.ParseUpdateAvailable(json));
-
-    // ── Native.ParseLatestVersion: null whenever ParseUpdateAvailable would be false ──
 
     [Fact]
     public void LatestVersionIsReturnedWhenAnUpdateIsAvailable()
@@ -52,7 +47,7 @@ public class UpdateCheckTests
     [Theory]
     [InlineData("{}")]
     [InlineData("not json at all")]
-    [InlineData("""{"update_available":true}""")]   // available, but no latest_version at all
+    [InlineData("""{"update_available":true}""")]   // available but no latest_version
     public void LatestVersionIsNullOnAnyAmbiguousOrMalformedPayload(string json) =>
         Assert.Null(Native.ParseLatestVersion(json));
 }

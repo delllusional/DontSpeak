@@ -1,52 +1,27 @@
-//  Glass.swift
-//
-//  Shared Liquid-Glass surfaces for the app's windows and floating overlay. macOS 26
-//  (Tahoe) gives us real Liquid Glass via `.glassEffect`; earlier systems fall back to
-//  a translucent material so the same call site renders sensibly everywhere. Kept in one
-//  place so the availability branch lives ONCE (the dictation overlay and the Status /
-//  Tools windows all share it).
-//
-//  The visual model is the Control-Center / HUD pattern: the WINDOW is one continuous
-//  glass slab (`glassWindow` + `windowGlass`), and content is grouped into translucent
-//  "platters" (`Platter` / `platterBackground`) that float on it — a secondary MATERIAL
-//  surface, not opaque cards, so text stays legible over any desktop behind the glass.
+// Shared Liquid Glass surfaces. macOS 26+ uses `.glassEffect`; earlier OS falls back to
+// ultraThinMaterial. Control-Center pattern: window = continuous slab; content groups =
+// translucent platters (material, not glass-on-glass).
 
 import SwiftUI
 
-/// Corner radii for the glass surfaces — the window slab is rounder than the platters
-/// that nest inside it, so the platters read as sitting *within* the panel.
 enum Glass {
-    /// The floating overlay / panel corner (matches the dictation pill).
     static let panelCorner: CGFloat = 18
-    /// An inner platter corner — tighter than the panel so it nests cleanly.
     static let platterCorner: CGFloat = 12
-    /// The content margin between a window's glass edge and its platters — 16pt. Shared by every
-    /// screen so margins can't drift.
+    /// Content margin window edge → platters; shared so screens can't drift.
     static let windowInset: CGFloat = 16
-    /// The margin between the content and the title-bar strip — the SAME as the sides, so the
-    /// content is inset evenly on all four edges. The detail respects the title-bar safe area, so
-    /// this is its whole top gap; the full-height sidebar bleeds UNDER the bar, so there it's
-    /// added ON TOP of the title-bar height (see MainWindow) to land its first row level.
+    /// Same as sides. Full-height sidebar bleeds under the bar so MainWindow adds this on top
+    /// of title-bar height; detail respects safe area so this is its whole top gap.
     static let windowTopInset: CGFloat = windowInset
-    /// The expand/collapse curve shared by every disclosure row (Status pane rows below,
-    /// DisclosureRow) so they can't drift out of sync.
+    /// Shared expand/collapse curve (Status rows + DisclosureRow).
     static let expandAnimation: Animation = .snappy(duration: 0.2)
 }
 
-/// Liquid Glass on macOS 26+, ultra-thin material otherwise, clipped to a rounded rect.
-/// For FLOATING shapes (the dictation overlay) — a single bare `.glassEffect` with the
-/// default `.regular` variant, the idiomatic form per Apple's "Applying Liquid Glass to
-/// custom views": `GlassEffectContainer` is for grouping/morphing multiple glass shapes
-/// (we have one), and `.tint` is reserved for meaning, not a uniform look. The material
-/// reflects surrounding content, so it reads glassier over dark apps than bright ones —
-/// that backdrop adaptation is intended.
+/// Floating shapes (dictation overlay): bare `.glassEffect(.regular)` — no container, no tint.
 private struct GlassBackground: ViewModifier {
     var cornerRadius: CGFloat = Glass.panelCorner
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        // A faint UNIFORM hairline around the whole card: gives every edge the same crisp
-        // highlight so Liquid Glass's brighter top-edge sheen doesn't read as one edge being
-        // lighter than the others.
+        // Uniform hairline so Liquid Glass's brighter top-edge sheen doesn't look one-sided.
         let hairline = shape.strokeBorder(.white.opacity(0.08))
         if #available(macOS 26, *) {
             content.glassEffect(.regular, in: shape).overlay(hairline)
@@ -58,20 +33,13 @@ private struct GlassBackground: ViewModifier {
     }
 }
 
-/// Full-bleed glass for a window: a continuous Liquid-Glass slab BEHIND the content, plus a
-/// frosted TITLE-BAR strip OVERLAY in FRONT of it (so content scrolling under the strip is
-/// blurred — the glass-toolbar look). The window itself supplies the outer rounding (see
-/// `glassWindow`), so both layers fill edge-to-edge and ignore safe area.
+/// Full-bleed window glass + frosted title-bar strip in front (content scrolling under blurs).
 private struct WindowGlassBackground: ViewModifier {
-    /// The live state wash for the TITLE-BAR strip (narrating = purple, dictating = orange,
-    /// clear when idle) and its measured height. The wash is a flat color fill — NOT a glass
-    /// tint — so it shows whether or not the window is key (a material tint follows the
-    /// window's active state and washes out when unfocused). `topHeight == 0` ⇒ no strip.
+    /// Flat color fill for the strip (not a material tint — those wash out when unfocused).
     var topTint: Color = .clear
     var topHeight: CGFloat = 0
     func body(content: Content) -> some View {
         content
-            // The frosted Liquid-Glass slab (untinted) BEHIND the content, filling the window.
             .background {
                 if #available(macOS 26, *) {
                     Rectangle().fill(.clear).glassEffect(.regular, in: Rectangle())
@@ -79,11 +47,6 @@ private struct WindowGlassBackground: ViewModifier {
                     Rectangle().fill(.ultraThinMaterial)
                 }
             }
-            // The TITLE-BAR strip, IN FRONT of the content: a frosted band so content
-            // scrolling up UNDER it is BLURRED (the glass-toolbar look). The state tint
-            // (purple narrating / orange dictating) washes over the frost. Pinned to the top,
-            // sized to the title-bar height, hit-test-transparent so it never blocks content
-            // or the system traffic-light buttons.
             .overlay(alignment: .top) {
                 ZStack {
                     if #available(macOS 26, *) {
@@ -104,34 +67,24 @@ private struct WindowGlassBackground: ViewModifier {
 }
 
 extension View {
-    /// Floating-shape glass (the dictation overlay).
     func glassBackground(cornerRadius: CGFloat = Glass.panelCorner) -> some View {
         modifier(GlassBackground(cornerRadius: cornerRadius))
     }
 
-    /// The window-filling glass slab (Status / Tools windows). Pair with `.glassWindow()`
-    /// (in WindowHelpers) so the host `NSWindow` is itself clear and only this shows.
+    /// Pair with `.glassWindow()` so the host NSWindow is clear.
     func windowGlass(topTint: Color = .clear, topHeight: CGFloat = 0) -> some View {
         modifier(WindowGlassBackground(topTint: topTint, topHeight: topHeight))
     }
 
-    /// The content inset shared by the Status and Tools windows — `Glass.windowInset` on the
-    /// sides and bottom, `Glass.windowTopInset` (half) below the traffic-light bar, since the
-    /// system title-bar safe area already supplies most of the top clearance. Do NOT
-    /// `.ignoresSafeArea()` on the content: the system reserves the hidden title-bar height,
-    /// so the first platter clears the traffic lights while the glass slab (`windowGlass`)
-    /// still fills edge-to-edge behind the bar. Respecting the safe area also keeps the
-    /// content-min size honest, so a resizable window wraps its content with no phantom
-    /// bottom gap.
+    /// Shared Status/Tools inset. Do NOT `.ignoresSafeArea()` on content — system title-bar
+    /// height keeps the first platter clear of traffic lights; glass slab still fills behind.
+    /// Honest content-min size → resizable window wraps with no phantom bottom gap.
     func windowContentInset() -> some View {
         padding(.top, Glass.windowTopInset)
             .padding([.horizontal, .bottom], Glass.windowInset)
     }
 
-    /// A translucent "platter" surface for a group of rows: a frosted MATERIAL card (not
-    /// opaque) with a hairline edge, clipped to a rounded rect. Material — not a second
-    /// glass layer — keeps text legible on the platter and avoids glass-on-glass muddiness
-    /// over the window slab; it's the readable secondary surface the HUD pattern calls for.
+    /// Material platter (not a second glass layer) — keeps text legible on the window slab.
     func platterBackground(cornerRadius: CGFloat = Glass.platterCorner) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         return
@@ -141,16 +94,12 @@ extension View {
             .overlay(shape.strokeBorder(.separator.opacity(0.6), lineWidth: 0.5))
     }
 
-    /// Consistent insets for one row inside a platter (replaces the grouped-Form row insets).
     func platterRow() -> some View {
         padding(.horizontal, 14).padding(.vertical, 9)
     }
 }
 
-/// A grouped "platter": an OPTIONAL header label rendered above the surface (standard
-/// grouped-list style, on the bare window glass), then the rows on a translucent material
-/// card. Status and Tools use headerless platters. The caller stacks rows inside with
-/// `Divider()`s between them (none after the last).
+/// Optional header above a material card. Status/Tools use headerless platters.
 struct Platter<Content: View>: View {
     var header: String? = nil
     var cornerRadius: CGFloat = Glass.platterCorner
@@ -169,26 +118,18 @@ struct Platter<Content: View>: View {
     }
 }
 
-/// A hairline divider between rows inside a platter — inset so it doesn't touch the
-/// rounded corners. Use BETWEEN rows, never after the last.
+/// Inset hairline between platter rows (not after the last).
 struct PlatterDivider: View {
     var body: some View {
         Divider().padding(.leading, 14)
     }
 }
 
-/// Toggle an expand/collapse `@State` with the standard platter-row animation curve, so every
-/// expandable row (Status pane's EngineStatRow/DontSpeakRow/CapsLockRow, and DisclosureRow below)
-/// animates the same way from one place.
 func expandToggle(_ expanded: Binding<Bool>) {
     withAnimation(Glass.expandAnimation) { expanded.wrappedValue.toggle() }
 }
 
-/// A collapsible platter row: a tappable header (the caller's `header`, plus a trailing
-/// rotating chevron) that reveals `content` when expanded. The open set is owned by the
-/// caller and keyed by `id`, so a whole list of these shares ONE `@State` and the disclosure
-/// look + animation live in one place — shared by the Tools and Libraries panes so they can't
-/// drift.
+/// Collapsible platter row; open set owned by caller keyed by `id` (Tools + Libraries share look).
 struct DisclosureRow<Header: View, Content: View>: View {
     @Binding var expanded: Set<String>
     let id: String
@@ -226,9 +167,7 @@ struct DisclosureRow<Header: View, Content: View>: View {
     }
 }
 
-/// Spreads a `LabeledContent`'s label to the leading edge and its value to the trailing
-/// edge — the look `Form` gives for free, which we lose once detail rows live in a plain
-/// VStack on a platter. Apply `.labeledContentStyle(.spread)` to a container of rows.
+/// Spread label leading / value trailing — Form's free layout lost when rows sit in a VStack.
 struct SpreadLabeledContentStyle: LabeledContentStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 8) {
@@ -243,35 +182,21 @@ extension LabeledContentStyle where Self == SpreadLabeledContentStyle {
     static var spread: SpreadLabeledContentStyle { .init() }
 }
 
-// MARK: - Semantic typography
-//
-// The glass panels use exactly four text roles. Naming them here (instead of spelling
-// `.font(...) + .foregroundStyle(...)` inline at each call site) keeps the hierarchy
-// consistent and in ONE place — the same single-source-of-truth approach as the colors
-// and the glass surfaces. All map to Apple's relative text styles, so they track Dynamic
-// Type / the system text size rather than hard-coding points.
+// MARK: - Semantic typography (relative styles — track Dynamic Type)
+
 extension View {
-    /// A platter's group heading. Secondary + semibold subheadline
-    /// — the grouped-list convention: quieter and smaller than the body-sized row TITLES it
-    /// groups, so it reads as a label for the card rather than competing with its rows.
     func glassSectionHeader() -> some View {
         font(.subheadline).fontWeight(.semibold).foregroundStyle(.secondary)
     }
 
-    /// A primary row title (engine name, role, permission name, tool name). The default body
-    /// style, stated explicitly so the role is obvious at the call site.
     func glassRowTitle() -> some View {
         font(.body)
     }
 
-    /// An inline secondary qualifier sitting beside a title or value — the concrete
-    /// backend/model ("ONNX", "Kokoro"), the "all-time" tag, a min–max range, a duration.
-    /// Subheadline + secondary so it recedes behind the primary text it annotates.
     func glassRowDetail() -> some View {
         font(.subheadline).foregroundStyle(.secondary)
     }
 
-    /// A caption / hint / explanatory sub-line (empty-state hints, a permission's purpose).
     func glassCaption() -> some View {
         font(.caption).foregroundStyle(.secondary)
     }

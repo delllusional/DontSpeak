@@ -1,17 +1,5 @@
-//  LogView.swift
-//
-//  The Log tab: a read-only tail of the COMBINED activity log (the unified log + every
-//  sibling auxiliary log), read via the FFI (ds_logs_json → the shared ds-config combined-log
-//  reader) — the SAME file the engine writes, so it can't drift from what actually happened.
-//  LIVE while the tab is open — driven by `LogFeed`, a dedicated background thread blocking in
-//  `ds_logs_wait` (an fs watch, not a poll timer), started on appear and stopped on disappear.
-//  A top filter bar narrows lines live; below it the color-coded (per-source + ERROR/WARN),
-//  selectable, wrapped log scrolls. The trash button next to the filter erases the on-disk log
-//  (ds_logs_clear) after a confirm.
-//
-//  The ordering + filter rules are the pure `LogCatalog` (in DontSpeakLogic, unit-tested); the
-//  colors are the shared `Brand.logSourcePalette` / `Brand.logLevelColor`. This view only
-//  wires the FFI read to that logic and renders it.
+// Combined activity log via `ds_logs_json` / `LogFeed` (`ds_logs_wait`). Filter + source
+// order: pure `LogCatalog`; colors: shared `Brand.logSourcePalette` / `logLevelColor`.
 
 import AppKit
 import DontSpeakLogic
@@ -27,13 +15,7 @@ struct LogView: View {
     }
 
     var body: some View {
-        // The Logs pane of the merged sidebar window — a filter bar over a scrollable colored
-        // log on one platter. The glass slab + traffic-light strip live on `MainWindow`.
         VStack(spacing: 10) {
-            // The live filter field — a glass-styled search field (magnifier glyph, no
-            // placeholder); see `SearchField`. A native NSSearchField / `.roundedBorder` drew an
-            // opaque white box that clashed with the glass. The trash button erases the on-disk
-            // log via `ds_logs_clear` — destructive, so it confirms first (macOS HIG).
             HStack(spacing: 8) {
                 SearchField(text: $filter)
                 Button {
@@ -75,17 +57,14 @@ struct LogView: View {
 
     @ViewBuilder
     private var logBody: some View {
-        // Run the filter ONCE per render and reuse it (it was previously read twice — for the
-        // emptiness check and the ForEach — re-filtering every line twice per keystroke).
+        // Filter once per render (emptiness check + ForEach).
         let result = shown
         if result.isEmpty {
-            // Distinguish "nothing logged yet" from "filter matched nothing", like Windows.
             Text(L.t(feed.lines.isEmpty ? "logs.empty" : "logs.no_match"))
                 .glassCaption()
         } else {
             LazyVStack(alignment: .leading, spacing: 2) {
-                // id = the line's index in the UNFILTERED load (stable while typing in the
-                // filter box), not its offset in the filtered slice.
+                // Unfiltered index = stable row id while the filter box is typed.
                 ForEach(result, id: \.index) { row in
                     lineText(row.line)
                 }
@@ -94,9 +73,7 @@ struct LogView: View {
         }
     }
 
-    /// One rendered log line: the source tag (its stable palette color, semibold) + the level
-    /// token when it isn't the ordinary INFO + the message (ERROR/WARN tint the message; INFO
-    /// keeps the default text color). Mirrors the Windows `RenderLogLines`.
+    /// Source tag (palette color) + non-INFO level + message (ERROR/WARN tint). Mirrors Windows.
     private func lineText(_ line: LogLine) -> Text {
         let levelColor = Brand.logLevelColor(line.level).map { Color(nsColor: $0) }
         var t = Text(line.source).fontWeight(.semibold)
@@ -105,7 +82,6 @@ struct LogView: View {
         if !line.level.isEmpty, line.level != "INFO" {
             t = t + Text(line.level + " ").foregroundStyle(levelColor ?? .secondary)
         }
-        // ERROR/WARN tint the message; INFO/unknown keeps the default text color.
         if let levelColor {
             t = t + Text(line.text).foregroundStyle(levelColor)
         } else {
@@ -114,8 +90,6 @@ struct LogView: View {
         return t
     }
 
-    /// The stable per-source color: the shared palette indexed by the source's first-appearance
-    /// position. Empty source or an empty palette ⇒ the secondary text color.
     private func sourceColor(_ source: String) -> Color {
         let palette = Brand.logSourcePalette
         guard !source.isEmpty, !palette.isEmpty,
@@ -125,11 +99,7 @@ struct LogView: View {
     }
 }
 
-/// The Logs filter field. A native `NSSearchField` draws an OPAQUE white bezel (it matches
-/// system chrome, not our glass), so it stood out as a white box on the panel. Instead we style
-/// our own: a plain `TextField` + magnifier glyph on the SAME glass surface as the window slab /
-/// sidebar (`glassBackground`), so it reads as lighter than — and distinct from — the
-/// `platterBackground` log card below it. Empty by design — no placeholder string.
+/// Custom search field: native NSSearchField draws an opaque white bezel that clashes with glass.
 private struct SearchField: View {
     @Binding var text: String
     var body: some View {
@@ -137,11 +107,11 @@ private struct SearchField: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
             TextField("", text: $text)
-                .textFieldStyle(.plain)  // no opaque bezel / focus box — just the glyph + text
+                .textFieldStyle(.plain)
         }
-        .font(.body)  // standard control text size
+        .font(.body)
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)  // ≈ the system's standard single-line control height
-        .glassBackground(cornerRadius: 8)  // the glass slab look of the left sidebar, not the card material
+        .padding(.vertical, 7)
+        .glassBackground(cornerRadius: 8)
     }
 }

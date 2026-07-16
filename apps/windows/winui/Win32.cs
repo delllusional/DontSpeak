@@ -3,13 +3,11 @@ using System.Runtime.InteropServices;
 
 namespace DontSpeak;
 
-// Shared Win32 interop for the hand-rolled UI pieces (DictationPanel, TrayIcon):
-// the window-class registration, DC, and DIB-section P/Invokes + their structs that were
-// otherwise duplicated in each file. Component-specific imports still live with their
-// component. Pull these in with `using static DontSpeak.Win32;`.
+// Shared Win32 interop for DictationPanel / TrayIcon (window class, DC, DIB). Component-specific
+// imports stay with their owners. `using static DontSpeak.Win32;`.
 
-/// <summary>WndProc signature for the hand-rolled Win32 windows (the layered overlay + the
-/// tray's owner window). Held in a field by each owner so the GC can't collect the thunk.</summary>
+/// <summary>WndProc for hand-rolled Win32 windows. Owners keep a field ref so the GC can't
+/// collect the thunk.</summary>
 internal delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -103,10 +101,8 @@ internal static class Win32
     [DllImport("user32.dll")]
     internal static extern int GetSystemMetrics(int index);
 
-    // Set this process's explicit AppUserModelID so the taskbar AND Task Manager group the app
-    // under its real identity (paired with the Start-menu shortcut's matching AppUserModelID,
-    // which maps this id -> the shortcut name "DontSpeak"). Without it Windows falls back to the
-    // exe base name ("ds-winui") for the group label. Must be called at startup before any UI.
+    // AppUserModelID so taskbar + Task Manager group as "DontSpeak" (paired with the Start-menu
+    // shortcut). Without it Windows labels the group "ds-winui". Call before any UI.
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
     internal static extern int SetCurrentProcessExplicitAppUserModelID(
         [MarshalAs(UnmanagedType.LPWStr)] string appID);

@@ -1,18 +1,14 @@
-//! The health panel — an `AdwApplicationWindow` of `AdwPreferencesGroup` rows showing the
-//! engine's live state, the GTK4/libadwaita analogue of the macOS `StatusView` / Windows
-//! `MainWindow` status tab. Control lives in the MCP, so this is read-only; it just renders
-//! the pushed [`Snapshot`].
+//! Health panel — `AdwApplicationWindow` of preference rows for live engine state (GTK4
+//! analogue of macOS `StatusView` / Windows status tab). Read-only; control is MCP.
 //!
-//! Strings come ONLY from the shared `ds-i18n` catalog via [`crate::ffi::t`] (the same
-//! keys the Swift/C# hosts use) — no Linux-local text. State is shown as colored dots (the
-//! libadwaita semantic style classes), exactly like the macOS/Windows hosts, never as words.
+//! Strings only from shared `ds-i18n` via [`crate::ffi::t`]. State as colored dots (libadwaita
+//! semantic classes), never words — same as the other hosts.
 
 use adw::prelude::*;
 use ds_status::{EngineObj, EngineState, ModelStatus};
 
 use crate::status::Snapshot;
 
-/// Shorthand for a shared-catalog lookup (the same keys macOS/Windows bind).
 fn t(key: &str) -> String {
     crate::ffi::t(key)
 }
@@ -23,7 +19,6 @@ pub struct Widgets {
     pub window: adw::ApplicationWindow,
     /// Engine headline dot (green running / gray idle).
     engine: gtk::Image,
-    /// TTS expander — subtitle = engine name, suffix dot = lifecycle; expands to the stat rows.
     tts_row: adw::ExpanderRow,
     tts_dot: gtk::Image,
     tts_runtime: gtk::Label,
@@ -32,7 +27,6 @@ pub struct Widgets {
     tts_spoken: gtk::Label,
     tts_failures: gtk::Label,
     tts_failures_row: adw::ActionRow,
-    /// STT expander + its stat rows.
     stt_row: adw::ExpanderRow,
     stt_dot: gtk::Image,
     stt_runtime: gtk::Label,
@@ -40,19 +34,16 @@ pub struct Widgets {
     stt_transcribed: gtk::Label,
     stt_failures: gtk::Label,
     stt_failures_row: adw::ActionRow,
-    /// Caps Lock state dot (green active / orange enabled-idle / gray off).
+    /// Caps Lock: green active / orange enabled-idle / gray off.
     caps_dot: gtk::Image,
-    /// Lifetime totals revealed under the headline (TTS / STT all-time durations).
     spoken: gtk::Label,
     heard: gtk::Label,
-    /// The headline row's version subtitle — the SAME `GtkLabel` `make_version_link` wires its
-    /// homepage click to. [`apply_update_check`] rewrites its text to "current → new" and tints
-    /// its background once the one-shot startup check confirms a newer release, so old+new sit
-    /// on one shared pill rather than a separate adjacent badge.
+    /// Headline version subtitle — same `GtkLabel` [`make_version_link`] wires for homepage
+    /// click. [`apply_update_check`] rewrites text to "current → new" and tints background
+    /// in place (one shared pill, not a separate badge).
     version_subtitle: gtk::Label,
 }
 
-/// Build the health window (hidden until presented). Returns the window + the value handles.
 pub fn build_window(app: &adw::Application) -> Widgets {
     let app_name = {
         let n = t("common.app_name");
@@ -71,10 +62,8 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         .build();
 
     let header = adw::HeaderBar::new();
-    // Show ONLY the close button. The documented GTK way is the header bar's decoration-layout
-    // (button names split into left`:`right; recognized: minimize, maximize, close, icon, menu),
-    // not CSS-hiding individual buttons — ":close" = nothing on the left, close on the right.
-    // The window lives in the tray, so its close request just hides it (see main.rs).
+    // Close only: decoration-layout left`:`right (not CSS-hiding buttons). ":close" = nothing
+    // left, close right. Window lives in the tray; close just hides it (main.rs).
     header.set_decoration_layout(Some(":close"));
 
     let content = gtk::Box::builder()
@@ -86,8 +75,7 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         .margin_end(18)
         .build();
 
-    // ── Headline: app name + version, expandable to the lifetime totals; the dot is the only
-    //    state indicator. Mirrors the macOS expandable engine row (StatusView.swift). ────────
+    // Headline: name + version, expandable lifetime totals; dot is the only state indicator.
     let engine_group = adw::PreferencesGroup::new();
     let version = crate::ffi::version();
     let status_row = adw::ExpanderRow::builder()
@@ -95,12 +83,8 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         .subtitle(version.as_str())
         .build();
     let engine = expander_indicator(&status_row);
-    // The version subtitle keeps opening the homepage (unchanged, same GtkLabel/click handler
-    // as before this feature) — apply_update_check later rewrites ITS text + background in
-    // place for "current → new", rather than adding a separate suffix widget.
     let version_subtitle = make_version_link(&status_row, &crate::ffi::homepage_url());
 
-    // Lifetime totals — "TTS all-time" / "STT all-time" (role + lifetime keys), revealed on expand.
     let tts_life = format!(
         "{} {}",
         t("status.engine.role_tts"),
@@ -119,9 +103,7 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     engine_group.add(&status_row);
     content.append(&engine_group);
 
-    // ── TTS / STT engine rows: role label + engine-name subtitle + lifecycle dot; expand to
-    //    the same detail the macOS/Windows hosts show (runtime, realtime, first-audio, count,
-    //    failures), built from the shared `status_fmt` formatters + shared stat snapshots. ────
+    // TTS/STT: role + engine-name subtitle + lifecycle dot; expand for shared status_fmt stats.
     let voice_group = adw::PreferencesGroup::new();
 
     let tts_row = adw::ExpanderRow::builder()
@@ -163,8 +145,7 @@ pub fn build_window(app: &adw::Application) -> Widgets {
 
     content.append(&voice_group);
 
-    // ── Caps Lock — pinned to the very bottom; a dot that expands to a brief tap/hold
-    //    reference (mirrors the macOS + Windows Caps Lock row). ────────────────────────────────
+    // Caps Lock at bottom; expands to tap/hold hint (peer parity).
     let caps_group = adw::PreferencesGroup::new();
     let caps_row = adw::ExpanderRow::builder()
         .title(t("status.caps_lock").as_str())
@@ -173,15 +154,13 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     let caps_hint = adw::ActionRow::builder()
         .title(t("status.caps_hint").as_str())
         .build();
-    caps_hint.set_title_lines(0); // wrap the full hint instead of ellipsizing
+    caps_hint.set_title_lines(0); // wrap full hint instead of ellipsizing
     caps_row.add_row(&caps_hint);
     caps_group.add(&caps_row);
     content.append(&caps_group);
 
-    // ── Four views: Status (this panel) / Tools / Log / Credits — an AdwViewStack driven by an
-    //    AdwInlineViewSwitcher (libadwaita 1.7's segmented switcher), the GNOME idiom for a
-    //    handful of top-level pages (HIG: 3–5 views). The switcher sits centered in the header.
-    //    Order matches the macOS + Windows tabs: Log sits before Credits. ─
+    // Status / Tools / Log / Credits — AdwViewStack + InlineViewSwitcher (HIG 3–5 views).
+    // Order matches macOS/Windows (Log before Credits).
     let stack = adw::ViewStack::new();
     stack.add_titled(&scrolled(&content), Some("status"), &t("common.nav_status"));
     stack.add_titled(
@@ -189,9 +168,6 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         Some("tools"),
         &t("common.nav_tools"),
     );
-    // Log view — a read-only tail of the unified activity log (mirrors the Windows Log tab),
-    // topped with a trash button that erases the on-disk log (mirrors macOS/Windows) behind an
-    // AdwAlertDialog confirmation (the GNOME HIG destructive-action pattern).
     let (log_scroll, log_view) = build_log_page();
     let log_clear_button = gtk::Button::builder()
         .icon_name("user-trash-symbolic")
@@ -215,11 +191,8 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         Some("credits"),
         &t("common.nav_credits"),
     );
-    // Live-update the Log page while it's the visible tab: an fs-watch push (`log_push`), not
-    // a poll timer — started when the tab is shown, stopped when it's left, since pushing logs
-    // into a closed tab is pure waste. `log_push_stop` holds the current push's stop-handle (if
-    // any is running); `Rc<RefCell<...>>` because GTK/glib closures are single-threaded/`Rc`-based
-    // even though the spawned push thread itself is a real OS thread.
+    // Live log only while the tab is visible (`log_push`); stop when leaving.
+    // `Rc<RefCell>` for GTK closures; the push itself is a real OS thread.
     let log_push_stop: std::rc::Rc<
         std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     > = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -246,7 +219,6 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     {
         let window = window.clone();
         log_clear_button.connect_clicked(move |_| {
-            // Title-only (no separate body) — one line, no redundant restatement.
             let dialog = adw::AlertDialog::builder()
                 .heading(t("logs.clear_confirm_title"))
                 .default_response("cancel")
@@ -255,11 +227,11 @@ pub fn build_window(app: &adw::Application) -> Widgets {
             dialog.add_response("cancel", &t("common.cancel"));
             dialog.add_response("clear", &t("logs.clear_confirm_action"));
             dialog.set_response_appearance("clear", adw::ResponseAppearance::Destructive);
-            // AdwAlertDialog closes itself automatically once a response is activated.
+            // AdwAlertDialog closes itself once a response is activated.
             dialog.connect_response(None, move |_dialog, response| {
                 if response == "clear" {
-                    // File removal can block on a busy log handle. Keep it off GTK's main loop;
-                    // the active log-push watcher publishes the resulting empty tail.
+                    // File removal can block — keep it off the GTK main loop; log-push
+                    // publishes the resulting empty tail.
                     let _ = std::thread::Builder::new()
                         .name("ds-logs-clear".into())
                         .spawn(crate::ffi::logs_clear);
@@ -308,7 +280,7 @@ pub fn build_window(app: &adw::Application) -> Widgets {
 /// Apply a status push to the panel.
 pub fn update(w: &Widgets, snap: &Snapshot) {
     let Some(s) = &snap.status else {
-        // Engine down: every dot idle, names cleared, all stats dashed, failures hidden.
+        // Engine down: idle dots, cleared names, dashed stats, failures hidden.
         let dash = t("common.dash");
         for dot in [&w.engine, &w.tts_dot, &w.stt_dot, &w.caps_dot] {
             set_dot(dot, "idle");
@@ -333,11 +305,8 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         return;
     };
 
-    // Headline dot: green while the engine is up.
     set_dot(&w.engine, "running");
 
-    // TTS row: engine name + lifecycle dot; the expanded stat detail (runtime/realtime/
-    // first-audio/spoken/failures) from the shared formatters + shared TtsSnapshot.
     let (tts_name, tts_state, tts_o) = match tts_engine(s) {
         Some((name, state, obj)) => (name, state, Some(obj)),
         None => (String::new(), "idle", None),
@@ -366,7 +335,6 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         .set_text(&crate::ffi::stats_count(tts.utterances, tts.audio_secs));
     set_failures(&w.tts_failures_row, &w.tts_failures, tts.failures);
 
-    // STT row: engine name + lifecycle dot; the expanded stat detail.
     let (stt_name, stt_state, stt_o) = match stt_engine(s) {
         Some((name, state, obj)) => (name, state, Some(obj)),
         None => (String::new(), "idle", None),
@@ -392,7 +360,6 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         .set_text(&crate::ffi::stats_count(stt.transcriptions, stt.audio_secs));
     set_failures(&w.stt_failures_row, &w.stt_failures, stt.failures);
 
-    // Caps Lock dot: active → green, armed-but-idle → orange, off → gray.
     set_dot(
         &w.caps_dot,
         if s.running.caps {
@@ -404,15 +371,13 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         },
     );
 
-    // Lifetime totals.
     w.spoken
         .set_text(&crate::ffi::duration_live(s.stats.lifetime.tts_secs as f64));
     w.heard
         .set_text(&crate::ffi::duration_live(s.stats.lifetime.stt_secs as f64));
 }
 
-/// The runtime row value: the shared `runtime_label` for the resolved provider token, or the
-/// dash when the engine has no ORT runtime (system / off / claude_code → `tts_provider` null).
+/// Shared `runtime_label` for the provider token, or dash when null (system/off/claude_code).
 fn runtime_text(provider: Option<&str>) -> String {
     match provider {
         Some(p) if !p.is_empty() => crate::ffi::runtime_label(p),
@@ -420,7 +385,7 @@ fn runtime_text(provider: Option<&str>) -> String {
     }
 }
 
-/// Show the failures row (red count) only when there were failures — matching macOS/Windows.
+/// Failures row only when count > 0 (macOS/Windows parity).
 fn set_failures(row: &adw::ActionRow, label: &gtk::Label, failures: u64) {
     if failures > 0 {
         label.set_text(&failures.to_string());
@@ -430,10 +395,7 @@ fn set_failures(row: &adw::ActionRow, label: &gtk::Label, failures: u64) {
     }
 }
 
-/// The selected TTS engine → (display name from a shared key, lifecycle `state` token, its
-/// `EngineObj`). `built_in` is the Kokoro model; `system` is the OS voice; `off`/unknown → None
-/// (row shows nothing + idle dot). ONE lookup shared by the row-subtitle and detail-panel code,
-/// so a new engine tag is wired in exactly one place.
+/// Selected TTS → (display name, lifecycle token, `EngineObj`). One lookup for subtitle + detail.
 fn tts_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
     match s.tts_engine.as_str() {
         "built_in" => Some((
@@ -450,9 +412,7 @@ fn tts_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
     }
 }
 
-/// The selected STT engine → (display name from a shared key, lifecycle `state` token, its
-/// `EngineObj`). `built_in` is the Parakeet model; `claude_code` delegates; `system` is the OS
-/// recognizer; unknown → None. ONE lookup shared by the row-subtitle and detail-panel code.
+/// Selected STT → (display name, lifecycle token, `EngineObj`). One lookup for subtitle + detail.
 fn stt_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
     match s.stt_engine.as_str() {
         "built_in" => Some((
@@ -474,18 +434,15 @@ fn stt_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
     }
 }
 
-/// Append the engine's lifecycle NOTE to its name when not ready ("Kokoro · Downloading 45%"),
-/// or an `extra` qualifier (the Claude-Code key hint) when ready — the subtitle analogue of the
-/// macOS/Windows "state word / delegation" detail. Empty name → just the note.
+/// Name + lifecycle note when not ready ("Kokoro · Downloading 45%"), or `extra` when ready.
 fn engine_subtitle(
     name: &str,
     state: &str,
     obj: Option<&EngineObj>,
     extra: Option<String>,
 ) -> String {
-    // The SHARED state-word formatter returns "" for the ready states (running/idle) and the
-    // localized note ("Downloading 45%", "Starting…", …) for the not-ready ones — so its emptiness
-    // IS the note-vs-ready gate, the SAME one macOS/Windows use. No local "is trouble" list to drift.
+    // Shared state-word returns "" for ready states — that emptiness IS the note-vs-ready
+    // gate (same as macOS/Windows). No local "is trouble" list to drift.
     let (prog, why) = obj
         .map(|o| (o.progress, o.error.as_deref().unwrap_or("")))
         .unwrap_or((0.0, ""));
@@ -504,8 +461,7 @@ fn engine_subtitle(
     }
 }
 
-/// Claude Code STT delegates (no local transcription), so name the key it sends — mirrors the
-/// macOS/Windows delegation hint.
+/// Claude Code STT has no local transcription — name the key it sends (peer delegation hint).
 fn claude_hint(s: &ModelStatus) -> Option<String> {
     if s.stt_engine != "claude_code" {
         return None;
@@ -516,7 +472,6 @@ fn claude_hint(s: &ModelStatus) -> Option<String> {
     })
 }
 
-/// A right-aligned, dimmed value label, primed with the shared dash placeholder.
 fn value_label() -> gtk::Label {
     let dash = t("common.dash");
     let l = gtk::Label::new(Some(dash.as_str()));
@@ -525,9 +480,8 @@ fn value_label() -> gtk::Label {
     l
 }
 
-/// Walks a widget's descendants for the first one carrying `class` — used to reach into an
-/// `AdwExpanderRow`/`AdwActionRow`'s internal template widgets (its disclosure arrow, its
-/// subtitle label, …), which aren't otherwise exposed.
+/// First descendant with `class` — reaches into AdwExpanderRow/ActionRow template widgets
+/// (disclosure arrow, subtitle label) that aren't otherwise exposed.
 fn find_by_css_class(w: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
     if w.has_css_class(class) {
         return Some(w.clone());
@@ -542,19 +496,9 @@ fn find_by_css_class(w: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
     None
 }
 
-/// Makes the headline row's version subtitle open the product homepage (dontspeak.org) — the
-/// shared URL from the Rust core (`ds_homepage_url`), same as the macOS/Windows hosts — leaving
-/// its look untouched: `AdwExpanderRow`'s subtitle is plain text with no click handling of its
-/// own, so rather than swap it for a styled link, this reaches into the row's internal template
-/// for the subtitle `GtkLabel` itself (via [`find_by_css_class`]) and adds the standard "pointer"
-/// cursor plus a `GtkGestureClick` claimed on *press* — the row's own tap-to-expand gesture fires
-/// on press too, so claiming any later (e.g. on release) would be too late to stop it. Mirrors the
-/// Windows `CursorHyperlinkButton` / macOS `linkCursor` pairing, minus any style change.
-///
-/// Returns the subtitle `GtkLabel` itself (falling back to a standalone, unparented one on the
-/// — practically never hit — case the row has no "subtitle"-classed child) so
-/// [`apply_update_check`] can later rewrite its text/background in place for "current → new",
-/// rather than adding a second, separate widget next to it.
+/// Wire homepage click on the headline version subtitle without restyling it. Claims
+/// `GestureClick` on *press* so the row's expand gesture (also press) loses; claiming on
+/// release is too late. Returns the subtitle `GtkLabel` for [`apply_update_check`].
 fn make_version_link(row: &adw::ExpanderRow, url: &str) -> gtk::Label {
     let subtitle = find_by_css_class(row.upcast_ref::<gtk::Widget>(), "subtitle")
         .and_then(|w| w.downcast::<gtk::Label>().ok())
@@ -576,16 +520,9 @@ fn make_version_link(row: &adw::ExpanderRow, url: &str) -> gtk::Label {
     subtitle
 }
 
-/// Load the `.ds-update-badge` pill styling — background + rounding ONLY, tinted with the
-/// shared brand-purple RGB, parsed by the SAME [`crate::icon::brand_colors`] the tray icon
-/// already uses (never a second hardcoded `#5B4397`), built as a runtime CSS string (per-pixel
-/// color, not a static stylesheet) since the RGB is only known at runtime via
-/// `ds_brand_colors_json`. Deliberately does NOT set `color`/`font-*`: applied to the version
-/// subtitle label itself (see [`apply_update_check`]), it must keep that label's existing text
-/// styling — only the background changes, so "current → new" reads exactly like the plain
-/// version did, just on a pale purple pill. Called once at startup (`main.rs`), independent of
-/// the (separately dispatched, network-touching) update check itself — the color source is
-/// local, no network round trip needed to load it.
+/// `.ds-update-badge` background only — brand purple from [`crate::icon::brand_colors`]
+/// (never a second hardcoded hex). Does NOT set `color`/`font-*` so the version subtitle
+/// keeps its text styling. Local color source; safe at startup independent of the network check.
 pub fn load_update_badge_css() {
     let (crate::icon::Rgb(r, g, b), _mic_orange) =
         crate::icon::brand_colors(&crate::ffi::brand_colors_json());
@@ -607,13 +544,9 @@ pub fn load_update_badge_css() {
     }
 }
 
-/// Apply the one-shot startup update-check result (`main.rs`'s background dispatch of
-/// `ds_update_check_json`). A `{}` payload, a missing/false `update_available` key, or a missing
-/// `latest_version` — ANY failure: offline, rate-limited, malformed — is treated as "no update,
-/// stay as the plain version", per the FFI contract; this never shows a pill on doubt. Rewrites
-/// the EXISTING version subtitle label in place to "current → new" and tints its background —
-/// no new widget, no new click target (no GitHub Releases link yet — that's a follow-up, not
-/// part of this change); the subtitle's own homepage click (`make_version_link`) is unchanged.
+/// One-shot startup update result. `{}` / missing-or-false `update_available` / missing
+/// `latest_version` → leave plain version (never show a pill on doubt). Rewrites the existing
+/// subtitle in place to "current → new" + badge class; homepage click unchanged.
 pub fn apply_update_check(w: &Widgets, json: &str) {
     let v: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
     let available = v
@@ -633,22 +566,18 @@ pub fn apply_update_check(w: &Widgets, json: &str) {
     w.version_subtitle.add_css_class("ds-update-badge");
     w.version_subtitle
         .set_tooltip_text(Some(&t("status.update_available")));
-    // AdwActionRow's subtitle label is hexpand/halign-fill by default so it lines up with the
-    // title above it; left alone, the badge background paints across the whole row instead of
-    // hugging just the "current → new" text. Shrink-wrap it to its natural width for the badge.
+    // Subtitle is hexpand/halign-fill by default; shrink-wrap so the badge hugs the text.
     w.version_subtitle.set_hexpand(false);
     w.version_subtitle.set_halign(gtk::Align::Start);
 }
 
-/// An `AdwActionRow` with `title` and any widget (a value label or a status dot) as suffix.
 fn action_row(title: &str, value: &impl IsA<gtk::Widget>) -> adw::ActionRow {
     let row = adw::ActionRow::builder().title(title).build();
     row.add_suffix(value);
     row
 }
 
-/// A status dot — a symbolic filled circle recolored by a libadwaita semantic style class.
-/// Created idle (dimmed); [`set_dot`] switches the class per state.
+/// Symbolic filled circle; recolored by libadwaita semantic class via [`set_dot`].
 fn status_dot() -> gtk::Image {
     let dot = gtk::Image::from_icon_name("media-record-symbolic");
     dot.set_pixel_size(12);
@@ -657,21 +586,15 @@ fn status_dot() -> gtk::Image {
     dot
 }
 
-/// Hide an `AdwExpanderRow`'s built-in disclosure arrow (the symbolic `expander-row-arrow`
-/// image) by walking the template tree and dropping it from layout with `set_visible(false)` —
-/// unlike CSS `opacity`, this also frees the ~16px slot it reserves, so a trailing suffix sits
-/// flush at the row's edge (keeping the status dots aligned with the non-expander rows).
+/// Hide expander-row disclosure arrow with `set_visible(false)` (not CSS opacity) so the ~16px
+/// slot frees and trailing suffixes sit flush — dots align with non-expander rows.
 fn hide_expander_arrow(row: &adw::ExpanderRow) {
     if let Some(arrow) = find_by_css_class(row.upcast_ref::<gtk::Widget>(), "expander-row-arrow") {
         arrow.set_visible(false);
     }
 }
 
-/// The right-side indicator for an expandable status row: the shared [`status_dot`] while the
-/// row is collapsed, a chevron once it's expanded (the dot "turns into" the chevron, occupying
-/// the same slot). The row's native expander arrow is hidden, so a bare dot is the only thing
-/// on the right until you open the row. Returns the dot `Image` so the caller can keep
-/// recoloring it with [`set_dot`].
+/// Collapsed: status dot; expanded: chevron in the same slot (native arrow hidden).
 fn expander_indicator(row: &adw::ExpanderRow) -> gtk::Image {
     hide_expander_arrow(row);
     let dot = status_dot();
@@ -692,10 +615,8 @@ fn expander_indicator(row: &adw::ExpanderRow) -> gtk::Image {
     dot
 }
 
-/// Recolor a dot from an `EngineObj.state` lifecycle token (the shared engine→app contract):
-/// running → green (`.success`), warming/downloading/blocked → orange (`.warning`),
-/// failed → red (`.error`), missing/idle/other → gray (`.dim-label`). Mirrors the
-/// macOS/Windows engine status dot.
+/// Recolor from `EngineObj.state`: running→success, warming/downloading/blocked→warning,
+/// failed→error, else dim-label. Shared engine→app contract.
 fn set_dot(dot: &gtk::Image, state: &str) {
     for c in ["success", "warning", "error", "dim-label"] {
         dot.remove_css_class(c);
@@ -708,9 +629,6 @@ fn set_dot(dot: &gtk::Image, state: &str) {
     });
 }
 
-// ── Tools / Libraries pages (the other two views) ────────────────────────────────────────────
-
-/// Wrap a page's content in a vertically-scrolling container (the lists can be long).
 fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
     gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -719,8 +637,6 @@ fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
         .build()
 }
 
-/// A page body: the margins the Status page uses + an AdwClamp around one preferences group,
-/// so wide windows don't stretch the cards.
 fn page_box(group: &adw::PreferencesGroup) -> gtk::Box {
     let b = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -734,8 +650,7 @@ fn page_box(group: &adw::PreferencesGroup) -> gtk::Box {
     b
 }
 
-/// The Tools page — the shared `ds_tools_json` catalog, one expander per tool (name +
-/// description), revealing its params. Mirrors the macOS/Windows Tools view.
+/// Tools catalog from `ds_tools_json` — expander per tool, params with shared `detail` string.
 fn build_tools_page() -> gtk::Widget {
     let group = adw::PreferencesGroup::new();
     if let Ok(serde_json::Value::Array(tools)) = serde_json::from_str(&crate::ffi::tools_json()) {
@@ -752,9 +667,7 @@ fn build_tools_page() -> gtk::Widget {
                     } else {
                         t("tools.param.optional")
                     };
-                    // The localized constraint qualifier (enum "one of: …" / numeric "lo–hi"),
-                    // pre-built by the shared status_fmt::tool_param_detail — same string the
-                    // macOS/Windows hosts show, no Linux-local derivation.
+                    // Constraint qualifier pre-built by status_fmt::tool_param_detail.
                     let detail = p["detail"].as_str().unwrap_or("");
                     let pdesc = p["description"].as_str().unwrap_or("");
                     let mut sub = format!("{ptype} · {req}");
@@ -777,10 +690,7 @@ fn build_tools_page() -> gtk::Widget {
     page_box(&group).upcast()
 }
 
-/// The Credits page — the shared `ds_libraries_json` catalog (downloaded models +
-/// runtimes), one expander per project (name + usage), revealing the project page link, the
-/// license (its name links to the license page), and the files with sizes. Mirrors the Windows
-/// Credits tab.
+/// Credits from `ds_libraries_json` — expander per project: homepage, license link, file sizes.
 fn build_credits_page() -> gtk::Widget {
     let group = adw::PreferencesGroup::builder().build();
     if let Ok(serde_json::Value::Array(projects)) =
@@ -794,9 +704,7 @@ fn build_credits_page() -> gtk::Widget {
             if let Some(hp) = p["homepage"].as_str().filter(|s| !s.is_empty()) {
                 row.add_row(&link_row(&t("libraries.homepage"), hp));
             }
-            // The license is a link row LABELED with the license name itself (e.g. "MIT",
-            // "Apache-2.0"), opening its license page — the same external-link affordance as the
-            // project page row.
+            // License row labeled with the license name, opening its license page.
             if let (Some(lic), Some(lu)) = (
                 p["license"].as_str().filter(|s| !s.is_empty()),
                 p["license_url"].as_str().filter(|s| !s.is_empty()),
@@ -822,7 +730,6 @@ fn build_credits_page() -> gtk::Widget {
     page_box(&group).upcast()
 }
 
-/// An activatable row that opens `url` in the default browser (the external-link affordance).
 fn link_row(title: &str, url: &str) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(title)
@@ -837,8 +744,6 @@ fn link_row(title: &str, url: &str) -> adw::ActionRow {
     row
 }
 
-/// The Log page — a read-only, monospace, scrollable text area. Returns the scroller (the
-/// page widget) + the text view to (re)fill from the log tail.
 fn build_log_page() -> (gtk::ScrolledWindow, gtk::TextView) {
     let view = gtk::TextView::builder()
         .editable(false)
@@ -858,8 +763,7 @@ fn build_log_page() -> (gtk::ScrolledWindow, gtk::TextView) {
     (scroll, view)
 }
 
-/// Render `tail` into the Logs view and scroll to the newest line. Both the initial read and
-/// every live update arrive from `log_push`'s worker, so tab selection never touches disk.
+/// Fill Logs view and scroll to newest. All tails arrive from `log_push` (no disk on tab select).
 fn set_log_text(view: &gtk::TextView, tail: String) {
     let text = if tail.trim().is_empty() {
         t("logs.empty")
@@ -868,7 +772,6 @@ fn set_log_text(view: &gtk::TextView, tail: String) {
     };
     let buf = view.buffer();
     buf.set_text(&text);
-    // Scroll to the end after layout settles (the buffer just changed).
     let view = view.clone();
     gtk::glib::idle_add_local_once(move || {
         let mut end = view.buffer().end_iter();

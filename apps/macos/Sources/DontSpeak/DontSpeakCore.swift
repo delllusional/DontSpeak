@@ -1,14 +1,5 @@
-//  DontSpeakCore.swift
-//
-//  A THIN, read-only status bridge over ds-core's global C probes. The app
-//  is now an informational menu-bar + health/permissions panel only — ALL control
-//  (voice, language, engine, rate, subsystem toggles) lives in DontSpeak.
-//  The one action it CAN take is kicking off a model download (tap a missing /
-//  failed dot), since that is a setup step, not runtime control.
-//
-//  The engine computes each engine's lifecycle `state` (missing / idle / warming /
-//  running / failed / downloading + progress) in its model-status JSON; this just
-//  parses it straight into `EngineStatus` and publishes it for SwiftUI.
+// Read-only status bridge over ds-core C probes. Runtime control lives elsewhere;
+// model lifecycle state arrives as model_status JSON → EngineStatus for SwiftUI.
 
 import AVFoundation  // AVCaptureDevice (Microphone)
 import AppKit
@@ -18,120 +9,81 @@ import DontSpeakLogic
 import Foundation
 import Observation
 
-/// Copy a returned `char*` into a Swift String and free it (paired alloc/free).
+/// Owned `char*` → String + free.
 private func takeCString(_ ptr: UnsafeMutablePointer<CChar>?) -> String? {
     guard let ptr else { return nil }
     defer { ds_string_free(ptr) }
     return String(cString: ptr)
 }
 
-/// Grant state of a macOS privacy permission. Three states so the UI can show
-/// "Granted" / "Not granted" / "—" (unknown / can't determine yet).
+/// Privacy grant for UI: granted / denied / unknown.
 enum Grant: Sendable, Equatable {
     case granted, denied, unknown
 }
 
-/// The OS permissions DontSpeak needs, each independently queryable.
 struct Perms: Sendable, Equatable {
-    var accessibility = Grant.unknown  // type dictation into apps (CGEventPost); also
-    // covers reading the Caps key, so no separate
-    // Input Monitoring grant is tracked.
-    var microphone = Grant.unknown  // record dictation (Parakeet STT)
+    // Accessibility also covers Caps key reads — no separate Input Monitoring grant.
+    var accessibility = Grant.unknown
+    var microphone = Grant.unknown
 }
 
-/// Live activity + tray state: what the engine is doing right now and how the
-/// menu-bar icon should reflect it.
 struct Activity: Sendable, Equatable {
     var engineRunning = false
     var capsRunning = false
-    /// The raw `caps_enabled` setting (before the OS-permission preflight). `true` +
-    /// `capsRunning == false` ⇒ dictation is enabled but blocked by a missing grant.
+    /// Raw `caps_enabled` (pre-permission). `true` + `capsRunning == false` ⇒ blocked by missing grant.
     var capsWanted = false
-    /// Live push-to-talk capture (true only while audio is being captured).
     var sttActive = false
-    /// Live TTS playback (true only while audio is actually playing).
     var ttsActive = false
-    /// Global mute (Caps-tap with dictation off, or the tray checkbox): playback still runs,
-    /// only the audio is silenced. Marks the menu-bar icon with a diagonal slash.
+    /// Playback continues but silenced; menu-bar slash.
     var muted = false
-    /// Which states color the menu-bar icon and whether they animate;
-    /// ["stt","tts_animated"] = mic static + voice breathing (default), [] = never color.
+    /// Color/animate tokens; [] = never color. Default: static mic + breathing voice.
     var trayIndicator = ["stt", "tts_animated"]
 }
 
-/// The per-engine lifecycle dots (missing / idle / warming / running / failed / downloading).
 struct EngineDots: Sendable, Equatable {
     var kokoro: EngineStatus = .missing
     var parakeet: EngineStatus = .missing
-    /// System STT (Apple's on-device recognizer) status — `.missing` when not
-    /// available, `.running` when it's the active STT engine.
     var system: EngineStatus = .missing
-    /// claude_code STT status — `.running` when Claude Code voice is on + its key is
-    /// synthesizable; `.failed` (with a "run /voice" hint) when selected but not usable.
+    /// claude_code: `.failed` + "run /voice" hint when selected but not usable.
     var claudeCode: EngineStatus = .missing
-    /// Speaker-diarization status — `.running` when enabled + models present.
     var diarizer: EngineStatus = .missing
-    /// System TTS (macOS `say`) status — `.running` when it's the active TTS engine.
     var ttsSystem: EngineStatus = .missing
 }
 
-/// Which STT/TTS engine + provider is active, and the synthesized Claude Code key.
 struct EngineSelection: Sendable, Equatable {
-    /// The ACTIVE STT engine token (claude_code|built_in|system) — picks which engine
-    /// the single STT status row reflects.
+    /// Active STT token (claude_code|built_in|system).
     var sttEngine = "built_in"
-    /// The ACTUAL STT runtime for the built_in engine — "ane" (Core ML / ANE) or "cpu"
-    /// (CPU); honest about the shim-absent fallback, like ttsProvider. Nil for
-    /// system/claude_code. Shown in the Parakeet expander.
+    /// built_in runtime "ane"|"cpu" (shim fallback); nil for system/claude_code.
     var sttProvider: String? = nil
-    /// The ACTIVE TTS engine token (built_in|system) — picks which engine the TTS row
-    /// reflects (built_in → Kokoro, system → System `say`).
+    /// Active TTS token (built_in|system).
     var ttsEngine = "built_in"
-    /// The ACTUAL TTS runtime for Kokoro, as a token — "ane"/"coreml"/"cuda"/"cpu"
-    /// (same vocabulary as sttProvider). Nil for the system engine. Shown in the Kokoro expander.
+    /// Kokoro runtime token; nil for system TTS.
     var ttsProvider: String? = nil
-    /// The keypress label DontSpeak synthesizes into Claude Code (its bound voice key),
-    /// shown in the claude_code STT expander instead of local stats. Nil unless claude_code
-    /// is the active engine and usable.
+    /// Bound Claude Code voice key label; nil unless claude_code active + usable.
     var claudeCodeKey: String? = nil
 }
 
-/// The dictation confirm-overlay state (drives `DictationPanelController`).
+/// Dictation overlay state for `DictationPanelController`.
 struct Dictation: Sendable, Equatable {
-    /// Live capture in progress (partials updating in `text`).
     var recording = false
-    /// Transcript finalized, awaiting the Caps confirm tap.
     var awaiting = false
-    /// Transcript to show: live partial while recording, final while confirming.
     var text = ""
-    /// App focused when recording started — the paste target ("→ Terminal").
+    /// Focused app at record start (paste target).
     var target = ""
-    /// The dictation is the local-transcript (Parakeet) path → show the overlay the
-    /// moment recording starts. False for ClaudeNative (no partials → no panel).
+    /// Local Parakeet path → show panel at start. False for ClaudeNative (no panel).
     var local = false
-    /// LIVE: is an editable text field focused to receive the paste right now? The
-    /// engine samples this each tick while the panel is up; the overlay tints the glow
-    /// when false ("no input to submit into"). True by default (fail-open).
+    /// Editable field focused for paste? False → warning glow. Default true (fail-open).
     var hasTarget = true
-    /// The engine's "speak now" glow decision (recording, nothing transcribed yet, not
-    /// awaiting confirm) — computed once in the core (`prompt_glow`) so this overlay and
-    /// the Windows one pulse identically. The no-target warning glow stays driven by
-    /// `hasTarget`.
+    /// Engine `prompt_glow` — shared with Windows so both pulse identically.
     var promptGlow = false
-    /// A dictation START was just refused (engine selected but can't transcribe yet —
-    /// model missing / still downloading / warm helper loading). The panel shows for the
-    /// refusal window washed in the SAME warning glow as `hasTarget == false`, so a Caps
-    /// tap on a fresh install is never a silent no-op. False by default (fail-quiet).
+    /// Start refused (missing model / warming): same warning wash as no-target; fail-quiet default.
     var refused = false
-    /// The canonical confirm-panel state token the panel's show gate switches on
-    /// (vocabulary: rust/crates/ds-status/src/dictation_state.rs — "hidden" /
-    /// "recording" / "awaiting_confirm" / "refused"). Empty = older engine payload
-    /// (key absent) ⇒ the panel falls back to the legacy boolean derivation.
+    /// Canonical token (ds-status dictation_state): hidden|recording|awaiting_confirm|refused.
+    /// Empty (older engine) ⇒ panel falls back to legacy booleans.
     var state = ""
 }
 
-/// An immutable, Sendable health snapshot produced off the main thread and carried to
-/// the main actor over an `AsyncStream`. `Equatable` is kept for tests / callers.
+/// Off-main-thread health snapshot for the main actor over AsyncStream.
 struct HealthSnapshot: Sendable, Equatable {
     var activity = Activity()
     var engineDots = EngineDots()
@@ -141,87 +93,52 @@ struct HealthSnapshot: Sendable, Equatable {
     var perms = Perms()
 }
 
-/// Read-only health bridge. `@Observable` so SwiftUI tracks the stored property groups
-/// automatically — only views that READ a changed group re-render, so there's no manual
-/// dedup. `@MainActor` so the mirrors are always mutated on the main thread; the blocking
-/// FFI probes run OFF the main actor (a dedicated thread / detached task) and hand back a
-/// `Sendable` snapshot.
+/// Read-only health bridge. Main-actor mutations; blocking FFI off-thread → Sendable snapshot.
 @Observable @MainActor
 final class Core {
-    /// Which screen the single window's sidebar shows. Stored here (not local to the window)
-    /// so the menu-bar items can open the window AND jump straight to a screen; the sidebar
-    /// binds to it, so navigating there writes back here.
+    /// Sidebar selection — also set by tray menu before openWindow.
     var screen: AppScreen = .status
 
-    /// Live activity + tray state (engine/caps liveness, record/speak, mute, tray prefs).
     var activity = Activity()
-    /// Per-engine lifecycle dots (Kokoro/Parakeet/system/claude_code/diarizer/ttsSystem).
     var engineDots = EngineDots()
-    /// Active STT/TTS engine + provider selection (and the synthesized claude_code key).
     var selection = EngineSelection()
-    /// Dictation confirm-overlay state (drives DictationPanelController).
     var dictation = Dictation()
     var stats = EngineStats()
-    /// Live OS-permission grant states. The engine can't observe System-Settings grants, so
-    /// these stay POLLED (see `permsTask`) rather than pushed over the status stream.
+    /// OS grants polled separately — engine can't observe System Settings.
     var perms = Perms()
 
-    /// Session guard for `maybeRequestMicAccess` (the one-shot mic TCC prompt).
-    /// `@ObservationIgnored`: pure bookkeeping, never rendered.
+    /// Session guard for one-shot mic TCC prompt.
     @ObservationIgnored private var micAccessRequested = false
 
-    /// The app version string ("0.1.0"), resolved ONCE from the shared Rust source. It's constant
-    /// for the process lifetime, so it lives here instead of an `ds_version()` FFI round-trip on
-    /// every Status render. `@ObservationIgnored`: never changes, so it needn't be tracked.
+    /// Process-constant version from Rust (avoid per-render FFI).
     @ObservationIgnored let version: String = {
         guard let ptr = ds_version() else { return L.t("common.dash") }
         defer { ds_string_free(ptr) }
         return String(cString: ptr)
     }()
 
-    /// Whether a newer DontSpeak release is out — set ONCE per launch by `checkForUpdateOnce()`.
-    /// Drives the small pill next to the version number in `DontSpeakRow`. Starts `false`
-    /// (fail-quiet): until the one-shot check resolves, or if it fails/times out, no pill shows.
+    /// Set once per launch by `checkForUpdateOnce()`; fail-quiet until resolved.
     var updateAvailable = false
-
-    /// The newer release's version number (e.g. "0.2.0"), shown INSIDE the pill next to an
-    /// arrow — set alongside `updateAvailable` by the same one-shot check. `nil` until/unless
-    /// a newer release is confirmed.
     var latestVersion: String?
 
-    /// Animates the menu-bar icon (crossfade on state change + breathing while active) off
-    /// this Core's activity. `@ObservationIgnored`: the reference never changes; the label
-    /// tracks the animator's own `image`. Set at the end of `init` (needs a ready `self`).
+    /// Set end of init (needs ready self). Label tracks animator's image.
     @ObservationIgnored private(set) var trayAnimator: TrayAnimator!
 
-    /// Consumes the status `AsyncStream` on the main actor (applies each snapshot + drives
-    /// the dictation overlay). `@ObservationIgnored`: lifecycle handle, not view state.
     @ObservationIgnored private var statusTask: Task<Void, Never>?
-    /// Polls the OS permissions every ~3 s — the one thing the push can't carry.
+    /// ~3 s poll — grants aren't on the status push.
     @ObservationIgnored private var permsTask: Task<Void, Never>?
-    /// The status continuation, finished on teardown so the consumer loop ends.
     @ObservationIgnored private var continuation: AsyncStream<HealthSnapshot>.Continuation?
-    /// The dedicated PRODUCER thread: blocks in `ds_model_status_wait` and yields each
-    /// FULL status snapshot the instant the engine bumps its gate (mirrors the Windows
-    /// `status-push` thread). A raw `Thread`, not a `Task` — the FFI call blocks, and blocking
-    /// the cooperative pool would starve it.
-    /// `@ObservationIgnored` + `nonisolated(unsafe)`: written once on the main actor, read only
-    /// in `deinit`, and `Thread.cancel()` is itself thread-safe — so the nonisolated deinit can
-    /// touch this non-Sendable handle without a data race.
+    /// Blocks in `ds_model_status_wait` (raw Thread — never Task/cooperative pool).
+    /// nonisolated(unsafe): main-actor write once; deinit cancel is thread-safe.
     @ObservationIgnored private nonisolated(unsafe) var pushThread: Thread?
 
     init() {
-        // Paint immediately: the first stream value can block up to the engine's 1 s wait
-        // timeout, so prime the UI synchronously from a non-blocking probe (model_status_json,
-        // not the wait variant) + a one-shot permission read.
+        // Prime UI from non-blocking probe; first stream value can wait up to ~1 s.
         let snap = Core.probe()
         apply(snap)
         perms = snap.perms
 
-        // ONE status stream replaces the old poll ticker + dictation push. The engine now bumps
-        // its gate on EVERY status change, so a single blocking-wait loop carries the FULL status
-        // (activity/dots/selection/dictation/stats). `bufferingNewest(1)`: only the latest matters,
-        // so a slow consumer can never build a backlog of stale snapshots.
+        // Single blocking-wait stream for full status. bufferingNewest(1): no stale backlog.
         let (stream, cont) = AsyncStream<HealthSnapshot>.makeStream(bufferingPolicy: .bufferingNewest(1))
         continuation = cont
         startStatusProducer(cont)
@@ -232,35 +149,23 @@ final class Core {
             }
         }
 
-        // OS permissions can't be pushed (the engine can't observe System-Settings grants), so
-        // poll them on a cheap, separate cadence — a grant flips the row within ~3 s.
+        // Grants not pushable — poll ~3 s. refresh() also re-reads on return from Settings.
         permsTask = Task { [weak self] in
             while !Task.isCancelled {
                 let p = await Task.detached { Core.probePerms() }.value
                 guard let self else { return }
-                // Assign only on a real change so an unchanged probe (the steady state, since
-                // grants are rare) doesn't fire a redundant @Observable notification. The poll
-                // is just a backstop for grants made while the Status window is open — `refresh()`
-                // already re-reads perms on the common return-from-System-Settings path — so a
-                // slower cadence is plenty and trims the wake-ups / detached-task spawns.
+                // != guard: @Observable fires on every assign with no equality short-circuit.
                 if self.perms != p { self.perms = p }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
 
-        // Now that `self` is ready, spin the menu-bar icon animator off this Core's activity.
         trayAnimator = TrayAnimator(core: self)
-
-        // One-shot per launch: is a newer release out? Off the main thread — `ds_update_check_json`
-        // is a blocking network GET, unlike every other probe here.
+        // Blocking network GET — off main thread.
         checkForUpdateOnce()
     }
 
-    /// One-shot startup check for a newer DontSpeak release (`ds_update_check_json`, the one
-    /// FFI call here that touches the network — a blocking GET — so it runs on a detached task,
-    /// never the main actor). On ANY failure the FFI already returns `"{}"`; a missing
-    /// `update_available` key decodes to `false` here too, so offline/rate-limited/malformed
-    /// just means no pill — never a crash or a stuck "checking" state.
+    /// One-shot update check. Failures → no pill (FFI returns `{}`).
     private func checkForUpdateOnce() {
         Task { [weak self] in
             let result = await Task.detached { () -> (Bool, String?) in
@@ -286,29 +191,17 @@ final class Core {
         pushThread?.cancel()
     }
 
-    /// Spin the dedicated PRODUCER thread: block in the engine's `WaitModelStatus`, then yield
-    /// the full snapshot into the stream. The engine bumps its status sequence on every change,
-    /// so this returns within a tick of any new state — a ~0-jitter push. When the engine is
-    /// down the wait can't block, so yield once (so the UI reflects engine-down) then pace
-    /// ourselves to avoid a hot spin until it comes back.
+    /// Producer thread: block in WaitModelStatus → yield. Engine down: yield once then 0.4 s pace.
     private func startStatusProducer(_ cont: AsyncStream<HealthSnapshot>.Continuation) {
         let t = Thread {
-            var since: UInt64 = 0  // 0 ⇒ the first call returns the current state immediately
+            var since: UInt64 = 0  // 0 ⇒ immediate current state
             var delivered = false
             var lastRunning = true
             while !Thread.current.isCancelled {
                 let (snap, seq) = Core.probeStatusWait(since)
                 let running = snap.activity.engineRunning
-                // The blocking wait returns on a ~1 s TIMEOUT with the SAME seq when nothing
-                // changed; yielding that identical snapshot would re-run `apply` and churn every
-                // @Observable reader (menu-bar label, any open window, the TrayAnimator chain)
-                // ~1×/s forever while idle. So yield only when something actually changed:
-                //   • the gate sequence advanced (a real engine-side status change), OR
-                //   • `engineRunning` flipped — this is an EXTERNAL pidfile/launchd probe NOT
-                //     carried in the gate seq, so a stop/crash freezes the seq and must be
-                //     caught here (else the menu-bar dot stays stale "running"), OR
-                //   • the very first sample.
-                // The 0.4 s pace below covers the can't-block down state.
+                // Idle timeout keeps seq unchanged — statusShouldYield dedups (incl. engineRunning
+                // flip, which is external to the gate seq). See StatusYield.swift.
                 if statusShouldYield(
                     delivered: delivered,
                     seq: seq,
@@ -332,13 +225,7 @@ final class Core {
         t.start()
     }
 
-    /// Apply a FULL status snapshot to the observed groups (NOT perms — those are polled
-    /// separately) and drive the dictation overlay. Each group is assigned only when it actually
-    /// CHANGED: `@Observable`'s generated setters fire `withMutation` on every assignment with no
-    /// equality short-circuit, so an unconditional reassign of all five groups would invalidate
-    /// every group's observers on every push (e.g. a per-utterance `stats` update would also
-    /// re-render the menu bar / tray animator, which only read `activity`). Gating on `!=` (all
-    /// groups are `Equatable`) keeps invalidation granular — the same guard `permsTask` uses.
+    /// Apply snapshot (not perms). Assign only when `!=` so @Observable invalidation stays granular.
     private func apply(_ s: HealthSnapshot) {
         if activity != s.activity { activity = s.activity }
         if engineDots != s.engineDots { engineDots = s.engineDots }
@@ -359,24 +246,15 @@ final class Core {
         )
     }
 
-    /// One-shot per launch: PROMPT for the Microphone permission as soon as the selected
-    /// STT engine is one DontSpeak captures for (`dontSpeakUsesMicrophone` — built_in /
-    /// system; never for off / claude_code). The mic-equivalent of the engine's
-    /// Accessibility registration (`request_permissions`): macOS only lists an app in
-    /// Privacy → Microphone after its FIRST access request, and the engine opens the mic
-    /// lazily on the first real dictation — so without this a fresh install has NO row in
-    /// the pane and the TCC prompt ambushes the first Caps tap instead of the setup flow.
-    /// `requestAccess` only shows a dialog while the state is `.notDetermined`; the
-    /// session guard just avoids re-dispatching while that dialog is pending. Re-runs on a
-    /// later engine switch (still `.notDetermined` → prompt fires then).
+    /// Prompt mic TCC once for engines we capture (not off/claude_code). Without this, a fresh
+    /// install has no Privacy→Microphone row and the prompt ambushes the first Caps tap.
+    /// Dialog only while `.notDetermined`; re-runs if engine switches still undetermined.
     private func maybeRequestMicAccess() {
         guard !micAccessRequested,
             dontSpeakUsesMicrophone(sttEngine: selection.sttEngine)
         else { return }
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else {
-            // Already decided (granted/denied) — nothing to request this session, so
-            // latch the guard: without this the TCC status would be re-read on every
-            // status push forever for an answer that can no longer change.
+            // Latch so we don't re-read TCC on every status push after decided.
             micAccessRequested = true
             return
         }
@@ -384,9 +262,7 @@ final class Core {
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
     }
 
-    /// Force an immediate refresh (e.g. after returning from System Settings, or right after
-    /// kicking off a download). Unlike the status stream this also re-reads perms, so a grant
-    /// made while away reflects without waiting for the next `permsTask` tick.
+    /// Immediate refresh including perms (return from System Settings / after download).
     func refresh() {
         Task { [weak self] in
             let snap = await Task.detached { Core.probe() }.value
@@ -396,9 +272,7 @@ final class Core {
         }
     }
 
-    /// Switch the TTS execution provider ("auto"|"cpu"|"cuda"|"coreml"|"ane"). The engine
-    /// restarts the warm child on the new provider and resets its stats (only if
-    /// the active provider actually changed); the next push reflects it.
+    /// Switch TTS provider; engine restarts warm child if the active provider changes.
     func setProvider(_ which: String) {
         Task { [weak self] in
             await Task.detached { which.withCString { _ = ds_set_provider($0) } }.value
@@ -406,10 +280,7 @@ final class Core {
         }
     }
 
-    /// Toggle global mute (the tray "Mute" checkbox). Mutes/unmutes the warm child's playback
-    /// without stopping it, then `refresh()` reads the flag back so the menu-bar icon reflects
-    /// the engine's state — the SAME status-driven path the `mute` MCP tool takes. The read-back
-    /// is instant in practice, so no optimistic local echo is needed.
+    /// Mute toggle; refresh reads back engine state (same path as MCP `mute`).
     func setMuted(_ on: Bool) {
         Task { [weak self] in
             await Task.detached { _ = ds_set_muted(on ? 1 : 0) }.value
@@ -417,16 +288,14 @@ final class Core {
         }
     }
 
-    /// Full snapshot INCLUDING the OS-permission grants. Used by `refresh()`; the poll
-    /// loop calls `probeStatus()` + `probePerms()` separately for the same result.
+    /// Full snapshot including perms.
     nonisolated static func probe() -> HealthSnapshot {
         var s = probeStatus()
         s.perms = probePerms()
         return s
     }
 
-    /// Engine liveness + the model-status JSON, WITHOUT the permission probes. Pure
-    /// w.r.t. the actor — touches no `self`, so it is safe to run detached.
+    /// Status without perms; pure w.r.t. actor (safe detached).
     nonisolated static func probeStatus() -> HealthSnapshot {
         let running = ds_engine_running_global() != 0
         var s = decodeStatus(takeCString(ds_model_status_json()))?.0 ?? HealthSnapshot()
@@ -434,11 +303,7 @@ final class Core {
         return s
     }
 
-    /// BLOCKING status read for the overlay PUSH (mirrors the Windows `ModelStatusWait`):
-    /// wait until the engine's status sequence differs from `since` — i.e. a dictation
-    /// change landed — or ~1 s elapses, then parse. Returns the snapshot plus the new
-    /// sequence to pass back as `since`. Runs on the dedicated push thread because the
-    /// FFI call blocks; never call it from the main actor or the cooperative pool.
+    /// Blocking WaitModelStatus (~1 s timeout). Push thread only — never main/cooperative pool.
     nonisolated static func probeStatusWait(_ since: UInt64) -> (HealthSnapshot, UInt64) {
         let running = ds_engine_running_global() != 0
         var s = HealthSnapshot()
@@ -451,13 +316,8 @@ final class Core {
         return (s, seq)
     }
 
-    /// Decode the model-status JSON into a snapshot (+ its top-level `seq`), the SINGLE
-    /// typed path shared by the polling `probeStatus` and the blocking `probeStatusWait`
-    /// so the two can't drift. Returns nil for down/invalid JSON — the caller keeps the
-    /// default snapshot (`engineRunning` is still set from the global probe). Every DTO
-    /// field is Optional, so a malformed or missing field falls back to the SAME default
-    /// the old `[String: Any]` path used instead of blanking the whole status. Does NOT
-    /// set `engineRunning`; the caller owns that from `ds_engine_running_global()`.
+    /// Single typed decode for poll + wait paths. Optional fields → per-field defaults.
+    /// Does not set `engineRunning` (caller uses `ds_engine_running_global()`).
     private nonisolated static func decodeStatus(_ json: String?) -> (HealthSnapshot, UInt64?)? {
         guard let json,
             let dto = try? JSONDecoder().decode(ModelStatusDTO.self, from: Data(json.utf8))
@@ -497,8 +357,7 @@ final class Core {
         return (s, dto.seq)
     }
 
-    /// Query the OS permissions without prompting. Cheap calls — safe to run
-    /// each poll, so a grant in System Settings flips the row within a few seconds.
+    /// Non-prompting permission probe.
     nonisolated static func probePerms() -> Perms {
         var p = Perms()
         p.accessibility = AXIsProcessTrusted() ? .granted : .denied
@@ -510,68 +369,42 @@ final class Core {
         return p
     }
 
-    /// Open the product homepage (dontspeak.org) in the default browser. The URL is the
-    /// shared single source of truth from Rust (`ds_homepage_url`), so every
-    /// platform links to the same place.
+    /// Homepage from shared Rust `ds_homepage_url`.
     func openHomepage() {
         guard let ptr = ds_homepage_url() else { return }
         defer { ds_string_free(ptr) }
         if let url = URL(string: String(cString: ptr)) { NSWorkspace.shared.open(url) }
     }
 
-    /// Open System Settings → Privacy & Security → Accessibility so the user can
-    /// grant DontSpeak.app — it hosts the in-process engine that posts Caps Lock
-    /// keystrokes. The engine re-probes AX, so the dot flips green shortly after.
     func openAccessibilitySettings() { openPrivacyPane("Privacy_Accessibility") }
     func openMicrophoneSettings() { openPrivacyPane("Privacy_Microphone") }
 
-    /// Open System Settings → Privacy & Security → <pane>. `anchor` is the pane key,
-    /// e.g. "Privacy_Accessibility" / "Privacy_Microphone".
-    /// The engine re-probes, so the row flips shortly after.
+    /// System Settings Privacy pane by anchor key.
     func openPrivacyPane(_ anchor: String) {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
             NSWorkspace.shared.open(url)
         }
     }
 
-    /// Open System Settings → Accessibility → Spoken Content, where macOS manages the System
-    /// TTS (`say`) voices ("Manage Voices…"). Routes to the SHARED cross-platform seam
-    /// (`ds_open_voice_settings`) so macOS, Windows, and Linux all open their system-voice
-    /// page from ONE Rust implementation (per-OS deep links live in ds-tts).
+    /// System voice settings via shared `ds_open_voice_settings`.
     func openSpokenContentSettings() {
         Task.detached { _ = ds_open_voice_settings() }
     }
 }
 
-// MARK: - model_status DTO (type-safe decode)
-//
-// The Swift HAND-MIRROR of the `model_status` wire schema. The single source of truth is the
-// Rust crate `ds-status` (rust/crates/ds-status/src/lib.rs): the engine serializes
-// a `ds_status::ModelStatus` to JSON over the C ABI and this decodes it back. These DTOs
-// mirror that schema field-for-field and MUST be kept in lockstep with it — see
-// ARCHITECTURE.md's "FFI boundary" section.
-//
-// EVERY field is Optional so a malformed/missing value degrades to its per-field default (see
-// `decodeStatus` / `EngineStats.from`) instead of failing the whole decode and blanking the
-// status. snake_case wire keys are mapped explicitly via `CodingKeys` (more robust than
-// `.convertFromSnakeCase` for keys like `tts`, `stt_active`, `first_avg_ms`). Keys the app does
-// NOT consume are omitted on purpose (`caps_events`, `build_id`, and the `running` engine
-// booleans kokoro/parakeet/system/… — the engine dots already carry those); `Decodable` ignores
-// unknown keys, so omitting them is safe.
+// MARK: - model_status DTO
+// Hand-mirror of `ds-status` wire schema — keep lockstep (ARCHITECTURE.md § FFI).
+// All fields Optional → per-field defaults. Unused wire keys omitted (Decodable ignores them).
 
-/// One engine's lifecycle block: `{state, progress, error}` (`present`/`removable` are in the
-/// wire schema but unused here — omitted per the file-header note above).
 struct EngineObjDTO: Decodable {
     var state: String?
-    /// Overall download fraction 0…1 — byte-weighted across the whole model set (a single global
-    /// percent, not per-file). Only meaningful while `state == "downloading"`.
+    /// Byte-weighted overall download fraction 0…1 while downloading.
     var progress: Double?
     var error: String?
 }
 
 extension Optional where Wrapped == EngineObjDTO {
-    /// Map this engine block to an `EngineStatus`, replicating the old `engineStatus(_:)`
-    /// logic exactly: a missing block (engine down) or missing `state` → `.missing`.
+    /// Missing block/state → `.missing`.
     var engineStatus: EngineStatus {
         guard let obj = self, let state = obj.state else { return .missing }
         switch state {
@@ -586,7 +419,6 @@ extension Optional where Wrapped == EngineObjDTO {
     }
 }
 
-/// The live `running` flags block.
 struct RunningDTO: Decodable {
     var caps: Bool?
     var capsWanted: Bool?
@@ -603,7 +435,6 @@ struct RunningDTO: Decodable {
     }
 }
 
-/// The dictation-overlay block.
 struct DictationDTO: Decodable {
     var recording: Bool?
     var awaitingConfirm: Bool?
@@ -613,8 +444,7 @@ struct DictationDTO: Decodable {
     var hasPasteTarget: Bool?
     var promptGlow: Bool?
     var refused: Bool?
-    /// The canonical confirm-panel state token; nil (older engine) ⇒ the consumer
-    /// falls back to the legacy boolean derivation (never straight to hidden).
+    /// Nil (older engine) ⇒ legacy boolean derivation, not straight to hidden.
     var state: String?
 
     enum CodingKeys: String, CodingKey {
@@ -630,7 +460,6 @@ struct DictationDTO: Decodable {
     }
 }
 
-/// The top-level model_status payload.
 struct ModelStatusDTO: Decodable {
     var kokoro: EngineObjDTO?
     var parakeet: EngineObjDTO?

@@ -1,24 +1,16 @@
-//! The focus-safe dictation overlay — the GTK4 analogue of the macOS `OverlayPanel` /
-//! Windows layered `DictationPanel`. It shows the live transcript (and a "speak now" /
-//! "no paste target" glow) WITHOUT stealing keyboard focus, so the paste still lands in the
-//! terminal the user was in.
+//! Focus-safe dictation overlay — GTK4 analogue of macOS `OverlayPanel` / Windows layered
+//! `DictationPanel`. Live transcript (and speak-now / no-paste glow) without stealing focus,
+//! so paste still lands in the user's terminal.
 //!
-//! Focus-safety on Linux has no single portable API: on wlroots/KDE compositors we use
-//! `gtk4-layer-shell` (an OVERLAY-layer surface with `KeyboardMode::None`); on GNOME/Mutter
-//! (no wlr-layer-shell) and X11 we fall back to a plain undecorated non-focusing window —
-//! best-effort, the documented Wayland limitation. Shown exactly when the macOS/Windows hosts
-//! show theirs: the canonical `dictation.state` token is not `hidden`.
+//! No single portable focus-safe API: wlroots/KDE use `gtk4-layer-shell` (OVERLAY layer,
+//! `KeyboardMode::None`); GNOME/Mutter (no wlr-layer-shell) and X11 fall back to a plain
+//! undecorated non-focusing window — best-effort. Shown when `dictation.state` ≠ `hidden`.
 //!
-//! Drag + resize (macOS/Windows parity): on the plain-toplevel path the pill is
-//! DRAGGABLE (press the body → `Toplevel::begin_move`) and horizontally RESIZABLE (press
-//! within `EDGE` of the left/right side → `Toplevel::begin_resize`), matching both peers,
-//! which are also width-only (macOS `DictationPanel.swift`, Windows `WM_SIZING`). The
-//! chosen width is clamped to [`MIN_WIDTH`, `MAX_WIDTH`] and PERSISTED across restarts
-//! (`$XDG_STATE_HOME/dontspeak/overlay-width`). Position is NOT persisted across restarts:
-//! GTK4 exposes no toplevel-positioning API (Wayland forbids it, X11 dropped it), so a
-//! drag only lasts the session (the window is hidden, never destroyed, so it stays put).
-//! The `gtk4-layer-shell` path stays compositor-anchored + fixed-width — a layer surface
-//! can't be user-moved or -resized; that's the same Wayland limitation as the focus gate.
+//! Drag + resize (peer parity): plain-toplevel path is draggable (`begin_move`) and
+//! horizontally resizable within [`MIN_WIDTH`, `MAX_WIDTH`] (edge grab `EDGE`); width
+//! persists in `$XDG_STATE_HOME/dontspeak/overlay-width`. Position is not: GTK4 has no
+//! reliable toplevel-position API (Wayland forbids it). Layer-shell path stays compositor-
+//! anchored + fixed-width — layer surfaces can't be user-moved/resized.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -30,10 +22,8 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use crate::status::Snapshot;
 use ds_status::DictationState;
 
-/// Default pill width; the user's dragged width is persisted and restored over this.
 const DEFAULT_WIDTH: i32 = 460;
-/// Horizontal-resize bounds (px) + the side-edge grab margin within which a press
-/// resizes instead of moves — mirrors macOS `Overlay.min/maxWidth`/`edgeMargin`.
+/// Horizontal-resize bounds + side-edge grab margin — mirrors macOS Overlay min/max/edgeMargin.
 const MIN_WIDTH: i32 = 280;
 const MAX_WIDTH: i32 = 900;
 const EDGE: f64 = 8.0;
@@ -43,16 +33,14 @@ pub struct Overlay {
     window: gtk::Window,
     label: gtk::Label,
     visible: Rc<Cell<bool>>,
-    /// True on the plain-toplevel path where the pill is user-movable/-resizable, so
-    /// `apply` knows to persist the width when it hides. False under layer-shell.
+    /// Plain-toplevel path only: `apply` persists width on hide. False under layer-shell.
     resizable: bool,
 }
 
 impl Overlay {
     pub fn new(app: &adw::Application) -> Self {
         let display = gtk::gdk::Display::default();
-        // `gtk4_layer_shell::is_supported()` ASSERTS a Wayland display (CRITICAL on X11), so
-        // gate it on the actual display backend first — never call layer-shell under X11.
+        // `is_supported()` ASSERTS a Wayland display (CRITICAL on X11) — gate on backend first.
         let on_wayland = display
             .as_ref()
             .map(|d| d.type_().name().contains("Wayland"))
@@ -61,7 +49,6 @@ impl Overlay {
 
         let window = gtk::Window::builder()
             .application(app)
-            // Only the plain-toplevel path can be user-resized; a layer surface can't.
             .resizable(!layer_shell)
             .decorated(false)
             .deletable(false)
@@ -75,7 +62,7 @@ impl Overlay {
         window.add_css_class("ds-overlay");
 
         if layer_shell {
-            // wlroots / KDE: a true overlay surface that never takes the keyboard.
+            // wlroots / KDE: true overlay surface that never takes the keyboard.
             window.init_layer_shell();
             window.set_namespace(Some("ds-dictation"));
             window.set_layer(Layer::Overlay);
@@ -83,20 +70,13 @@ impl Overlay {
             window.set_anchor(Edge::Bottom, true);
             window.set_margin(Edge::Bottom, 90);
         } else {
-            // GNOME/Mutter (no wlr-layer-shell) or X11: best-effort non-focusing float.
+            // GNOME/Mutter or X11: best-effort non-focusing float.
             window.set_modal(false);
-            // Floor the width so an edge-drag can't shrink the pill past readability;
-            // the ceiling is enforced when the width is saved/restored (GTK toplevels
-            // have no max-size). Matches macOS's clamp.
+            // Floor width at MIN_WIDTH; ceiling enforced on save/restore (no GTK max-size).
             window.set_size_request(MIN_WIDTH, -1);
-            // CSS `background: transparent` relies on a compositor for alpha blending; without
-            // one the window renders as opaque black instead of see-through.
-            // `Display::is_composited()` (still present in gdk4-rs 0.11 — a prior version of
-            // this comment incorrectly assumed GTK4 had removed it) is GDK's own documented
-            // check for exactly this, and more precise than inferring from the backend: a
-            // Wayland compositor always composites by definition, but plain X11 can go either
-            // way — a bare tiling WM with no `picom`/`compton` doesn't, while GNOME/KDE-on-Xorg
-            // does, and the backend-only heuristic wrongly painted the latter opaque too.
+            // Transparent CSS needs a compositor; without one the window is opaque black.
+            // `Display::is_composited()` is more precise than backend alone: Wayland always
+            // composites, but X11 varies (bare tiling WM vs GNOME/KDE-on-Xorg).
             if !display.as_ref().map(|d| d.is_composited()).unwrap_or(false) {
                 window.add_css_class("ds-overlay-solid");
             }
@@ -123,17 +103,13 @@ impl Overlay {
         }
     }
 
-    /// Show/update or hide the overlay from a status push (same gate as the other hosts).
+    /// Show/update or hide from a status push (same gate as the other hosts).
     pub fn apply(&self, snap: &Snapshot) {
-        // Visibility is decided ONCE in the engine and shipped as the canonical
-        // `dictation.state` token (vocabulary: `ds_status::DictationState`), so this pill
-        // shows exactly when the macOS/Windows overlays do — including the REFUSED start
-        // (the brief warning-glow pill is the feedback that the Caps tap did nothing).
+        // Visibility is engine-side via canonical `dictation.state` (incl. REFUSED brief glow).
         let show = match &snap.status {
             Some(s) => match DictationState::parse(&s.dictation.state) {
                 Some(st) => st != DictationState::Hidden,
-                // Older engine (no/unknown token): the legacy boolean derivation, removed
-                // with the redundant booleans once every producer ships the token.
+                // Older engine (no/unknown token): legacy boolean derivation.
                 None => {
                     s.dictation.awaiting_confirm
                         || (s.dictation.recording && s.dictation.local_stt)
@@ -145,8 +121,7 @@ impl Overlay {
 
         if !show {
             if self.visible.replace(false) {
-                // Persist the width the user dragged to before hiding (still allocated
-                // here; 0 once hidden). Position can't be persisted — see module docs.
+                // Persist width while still allocated (0 once hidden). Position: see module docs.
                 if self.resizable {
                     save_width(self.window.width());
                 }
@@ -156,11 +131,9 @@ impl Overlay {
         }
 
         let s = snap.status.as_ref().expect("show implies Some");
-        // Show the live transcript; empty while recording shows nothing (no Linux-local prompt
-        // text — there is no shared i18n key for one, and the glow already cues "speak now").
+        // Empty while recording: no shared i18n "speak now" key; glow is the cue.
         self.label.set_text(&s.dictation.text);
-        // Orange glow: the engine-computed "speak now" hint, a missing paste target, OR a
-        // refused start (the refusal REUSES the no-target warning glow verbatim).
+        // Orange glow: speak-now, missing paste target, or refused start (reuses no-target glow).
         let glow = s.dictation.prompt_glow || !s.dictation.has_paste_target || s.dictation.refused;
         if glow {
             self.window.add_css_class("glow");
@@ -174,14 +147,8 @@ impl Overlay {
     }
 }
 
-/// Wire drag-to-move + horizontal edge-resize onto the pill (plain-toplevel path only).
-///
-/// One primary-button press gesture decides move vs. resize by where the press lands —
-/// within `EDGE` of the left/right side resizes that edge (`begin_resize`), anywhere else
-/// moves the whole window (`begin_move`) — exactly the macOS `DragView` split. Both hand
-/// the interaction to the compositor, so it works on X11 and Mutter/Wayland alike without
-/// GTK owning any positioning state. A motion controller shows the `ew-resize` cursor over
-/// the side edges so the affordance is discoverable.
+/// Drag-to-move + horizontal edge-resize (plain-toplevel only). Press within `EDGE` of a side
+/// → `begin_resize`; else `begin_move` — compositor owns the interaction (X11 + Mutter).
 fn install_move_resize(window: &gtk::Window, card: &gtk::Box) {
     use gtk::gdk;
 
@@ -212,7 +179,6 @@ fn install_move_resize(window: &gtk::Window, card: &gtk::Box) {
     }
     card.add_controller(press);
 
-    // Hover feedback: a horizontal-resize cursor within the side-edge grab margin.
     let motion = gtk::EventControllerMotion::new();
     {
         let window = window.clone();
@@ -225,9 +191,7 @@ fn install_move_resize(window: &gtk::Window, card: &gtk::Box) {
     card.add_controller(motion);
 }
 
-/// Where a press landed along the pill's width — a side edge (resize) or the body (move).
-/// Pure so the move-vs-resize split is unit-tested without a display; mirrors macOS
-/// `DragView`'s `edgeMargin` hit test.
+/// Side edge (resize) vs body (move). Pure for unit tests without a display.
 #[derive(PartialEq, Debug)]
 enum Hit {
     LeftEdge,
@@ -246,10 +210,8 @@ fn hit_test(x: f64, width: f64) -> Hit {
 }
 
 // ── width persistence ────────────────────────────────────────────────────────
-//
-// `$XDG_STATE_HOME/dontspeak/overlay-width` (fallback `~/.local/state/…`) — the same
-// local-state root the engine's capskey marker uses, computed here directly to keep this
-// host dependency-light. Only the width is stored (macOS/Windows resize is width-only too).
+// `$XDG_STATE_HOME/dontspeak/overlay-width` (fallback `~/.local/state/…`) — same local-state
+// root as the engine capskey marker; computed here to stay dependency-light. Width only.
 
 fn width_path() -> Option<PathBuf> {
     let state = std::env::var_os("XDG_STATE_HOME")
@@ -265,7 +227,7 @@ fn clamp_width(w: i32) -> i32 {
     w.clamp(MIN_WIDTH, MAX_WIDTH)
 }
 
-/// The persisted width, clamped; `DEFAULT_WIDTH` when unset or unparseable.
+/// Persisted width, clamped; `DEFAULT_WIDTH` when unset or unparseable.
 fn load_width() -> i32 {
     width_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -274,10 +236,10 @@ fn load_width() -> i32 {
         .unwrap_or(DEFAULT_WIDTH)
 }
 
-/// Persist the current width (clamped). Best-effort — a failure just forgets the size.
+/// Persist current width (clamped). Best-effort.
 fn save_width(w: i32) {
     if w <= 0 {
-        return; // not allocated (already hidden) — nothing meaningful to store.
+        return; // not allocated (already hidden)
     }
     if let Some(p) = width_path() {
         if let Some(dir) = p.parent() {
@@ -287,7 +249,7 @@ fn save_width(w: i32) {
     }
 }
 
-/// The overlay (and panel) styling, loaded once into the default display.
+/// Overlay (and panel) styling, loaded once into the default display.
 pub fn load_css() {
     let css = "
         .ds-overlay { background: transparent; }
@@ -323,19 +285,19 @@ mod tests {
     fn hit_test_splits_edges_from_body() {
         let w = 460.0;
         assert_eq!(hit_test(0.0, w), Hit::LeftEdge);
-        assert_eq!(hit_test(EDGE, w), Hit::LeftEdge); // inclusive at the margin
+        assert_eq!(hit_test(EDGE, w), Hit::LeftEdge);
         assert_eq!(hit_test(EDGE + 0.1, w), Hit::Body);
         assert_eq!(hit_test(w / 2.0, w), Hit::Body);
         assert_eq!(hit_test(w - EDGE - 0.1, w), Hit::Body);
-        assert_eq!(hit_test(w - EDGE, w), Hit::RightEdge); // inclusive at the margin
+        assert_eq!(hit_test(w - EDGE, w), Hit::RightEdge);
         assert_eq!(hit_test(w, w), Hit::RightEdge);
     }
 
     #[test]
     fn width_clamps_to_bounds() {
-        assert_eq!(clamp_width(100), MIN_WIDTH); // below floor
-        assert_eq!(clamp_width(2000), MAX_WIDTH); // above ceiling
-        assert_eq!(clamp_width(500), 500); // in range, untouched
+        assert_eq!(clamp_width(100), MIN_WIDTH);
+        assert_eq!(clamp_width(2000), MAX_WIDTH);
+        assert_eq!(clamp_width(500), 500);
         assert_eq!(clamp_width(MIN_WIDTH), MIN_WIDTH);
         assert_eq!(clamp_width(MAX_WIDTH), MAX_WIDTH);
     }

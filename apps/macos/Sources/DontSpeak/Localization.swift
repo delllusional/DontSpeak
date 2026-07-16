@@ -1,15 +1,10 @@
-//  Localization.swift
-//
-//  Thin Swift bridge to the shared ds-i18n catalog via ds-core's C ABI. Every
-//  user-facing string flows through `L.t(...)` so macOS and Windows render ONE catalog
-//  instead of duplicating literals. English is the fallback; the active locale defaults
-//  to the OS language (resolved lazily in Rust on first lookup).
+// Bridge to shared ds-i18n via ds-core. All UI strings go through `L.t(...)`.
 
 import CDontSpeak
 import Foundation
 
 enum L {
-    /// Localized string for `key` (English fallback; a missing key returns the key).
+    /// Localized string for `key` (English fallback; missing key returns the key).
     static func t(_ key: String) -> String {
         key.withCString { kp in
             guard let ptr = ds_t(kp) else { return key }
@@ -18,8 +13,7 @@ enum L {
         }
     }
 
-    /// Localized string for `key` with `%{name}` placeholders filled from `args`. Numbers
-    /// should be formatted by the caller (locale-aware) and passed as strings.
+    /// `key` with `%{name}` placeholders from `args`. Caller formats numbers as strings.
     static func t(_ key: String, _ args: [String: String]) -> String {
         let json =
             (try? JSONSerialization.data(withJSONObject: args))

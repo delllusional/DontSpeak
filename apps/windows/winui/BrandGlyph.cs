@@ -8,36 +8,20 @@ using Microsoft.Win32;
 namespace DontSpeak;
 
 /// <summary>
-/// The DontSpeak Windows tray mark — the line-art speech bubble with the code "</>" inside,
-/// drawn straight from <c>assets/tray-icon.svg</c> (the single brand source; the macOS app
-/// reads the same shape). It is ONE color (the SVG's <c>currentColor</c>), rendered via GDI+
-/// at runtime. There is NO background tile in any state — Microsoft's notification-area
-/// guidance is a monochrome glyph with NO padding that fills the 16px cell edge-to-edge, so
-/// the mark is fit to the whole cell and the engine state is shown by RECOLORING the ink:
-///   idle      = theme-foreground ink (template-style auto-tint, like a native tray glyph);
-///   recording = mic-ORANGE ink (STT active);
-///   speaking  = brand SEED-PURPLE ink (TTS active).
-/// The mark keeps the SAME shape and size in every state — only its color changes — so it
-/// always renders at the maximum size the cell allows. The notification-area
-/// <see cref="TrayIcon"/> wraps these pixels in an HICON.
+/// Tray mark from <c>assets/tray-icon.svg</c> (shared brand source with macOS): one-color
+/// line-art bubble + "&lt;/&gt;", no background tile. Microsoft tray guidance is monochrome,
+/// edge-to-edge at 16px; state is ink color only (idle = theme fg, recording = mic orange,
+/// speaking = seed purple). <see cref="TrayIcon"/> wraps the BGRA in an HICON.
 /// </summary>
 internal static class BrandGlyph
 {
-    // tray-icon.svg stroke width, in the SVG's own coordinate space. The geometry in
-    // BuildMark is transcribed verbatim from that file so the Windows mark and the SVG never
-    // drift apart; the mark is then fit to the cell by its stroked bounds (no viewBox needed).
-    // Heavier than the SVG's own 30 so the thin line-art reads as visually as large as the
-    // neighbouring solid Fluent system icons (network/volume) — a 16px tray cell makes a thin
-    // stroke look small even when the bounds fill the cell.
+    // SVG coordinate-space stroke. Geometry in BuildMark is transcribed verbatim from tray-icon.svg
+    // so Windows and the asset never drift. Heavier than the SVG's 30 so thin line-art reads like
+    // neighboring solid Fluent tray icons at 16px.
     private const float StrokeW = 46f;
 
-    /// <summary>Render the mark into a <paramref name="size"/>×<paramref name="size"/>
-    /// straight-alpha BGRA buffer (top-down rows — what an HICON DIB expects): the one-color
-    /// <paramref name="ink"/> line-art bubble + "&lt;/&gt;", fit to FILL the cell (no tile, no
-    /// padding). When <paramref name="muted"/>, a diagonal "muted" slash is drawn across the
-    /// glyph (the Windows analogue of the macOS slashed menu-bar icon): a clear knockout
-    /// channel cut through the mark with the ink slash in it, so it reads as crossed-out at
-    /// tray size in either theme.</summary>
+    /// <summary>size×size straight-alpha BGRA (top-down, HICON DIB). Optional muted slash =
+    /// clear knockout then ink (macOS slashed menu-bar analogue).</summary>
     internal static byte[] RenderBgra(int size, Color ink, bool muted)
     {
         int w = size, h = size;
@@ -49,32 +33,26 @@ internal static class BrandGlyph
             g.PixelOffsetMode = PixelOffsetMode.HighQuality; // crisp edges at 16–20px
             g.Clear(Color.Transparent);
 
-            // The line-art mark (bubble outline + "</>") in one ink color, fit to fill the
-            // whole cell. We measure the mark's STROKED bounds (round caps included) and scale
-            // those to the cell minus a hair, so the glyph is as large as possible without the
-            // anti-aliased caps clipping at the edge. No tile: the state is the ink color.
+            // Fit stroked bounds (round caps included) to the cell minus a hair so AA caps don't clip.
             using var mark = BuildMark();
             using var pen = new Pen(ink, StrokeW)
             { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
 
-            var b = mark.GetBounds(new Matrix(), pen); // tight bounds incl. the stroke
-            float margin = size * 0.015f;              // hug the cell edges; just enough so AA caps don't clip
+            var b = mark.GetBounds(new Matrix(), pen);
+            float margin = size * 0.015f;
             float avail = size - 2f * margin;
-            float scale = avail / Math.Max(b.Width, b.Height); // fit by the longer axis → fills the cell
+            float scale = avail / Math.Max(b.Width, b.Height);
             float offX = margin + (avail - b.Width * scale) / 2f - b.X * scale;
             float offY = margin + (avail - b.Height * scale) / 2f - b.Y * scale;
             using (var m = new Matrix(scale, 0f, 0f, scale, offX, offY))
                 mark.Transform(m);
 
-            pen.Width = StrokeW * scale; // scale the stroke to match the fitted geometry
+            pen.Width = StrokeW * scale;
             g.DrawPath(pen, mark);
 
             if (muted)
             {
-                // Diagonal slash, top-left → bottom-right, inset from the corners. First cut a
-                // CLEAR channel through the glyph (SourceCopy with Transparent erases pixels),
-                // then lay the ink slash inside it — so the slash reads distinctly over the
-                // mark instead of blending into its strokes (mirrors the macOS slashed icon).
+                // SourceCopy + Transparent cuts a channel; then ink slash (else stroke blends into mark).
                 float inset = size * 0.13f;
                 float x1 = inset, y1 = inset, x2 = size - inset, y2 = size - inset;
                 float sw = StrokeW * scale;
@@ -94,9 +72,8 @@ internal static class BrandGlyph
         return buf;
     }
 
-    /// <summary>Idle ink color = the theme foreground (dark in light mode, light in dark
-    /// mode) — the Windows analogue of the macOS isTemplate auto-tint, so idle never reads
-    /// as "disabled". Used only for the idle state.</summary>
+    /// <summary>Theme foreground ink (light/dark) — macOS isTemplate analogue so idle isn't
+    /// "disabled". Idle state only.</summary>
     internal static Color IdleForeground()
     {
         bool light;
@@ -106,20 +83,18 @@ internal static class BrandGlyph
                 @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
             light = k?.GetValue("SystemUsesLightTheme") is int v && v != 0;
         }
-        catch { light = false; } // locked-down registry (policy/AV/sandbox) → default to dark ink
+        catch { light = false; } // locked-down registry → dark ink
         return light ? Color.FromArgb(255, 40, 40, 45) : Color.FromArgb(255, 236, 236, 240);
     }
 
-    /// <summary>Build the line-art mark — the bubble (closed) + the "</>" (three open
-    /// sub-figures) — in one <see cref="GraphicsPath"/> in raw assets/tray-icon.svg coordinates
-    /// (transcribed VERBATIM). The caller measures its stroked bounds and fits it to the cell,
-    /// so no viewBox mapping happens here.</summary>
+    /// <summary>Bubble (closed) + "&lt;/&gt;" (three open figures) in raw tray-icon.svg coords
+    /// (verbatim). Caller measures stroked bounds and fits — no viewBox here.</summary>
     private static GraphicsPath BuildMark()
     {
-        static PointF P(float x, float y) => new(x, y); // raw SVG coords; caller fits them
+        static PointF P(float x, float y) => new(x, y);
         var p = new GraphicsPath();
 
-        // bubble outline (closed) — same path the macOS bubble uses, here stroked not filled
+        // bubble outline (closed) — same path as macOS; stroked not filled
         p.StartFigure();
         p.AddBezier(P(270, 90), P(390, 90), P(470, 165), P(470, 250));
         p.AddBezier(P(470, 250), P(470, 335), P(390, 410), P(270, 410));
@@ -131,7 +106,7 @@ internal static class BrandGlyph
         p.AddBezier(P(70, 250), P(70, 165), P(150, 90), P(270, 90));
         p.CloseFigure();
 
-        // "</>" — three OPEN sub-figures so the round end-caps show (the playful brand glyph)
+        // "</>" — open figures so round end-caps show
         p.StartFigure(); p.AddLines(new[] { P(218, 205), P(168, 250), P(218, 295) }); // <
         p.StartFigure(); p.AddLine(P(274, 178), P(238, 322));                          // /
         p.StartFigure(); p.AddLines(new[] { P(292, 205), P(342, 250), P(292, 295) }); // >

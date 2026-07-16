@@ -4,23 +4,20 @@ using Xunit;
 namespace DontSpeak.Tests;
 
 /// <summary>
-/// The model-status parse (<see cref="HealthSnapshot.FromJson(string, Func{string, double, string, string})"/>)
-/// with a stubbed state-word formatter — the same wire shapes dontspeakd's
-/// model_status_json emits, mirroring the macOS DontSpeakLogic tests.
+/// Model-status parse with stubbed state-word formatter (no ds_core.dll) — wire shapes match
+/// dontspeakd model_status_json / macOS DontSpeakLogic tests.
 /// </summary>
 public class HealthSnapshotTests
 {
-    /// <summary>Stub for the Rust `ds_engine_state_word` formatter (tests run without ds_core.dll).</summary>
+    /// <summary>Stub for ds_engine_state_word (tests without ds_core.dll).</summary>
     private static string Word(string state, double progress, string why) => state;
 
     private static HealthSnapshot Parse(string json) => HealthSnapshot.FromJson(json, Word);
 
-    // CA1861: constant array arguments hoisted out of the repeatedly-called asserts.
+    // CA1861: hoist constant arrays out of asserts.
     private static readonly string[] DefaultIndicator = { "stt", "tts_animated" };
     private static readonly string[] TtsOnly = { "tts" };
     private static readonly string[] AlexOnly = { "Alex" };
-
-    // ── The engine-down / garbage paths must yield the safe default snapshot ──
 
     [Theory]
     [InlineData("")]
@@ -36,15 +33,13 @@ public class HealthSnapshotTests
         Assert.Equal(DefaultIndicator, s.Activity.TrayIndicator);
     }
 
-    // ── Happy path: a well-formed payload maps every group ──
-
     [Fact]
     public void WellFormedPayloadMapsActivityAndSeq()
     {
         var s = Parse("""
             {"seq": 42, "running": {"caps": true, "stt_active": true, "tts_active": false, "muted": true}}
             """);
-        Assert.True(s.Activity.EngineRunning);   // any well-formed payload ⇒ engine is up
+        Assert.True(s.Activity.EngineRunning);
         Assert.Equal(42UL, s.StatusSeq);
         Assert.True(s.Activity.Caps);
         Assert.True(s.Activity.Recording);
@@ -107,7 +102,7 @@ public class HealthSnapshotTests
     [InlineData("refused", true)]
     public void ShowPanelFollowsTheCanonicalToken(string token, bool expected)
     {
-        // Legacy booleans deliberately CONTRADICT the token so the token provably wins.
+        // Legacy booleans contradict token so token wins.
         var visible = new Dictation { DictState = token };
         Assert.Equal(expected, visible.ShowPanel(recording: false));
         var hidden = new Dictation
@@ -127,14 +122,10 @@ public class HealthSnapshotTests
     [InlineData("bogus_token")]
     public void ShowPanelFallsBackToBooleansOnUnknownToken(string token)
     {
-        // awaiting_confirm alone shows.
         Assert.True(new Dictation { DictState = token, DictAwaitingConfirm = true }.ShowPanel(recording: false));
-        // recording needs local_stt.
         Assert.True(new Dictation { DictState = token, DictLocalStt = true }.ShowPanel(recording: true));
         Assert.False(new Dictation { DictState = token, DictLocalStt = false }.ShowPanel(recording: true));
-        // refused alone shows.
         Assert.True(new Dictation { DictState = token, DictRefused = true }.ShowPanel(recording: false));
-        // nothing set ⇒ hidden.
         Assert.False(new Dictation { DictState = token }.ShowPanel(recording: false));
     }
 
@@ -164,16 +155,14 @@ public class HealthSnapshotTests
     [InlineData("something_new", EngineState.Missing)]
     public void EngineStateStringMapsToEnum(string state, EngineState expected)
     {
-        // The space before the final brace keeps the JSON's `}}` from reading as the
-        // $$-interpolation's closing delimiter (CS9007).
+        // Space before final brace: avoid $$ interpolation treating `}}` as closer (CS9007).
         var s = Parse($$"""{"kokoro": {"state": "{{state}}", "progress": 0.5} }""");
         Assert.Equal(expected, s.EngineDots.Kokoro.State);
         Assert.Equal(0.5, s.EngineDots.Kokoro.Progress);
-        Assert.Equal(EngineState.Missing, s.EngineDots.Parakeet.State); // absent object
+        Assert.Equal(EngineState.Missing, s.EngineDots.Parakeet.State);
     }
 
-    /// <summary>The `diarization` engine object maps into EngineDots.Diarization exactly like
-    /// every other engine object (Kokoro/Parakeet/etc.) — same ToEngine mapping.</summary>
+    /// <summary>diarization engine object uses same ToEngine mapping as Kokoro/etc.</summary>
     [Fact]
     public void DiarizationEngineObjectMapsIntoEngineDots()
     {
@@ -206,27 +195,24 @@ public class HealthSnapshotTests
         Assert.Equal("ane", s.Diarization.Runtime);
     }
 
-    // ── IndicatorState: the ONE tray/state-stripe mapping, gated by tray_indicator ──
-
-    /// <summary>Recording wins over speaking; each state tints only when its token (plain or
-    /// _animated) is in the set; an empty set never tints.</summary>
+    /// <summary>Recording wins over speaking; tint only when token/_animated in set; [] never tints.</summary>
     [Fact]
     public void IndicatorStateHonorsTheTrayIndicatorSet()
     {
         var s = new HealthSnapshot();
         s.Activity.Recording = true;
         s.Activity.Speaking = true;
-        Assert.Equal(TrayIcon.IconState.Recording, s.IndicatorState()); // stt in the default set
+        Assert.Equal(TrayIcon.IconState.Recording, s.IndicatorState());
 
         s.Activity.TrayIndicator = new[] { "tts_animated" };
-        Assert.Equal(TrayIcon.IconState.Speaking, s.IndicatorState()); // stt not in set → tts wins
+        Assert.Equal(TrayIcon.IconState.Speaking, s.IndicatorState());
 
         s.Activity.TrayIndicator = Array.Empty<string>();
-        Assert.Equal(TrayIcon.IconState.Idle, s.IndicatorState()); // never tint
+        Assert.Equal(TrayIcon.IconState.Idle, s.IndicatorState());
 
         s.Activity.Recording = false;
         s.Activity.Speaking = false;
         s.Activity.TrayIndicator = new[] { "stt", "tts" };
-        Assert.Equal(TrayIcon.IconState.Idle, s.IndicatorState()); // nothing active
+        Assert.Equal(TrayIcon.IconState.Idle, s.IndicatorState());
     }
 }

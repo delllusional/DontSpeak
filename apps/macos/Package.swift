@@ -1,21 +1,12 @@
 // swift-tools-version: 6.2
 //
-// DontSpeak — native macOS SwiftUI app (MenuBarExtra tray + a sidebar window with the
-// Status / Tools / Logs / Libraries screens) bound to the Rust core over the C ABI in
-// CDontSpeak/include/dontspeak.h.
+// DontSpeak — macOS SwiftUI host (MenuBarExtra + sidebar Status/Tools/Logs/Libraries)
+// over the Rust C ABI (`CDontSpeak/include/dontspeak.h`).
 //
-// Deployment target is macOS 14 (Sonoma) — the floor set by the app's core shell
-// (MenuBarExtra, the Layout protocol, SMAppService) plus the SmKokoro apple-native audio
-// stack (FluidAudio's Core ML / ANE Kokoro + Parakeet + diarization, all macOS 14+).
-// Newer adoptions degrade behind availability checks: Liquid Glass `.glassEffect` and the
-// top window-resize anchor (macOS 26) fall back to `.ultraThinMaterial` / AppKit's default
-// bottom anchor — so the app still builds against the latest SDK and runs back to Sonoma
-// without serious degradation. There is no longer any macOS 13 legacy path.
-//
-// The DontSpeak target links the Rust staticlib libds_core.a built by
-// build.sh into ../../rust/target/release-ffi. Running `swift build` directly
-// (without build.sh first) fails at link with "library 'ds_core' not
-// found" — use build.sh, which builds the staticlib first.
+// Floor: macOS 14 (MenuBarExtra / Layout / SMAppService + SmKokoro Core ML stack).
+// Newer APIs degrade behind availability (e.g. Liquid Glass → ultraThinMaterial).
+// Link against libds_core.a from build.sh (`../../rust/target/release-ffi`); plain
+// `swift build` without that staticlib fails at link.
 
 import PackageDescription
 
@@ -25,17 +16,12 @@ let package = Package(
         .macOS(.v14)
     ],
     targets: [
-        // The C target wrapping the committed header. A SwiftPM auto-generated
-        // module map (from include/) exposes `import CDontSpeak`. The shim.c keeps
-        // it a buildable C target; the real symbols come from the linked Rust
-        // staticlib (linkerSettings on the DontSpeak target below).
+        // Header-only C target → `import CDontSpeak`; symbols come from the Rust staticlib.
         .target(
             name: "CDontSpeak",
             publicHeadersPath: "include"
         ),
-        // Pure, dependency-free app logic (no FFI, no frameworks) split out so it is
-        // unit-testable on its own — the executable target can't host XCTest because it
-        // force-loads the Rust staticlib. Keep only genuinely pure helpers here.
+        // Pure helpers only — executable force-loads the staticlib and can't host XCTest.
         .target(
             name: "DontSpeakLogic"
         ),
@@ -47,36 +33,20 @@ let package = Package(
             name: "DontSpeak",
             dependencies: ["CDontSpeak", "DontSpeakLogic"],
             linkerSettings: [
-                // The Rust staticlib (built by build.sh, symbols un-stripped via
-                // the release-ffi profile). `-force_load` pulls EVERY member
-                // object in so the linker's `-dead_strip` (default for SwiftPM
-                // executables) cannot drop the FFI symbols that Swift references
-                // only across the C-ABI boundary — without it the archive
-                // members are not retained and the link leaves the ds_*
-                // symbols undefined.
+                // `-force_load` retains every archive member so `-dead_strip` cannot drop
+                // ds_* symbols that Swift only references across the C ABI boundary.
                 .unsafeFlags([
                     "-L", "../../rust/target/release-ffi",
                     "-Xlinker", "-force_load",
                     "-Xlinker", "../../rust/target/release-ffi/libds_core.a",
                 ]),
-                // System frameworks the staticlib transitively needs — derived
-                // from `cargo rustc -- --print native-static-libs`, EXCEPT Carbon
-                // (added by hand: `ds-platform/build.rs` links it via
-                // `cargo:rustc-link-lib=framework=Carbon` for the Text Input Source
-                // Services calls in `macos.rs`'s `active_layout_keycode`, but that
-                // `println!` directive is Cargo-only metadata — it has no way to
-                // reach this SEPARATE SwiftPM linker-settings list, which links the
-                // prebuilt `libds_core.a` directly via `-force_load` rather than
-                // through Cargo. `--print native-static-libs` won't surface it
-                // either, since the crate's own `extern "C"` block declares the
-                // Carbon symbols directly with no linked crate to report). Missing
-                // this list entry doesn't fail a Rust-only `cargo build`/`cargo
-                // test` — it only surfaces at the SwiftPM app/test LINK step, e.g.
-                // `swift test` or `bundle.sh` — so it's easy to add the Rust side
-                // and forget this one; re-derive the whole list by hand after any
-                // dependency change that could alter native linkage, don't just
-                // trust the snapshot comment above.
-                //   AudioToolbox CoreAudio IOKit ApplicationServices AppKit
+                // Transitive native deps of the staticlib (`cargo rustc -- --print
+                // native-static-libs`), PLUS Carbon by hand: ds-platform links it for TIS
+                // layout keycodes, but that `cargo:rustc-link-lib` never reaches this
+                // separate SwiftPM list (we `-force_load` the prebuilt .a, not Cargo).
+                // Missing Carbon fails only at `swift test` / `bundle.sh`, not `cargo test`.
+                // Re-derive the whole list after any native-linkage change.
+                // Snapshot: AudioToolbox CoreAudio IOKit ApplicationServices AppKit
                 //   Foundation CoreGraphics CoreFoundation Carbon + libiconv/libobjc.
                 .linkedFramework("AppKit"),
                 .linkedFramework("Foundation"),

@@ -1,15 +1,9 @@
-//  CreditsView.swift
-//
-//  The Credits tab: the third-party open-source models + runtimes DontSpeak downloads,
-//  each with its license. The list is the SAME shared catalog every platform renders —
-//  read via the FFI (ds_libraries_json → the shared ds-model `libraries` catalog), already
-//  FILTERED to this platform (so an Apple-Silicon build shows the Core ML / ANE model sets
-//  and never the CUDA GPU runtime). It can't drift from what's actually fetched.
+// Libraries/Credits: third-party models + runtimes from `ds_libraries_json`
+// (shared ds-model catalog, already platform-filtered — no CUDA on Apple Silicon).
 
 import CDontSpeak
 import SwiftUI
 
-/// One downloaded file of a library, from the catalog's `files` array.
 struct LibraryFile: Identifiable, Sendable {
     let name: String
     let url: String
@@ -17,7 +11,6 @@ struct LibraryFile: Identifiable, Sendable {
     var id: String { name }
 }
 
-/// One library/project as shown in the list.
 struct LibraryInfo: Identifiable, Sendable {
     let name: String
     let usage: String
@@ -28,9 +21,6 @@ struct LibraryInfo: Identifiable, Sendable {
     var id: String { name }
 }
 
-/// Wire shape of the FFI libraries catalog (`ds_libraries_json` → the shared ds-model
-/// `libraries::catalog`): an array of projects, each with a `files` array. Decoded
-/// type-safely, then mapped to the view models above.
 private struct LibraryDTO: Decodable {
     let name: String
     let usage: String?
@@ -56,8 +46,7 @@ private struct LibraryFileDTO: Decodable {
     }
 }
 
-/// Read the catalog from the FFI and decode it into typed `LibraryInfo`s. Display order is
-/// the catalog's own (lowest-level first), so render as-is — no re-sorting.
+/// Catalog order is intentional (lowest-level first) — render as-is.
 private func loadLibraries() -> [LibraryInfo] {
     guard let dtos = ffiDecode([LibraryDTO].self, ds_libraries_json) else { return [] }
     return dtos.map { d in
@@ -74,8 +63,7 @@ private func loadLibraries() -> [LibraryInfo] {
     }
 }
 
-/// Human file size ("325 MB") from a byte count — resolved by the shared Rust formatter
-/// (`ds_human_size`, decimal units) so every platform's Libraries/Credits tab agrees.
+/// Shared Rust formatter (`ds_human_size`, decimal) so every platform's size labels agree.
 private func humanSize(_ bytes: Int) -> String {
     guard let ptr = ds_human_size(UInt64(max(0, bytes))) else { return "" }
     defer { ds_string_free(ptr) }
@@ -84,22 +72,15 @@ private func humanSize(_ bytes: Int) -> String {
 
 struct CreditsView: View {
     @State private var libraries: [LibraryInfo] = []
-    /// Names of the libraries currently expanded (collapsed by default) — same disclosure
-    /// idea as the Tools pane: a tappable header with a rotating chevron.
     @State private var expanded: Set<String> = []
 
     var body: some View {
-        // The Libraries pane of the merged sidebar window — just the scrollable content; the
-        // glass slab + traffic-light strip live once on the `MainWindow` container.
         libraryList
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // The catalog is immutable for the process lifetime, so load it ONCE — re-navigating
-            // to this tab re-fires `onAppear` but must not re-run the FFI + JSON decode.
+            // Catalog is process-immutable; re-navigating re-fires onAppear — load once.
             .onAppear { if libraries.isEmpty { libraries = loadLibraries() } }
     }
 
-    /// The catalog as a Control-Center / HUD layout matching the Tools pane: one glass slab
-    /// with the libraries on a single headerless "platter".
     @ViewBuilder private var libraryList: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -116,10 +97,6 @@ struct CreditsView: View {
         .scrollIndicators(.hidden)
     }
 
-    /// One collapsible library: a tappable header (just the name + a rotating chevron — the
-    /// collapsed row stays clean) that reveals what it's for, the project link, the license (its
-    /// name links to the license page), and the files it fetches — the shared `DisclosureRow`,
-    /// the same disclosure look the Tools pane uses.
     @ViewBuilder
     private func libraryRow(_ lib: LibraryInfo) -> some View {
         DisclosureRow(expanded: $expanded, id: lib.name) {
@@ -129,7 +106,6 @@ struct CreditsView: View {
         }
     }
 
-    /// The expanded body of a library row: what it's for, its links, then the files it fetches.
     @ViewBuilder
     private func libraryDetail(_ lib: LibraryInfo) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -145,8 +121,7 @@ struct CreditsView: View {
                         Label(L.t("libraries.homepage"), systemImage: "link")
                     }
                 }
-                // The license LINK is labeled with the license name itself (e.g. "MIT",
-                // "Apache-2.0") and opens its license page.
+                // License link label is the SPDX/name itself ("MIT"), not a generic "License".
                 if !lib.license.isEmpty, !lib.licenseURL.isEmpty, let url = URL(string: lib.licenseURL) {
                     Link(destination: url) {
                         Label(lib.license, systemImage: "doc.text")

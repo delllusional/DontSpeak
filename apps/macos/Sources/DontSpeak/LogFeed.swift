@@ -1,15 +1,6 @@
-//  LogFeed.swift
-//
-//  Drives the Logs tab live while it's open: a dedicated background `Thread` blocks in
-//  `ds_logs_wait` in a loop and yields each fresh tail into an `AsyncStream`, consumed by a
-//  `Task` on the main actor — the CLIENT-SIDE analogue of `Core.startStatusProducer` (that one
-//  blocks over the engine's IPC socket; this one blocks on an fs watch in THIS process, since
-//  logs are read straight off disk here, same as `ds_logs_json`). Same shape as `Core`'s
-//  producer/consumer split for the SAME reason: the FFI wait call blocks, so it must run on a
-//  raw `Thread`, never a `Task` (which would starve the cooperative pool); the stream boundary
-//  is what lets a non-Sendable `@Observable` class receive it safely under strict concurrency.
-//  Scoped to `LogView`'s own lifetime (start on appear, stop on disappear) rather than the
-//  whole app, since pushing logs while the tab is closed is pure waste.
+// Live Logs tab feed: background Thread blocks in `ds_logs_wait` → AsyncStream → main actor.
+// Same producer/consumer shape as `Core.startStatusProducer` — FFI wait must not run on a
+// Task (cooperative pool). Scoped to LogView appear/disappear (no work while tab closed).
 
 import CDontSpeak
 import DontSpeakLogic
@@ -27,8 +18,7 @@ final class LogFeed {
     private static let maxBytes: UInt32 = 64 * 1024
     private static let timeoutMs: UInt32 = 2000
 
-    /// Start with an immediate read on the producer thread, then enter the blocking-wait loop.
-    /// Both FFI calls touch disk, so neither belongs on the main actor that handles tab input.
+    /// Immediate disk read, then blocking wait loop — both off the main actor.
     func start() {
         let (stream, cont) = AsyncStream<[LogLine]>.makeStream(bufferingPolicy: .bufferingNewest(1))
         continuation = cont
@@ -72,9 +62,8 @@ final class LogFeed {
         continuation = nil
     }
 
-    /// Clear and re-prime on a one-shot worker so the destructive file operation cannot block
-    /// the main actor. The live watcher will normally publish the same result too; the stream's
-    /// newest-one buffer makes that harmless while guaranteeing an immediate empty refresh.
+    /// Clear + re-prime on a worker so disk work never blocks the main actor.
+    /// Live watcher may also publish; newest-one buffer makes the double yield harmless.
     func clear() {
         guard let continuation else { return }
         let maxBytes = Self.maxBytes

@@ -5,15 +5,12 @@ using System.Text.Json.Serialization;
 
 namespace DontSpeak;
 
-/// <summary>One line of the combined activity log — <see cref="LogParser.ParseLogs"/>'s
-/// display-ready output (source tag, level token, message text).</summary>
+/// <summary>One combined-activity-log line for the Logs tab.</summary>
 internal readonly record struct LogLine(string Source, string Level, string Text);
 
-/// <summary>Pure JSON→<see cref="LogLine"/> parse for the Logs tab (the wire shape
-/// <c>Native.LogsJson</c>/dontspeakd's combined-log endpoint emits). Deliberately a
-/// standalone class (not a member of <see cref="MainWindow"/>, which derives from the WinUI
-/// <c>Window</c> type) so <c>DontSpeak.WinUI.Tests</c> can exercise it on a bare runner with no
-/// Windows App Runtime, exactly like <see cref="HealthSnapshot.FromJson(string, System.Func{string, double, string, string})"/>.</summary>
+/// <summary>Pure JSON→<see cref="LogLine"/> for the Logs tab wire shape (<c>Native.LogsJson</c>).
+/// Standalone (not on <see cref="MainWindow"/>) so tests run without Windows App Runtime, like
+/// <see cref="HealthSnapshot.FromJson(string, System.Func{string, double, string, string})"/>.</summary>
 internal static class LogParser
 {
     private static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true };

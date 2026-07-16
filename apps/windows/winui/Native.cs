@@ -8,11 +8,8 @@ using System.Text.Json.Serialization;
 namespace DontSpeak;
 
 /// <summary>
-/// P/Invoke bridge to <c>ds_core.dll</c> — the SAME stable C ABI the macOS
-/// SwiftUI app links (see <c>macos/Sources/CDontSpeak/include/dontspeak.h</c>). The
-/// app hosts the engine IN-PROCESS: <see cref="EngineStart"/> on launch spins up
-/// the caps loop + RPC server + TTS queue on a Rust background thread inside this
-/// process; <see cref="EngineStop"/> tears it down on quit.
+/// P/Invoke to <c>ds_core.dll</c> — same C ABI as macOS (<c>dontspeak.h</c>). Hosts the engine
+/// in-process: <see cref="EngineStart"/> / <see cref="EngineStop"/> for caps loop + RPC + TTS.
 /// </summary>
 internal static class Native
 {
@@ -32,7 +29,7 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_brand_colors_json();
     [DllImport(Dll)] private static extern IntPtr ds_log_colors_json();
     [DllImport(Dll)] private static extern IntPtr ds_update_check_json();
-    // Shared status-panel formatters (one implementation, every platform UI).
+    // Shared status-panel formatters (one impl, every platform UI).
     [DllImport(Dll)] private static extern IntPtr ds_engine_state_word([MarshalAs(UnmanagedType.LPUTF8Str)] string state, double progress, [MarshalAs(UnmanagedType.LPUTF8Str)] string why);
     [DllImport(Dll)] private static extern IntPtr ds_duration_live(double secs);
     [DllImport(Dll)] private static extern IntPtr ds_runtime_label([MarshalAs(UnmanagedType.LPUTF8Str)] string provider);
@@ -46,63 +43,38 @@ internal static class Native
     public static bool EngineStart() => ds_engine_start() != 0;
     public static bool EngineStop() => ds_engine_stop() != 0;
 
-    /// <summary>Mute/unmute the voice (silences playback without stopping it) — the same C ABI
-    /// the macOS tray "Mute" toggle calls. Returns true if the request reached the engine
-    /// (false = engine down), NOT the resulting muted state.</summary>
+    /// <summary>Silence playback without stopping it. Returns true if the request reached the
+    /// engine (false = engine down), NOT the resulting muted state.</summary>
     public static bool SetMuted(bool on) => ds_set_muted((byte)(on ? 1 : 0)) != 0;
 
-    /// <summary>Open the OS system-voice settings page (Windows: Time &amp; language ▸ Speech)
-    /// via the SHARED Rust seam every platform UI calls — the System-TTS "Manage voices"
-    /// affordance. Returns true if a page was launched.</summary>
+    /// <summary>Open OS voice settings (Windows: Time &amp; language ▸ Speech) via the shared
+    /// Rust seam. Returns true if a page was launched.</summary>
     public static bool OpenVoiceSettings() => ds_open_voice_settings() != 0;
 
-    /// <summary>Localized hover word for an engine lifecycle state (shared with macOS).</summary>
     public static string EngineStateWord(string state, double progress, string why) => TakeString(ds_engine_state_word(state, progress, why));
-
-    /// <summary>Localized lifetime duration down to seconds (shared with macOS).</summary>
     public static string DurationLive(double secs) => TakeString(ds_duration_live(secs));
-
-    /// <summary>Localized RUNTIME label for a resolved provider token (shared with macOS/Linux).</summary>
     public static string RuntimeLabel(string provider) => TakeString(ds_runtime_label(provider));
-
-    /// <summary>A stat RANGE string "avg&lt;unit&gt;  ·  lo–hi" (shared formatter).</summary>
     public static string StatsRange(double lo, double avg, double hi, uint precision, string unitKey) => TakeString(ds_stats_range(lo, avg, hi, precision, unitKey));
-
-    /// <summary>A COUNT + audio-duration stat string "&lt;count&gt;  &lt;secs&gt; s" (shared formatter).</summary>
     public static string StatsCount(ulong count, double audioSecs) => TakeString(ds_stats_count(count, audioSecs));
-
-    /// <summary>A human-readable file size "325 MB" / "12 KB" — the shared decimal formatter every
-    /// platform's Libraries tab calls, so sizes agree byte-for-byte (shared with macOS/Linux).</summary>
+    /// <summary>Decimal size string shared with macOS/Linux Libraries tabs (byte-for-byte parity).</summary>
     public static string HumanSize(ulong bytes) => TakeString(ds_human_size(bytes));
 
-    /// <summary>The product version (shared Rust workspace version), e.g. "0.2.0". Cached —
-    /// it can't change while the process lives, and ApplyStatus reads it on every push.</summary>
+    /// <summary>Workspace product version; cached (immutable for process life; ApplyStatus reads often).</summary>
     public static string Version() => _version ??= TakeString(ds_version());
     private static string? _version;
 
-    /// <summary>The product homepage URL (dontspeak.org) — the SAME shared source of truth
-    /// the macOS app links to; the version label opens it in the default browser.</summary>
     public static string HomepageUrl() => TakeString(ds_homepage_url());
-
-    /// <summary>The brand tints as JSON ({seed_purple, mic_orange, warning}) — the SAME
-    /// cross-platform source the macOS app reads (Brand.swift), so every UI tints
-    /// identically. "{}" on the engine side; callers fall back to the brand hexes.</summary>
+    /// <summary>Brand tints JSON; "{}" → callers use brand-hex fallbacks (see <see cref="Brand"/>).</summary>
     public static string BrandColorsJson() => TakeString(ds_brand_colors_json());
-
-    /// <summary>The Logs-tab colors as JSON ({levels, source_palette}) — the SAME shared Rust
-    /// source every platform's Logs tab tints from. "{}" on the engine side; <see cref="Brand"/>
-    /// falls back to the built-in palette.</summary>
+    /// <summary>Logs-tab colors JSON; "{}" → <see cref="Brand"/> built-in palette.</summary>
     public static string LogColorsJson() => TakeString(ds_log_colors_json());
 
-    /// <summary>Startup update check: BLOCKS on a real GitHub API GET (ds_update_check_json) —
-    /// call OFF the UI thread (see App.OnLaunched's dedicated "update-check" thread). Raw JSON;
-    /// parse with <see cref="ParseUpdateAvailable"/> / <see cref="ParseLatestVersion"/>.</summary>
+    /// <summary>BLOCKS on GitHub API GET — call off UI thread. Parse with
+    /// <see cref="ParseUpdateAvailable"/> / <see cref="ParseLatestVersion"/>.</summary>
     public static string UpdateCheckJson() => TakeString(ds_update_check_json());
 
-    /// <summary>The pure parse half of the startup update check, split out so the "missing/
-    /// malformed ⇒ false" contract can be unit-tested without ds_core.dll (mirrors how
-    /// <see cref="HealthSnapshot.FromJson(string, Func{string, double, string, string})"/> is
-    /// tested) — internal (not private) so DontSpeak.WinUI.Tests can call it directly.</summary>
+    /// <summary>Pure parse: missing/malformed ⇒ false (never show the pill on ambiguity).
+    /// Internal for unit tests without ds_core.dll.</summary>
     internal static bool ParseUpdateAvailable(string json)
     {
         if (string.IsNullOrWhiteSpace(json)) return false;
@@ -111,12 +83,10 @@ internal static class Native
             var dto = JsonSerializer.Deserialize<UpdateCheckDto>(json, UpdateCheckJsonOptions);
             return dto?.UpdateAvailable ?? false;
         }
-        catch { return false; } // malformed JSON → never show the pill on ambiguity
+        catch { return false; } // malformed → never show pill on ambiguity
     }
 
-    /// <summary>The version number the pill shows (e.g. "0.2.0") — <c>null</c> whenever
-    /// <see cref="ParseUpdateAvailable"/> would return <c>false</c>, so a caller never needs to
-    /// check both: a non-null result already implies an update is available.</summary>
+    /// <summary>Pill version string, or null whenever <see cref="ParseUpdateAvailable"/> is false.</summary>
     internal static string? ParseLatestVersion(string json)
     {
         if (!ParseUpdateAvailable(json)) return null;
@@ -134,50 +104,29 @@ internal static class Native
         [property: JsonPropertyName("update_available")] bool UpdateAvailable,
         [property: JsonPropertyName("latest_version")] string? LatestVersion);
 
-    /// <summary>The engine's model-status JSON ("{}" when the engine is down).</summary>
     public static string ModelStatusJson() => TakeString(ds_model_status_json());
 
-    /// <summary>BLOCKS until the engine's status sequence differs from <paramref name="since"/>
-    /// or <paramref name="timeoutMs"/> elapses, then returns the current model-status JSON
-    /// (whose "seq" is the next <paramref name="since"/>). The push transport for the dictation
-    /// overlay — call on a DEDICATED background thread (it blocks), never the UI thread. Pass
-    /// since=0 first. "{}" when the engine is down.</summary>
+    /// <summary>BLOCKS until status seq ≠ <paramref name="since"/> or timeout; returns model-status
+    /// JSON ("seq" is next since). Dedicated background thread only; since=0 first. "{}" if down.</summary>
     public static string ModelStatusWait(ulong since, uint timeoutMs) => TakeString(ds_model_status_wait(since, timeoutMs));
 
-    /// <summary>The MCP tool catalog JSON, UI shape: an array of {name, description,
-    /// params:[{name, type, required, description, …}]} in authored display order (the
-    /// shared ds-tools catalog, same as the macOS ToolsView reads).</summary>
+    /// <summary>MCP tool catalog (ds-tools), authored display order — same as macOS ToolsView.</summary>
     public static string ToolsJson() => TakeString(ds_tools_json());
 
-    /// <summary>The third-party libraries catalog JSON (downloaded models + runtimes), UI shape:
-    /// an array of {name, usage, homepage, license, license_url, files:[{name, url, size_bytes?}]}.
-    /// The SAME shared Rust catalog (ds-model) every platform's Libraries tab renders, so it
-    /// can't drift from what's actually fetched.</summary>
+    /// <summary>Libraries catalog (ds-model); shared so credits can't drift from what ships.</summary>
     public static string LibrariesJson() => TakeString(ds_libraries_json());
 
-    /// <summary>The COMBINED activity-log tail (last <paramref name="maxBytes"/> per file) for the
-    /// Logs tab — a JSON array of {source, level, text} merging the unified log (tagged per
-    /// subsystem) with every sibling aux log (e.g. the out-of-process "helper" stderr), in rough
-    /// chronological order. Reads the SAME files the engine writes (shared-read). "[]" if no log
-    /// yet. The UI derives its source filter from the distinct source values.</summary>
+    /// <summary>Combined activity-log tail ({source, level, text}); unified + aux logs. "[]" if none.</summary>
     public static string LogsJson(uint maxBytes) => TakeString(ds_logs_json(maxBytes));
 
-    /// <summary>Like <see cref="LogsJson"/> but BLOCKS until the logs directory changes (any
-    /// *.log file created/modified/removed — the unified log or a sibling aux log; rotated
-    /// *.log.N files don't count) or <paramref name="timeoutMs"/> elapses, then returns the
-    /// CURRENT combined log JSON — the same shape as <see cref="LogsJson"/>, no diff/since
-    /// token. CLIENT-SIDE (an fs watch in this process), not an engine round-trip. Call ONLY on
-    /// a DEDICATED background thread (it blocks), in a loop: call → render → call again.</summary>
+    /// <summary>Like <see cref="LogsJson"/> but BLOCKS on log-dir change (client-side fs watch, not
+    /// engine RPC; rotated *.log.N ignored) or timeout. Dedicated background thread only.</summary>
     public static string LogsWait(uint maxBytes, uint timeoutMs) => TakeString(ds_logs_wait(maxBytes, timeoutMs));
 
-    /// <summary>Erase the ENTIRE on-disk activity log — the unified log, its rotated backups, and
-    /// every sibling aux log — for the Logs tab's Clear button. Irreversible; the caller must
-    /// confirm with the user before calling.</summary>
+    /// <summary>Erase on-disk activity log (unified + rotated + aux). Irreversible — confirm first.</summary>
     public static void LogsClear() => ds_logs_clear();
 
-    /// <summary>Copy a Rust-owned UTF-8 char* into a managed string and free it. Internal (not
-    /// private) so other ds_core.dll bindings in this assembly — e.g. <see cref="Loc"/> — share
-    /// this ONE marshal-and-free implementation instead of redefining their own.</summary>
+    /// <summary>Marshal Rust UTF-8 char* and free. Shared by <see cref="Loc"/> and this class.</summary>
     internal static string TakeString(IntPtr ptr)
     {
         if (ptr == IntPtr.Zero) return "";
@@ -186,84 +135,55 @@ internal static class Native
     }
 }
 
-/// <summary>Lifecycle state of one engine/model (mirrors the SwiftUI EngineStatus).</summary>
 public enum EngineState { Missing, Idle, Downloading, Warming, Blocked, Running, Failed }
 
-// Word is resolved ONCE at parse time via the shared Rust formatter
-// (ds_engine_state_word), so the state→word mapping lives in one place for
-// every platform — no per-UI switch to drift from the macOS wording.
+// Word from shared Rust formatter at parse time — one state→word map for all platforms.
 public readonly record struct EngineInfo(EngineState State, double Progress, string Word);
 
-// The flat HealthSnapshot fields, grouped into cohesive sub-structs that MIRROR the macOS
-// HealthSnapshot for cross-platform parity. The per-engine stats/loaded/lifetime totals
-// (further down on HealthSnapshot) keep their own grouping, exactly as before.
-
-/// <summary>Live activity flags — the engine's `running` map plus the tray-tint setting.</summary>
+/// <summary>Engine `running` map + tray-tint setting.</summary>
 public sealed record Activity
 {
     public bool EngineRunning;
     public bool Caps, Recording, Speaking;
-    // Global mute (the tray "Mute" toggle): the voice is silenced but playback isn't stopped.
-    // Drives the tray icon's muted slash + the menu checkmark (mirrors macOS).
+    // Mute silences voice without stopping playback (tray slash + menu checkmark).
     public bool Muted;
-    // Which live states tint the tray icon — a SET of tokens, one per state: stt/tts (static)
-    // or stt_animated/tts_animated (the breathing form, a macOS effect). Default ["stt",
-    // "tts_animated"]; [] = never tint. Engine default; this is a fallback only.
+    // Tray tint tokens: stt/tts or stt_animated/tts_animated. Default ["stt","tts_animated"];
+    // [] = never tint. Fallback only — engine is source of truth.
     public string[] TrayIndicator = { "stt", "tts_animated" };
 }
 
-/// <summary>Per-engine lifecycle dots — every engine object the status JSON carries:
-/// Kokoro/Parakeet are the local models; ClaudeCode/System/TtsSystem are the delegate/OS
-/// engines (no downloadable model); Diarization is the on-demand speaker-lock engine (no
-/// downloadable model rendered elsewhere).</summary>
+/// <summary>Lifecycle dots for every engine object on the wire (local, OS, delegate, diarization).</summary>
 public sealed record EngineDots
 {
     public EngineInfo Kokoro, Parakeet, ClaudeCode, System, TtsSystem, Diarization;
 }
 
-/// <summary>The ACTIVE engine tokens + their runtime EPs — the TTS/STT rows adapt to these
-/// (which concrete engine is named, which dot/stats render), exactly as the macOS StatusView.</summary>
+/// <summary>Active STT/TTS tokens + runtime EPs (drives which row/dot/stats render).</summary>
 public sealed record EngineSelection
 {
-    //   stt_engine: claude_code (delegate) | built_in (Parakeet) | system (OS recognizer)
-    //   tts_engine: built_in (Kokoro)      | system  (OS voice)
+    // stt: claude_code | built_in | system; tts: built_in | system
     public string SttEngine = "claude_code", TtsEngine = "built_in";
-    // The active runtime/EP token for the built_in models (cpu | cuda | coreml
-    // | ane), shown as the "Runtime" line inside the Kokoro/Parakeet stats. Empty = none.
+    // built_in runtime EP (cpu|cuda|coreml|ane); empty = none
     public string SttProvider = "", TtsProvider = "";
-    // The human key label DontSpeak synthesizes for Claude Code dictation (e.g. "Space");
-    // shown in the claude_code STT hint instead of meaningless local stats. Empty if N/A.
+    // Claude Code synthesized key label (e.g. "Space"); empty if N/A
     public string ClaudeCodeKey = "";
 }
 
-/// <summary>Dictation confirm-panel state (the `dictation` object): the live/final transcript,
-/// whether it's awaiting the confirm tap, and whether this is the local (Parakeet) path — so
-/// the overlay can appear the moment recording starts (see model_status).</summary>
+/// <summary>Dictation confirm-panel wire object (transcript + panel gating fields).</summary>
 public sealed record Dictation
 {
     public string DictText = "";
     public bool DictAwaitingConfirm, DictLocalStt;
-    // LIVE: is an editable text field focused to receive the paste right now? The engine
-    // samples this each tick while the panel is up; the overlay tints its glow when false
-    // ("no input to submit into"). True by default (fail-open; mirrors macOS).
+    // Editable paste target focused? Fail-open true (old engines omit the key).
     public bool DictHasTarget = true;
-    // The engine's "speak now" glow decision (recording, nothing transcribed yet, not
-    // awaiting confirm) — computed once in the core so this overlay and the macOS one
-    // pulse identically. The no-target warning glow stays driven by DictHasTarget.
+    // Core-computed "speak now" glow — shared with macOS; no-target uses DictHasTarget.
     public bool DictPromptGlow;
-    // A dictation START was just refused (engine selected but can't transcribe yet — model
-    // missing / still downloading / warm helper loading). The panel shows for the refusal
-    // window washed in the SAME warning glow as DictHasTarget == false, so a Caps tap on a
-    // fresh install is never a silent no-op. False by default (fail-quiet; mirrors macOS).
+    // Start refused (model missing/downloading/warming). Fail-quiet false. Warning glow like no-target.
     public bool DictRefused;
-    // The canonical confirm-panel state token (vocabulary:
-    // rust/crates/ds-status/src/dictation_state.rs). Empty = older engine payload (key
-    // absent) ⇒ ShowPanel falls back to the legacy boolean derivation.
+    // Canonical token (ds-status dictation_state.rs). Empty ⇒ older engine ⇒ legacy boolean fallback.
     public string DictState = "";
 
-    /// <summary>Panel visibility from the canonical `dictation.state` token (vocabulary:
-    /// rust/crates/ds-status/src/dictation_state.rs); absent/unknown token (older engine
-    /// DLL) falls back to the legacy boolean derivation — removed with the booleans later.</summary>
+    /// <summary>Visibility from `dictation.state`; unknown/absent falls back to legacy booleans.</summary>
     public bool ShowPanel(bool recording) => DictState switch
     {
         "hidden" => false,
@@ -272,8 +192,6 @@ public sealed record Dictation
     };
 }
 
-/// <summary>TTS realtime / first-audio / throughput stats for the expandable Kokoro row
-/// (mirrors the macOS EngineStats.tts group).</summary>
 public sealed record TtsStats
 {
     public double RtfAvg, RtfMin, RtfMax;
@@ -282,24 +200,18 @@ public sealed record TtsStats
     public int Utterances, Failures;
 }
 
-/// <summary>STT realtime / throughput stats for the expandable Parakeet row
-/// (mirrors the macOS EngineStats.stt group).</summary>
 public sealed record SttStats
 {
     public double RtfAvg, RtfMin, RtfMax, AudioSecs;
     public int Transcriptions, Failures;
 }
 
-/// <summary>Persisted lifetime totals (seconds spoken / heard), summed across all sessions —
-/// shown under the Status "DontSpeak" row's expansion (mirrors the macOS EngineStats.lifetime).</summary>
 public sealed record LifetimeStats
 {
     public double TtsSecs, SttSecs;
 }
 
-/// <summary>Diarization stats for the expandable diarizer row (mirrors the macOS
-/// EngineStats.Diar group — only the fields the UI renders; `present`/`speaker_threshold`
-/// are on the wire but unused here, matching macOS).</summary>
+/// <summary>Diarization UI fields only (`present`/`speaker_threshold` on wire but unused, macOS parity).</summary>
 public sealed record DiarizationStats
 {
     public bool Enabled;
@@ -308,7 +220,7 @@ public sealed record DiarizationStats
     public double ClusteringThreshold;
 }
 
-/// <summary>A parsed snapshot of the engine's model-status JSON (mirrors HealthSnapshot).</summary>
+/// <summary>Parsed model-status snapshot (macOS HealthSnapshot parity).</summary>
 internal sealed class HealthSnapshot
 {
     public Activity Activity = new();
@@ -316,11 +228,9 @@ internal sealed class HealthSnapshot
     public EngineSelection EngineSelection = new();
     public Dictation Dictation = new();
 
-    /// <summary>The engine object ACTUALLY doing TTS for the active tts_engine (Kokoro,
-    /// or the OS voice when "system") — so dots/tooltips name what's really speaking.</summary>
+    /// <summary>Engine object actually doing TTS for active tts_engine.</summary>
     public EngineInfo ActiveTts => EngineSelection.TtsEngine == "system" ? EngineDots.TtsSystem : EngineDots.Kokoro;
-    /// <summary>The engine object ACTUALLY doing STT for the active stt_engine
-    /// (Parakeet for "built_in", else the Claude Code delegate or OS recognizer).</summary>
+    /// <summary>Engine object actually doing STT for active stt_engine.</summary>
     public EngineInfo ActiveStt => EngineSelection.SttEngine switch
     {
         "claude_code" => EngineDots.ClaudeCode,
@@ -328,10 +238,8 @@ internal sealed class HealthSnapshot
         _ => EngineDots.Parakeet,
     };
 
-    /// <summary>The status-indicator state for the live engine — the ONE mapping shared by the
-    /// tray icon and the window's state stripe, gated by the `tray_indicator` setting. A state
-    /// colors when its token is present in either form (`stt`/`stt_animated`, `tts`/`tts_animated`);
-    /// the breathing the `_animated` form adds is a macOS effect, so Windows just colors.</summary>
+    /// <summary>ONE tray/state-stripe mapping, gated by tray_indicator. Token or token_animated
+    /// both color; _animated breathing is macOS-only — Windows just tints.</summary>
     public TrayIcon.IconState IndicatorState()
     {
         bool Colors(string state) =>
@@ -339,39 +247,30 @@ internal sealed class HealthSnapshot
             Array.IndexOf(Activity.TrayIndicator, state + "_animated") >= 0;
         if (Activity.Recording && Colors("stt")) return TrayIcon.IconState.Recording;
         if (Activity.Speaking && Colors("tts")) return TrayIcon.IconState.Speaking;
-        // Downloading/warming are shown ONLY on the per-engine TTS/STT dots (macOS parity), never
-        // on the tray icon or the window state-stripe — so both stay idle unless recording/speaking.
+        // Download/warm only on per-engine dots (macOS parity), never tray/stripe.
         return TrayIcon.IconState.Idle;
     }
-    // Per-engine stats for the expandable Kokoro/Parakeet rows, grouped into cohesive
-    // sub-records that mirror the macOS EngineStats split (tts / stt / lifetime).
     public TtsStats Tts = new();
     public SttStats Stt = new();
     public LifetimeStats Lifetime = new();
     public DiarizationStats Diarization = new();
 
-    // The engine's push sequence (status.rs StatusGate): the app echoes it back as
-    // `since` to the next ModelStatusWait so the call blocks until the NEXT change.
+    // status.rs StatusGate: echo as `since` to ModelStatusWait to block until next change.
     public ulong StatusSeq;
 
     public static HealthSnapshot Probe() => FromJson(Native.ModelStatusJson());
 
-    // System.Text.Json options for the model_status decode: case-insensitive (belt-and-
-    // braces over the explicit [JsonPropertyName]s) and tolerant of unknown/missing members
-    // (default behaviour) so a schema that grows on the Rust side never throws here.
+    // Case-insensitive + tolerant of unknown members so a grown Rust schema never throws here.
     private static readonly JsonSerializerOptions ModelStatusJsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
     };
 
-    /// <summary>Parse a model-status JSON string into a snapshot. Shared by the polling
-    /// <see cref="Probe"/> and the push loop (which already holds the JSON from a blocking
-    /// ModelStatusWait, so it must not re-fetch).</summary>
+    /// <summary>Parse model-status JSON. Push path already holds JSON — must not re-fetch.</summary>
     public static HealthSnapshot FromJson(string json) => FromJson(json, Native.EngineStateWord);
 
-    /// <summary>As <see cref="FromJson(string)"/>, with the per-engine status-word formatter
-    /// injected: production passes the shared Rust formatter (`ds_engine_state_word`); the
-    /// unit tests pass a stub so the PARSE logic runs without ds_core.dll.</summary>
+    /// <summary>As <see cref="FromJson(string)"/> with injectable state-word formatter
+    /// (tests stub so parse runs without ds_core.dll).</summary>
     public static HealthSnapshot FromJson(string json, Func<string, double, string, string> stateWord)
     {
         var s = new HealthSnapshot();
@@ -379,23 +278,19 @@ internal sealed class HealthSnapshot
         try
         {
             var dto = JsonSerializer.Deserialize<ModelStatusDto>(json, ModelStatusJsonOptions);
-            if (dto is null) return s; // malformed/empty payload → default snapshot (Activity.EngineRunning stays false)
-            // Non-empty, well-formed JSON ⇒ the engine is up (matches the old walk, which set
-            // Activity.EngineRunning=true the moment JsonDocument.Parse succeeded). A malformed payload
-            // throws above and falls into catch → default snapshot, exactly as before.
+            if (dto is null) return s;
+            // Well-formed non-empty JSON ⇒ engine up; malformed → catch → empty snapshot.
             s.Activity.EngineRunning = true;
             s.StatusSeq = dto.Seq;
 
             if (dto.Running is { } r)
             {
-                // Field names per dontspeakd's model_status_json "running" map.
                 s.Activity.Caps = r.Caps;
                 s.Activity.Recording = r.SttActive;
                 s.Activity.Speaking = r.TtsActive;
                 s.Activity.Muted = r.Muted;
             }
-            // Only override the default {"stt","tts_animated"} when the key is actually present
-            // (absent ⇒ DTO field is null ⇒ keep the default), mirroring the old guard.
+            // Override default tray_indicator only when key present (null ⇒ keep default).
             if (dto.TrayIndicator is { } ti)
                 s.Activity.TrayIndicator = ti.Where(t => t is not null).Cast<string>().ToArray();
             if (dto.Dictation is { } d)
@@ -403,14 +298,13 @@ internal sealed class HealthSnapshot
                 s.Dictation.DictText = d.Text ?? "";
                 s.Dictation.DictAwaitingConfirm = d.AwaitingConfirm;
                 s.Dictation.DictLocalStt = d.LocalStt;
-                // Fail-open: true unless the engine explicitly says false (missing ⇒ true).
+                // Fail-open: true unless engine explicitly says false.
                 s.Dictation.DictHasTarget = d.HasPasteTarget ?? true;
                 s.Dictation.DictPromptGlow = d.PromptGlow;
                 s.Dictation.DictRefused = d.Refused;
                 s.Dictation.DictState = d.State ?? "";
             }
-            // Active-engine tokens + their runtime EPs drive which TTS/STT row renders
-            // (default to the engine's own defaults so a partial payload still picks a row).
+            // Partial payload still picks a row via engine defaults.
             s.EngineSelection.SttEngine = NonEmptyOr(dto.SttEngine, "claude_code");
             s.EngineSelection.TtsEngine = NonEmptyOr(dto.TtsEngine, "built_in");
             s.EngineSelection.SttProvider = dto.SttProvider ?? "";
@@ -450,17 +344,14 @@ internal sealed class HealthSnapshot
                 }
             }
         }
-        catch { /* engine mid-write / malformed → treat as the empty snapshot */ }
+        catch { /* mid-write / malformed → empty snapshot */ }
         return s;
     }
 
     private static string NonEmptyOr(string? v, string fallback) =>
         string.IsNullOrEmpty(v) ? fallback : v;
 
-    /// <summary>Map a decoded engine object → <see cref="EngineInfo"/>: the `state` string
-    /// drives the <see cref="EngineState"/> enum (1:1 with dontspeakd's engine_obj states) and
-    /// the hover word comes from the shared Rust formatter (one mapping for every UI). A
-    /// missing object reads as Missing, exactly as the old TryGetProperty walk did.</summary>
+    /// <summary>`state` string → enum 1:1 with dontspeakd; missing object → Missing; word from shared Rust.</summary>
     private static EngineInfo ToEngine(EngineObjDto? o, Func<string, double, string, string> stateWord)
     {
         if (o is null)
@@ -482,15 +373,9 @@ internal sealed class HealthSnapshot
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Wire DTOs mirroring the engine's `model_status` JSON. The single source of truth for this
-// schema is the Rust `ds-status` crate (rust/crates/ds-status/src/lib.rs); the
-// engine builds it in dontspeakd/src/status.rs. These C# DTOs are a HAND mirror of that shape,
-// kept honest by ds-status's round-trip contract test (a deliberately small,
-// dependency-free boundary instead of codegen). Keep them in lockstep with the Rust schema.
-// Every key is pinned with [JsonPropertyName] (no naming policy); unknown/missing members are
-// tolerated, so a grown schema never throws. These types feed ONLY HealthSnapshot.FromJson —
-// the public HealthSnapshot/EngineInfo shapes above are unchanged.
+// Hand mirror of ds-status model_status JSON (dontspeakd/src/status.rs). No codegen — kept honest
+// by ds-status round-trip test. Lockstep with Rust; [JsonPropertyName] only; unknown members OK.
+// Feeds HealthSnapshot.FromJson only.
 
 internal sealed record ModelStatusDto
 {
@@ -546,13 +431,12 @@ internal sealed record DictationDto
     [JsonPropertyName("text")] public string? Text { get; init; }
     [JsonPropertyName("target")] public string? Target { get; init; }
     [JsonPropertyName("local_stt")] public bool LocalStt { get; init; }
-    // Nullable so "absent" (⇒ fail-open true) is distinguishable from an explicit false.
+    // Nullable: absent ⇒ fail-open true vs explicit false.
     [JsonPropertyName("has_paste_target")] public bool? HasPasteTarget { get; init; }
     [JsonPropertyName("prompt_glow")] public bool PromptGlow { get; init; }
-    // Absent (older engine) ⇒ false: fail-quiet, no spurious refusal glow.
+    // Absent (older engine) ⇒ false (fail-quiet).
     [JsonPropertyName("refused")] public bool Refused { get; init; }
-    // The canonical confirm-panel state token; absent (older engine) ⇒ the consumer
-    // falls back to the legacy boolean derivation (never straight to hidden).
+    // Canonical panel token; absent ⇒ legacy boolean fallback (never straight to hidden).
     [JsonPropertyName("state")] public string? State { get; init; }
 }
 

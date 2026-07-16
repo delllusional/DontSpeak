@@ -3,16 +3,12 @@ using Xunit;
 namespace DontSpeak.Tests;
 
 /// <summary>
-/// <see cref="DictationPanel.BuildWords"/> — the per-word fade-in/fade-out diff that drives the
-/// dictation overlay's blur transitions. `now` is passed in directly (never a live
-/// <see cref="System.Diagnostics.Stopwatch"/>) and no <see cref="DictationPanel"/> instance is
-/// constructed (that would open a real Win32 window), so this runs as plain data-in/data-out
-/// logic, mirroring <see cref="HealthSnapshotTests"/> and <see cref="LogParserTests"/>.
+/// <see cref="DictationPanel.BuildWords"/> pure data tests — injected `now`, no panel instance
+/// (would open a Win32 window).
 /// </summary>
 public class DictationPanelBuildWordsTests
 {
-    // CA1861: constant array arguments hoisted out of the repeatedly-built snapshots/asserts
-    // (same convention as HealthSnapshotTests).
+    // CA1861: hoist constant arrays out of asserts.
     private static readonly string[] HelloWorld = { "hello", "world" };
     private static readonly string[] HelloThere = { "hello", "there" };
     private static readonly string[] HelloWorldFoo = { "hello", "world", "foo" };
@@ -53,7 +49,7 @@ public class DictationPanelBuildWordsTests
         DictationPanel.BuildWords(prev, next, "hello world foo", now: 5000);
 
         Assert.Equal(HelloWorldFoo, next.Words);
-        // The stable prefix keeps its original stamp so it doesn't re-animate on a partial.
+        // Stable prefix keeps stamp (no re-animate on partial).
         Assert.Equal(Stamp1000Then5000, next.AppearMs);
     }
 
@@ -63,28 +59,26 @@ public class DictationPanelBuildWordsTests
         var prev = Prev(HelloWorld, Stamp1000Twice);
         var next = new DictationPanel.Snapshot();
 
-        // A refinement: "world" → "there" at slot 1 (e.g. STT correcting itself).
         DictationPanel.BuildWords(prev, next, "hello there", now: 2000);
 
         Assert.Equal(HelloThere, next.Words);
-        Assert.Equal(Stamp1000Then2000, next.AppearMs); // hello unchanged, there is new
-        Assert.Equal(NullThenWorld, next.OutWords); // the old word fades out
+        Assert.Equal(Stamp1000Then2000, next.AppearMs);
+        Assert.Equal(NullThenWorld, next.OutWords);
         Assert.Equal(ZeroThen2000, next.OutAppearMs);
     }
 
     [Fact]
     public void InFlightOutgoingFadeCarriesOverOnAnUnchangedRapidRerender()
     {
-        // Right after a replacement: slot 1 is mid-fade-out ("world" fading, stamped at 2000).
+        // Slot 1 mid-fade-out inside 360ms window.
         var prev = Prev(HelloThere, Stamp1000Then2000, NullThenWorld, ZeroThen2000);
         var next = new DictationPanel.Snapshot();
 
-        // Same text, 100ms later — well inside the 360ms fade window.
         DictationPanel.BuildWords(prev, next, "hello there", now: 2100);
 
         Assert.Equal(NullThenWorld, next.OutWords);
         Assert.Equal(ZeroThen2000, next.OutAppearMs);
-        Assert.Equal(Stamp1000Then2000, next.AppearMs); // unchanged slots keep their stamp
+        Assert.Equal(Stamp1000Then2000, next.AppearMs);
     }
 
     [Fact]
@@ -93,7 +87,7 @@ public class DictationPanelBuildWordsTests
         var prev = Prev(HelloThere, Stamp1000Then2000, NullThenWorld, ZeroThen2000);
         var next = new DictationPanel.Snapshot();
 
-        // 500ms later — past the 360ms fade window, so the stale outgoing word is dropped.
+        // Past 360ms fade window → drop stale outgoing.
         DictationPanel.BuildWords(prev, next, "hello there", now: 2500);
 
         Assert.Equal(NullTwice, next.OutWords);

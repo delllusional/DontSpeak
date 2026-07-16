@@ -3,14 +3,10 @@ using Xunit;
 namespace DontSpeak.Tests;
 
 /// <summary>
-/// <see cref="LogParser.ParseLogs"/> — the combined activity log's JSON→<see cref="LogLine"/>
-/// parse, exercised with canned JSON (the same wire shape <c>Native.LogsJson</c> returns)
-/// instead of a real log file, mirroring <see cref="HealthSnapshotTests"/>.
+/// <see cref="LogParser.ParseLogs"/> with canned LogsJson-shaped JSON (no real log file).
 /// </summary>
 public class LogParserTests
 {
-    // ── Empty/malformed payloads must yield an empty list, never throw ──
-
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
@@ -21,8 +17,6 @@ public class LogParserTests
     {
         Assert.Empty(LogParser.ParseLogs(json));
     }
-
-    // ── Happy path: every line's source/level/text is mapped in order ──
 
     [Fact]
     public void WellFormedPayloadMapsEveryLineInOrder()

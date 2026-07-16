@@ -1,16 +1,6 @@
-//  EngineStatsModel.swift
-//
-//  Pure model for the engine's `stats` push: the wire DTOs (model_status `stats`) and
-//  the `EngineStats` groups the UI binds, plus the DTO→stats mapping with its per-field
-//  defaulting rules. Framework-free (Codable is the Swift standard library) and split
-//  into this target so the mapping is unit-testable without the Rust FFI staticlib —
-//  the same seam the Windows app covers in winui.tests/HealthSnapshotTests.
-
-/// Engine stats parsed from model_status `stats`. Grouped into cohesive nested
-/// sub-structs that mirror the `stats` wire object (tts / stt / diarization /
-/// lifetime), so each reader binds the one block it cares about.
+/// Engine stats from model_status `stats`, grouped to mirror the wire object so each UI
+/// reader binds one block. Same seam as Windows `HealthSnapshotTests`.
 public struct EngineStats: Sendable, Equatable {
-    /// Text-to-speech (Kokoro): realtime factor, time-to-first-audio, and totals.
     public struct Tts: Sendable, Equatable {
         public var rtfAvg: Double = 0
         public var rtfMin: Double = 0
@@ -24,7 +14,6 @@ public struct EngineStats: Sendable, Equatable {
         public init() {}
     }
 
-    /// Speech-to-text (Parakeet), through the same helper.
     public struct Stt: Sendable, Equatable {
         public var rtfAvg: Double = 0
         public var rtfMin: Double = 0
@@ -35,9 +24,8 @@ public struct EngineStats: Sendable, Equatable {
         public init() {}
     }
 
-    /// Speaker diarization (on-demand): whether enabled + the enrolled voiceprint names
-    /// it can label, the live clustering threshold (lower = more speakers split), and the
-    /// resolved runtime token (tts_provider/stt_provider vocabulary) — empty when absent.
+    /// On-demand diarization: enabled, enrolled names, clustering threshold (lower = more
+    /// speakers), resolved runtime token — empty when absent.
     public struct Diar: Sendable, Equatable {
         public var enabled = false
         public var speakers: [String] = []
@@ -46,7 +34,6 @@ public struct EngineStats: Sendable, Equatable {
         public init() {}
     }
 
-    /// Persisted lifetime totals (seconds), summed across all sessions.
     public struct Lifetime: Sendable, Equatable {
         public var ttsSecs: Double = 0
         public var sttSecs: Double = 0
@@ -60,12 +47,12 @@ public struct EngineStats: Sendable, Equatable {
 
     public init() {}
 
-    /// Map the decoded `stats` DTO into `EngineStats`. A nil block (absent in the JSON,
-    /// or the whole status missing) leaves every field at its struct default; a present
-    /// block with a missing/null leaf falls back to the SAME per-field default the old
-    /// `[String: Any]` path used (numbers → 0, flags → false, speakers → []). Note
-    /// `clusteringThreshold` lands on 0 (not the 0.7 struct default) once a `diarization`
-    /// block is present but omits the key — matching the old behavior exactly.
+    /// Map decoded `stats` DTO → `EngineStats`.
+    /// - Nil block / missing status → every field at its struct default.
+    /// - Present block with missing leaf → per-field default of the old `[String: Any]` path
+    ///   (numbers → 0, flags → false, speakers → []).
+    /// - Quirk: `clusteringThreshold` is 0 (not the 0.7 struct default) once a `diarization`
+    ///   block is present but omits the key — matching old behavior exactly.
     public static func from(_ dto: StatsDTO?) -> EngineStats {
         var s = EngineStats()
         guard let dto else { return s }
@@ -102,9 +89,8 @@ public struct EngineStats: Sendable, Equatable {
     }
 }
 
-// ── Wire DTOs (model_status `stats`) ──────────────────────────────────────────────
+// MARK: - Wire DTOs (model_status `stats`)
 
-/// TTS rolling-stat block.
 public struct TtsStatsDTO: Decodable {
     public var rtfAvg: Double?
     public var rtfMin: Double?
@@ -129,7 +115,6 @@ public struct TtsStatsDTO: Decodable {
     }
 }
 
-/// STT rolling-stat block.
 public struct SttStatsDTO: Decodable {
     public var rtfAvg: Double?
     public var rtfMin: Double?
@@ -148,7 +133,7 @@ public struct SttStatsDTO: Decodable {
     }
 }
 
-/// Lifetime totals (engine emits u64; `Double` decodes a JSON integer fine).
+/// Lifetime totals (engine emits u64; `Double` decodes JSON integers fine).
 public struct LifetimeStatsDTO: Decodable {
     public var ttsSecs: Double?
     public var sttSecs: Double?
@@ -159,8 +144,7 @@ public struct LifetimeStatsDTO: Decodable {
     }
 }
 
-/// Speaker-diarization stat block. The wire also carries `present`, `speaker_threshold`
-/// and a `loaded` block — nothing in this app renders them, so they aren't decoded.
+/// Wire also carries `present`, `speaker_threshold`, `loaded` — unused here, not decoded.
 public struct DiarizationStatsDTO: Decodable {
     public var enabled: Bool?
     public var runtime: String?
@@ -175,7 +159,6 @@ public struct DiarizationStatsDTO: Decodable {
     }
 }
 
-/// The `stats` block. Mapped into `EngineStats` by `EngineStats.from(_:)`.
 public struct StatsDTO: Decodable {
     public var tts: TtsStatsDTO?
     public var stt: SttStatsDTO?

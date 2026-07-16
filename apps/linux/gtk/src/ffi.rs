@@ -1,25 +1,19 @@
-//! Safe Rust wrappers over the `ds-core` C ABI — the SAME stable surface the macOS
-//! (Swift) and Windows (C#) hosts bind, called directly here (the entry points are
-//! `pub extern "C" fn` defined in Rust, so calling them is safe; only their internal
-//! pointer derefs are unsafe, encapsulated by core). String returns are owned `*mut c_char`
-//! we copy into a Rust `String` and free with `ds_string_free`.
+//! Safe Rust wrappers over the `ds-core` C ABI — the same surface the macOS (Swift) and
+//! Windows (C#) hosts bind. Entry points are `pub extern "C" fn` in Rust (safe to call);
+//! owned `*mut c_char` returns are copied into `String` and freed with `ds_string_free`.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
 use ds_core::ffi as sys;
 
-/// Copy an owned C string returned by a `ds_*` function into a Rust `String`, then
-/// free it through the ABI. NULL → empty string.
+/// Copy an owned C string from a `ds_*` return into a Rust `String`, then free it. NULL → "".
 fn take(p: *mut c_char) -> String {
     if p.is_null() {
         return String::new();
     }
-    // SAFETY: `p` is non-null (checked above); per this module's contract (see the file
-    // doc comment above), every `ds_*` call returns a `*mut c_char` that is either NULL
-    // or a valid, NUL-terminated string owned by `ds-core` until freed —
-    // `to_string_lossy().into_owned()` copies it into an owned `String` before
-    // `sys::ds_string_free(p)` frees the original allocation on the next line.
+    // SAFETY: `p` is non-null; every `ds_*` return is either NULL or a valid NUL-terminated
+    // string owned by `ds-core` until `ds_string_free`. Copy before free.
     let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
     sys::ds_string_free(p);
     s
@@ -48,47 +42,38 @@ pub fn set_provider(which: &str) -> bool {
 }
 
 // ── Status ───────────────────────────────────────────────────────────────────
-// BLOCKING (unlike model_status_wait, no background-thread requirement docs — but it's the
-// same ds_ipc round-trip under the hood). No longer called from on_activate (see main.rs);
-// kept for parity with the macOS/Windows hosts' equivalent one-shot status fetch.
+// BLOCKING (same ds_ipc round-trip as wait). No longer called from on_activate (see main.rs);
+// kept for parity with the other hosts' one-shot status fetch.
 #[allow(dead_code)]
 pub fn model_status_json() -> String {
     take(sys::ds_model_status_json())
 }
-/// BLOCKING: returns when the status sequence differs from `since` or `timeout_ms` elapses.
-/// Call ONLY on a dedicated background thread (never the GTK main thread).
+/// BLOCKING until status seq differs from `since` or `timeout_ms`. Background thread only.
 pub fn model_status_wait(since: u64, timeout_ms: u32) -> String {
     take(sys::ds_model_status_wait(since, timeout_ms))
 }
 pub fn tools_json() -> String {
     take(sys::ds_tools_json())
 }
-/// The shared cross-platform LIBRARIES catalog (downloaded open-source projects + licenses) —
-/// the SAME `ds-model::libraries::catalog` JSON the Windows host renders.
+/// Shared libraries catalog (`ds-model::libraries::catalog`) — same JSON Windows renders.
 pub fn libraries_json() -> String {
     take(sys::ds_libraries_json())
 }
-/// The tail of the unified activity log (up to `max_bytes`), for the Logs view. Core exposes
-/// the combined log as a JSON array of `{source, level, text}` (`ds_logs_json`, the SAME
-/// payload the Windows host parses for per-source coloring); the GTK Logs `TextView` shows
-/// plain text, so we flatten it to `"[source] text"` lines here.
+/// Activity-log tail (up to `max_bytes`). Core returns JSON `{source, level, text}` entries
+/// (Windows colors by source); we flatten to `"[source] text"` for the GTK TextView.
 pub fn log_tail(max_bytes: u32) -> String {
     flatten_log_json(&take(sys::ds_logs_json(max_bytes)))
 }
 
-/// Like [`log_tail`] but BLOCKS until the logs directory changes (any `*.log` file
-/// created/modified/removed) or `timeout_ms` elapses, then returns the CURRENT flattened tail
-/// — the same `"[source] text"` shape `log_tail` returns. CLIENT-SIDE (an fs watch in this
-/// process), not an engine round-trip. Call ONLY on a dedicated background thread (it blocks),
-/// in a loop: call → render → call again — see `log_push::spawn_push`.
+/// Like [`log_tail`] but BLOCKS until any `*.log` under the logs dir changes or `timeout_ms`
+/// elapses, then returns the current flattened tail. Client-side fs watch (not engine IPC).
+/// Background thread only; loop via `log_push::spawn_push`.
 pub fn log_wait(max_bytes: u32, timeout_ms: u32) -> String {
     flatten_log_json(&take(sys::ds_logs_wait(max_bytes, timeout_ms)))
 }
 
-/// Flatten the combined-log JSON array of `{source, level, text}` into `"[source] text"` lines
-/// (or bare `text` when `source` is empty) — shared by [`log_tail`] and [`log_wait`] so the
-/// one-shot and push paths can't drift. Falls back to the raw payload if it isn't the expected
-/// JSON array.
+/// Flatten combined-log JSON to `"[source] text"` lines — shared by [`log_tail`] / [`log_wait`]
+/// so one-shot and push paths can't drift. Raw payload if not the expected array.
 fn flatten_log_json(json: &str) -> String {
     match serde_json::from_str::<Vec<serde_json::Value>>(json) {
         Ok(entries) => entries
@@ -107,14 +92,12 @@ fn flatten_log_json(json: &str) -> String {
         Err(_) => json.to_string(),
     }
 }
-/// Erase the ENTIRE on-disk activity log — the unified log, its rotated backups, and every
-/// sibling aux log — for the Logs tab's Clear button. Irreversible; the caller must confirm with
-/// the user before calling (see the AdwAlertDialog in `ui.rs`).
+/// Erase the on-disk activity log (unified + rotated + aux). Irreversible — confirm first
+/// (AdwAlertDialog in `ui.rs`).
 pub fn logs_clear() {
     sys::ds_logs_clear();
 }
-/// Localized engine lifecycle NOTE ("Downloading 45%", "Starting…", "Failed — <why>", …) for a
-/// not-ready engine — the SAME `status_fmt::engine_state_word` the Swift/C# hosts show.
+/// Localized lifecycle note for a not-ready engine (`status_fmt::engine_state_word`).
 pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
     let s = CString::new(state).unwrap_or_default();
     let w = CString::new(why).unwrap_or_default();
@@ -131,11 +114,8 @@ pub fn homepage_url() -> String {
 pub fn brand_colors_json() -> String {
     take(sys::ds_brand_colors_json())
 }
-/// Startup update check: the SAME `ds_update_check_json` the macOS/Windows hosts call — a
-/// blocking HTTP GET against the real GitHub API, NOT handle-free like the calls above. Call
-/// only from a dedicated background thread (see `main.rs`'s one-shot startup dispatch), never
-/// the GTK main thread. Returns the raw JSON (`"{}"` on any failure — offline, rate-limited,
-/// malformed); the caller must treat a missing `update_available` key as `false`.
+/// Startup update check (`ds_update_check_json`): blocking HTTP to GitHub. Background thread
+/// only (see `main.rs`). `"{}"` on any failure; missing `update_available` ⇒ false.
 pub fn update_check_json() -> String {
     take(sys::ds_update_check_json())
 }
@@ -149,9 +129,7 @@ pub fn t(key: &str) -> String {
     let c = CString::new(key).unwrap_or_default();
     take(sys::ds_t(c.as_ptr()))
 }
-/// Localized string with `%{name}` placeholders interpolated from `args` — the SAME `ds_t_args`
-/// C ABI entry point the macOS/Windows hosts call, so templated strings render identically
-/// instead of Linux hand-rolling its own client-side `%{...}` replace.
+/// Localized string with `%{name}` placeholders via `ds_t_args` (same as macOS/Windows).
 pub fn t_args(key: &str, args: &[(&str, &str)]) -> String {
     let key_c = CString::new(key).unwrap_or_default();
     let mut obj = serde_json::Map::with_capacity(args.len());
@@ -167,35 +145,30 @@ pub fn t_args(key: &str, args: &[(&str, &str)]) -> String {
     take(sys::ds_t_args(key_c.as_ptr(), args_c.as_ptr()))
 }
 
-// ── Formatters (the shared `status_fmt`, same as the macOS/Windows hosts) ──────
-/// Localized lifetime duration down to seconds, leading zero-units dropped
-/// (e.g. "12m 04s", "1d 02h 03m 04s"). The SAME `ds-core` formatter macOS and
-/// Windows bind — Linux no longer hand-rolls its own divergent copy.
+// ── Formatters (`status_fmt` — shared with macOS/Windows) ────────────────────
+/// Lifetime duration down to seconds, leading zero-units dropped (e.g. "12m 04s").
 pub fn duration_live(secs: f64) -> String {
     take(sys::ds_duration_live(secs))
 }
 
-/// Localized RUNTIME label for a resolved provider token (cpu/cuda/coreml/ane).
-/// The SAME shared formatter the macOS/Windows hosts call — no Linux-local mapping.
+/// Runtime label for a resolved provider token (cpu/cuda/coreml/ane).
 pub fn runtime_label(provider: &str) -> String {
     let c = CString::new(provider).unwrap_or_default();
     take(sys::ds_runtime_label(c.as_ptr()))
 }
 
-/// A stat RANGE string "avg<unit>  ·  lo–hi" (shared formatter; `precision` decimals,
-/// `unit_key` = the catalog unit key). The SAME builder the Swift/C# hosts call.
+/// Stat range `"avg<unit>  ·  lo–hi"` (`precision` decimals; `unit_key` = catalog unit key).
 pub fn stats_range(lo: f64, avg: f64, hi: f64, precision: u32, unit_key: &str) -> String {
     let c = CString::new(unit_key).unwrap_or_default();
     take(sys::ds_stats_range(lo, avg, hi, precision, c.as_ptr()))
 }
 
-/// A COUNT + audio-duration stat string "<count>  <secs> s" (shared formatter).
+/// Count + audio-duration stat `"<count>  <secs> s"`.
 pub fn stats_count(count: u64, audio_secs: f64) -> String {
     take(sys::ds_stats_count(count, audio_secs))
 }
 
-/// A human-readable file size "325 MB" / "12 KB" (shared decimal formatter). The SAME builder
-/// the Swift/C# hosts call, so every Libraries tab agrees byte-for-byte.
+/// Decimal file size ("325 MB" / "12 KB") — same builder every Libraries tab uses.
 pub fn human_size(bytes: u64) -> String {
     take(sys::ds_human_size(bytes))
 }

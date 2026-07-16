@@ -1,6 +1,4 @@
-// Smoke test for FluidAudio's ANE Kokoro path.
-// Text -> KokoroAneManager.synthesize -> 24 kHz mono WAV. Reports init/synth
-// timing + RTFx so we can confirm it's worth wiring into DontSpeak.
+// Smoke: Kokoro ANE path → 24 kHz WAV; reports init/synth + RTFx.
 import FluidAudio
 import Foundation
 
@@ -11,7 +9,7 @@ let text =
 let outPath = args.count > 1 ? args[1] : "smoke.wav"
 
 func audioSeconds(_ wav: Data) -> Double {
-    // 24 kHz mono 16-bit PCM WAV: (bytes - 44-byte header) / 2 / 24000
+    // 24 kHz mono 16-bit PCM: (bytes - 44) / 2 / 24000
     guard wav.count > 44 else { return 0 }
     return Double(wav.count - 44) / 2.0 / 24_000.0
 }

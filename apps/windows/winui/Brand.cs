@@ -6,44 +6,32 @@ using GdiColor = System.Drawing.Color;
 namespace DontSpeak;
 
 /// <summary>
-/// Brand tints — the SAME cross-platform source the macOS app reads (see
-/// <c>macos/Sources/DontSpeak/Brand.swift</c>): colors come from the Rust core via
-/// <see cref="Native.BrandColorsJson"/> (<c>ds_brand_colors_json</c>), with the
-/// brand hexes as a fallback, so every platform's UI tints identically without each
-/// hardcoding its own copy. Resolved once and cached. Each tint is exposed in both color
-/// worlds this app spans: <c>Windows.UI.Color</c> for the WinUI/XAML window and
-/// <c>System.Drawing.Color</c> for the GDI+ tray glyph and dictation overlay.
+/// Brand tints from the Rust core via <see cref="Native.BrandColorsJson"/> (same source as
+/// <c>macos/.../Brand.swift</c>), with brand-hex fallbacks. Cached once. Exposed as both
+/// <c>Windows.UI.Color</c> (WinUI) and <c>System.Drawing.Color</c> (GDI+ tray/overlay).
 /// </summary>
 internal static class Brand
 {
-    /// <summary>Icon seed / "speaking" tint — brand purple (#5B4397).</summary>
-    public static readonly WinColor SeedPurple;
-    /// <summary>"Recording" tint — mic orange (#FF9F0A).</summary>
-    public static readonly WinColor MicOrange;
-    /// <summary>Warming / blocked / downloading dots AND the dictation no-target glow (#FF9F0A).</summary>
-    public static readonly WinColor Warning;
+    public static readonly WinColor SeedPurple;   // speaking / icon seed (#5B4397)
+    public static readonly WinColor MicOrange;    // recording (#FF9F0A)
+    public static readonly WinColor Warning;      // warming/blocked/download + no-target glow
 
-    /// <summary><see cref="SeedPurple"/> as a GDI+ color (the tray "speaking" glyph ink).</summary>
     public static GdiColor SeedPurpleGdi => Gdi(SeedPurple);
-    /// <summary><see cref="MicOrange"/> as a GDI+ color (the tray "recording" glyph ink).</summary>
     public static GdiColor MicOrangeGdi => Gdi(MicOrange);
 
-    /// <summary>Logs-tab source palette — distinct, theme-neutral colors from the SAME shared
-    /// Rust source (<c>ds_log_colors_json</c>) every platform reads; a UI assigns each
-    /// source the entry at its first-appearance index. Brand-hex fallback if the engine returns
-    /// "{}".</summary>
+    /// <summary>Logs-tab source palette from <c>ds_log_colors_json</c> (shared across platforms);
+    /// first-appearance index picks the color. Brand-hex fallback if engine returns "{}".</summary>
     public static readonly WinColor[] LogSourcePalette;
     private static readonly System.Collections.Generic.Dictionary<string, WinColor> LogLevelColors =
         new(StringComparer.Ordinal);
 
-    /// <summary>The color for a log level (ERROR / WARN), or null for INFO / unknown (which render
-    /// in the default text color). Resolved from the shared Rust log-colors source.</summary>
+    /// <summary>ERROR/WARN level color from the shared Rust log-colors source; null for INFO/unknown.</summary>
     public static WinColor? LogLevelColor(string level) =>
         LogLevelColors.TryGetValue(level, out var c) ? c : null;
 
     static Brand()
     {
-        // Hardcoded fallbacks, identical to Brand.swift — used if the engine returns "{}".
+        // Fallbacks match Brand.swift — used if the engine returns "{}".
         SeedPurple = FromHex("#5B4397");
         MicOrange = FromHex("#FF9F0A");
         Warning = FromHex("#FF9F0A");
@@ -55,10 +43,9 @@ internal static class Brand
             MicOrange = Hex(root, "mic_orange", MicOrange);
             Warning = Hex(root, "warning", Warning);
         }
-        catch { /* engine down / malformed → keep the brand-hex fallbacks */ }
+        catch { /* engine down / malformed → keep fallbacks */ }
 
-        // Logs-tab colors — the sibling shared source (ds_log_colors_json). Fallbacks
-        // mirror the Rust defaults so coloring still works if the engine returns "{}".
+        // Fallbacks mirror Rust defaults so coloring works if the engine returns "{}".
         WinColor[] palette =
         {
             FromHex("#8B7BD8"), FromHex("#3FA7A1"), FromHex("#5B8DEF"), FromHex("#4CAF6E"),
@@ -83,7 +70,7 @@ internal static class Brand
                     if (p.Value.ValueKind == JsonValueKind.String && p.Value.GetString() is string s)
                         LogLevelColors[p.Name] = FromHex(s);
         }
-        catch { /* engine down / malformed → keep the fallback palette + level colors */ }
+        catch { /* engine down / malformed → keep fallback palette + level colors */ }
         LogSourcePalette = palette;
     }
 
@@ -93,7 +80,7 @@ internal static class Brand
         e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is string s
             ? FromHex(s) : fallback;
 
-    /// <summary>Parse "#RRGGBB" (alpha forced opaque); returns a visible magenta on garbage.</summary>
+    /// <summary>Parse "#RRGGBB" (opaque); magenta on garbage so bad hex is visible.</summary>
     private static WinColor FromHex(string hex)
     {
         var h = hex.TrimStart('#');

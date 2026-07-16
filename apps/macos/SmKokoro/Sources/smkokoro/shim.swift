@@ -1,16 +1,6 @@
-// libsmkokoro — a thin C ABI over FluidAudio's ANE Kokoro, dlopen'd by the
-// DontSpeak Rust helper. Kokoro-compatible IPA phonemes in, 24 kHz mono fp32 PCM out.
-// Rust owns the single text frontend used by both ONNX and Core ML; this shim bypasses
-// FluidAudio's separate G2P so pronunciation and chunk boundaries cannot drift by backend.
-//
-// C ABI (see smkokoro.h):
-//   int32 smk_init(const char* model_dir, int32 compute_units)
-//   int32 smk_synthesize_phonemes(const char* phonemes, const char* voice, float speed,
-//                                  void* ctx, smk_pcm_cb cb)
-//   void  smk_shutdown(void)
-//
-// Returns 0 on success, non-zero on error. The helper drives synthesis serially;
-// a lock guards the shared manager for safety.
+// libsmkokoro — C ABI over FluidAudio ANE Kokoro (IPA phonemes → 24 kHz mono f32).
+// Rust owns the shared text frontend; this shim skips FluidAudio G2P so backends don't drift.
+// See smkokoro.h. 0 = success. Helper synthesizes serially; lock guards shared manager.
 import AVFoundation
 import FluidAudio
 import Foundation
@@ -21,10 +11,8 @@ import Speech
 
 private final class Box<T>: @unchecked Sendable { var value: Result<T, Error>? }
 
-/// Parks the CALLING thread on a semaphore until `op` completes. Only safe because every
-/// caller is a C entry point invoked from a Rust worker thread — NEVER call this from a
-/// Swift concurrency task: blocking a cooperative-pool thread on work that needs the same
-/// pool can deadlock.
+/// Park calling thread until `op` completes. C entry from Rust worker only —
+/// never from a Swift Task (cooperative-pool deadlock risk).
 private func runBlocking<T>(_ op: @escaping @Sendable () async throws -> T) -> Result<T, Error> {
     let sem = DispatchSemaphore(value: 0)
     let box = Box<T>()
@@ -42,13 +30,8 @@ private enum SmkError: Error {
 }
 
 // MARK: - borrowed-result callbacks
-//
-// Buffer-returning calls still BLOCK (via `runBlocking`) and still return their status code as
-// the C return value. What changed is result delivery: instead of allocating an owned buffer
-// the caller must free (`smk_free`/`smk_free_str`), they BORROW the result to one of these
-// callbacks — fired once, synchronously, on this same thread before the function returns. The
-// Rust side copies it out during the call, so there is no ownership transfer and nothing to
-// free. The callback runs only on the success (rc 0) path. These types mirror smkokoro.h.
+// Success path: fire cb once on this thread with borrowed buffer; Rust copies out — no free.
+// Still blocking via runBlocking; status is the C return. Types mirror smkokoro.h.
 public typealias SmkPcmCb =
     @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Float>?, Int, Int32) -> Void
 public typealias SmkStrCb = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
@@ -87,9 +70,7 @@ private func logErr(_ s: String) {
 public func smk_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
     state.lock.lock()
     defer { state.lock.unlock() }
-    // DontSpeak pre-downloads EVERY FluidAudio model itself (so it owns integrity + shows real
-    // %); FluidAudio must only LOAD from the dirs we populated, never fetch. offlineMode
-    // turns any gap into a typed `modelMissing` instead of a silent download.
+    // offlineMode: load only — DontSpeak pre-downloads (integrity + % UI).
     ModelHub.offlineMode = true
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     let mgr = KokoroAneManager(
@@ -161,10 +142,7 @@ private final class AsrState: @unchecked Sendable {
 }
 private let asr = AsrState()
 
-/// Download (first use) + load the Parakeet TDT v2 (English-only) Core ML models and
-/// build the ASR manager. English-only by design — mirrors the ONNX STT path, which
-/// uses the v2 model too; v3 (25-language multilingual) is deliberately NOT used.
-/// `model_dir` "" → FluidAudio's default cache. Returns 0 on success.
+/// Load Parakeet TDT v2 (English-only; mirrors ONNX — not v3 multilingual). 0 = ok.
 @_cdecl("smk_asr_init")
 public func smk_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
     asr.lock.lock()
@@ -172,8 +150,7 @@ public func smk_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int3
     ModelHub.offlineMode = true  // load-only: DontSpeak pre-downloads the Parakeet set
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     switch runBlocking({ () -> AsrManager in
-        // `load(from:)` (not `downloadAndLoad`) reads the already-present models — it resolves
-        // `<parent-of-dir>/parakeet-tdt-0.6b-v2`, exactly where our downloader placed them.
+        // load(from:) only — DontSpeak pre-downloads to parent/parakeet-tdt-0.6b-v2.
         guard let dir else { throw SmkError.nilDir }
         let models = try await AsrModels.load(from: dir, version: .v2)
         let mgr = AsrManager(config: .default)
@@ -189,9 +166,7 @@ public func smk_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int3
     }
 }
 
-/// Transcribe 16 kHz mono f32 PCM → UTF-8 text. `cb` borrows the text for the duration of
-/// the synchronous call (see the borrowed-result MARK above); nothing to free. Empty input
-/// yields an empty string (rc 0).
+/// 16 kHz mono f32 → UTF-8 via borrowed cb. Empty input → "" (rc 0).
 @_cdecl("smk_transcribe")
 public func smk_transcribe(
     _ samples: UnsafePointer<Float>?,
@@ -213,7 +188,7 @@ public func smk_transcribe(
     }
     let audio = Array(UnsafeBufferPointer(start: samples, count: n))
     switch runBlocking({ () -> String in
-        // Parakeet TDT is stateless per utterance — a fresh decoder state each call.
+        // Fresh decoder state per utterance (stateless TDT).
         var decoderState = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
         let result = try await mgr.transcribe(audio, decoderState: &decoderState, language: nil)
         return result.text
@@ -241,26 +216,16 @@ public func smk_asr_shutdown() {
     }
 }
 
-// MARK: - Streaming ASR (FluidAudio StreamingEouAsrManager, Core ML / ANE)
-//
-// The cache-aware STREAMING counterpart of `smk_transcribe`: feed 16 kHz chunks as they arrive
-// (encoder cache threaded inside FluidAudio — each frame encoded once), instead of re-transcribing
-// the whole buffer per preview. Drives the SAME helper loop as the ONNX streaming path via the
-// Rust `CoremlStreamer` (start/push/finish == reset/accept/finalize).
-//
-// NOTE: `process(audioBuffer:)` deliberately returns "" mid-stream (it decodes incrementally but
-// only surfaces text from `finish()` / the EOU callback). So `smk_asr_stream_push` reads the
-// running hypothesis via `getPartialTranscript()` after each chunk to feed the live overlay — see
-// the call site below.
+// MARK: - Streaming ASR (StreamingEouAsrManager)
+// Chunk feed with encoder cache; same start/push/finish shape as ONNX CoremlStreamer.
+// process() returns "" mid-stream — use getPartialTranscript() for live overlay.
 private final class StreamAsrState: @unchecked Sendable {
     let lock = NSLock()
     var manager: StreamingEouAsrManager?
 }
 private let streamAsr = StreamAsrState()
 
-/// Begin a new streaming utterance: build/load the streaming manager on first use (from
-/// `modelDir`, the streaming EOU Core ML model dir DontSpeak pre-downloaded), then reset its
-/// per-utterance state. Returns 0 on success. `modelDir` is only consulted on the first call.
+/// Start/reset streaming utterance (modelDir only on first load). 0 = ok.
 @_cdecl("smk_asr_stream_start")
 public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
     streamAsr.lock.lock()
@@ -287,8 +252,7 @@ public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
     }
 }
 
-/// Feed a 16 kHz mono chunk; hand back the running hypothesis-so-far (via `getPartialTranscript`,
-/// since `process` itself returns "" mid-stream). `cb` borrows the text; nothing to free.
+/// Push chunk; cb gets getPartialTranscript() (process returns "" mid-stream).
 @_cdecl("smk_asr_stream_push")
 public func smk_asr_stream_push(
     _ samples: UnsafePointer<Float>?,
@@ -304,10 +268,7 @@ public func smk_asr_stream_push(
         logErr("smk_asr_stream_push: not started")
         return 2
     }
-    // StreamingEouAsrManager.process expects an AVAudioPCMBuffer and resamples it to 16 kHz
-    // mono Float32 internally. Copy the caller's chunk into a Sendable [Float] and build the
-    // (non-Sendable) buffer INSIDE the closure — capturing the buffer here would violate the
-    // @Sendable contract of runBlocking.
+    // Build non-Sendable AVAudioPCMBuffer inside the @Sendable closure (not capture it).
     let audio = samples.map { Array(UnsafeBufferPointer(start: $0, count: n)) } ?? []
     let rate = Double(sampleRate)
     switch runBlocking({ () -> String in
@@ -323,10 +284,7 @@ public func smk_asr_stream_push(
         if !audio.isEmpty, let dst = buffer.floatChannelData {
             audio.withUnsafeBufferPointer { dst[0].update(from: $0.baseAddress!, count: audio.count) }
         }
-        // `process()` decodes the chunk but RETURNS "" by design (it only yields text from
-        // `finish()` / the EOU callback) — so reading its result gave the overlay nothing mid-stream.
-        // Pull the running hypothesis explicitly: `getPartialTranscript()` decodes the accumulated
-        // token ids, i.e. the same transcript-so-far `finish()` will return, growing per chunk.
+        // process() yields "" until finish/EOU — pull partial via getPartialTranscript().
         _ = try await mgr.process(audioBuffer: buffer)
         return await mgr.getPartialTranscript()
     }) {
@@ -339,7 +297,7 @@ public func smk_asr_stream_push(
     }
 }
 
-/// Flush the stream and return the final transcript. `cb` borrows the text; nothing to free.
+/// Finish stream; cb borrows final transcript.
 @_cdecl("smk_asr_stream_finish")
 public func smk_asr_stream_finish(
     _ ctx: UnsafeMutableRawPointer?,
@@ -362,30 +320,14 @@ public func smk_asr_stream_finish(
     }
 }
 
-// MARK: - System STT (Apple on-device recognition, en-US)
-//
-// The `system` STT engine, in two OS-version tiers:
-//   • macOS 26+ — the modern SpeechAnalyzer / SpeechTranscriber API: async/await-native
-//     (NO run loop, works from the helper's run-loop-less worker thread), better models,
-//     no Speech-Recognition authorization needed. Per-locale model downloads on enable.
-//   • macOS 14–25 — legacy `SFSpeechRecognizer` with `requiresOnDeviceRecognition`. Its
-//     result handlers default to the app's MAIN queue, which deadlocks here (no main run
-//     loop) — that bug once killed this path; the fix is `recognizer.queue = <private
-//     OperationQueue>`, after which the path is plain synchronous code parking the calling
-//     C thread on a semaphore (no Swift concurrency needed). Unlike 26+, this tier DOES
-//     need Speech-Recognition authorization (TCC prompt; NSSpeechRecognitionUsageDescription
-//     is in the app's Info.plist).
-// Both tiers are on-device only — audio never leaves the machine, no server fallback.
-//
-// Status codes (smk_sys_available / smk_sys_authorize):
-//   0 = ready, 1 = preparing (26+: model not installed yet; <26: permission not requested
-//   yet — the authorize gate / first dictation prompts), 2 = no on-device recognition for
-//   the locale, 3 = macOS too old (below the app floor; unreachable in practice),
-//   4 = Speech-Recognition permission denied (<26 only; 26+ needs no authorization).
+// MARK: - System STT (on-device en-US)
+// macOS 26+: SpeechAnalyzer (async, no run loop, no Speech-Rec TCC; model download on enable).
+// macOS 14–25: SFSpeechRecognizer + requiresOnDeviceRecognition. Callbacks MUST use
+// private OperationQueue (main-queue default deadlocked the helper). Needs Speech-Rec TCC.
+// Status: 0 ready, 1 preparing, 2 no on-device locale, 3 too old, 4 permission denied.
 
 private let SYS_LOCALE = Locale(identifier: "en-US")
 
-/// Mono f32 PCM → AVAudioPCMBuffer at `sampleRate`. Shared by both System STT tiers.
 private func sysMakeBuffer(_ samples: [Float], sampleRate: Double) -> AVAudioPCMBuffer? {
     guard
         let format = AVAudioFormat(
@@ -423,8 +365,7 @@ private func sysEnsureModel(_ transcriber: SpeechTranscriber) async throws {
 
 // MARK: legacy tier (macOS 14–25, SFSpeechRecognizer)
 
-/// Where legacy recognition callbacks land — NEVER the main queue (see the section
-/// comment: an undelivered main-queue callback is the historical deadlock).
+/// Legacy callbacks — never main queue (historical deadlock).
 private let legacyQueue: OperationQueue = {
     let q = OperationQueue()
     q.name = "smkokoro.sysstt.legacy"
@@ -432,17 +373,13 @@ private let legacyQueue: OperationQueue = {
     return q
 }()
 
-/// en-US recognizer with off-main callback delivery, or nil when the locale has no
-/// recognizer at all.
 private func legacyRecognizer() -> SFSpeechRecognizer? {
     guard let r = SFSpeechRecognizer(locale: SYS_LOCALE) else { return nil }
     r.queue = legacyQueue
     return r
 }
 
-/// Non-prompting availability for the legacy tier. "Preparing" here means the permission
-/// hasn't been requested yet (there is no separate model download step — the OS recognizer
-/// is resident once on-device support exists).
+/// Legacy availability. Preparing = permission not yet requested.
 private func legacyAvailable() -> Int32 {
     guard let r = legacyRecognizer(), r.supportsOnDeviceRecognition else { return 2 }
     switch SFSpeechRecognizer.authorizationStatus() {
@@ -452,10 +389,7 @@ private func legacyAvailable() -> Int32 {
     }
 }
 
-/// ENABLE the legacy tier: request Speech-Recognition authorization (the one-time TCC
-/// prompt), BLOCKING. `requestAuthorization` is a class method whose completion queue is
-/// undocumented (possibly the main queue, which never drains here) — so poll the TCC state
-/// instead of trusting the callback, and give the user up to 120 s to answer the dialog.
+/// Blocking Speech-Rec TCC. Poll status (completion queue may be main, which never drains).
 private func legacyAuthorize() -> Int32 {
     guard let r = legacyRecognizer(), r.supportsOnDeviceRecognition else { return 2 }
     if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
@@ -467,13 +401,10 @@ private func legacyAuthorize() -> Int32 {
             sem.wait(timeout: .now() + .milliseconds(250)) == .timedOut
         {}
     }
-    // notDetermined after the wait = prompt unanswered/undelivered — report as denied
-    // (rc 4's remedy text covers it); a later authorize can still succeed.
+    // Still notDetermined → treat as denied (rc 4); later authorize can succeed.
     guard SFSpeechRecognizer.authorizationStatus() == .authorized else { return 4 }
-    // `supportsOnDeviceRecognition` lies when macOS Dictation is switched off: the local
-    // recognition service then refuses every request (kLSRErrorDomain 201, "Siri and
-    // Dictation are disabled"). Smoke-run a beat of silence so enabling FAILS here with a
-    // clear remedy instead of shipping a green dot that can't transcribe.
+    // supportsOnDeviceRecognition lies if Dictation is off (kLSRErrorDomain 201).
+    // Smoke silence so enable fails here instead of a green-but-dead UI.
     switch legacyTranscribe([Float](repeating: 0, count: 3_200), sampleRate: 16_000) {
     case .success:
         return 0
@@ -484,27 +415,14 @@ private func legacyAuthorize() -> Int32 {
     }
 }
 
-/// Debug-only timing for detected legacy phrase resets. Invisible/unpersisted unless a
-/// developer explicitly enables debug capture for this subsystem (mirrors the Rust engine's
-/// DONTSPEAK_DEBUG-gated verbose telemetry — see ds-log's `LogLevel::Debug` doc). Never logs
-/// dictated text, only the interval since the prior changed hypothesis.
+/// Debug-only reset timing (never logs dictated text).
 private let legacyResetLog = Logger(subsystem: "app.dontspeak.org", category: "legacy-stt")
 
-/// One batch recognition's shared state: the callback (on `legacyQueue`) fills it, the
-/// calling C thread parks on `sem`. Also RETAINS the recognizer + task for the duration —
-/// nothing else keeps them alive. `finish` is single-shot: a trailing error after the
-/// final result (or a post-timeout callback) must not clobber the outcome.
-///
-/// `committedText`/`latestPartial`/`settledPartial` are used ONLY by the streaming
-/// entry points (`sysStreamStartLegacy` and friends) — `legacyTranscribe`'s one-shot
-/// batch use never touches them, so they just sit at their empty default there. They're
-/// owned by THIS run object rather than `SysStreamState` (finding #2 follow-up) so a
-/// stale/replaced run's own callback can only ever read/write ITS OWN copy — no cross-run
-/// corruption is possible by construction, and `smk_sys_stream_finish`'s own `isFinal`
-/// callback can still read them correctly even after `SysStreamState`'s shared
-/// `legacyRun`/`legacyRequest` pointers have already been cleared (which happens as soon
-/// as `finish` starts waiting — a check against those shared pointers at that point would
-/// incorrectly read this, the CORRECT run, as stale).
+/// Per-run recognition state. Callback fills; C thread parks on `sem`. Retains
+/// recognizer+task. finish is single-shot (trailing errors must not clobber).
+/// Streaming fields live on the run (not SysStreamState) so a replaced run can't
+/// corrupt another's committed/partial text; isFinal can still read after shared
+/// pointers clear (finding #2).
 final class LegacyRun: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
@@ -516,9 +434,8 @@ final class LegacyRun: @unchecked Sendable {
 
     private let textLock = NSLock()
     private var committedText: String = ""
-    /// The newest nonempty callback, retained for phrase-reset detection.
     private var latestPartial: String = ""
-    /// The popup/final candidate, protected from empty callback regressions.
+    /// Popup/final candidate; protected from empty-callback regressions (#84).
     private var settledPartial: String = ""
     private var lastPartialChangedAt: TimeInterval?
 
@@ -532,26 +449,20 @@ final class LegacyRun: @unchecked Sendable {
         sem.signal()
     }
 
-    /// `committedText + " " + settledPartial` (whichever half is non-empty) — same shape as
-    /// `SysModernSession.hypothesis()`.
     func hypothesis() -> String {
         textLock.lock()
         defer { textLock.unlock() }
         return legacyJoin(committedText, settledPartial)
     }
 
-    /// A no-speech terminal after a valid partial still finalizes to that popup-visible text.
+    /// No-speech after a valid partial still finalizes that text.
     func finishNoSpeech() {
         finish(text: finalJoined("", preserveStrictPrefix: false), error: nil)
     }
 
-    /// Record one non-final result's `bestTranscription`. Detects a phrase-segment boundary
-    /// (`legacySegmentDidReset` — see its doc comment) and, if one just happened, commits the
-    /// pre-reset settled partial into `committedText` (finding #7's pattern: skip an empty
-    /// segment so it can't bake in a stray separator) before starting the new segment.
+    /// Non-final partial: on phrase reset, commit settled segment (finding #7).
     func recordPartial(_ newText: String) {
-        // #84: legacy Speech can emit an empty non-final callback between two hypotheses.
-        // It carries no boundary identity, and consuming it loses the last nonempty timing.
+        // #84: empty non-final between hypotheses — ignore (keeps timing).
         guard !newText.isEmpty else { return }
 
         textLock.lock()
@@ -564,8 +475,7 @@ final class LegacyRun: @unchecked Sendable {
             now: now)
         let gap = timing.gapSeconds
         if legacySegmentDidReset(previous: latestPartial, new: newText, gapSeconds: gap), !latestPartial.isEmpty {
-            // `.public` privacy is deliberate: this is a numeric measurement, never dictated
-            // text. Keep os.Logger's lazy `format:` instead of eagerly formatting every reset.
+            // Numeric only (.public); never dictated text.
             if let gap {
                 legacyResetLog.debug(
                     "legacy STT phrase reset: gapSeconds=\(gap, format: .fixed(precision: 3), privacy: .public)")
@@ -584,8 +494,6 @@ final class LegacyRun: @unchecked Sendable {
         lastPartialChangedAt = timing.lastChangedAt
     }
 
-    /// `committedText + " " + finalSegment` — the shape `isFinal`'s callback hands to
-    /// `finish`, joining whatever was already committed with the last (final) segment.
     func finalJoined(_ finalSegment: String, preserveStrictPrefix: Bool) -> String {
         textLock.lock()
         defer { textLock.unlock() }
@@ -597,17 +505,13 @@ final class LegacyRun: @unchecked Sendable {
     }
 }
 
-/// kAFAssistantErrorDomain 1110 — "no speech detected". A silent segment is a normal
-/// dictation outcome, not a failure: map it to the empty transcript.
+/// kAFAssistantErrorDomain 1110 no-speech → empty transcript (not a failure).
 private func legacyIsNoSpeech(_ error: Error) -> Bool {
     let e = error as NSError
     return e.domain == "kAFAssistantErrorDomain" && e.code == 1110
 }
 
-/// Shared auth+recognizer gate for BOTH legacy entry points (batch `legacyTranscribe` and
-/// streaming `sysStreamStartLegacy`): prompt for authorization on demand (mirrors the 26+
-/// tier's download-on-first-dictation), then hand back a ready-to-use recognizer. Factored out
-/// (finding #6) — this exact sequence used to be copy-pasted in both places.
+/// Shared auth+recognizer gate for batch + streaming legacy (finding #6).
 private func legacyEnsureAuthorizedRecognizer() -> Result<SFSpeechRecognizer, Error> {
     if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
         _ = legacyAuthorize()
@@ -621,10 +525,7 @@ private func legacyEnsureAuthorizedRecognizer() -> Result<SFSpeechRecognizer, Er
     return .success(recognizer)
 }
 
-/// Batch-transcribe on the legacy tier, synchronously on the calling thread. Prompts for
-/// authorization on demand (mirrors the 26+ tier's download-on-first-dictation), then runs
-/// one on-device `SFSpeechAudioBufferRecognitionRequest` with a bounded wait so a wedged
-/// recognizer can't hang the helper forever.
+/// Legacy batch transcribe; bounded wait so a wedged recognizer can't hang the helper.
 private func legacyTranscribe(_ samples: [Float], sampleRate: Double) -> Result<String, Error> {
     let recognizer: SFSpeechRecognizer
     switch legacyEnsureAuthorizedRecognizer() {
@@ -663,9 +564,7 @@ private func legacyTranscribe(_ samples: [Float], sampleRate: Double) -> Result<
 
 // MARK: C entry points (both tiers)
 
-/// Current usability WITHOUT prompting/downloading (safe for the frequent model-status
-/// poll). Status codes as per the section comment; the engine maps 1 → the orange
-/// "preparing" dot (mirrors Parakeet warming).
+/// Non-prompting availability for model-status poll (1 → preparing orange).
 @_cdecl("smk_sys_available")
 public func smk_sys_available() -> Int32 {
     guard #available(macOS 26, *) else { return legacyAvailable() }
@@ -678,10 +577,7 @@ public func smk_sys_available() -> Int32 {
     }
 }
 
-/// ENABLE the engine, BLOCKING. 26+: download the en-US on-device model if needed (the
-/// one-time first-use cost; SpeechAnalyzer needs no Speech-Recognition authorization —
-/// the model is the only gate). <26: request Speech-Recognition authorization (the
-/// one-time TCC prompt). 0 when ready; other codes per the section comment.
+/// Blocking enable: 26+ model download; <26 Speech-Rec TCC. 0 = ready.
 @_cdecl("smk_sys_authorize")
 public func smk_sys_authorize() -> Int32 {
     guard #available(macOS 26, *) else { return legacyAuthorize() }
@@ -698,8 +594,7 @@ public func smk_sys_authorize() -> Int32 {
     }
 }
 
-/// Transcribe 16 kHz mono f32 PCM → UTF-8 text on-device, as ONE batch; `cb` borrows the
-/// text (copied out during the call). Empty input → empty string. rc: 0 ok, 1 error.
+/// On-device batch transcribe; cb borrows text. Empty → "".
 @_cdecl("smk_sys_transcribe")
 public func smk_sys_transcribe(
     _ samples: UnsafePointer<Float>?,
@@ -729,15 +624,12 @@ public func smk_sys_transcribe(
     }
 }
 
-/// Run one batch transcription through SpeechAnalyzer + SpeechTranscriber (on-device).
 @available(macOS 26, *)
 private func sysTranscribe(_ samples: [Float], sampleRate: Double) async throws -> String {
     let transcriber = SpeechTranscriber(locale: SYS_LOCALE, preset: .transcription)
     try await sysEnsureModel(transcriber)
     let analyzer = SpeechAnalyzer(modules: [transcriber])
 
-    // Wrap our mono f32 PCM at its real rate, then convert to the analyzer's preferred
-    // format if it differs.
     guard let inBuf = sysMakeBuffer(samples, sampleRate: sampleRate) else { return "" }
     var buffer = inBuf
     if let target = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]),
@@ -747,7 +639,6 @@ private func sysTranscribe(_ samples: [Float], sampleRate: Double) async throws 
         buffer = converted
     }
 
-    // Feed the single buffer, finish input, finalize, then drain the results.
     let (stream, cont) = AsyncStream<AnalyzerInput>.makeStream()
     try await analyzer.start(inputSequence: stream)
     cont.yield(AnalyzerInput(buffer: buffer))
@@ -761,16 +652,13 @@ private func sysTranscribe(_ samples: [Float], sampleRate: Double) async throws 
     return text
 }
 
-/// One-shot input source for AVAudioConverter: hands the whole buffer over on the first
-/// pull, then signals end-of-stream. A reference holder so the converter's @Sendable input
-/// block captures no mutable var / non-Sendable buffer directly.
+/// Converter input: whole buffer once then EOS (avoids capturing non-Sendable buffer).
 private final class ConvertFeed: @unchecked Sendable {
     let buffer: AVAudioPCMBuffer
     var done = false
     init(_ b: AVAudioPCMBuffer) { buffer = b }
 }
 
-/// Convert a PCM buffer to `format` (sample-rate + layout) via AVAudioConverter.
 @available(macOS 26, *)
 private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) throws -> AVAudioPCMBuffer? {
     guard let converter = AVAudioConverter(from: input.format, to: format) else { return nil }
@@ -792,53 +680,18 @@ private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) thr
     return output
 }
 
-// MARK: - System STT streaming (incremental hypothesis, mirrors smk_asr_stream_*)
-//
-// Gives the `system` engine real incremental streaming instead of the periodic full-tail
-// re-transcription the Rust `transcribe_loop` fallback still does for it. Same three-call
-// shape as `smk_asr_stream_*` above (start/push/finish == reset/accept/finalize on the Rust
-// `StreamingStt` side), but driving Apple's own recognizer per tier:
-//   • macOS 26+: ONE persistent `SpeechAnalyzer` + `AsyncStream<AnalyzerInput>` for the whole
-//     utterance. A detached `Task` drains `transcriber.results` WITHOUT the `where
-//     result.isFinal` filter `sysTranscribe` uses, so we see volatile (non-final) results too:
-//     `committedText` accumulates each finalized result, `latestVolatileText` holds the latest
-//     nonempty in-flight hypothesis. It runs independently of whichever thread is
-//     currently inside a push/finish call — those only read the two fields under the session's lock.
-//   • Legacy (<26): a FRESH `SFSpeechAudioBufferRecognitionRequest` per utterance (like
-//     `legacyTranscribe`), but with `shouldReportPartialResults = true` — today's batch path
-//     sets it `false`, which is the actual bug this streaming path fixes.
-//
-//     `SFSpeechRecognizer` on this tier gives NO explicit signal for a phrase-segment
-//     boundary: empirically (real `say`-generated speech, real-time-paced across a 3.5s
-//     pause, every callback logged), after a pause the task stays `.running` and `isFinal`
-//     never fires early — `bestTranscription` just silently resets to a fresh short
-//     hypothesis on the very next non-final callback, confirmed across MULTIPLE pauses in
-//     the same request/task without it ever dying. So the ONE task/request lives for the
-//     whole utterance (no restart needed), but its `bestTranscription` only ever covers the
-//     CURRENT phrase segment — mirroring `SysModernSession`, `LegacyRun` (see its doc
-//     comment for why it lives THERE and not on `SysStreamState`) accumulates each
-//     completed segment in `committedText`, tracks the CURRENT segment's newest nonempty
-//     callback in `latestPartial`, and preserves its popup/final candidate in `settledPartial`. A
-//     segment boundary is inferred from the text itself in `legacySegmentDidReset` (see its doc
-//     comment for the exact heuristic and why a naive word/length check false-positives on
-//     ordinary in-phrase revisions like digit re-grouping); when detected,
-//     `LegacyRun.recordPartial` commits the pre-reset `settledPartial` into `committedText`
-//     before overwriting it. `run.finish` only fires once, on `isFinal` (mirrors
-//     `LegacyRun`'s guard-against-double-signal), and its text is
-//     `LegacyRun.finalJoined(_:)` — `committedText + " " + <final segment>`, the same
-//     committed+volatile shape `SysModernSession.hypothesis()` uses.
-//
-// Both tiers reuse the existing per-tier helpers (`sysEnsureModel`/`sysConvert`/`sysMakeBuffer`,
-// `legacyRecognizer`/`legacyQueue`/`LegacyRun`/`legacyIsNoSpeech`) — no duplicated auth/model
-// logic. `smk_sys_transcribe`/`legacyTranscribe`/`sysTranscribe` (batch) are untouched.
+// MARK: - System STT streaming (start/push/finish like smk_asr_stream_*)
+// Incremental hyp vs full-tail re-transcribe. Per tier:
+//   26+: persistent SpeechAnalyzer; drain volatile + final results into committed/latest.
+//   <26: one request/task for the utterance with partials=true. No phrase-boundary signal —
+//     bestTranscription silently resets after pauses; legacySegmentDidReset + LegacyRun
+//     commit segments (see those docs). Reuses per-tier auth/model helpers.
 
 private func systemSpeechWords(_ text: String) -> [String] {
     text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
 }
 
-/// Keep the live hypothesis for empty callbacks and, only when requested, strict word prefixes.
-/// The latter is a macOS 15 legacy-recognizer workaround; modern finalized results and ordinary
-/// partial refinements remain authoritative so they can retract a speculative suffix.
+/// Prefer nonempty prior; optional strict-prefix keep (macOS 15 final-truncation workaround).
 func systemSettledSegment(
     latestPartial: String,
     incomingSegment: String,
@@ -858,24 +711,19 @@ func systemSettledSegment(
     return incomingSegment
 }
 
-/// macOS 15's legacy recognizer can finalize with a strict prefix of its last complete partial.
+/// macOS 15: final can be a strict prefix of last complete partial.
 private var legacyNeedsStrictPrefixFinalWorkaround: Bool {
     ProcessInfo.processInfo.operatingSystemVersion.majorVersion == 15
 }
 
-/// Modern-tier (26+) per-utterance session. Held as a plain (non-`@available`) `Any?` on
-/// `SysStreamState` so the OUTER state class itself needs no availability gate; every site that
-/// casts it back out is already inside a `#available(macOS 26, *)` check.
+/// 26+ session; stored as Any? on SysStreamState so outer class needs no @available.
 @available(macOS 26, *)
 private final class SysModernSession: @unchecked Sendable {
     let lock = NSLock()
     let analyzer: SpeechAnalyzer
     let transcriber: SpeechTranscriber
     let continuation: AsyncStream<AnalyzerInput>.Continuation
-    /// The analyzer's preferred audio format for `transcriber`, resolved ONCE at session start.
-    /// It's invariant for the session's lifetime (depends only on the fixed transcriber), so
-    /// `sysStreamConvert` reads this instead of re-deriving it via a blocking async round-trip
-    /// on every push call.
+    /// Preferred format, resolved once at start (avoid per-push async re-derive).
     let targetFormat: AVAudioFormat?
     var drainTask: Task<Void, Never>?
     var committedText: String = ""
@@ -892,9 +740,6 @@ private final class SysModernSession: @unchecked Sendable {
         self.targetFormat = targetFormat
     }
 
-    /// `committedText + " " + latestVolatileText` (whichever half is non-empty) — the running
-    /// hypothesis `push`/`finish` hand back, same shape as `smk_asr_stream_push`'s
-    /// `getPartialTranscript()`.
     func hypothesis() -> String {
         lock.lock()
         defer { lock.unlock() }
@@ -903,10 +748,7 @@ private final class SysModernSession: @unchecked Sendable {
         return "\(committedText) \(latestVolatileText)"
     }
 
-    /// Record one `transcriber.results` element. A plain (non-`async`) method so the drain
-    /// task's `for try await` body can call it without tripping `NSLock.lock()`'s "unavailable
-    /// from asynchronous contexts" restriction — the lock/unlock pair lives entirely inside this
-    /// synchronous function, which is a legal (if blocking) call from any async context.
+    /// Sync so drain Task can lock NSLock (unavailable from async contexts).
     func recordResult(_ text: String, isFinal: Bool) {
         lock.lock()
         defer { lock.unlock() }
@@ -915,8 +757,7 @@ private final class SysModernSession: @unchecked Sendable {
                 latestPartial: latestVolatileText,
                 incomingSegment: text,
                 preserveStrictPrefix: false)
-            // An empty final (e.g. a silent segment) must NOT bake a permanent trailing
-            // separator into committedText — only append when there's real text.
+            // Skip empty finals (no stray trailing separator).
             if !settled.isEmpty {
                 committedText =
                     committedText.isEmpty ? settled : "\(committedText) \(settled)"
@@ -931,10 +772,7 @@ private final class SysModernSession: @unchecked Sendable {
     }
 }
 
-/// Publish the just-built modern-tier session. A plain (non-`async`) function for the same
-/// reason as `SysModernSession.recordResult` — `sysStreamStartModern`'s `runBlocking` closure is
-/// an async context, so the `sysStream.lock` lock/unlock pair has to live inside an ordinary
-/// synchronous call instead of appearing inline there.
+/// Install modern session (sync lock for async caller).
 @available(macOS 26, *)
 private func sysStreamSetModern(_ session: SysModernSession) {
     sysStream.lock.lock()
@@ -942,11 +780,7 @@ private func sysStreamSetModern(_ session: SysModernSession) {
     sysStream.modern = session
 }
 
-/// Atomically pop whatever modern-tier session is currently installed (if any), clearing the
-/// slot. Used by `sysStreamStartModern`'s self-heal (finding #1): a prior session must be torn
-/// down before a new one replaces it, since `smk_sys_stream_start` used to overwrite the slot
-/// unconditionally, leaking the old continuation/analyzer/drain-task whenever `finish` hadn't
-/// run (e.g. a failed tail-flush skipped it — see `StreamSession::finalize` on the Rust side).
+/// Pop modern session (finding #1 self-heal before replace — avoid leak if finish skipped).
 @available(macOS 26, *)
 private func sysStreamTakeModern() -> SysModernSession? {
     sysStream.lock.lock()
@@ -956,15 +790,10 @@ private func sysStreamTakeModern() -> SysModernSession? {
     return prior
 }
 
-/// Bound on tearing down a modern-tier session's analyzer — mirrors the legacy tier's explicit
-/// 30s bound in `smk_sys_stream_finish` (finding #4): a wedged `SpeechAnalyzer` can't hang the
-/// helper forever.
+/// Modern finish timeout (finding #4 — mirror legacy 30s bound).
 private let sysStreamModernFinishTimeoutSeconds: Double = 30
 
-/// Resume a `CheckedContinuation` exactly once, no matter how many racing tasks try — extra
-/// callers are silently dropped. `CheckedContinuation.resume` traps if called twice, and two
-/// independent detached tasks (the real finish vs. the timeout) race to resume the same one in
-/// `sysStreamTeardownModern` below, so this guard is required, not just tidy.
+/// Resume CheckedContinuation once (finish vs timeout race). Extra resumes dropped.
 private final class SingleShotContinuation<T: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
@@ -977,20 +806,9 @@ private final class SingleShotContinuation<T: Sendable>: @unchecked Sendable {
     }
 }
 
-/// Finish + drain a modern-tier session (finalize the analyzer, let the drain task consume the
-/// last results, hand back the accumulated hypothesis), bounded by
-/// `sysStreamModernFinishTimeoutSeconds` (finding #4) — mirrors the legacy tier's
-/// semaphore-with-timeout in `smk_sys_stream_finish` below: race the real finish against a
-/// timer and return whichever settles first, WITHOUT waiting on the loser. (A `TaskGroup`
-/// can't express this — `withTaskGroup` implicitly awaits every child before returning, even
-/// after `cancelAll()`, so it can't bound a call that ignores cancellation; a bare detached
-/// task + a single-shot continuation can, at the cost of leaking the abandoned task if the
-/// analyzer really is wedged — same trade the legacy tier makes with `run.task?.cancel()` not
-/// being awaited either.) On timeout, returns whatever `session.hypothesis()` has accumulated
-/// so far rather than blocking indefinitely. Shared by `smk_sys_stream_finish` (the normal
-/// end-of-utterance path) and `sysStreamStartModern`'s self-heal teardown of a leaked prior
-/// session (finding #1) — the return value is discarded there since the prior utterance is
-/// being abandoned anyway.
+/// Finish + drain modern session, bounded (finding #4). Race finish vs timer — TaskGroup
+/// can't bound cancel-ignoring work. On timeout return partial hypothesis. Also used by
+/// finding #1 self-heal (return discarded).
 @available(macOS 26, *)
 private func sysStreamTeardownModern(_ session: SysModernSession) async -> String {
     session.continuation.finish()
@@ -1024,18 +842,14 @@ private final class SysStreamState: @unchecked Sendable {
 }
 private let sysStream = SysStreamState()
 
-/// `committed + " " + current` (whichever half is non-empty) — the running hypothesis
-/// shape shared by `LegacyRun.hypothesis()`/`finalJoined` and `SysModernSession.hypothesis()`.
 private func legacyJoin(_ committed: String, _ current: String) -> String {
     if current.isEmpty { return committed }
     if committed.isEmpty { return current }
     return "\(committed) \(current)"
 }
 
-/// Gap since the previous actual hypothesis change. System Speech repeats the final partial
-/// unchanged while crossing a phrase boundary; treating that duplicate as fresh made a measured
-/// ~2s pause look like ~0.3s and hid a genuine reset. Ordinary low-prefix revisions were observed
-/// at 0.197–0.306s, so lowering the 0.65s threshold instead would introduce false commits.
+/// Gap since last *changed* hyp. Duplicates at phrase boundary must not refresh the timestamp
+/// (~2s pause looked like 0.3s). Low-prefix revisions at ~0.3s — keep 0.65s threshold.
 func legacyPartialTiming(
     previous: String,
     new: String,
@@ -1046,18 +860,9 @@ func legacyPartialTiming(
     return (gap, new == previous ? lastChangedAt : now)
 }
 
-/// Heuristic detection of a legacy-tier phrase-segment boundary. `SFSpeechRecognizer` gives
-/// NO explicit signal for this (confirmed empirically — see the streaming section's doc
-/// comment): after a pause, `bestTranscription` just silently starts over on the next
-/// non-final callback, with the task still `.running` and `isFinal` never firing early. So
-/// a reset is inferred from the text itself: a genuine reset shares almost none of the
-/// previous leading characters and either shrinks OR arrives after a phrase-sized callback gap —
-/// vs. an ordinary in-flight revision (e.g. digit re-grouping: `"Testing one"` →
-/// `"Testing 12"`, observed empirically), which may shrink by a character or two but keeps
-/// most of the previous text's prefix intact. Requiring both conditions (not just a length
-/// decrease) is what tells the two apart; `< 0.5` was chosen because the empirical reset
-/// cases measured ~0–5% shared prefix vs. ~70%+ for ordinary revisions — comfortably clear
-/// of both.
+/// Phrase-segment boundary: no explicit signal from SFSpeechRecognizer after pauses.
+/// Reset iff shared-prefix ratio < 0.5 AND (shrink OR gap ≥ 0.65s). Ratio alone separates
+/// genuine resets (~0–5% prefix) from in-phrase revisions like digit re-grouping (~70%+).
 func legacySegmentDidReset(previous: String, new: String, gapSeconds: TimeInterval?) -> Bool {
     guard !previous.isEmpty else { return false }
     let commonPrefixLen = zip(previous, new).prefix { $0 == $1 }.count
@@ -1079,20 +884,12 @@ public func smk_sys_stream_start() -> Int32 {
 private func sysStreamStartModern() -> Int32 {
     switch runBlocking({ () -> Int32 in
         guard await sysLocaleSupported() else { return 1 }
-        // Self-heal (finding #1): tear down any prior session BEFORE installing a new one — a
-        // failed tail-flush on the Rust side can skip the normal `smk_sys_stream_finish` call,
-        // leaking the previous continuation/analyzer/drain-task. Discard its (now-abandoned)
-        // hypothesis; the caller is starting a fresh utterance.
+        // Finding #1: tear down prior session before replace (finish may have been skipped).
         if let prior = sysStreamTakeModern() {
             logErr("smk_sys_stream_start: tearing down a leaked prior session")
             _ = await sysStreamTeardownModern(prior)
         }
-        // Force `.volatileResults` on top of whatever the `.transcription` preset's own
-        // reportingOptions already are: this streaming path NEEDS non-final results, and the
-        // preset's live default couldn't be confirmed on this (Sequoia-only) box — union
-        // guarantees it regardless of what the preset already includes. `.fastResults`
-        // biases the transcriber toward responsiveness (faster, slightly less accurate
-        // interim guesses) to match the ~6/sec cadence of the ANE/Parakeet streaming path.
+        // Need volatile partials; union preset with volatile+fastResults (~6/sec cadence).
         let base = SpeechTranscriber.Preset.transcription
         let transcriber = SpeechTranscriber(
             locale: SYS_LOCALE,
@@ -1104,7 +901,7 @@ private func sysStreamStartModern() -> Int32 {
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         let (stream, cont) = AsyncStream<AnalyzerInput>.makeStream()
         try await analyzer.start(inputSequence: stream)
-        // Resolved ONCE here (finding #5) and cached on the session — see its doc comment.
+        // Finding #5: resolve format once, cache on session.
         let targetFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber])
 
         let session = SysModernSession(
@@ -1132,13 +929,7 @@ private func sysStreamStartModern() -> Int32 {
     }
 }
 
-/// Tear down a leaked prior legacy run/request before installing a new one (finding #1's
-/// legacy-tier counterpart to `sysStreamTakeModern`+`sysStreamTeardownModern`): cancel the old
-/// task and end its request so `smk_sys_stream_start` is self-healing even when the previous
-/// utterance's `finish` never ran (e.g. a failed tail-flush on the Rust side skipped the real
-/// finalize call). Any callback still in flight for the old run is neutralized by the identity
-/// check in `sysStreamStartLegacy`'s completion handler (finding #3) once the slot below is
-/// cleared, so there's no need to block here waiting for it to actually stop.
+/// Finding #1 legacy teardown (counterpart of modern take+teardown); stragglers via #3.
 private func sysStreamTeardownLegacy() {
     sysStream.lock.lock()
     let priorRequest = sysStream.legacyRequest
@@ -1165,15 +956,8 @@ private func sysStreamStartLegacy() -> Int32 {
     let request = SFSpeechAudioBufferRecognitionRequest()
     request.requiresOnDeviceRecognition = true
     request.shouldReportPartialResults = true  // the core fix vs. legacyTranscribe's batch request
-    // Finding #2 originally set this on the theory that an unhinted recognizer autonomously
-    // emits `isFinal=true` after a mid-utterance pause, silently ending the request. Empirical
-    // testing (real paced speech across a pause — see the streaming section's doc comment)
-    // showed that's NOT what happens: the task stays alive and `isFinal` never fires early;
-    // instead `bestTranscription` silently resets per phrase segment, which
-    // `legacySegmentDidReset` + `LegacyRun`'s committed/partial split now handle. `.dictation`
-    // is still Apple's documented hint for long continuous input, so it stays — just doesn't
-    // single-handedly fix this. Only the streaming request needs it — `legacyTranscribe`'s
-    // batch request is genuinely one-shot.
+    // .dictation = long continuous input hint (finding #2: does NOT auto-isFinal on pause;
+    // phrase resets handled by legacySegmentDidReset). Streaming only — batch is one-shot.
     request.taskHint = .dictation
 
     let run = LegacyRun()
@@ -1187,23 +971,14 @@ private func sysStreamStartLegacy() -> Int32 {
     run.task = recognizer.recognitionTask(with: request) { result, error in
         if let result {
             if result.isFinal {
-                // The task's own `bestTranscription` only ever covers its CURRENT phrase
-                // segment (see the streaming section's doc comment) — `finalJoined` prepends
-                // whatever `run` had already committed, same shape as
-                // `SysModernSession.hypothesis()`. Reads `run`'s OWN committed text (not
-                // `SysStreamState`'s shared pointers, which `smk_sys_stream_finish` already
-                // clears before this callback can fire) — see `LegacyRun`'s doc comment.
+                // bestTranscription = current segment only; finalJoined prepends committed.
                 run.finish(
                     text: run.finalJoined(
                         result.bestTranscription.formattedString,
                         preserveStrictPrefix: legacyNeedsStrictPrefixFinalWorkaround),
                     error: nil)
             } else {
-                // Finding #3: a straggler callback from a cancelled/replaced run must not
-                // clobber the CURRENTLY installed run's partial — check identity under the
-                // same lock before writing. (`recordPartial` only ever mutates `run`'s OWN
-                // fields now, so this is a defensive skip rather than the sole correctness
-                // mechanism — see `LegacyRun`'s doc comment.)
+                // Finding #3: skip straggler callbacks from replaced runs (identity check).
                 sysStream.lock.lock()
                 let isCurrent = sysStream.legacyRun === run
                 sysStream.lock.unlock()
@@ -1213,8 +988,7 @@ private func sysStreamStartLegacy() -> Int32 {
             }
         } else if let error {
             let noSpeech = legacyIsNoSpeech(error)
-            // macOS 15 can report no-speech after already publishing a valid partial.
-            // Preserve that popup-visible hypothesis instead of finalizing to empty.
+            // macOS 15: no-speech after valid partial → keep partial.
             if noSpeech {
                 run.finishNoSpeech()
             } else {
@@ -1225,12 +999,7 @@ private func sysStreamStartLegacy() -> Int32 {
     return 0
 }
 
-/// Convert `buffer` to the analyzer's preferred format if needed (mirrors `sysTranscribe`'s
-/// own conversion step); `nil` means "use `buffer` as-is" (already compatible, or conversion
-/// itself failed — logged, not fatal, since the analyzer may still accept the raw format).
-/// Reads `session.targetFormat`, resolved ONCE at session start (finding #5) — `sysConvert`
-/// itself is synchronous, so this no longer needs the `runBlocking` round-trip that used to
-/// re-derive the format on every single push call.
+/// Convert to session.targetFormat if needed; nil = use as-is (finding #5).
 @available(macOS 26, *)
 private func sysStreamConvert(_ buffer: AVAudioPCMBuffer, for session: SysModernSession) -> AVAudioPCMBuffer? {
     guard let target = session.targetFormat, target != buffer.format else { return nil }
@@ -1340,12 +1109,8 @@ public func smk_sys_stream_finish(
     return 1
 }
 
-// MARK: - Diarization (Pyannote segmentation + WeSpeaker embeddings, Core ML / ANE)
-//
-// "Who spoke when" — the apple-native speaker-diarization backend. A third subsystem
-// of this shim (smk_diar_*), mirroring the ASR one: dlopen'd from the SAME dylib, its
-// own FluidAudio manager + lock. Models (Pyannote + WeSpeaker) auto-download on first
-// init. Output is JSON so the C ABI stays one string wide; the Rust side parses it.
+// MARK: - Diarization (Pyannote + WeSpeaker Core ML)
+// Own manager+lock; JSON out for C ABI. Models pre-downloaded by DontSpeak.
 
 private final class DiarState: @unchecked Sendable {
     let lock = NSLock()
@@ -1353,18 +1118,12 @@ private final class DiarState: @unchecked Sendable {
 }
 private let diar = DiarState()
 
-/// Download (first use) + load the Pyannote segmentation + WeSpeaker embedding Core ML
-/// models and build the diarizer. `model_dir` "" → FluidAudio's default cache. Returns 0
-/// on success. `clustering_threshold` tunes how readily distinct embeddings split into
-/// separate speakers (FluidAudio range 0.5–0.9, lower = MORE speakers); pass <= 0 to use
-/// FluidAudio's default (0.7).
+/// Load diarizer. clustering_threshold ≤0 → FluidAudio default 0.7 (lower = more speakers).
 @_cdecl("smk_diar_init")
 public func smk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThreshold: Float) -> Int32 {
     diar.lock.lock()
     defer { diar.lock.unlock() }
-    // debugMode makes performCompleteDiarization populate `speakerDatabase` (per-speaker
-    // embeddings), which we surface so the engine can match clusters to enrolled voiceprints.
-    // Built as a `let` (immutable) so it's safe to capture in the @Sendable runBlocking closure.
+    // debugMode → speakerDatabase embeddings for enrollment match. let for @Sendable capture.
     let config: DiarizerConfig = {
         var c =
             clusteringThreshold > 0
@@ -1373,13 +1132,8 @@ public func smk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThresho
         c.debugMode = true
         return c
     }()
-    // DontSpeak pre-downloads the two diarization models into `<model_dir>/speaker-diarization-
-    // coreml`; load them DIRECTLY from there (no network) via FluidAudio's local-file API.
-    // CONTRACT: the folder + the two `.mlmodelc` basenames below MIRROR the Rust consts
-    // `DIARIZATION_COREML_DIR_NAME` / `DIARIZATION_SEGMENTATION_MODEL` / `DIARIZATION_EMBEDDING_MODEL`
-    // in `ds-model/src/coreml_repo.rs` (which is where they're downloaded). Keep them
-    // byte-identical — a mismatch makes this offline load fail with `modelMissing`. The Rust
-    // `diarization_model_names_match_prefixes` test pins the Rust half.
+    // Offline load from model_dir/speaker-diarization-coreml. CONTRACT: basenames match
+    // ds-model coreml_repo.rs DIARIZATION_* consts (Rust test pins the other half).
     ModelHub.offlineMode = true
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     switch runBlocking({ () -> DiarizerManager in
@@ -1402,13 +1156,7 @@ public func smk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThresho
     }
 }
 
-/// Diarize 16 kHz mono f32 PCM → UTF-8 JSON:
-///   {"segments":[{"speaker":"<id>","start":0.0,"end":2.34}, ...],
-///    "speakers":{"<id>":[..floats..]}}
-/// Each segment's `speaker` and the `speakers` map share ONE id-space (FluidAudio's
-/// speakerId) so the engine can join them to relabel clusters by enrolled name.
-/// `cb` borrows the JSON for the duration of the call; nothing to free. Empty input yields
-/// {"segments":[]} (rc 0).
+/// 16 kHz mono f32 → JSON {segments, speakers}. Same id-space for join. Empty → {"segments":[]}.
 @_cdecl("smk_diarize")
 public func smk_diarize(
     _ samples: UnsafePointer<Float>?,
@@ -1418,9 +1166,7 @@ public func smk_diarize(
     _ cb: SmkStrCb?
 ) -> Int32 {
     _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
-    // Hold the lock for the FULL call (not just the manager read): DiarizerManager is a
-    // plain class with mutable Sendable-struct state (speakerManager), not an actor like
-    // the TTS/ASR managers, so concurrent calls into it race unless fully serialized here.
+    // Full-call lock: DiarizerManager is not an actor (races if concurrent).
     diar.lock.lock()
     defer { diar.lock.unlock() }
     guard let mgr = diar.manager else {
@@ -1442,13 +1188,7 @@ public func smk_diarize(
                 "end": seg.endTimeSeconds,
             ]
         }
-        // Per-speaker embeddings (debugMode) so the engine can match clusters to enrolled
-        // voiceprints. CONTRACT: this map is keyed by the SAME id string that appears as
-        // each segment's `speaker` (seg.speakerId) — the engine joins speakers→segments
-        // on that single id-space. We build it by walking the segments' ids and pulling
-        // each one's voiceprint from speakerDatabase, so every key here is guaranteed to
-        // occur in `segments` (no orphan ids from a divergent db key-space). Absent db /
-        // unmatched id → an empty/partial map; the engine then keeps the numeric id.
+        // Embeddings keyed by segment speakerId (same id-space for engine join).
         var speakers: [String: [Float]] = [:]
         let db = result.speakerDatabase ?? [:]
         for seg in result.segments {
@@ -1476,10 +1216,7 @@ public func smk_diar_shutdown() {
     diar.lock.unlock()
 }
 
-/// Extract a single WeSpeaker voiceprint embedding from 16 kHz mono f32 PCM — the
-/// enrollment primitive. Requires the diarizer to be initialized (`smk_diar_init`).
-/// `cb` borrows the float buffer for the duration of the call; nothing to free.
-/// Empty input → rc 3.
+/// WeSpeaker embedding for enrollment. Needs smk_diar_init. Empty → rc 3.
 @_cdecl("smk_diar_embed")
 public func smk_diar_embed(
     _ samples: UnsafePointer<Float>?,
@@ -1489,8 +1226,7 @@ public func smk_diar_embed(
     _ cb: SmkPcmCb?
 ) -> Int32 {
     _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
-    // See smk_diarize: hold the lock for the full call to serialize access to the
-    // non-actor DiarizerManager's mutable state.
+    // Full-call lock (non-actor manager).
     diar.lock.lock()
     defer { diar.lock.unlock() }
     guard let mgr = diar.manager else {
@@ -1510,9 +1246,7 @@ public func smk_diar_embed(
     }
 }
 
-/// Download (if absent) just the diarization models — an explicit pre-download path
-/// (vs. lazy download on first init). Returns 0 on success (or already-present). Does
-/// NOT build a manager.
+/// Pre-download diarization models only (no manager).
 @_cdecl("smk_diar_download")
 public func smk_diar_download() -> Int32 {
     switch runBlocking({ () -> Bool in

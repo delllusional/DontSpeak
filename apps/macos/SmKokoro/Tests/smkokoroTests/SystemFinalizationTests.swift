@@ -3,8 +3,7 @@ import XCTest
 @testable import smkokoro
 
 final class SystemFinalizationTests: XCTestCase {
-    /// Regression from the macOS 15 live repro: the final callback dropped a real suffix that
-    /// the last partial (and therefore the popup) had already shown.
+    /// macOS 15: final dropped a suffix the last partial (popup) already showed.
     func testMacOS15StrictPrefixWorkaroundKeepsCompletePartial() {
         XCTAssertEqual(
             systemSettledSegment(
@@ -40,8 +39,7 @@ final class SystemFinalizationTests: XCTestCase {
         XCTAssertEqual(run.text, "Hello from the popup")
     }
 
-    /// #84: a transient empty callback followed by the same phrase must not commit the phrase
-    /// and then expose its resumed copy as a second segment.
+    /// #84: empty then same phrase must not duplicate as a second segment.
     func testTransientEmptyPartialThenSameTextDoesNotDuplicate() {
         let run = LegacyRun()
         run.recordPartial("hello world")
@@ -53,8 +51,7 @@ final class SystemFinalizationTests: XCTestCase {
             "hello world")
     }
 
-    /// Ignoring an empty callback must leave the prior segment available for the next genuine
-    /// low-prefix reset instead of dropping either side of the phrase boundary.
+    /// Empty ignore must leave prior segment for the next genuine reset.
     func testEmptyPartialThenNewSegmentCommitsPreviousOnce() {
         let run = LegacyRun()
         run.recordPartial("the first phrase is complete")
