@@ -9,7 +9,6 @@
 
 use std::time::Instant;
 
-/// One fully synthesized and validated phoneme batch, ready to commit to playback.
 pub(crate) struct PreparedAudio {
     pub(crate) pcm: Vec<f32>,
     pub(crate) synth_nanos: u128,
@@ -20,10 +19,8 @@ pub(crate) enum PrepareOutcome {
     Finished,
 }
 
-/// Synthesize and commit each FULL phoneme batch before starting the next one. A synthesis
-/// failure or empty PCM discards the current uncommitted batch and returns `Err` without
-/// calling `commit` for it. Cancellation is checked before and after inference, between
-/// batches, and after the final commit.
+/// Synthesize + commit each full phoneme batch. Failure/empty PCM discards the uncommitted
+/// batch (no `commit`). Cancel checked before/after inference, between batches, after final commit.
 pub(crate) fn prepare_audio<T>(
     batches: &[T],
     cancelled: impl Fn() -> bool,
@@ -37,8 +34,7 @@ pub(crate) fn prepare_audio<T>(
         let started = Instant::now();
         let result = synthesize(batch);
         let elapsed = started.elapsed().as_nanos();
-        // A barge that landed during inference owns the terminal outcome. Discard either PCM or
-        // an incidental backend error so a cancelled request reports DONE, never a misleading ERR.
+        // Barge during inference owns the terminal: report DONE, not a misleading ERR.
         if cancelled() {
             return Ok(PrepareOutcome::Cancelled);
         }
@@ -65,7 +61,6 @@ mod tests {
 
     use super::{PrepareOutcome, PreparedAudio, prepare_audio};
 
-    /// A `commit` that records each committed batch.
     fn collect(groups: &RefCell<Vec<Vec<f32>>>) -> impl FnMut(PreparedAudio) -> Result<(), String> {
         |audio| {
             groups.borrow_mut().push(audio.pcm);

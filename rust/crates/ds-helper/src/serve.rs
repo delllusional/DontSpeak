@@ -212,15 +212,13 @@ fn emit_cue_done() {
     let _ = std::io::stdout().flush();
 }
 
-/// Flatten an error for a protocol line: the engine's reader parses helper stdout strictly
-/// line-by-line, so a multi-line message (ort/ONNX Runtime `Display` can be) would truncate
-/// the `ERR`/`TTSLOADERR` terminal at its first line and leak the rest as stray lines.
+/// Flatten multi-line errors (ort `Display`) so protocol lines stay one-line terminals.
 fn one_line(e: &str) -> String {
     e.lines().collect::<Vec<_>>().join(" ")
 }
 use crate::stt_residency::SttResidencySlot;
 
-/// One stdin request in `--serve` mode (one JSON object per line).
+/// One stdin request (`--serve`, one JSON object per line).
 #[derive(Debug, Deserialize)]
 struct ServeReq {
     op: String,
@@ -230,21 +228,17 @@ struct ServeReq {
     rate: f32,
     #[serde(default)]
     text: String,
-    /// For `op:"unload"` — which cached model to free: "tts" (Kokoro) or "stt"
-    /// (Parakeet). Ignored by other ops.
+    /// `unload`/`load`: `"tts"` | `"stt"`.
     #[serde(default)]
     engine: String,
-    /// For `op:"diarize"` / `op:"enroll"` — how many seconds of mic to record first.
+    /// `diarize`/`enroll` capture length.
     #[serde(default)]
     seconds: Option<u64>,
-    /// Monotonic daemon-owned identity for `listen`/`lstop`. A stop cancels this
-    /// generation even when it reaches the helper before the queued start runs.
+    /// Daemon-owned `listen`/`lstop` generation (stop can beat a queued start).
     #[serde(default)]
     session: Option<u64>,
-    /// For `op:"speak"` — frontend batches an earlier run of this exact text already
-    /// PLAYED (the engine echoes our `PROGRESS` mark back), for batch-granular resume.
-    /// `#[serde(default)]` + no `deny_unknown_fields` on this struct = skew-safe both
-    /// ways: an older engine omits it (0 = from the top) and an older helper ignores it.
+    /// Already-played frontend batches (engine echoes `PROGRESS`). Default 0; skew-safe
+    /// both ways (no `deny_unknown_fields`).
     #[serde(default)]
     skip: usize,
 }
@@ -252,8 +246,7 @@ fn default_rate() -> f32 {
     1.0
 }
 
-/// Record a fixed `seconds`-long window of mic audio, resampled to 16 kHz mono — the
-/// shared capture step for one-shot `diarize` and `enroll`. `Err` if the mic won't open.
+/// Fixed-window mic capture → 16 kHz mono for one-shot diarize/enroll.
 #[cfg(target_os = "macos")]
 fn record_16k(seconds: u64, cancel: &std::sync::atomic::AtomicBool) -> Result<Vec<f32>, String> {
     use std::sync::atomic::Ordering;
@@ -270,8 +263,6 @@ fn record_16k(seconds: u64, cancel: &std::sync::atomic::AtomicBool) -> Result<Ve
     }
     accum.extend_from_slice(&capture.drain_new()); // tail
     let pcm = ds_stt::resample_to_16k(&accum, rate);
-    // Per-capture diagnostic (fires once per diarize/enroll job) — routine, so it's gated
-    // behind DONTSPEAK_DEBUG like the engine's own DEBUG lines, not shown by default.
     log::debug!(
         target: "helper",
         "capture: rate={rate} accum={} pcm16k={} secs={seconds}",
@@ -281,20 +272,14 @@ fn record_16k(seconds: u64, cancel: &std::sync::atomic::AtomicBool) -> Result<Ve
     Ok(pcm)
 }
 
-/// The Core ML / ANE backend is the only diarizer wired today. Resolves the config's
-/// provider ladder, then delegates the provider → backend gate to
-/// [`ds_stt::diarize::ensure_coreml_backend`] — THE single mapping site — so this helper
-/// can't drift from it. Returns that gate's `Err` (a user-facing message) when the
-/// resolved provider is anything Core ML can't serve; `Ok` ⇒ Core ML is the right backend.
+/// Gate via [`ds_stt::diarize::ensure_coreml_backend`] (sole provider→backend mapping).
 #[cfg(target_os = "macos")]
 fn ensure_coreml_diarizer(cfg: &ds_config::VoiceConfig) -> Result<(), String> {
     ds_stt::diarize::ensure_coreml_backend(cfg.resolved_diarizer_provider())
 }
 
-/// One-shot diarization: record `seconds`, then diarize with the config's clustering
-/// threshold. Gated on diarization being ON (non-empty `diarizer_provider`) + a Core ML-resolvable rung.
-/// Emits `DIAR <json>` ({segments,speakers}) then `DDONE`, or `DIARERR <msg>`/`DDONE`.
-/// The engine does enrolled-name matching.
+/// One-shot diarize: record → cluster (config threshold). Emits `DIAR`/`DIARERR` + `DDONE`.
+/// Engine does enrolled-name matching. Requires diarization on + Core ML-resolvable provider.
 #[cfg(target_os = "macos")]
 fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
     use ds_stt::diarize::{CoremlDiarizer, Diarizer};
@@ -306,7 +291,7 @@ fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
         let _ = std::io::stdout().flush();
     };
 
-    // Read config fresh (mirrors capture_gain); gate + threshold come from it.
+    // Fresh config each call (mirrors capture_gain).
     let cfg = ds_config::Paths::resolve().map(|p| ds_config::VoiceConfig::load(&p));
     let Some(cfg) = cfg else {
         return emit_err("config unavailable");
@@ -341,11 +326,8 @@ fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
     }
 }
 
-/// One-shot enrollment: record `seconds`, extract one WeSpeaker voiceprint, emit
-/// `EMB <json-floats>` then `EDONE` (or `ENROLLERR <msg>`/`EDONE`). The engine persists
-/// it under the user-supplied name (the name never reaches the helper). Gated the same
-/// way as `diarize` (enabled + a Core ML-resolvable provider) so the two stay consistent
-/// and enrollment can't silently fetch models while diarization is off.
+/// One-shot enroll: record → WeSpeaker embed → `EMB`/`ENROLLERR` + `EDONE`. Name stays in
+/// the engine. Same gate as diarize so enroll can't fetch models while diarization is off.
 #[cfg(target_os = "macos")]
 fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
     use ds_stt::diarize::{CoremlDiarizer, Diarizer};
@@ -384,24 +366,13 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
     }
 }
 
-// The warm synth/STT server is cross-platform: the body is rodio + ds_stt +
-// ds_model (all portable) and `_exit` is an extern-C symbol present on every libc.
-// Audio that can't open degrades via the `ERR audio` path below — there is no
-// platform that needs a blanket "unsupported" stub.
-//
-// NOTE: the helper does NOT download models — not even the apple-native Core ML sets it
-// loads (FluidAudio runs in `offlineMode`). EVERY model fetch goes through the engine's
-// single-flight download manager (`dontspeakd::downloads`, targets `kokoro_coreml` /
-// `parakeet_coreml` / …), which owns progress, failure surfacing, and the warm-child
-// restart once the files land. A load attempted while the files are still absent simply
-// fails; the engine restarts this helper after the fetch completes (the shared self-heal).
+// Helper never downloads: FluidAudio offlineMode; engine single-flight download manager
+// owns fetch + warm-child restart. Absent files → load fails; engine restarts after fetch.
 
-/// Feed VPIO in 100 ms source-rate chunks: chunking keeps cancellation responsive
-/// throughout a committed phoneme batch (state is re-read per chunk) and keeps the
-/// live `buffered` re-reads fine-grained for pure backpressure. Mute is applied at
-/// RENDER time in the VPIO callback (`ds_aec::RenderHandle::set_muted`), not here.
+/// 100 ms source-rate chunks: cancel-responsive + fine-grained backpressure.
+/// Mute is at VPIO render (`set_muted`), not here.
 const DUPLEX_RENDER_CHUNK_SAMPLES: usize = ds_tts::SAMPLE_RATE as usize / 10;
-/// VPIO lookahead: enough to absorb scheduler jitter without buffering a whole reply.
+/// VPIO lookahead (scheduler jitter, not a whole reply).
 const DUPLEX_RENDER_AHEAD: Duration = Duration::from_secs(2);
 const DUPLEX_RENDER_POLL: Duration = Duration::from_millis(10);
 
@@ -411,8 +382,7 @@ struct DuplexRenderState {
     buffered: Duration,
 }
 
-/// Pace one already-transactional phoneme batch into VPIO while re-reading live cancel
-/// state. Returns `false` when cancellation stops the batch before every chunk is pushed.
+/// Pace a committed batch into VPIO; `false` if cancelled mid-batch.
 fn push_duplex_pcm(
     pcm: &[f32],
     mut read_state: impl FnMut() -> DuplexRenderState,
@@ -435,36 +405,21 @@ fn push_duplex_pcm(
     true
 }
 
-/// Drains committed batches until the sender closes. `push_batch`'s return is ignored:
-/// after a cancel it keeps consuming so the queue empties cheaply and join stays fast.
+/// Drain committed batches until sender closes (keeps consuming after cancel for fast join).
 fn run_duplex_feeder(rx: std::sync::mpsc::Receiver<Vec<f32>>, mut push_batch: impl FnMut(&[f32])) {
     for pcm in rx {
         push_batch(&pcm);
     }
 }
 
-/// The frontend batches left to synthesize after `skip` already-played ones (see
-/// `ServeReq::skip`). CLAMPED: an oversized skip — e.g. a residual voice/rate change
-/// between the runs shifted the batch count — yields an empty remainder, never a
-/// panic. PURE.
+/// Remainder after `ServeReq::skip` (clamped; oversized skip → empty, never panic).
 fn batches_after_skip<T>(batches: &[T], skip: usize) -> &[T] {
     &batches[skip.min(batches.len())..]
 }
 
-/// Block until a full-duplex dictation session releases the mic (`full_duplex_listening`
-/// clears) OR shutdown fires (`capture_cancel`) — the full-duplex mutual exclusion between
-/// dictation (the concurrent listen thread, reading the VPIO capture handle) and a
-/// one-shot diarize/enroll job (its own independent cpal stream): half-duplex gets the
-/// "one capture thread" guarantee for free (Listen/Diarize/Enroll dispatch one at a time
-/// on the same playback-loop thread), but full-duplex routes `listen` to a SEPARATE
-/// concurrent-listen thread — nothing else serializes the two capture streams.
-/// `full_duplex_listening` is set the moment a full-duplex `listen` is requested and
-/// cleared on `lstop`; a diarize/enroll job calls this BEFORE opening its own cpal stream.
-/// Returns `false` the instant `capture_cancel` fires (including if it was ALREADY set
-/// before this was even called) — the caller must then skip opening its own capture
-/// rather than racing the process exit; `true` once the mic is genuinely free. Polls every
-/// 30ms — cheap, and this only gates the rare diarize/enroll one-shot jobs. Unused (and so
-/// `#[cfg]`'d out) on non-macOS: diarize/enroll never open a capture there.
+/// Full-duplex: wait until concurrent listen releases the mic (or `capture_cancel`).
+/// Diarize/enroll open their own cpal stream; half-duplex serializes on one thread for free.
+/// `false` if shutdown already set — skip open rather than race process exit.
 #[cfg(target_os = "macos")]
 fn wait_for_mic_free(
     full_duplex_listening: &std::sync::atomic::AtomicBool,
@@ -487,15 +442,9 @@ pub(crate) fn serve() -> ! {
 
     let tts_wanted = std::env::var_os("DONTSPEAK_TTS_PRELOAD").is_some();
 
-    // ── STT (Parakeet) preloads in PARALLEL with the TTS load below ──────────────────────
-    // Construct the transcriber first (cheap — no model load yet) and, when STT is wanted
-    // (DONTSPEAK_STT_PRELOAD, set by the engine only for the built-in engine), preload it on its
-    // OWN thread. So STT and TTS download/warm INDEPENDENTLY — each reports its own lifecycle
-    // and neither blocks the other. The ONNX bootstrap's `ORT_DYLIB_PATH` write is serialized
-    // by a Once in the model layer, so the two parallel loads don't race the env.
-    // DONTSPEAK_STT_PROVIDER picks the local backend: "ane" → FluidAudio Core ML / ANE,
-    // "cpu" → portable ONNX Parakeet. Shared (Arc<Mutex>) so the preload thread, the
-    // full-duplex concurrent-listen thread, and the request loop all reach it.
+    // STT preloads on its own thread in parallel with TTS. ORT_DYLIB_PATH write is Once-
+    // serialized in ds-model. DONTSPEAK_STT_PROVIDER: ane|cpu. Shared Arc for preload +
+    // concurrent-listen + request loop.
     let parakeet_dir = ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE)
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_default();
@@ -504,28 +453,18 @@ pub(crate) fn serve() -> ! {
         &stt_provider,
         parakeet_dir,
     )));
-    // The `transcriber` cache is managed by preload/load/unload stt. Real listen falls back to
-    // it only for non-streaming backends. Streaming providers use a separate `backend_cell` (in
-    // listen.rs) that is also preloaded/unloaded — every call site below tries it FIRST. `unload
-    // stt` drives both. `STTLOADED`/`STT_PROVIDER` are reported from whichever cache actually
-    // loaded (`loaded`, a few lines down), not hardcoded to `transcriber`. See `SttResidencySlot`.
-    // Claimed the MOMENT the STT load starts — by the parallel preload below OR a later
-    // `load stt` request — so the two can't BOTH load the model concurrently. See
-    // `SttResidencySlot`: `Idle -> Loading -> Loaded`, with `Loading`/`Loaded` only ever
-    // exiting via `resolve_ok`/`mark_unloaded`, so the claim can't get stuck.
+    // Offline `transcriber` cache for non-streaming; streaming uses `backend_cell` in
+    // listen.rs. `unload stt` drives both. STTLOADED/STT_PROVIDER from whichever loaded.
+    // Claim at load start so preload and `load stt` can't both load — see SttResidencySlot.
     let stt_claimed = Arc::new(SttResidencySlot::new());
     if std::env::var_os("DONTSPEAK_STT_PRELOAD").is_some() {
-        // Claim BEFORE spawning so a `load stt` that races in skips its own load. Nothing
-        // else has claimed yet at this point in startup, so this always succeeds.
+        // Claim before spawn so a racing `load stt` skips.
         stt_claimed.try_claim();
         let transcriber = transcriber.clone();
         let stt_provider = stt_provider.clone();
         let stt_claimed = stt_claimed.clone();
         std::thread::spawn(move || {
-            // Loading + warming (the model files were fetched by the ENGINE's download
-            // manager before this helper was (re)started; preload() loads them offline).
-            // "Starting…" until STTLOADED (preload runs a warmup inference, so STTLOADED
-            // honestly means resident + warm).
+            // Engine already fetched files; preload is offline. STTLOADED = resident + warm.
             println!("{}stt", proto::WARMING_PREFIX);
             let _ = std::io::stdout().flush();
             log::info!(target: "helper", "load stt attempting (provider={stt_provider})");
@@ -543,13 +482,7 @@ pub(crate) fn serve() -> ! {
                     stt_claimed.resolve_ok();
                 }
                 Err(e) => {
-                    // Release the claim on failure (e.g. the model isn't downloaded yet on a
-                    // fresh install) so a LATER `load stt` — sent whenever the engine reconciles
-                    // the helper's models again — can actually retry. Without this, the claim
-                    // stayed true forever: the very first failed attempt permanently wedged
-                    // STT off for this process's whole lifetime, recoverable only by the daemon
-                    // happening to fully RESTART this helper (mirrors Job::LoadTts below, which
-                    // rechecks `synth.is_none()` fresh each time instead of a one-shot latch).
+                    // Release on failure so a later `load stt` can retry (pre-4ef3013: stuck true).
                     stt_claimed.mark_unloaded();
                     println!("{}{e}", proto::STTLOADERR_PREFIX);
                     let _ = std::io::stdout().flush();
@@ -559,23 +492,16 @@ pub(crate) fn serve() -> ! {
         });
     }
 
-    // LOADING + warming the synth (the model files — ONNX or Core ML — were fetched by the
-    // ENGINE's download manager; load_backend only loads them offline). Tell the engine so
-    // the dot reads "Starting…" through the load + warmup (which can be slow on the first
-    // ANE compile), instead of a premature green, until READY below.
+    // Engine fetched TTS assets; load_backend is offline. WARMING until READY (not premature green).
     if tts_wanted {
         println!("{}tts", proto::WARMING_PREFIX);
         let _ = std::io::stdout().flush();
     }
-    // Load once. READY/ERR let the UI know the model is warm.
-    // Held as Option so a `unload tts` can free the Kokoro model while the helper
-    // stays warm for STT; the next speak lazily reloads it (below).
+    // Option so unload tts frees Kokoro while STT stays warm; next speak reloads.
     let mut synth = if tts_wanted {
         match load_backend() {
             Ok(s) => {
-                // PROVIDER (before READY) lets the engine report the active execution provider.
-                // READY is emitted LATER — only after the audio OUTPUT is opened + primed below —
-                // so green honestly means "warm AND able to make sound", not just "model loaded".
+                // PROVIDER before READY; READY only after audio open — green = warm AND can sound.
                 println!("{}{}", proto::PROVIDER_PREFIX, s.provider().as_str());
                 let _ = std::io::stdout().flush();
                 Some(s)
@@ -583,9 +509,7 @@ pub(crate) fn serve() -> ! {
             Err(e) => {
                 println!("{} {}", proto::ERR, one_line(&e));
                 let _ = std::io::stdout().flush();
-                // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
-                // destructors is this crate's teardown convention (see main.rs's top
-                // comment — ort/cpal abort on teardown).
+                // SAFETY: deliberate `_exit` teardown; see main.rs.
                 unsafe { _exit(1) };
             }
         }
@@ -593,33 +517,26 @@ pub(crate) fn serve() -> ! {
         None
     };
 
-    /// A playback request the loop will synth + play.
     struct PlayReq {
         voice: String,
         rate: f32,
         text: String,
-        /// Already-played batches to drop before synthesis (see `ServeReq::skip`).
+        /// Already-played batches (see `ServeReq::skip`).
         skip: usize,
     }
     struct State {
         req: Option<PlayReq>,
-        /// A `listen` (STT) job was requested. Mutually exclusive with TTS playback
-        /// (the engine never speaks and listens at once — the mic-barge gates them).
+        /// Mutually exclusive with TTS (engine mic-barge).
         listen: Option<u64>,
         quit: bool,
-        /// `unload` requests: free the cached Kokoro (tts) / Parakeet (stt) model
-        /// when the engine no longer needs it but the helper stays warm for the other.
+        /// Free one model while the other stays warm.
         unload_tts: bool,
         unload_stt: bool,
-        /// `load` requests: eagerly (pre)load a model so it's resident the moment its
-        /// engine is selected — keeps "loaded" honest BEFORE first use (Parakeet is
-        /// otherwise lazy), so the UI's green dot matches actual residency.
+        /// Eager residency so UI green matches before first use.
         load_tts: bool,
         load_stt: bool,
-        /// A one-shot `diarize` job: record this many seconds, then diarize. Like
-        /// `listen` it's mutually exclusive with TTS playback (single capture thread).
+        /// One-shot; exclusive with TTS (single capture thread).
         diarize: Option<u64>,
-        /// A one-shot `enroll` job: record this many seconds, then extract a voiceprint.
         enroll: Option<u64>,
     }
     let shared = Arc::new((
@@ -636,17 +553,9 @@ pub(crate) fn serve() -> ! {
         }),
         Condvar::new(),
     ));
-    // (`transcriber` + `stt_provider` were constructed at the top of `serve()` so STT could
-    // preload in parallel with the TTS load; both are in scope here for the request loop.)
-    // Diarize/enroll construct their own CoremlDiarizer per call (reading the config's
-    // clustering threshold fresh), so there is no persistent diarizer local here.
-    // Full-duplex AEC (macOS VPIO): when DONTSPEAK_FULL_DUPLEX is set we render TTS
-    // AND capture STT through ONE echo-cancelled unit, so STT never hears the TTS.
-    // Falls back to the half-duplex rodio + cpal path when unset or the unit won't
-    // open. Coexist is LIVE: a dedicated concurrent-listen thread (below) drains the
-    // echo-cancelled mic WHILE this thread renders TTS, so the user dictates over
-    // the voice. There is no implicit voice-barge — stopping it is an explicit `stop` /
-    // Caps long-press.
+    // Full-duplex AEC (DONTSPEAK_FULL_DUPLEX): one echo-cancelled unit for TTS render +
+    // STT capture. Else half-duplex rodio+cpal. Coexist via concurrent-listen thread;
+    // stop is explicit (`stop` / Caps long-press), not talk-over barge.
     let duplex: Option<DuplexAudio> = if std::env::var_os("DONTSPEAK_FULL_DUPLEX").is_some() {
         match DuplexAudio::open() {
             Ok(d) => {
@@ -661,17 +570,11 @@ pub(crate) fn serve() -> ! {
     } else {
         None
     };
-    // Whether the duplex backend owns the render path (macOS VPIO: TTS is rendered
-    // THROUGH the unit as the AEC reference, so we skip rodio). Capture-side backends
-    // (Windows WASAPI Communications, Linux module-echo-cancel) return false: rodio
-    // still renders and the duplex only supplies the echo-cancelled capture.
+    // VPIO owns render (skip rodio); capture-only duplex still uses rodio for TTS.
     let render_via_duplex = duplex.as_ref().is_some_and(|d| d.owns_render());
     let tts_output_available = tts_output_available(tts_wanted, render_via_duplex);
-    // One persistent audio device (the cpal stream is !Send → it must stay on THIS
-    // playback thread). `log_on_drop(false)` + `_exit` on quit avoid the macOS-26
-    // CoreAudio teardown abort. Per-request `Player`s are created on its mixer.
-    // Skipped only when the duplex backend owns render (macOS VPIO); a capture-only
-    // duplex keeps rodio for output.
+    // Persistent device on this thread (cpal !Send). log_on_drop(false)+`_exit` avoid
+    // macOS-26 CoreAudio teardown abort. Skipped when VPIO owns render.
     let device = if render_via_duplex || !tts_wanted {
         None
     } else {
@@ -683,20 +586,15 @@ pub(crate) fn serve() -> ! {
             Err(e) => {
                 println!("{} audio: {}", proto::ERR, one_line(&e.to_string()));
                 let _ = std::io::stdout().flush();
-                // SAFETY: `_exit` takes only an exit code and never returns; skipping
-                // Rust destructors is this crate's teardown convention (see main.rs's
-                // top comment).
+                // SAFETY: deliberate `_exit` teardown; see main.rs.
                 unsafe { _exit(1) };
             }
         }
     };
-    // An OWNED, `Send` clone of the device mixer (it's an `Arc` handle) for ordered one-shot
-    // EARCONS. `None` when the duplex backend owns render (macOS VPIO, no rodio mixer); the
-    // tracked cue then uses `afplay` on macOS (see the `cue` op below).
+    // Send mixer clone for earcons; None under VPIO (macOS cue uses afplay).
     let cue_mixer = device.as_ref().map(|d| d.mixer().clone());
     let cue_playback = Arc::new(CuePlayback::default());
-    // The model is loaded + warm and the output device is open → signal READY (green). The
-    // audio-stream RESUME latency (rodio pauses the CoreAudio output when idle) is handled
+    // Warm + output open → READY. Resume latency (rodio pauses idle CoreAudio) is handled
     // per-utterance below — a brief leading silence absorbs the resume so the speech onset
     // isn't clipped (the "purple icon, no sound" first speak).
     println!("{}", proto::READY);
@@ -735,59 +633,21 @@ pub(crate) fn serve() -> ! {
             }
         }
     });
-    // Full-duplex mutual exclusion between dictation (the concurrent listen thread
-    // above, reading the VPIO capture handle) and the one-shot diarize/enroll capture
-    // (its own independent cpal stream, opened in `run_diarize`/`run_enroll` below):
-    // half-duplex gets the "one capture thread" guarantee for free because
-    // Listen/Diarize/Enroll are jobs dispatched one at a time on the SAME playback-
-    // loop thread, but full-duplex routes `listen` to the SEPARATE concurrent-listen
-    // thread — nothing serialized the two capture streams before (the documented
-    // "one capture thread" mutual exclusion only held in half-duplex).
-    // `full_duplex_listening` is set the moment a full-duplex `listen` is requested
-    // (before the concurrent thread actually reads the mic) and cleared on `lstop`;
-    // the diarize/enroll job below waits for it to clear before opening its own cpal
-    // stream. `capturing_diarize` is the reverse guard: set while that capture is in
-    // flight, so a `listen` request arriving mid-capture waits it out (off the reader
-    // thread, so a slow diarize doesn't stall stdin reading) before waking the
-    // concurrent thread. Plain flags, not a perfectly atomic handoff — there is a
-    // short window at the boundary while the other side's stream is actually
-    // finishing/tearing down — but this closes the "whole session" overlap the audit
-    // flagged. No-ops in half-duplex (`listen_sig` is `None`, so
-    // `full_duplex_listening` is never set).
-    // The CURRENT request's player, shared with the reader thread for INSTANT barge
-    // (`stop()` is a non-blocking flag; the player is discarded after each request).
+    // Full-duplex mic mutex: concurrent listen vs diarize/enroll cpal. Flags close
+    // whole-session overlap (short tear-down window remains). Half-duplex no-ops.
+    // cur_player: reader barge (non-blocking stop). cancel: stop/newer speak, checked mid-batch.
     let cur_player: Arc<Mutex<Option<Arc<rodio::Player>>>> = Arc::new(Mutex::new(None));
-    // Set by the reader on `stop` OR a newer request; the playback loop checks it
-    // between phoneme batches and during afplay polling so a barge-in interrupts
-    // even mid-synthesis. Reset to false when the loop dequeues a fresh request.
     let cancel = Arc::new(AtomicBool::new(false));
-    // The INSTANT the current barge's AUDIBLE stop landed (the reader's `stop()` /
-    // fade start) — `None` while no barge is in flight; cleared with `cancel` when a
-    // fresh request dequeues. The playback loop computes its resume `PROGRESS` mark
-    // at `min(now, stamp)`: it runs up to a batch-synthesis latency AFTER the reader
-    // stopped the player, and wall time kept advancing over batch boundaries nobody
-    // heard — an uncapped count would over-skip (lost words). The earliest stamp wins
-    // if a second barge lands. Under-skip of the ~60 ms fade tail is acceptable.
+    // Audible-stop instant for PROGRESS cap: min(now, stamp) so post-stop synth latency
+    // doesn't over-skip unheard batch boundaries. Earliest stamp wins; ~60 ms fade under-skip OK.
     let cancel_stamp: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
-    // A SEPARATE cancel for the one-shot CAPTURE jobs (diarize/enroll). Unlike `cancel`,
-    // it is NOT tripped by a TTS barge (`speak`/`stop`/`stopfade`) — those routinely
-    // arrive mid-recording (warm-engine pings, narration, record-barges) and must NOT
-    // abort a diarize/enroll capture. It trips only on engine shutdown (stdin EOF), so a
-    // killed engine still ends the recording. (`listen` keeps using `cancel`: a `stop`
-    // SHOULD end a dictation.)
+    // Diarize/enroll only: NOT tripped by TTS barge (pings/narration mid-record). EOF only.
+    // Half-duplex listen: stop/lstop/EOF end it; a mid-listen speak must queue, not truncate.
     let capture_cancel = Arc::new(AtomicBool::new(false));
-    // The half-duplex `listen` (dictation) cancel. Like `capture_cancel` it is NOT tripped
-    // by a TTS `speak` barge — the engine "never speaks and listens at once", so a `speak`
-    // arriving mid-listen (narration) must QUEUE behind the dictation, not abort it (which
-    // truncated the capture). It trips on the INTENDED stops only: `stop` / `lstop` (the
-    // seconds-timer + Caps release) and shutdown (stdin EOF).
-    // MUTE: speech keeps draining silently, while one-shot cues are suppressed or stopped.
-    // Applied instantly to the sounding rodio player; the VPIO render path mutes at
-    // render time via `duplex_render.set_muted` (the reader's `mute` op) instead.
+    // MUTE: speech drains silent; cues suppressed. Rodio instant; VPIO via set_muted.
     let muted = Arc::new(AtomicBool::new(false));
 
-    // Reader thread: parse JSON requests. speak/preview enqueue (newest wins) and
-    // cancel any current playback; stop only cancels (no enqueue, no DONE).
+    // Reader: speak/preview enqueue (newest wins); stop cancels only (no DONE).
     {
         let shared = shared.clone();
         let cur_player = cur_player.clone();
@@ -820,13 +680,9 @@ pub(crate) fn serve() -> ! {
                     req.voice
                 };
                 let cancel_current = || {
-                    // Signal the playback loop to stop the in-flight request, then
-                    // stop the player sounding right now (non-blocking flag). In
-                    // full-duplex mode there is no rodio player — drain the VPIO
-                    // render ring via its barge flag instead.
+                    // Instant barge: flag + rodio stop, or VPIO ring drain in full-duplex.
                     cancel.store(true, Ordering::SeqCst);
-                    // Stamp the audible-stop instant for the resume `PROGRESS` cap
-                    // (just before the stop = conservative). See `cancel_stamp`.
+                    // Stamp just before stop for PROGRESS cap (see cancel_stamp).
                     cancel_stamp
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -843,27 +699,17 @@ pub(crate) fn serve() -> ! {
                     }
                     cue_playback.cancel();
                 };
-                // Graceful variant: ramp the rodio player's volume to zero over a SHORT
-                // window so NO explicit barge is a hard cut/click — used by every user-
-                // facing stop (mic record-barge, the caps long-press reset, per-window
-                // clear-on-submit / window close / newest-reply preempt). The helper's
-                // INTERNAL block-to-block preempt keeps using the instant `cancel_current`
-                // so sequential narration has no gap between blocks. Full-duplex has no
-                // rodio player, so this degrades to the instant VPIO-ring drain below.
-                // ~60 ms is short enough to stay responsive and limit bleed into the mic
-                // on a record-barge, yet long enough to de-click.
+                // User-facing stops: ~60 ms volume ramp (de-click, limit mic bleed).
+                // Internal block preempt uses instant cancel_current (no gap). Full-duplex → VPIO drain.
                 let cancel_current_fade = || {
                     cancel.store(true, Ordering::SeqCst);
-                    // Stamp at FADE START, not fade end: from here the audio is
-                    // ramping to silence, so counting any later batch boundary as
-                    // "played" would over-skip. See `cancel_stamp`.
+                    // Stamp at fade start (later boundaries aren't "played").
                     cancel_stamp
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .get_or_insert_with(Instant::now);
                     cue_playback.cancel();
-                    // Clone the Arc out so the ramp does NOT hold the `cur_player` lock
-                    // (the playback loop touches it too).
+                    // Clone Arc so ramp doesn't hold cur_player (playback loop also locks).
                     let player = cur_player
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())

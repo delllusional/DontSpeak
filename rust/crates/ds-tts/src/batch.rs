@@ -1,21 +1,17 @@
-//! Model-bounded phoneme batching for Kokoro synthesis.
+//! Model-bounded phoneme batching for Kokoro.
 //!
-//! [`split_phonemes`](crate::batch::split_phonemes) packs a long phoneme string at sentence
-//! marks under `MAX_PHONEME_LENGTH` (port of `splitPhonemes`);
-//! [`stream_batches`](crate::batch::stream_batches) is the ramped variant used by the shared
-//! frontend — a ramped, model-bounded, floor-protected batch sequence. What happens to a
-//! finished batch is the consumer's contract — see the helper's `prepare` module. Both paths
-//! share `pack_batches`.
+//! [`split_phonemes`] packs at sentence marks under `MAX_PHONEME_LENGTH` (port of
+//! `splitPhonemes`). [`stream_batches`] is the ramped, floor-protected variant for the
+//! shared frontend. Batch commit is the consumer's job (helper `prepare`). Both use
+//! `pack_batches`.
 
 use crate::vocab::MAX_PHONEME_LENGTH;
 
-/// The sentence/clause marks batches may break at — the split set from
-/// `Tokenizer.kt::splitPhonemes` / kokoro-onnx `_split_phonemes`.
+/// Clause marks from `Tokenizer.kt::splitPhonemes` / kokoro-onnx `_split_phonemes`.
 const SPLIT_CHARS: &[char] = &['.', ',', '!', '?', ';'];
 
-/// Split a phoneme string at `.,!?;` into interleaved `[text, mark, text, …]`
-/// atomic parts — `re.split(r"([.,!?;])", s)`. A "lone mark" part glues to its
-/// preceding chunk during batching; this never breaks mid-clause.
+/// Split at `.,!?;` into interleaved `[text, mark, …]` (`re.split(r"([.,!?;])", s)`).
+/// Lone marks glue to the preceding chunk — never mid-clause.
 fn atomic_parts(phonemes: &str) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -32,19 +28,13 @@ fn atomic_parts(phonemes: &str) -> Vec<String> {
 }
 
 pub fn split_phonemes(phonemes: &str) -> Vec<String> {
-    // Constant model cap (no ramp), and DON'T break early at every sentence — pack
-    // greedily so multiple sentences share a batch, preserving the inter-sentence
-    // pauses (each batch is trimmed only at its ends). A forced break at the cap
-    // still backtracks to the last sentence boundary, and a short trailing
-    // remainder is still folded back — the same squeak guard as the stream path.
+    // Constant cap, pack greedily across sentences (preserve inter-sentence pause
+    // — batches trim only at ends). Cap break backtracks to last sentence mark;
+    // short trailing remainder folds back (same squeak guard as stream path).
     //
-    // `pack_batches` only ever forces a break BETWEEN `.,!?;`-delimited atomic
-    // parts (see `atomic_parts`); a run with NO such mark at all (e.g. a long
-    // digit string expanded by `numbers::expand_numbers` into an unpunctuated
-    // word run) is a single atomic part and survives packing oversized. Guard
-    // with the same hard word/char-split fallback the streaming path uses, so no
-    // batch handed to the ONNX/Core ML engines can ever exceed the cap that
-    // gets it silently truncated (ONNX) or dropped whole (Core ML/ANE).
+    // `pack_batches` only breaks BETWEEN `.,!?;` atomics; unpunctuated runs
+    // (e.g. expanded digit strings) can stay oversized — hard_split_words so
+    // engines never get over-cap (ONNX truncates silently; Core ML drops whole).
     pack_batches(
         phonemes,
         MAX_PHONEME_LENGTH,
@@ -58,18 +48,15 @@ pub fn split_phonemes(phonemes: &str) -> Vec<String> {
     .collect()
 }
 
-/// Last-resort split of an over-cap chunk/batch at WORD boundaries (spaces), so nothing
-/// exceeds `cap` even when it has no `.,!?;` to break on. A single word longer than `cap`
-/// is split at a char boundary — degraded but never dropped/truncated. Split results also stay
-/// above `floor`; an in-cap whole reply remains unchanged even when it is shorter than the floor.
+/// Last-resort over-cap split at word (space) boundaries. No `.,!?;` needed.
+/// Single word > cap → char split (degraded, never dropped). Respects `floor`.
 fn hard_split_words(s: &str, cap: usize, floor: usize) -> Vec<String> {
     if s.chars().count() <= cap {
         return vec![s.to_string()];
     }
     debug_assert!(floor > 0 && floor <= cap.div_ceil(2));
 
-    // Match the previous word packer's whitespace normalization before choosing
-    // boundaries. A space used as a batch boundary is omitted as before.
+    // Whitespace-normalize like the old word packer; boundary spaces omitted.
     let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
     let chars = normalized.chars().collect::<Vec<_>>();
     if chars.is_empty() {

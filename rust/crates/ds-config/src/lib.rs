@@ -1,41 +1,26 @@
 //! Centralized paths and runtime config for the dontspeak Rust workspace.
 //!
-//! The existing system uses these fixed locations (DO NOT relocate — the
-//! pidfile is the single-speaker contract shared between the engine's barge-in
-//! and the hook executor):
-//!   speak-hook.pid (in the per-OS state dir)  process-GROUP id of the current speaker
+//! Fixed locations (DO NOT relocate — pidfile is the single-speaker contract shared by
+//! barge-in and the hook executor):
+//!   speak-hook.pid (per-OS state dir)  process-GROUP id of the current speaker
 //!
-//! The unified activity log lives in the per-OS logs dir (macOS:
-//! `~/Library/Logs/DontSpeak/dontspeak.log`) with lean, sudo-free in-process
-//! size rotation (rename-based) — see `Paths::log_file` and `ds_log::log()`
-//! (the writer itself lives in the `ds-log` crate, split out per issue #6). No `newsyslog`.
+//! Unified activity log: per-OS logs dir (e.g. macOS `~/Library/Logs/DontSpeak/dontspeak.log`),
+//! rename-based size rotation in `ds-log` (issue #6). No `newsyslog`.
 //!
-//! Synthesis is NATIVE in-process Kokoro (ds-tts: ort + voice-g2p + rodio).
-//! Model assets (kokoro onnx + voices + the onnxruntime dylib) live in the
-//! per-OS data dir from `directories` (NOT in the repo, NOT bundled) — see
-//! `model_dir()`.
+//! Synthesis is native in-process Kokoro (`ds-tts`). Model assets live in the per-OS data dir
+//! from `directories` (not repo, not bundled) — see `model_dir()`.
 //!
-//! This crate is split into focused modules, but its PUBLIC API is flat: every
-//! item is re-exported at the crate root, so external crates keep using the
-//! `ds_config::X` paths they always have. `enums` is declared first (with
-//! `#[macro_use]`) so its declarative deserialize/serialize macros are textually
-//! in scope.
+//! Modules are focused; PUBLIC API is flat (re-exports at crate root). `enums` is first
+//! (`#[macro_use]`) so deserialize/serialize macros are textually in scope.
 //!
-//! # What belongs here (and what doesn't)
+//! # What belongs here
 //!
-//! This crate is where configuration is DEFINED and read, not where it is acted
-//! on: [`Paths`], the `config.toml` schema and its enums, the read-only
-//! `settings.json` bridge, and the client wire shapers.
-//!
-//! It is NOT a home for runtime state machines, engine behavior, or protocol
-//! definitions — nearly everything depends on this crate, so code parked here
-//! is code everything transitively rebuilds and links. If a new piece's only
-//! tie to config is that it reads some of it, it doesn't belong here: put the
-//! behavior next to its owner and pass the config value in.
+//! Configuration DEFINED and read: [`Paths`], `config.toml` schema/enums, settings.json bridge,
+//! client wire shapers. Not runtime state machines, engine behavior, or protocol defs —
+//! nearly everything depends here, so code parked here rebuilds the world. Behavior that only
+//! *reads* config belongs with its owner; pass the value in.
 
-// `enums` FIRST: its `macro_rules!` (`fail_open_de!`, `serialize_as_str!`, `strict_de!`)
-// are textually scoped, so it must be declared before anything that uses them.
-// `#[macro_use]` lifts them to the crate so a future sibling could invoke them too.
+// `enums` FIRST: `macro_rules!` are textually scoped; `#[macro_use]` lifts them crate-wide.
 #[macro_use]
 mod enums;
 mod brand;
@@ -48,15 +33,11 @@ pub mod speakers;
 mod voice;
 mod wire;
 
-// MCP HTTP transport settings — kept its own module; re-exported flat below.
-
 // ── Flat public re-export facade — preserves every `ds_config::X` path ──────────
 pub use brand::{DISPLAY_NAME, VERSION, name_version};
 pub use claude_code::{ClaudeCodeVoice, read_claude_code_voice};
-/// The client IDENTITY enum, re-exported from the `ds-client` leaf crate (it used to be this
-/// crate's own `WireTarget`). It lives BELOW `ds-log`/`ds-ipc` so both can take a client
-/// without a dependency cycle on `ds-config`; re-exporting it here keeps every downstream
-/// `ds_config::ClientSource` path working with no Cargo.toml edit.
+/// Client identity from the `ds-client` leaf (ex-`WireTarget`). Lives below `ds-log`/`ds-ipc`
+/// to avoid a cycle; re-export keeps `ds_config::ClientSource` working.
 pub use ds_client::ClientSource;
 pub use enums::{
     CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Provider, RealizedProvider,

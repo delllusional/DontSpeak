@@ -1,11 +1,7 @@
-//! The client-neutral streaming step + the file-backed per-session state (the streaming
-//! WITNESS). Moved out of `dontspeak::hook_narrate` so the CLI hook adapters (Claude
-//! Code / Qwen Code) and the engine's Codex app-server subscriber all drive the ONE
-//! pipeline: [`StreamBatch`] in → [`step`] (pure) → [`deliver_batch`] (lock → read state
-//! → step → queue admission → atomic commit). Because every adapter persists through the
-//! same per-session file, the witness ([`witness_exists`]) that keeps `Stop` silent
-//! comes for free for all three, and the on-disk admission-committed `offset` plus stable
-//! utterance IDs make reconnect/retry dedup-safe.
+//! Client-neutral streaming step + file-backed per-session state (the streaming WITNESS).
+//! Pipeline: [`StreamBatch`] → [`step`] (pure) → [`deliver_batch`] (lock → read → step →
+//! admit → commit). Shared state file gives every adapter [`witness_exists`] for free;
+//! admission-committed `offset` + stable utterance IDs make reconnect/retry dedup-safe.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -18,75 +14,53 @@ use sha2::{Digest, Sha256};
 
 use crate::accum::Accum;
 
-/// One streamed text batch, client-neutral — the event every adapter's payload shape maps
-/// onto (Claude Code's `MessageDisplay` delta, Qwen Code's cumulative snapshot, Codex's
-/// `item/agentMessage/delta` / `item/completed`).
+/// One streamed text batch — every adapter's payload maps onto this.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamBatch {
-    /// Stable per-message key: the client's message/item id, or (older Claude Code with no
-    /// id) the adapter's text fingerprint fallback (see [`crate::display_state_path`]'s
-    /// sibling `message_key` in the adapters). A NEW key resets accumulation — one key is
-    /// one assistant message.
+    /// Per-message key (client message/item id, or fingerprint fallback). New key resets.
     pub key: String,
     pub payload: BatchPayload,
-    /// True on the message's last batch → the final blockquote run counts as complete even
-    /// with no terminating blank line after it (and the "shorts" fallback may fire).
+    /// Last batch: final run counts complete without a trailing blank line; shorts may fire.
     pub is_final: bool,
 }
 
 /// How this batch carries its text.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BatchPayload {
-    /// An incremental chunk. `index` is the content-block index within the message —
-    /// NOT a key, but essential for ORDER when batches race (Claude Code spawns a process
-    /// per batch); `None` (older clients / inherently ordered transports) appends after
-    /// the highest index seen, preserving arrival order.
+    /// Incremental chunk. `index` orders racing batches (not a message key); `None` appends
+    /// after the highest seen (ordered transports / older clients).
     Delta { index: Option<u64>, text: String },
-    /// The whole message text so far (cumulative snapshot) — wins over any accumulated
-    /// deltas, covering missed chunks (e.g. deltas sent before a Codex subscriber attached).
+    /// Whole text so far — wins over deltas (covers missed chunks before attach).
     Cumulative { text: String },
 }
 
-/// Per-session state for the streaming diff: how many blockquote utterances of the
-/// current message the engine queue has accepted (`offset`), plus the message key
-/// to detect when a NEW message starts (accumulation resets). Serialized as
-/// `narrate-display-<session>.json` — the field names are the ON-DISK contract, shared
-/// by every adapter process; don't rename them.
+/// Per-session streaming state (`narrate-display-<session>.json`). Field names are the
+/// ON-DISK contract across adapter processes — don't rename.
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 pub struct DisplayState {
-    /// Count of this message's top-level blockquotes accepted for delivery. `step` uses this
-    /// as its selection mark; `deliver_batch` supplies a shadow mark for pending work and
-    /// advances the serialized value only after admission succeeds.
+    /// Blockquotes admitted to the queue. `step` selects against it; `deliver_batch`
+    /// advances only after successful admission (pending is a shadow mark).
     pub offset: usize,
     pub key: String,
-    /// Delta mode: each batch's chunk keyed by its content-block `index`, so the cumulative
-    /// text reconstructs in INDEX order regardless of the order racing batch-processes
-    /// reach us. Empty in cumulative mode.
+    /// Delta chunks by content-block `index` (empty in cumulative mode).
     #[serde(default)]
     pub parts: BTreeMap<u64, String>,
-    /// Sticky "a batch with final=true has been seen" — the terminating flag must survive
-    /// even when that batch is processed BEFORE the one carrying the blockquote (out of order).
+    /// Sticky final flag (survives out-of-order: final batch before the quote batch).
     #[serde(default)]
     pub seen_final: bool,
-    /// Sticky latch for the "shorts" fallback (a blockquote-less final reply voiced whole,
-    /// once) — maps to `Accum::short_done`, so a late duplicate batch never re-speaks it.
+    /// Shorts latch (`Accum::short_done`).
     #[serde(default)]
     pub short_done: bool,
-    /// The mic gate is decided ONCE per assistant message (keyed by the message key) and
-    /// cached here, so a mid-stream mic flap can't strand the tail of a message we
-    /// already started narrating — nor start one we decided to skip. `gate_msg` is the
-    /// key the decision belongs to; `gate_on` is whether it narrates.
+    /// Mic gate decided ONCE per message key — mid-stream mic flap can't strand/start.
     #[serde(default)]
     pub gate_msg: String,
     #[serde(default)]
     pub gate_on: bool,
-    /// Distinguishes an actual cached decision for an empty message key from the
-    /// all-empty serde/default state.
+    /// True once a gate decision was cached (vs all-empty serde default).
     #[serde(default)]
     pub gate_set: bool,
-    /// Utterances selected from the stream but not yet accepted by the engine queue. They
-    /// stay in the same locked state transaction as the delivered high-water mark, so an
-    /// admission rejection can be retried without re-selecting or skipping text.
+    /// Selected but not yet admitted; same lock transaction as the high-water mark so
+    /// rejection retries without re-selecting or skipping.
     #[serde(default)]
     pending: Vec<PendingUtterance>,
 }
@@ -106,32 +80,21 @@ enum DeliveryCheckpoint {
     Short,
 }
 
-/// One identified utterance offered to a delivery adapter. Retrying the same value is
-/// intentional: the engine deduplicates `id`, while the state high-water mark advances only
-/// after the adapter reports successful queue admission.
+/// Utterance offered for delivery. Retry same `id` is intentional (engine dedups);
+/// high-water mark advances only after successful admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NarrationUtterance {
     pub id: String,
     pub text: String,
 }
 
-/// One batch's effect, decided PURELY (no IO) so it is unit-testable — the seam the
-/// streaming-accumulation regression tests drive. `write = None` means "leave the state
-/// file untouched" (a no-op batch); `speak` holds the blockquote utterances that became
-/// COMPLETE this batch (one per top-level `>` run), in order, each voiced once. Usually
-/// empty or one item; a batch that completes several runs at once (out-of-order delivery,
-/// or a body line that terminates the last run) yields several.
+/// Pure batch effect (`write = None` ⇒ leave state file alone).
 pub struct DisplayStep {
     pub write: Option<DisplayState>,
     pub speak: Vec<String>,
 }
 
-/// Decide what a single streamed batch does, given the previous per-session state and
-/// whether the mic is live. Pure: same inputs → same outputs, no disk/socket/platform.
-/// This is `dontspeak`'s old `step_display` with the hook struct swapped for the
-/// client-neutral [`StreamBatch`]; the per-message mic gate is keyed by `batch.key`
-/// (the same message id the old code gated on — the adapters put the message/item id, or
-/// the fingerprint fallback, in `key`).
+/// Pure: same inputs → same outputs. Per-message mic gate is keyed by `batch.key`.
 pub fn step(
     prev: &DisplayState,
     batch: &StreamBatch,
@@ -139,24 +102,16 @@ pub fn step(
     digests_on: bool,
     shorts_on: bool,
 ) -> DisplayStep {
-    // Per-MESSAGE mic gate. A message streams as many batches; checking the gate on EACH
-    // batch lets a momentary mic blip strand the rest of a message we already began
-    // narrating — observed as "only the first sentence spoke." So decide ONCE, when a
-    // message first appears (by key), and cache it: every later batch of the same message
-    // inherits that decision.
-    //
-    // FOCUS is NOT gated here: narration is forwarded TAGGED BY SESSION, and the engine
-    // speaks only the ACTIVE terminal's items, holding the rest until they become active
-    // (see docs/PER-TERMINAL-QUEUES.md). We still suppress narration sent WHILE the user is
-    // recording — no reason to stream fresh chatter into a dictation.
+    // Mic gate once per message key — per-batch checks stranded mid-message on a mic blip
+    // ("only the first sentence spoke"). FOCUS is NOT gated here: engine holds inactive
+    // terminals (docs/PER-TERMINAL-QUEUES.md); we only suppress while the user is recording.
     let gate_on = if prev.gate_set && prev.gate_msg == batch.key {
         prev.gate_on
     } else {
         !mic_active
     };
     if !gate_on {
-        // Remember the skip so later batches of this message skip too (no re-check), while
-        // still advancing the new-message key so the NEXT message is detected.
+        // Cache the skip for later batches of this message.
         return DisplayStep {
             write: Some(DisplayState {
                 offset: 0,
@@ -173,16 +128,10 @@ pub fn step(
         };
     }
 
-    // New-message key: the stable message/item id ALONE (never a per-batch index — keying
-    // on the index once reset the accumulator each batch and silently dropped the leading
-    // blockquote). The adapters fall back to a text fingerprint when the client sends no id.
+    // Key is message/item id alone — never a per-batch index (that dropped leading quotes).
     let same = prev.key == batch.key;
 
-    // Drive the accumulator core ([`Accum`]) — the reconstruction + every-blockquote emit
-    // logic, kept pure so it is exhaustively unit-testable and a fix lands in one place.
-    // The per-session state FILE is this path's cross-process persistence, so we hydrate an
-    // `Accum` from the prior state (for the same message) or fresh, step it, and write it
-    // back. `offset` ⇆ `Accum::emitted` (runs already selected); `parts`/`seen_final` map 1:1.
+    // Hydrate Accum from prior state (`offset` ⇆ `emitted`); pure core does the emit.
     let mut accum = if same {
         Accum {
             parts: prev.parts.clone(),
@@ -195,8 +144,6 @@ pub fn step(
     };
     let speak = match &batch.payload {
         BatchPayload::Delta { index, text } => {
-            // No `index` (older clients / ordered transports) → append after the highest
-            // seen, preserving arrival order.
             let index =
                 index.unwrap_or_else(|| accum.parts.keys().next_back().map_or(0, |k| k + 1));
             accum.feed(index, text, None, batch.is_final, digests_on, shorts_on)
@@ -222,10 +169,8 @@ pub fn step(
     }
 }
 
-/// Run one batch and make successful queue admission the delivery commit point. Rejected
-/// utterances remain in the state file and are offered again before newly selected work on a
-/// later batch. The adapter must treat `NarrationUtterance::id` idempotently because a process
-/// can exit after admission succeeds but before the following atomic state write lands.
+/// Admission is the commit point. Rejected work stays pending and is retried first next
+/// batch. Treat `id` as idempotent: process can die after admit but before state write.
 pub fn deliver_batch(
     paths: &Paths,
     session: &str,
@@ -240,8 +185,7 @@ pub fn deliver_batch(
     with_state_lock(&state_path, || {
         let prev = read_state(&state_path);
 
-        // `step`'s offset is the selection high-water mark. Pending checkpoints extend that
-        // shadow mark while the serialized `offset` itself remains admission-committed.
+        // Selection mark (with pending as shadow); serialized `offset` is admission-committed.
         let mut selected = prev.clone();
         for pending in prev
             .pending
@@ -281,7 +225,6 @@ pub fn deliver_batch(
                 next.pending
                     .push(pending_utterance(session, &next.key, text, after));
             }
-            // A batch with no blockquote checkpoint has no offset work to admit.
             if block_count == 0 {
                 next.offset = selected_after;
             }
@@ -297,8 +240,7 @@ pub fn deliver_batch(
                 false,
                 "narration selections must map one-to-one to delivery checkpoints"
             );
-            // Fail closed: retain the prior committed state rather than advancing past work
-            // whose admission checkpoint cannot be represented safely.
+            // Fail closed: don't advance past unrepresentable checkpoints.
             return admit_pending(&state_path, prev, &mut admit);
         }
         if !short_after
@@ -308,21 +250,18 @@ pub fn deliver_batch(
                 .iter()
                 .any(|p| p.key == next.key && matches!(p.after, DeliveryCheckpoint::Short))
         {
-            // A selected short with no utterance (empty after cleanup) needs no admission.
+            // Empty-after-cleanup short needs no admission.
         } else {
             next.short_done = true;
         }
 
-        // Persist the newly selected work before offering it. Rejection or process exit can
-        // therefore only leave a retryable pending record, never an advanced/lost offset.
+        // Persist before offer — rejection/exit leaves retryable pending, not a lost offset.
         write_state(&state_path, &next);
         admit_pending(&state_path, next, &mut admit)
     })
 }
 
-/// Retry only the delivery work already persisted for `session`. The Codex subscriber calls
-/// this from its housekeeping tick, allowing a full background-held queue to drain and admit
-/// the blocked digest even when no further app-server event arrives.
+/// Retry already-persisted pending for `session` (Codex housekeeping when no new events).
 pub fn retry_pending(
     paths: &Paths,
     session: &str,
@@ -359,8 +298,7 @@ fn admit_pending(
                 DeliveryCheckpoint::Short => state.short_done = true,
             }
         }
-        // This closes the ordinary retry window one utterance at a time. The stable ID
-        // closes the remaining crash window between engine acceptance and this write.
+        // Per-utterance commit; stable id covers the crash window after engine accept.
         write_state(state_path, &state);
     }
     Ok(())
@@ -433,22 +371,17 @@ fn write_state(state_path: &Path, state: &DisplayState) {
     );
 }
 
-// ── The streaming witness + session lifecycle ────────────────────────────────────
+// ── Streaming witness + session lifecycle ────────────────────────────────────────
 
-/// Pre-create THIS session's streaming state file so the `Stop` hook's `streamed` guard
-/// is reliably true before the first batch lands (closing the short-turn race where a
-/// `Stop` could fire before the first flush). Idempotent + non-destructive: never
-/// clobbers real in-progress state (a re-fired seed is a no-op), and the seeded default
-/// reads exactly like "no file yet" (fresh [`Accum`]), so streaming is unaffected.
-/// Callers: Claude Code's plain-`notify` SessionStart, and the Codex supervisor on a
-/// successful `thread/resume`.
+/// Pre-create the session state file so `Stop`'s `streamed` guard is true before the
+/// first batch (closes the short-turn race). Idempotent/`create_new` — never clobbers
+/// in-progress state. Callers: Claude Code SessionStart; Codex on `thread/resume`.
 pub fn seed_witness(paths: &Paths, session: &str) {
     let path = display_state_path(paths, session);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // create_new is the atomic existence check: two concurrent seeders cannot both
-    // observe a missing file and then overwrite a real batch written between those steps.
+    // create_new: two concurrent seeders can't both overwrite a real batch in between.
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -462,18 +395,12 @@ pub fn seed_witness(paths: &Paths, session: &str) {
     }
 }
 
-/// Witness that a streaming pass ran (or was seeded) for this session: its per-session
-/// state file exists. The deterministic client-discriminator the `Stop` path needs —
-/// present ⇒ the reply was (or will be) narrated mid-turn, so `Stop` must not re-speak
-/// it; absent ⇒ `Stop` is this session's only narration path (for example, plain-TUI Codex).
+/// State file exists ⇒ streaming already narrated (or seeded) ⇒ `Stop` must stay silent.
 pub fn witness_exists(paths: &Paths, session: &str) -> bool {
     display_state_path(paths, session).exists()
 }
 
-/// Reclaim a finished session's on-disk narration state: the state file and its lock/tmp
-/// siblings. Without this they accumulate one `narrate-display-<session>.json` per
-/// distinct session in the data dir forever. Called on `SessionEnd` (Claude/Qwen hooks)
-/// and by the Codex supervisor's eviction (Codex wires no SessionEnd hook).
+/// Drop state + lock/tmp siblings (SessionEnd / Codex eviction — otherwise they accumulate).
 pub fn clear_session_state(paths: &Paths, session: &str) {
     let path = display_state_path(paths, session);
     let _ = std::fs::remove_file(path.with_extension("lock"));
@@ -481,18 +408,8 @@ pub fn clear_session_state(paths: &Paths, session: &str) {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Decide what the `Stop` hook should voice, PURELY (no IO) so it is exhaustively
-/// unit-testable — the seam the double-narration regression tests drive. Returns the
-/// blockquote / short utterances to speak, in order, or EMPTY when `Stop` must stay silent:
-///   • narration off (`!messages_on && !short_on`),
-///   • mid-dictation (`mic_active` — don't talk over the user, mirrors the streaming gate),
-///   • `streamed` — a streaming pass already narrated this turn; re-voicing here is the
-///     double-narration bug, so we suppress it,
-///   • no usable final text.
-/// Otherwise the whole reply is fed through a fresh [`Accum`] as ONE final batch, yielding
-/// the exact runs the streaming path would emit (every top-level blockquote in order; or,
-/// under `short`, a brief blockquote-less reply whole) — so a non-streamed reply is voiced
-/// just like a streamed one.
+/// Pure `Stop` decision — empty when narration is off, mic is live, `streamed` (double-
+/// narration guard), or no final text. Else one final [`Accum`] feed matching the stream path.
 pub fn stop_utterances(
     last_assistant_message: Option<&str>,
     messages_on: bool,
@@ -507,7 +424,7 @@ pub fn stop_utterances(
         return Vec::new();
     }
     if streamed {
-        return Vec::new(); // a streaming pass already narrated this session ⇒ never double-speak
+        return Vec::new(); // already narrated mid-turn ⇒ never double-speak
     }
     let Some(text) = last_assistant_message
         .map(str::trim)
@@ -518,12 +435,9 @@ pub fn stop_utterances(
     Accum::default().feed(0, text, None, true, messages_on, short_on)
 }
 
-// ── File plumbing (the per-session state file, its lock, and the atomic write) ────
+// ── File plumbing ────────────────────────────────────────────────────────────────
 
-/// The per-session streaming state file: `narrate-display-<session>.json`, a sibling of
-/// `narrate.pid` in the data dir. Session ids are uuid-like; keep only filename-safe
-/// chars defensively. Public so the engine's orphan sweep can enumerate/match the files
-/// it owns.
+/// `narrate-display-<session>.json` (filename-safe). Public for the engine orphan sweep.
 pub fn display_state_path(paths: &Paths, session: &str) -> PathBuf {
     let safe: String = session
         .chars()
@@ -544,15 +458,9 @@ pub fn display_state_path(paths: &Paths, session: &str) -> PathBuf {
     dir.join(format!("narrate-display-{safe}.json"))
 }
 
-/// Serialize the per-session state read-modify-write across independent processes (Claude
-/// Code spawns one per streamed batch). Without it, overlapping batches race on the state
-/// file and the accumulated blockquote is lost → the spoken line is silently dropped. A
-/// lock file beside the state file is the mutex: `create_new` is atomic, so exactly one
-/// process holds it and the rest spin briefly. Bounded so narration can never wedge (it
-/// proceeds without the lock after the ceiling), and a stale lock from a crashed holder is
-/// broken by age — batches are sub-second, so a 2 s floor never trips during normal
-/// streaming. (The Codex subscriber is a single ordered in-process feeder, so for its
-/// sessions the lock simply never contends.)
+/// Cross-process RMW mutex (Claude Code: one process per batch). Without it overlapping
+/// writers drop the spoken line. `create_new` lockfile; ~800 ms spin then proceed;
+/// 2 s stale break. Codex is single-threaded so this rarely contends.
 fn with_state_lock<T>(state_path: &Path, f: impl FnOnce() -> T) -> T {
     let lock_path = state_path.with_extension("lock");
     const SPIN_TRIES: u32 = 400; // ×2 ms ≈ 800 ms ceiling, then proceed anyway
@@ -569,7 +477,6 @@ fn with_state_lock<T>(state_path: &Path, f: impl FnOnce() -> T) -> T {
                 break;
             }
             Err(_) => {
-                // Break a stale lock left by a crashed holder, else wait and retry.
                 let stale = std::fs::metadata(&lock_path)
                     .and_then(|m| m.modified())
                     .ok()
@@ -591,9 +498,6 @@ fn with_state_lock<T>(state_path: &Path, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// Write `contents` to `path` atomically: write a sibling temp file, then rename over the
-/// target (atomic on the same filesystem), so a concurrent reader never observes a torn or
-/// empty file — only the previous or the new complete contents.
 fn atomic_write(path: &Path, contents: &str) {
     if let Err(e) = ds_config::atomic_write_str(path, contents) {
         eprintln!(
@@ -626,8 +530,6 @@ mod tests {
         }
     }
 
-    /// Feed a sequence of batches through the pure step, threading state as the
-    /// file-backed path would. Returns the final state and every spoken line, in order.
     fn drive(batches: &[StreamBatch], mic_active: bool) -> (DisplayState, Vec<String>) {
         let mut state = DisplayState::default();
         let mut spoken = Vec::new();
@@ -643,9 +545,7 @@ mod tests {
 
     #[test]
     fn state_lock_serializes_concurrent_read_modify_write() {
-        // Reproduces the batch-process race that silently dropped narration: many writers
-        // doing read-modify-write on one state file. Under `with_state_lock` every increment
-        // must land (final == N); without the lock the widened window loses updates.
+        // Race that silently dropped narration: concurrent RMW without the lock.
         use std::sync::Arc;
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(dir.path().join("narrate-display-x.json"));
@@ -660,7 +560,7 @@ mod tests {
                             .ok()
                             .and_then(|s| s.trim().parse().ok())
                             .unwrap_or(0);
-                        // Widen the critical section so an UNLOCKED version would lose updates.
+                        // Widen the critical section so unlocked RMW would lose updates.
                         std::thread::sleep(Duration::from_millis(1));
                         atomic_write(&sp, &(cur + 1).to_string());
                     });
@@ -681,12 +581,7 @@ mod tests {
         );
     }
 
-    // ── The "one core, three adapters" parity pin ─────────────────────────────────
-    //
-    // The SAME reply fed three ways — (a) Claude-Code-style per-batch deltas, (b)
-    // Qwen-style cumulative snapshots, (c) Codex-style deltas + final-cumulative — must
-    // speak IDENTICAL utterance sequences. This is the contract that lets three clients
-    // share one core; if a payload shape ever needs core changes, this fails first.
+    // One core, three adapters: same reply via delta / cumulative / hybrid → same speak.
 
     const REPLY: &str = "> First point.\n\nDetail.\n\n> Second point.\n\nMore.\n\n> Closing ask?";
     const EXPECT: &[&str] = &["First point.", "Second point.", "Closing ask?"];
@@ -720,9 +615,7 @@ mod tests {
 
     #[test]
     fn parity_codex_style_deltas_then_final_cumulative() {
-        // Codex: ordered deltas per item, then `item/completed` carries the WHOLE final
-        // text as one cumulative batch (flushing the last run exactly like CC's `final`
-        // flag — and covering deltas missed before attach).
+        // Deltas then final cumulative (covers missed pre-attach deltas).
         let batches = [
             delta("item_1", 0, "> First point.\n\nDetail.", false),
             delta("item_1", 1, "\n\n> Second point.\n\nMore.", false),
@@ -730,16 +623,14 @@ mod tests {
         ];
         let (_, spoken) = drive(&batches, false);
         assert_eq!(spoken, EXPECT);
-        // A late-attach subscriber that saw NO deltas still voices everything from the
-        // final cumulative batch alone.
+        // Late attach with only the final cumulative still voices everything.
         let (_, late) = drive(&[cumulative("item_1", REPLY, true)], false);
         assert_eq!(late, EXPECT);
     }
 
     #[test]
     fn parity_duplicate_final_batch_is_a_noop() {
-        // A replayed final batch (reconnect / duplicate hook process) emits nothing more,
-        // in every payload shape.
+        // Replayed final (reconnect / duplicate hook) emits nothing more.
         let mut state = DisplayState::default();
         let fin = cumulative("m", REPLY, true);
         let s1 = step(&state, &fin, false, true, false);
@@ -764,8 +655,7 @@ mod tests {
 
     #[test]
     fn mic_active_at_message_start_gates_whole_message() {
-        // If the mic was live when the message first appeared, the whole message stays
-        // gated even after the blockquote completes (decided once, cached per key).
+        // Gate once per key — stays gated even after the blockquote completes.
         let batches = [
             delta("m1", 0, "> Spoken.", false),
             delta("m1", 1, "\n\nBody.", true),
@@ -776,9 +666,7 @@ mod tests {
 
     #[test]
     fn final_arriving_first_does_not_recompute_the_message_gate() {
-        // Hook processes can race: the final-index batch may land before an earlier batch.
-        // `seen_final` must not invalidate the per-message gate, or a mic transition between
-        // those arrivals changes one message from speak→skip (or skip→speak) halfway through.
+        // Final-before-quote race: `seen_final` must not re-open the mic gate mid-message.
         let final_first = delta("m1", 1, "\n\nBody.", true);
         let quote_late = delta("m1", 0, "> Spoken.", false);
 
@@ -808,13 +696,9 @@ mod tests {
         assert_eq!(spoken, vec!["Spoken line.".to_string()]);
     }
 
-    // ── deliver_batch: the file-backed composition ────────────────────────────────
-
     #[test]
     fn deliver_batch_persists_across_processes_and_never_double_speaks() {
-        // Two independent `deliver_batch` calls (as two hook processes / a reconnected
-        // subscriber would make) share state through the file: the second call sees the
-        // first's high-water mark and re-emits nothing.
+        // Two independent calls share the file high-water mark — second is silent.
         let dir = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(dir.path());
         let session = "sess-a";
@@ -830,7 +714,6 @@ mod tests {
             panic!("replayed batch after the state landed on disk must be silent")
         })
         .unwrap();
-        // And the witness came for free.
         assert!(witness_exists(&paths, session));
     }
 
@@ -846,7 +729,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(first, vec!["Hi.".to_string()]);
-        // A different session has its own file ⇒ speaks again.
+        // Different session ⇒ own file ⇒ speaks again.
         let mut second = Vec::new();
         deliver_batch(&paths, "s2", &fin, false, true, false, |utt| {
             second.push(utt.text.clone());
@@ -933,8 +816,6 @@ mod tests {
         assert_eq!(read_state(&display_state_path(&paths, "s")).offset, 2);
     }
 
-    // ── Witness + lifecycle ───────────────────────────────────────────────────────
-
     #[test]
     fn witness_is_seeded_scoped_and_cleared() {
         let dir = tempfile::tempdir().unwrap();
@@ -946,10 +827,8 @@ mod tests {
             !witness_exists(&paths, "s2"),
             "a different session is never marked streamed"
         );
-        // Seeded ⇒ Stop stays silent for that session.
         assert!(stop_utterances(Some("> X.\n\nY."), true, true, false, true).is_empty());
 
-        // clear_session_state removes the whole trio.
         let path = display_state_path(&paths, "s1");
         let _ = std::fs::write(path.with_extension("lock"), "");
         let _ = std::fs::write(path.with_extension("tmp"), "");
@@ -961,7 +840,7 @@ mod tests {
 
     #[test]
     fn seed_witness_is_non_destructive() {
-        // Real in-progress state must survive a re-fired seed verbatim.
+        // Re-fired seed must not clobber in-progress state.
         let dir = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(dir.path());
         let path = display_state_path(&paths, "s1");
@@ -985,10 +864,7 @@ mod tests {
         assert_eq!(name, "narrate-display-a_b_c_d_e.json");
     }
 
-    // ── Stop decision (moved verbatim from dontspeak::hook_narrate) ──────────────────
-
-    /// A reply whose digest is two blockquotes plus body — the exact shape the streaming
-    /// path narrates and the shape Stop would re-speak if the guard regressed.
+    /// Shape streaming narrates — Stop would re-speak this if the guard regressed.
     const DIGEST_REPLY: &str = "> First point.\n\nDetail.\n\n> Second point.\n\nMore.";
 
     #[test]

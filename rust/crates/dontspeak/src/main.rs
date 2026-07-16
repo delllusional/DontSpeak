@@ -1,46 +1,26 @@
-//! `dontspeak` — the single multi-call binary. With NO args it is normally a stdio Model
-//! Context Protocol (MCP) server that exposes the DontSpeak engine's TTS/STT to MCP clients
-//! (e.g. Claude Code). A no-argument launch carrying Grok's reserved `GROK_HOOK_EVENT`
-//! variable is instead its deduplicated native/compatibility hook. With a subcommand it is
-//! a client launcher, hook executor, or installer step — see the front-door dispatch in `main`
-//! and the `hook_speak` / `hook_narrate` modules (the former `ds-speak` /
-//! `ds-narrate` binaries, now folded in here).
+//! `dontspeak` — multi-call binary. No args: stdio MCP server (or Grok's bare-command hook when
+//! `GROK_HOOK_EVENT` is set). With a subcommand: client launcher, hook executor, or installer.
 //!
-//! As the MCP server it is a THIN BRIDGE: it speaks newline-delimited JSON-RPC 2.0 over
-//! stdio on one side (the MCP spec, revision 2025-11-25) and the existing `ds-ipc`
-//! Unix-socket protocol to the resident engine on the other — so MCP is just another
-//! client of the SAME engine the hooks and host app use (one warm owner, in sync).
+//! MCP is a thin bridge: newline-delimited JSON-RPC 2.0 on stdio (MCP 2025-11-25) and `ds-ipc`
+//! Unix-socket protocol to the resident engine — same engine as hooks and the host app.
 //!
-//! Tools (the authoritative catalog — names, schemas, descriptions — lives in
-//! `ds_tools::catalog()`; this is just an orientation): speak, stop_speech,
-//! listen, get_status, list_voices, diarize, manage_speakers, set_config.
+//! Tool catalog lives in `ds_tools::catalog()`. `list_voices` is config-direct (no engine
+//! round-trip); all config writes go through `set_config` / `config.toml` (engine hot-reloads
+//! on mtime) — no per-session voice override.
 //!
-//! `list_voices` is config-DIRECT: it reads DontSpeak's own settings file
-//! (`our config.toml`) to mark the active voice, so it needs no engine
-//! round-trip and works even with no engine running. The voice itself is a
-//! persistent setting: all config writes (the spoken voice included) go through
-//! `set_config` (same file; the engine hot-reloads on its mtime) — config is the
-//! single source of truth, so there is no transient per-session voice override.
-//!
-//! Transport rules (spec): stdout carries ONLY JSON-RPC messages, one per line;
-//! ALL logging goes to stderr. Each request gets exactly one response (matched by
-//! id); notifications (no id) get none.
+//! Transport: stdout is JSON-RPC only (one message per line); all logging to stderr. Each
+//! request gets one response by id; notifications (no id) get none.
 //!
 //! ## Module layout
-//! `main.rs` is just the front door (subcommand dispatch). The MCP server core lives in
-//! [`mcp`] (envelope helpers + `route` + the `initialize`/`tools` methods),
-//! the tool handlers in [`tools`], voice/language enumeration in [`voices`], the engine
-//! spawn lifecycle in [`engine_launch`], and the `prompt-context` hook in [`hook_prompt`].
-// This must remain a console-subsystem binary on Windows. Hook/MCP processes inherit their
-// terminal or redirected stdio, while `dontspeak <client>` needs the invoking shell to WAIT
-// and leave the console attached to the interactive child. A GUI-subsystem binary makes
-// PowerShell return immediately, racing its prompt against the launched TUI.
+//! Front-door dispatch here; MCP core in [`mcp`]; handlers in [`tools`]; voice enum in
+//! [`voices`]; engine spawn in [`engine_launch`]; `prompt-context` in [`hook_prompt`];
+//! speak/narrate hooks in [`hook_speak`] / [`hook_narrate`] (former `ds-speak` / `ds-narrate`).
+// Console-subsystem on Windows: hook/MCP inherit stdio; `dontspeak <client>` must block the
+// shell with the console attached to the interactive child. A GUI-subsystem binary makes
+// PowerShell return immediately and race the prompt against the TUI.
 //
-// The tradeoff: a console-subsystem child spawned by a console-LESS GUI host (Claude Code
-// Desktop, the WinUI app) gets a new, briefly visible console window unless it detaches —
-// exactly what the GUI subsystem used to prevent for free. `main` calls
-// `ds_platform::detach_console()` for every role except `Launch`, which is the only one
-// that needs the console kept attached.
+// Tradeoff: a console-subsystem child of a console-less GUI host briefly flashes a console
+// unless detached. `main` calls `ds_platform::detach_console()` for every role except `Launch`.
 
 mod client_launch;
 mod engine_launch;
@@ -54,32 +34,27 @@ mod voices;
 
 use ds_config::ClientSource;
 
-/// The roles argv\[1\] can select, plus the fallback for an unrecognized token. Pure
-/// decision extracted from `main` so it is testable without touching stdio or spawning a client.
+/// Roles argv\[1\] can select. Extracted so dispatch is unit-testable without stdio/spawns.
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand<'a> {
-    /// `dontspeak notify` — COMMAND hook sink.
     Notify,
-    /// `dontspeak provide` — QUERY hook.
     Provide,
-    /// `dontspeak wire <client> [--remove]` — carries argv\[2..\] (the args after `wire`).
+    /// Args after `wire` (argv\[2..\]).
     Wire(&'a [String]),
-    /// `dontspeak <client> [args…]` — launch one registry client with argv\[2..\].
+    /// Registry client + trailing args.
     Launch(ClientSource, &'a [String]),
-    /// No argv\[1\]: the stdio MCP server (the default).
+    /// No argv\[1\]: stdio MCP server (or Grok bare hook).
     Server,
-    /// An explicit but unrecognized argv\[1\].
     Unknown(String),
 }
 
-/// WHICH client invoked this hook — the `--client <token>` verb the wiring stamps into every
-/// hook command (`ds_config::wire::cmdline`). Rides at argv\[2+\], like `--greet-only`, so
-/// `resolve_subcommand` (which matches argv\[1\] only) is undisturbed.
+/// `--client <token>` from wiring (`ds_config::wire::cmdline`). Rides at argv\[2+\], so
+/// `resolve_subcommand` (argv\[1\] only) is undisturbed.
 ///
-/// Unrecognised, missing, or NON-CLIENT (`dontspeak`, `unknown`) ⇒ [`ClientSource::Unknown`] —
-/// never a hard error: a hook must degrade, never fail the client's turn. That is NOT a legacy
-/// path (every wired hook carries the token, and the engine re-wires every client at boot): it
-/// is the honest answer when the binary is invoked by hand, or by something we don't recognise.
+/// Unrecognised / missing / non-client (`dontspeak`, `unknown`) ⇒ [`ClientSource::Unknown`] —
+/// never a hard error: hooks must degrade, never fail the client's turn. Not a legacy path
+/// (every wired hook carries the token; engine re-wires at boot); the honest answer when
+/// invoked by hand or by something we don't recognise.
 fn client_from_argv(argv: &[String]) -> ClientSource {
     argv.iter()
         .position(|a| a == "--client")
@@ -89,9 +64,7 @@ fn client_from_argv(argv: &[String]) -> ClientSource {
         .unwrap_or(ClientSource::Unknown)
 }
 
-/// Decide which of the four subcommand roles (or the no-args MCP server default, or the
-/// unknown-subcommand fallback) this invocation selects, based on argv\[1\]. Pure — no I/O,
-/// no `process::exit`; `main` performs the actual side effects per variant.
+/// Pure argv\[1\] dispatch — no I/O, no `process::exit`.
 fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
     match argv.get(1).map(String::as_str) {
         Some("notify") => Subcommand::Notify,
@@ -108,31 +81,25 @@ fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
     }
 }
 
-/// Whether this role should detach from any console Windows attached or auto-created for
-/// it. Every role except `Launch` runs headless behind piped stdio; only `Launch` needs
-/// the console kept attached so it can block the invoking shell for the interactive child.
+/// Detach every role except `Launch` (only Launch needs the console for the interactive child).
 fn should_detach_console(subcommand: &Subcommand) -> bool {
     !matches!(subcommand, Subcommand::Launch(..))
 }
 
-/// Grok injects this reserved variable into every hook process. Its presence is the
-/// unambiguous discriminator between a bare-command hook and the normal bare-command MCP
-/// server; the value itself is only a marker because the payload remains the routing source
-/// of truth. Kept pure so tests never mutate the process-wide environment in parallel.
+/// Grok injects this reserved env var into every hook process — discriminator between a
+/// bare-command hook and bare-command MCP. Value is a marker only; payload is the routing
+/// source of truth. Pure so tests never mutate process-wide env in parallel.
 fn is_grok_hook_launch(marker: Option<&std::ffi::OsStr>) -> bool {
     marker.is_some_and(|value| !value.is_empty())
 }
 
-/// Grok's compatibility adapter drops Claude Code's `args`, and Grok deduplicates handlers
-/// by their resulting bare command target. One no-argument process must therefore perform
-/// the event side effect and compatibility query output in one process. Grok's native passive
-/// hooks ignore stdout; its imported Claude-hook compatibility path may still consume it.
-/// `greet_only=true` matters only for SessionStart and keeps this non-streaming client from
-/// seeding Claude's MessageDisplay witness.
+/// Grok's compatibility adapter drops Claude Code's `args` and deduplicates handlers by bare
+/// command target, so one no-arg process must do both the notify side effect and provide
+/// stdout. Native Grok hooks ignore stdout; imported Claude-hook compat may still consume it.
+/// `greet_only=true` only for SessionStart (no MessageDisplay witness seed).
 ///
-/// Because Grok ignores provide stdout, we also refresh the managed `~/.grok/AGENTS.md`
-/// narrate section on every hook (issue #95) so digests reach the model at the next session
-/// start (and so a mid-session digests toggle is ready for the next session).
+/// Because Grok ignores provide stdout, also refresh managed `~/.grok/AGENTS.md` narrate
+/// section on every hook (issue #95) so digests reach the model next session start.
 fn run_grok_hook() {
     let payload = read_stdin();
     let event = hook_core::event_name(&payload);
@@ -152,40 +119,21 @@ fn run_grok_hook() {
 }
 
 fn main() {
-    // Subcommand front-door — this ONE `dontspeak` binary is every voice role (busybox-style),
-    // selected by argv[1]:
-    //   `dontspeak notify`             — COMMAND hook sink: read the hook JSON on stdin, run the
-    //                                   event's side effect (greet / mark-active / narrate /
-    //                                   barge), reply with nothing. Wired on every fire-and-
-    //                                   forget event; routes internally on `hook_event_name`.
-    //   `dontspeak provide`            — QUERY hook: read the hook JSON on stdin, print the
-    //                                   event's `hookSpecificOutput` JSON (UserPromptSubmit →
-    //                                   the narration spec). The only entry Claude Code waits on.
-    //   `dontspeak wire <client> [--remove]` — the ONE per-client integration installer: it
-    //                                   wires (or removes) EVERYTHING that client needs in a
-    //                                   single registry-driven step. See the `ds-wire` crate.
-    //   `dontspeak <client> [args…]`   — launch a supported client with its integration active;
-    //                                   Codex's interactive path first prepares app-server narration.
-    // With no argv it is the stdio MCP server unless Grok's hook runner marker is present.
-    // ALL communication is stdio: the MCP tool surface (JSON-RPC over stdio) and the two
-    // Claude Code hook verbs above. There is no HTTP transport.
+    // Subcommands: `notify` (command hooks), `provide` (query hooks), `wire`,
+    // `dontspeak <client>` (launch). No args → MCP unless GROK_HOOK_EVENT (see module docs).
     ds_log::init();
     let argv: Vec<String> = std::env::args().collect();
     let subcommand = resolve_subcommand(&argv);
-    // A no-op on non-Windows targets; see the file-level comment above.
+    // No-op on non-Windows; see file-level console comment.
     if should_detach_console(&subcommand) {
         ds_platform::detach_console();
     }
     match subcommand {
         Subcommand::Notify => {
             let payload = read_stdin();
-            // `--greet-only` (wired on SessionStart for non-streaming hook clients):
-            // greet, but skip the streaming-witness seed — on a client with no MessageDisplay
-            // stream the seed would mark every session "already narrated" and silence each
-            // Stop reply. Rides at argv[2+]; `resolve_subcommand` matches argv[1] only.
+            // `--greet-only`: SessionStart for non-streaming clients — greet but skip the
+            // streaming-witness seed (would silence Stop on clients with no MessageDisplay).
             let greet_only = argv.iter().any(|a| a == "--greet-only");
-            // `--client <token>`: WHO invoked us (see `client_from_argv`). Rides to the engine
-            // on every ds-ipc request this hook sends, and onto the activity log.
             hook_core::notify(
                 &hook_core::event_name(&payload),
                 &payload,
@@ -209,11 +157,8 @@ fn main() {
                 .expect("every launchable client is a registry client");
             std::process::exit(client_launch::run(spec, args));
         }
-        // An explicit but UNRECOGNIZED first argument must NOT fall through to the stdio MCP
-        // server: that silently blocks on stdin forever (a typo, or an OLD binary handed a
-        // subcommand it predates — e.g. `dontspeak wire` on a build without `wire` — would just
-        // hang instead of failing). The MCP server is the NO-argument mode ONLY (how MCP clients
-        // spawn us: `command: dontspeak`, no args). So error out on any leftover argument.
+        // Unrecognized argv\[1\] must not fall through to MCP (blocks on stdin forever —
+        // typo or old binary handed a newer subcommand). MCP is no-argument only.
         Subcommand::Unknown(sub) => {
             let msg = format!(
                 "dontspeak: unknown subcommand {sub:?}; expected `claude`, `codex`, `qwen`, \
@@ -224,9 +169,8 @@ fn main() {
             log::error!(target: "hook", "{msg}");
             std::process::exit(2);
         }
-        // No arguments: Grok hooks and MCP servers use the same bare executable. The hook
-        // runner's reserved environment marker distinguishes them without changing Claude's
-        // args-array hooks or disabling any of the user's other Claude compatibility hooks.
+        // Bare executable: GROK_HOOK_EVENT distinguishes Grok hooks from MCP without
+        // changing Claude's args-array hooks.
         Subcommand::Server => {
             if is_grok_hook_launch(std::env::var_os("GROK_HOOK_EVENT").as_deref()) {
                 run_grok_hook();
@@ -237,8 +181,7 @@ fn main() {
     }
 }
 
-/// Read the whole hook payload from stdin (single-shot). Empty on any read error — the hook
-/// then degrades cleanly (an unknown/empty event is a no-op).
+/// Whole stdin, single-shot. Empty on read error — unknown/empty event is a no-op.
 fn read_stdin() -> String {
     use std::io::Read;
     let mut s = String::new();
@@ -262,8 +205,7 @@ mod tests {
 
     #[test]
     fn notify_with_greet_only_flag_still_resolves_to_notify() {
-        // The `--greet-only` flag (non-streaming SessionStart wiring) rides at argv[2];
-        // `resolve_subcommand` matches argv[1] only, so it must not disturb the dispatch.
+        // `--greet-only` rides at argv[2]; resolve matches argv[1] only.
         let argv = argv(&["dontspeak", "notify", "--greet-only"]);
         assert_eq!(resolve_subcommand(&argv), Subcommand::Notify);
     }
@@ -336,15 +278,13 @@ mod tests {
 
     #[test]
     fn no_args_resolves_to_server() {
-        // Only argv[0] (the program name) present — the documented no-argument case:
-        // the stdio MCP server is the default.
         let argv = argv(&["dontspeak"]);
         assert_eq!(resolve_subcommand(&argv), Subcommand::Server);
     }
 
     #[test]
     fn truly_empty_argv_resolves_to_server() {
-        // Defensive: even with no argv[0] at all, argv.get(1) is still None.
+        // Even with no argv[0], argv.get(1) is still None.
         let argv: Vec<String> = Vec::new();
         assert_eq!(resolve_subcommand(&argv), Subcommand::Server);
     }
@@ -370,7 +310,6 @@ mod tests {
             let argv = argv(&["dontspeak", "notify", "--client", tok]);
             assert_eq!(client_from_argv(&argv), want, "{tok}");
         }
-        // The flag rides alongside the other verbs, in any order.
         assert_eq!(
             client_from_argv(&argv(&[
                 "dontspeak",
@@ -385,16 +324,14 @@ mod tests {
 
     #[test]
     fn a_missing_malformed_or_non_client_token_degrades_to_unknown() {
-        // A hook must DEGRADE, never fail the client's turn — every one of these is `Unknown`,
-        // not a hard error. `dontspeak`/`unknown` are real `ClientSource::parse` tokens now, so
-        // the `is_client()` filter is what keeps them out (a hook can never claim to be US).
+        // Hooks degrade — never hard-error. `is_client()` keeps dontspeak/unknown out.
         for argv_ in [
-            vec!["dontspeak", "notify"],             // no flag at all (hand-invoked)
-            vec!["dontspeak", "notify", "--client"], // flag with no value
-            vec!["dontspeak", "notify", "--client", "gemini"], // a client we haven't wired
-            vec!["dontspeak", "notify", "--client", "dontspeak"], // us — never a client
-            vec!["dontspeak", "notify", "--client", "unknown"], // the literal token
-            vec!["dontspeak", "notify", "--client", ""], // empty
+            vec!["dontspeak", "notify"],
+            vec!["dontspeak", "notify", "--client"],
+            vec!["dontspeak", "notify", "--client", "gemini"],
+            vec!["dontspeak", "notify", "--client", "dontspeak"],
+            vec!["dontspeak", "notify", "--client", "unknown"],
+            vec!["dontspeak", "notify", "--client", ""],
         ] {
             assert_eq!(
                 client_from_argv(&argv(&argv_)),
@@ -406,8 +343,6 @@ mod tests {
 
     #[test]
     fn client_flag_does_not_disturb_subcommand_dispatch() {
-        // `resolve_subcommand` matches argv[1] ONLY, so the token (like `--greet-only`) rides
-        // at argv[2+] without touching dispatch.
         let notify = argv(&["dontspeak", "notify", "--client", "codex"]);
         assert_eq!(resolve_subcommand(&notify), Subcommand::Notify);
         let provide = argv(&["dontspeak", "provide", "--client", "codex"]);

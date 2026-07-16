@@ -1,51 +1,33 @@
 //! ds-tts — pluggable text-to-speech engines for dontspeak (ARCHITECTURE §A.1).
 //!
-//! One trait [`Tts`] behind dynamic dispatch — ds-tts's public engine seam,
-//! selected by config enum (`VoiceConfig::resolved_tts`, driven by the engine's
-//! TTS manager). Two implementors:
-//!   * [`KokoroTts`] — the DEFAULT. NATIVE in-process Kokoro synthesis (ort +
-//!     voice-g2p + rodio), spawned via the thin `ds-helper` helper bin in
-//!     its own process group, recorded in the single-speaker pidfile. NO Python,
-//!     NO uv, NO speak.py.
-//!   * [`SystemTts`] — macOS `say -v NAME -r WPM` (compiled here); Windows
-//!     PowerShell System.Speech + Linux Speech Dispatcher behind cfg (NOT built on
-//!     the macOS host).
+//! One trait [`Tts`] behind dynamic dispatch (`VoiceConfig::resolved_tts`). Implementors:
+//!   * [`KokoroTts`] — DEFAULT. Native Kokoro (ort + voice-g2p + rodio) via the
+//!     `ds-helper` bin in its own process group + single-speaker pidfile. No Python.
+//!   * [`SystemTts`] — macOS `say`; Windows System.Speech + Linux spd-say behind cfg.
 //!
-//! The native Kokoro pipeline (in the helper bin): parse rendered text into spoken prose,
-//! normalize numbers, and contextually phonemize it with voice-g2p ([`spoken`], [`g2p`])
-//! → map to Kokoro vocab token ids (`vocab`)
-//! → batch the phonemes at clause marks into a ramped sequence ([`batch`]'s
-//! `stream_batches`) → per-batch synthesis and commit (strategy: the helper's `prepare`
-//! module) → ort over
-//! kokoro-v1.0.onnx ([`synth`], style rows from the voices npz parsed by
-//! `voices`) → trim silence (`trim`) → play 24 kHz mono PCM ([`play`]). The pure stages (vocab/voices/
-//! trim/g2p) are unit-tested with no audio, no model, no network; synth/play are
-//! gated behind the helper bin.
+//! Helper pipeline: markdown → prose ([`spoken`]) → numbers → G2P ([`g2p`]) → vocab
+//! tokens → clause batches ([`batch`]) → ort synth ([`synth`] / Core ML) → trim →
+//! play. Pure stages unit-tested without audio/model/network.
 //!
-//! The single-speaker pidfile contract is sacred: every engine spawns playback
-//! in its OWN process group and returns its pgid so the caller records it in
-//! `~/.claude/speak-hook.pid` for barge-in (killpg). `speak` therefore returns a
-//! [`SpeakHandle`]; the live `Child` (needed by narrate's pidfile-takeover watch
-//! loop) is obtained via the per-engine `kokoro::spawn` / `system::spawn` helpers,
-//! which `speak` wraps.
+//! Single-speaker pidfile is sacred: every engine spawns in its OWN process group and
+//! returns pgid for barge-in (`killpg`). Live `Child` via `kokoro::spawn` / `system::spawn`.
 
 use std::io;
 
-/// Materialize FluidAudio Core ML / ANE Kokoro voice packs from the local ONNX
-/// `voices-v1.0.bin` (the ANE repo ships only `af_heart`). Path logic is harmless
-/// off-macOS; only the apple-native backend ever calls it.
+/// Materialize ANE Kokoro voice packs from local ONNX `voices-v1.0.bin` (ANE ships only
+/// `af_heart`). Only the apple-native backend calls this.
 pub mod ane_voices;
-/// Model-bounded phoneme batching used by the helper bin.
+/// Model-bounded phoneme batching (helper bin).
 pub mod batch;
 pub mod g2p;
 pub(crate) mod kokoro;
 pub(crate) mod numbers;
 pub mod play;
-/// Incremental rodio sink shared by the warm serve loop and the one-shot player.
+/// Incremental rodio sink (warm serve + one-shot player).
 pub mod sink;
 pub mod spoken;
 pub mod synth;
-/// Apple-native (FluidAudio Core ML / ANE) Kokoro backend. macOS only.
+/// FluidAudio Core ML / ANE Kokoro. macOS only.
 #[cfg(target_os = "macos")]
 pub mod synth_coreml;
 pub mod system;
@@ -58,63 +40,53 @@ pub use kokoro::KokoroTts;
 pub use system::SystemTts;
 pub use vocab::SAMPLE_RATE;
 
-/// Voice/language enumeration + the enumeration-only Gender/Quality/SpeakerVoice types now
-/// live in `ds-voices` (issue #5) — a crate with no ort/rodio/voice-g2p/
-/// ds-model in its graph, so the CLI can depend on it directly instead of this (heavy) crate.
-/// Re-exported here so this crate's own synth code below and every existing
-/// `ds_tts::enumerate` / `ds_tts::SpeakerVoice` call site elsewhere keep compiling unchanged.
+/// Re-export from `ds-voices` (issue #5) so CLI can list voices without this heavy crate,
+/// and existing `ds_tts::enumerate` / `SpeakerVoice` call sites keep compiling.
 pub use ds_voices::enumerate;
 pub use ds_voices::{Gender, Quality, SpeakerVoice};
-// Crate-PRIVATE alias — `voices` was never part of ds-tts's public API and still isn't;
-// synth.rs/ane_voices.rs reach the Kokoro npz parser via `crate::voices::...` exactly as before.
+// Private: synth/ane_voices reach the npz parser as `crate::voices` (never public API).
 pub(crate) use ds_voices::voices;
 
-/// Normalize rendered English text before the shared Kokoro frontend phonemizes it.
-///
-/// This is the shared text-front-end boundary used by the helper before its ONNX/Core ML
-/// backend split. It is intentionally idempotent so each backend may also call it
-/// defensively when used outside the helper.
+/// Normalize rendered English before Kokoro G2P. Shared helper front-end; idempotent
+/// so backends may call it defensively outside the helper.
 pub fn normalize_kokoro_text(text: &str) -> String {
     numbers::expand_numbers(&spoken::SpokenText::from_markdown(text).into_string())
 }
 
-/// The process-GROUP id of a spawned speaker — recorded in the pidfile so the
-/// engine's caps-ON barge-in (`killpg(-pgid, SIGTERM)`) can preempt it.
+/// Process-GROUP id of a spawned speaker — pidfile records it for caps-ON barge-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpeakHandle {
     pub pgid: i32,
 }
 
-/// A text-to-speech backend. Object-safe so the factory hands back `Box<dyn Tts>`.
+/// TTS backend. Object-safe for `Box<dyn Tts>`.
 pub trait Tts: Send {
-    /// Speak `text` with `voice_id` (engine-opaque) at `rate` (1.0 = normal).
-    /// Spawns playback in its OWN process group and returns its pgid; the caller
-    /// records it in the pidfile and owns the wait + pidfile-clear lifecycle.
+    /// Speak at `rate` (1.0 = normal). Spawns in own process group; caller records
+    /// pgid and owns wait + pidfile-clear.
     fn speak(&self, text: &str, voice_id: Option<&str>, rate: f32) -> io::Result<SpeakHandle>;
 
-    /// Stop current playback. Default no-op: the pidfile `killpg` barge-in owns
-    /// preemption, so engines that record their pgid need do nothing here.
+    /// Default no-op: pidfile `killpg` owns preemption.
     fn stop(&self) {}
 
-    /// Voices for the settings picker. Empty where enumeration isn't supported.
+    /// Settings-picker voices. Empty where enumeration unsupported.
     fn voices(&self) -> Vec<SpeakerVoice> {
         Vec::new()
     }
 
-    /// Whether this engine can open the OS voice installer (§B.3).
+    /// Can open OS voice installer (§B.3).
     fn can_manage_voices(&self) -> bool {
         false
     }
 
-    /// Open the OS voice installer / settings pane (§B.3).
+    /// Open OS voice installer / settings (§B.3).
     fn manage_voices(&self) {}
 
-    /// A short human hint for the picker ("Spoken Content > System Voice > …").
+    /// Short picker hint ("Spoken Content > System Voice > …").
     fn manage_voices_hint(&self) -> Option<&str> {
         None
     }
 
-    /// Debug tag for tests / logs (which concrete engine this box is).
+    /// Debug tag for tests / logs.
     fn kind(&self) -> &'static str {
         "tts"
     }

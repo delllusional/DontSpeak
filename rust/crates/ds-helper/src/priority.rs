@@ -14,52 +14,37 @@
 //! designed for a genuine periodic audio callback, not this variable-duration
 //! synth/inference loop, so there is nothing safe to add here yet.
 
-/// Call ONCE, as the first thing in the `--serve` / one-shot synth paths of
-/// `main()` — raises the WHOLE process's priority class. Windows only; no-op
-/// elsewhere.
+/// Once at start of `--serve` / one-shot in `main()` — whole process priority. Windows only.
 pub(crate) fn elevate_process() {
     #[cfg(windows)]
     {
         use windows::Win32::System::Threading::{
             ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, SetPriorityClass,
         };
-        // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no close, and
-        // SetPriorityClass on it only adjusts our own process's priority class.
+        // SAFETY: GetCurrentProcess is a pseudo-handle (no close); SetPriorityClass is self-only.
         unsafe {
             let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
         }
     }
 }
 
-/// Call at the START of every latency-critical thread (the serve-loop/one-shot
-/// thread via `main()`, and the full-duplex concurrent-listen thread). Windows:
-/// registers this thread with MMCSS under the "Audio" task category — the same
-/// mechanism the Windows audio stack itself uses, no revert (the OS reclaims the
-/// registration when the PROCESS terminates — normally via `_exit()`, matching
-/// this crate's existing teardown convention; see main.rs's top comment — so
-/// leaving it unreverted per-thread is safe even on the one auxiliary thread that
-/// exits by a plain `return` rather than `_exit()` itself). macOS: bumps this
-/// thread's QoS class. Linux: no-op (see module doc).
+/// Start of each latency-critical thread (serve/one-shot + full-duplex listen).
+/// Windows: MMCSS "Audio" (no revert — process ends via `_exit`, so leak is intentional).
+/// macOS: QoS bump. Linux: no-op (see module doc).
 pub(crate) fn elevate_current_thread() {
     #[cfg(windows)]
     {
         use windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
         let mut task_index: u32 = 0;
-        // SAFETY: `task_index` is a live stack out-param for the duration of the call
-        // and the task name is a static wide literal (`w!`); the returned MMCSS handle
-        // is intentionally leaked (see below).
+        // SAFETY: live stack out-param + static wide task name; MMCSS handle intentionally
+        // leaked (process ends via `_exit`; revert would be dead code).
         unsafe {
-            // Leaked HANDLE is intentional: this thread lives for the process's
-            // lifetime, which ends via `_exit()` (skips destructors) — reverting
-            // would be dead code, not a fix.
             let _ = AvSetMmThreadCharacteristicsW(windows::core::w!("Audio"), &mut task_index);
         }
     }
     #[cfg(target_os = "macos")]
     {
-        // SAFETY: pthread_set_qos_class_self_np adjusts only the CALLING thread's QoS
-        // class; QOS_CLASS_USER_INTERACTIVE with relative priority 0 is a valid argument
-        // pair, and the call touches no caller-owned memory.
+        // SAFETY: self-only QoS; QOS_CLASS_USER_INTERACTIVE + relative 0 is valid; no caller memory.
         unsafe {
             let _ = libc::pthread_set_qos_class_self_np(
                 libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
@@ -71,11 +56,7 @@ pub(crate) fn elevate_current_thread() {
 
 #[cfg(test)]
 mod tests {
-    // Only exercised where these are genuine no-ops (per-commit CI is Linux-only).
-    // NOT run on windows/macos: elevate_process/elevate_current_thread do REAL,
-    // unreverted OS priority/QoS mutation there (by design — see module doc), so
-    // running them against the live `cargo test` process/thread would leave that
-    // process permanently boosted with no seam to undo it.
+    // Linux only (CI): on win/mac these do unreverted real priority mutation.
     #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn elevate_calls_are_a_noop_here() {

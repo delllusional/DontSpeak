@@ -1,46 +1,29 @@
-//! The per-message narration accumulation core — "given a streamed text batch, which
-//! top-level blockquote runs become speakable now". PURE of IO (no socket, no disk) so
-//! it is exhaustively unit-testable; [`crate::deliver_batch`] wraps it with the
-//! per-session state file + lock; the adapters forward the utterances to the engine.
+//! Per-message accumulation: which top-level blockquote runs become speakable now.
+//! PURE of IO (unit-testable); [`crate::deliver_batch`] adds the state file + lock.
 //!
-//! Claude Code streams an assistant message as many `MessageDisplay` batches (a `delta` chunk
-//! keyed by content-block `index`, plus a sticky `final` flag), and — because "all matching
-//! hooks run in parallel" — the per-batch hook processes can arrive out of order or overlap.
-//! [`Accum`] makes reconstruction INDEPENDENT of arrival order (parts keyed by index) and emits
-//! each completed blockquote run EXACTLY ONCE, in document order (a high-water mark, not a
-//! one-shot latch), so a later run — e.g. a closing question — is still voiced and a re-fed or
-//! duplicate batch emits nothing. The cumulative (`displayed_text`) mode serves clients
-//! that send whole-text snapshots instead of deltas (Qwen Code's hook; Codex's
-//! authoritative `item/completed` final text).
+//! Claude Code can deliver batches out of order (hooks run in parallel). [`Accum`]
+//! reconstructs by content-block `index` and emits each completed run EXACTLY ONCE in
+//! document order (high-water mark, not a one-shot latch). Cumulative `displayed_text`
+//! mode covers Qwen / Codex final snapshots.
 
 use std::collections::BTreeMap;
 
-/// Per-message accumulation: feed batches, get back the blockquote runs that became newly
-/// speakable. [`crate::deliver_batch`] persists one of these per session (serialized to a
-/// file under a lock, so overlapping per-batch hook processes take turns).
+/// Feed batches → newly speakable blockquote runs. One per session under a lock.
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct Accum {
-    /// Each batch's chunk keyed by content-block `index` → cumulative text reconstructs in
-    /// index order regardless of the order calls arrive.
+    /// Chunks by content-block `index` — reconstructs regardless of arrival order.
     pub parts: BTreeMap<u64, String>,
-    /// Sticky: once ANY batch carried `final=true`, the message is final — even if that
-    /// batch arrived before the one holding the blockquote.
+    /// Sticky: any `final=true` makes the message final (even if that batch arrived early).
     pub seen_final: bool,
-    /// High-water mark: how many blockquote runs have already been forwarded to TTS, in
-    /// document order. Each run is emitted EXACTLY ONCE — the moment it is provably complete —
-    /// so re-fed and duplicate batches advance nothing.
+    /// High-water mark of runs already forwarded; re-fed batches advance nothing.
     pub emitted: usize,
-    /// Latch for the "shorts" fallback: a final message with NO blockquote is voiced WHOLE
-    /// exactly once (set true the moment we consider it), so a late duplicate batch can't
-    /// re-speak it.
+    /// "Shorts" latch: blockquote-less final reply voiced whole, once.
     pub short_done: bool,
 }
 
 impl Accum {
-    /// Feed one streamed batch; return the blockquote runs that became newly speakable on THIS
-    /// batch, in document order, each returned exactly once over the message's lifetime (usually
-    /// empty mid-run, sometimes several at once). `displayed_text` (cumulative) wins over `delta`
-    /// when a CC version sends it; otherwise the per-index `delta` parts are reconstructed.
+    /// Newly speakable runs this batch (usually empty mid-run). Cumulative
+    /// `displayed_text` wins over delta reconstruction when present.
     pub fn feed(
         &mut self,
         index: u64,
@@ -54,8 +37,8 @@ impl Accum {
 
         let cumulative = match displayed_text {
             Some(dt) if !dt.trim().is_empty() => {
-                // Codex legitimately ends a delta stream with one authoritative final snapshot.
-                // Any earlier switch would leave `parts` stale if another delta followed.
+                // Codex ends deltas with one authoritative final snapshot. Earlier
+                // cumulative would leave `parts` stale if another delta followed.
                 debug_assert!(
                     self.parts.is_empty() || is_final,
                     "a non-final cumulative payload must not follow delta payloads"
@@ -68,12 +51,9 @@ impl Accum {
             }
         };
 
-        // Every top-level blockquote run so far, in document order, each flagged `complete`.
-        // The speakable prefix is the leading stretch of complete runs (only the LAST run can
-        // still be open). Emit those beyond the high-water mark, in order, and advance it —
-        // so each run is voiced exactly once and a later run (e.g. a closing question) is
-        // still caught. The high-water mark advances regardless of `messages_on`, so the
-        // short fallback below can tell "no blockquote at all" from "blockquotes, but muted".
+        // Speakable prefix = leading complete runs (only the last can still be open).
+        // Advance the high-water mark even when `messages_on` is false so shorts can
+        // tell "no blockquote" from "blockquotes, but muted".
         let runs = ds_config::all_blockquotes_state(&cumulative, self.seen_final);
         let total = runs.len();
         let speakable = runs.iter().take_while(|(_, complete)| *complete).count();
@@ -88,9 +68,7 @@ impl Accum {
         }
         self.emitted = speakable.max(self.emitted);
 
-        // SHORT fallback: a FINAL message with NO blockquote AT ALL is voiced whole, once —
-        // if it's short and plain enough to read aloud cleanly (no code fence / path / URL).
-        // Latched so a late duplicate batch never re-speaks it.
+        // Final + no blockquote at all → voice whole once (latched).
         if short_on && self.seen_final && total == 0 && !self.short_done {
             self.short_done = true;
             if let Some(utt) = short_reply_utterance(&cumulative) {
@@ -98,8 +76,7 @@ impl Accum {
             }
         }
 
-        // Once the message is final and every run has been voiced, free the buffered text —
-        // the high-water mark stays, so any late duplicate batch still emits nothing.
+        // Free buffer when done; high-water mark stays so late duplicates stay silent.
         if self.seen_final && self.emitted >= total {
             self.parts.clear();
         }
@@ -107,14 +84,10 @@ impl Accum {
     }
 }
 
-/// Turn a blockquote-less reply into a spoken utterance — read WHOLE, so no information is
-/// lost. A reply WITHOUT a `>` digest is the "short" case and is voiced in full; the only
-/// thing dropped is inline Markdown markers (`` ` `` `* _ #`) and collapsed whitespace, for
-/// cleaner speech (no words removed). Returns `None` only for empty / markers-only text.
+/// Blockquote-less reply → spoken whole. Only strips inline Markdown markers
+/// (`` ` `` `* _ #`) and collapses whitespace; returns `None` for empty/markers-only.
 ///
-/// (No length/code/URL/slash guards: they silently swallowed readable replies — e.g. a
-/// slashed word like "pause/resume" muted a whole answer. We read everything for now and can
-/// special-case genuinely-unspeakable content later.)
+/// No length/code/URL/slash guards: they swallowed readable replies (e.g. "pause/resume").
 pub fn short_reply_utterance(text: &str) -> Option<String> {
     let t = text.trim();
     if t.is_empty() {
@@ -123,7 +96,7 @@ pub fn short_reply_utterance(text: &str) -> Option<String> {
     let mut s = String::with_capacity(t.len());
     for ch in t.chars() {
         match ch {
-            '`' | '*' | '_' | '#' => {} // drop inline Markdown emphasis/code/heading markers
+            '`' | '*' | '_' | '#' => {}
             '\n' | '\r' | '\t' => s.push(' '),
             other => s.push(other),
         }
@@ -136,10 +109,7 @@ pub fn short_reply_utterance(text: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    // ── Exhaustive coverage for `short_reply_utterance` (the blockquote-less "shorts"
-    // path). The rule is now: read a blockquote-less reply WHOLE — no info lost. Only
-    // empty / markers-only text is dropped. (It used to over-filter and silently swallow
-    // readable replies — e.g. a slashed word like "pause/resume" muted a whole answer.)
+    // short_reply_utterance: read WHOLE; only empty/markers-only dropped.
 
     #[test]
     fn short_utt_plain_text_passes_trimmed() {
@@ -157,14 +127,13 @@ mod tests {
 
     #[test]
     fn short_utt_markers_only_becomes_none() {
-        // After dropping the markdown markers nothing remains → not spoken.
         assert_eq!(short_reply_utterance("***"), None);
         assert_eq!(short_reply_utterance("###  _ "), None);
     }
 
     #[test]
     fn short_utt_long_text_is_read_whole() {
-        // No length cap any more — a long blockquote-less reply is still read.
+        // No length cap.
         let long = "word ".repeat(120); // ~600 chars
         let spoken = short_reply_utterance(&long).expect("long text is read");
         assert!(spoken.starts_with("word word"));
@@ -173,7 +142,7 @@ mod tests {
 
     #[test]
     fn short_utt_slashed_word_is_read_whole() {
-        // The regression: a slashed word must NOT silence the reply — it's read.
+        // Regression: slash must not silence the reply.
         assert_eq!(
             short_reply_utterance("The pause/resume toggle.").as_deref(),
             Some("The pause/resume toggle.")
@@ -186,8 +155,7 @@ mod tests {
 
     #[test]
     fn short_utt_code_and_url_are_read_whole() {
-        // Read everything for now: code-fence backticks are stripped as markers; a URL is
-        // kept (no info lost). Genuinely-unspeakable cases can be special-cased later.
+        // Backticks stripped as markers; URL kept.
         assert_eq!(
             short_reply_utterance("Run ```cargo build``` now").as_deref(),
             Some("Run cargo build now")
@@ -229,16 +197,14 @@ mod tests {
             a.feed(2, "\n\nBody.", None, true, true, false),
             vec!["The spoken line."]
         );
-        // Any later/duplicate batch is a no-op (the run is past the high-water mark).
+        // Past high-water mark → no-op.
         assert!(a.feed(3, " more body.", None, true, true, false).is_empty());
     }
 
     #[test]
     fn speaks_every_blockquote_in_order_each_once() {
-        // The core multi-emit guarantee: a reply with several blockquotes voices ALL of them,
-        // in document order, each exactly once, as each run closes.
+        // Multi-emit: every blockquote, document order, each once as it closes.
         let mut a = Accum::default();
-        // First run closes when the second `>` block's blank line separates them.
         assert_eq!(
             a.feed(
                 0,
@@ -250,7 +216,6 @@ mod tests {
             ),
             vec!["One.", "Two."]
         );
-        // A later run streams in and closes on the final batch.
         assert!(
             a.feed(1, "more.\n\n> Three.", None, false, true, false)
                 .is_empty()
@@ -259,29 +224,24 @@ mod tests {
             a.feed(2, "\n\ntail.", None, true, true, false),
             vec!["Three."]
         );
-        // Fully drained: nothing re-emits.
         assert!(a.feed(3, " extra.", None, true, true, false).is_empty());
     }
 
     #[test]
     fn whole_reply_as_one_final_batch_emits_all_blockquotes() {
-        // The NON-STREAMING (OpenAI Codex `Stop`) path: the entire reply arrives as ONE final
-        // batch (index 0, is_final = true). The same core must emit every top-level blockquote,
-        // in order, each once — exactly what the streamed path would, just in one feed.
+        // Non-streaming (`Stop`): one final batch must match the streamed multi-emit.
         let reply = "> First point.\n\nDetail.\n\n> Second point.\n\nMore.\n\n> Closing ask?";
         let mut a = Accum::default();
         assert_eq!(
             a.feed(0, reply, None, true, true, false),
             vec!["First point.", "Second point.", "Closing ask?"]
         );
-        // Idempotent: a duplicate final batch re-speaks nothing.
         assert!(a.feed(0, reply, None, true, true, false).is_empty());
     }
 
     #[test]
     fn whole_blockquoteless_reply_voiced_whole_under_short() {
-        // Codex `Stop` with the `short` mode on and NO blockquote: a brief plain reply is
-        // voiced whole, once. With `short` OFF it stays silent (messages-only).
+        // Short on + no blockquote → whole once; short off → silent.
         let reply = "Done — all three tests pass.";
         let mut a = Accum::default();
         assert_eq!(
@@ -300,7 +260,7 @@ mod tests {
     #[test]
     fn out_of_order_batches_assemble_correctly() {
         let mut a = Accum::default();
-        // Deliver indices 2 (body, final), 0 (preamble), 1 (quote) — reversed.
+        // Indices 2, 0, 1 — reversed arrival.
         assert!(
             a.feed(2, "\n\nBody after.", None, true, true, false)
                 .is_empty()
@@ -337,22 +297,19 @@ mod tests {
 
     #[test]
     fn short_mode_speaks_a_blockquoteless_final_reply_once() {
-        // With "shorts" on, a final message that has NO blockquote is voiced whole (cleaned),
-        // exactly once.
         let mut a = Accum::default();
         assert!(a.feed(0, "Yes, ", None, false, true, true).is_empty()); // not final yet
         assert_eq!(
             a.feed(1, "that's the `default`.", None, true, true, true),
-            vec!["Yes, that's the default."] // backticks stripped, whitespace joined
+            vec!["Yes, that's the default."]
         );
-        // Latched: a late duplicate batch never re-speaks it.
+        // Latched against late duplicates.
         assert!(a.feed(2, " dup", None, true, true, true).is_empty());
     }
 
     #[test]
     fn short_mode_reads_code_paths_and_long_text_whole() {
-        // No guards now: code, paths, and long blockquote-less text are all READ (no info
-        // lost) — only the markdown markers are cleaned off.
+        // No content guards — only markdown markers cleaned.
         assert_eq!(
             Accum::default().feed(0, "Run ```cargo build```", None, true, true, true),
             vec!["Run cargo build"],
@@ -371,8 +328,7 @@ mod tests {
             1,
             "long text → read, not silenced"
         );
-        // A reply WITH a blockquote is digests-territory: with digests OFF + short ON it
-        // still stays silent (shorts only fires when there is NO blockquote at all).
+        // Shorts only when there is NO blockquote at all.
         assert!(
             Accum::default()
                 .feed(0, "> Spoken.\n\nbody.", None, true, false, true)
@@ -404,8 +360,7 @@ mod tests {
 
     #[test]
     fn final_drains_buffer_but_keeps_high_water_mark() {
-        // After the message is final and every run voiced, the buffered parts are freed but a
-        // late duplicate batch still emits nothing (the high-water mark persists).
+        // Free buffer when drained; high-water mark still silences late duplicates.
         let mut a = Accum::default();
         assert_eq!(
             a.feed(0, "> Once.\n\nbody", None, true, true, false),

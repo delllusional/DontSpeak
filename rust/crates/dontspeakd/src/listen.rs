@@ -1,17 +1,5 @@
-//! Always-listening (hands-free) turn logic — the PURE core (no audio I/O, no
-//! platform, no clock). See docs/ALWAYS-LISTENING.md.
-//!
-//! Three pieces, all unit-tested with synthetic inputs:
-//!   * [`Endpointer`] — energy-VAD segmentation: per-frame energy + frame duration
-//!     → `SpeechOnset` / `SegmentClosed` events.
-//!   * [`match_submit_word`] — does a transcript END with the stopword (on a word
-//!     boundary), and what is the content before it.
-//!   * [`TurnLogic`] — consumes closed segments + onset + ticks → `SubmitText`/`Cancel`
-//!     actions, implementing the stopword + trailing-silence confirmation.
-//!
-//! The daemon glue (dontspeakd::lib) owns the audio buffer, the Parakeet
-//! transcribe call, and the platform paste/Enter — it just feeds these state
-//! machines and executes their actions.
+//! Always-listening pure core (no I/O). docs/ALWAYS-LISTENING.md.
+//! [`Endpointer`] energy-VAD; [`match_submit_word`]; [`TurnLogic`] stopword + silence.
 
 /// Default energy gate (RMS of f32 PCM in [-1, 1]). Speech RMS is typically
 /// ~0.02–0.1; ambient silence ~0.001–0.005, so ~0.01 separates them with margin.

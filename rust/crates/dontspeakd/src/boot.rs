@@ -1,5 +1,4 @@
-//! Engine lifecycle / orchestration: the in-process entry, `engine_run`, the
-//! startup wiring, the signal handlers, and `install_bin`.
+//! Engine lifecycle: `engine_run`, startup wiring, signals, `install_bin`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,42 +27,20 @@ use crate::stt_test::TestSession;
 use crate::tts::TtsManager;
 use crate::ttsq::TtsQueue;
 
-// ── Tunables ────────────────────────────────────────────────────────────────
 pub(crate) const POLL_MS: u64 = 30; // caps-state poll interval
-/// Hot-reload quiet window: a trailing-edge debounce (see
-/// [`config_gate::reload_tick`]) that collapses a flurry of triggers — the host's atomic
-/// config.toml write and the explicit `engine_reload()` nudge that follows it, plus
-/// whatever an editor's write-twice-on-save adds — into a SINGLE reload, by waiting for
-/// this long of silence after the LAST trigger rather than a fixed gap after the last
-/// reload that ran. Sized with headroom over a measured 581 ms production gap between the
-/// nudge and its own filesystem-watch echo for the same edit.
+/// Trailing-edge reload debounce after last trigger (headroom over ~581 ms nudge+echo).
 const RELOAD_QUIET_WINDOW: Duration = Duration::from_millis(750);
-/// How often to re-probe Accessibility trust so a live grant/revoke flips the
-/// caps loop without a reload (the dot follows ~this fast).
+/// Re-probe Accessibility so live grant/revoke flips the caps loop without reload.
 const AX_PROBE_INTERVAL: Duration = Duration::from_secs(2);
-/// How often the poll loop re-checks for a missing model to auto-download (retry safety
-/// net for a launch-time download that failed / had no network). Slow — the startup +
-/// reload hooks handle the common "first activation" case immediately.
+/// Slow auto-download retry when launch fetch failed / no network.
 const AUTO_DL_RETRY_INTERVAL: Duration = Duration::from_secs(20);
-/// How often to nudge the status gate while a background download runs. Progress updates
-/// (`DownloadProg.done`) don't themselves bump the status seq, so without this the app's
-/// seq-gated status push would show a FROZEN "Downloading N%" that looks stuck. ~2.5 Hz is
-/// smooth for the ring/percent without being a repaint storm; only fires while a fetch is active.
+/// Nudge status gate while downloading (progress itself doesn't bump seq) ~2.5 Hz.
 const DL_PROGRESS_BUMP_INTERVAL: Duration = Duration::from_millis(400);
-/// Coarse `stat()` backstop for an out-of-band config.toml edit. The primary trigger is
-/// the push-based [`config_watch`](crate::config_watch) filesystem watcher; this slow stat
-/// only covers the rare case the watcher can't start or a filesystem drops an event. Kept
-/// well under any human re-edit cadence. The explicit reload path (`engine_reload()` / the
-/// Reload RPC) is independent (it sets `reload_requested` directly, read every tick).
+/// Coarse `stat()` backstop if config_watch fails/drops events.
 const MTIME_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Run the engine to completion on the CURRENT thread. The host owns the two
-/// control flags: `running` (clear it → graceful stop) and `reload_requested`
-/// (set it → re-read config.toml). The in-process host (the SwiftUI/Win/Linux app
-/// via the `ds-core` C ABI) drives them from `engine_stop()` / `engine_reload()` —
-/// this is the ONLY way the engine runs (there is no headless binary). The caps loop,
-/// RPC server, and TTS queue all run from here, so whichever process calls this is
-/// the one that needs the OS permissions (Accessibility / Input-Monitoring / Mic).
+/// Run engine on this thread. Host drives `running` / `reload_requested` via C ABI
+/// (`engine_stop` / `engine_reload`). Only entry path; process needs OS permissions.
 pub fn engine_run(
     running: Arc<AtomicBool>,
     reload_requested: Arc<AtomicBool>,

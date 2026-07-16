@@ -1,33 +1,28 @@
-//! ds-i18n — the shared DontSpeak localization catalog.
+//! Shared localization catalog.
 //!
-//! User-facing strings live here as YAML (`locales/*.yml`); **English is the source of
-//! truth and the fallback**. They are looked up at runtime via `rust-i18n` and reached
-//! from every platform UI through ds-core's C ABI (`ds_t` / `ds_t_args`
-//! / `ds_set_locale` / `ds_locale`), so macOS (Swift) and Windows (WinUI)
-//! render ONE catalog instead of duplicating near-identical literals.
+//! User-facing strings live as YAML (`locales/*.yml`); **English is the source of truth
+//! and the fallback**. Looked up via `rust-i18n`, reached from every platform UI through
+//! ds-core's C ABI (`ds_t` / `ds_t_args` / `ds_set_locale` / `ds_locale`) — one catalog
+//! for macOS and Windows.
 //!
-//! Scope: only **app-rendered** strings belong here. OS-rendered metadata — macOS
-//! `Info.plist` usage descriptions, the Windows app manifest — stays in each platform's
-//! native resources (it can't be served over the FFI).
+//! Scope: **app-rendered** strings only. OS-rendered metadata (Info.plist usage
+//! descriptions, Windows app manifest) stays in native resources (can't cross FFI).
 //!
-//! Keys are mostly **shared**; a few are **Windows-only** (`tray.start_at_login`, the
-//! taskbar hints). Platform-idiomatic terms that legitimately differ are kept on distinct
-//! keys on purpose (`tray.quit` = "Quit" on macOS, `tray.exit` = "Exit" on Windows), NOT
-//! force-merged.
+//! Keys are mostly shared; a few are Windows-only. Platform-idiomatic terms stay on
+//! distinct keys on purpose (`tray.quit` vs `tray.exit`), not force-merged.
 
 use std::sync::Once;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
-// First touch wins: either an explicit `set_locale` from the UI, or OS detection. Both
-// consume this Once so a later lookup can't re-run OS detection and clobber a UI choice.
+// First touch wins: explicit `set_locale` or OS detection. Once so a later lookup
+// can't re-run OS detection and clobber a UI choice.
 static INIT: Once = Once::new();
 
-/// Make the OS language the active locale (best-effort); English is the fallback for any
-/// locale or key we don't have. Runs at most once, lazily, on the first lookup.
+/// OS language as active locale (best-effort); English fallback. At most once, lazy.
 fn init_from_os() {
     if let Some(loc) = sys_locale::get_locale() {
-        // rust-i18n matches on the language subtag, e.g. "de-DE" → "de".
+        // rust-i18n matches language subtag, e.g. "de-DE" → "de".
         let lang = loc.split(['-', '_']).next().unwrap_or("en");
         rust_i18n::set_locale(lang);
     }
@@ -37,38 +32,31 @@ fn ensure_init() {
     INIT.call_once(init_from_os);
 }
 
-/// Set the active locale (BCP-47 or a bare language tag). Unknown locales fall back to
-/// English at lookup time. Marks initialization done so OS detection won't override it.
+/// Set active locale (BCP-47 or bare language tag). Marks init done so OS won't override.
 pub fn set_locale(locale: &str) {
     INIT.call_once(|| {});
     rust_i18n::set_locale(locale);
 }
 
-/// The active locale tag — so a UI's native number formatter can match the catalog's
-/// language when it formats values to inject via [`t_args_json`].
+/// Active locale tag — so a UI number formatter can match the catalog language.
 pub fn locale() -> String {
     ensure_init();
     rust_i18n::locale().to_string()
 }
 
-/// Look up `key` in the active locale (English fallback). A missing key returns the key
-/// itself, so a gap is visible rather than blank.
+/// Look up `key` (English fallback). Missing key returns the key itself (visible gap).
 pub fn t(key: &str) -> String {
     ensure_init();
     rust_i18n::t!(key).to_string()
 }
 
-/// Look up `key` and interpolate `%{name}` placeholders from a JSON object of
-/// `{ "name": value }` (values may be strings or numbers). Used for the parameterized
-/// strings; the caller formats numbers (locale-aware, natively) and passes them in, so
-/// number formatting can stay native while the sentence template lives in the catalog.
+/// Look up `key` and interpolate `%{name}` from a JSON object. Caller formats numbers
+/// natively and passes them in — templates stay in the catalog.
 pub fn t_args_json(key: &str, args_json: &str) -> String {
     let s = t(key);
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(args_json)
     {
-        // Reuse rust-i18n's own `%{name}` interpolator: it walks the template once,
-        // substitutes each `%{key}`, and leaves unknown placeholders intact. Numbers/bools
-        // stringify via their JSON form; strings pass through unquoted.
+        // rust-i18n's interpolator: unknown placeholders left intact.
         let mut patterns: Vec<&str> = Vec::with_capacity(map.len());
         let mut values: Vec<String> = Vec::with_capacity(map.len());
         for (k, v) in &map {
@@ -92,20 +80,18 @@ mod tests {
         set_locale("en");
         assert_eq!(t("tray.quit"), "Quit");
         assert_eq!(t("common.nav_status"), "Status");
-        // A missing key returns the key itself (visible gap, not blank).
+        // Missing key returns itself (visible gap, not blank).
         assert_eq!(t("nope.not.here"), "nope.not.here");
     }
 
     #[test]
     fn interpolates_named_args() {
         set_locale("en");
-        // String placeholder (a live key — `about.version` was retired when the About
-        // surface moved into the Status row; the version number is supplied separately).
         assert_eq!(
             t_args_json("status.engine.status.failed", r#"{"why":"no model"}"#),
             "Failed — no model"
         );
-        // Numbers stringify; missing placeholders are left intact.
+        // Numbers stringify; missing placeholders left intact.
         assert_eq!(
             t_args_json("status.engine.status.downloading", r#"{"pct":42}"#),
             "Downloading 42%"

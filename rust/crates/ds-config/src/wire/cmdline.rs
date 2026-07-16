@@ -1,31 +1,13 @@
-//! The ONE renderer + recogniser for DontSpeak's hook COMMAND STRING — shared by every
-//! client whose hook runner is handed a single command *string* instead of an argv array:
-//! Codex (`ClaudeTomlHooks`) and Qwen Code (`ClaudeJsonHooks` +
-//! `HookCommandStyle::InlineShell`).
+//! ONE renderer/recogniser for hook COMMAND STRINGS (Codex, Qwen InlineShell).
+//! Claude Code uses argv (`ArgsArray`) and never comes here — only client whose Windows
+//! hooks worked before this module.
 //!
-//! Claude Code is the ONE client that never comes here: it takes `command` + an `args` array
-//! and spawns them DIRECTLY, with no shell in between (`HookCommandStyle::ArgsArray`), so
-//! nothing can re-quote or re-parse its path. That is exactly why it was the only client
-//! whose Windows hooks ever worked — see the quoting note below.
+//! ## Windows: no double quotes in the command string
 //!
-//! ## Why a Windows command string must not contain double quotes
-//!
-//! Every one of these runners spawns its shell with the whole command string as ONE argv
-//! element: Codex does `Command::new($COMSPEC).arg("/C").arg(command)`
-//! (`codex-rs/hooks/src/engine/command_runner.rs`), Qwen does
-//! `spawn(comspec, [...prefix, command], {shell:false})`. Both Rust and Node then escape that
-//! element per `CommandLineToArgvW` rules, which rewrite an embedded `"` as `\"`. **cmd.exe
-//! does not implement those rules** — it has its own quote handling and treats `\"`
-//! literally. So `"C:\…\dontspeak.exe" notify` reaches cmd as `\"C:\…\dontspeak.exe\" notify`
-//! and cmd tries to execute a program literally named `\"C:\…\dontspeak.exe\"`:
-//!
-//! ```text
-//! '\"C:\Users\usr\AppData\Local\Programs\DontSpeak\dontspeak.exe\"' is not recognized
-//! as an internal or external command, operable program or batch file.
-//! ```
-//!
-//! …exiting 1, before our binary ever runs. Reproduced against both runners. Hence the
-//! Windows forms below are quote-free, and a spaced path is handled by other means.
+//! Runners pass the whole string as ONE argv to cmd (`/C`). Rust/Node escape `"` as `\"`
+//! per `CommandLineToArgvW`; **cmd.exe does not** and treats `\"` literally — so a quoted
+//! path becomes a non-existent program name. Windows forms here are quote-free; spaced
+//! paths use other means (see `ShellOverride` / short names).
 
 /// The OS command-line dialect a hook command string is formatted for. A parameter (not
 /// `cfg!` inside the formatter) so BOTH forms are unit-tested on Linux CI; production selects

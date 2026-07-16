@@ -1,58 +1,33 @@
-//! dontspeakd — the dontspeak dictation-engine LIBRARY for Claude Code voice
-//! (TAP-TOGGLE), hosted in-process by each platform's host app via `ds-core`
-//! (there is no standalone/headless binary).
+//! dontspeakd — in-process dictation engine for Claude Code voice (TAP-TOGGLE),
+//! hosted by each platform app via `ds-core` (no standalone binary).
 //!
-//! Cross-platform Rust port of the original Swift caps-poll daemon (since removed).
-//! Reads the PHYSICAL Caps key
-//! (down/up edges, via the platform's IOHIDManager monitor on macOS) every
-//! POLL_MS and drives Claude Code's voice TAP mode: a TAP toggles recording.
+//! Physical Caps edges (via platform IOHIDManager on macOS) every POLL_MS drive
+//! Claude Code voice TAP mode. State machine decides on RELEASE, not press, so
+//! the Caps LED (pure output) only moves on release:
+//! - TAP (release before long_press_ms): toggle dictation. Start barges TTS and
+//!   routes through `stt.start()`; next tap `stt.stop()`s. ClaudeNative emits one
+//!   Ctrl+G per edge; Parakeet opens/closes the mic + injects. LED on start, off stop.
+//! - LONG-PRESS (≥ long_press_ms): `cancel_all` — abort dictation + silence voice,
+//!   idle, LED off. Never records; ending release is not a tap.
 //!
-//! State machine ("tap to dictate, hold to cancel") — decided on the key's RELEASE,
-//! NOT its press, so the Caps LED (a pure output we drive) only moves on release:
-//! - physical TAP (quick press → release before long_press_ms): toggle dictation ON
-//!   THE RELEASE. The start tap barges in (kills any playing TTS via the shared
-//!   pidfile) and routes through the boxed STT engine (`stt.start()`); the next tap
-//!   `stt.stop()`s it. For the default (ClaudeNative) start/stop each emit ONE Ctrl+G
-//!   byte (Claude's tap toggle); for Parakeet start opens the mic and stop runs the
-//!   final pass + injects. The LED lights on the start release, extinguishes on the
-//!   stop release.
-//! - physical LONG-PRESS (hold ≥ long_press_ms): `cancel_all` — discard any in-flight
-//!   dictation (`stt.abort()`) AND silence the voice/generation, idle, LED off. A hold
-//!   NEVER records and never lights; the release that ends it is NOT counted as a tap.
-//!   (A sub-poll tap too fast for the ~POLL_MS sampler to see the key-down is missed —
-//!   tap again. The LED is never read back, so there's no latch/LED desync.)
+//! STT is a config-selected `Box<dyn Stt>` from `ds-engines`. Hot reload watches
+//! config.toml mtime + explicit reload (C ABI / Reload RPC); `Engine::reload`
+//! aborts in-flight HOLD before swapping engines (no LED, no spurious edge).
+//! Platform surface: ds-platform traits.
 //!
-//! Each edge delegates to a config-selected `Box<dyn Stt>` from the `ds-engines`
-//! factory. `ClaudeNative` preserves the original Ctrl+G behavior.
-//!
-//! For hot reload, the engine writes its own pid to its
-//! `dontspeakd.pid` on startup (removed on clean exit) and watches `config.toml`
-//! by mtime each tick. EITHER an mtime change OR an explicit reload (the host
-//! app's `engine_reload()` over the C ABI, or the Reload RPC) re-runs
-//! `VoiceConfig::load` and rebuilds the boxed `Stt` via the factory — no restart.
-//! `Engine::reload` ends any in-flight HOLD cleanly (engine `abort()`) before
-//! swapping engines, WITHOUT driving the Caps LED or emitting a spurious edge. A
-//! debounce window collapses a write+reload into one.
-//!
-//! The platform surface (caps read / key inject / frontmost) is behind the
-//! ds-platform traits.
-//!
-//! ## Module layout
-//! The engine was split out of one god-file into focused modules; this `lib.rs` is
-//! the crate-doc + facade that re-exports the public API the host consumes:
-//! - `boot` — lifecycle/orchestration: [`engine_run`], [`EngineError`], `install_bin`.
-//! - `engine` — the `Engine<P>` gesture state machine + the dictation-preview buffer.
-//! - `ipc` — the RPC server thread + its request-dispatch arms.
-//! - `status` — the `model_status` aggregator + the caps-event status channel.
-//! - `downloads` — background model-download state + the auto-fetch orchestration.
-//! - `config_gate` — the pure config predicates + reload-decision fns.
-//! - `barge` — the mic-barge watcher thread.
-//! - `codex_stream` — the Codex app-server subscriber: mid-turn narration for sessions
-//!   hosted on the shared codex daemon (docs/STREAMING-NARRATION.md).
+//! ## Modules
+//! - `boot` — [`engine_run`], [`EngineError`], `install_bin`
+//! - `engine` — `Engine<P>` gesture machine + dictation-preview buffer
+//! - `ipc` — RPC server + request arms
+//! - `status` — `model_status` aggregator + caps-event channel
+//! - `downloads` — background model-download + auto-fetch
+//! - `config_gate` — pure config predicates + reload decisions
+//! - `barge` — mic-barge watcher
+//! - `codex_stream` — Codex app-server mid-turn narration
+//! - `listen` / `listener` — always-listening pure core / poll-loop glue
 
-// Always-listening: `listen` is the pure, unit-tested core (endpointer, stopword,
-// turn logic); `listener` is the runtime glue the poll loop drives. The allow
-// covers a couple of inspector methods exercised only by `listen`'s unit tests.
+// `listen` is pure/tested; `listener` is runtime glue. allow covers inspector
+// methods only used by `listen`'s unit tests.
 mod child_slot;
 mod helper_stt;
 #[allow(dead_code)]
@@ -75,9 +50,8 @@ mod ipc;
 mod status;
 mod timer;
 
-// The in-process host (the `ds-core` FFI crate) consumes ONLY these two items.
+// In-process host (`ds-core` FFI) consumes only these two.
 pub use boot::{EngineError, engine_run};
 
-// Crate-root re-export so the sibling modules that pre-date the split keep
-// resolving their historical path without edits: `crate::{FinalState, PasteBuf, PasteState}`.
+// Historical crate-root paths for modules that predate the split.
 pub(crate) use engine::{FinalState, PasteBuf, PasteState};

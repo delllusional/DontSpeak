@@ -1,28 +1,15 @@
-//! ONNX inference over `kokoro-v1.0.onnx` via the `ort` crate (load-dynamic) —
-//! the Kokoro `synthesizeBatch` pipeline.
+//! ONNX inference over `kokoro-v1.0.onnx` via `ort` (load-dynamic) — `synthesizeBatch`.
 //!
-//! Exact I/O parity with kokoro-onnx `_create_audio`:
-//!   * "tokens": int64, shape [1, n+2]. padded = [0, ...tokenIds, 0] (0 at both
-//!     ends = pad reused as BOS/EOS), so len = tokens.len()+2.
-//!   * "style": f32, shape `[1, 256]`. The row is the per-voice 510*256 array
-//!     indexed by the UNPADDED token count (before bos/eos) — see
-//!     `voices::style_row`.
-//!   * "speed": f32, shape `[1]`. Clamped to 0.5..=2.0 (Kokoro `speed`; our
-//!     `rate` maps directly, unlike System TTS we do NOT use rate_to_wpm).
+//! I/O parity with kokoro-onnx `_create_audio`:
+//!   * "tokens": int64 [1, n+2], padded `[0, …ids, 0]` (pad = BOS/EOS)
+//!   * "style": f32 [1, 256] — voice 510*256 row by UNPADDED token count (`style_row`)
+//!   * "speed": f32 [1], clamped 0.5..=2.0 (`rate` maps directly; not rate_to_wpm)
 //!
-//! Output: the first output tensor (`session.outputs[0].name`, matching kokoro-onnx
-//! `session.outputNames.first()`), f32 24 kHz mono PCM in `[-1, 1]`, then
-//! `trim::trim_silence`. `try_extract_tensor::<f32>()` enforces the f32
-//! dtype and yields a flat contiguous slice; we additionally cross-check its
-//! length against the reported shape's element count.
+//! Output: first tensor, f32 24 kHz mono `[-1, 1]`, then `trim_silence`.
 //!
-//! ONNXRUNTIME, build vs runtime: with the `load-dynamic` feature this module
-//! COMPILES on a host with NO onnxruntime present — the dylib is resolved at
-//! RUNTIME from `ORT_DYLIB_PATH` (set by the caller to the downloaded
-//! libonnxruntime). If it is absent at runtime, [`KokoroSynth::load`] returns an
-//! Err and the caller degrades fail-quiet (like the STT "no model" path).
-//! Nothing here is exercised by unit tests (no model, no onnxruntime); the pure,
-//! tested pieces live in vocab/voices/trim/batch.
+//! load-dynamic: compiles without onnxruntime; dylib from `ORT_DYLIB_PATH` at runtime.
+//! Missing dylib → `load` Err → fail-quiet. Not unit-tested (no model); pure stages
+//! in vocab/voices/trim/batch.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,43 +20,33 @@ use ort::value::Tensor;
 use crate::batch::split_phonemes;
 use crate::vocab::{MAX_PHONEME_LENGTH, tokenize};
 
-/// A loaded Kokoro ONNX session + parsed per-voice style arrays.
+/// Loaded Kokoro ONNX session + per-voice style arrays.
 pub struct KokoroSynth {
     session: Session,
-    // `Arc<Vec<f32>>`, not `Vec<f32>`: each per-voice style array is ~522 KB (510×256 f32),
-    // and `synthesize()` clones the selected voice's array once per prepared batch. Holding
-    // it behind an Arc makes that clone a pointer bump instead of a half-megabyte memcpy in
-    // the synthesis hot loop. Only a 256-float row is read per forward pass (`style_row`).
+    // Arc: each style is ~522 KB; synthesize clones once per batch — pointer bump
+    // not memcpy. Only a 256-float row is read per forward (`style_row`).
     voices: HashMap<String, Arc<Vec<f32>>>,
     output_name: String,
-    /// The REALIZED execution provider this synth loaded on, for the engine stats / the child's
-    /// `PROVIDER` line — the shared [`RealizedProvider`](ds_config::RealizedProvider) type STT uses.
+    /// REALIZED EP for stats / child's `PROVIDER` (shared type with STT).
     provider: ds_config::RealizedProvider,
 }
 
 impl KokoroSynth {
-    /// The REALIZED execution provider this synth loaded on.
     pub fn provider(&self) -> ds_config::RealizedProvider {
         self.provider
     }
 }
 
 impl KokoroSynth {
-    /// Build a session from the model bytes and parse the voices npz. Call
-    /// [`ds_model::set_ort_dylib_path`] (or [`ds_model::ensure_ort_dylib`]) first
-    /// so `ort` (load-dynamic) can resolve libonnxruntime. Errors (no dylib, bad
-    /// model, bad voices) are returned for the caller to fail-quiet.
+    /// Session from model bytes + voices npz. Call [`ds_model::ensure_ort_dylib`]
+    /// (or set path) first. Errors for caller fail-quiet.
     pub fn load(model_bytes: &[u8], voices_npz: &[u8]) -> Result<Self, String> {
-        // Execution provider from DONTSPEAK_PROVIDER: "cpu" | "cuda" | "coreml"
-        // | "auto" (the `ane` token never reaches here — it routes to the native FluidAudio
-        // backend in the helper, not KokoroSynth). On Windows `auto` PREFERS CUDA (NVIDIA
-        // GPU — 2.8-4.6x faster for Kokoro, validated). On macOS `auto` stays CPU (the ort
-        // CoreML EP benchmarked slower).
+        // DONTSPEAK_PROVIDER: cpu|cuda|coreml|auto (`ane` never reaches here — FluidAudio).
+        // Windows auto → CUDA; macOS auto → CPU (ort CoreML EP slower).
         let pref = std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into());
         match Self::load_with_provider(model_bytes, voices_npz, &pref) {
             Ok(s) => Ok(s),
-            // A GPU-preferred session that fails to BUILD (driver/op/version issue)
-            // retries once on CPU so TTS never breaks — GPU is a best-effort speedup.
+            // GPU build failure retries CPU — GPU is best-effort.
             Err(e) if !pref.eq_ignore_ascii_case("cpu") => {
                 eprintln!("dontspeak/synth: provider '{pref}' failed ({e}); falling back to CPU");
                 Self::load_with_provider(model_bytes, voices_npz, "cpu")

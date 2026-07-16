@@ -1,49 +1,26 @@
-//! Startup update check: is a newer DontSpeak release out?
-//!
-//! Hits GitHub's REST `releases/latest` endpoint for this repo (which already excludes
-//! drafts/prereleases — no client-side filtering needed), parses the release's `tag_name` as
-//! semver (a leading `v` is stripped, matching this repo's tag convention — see `make-release`),
-//! and compares it against the RUNNING version via a real semver ordering (not a string
-//! compare, which would misorder e.g. "0.9.0" vs "0.10.0"). [`crate::update_check::check_for_update_at`] takes the
-//! API base as a parameter so tests can point it at a local httpmock server instead of the
-//! real `api.github.com`; [`check_for_update`] is the thin wrapper the ds-core FFI boundary
-//! calls, pointed at the real GitHub API.
-//!
-//! No async runtime (matches the rest of ds-model): one blocking `attohttpc` GET using the
-//! crate's shared timeout/TLS-root builder (`crate::download::http_get_builder`). Network —
-//! callers (the ds-core FFI, then each host's UI) must run this off the main/UI thread, the
-//! same way `ds_model_status_wait` is documented to be.
+//! Startup update check against GitHub `releases/latest` (excludes drafts/prereleases).
+//! Semver compare of `tag_name` (strip leading `v`) vs running version — not string order.
+//! [`check_for_update_at`] takes the API base for httpmock; [`check_for_update`] is the
+//! production wrapper. Blocking `http_get_builder` — run off the UI thread.
 
 use serde_json::Value;
 
-/// GitHub REST API base — parameterized so tests can swap in a local mock server.
 const GITHUB_API_BASE: &str = "https://api.github.com";
-
-/// `owner/repo` slug for the release-check endpoint (matches the workspace `repository` field
-/// in `rust/Cargo.toml`).
 const REPO_SLUG: &str = "delllusional/DontSpeak";
 
-/// Outcome of a startup update check — the shape [`UpdateInfo::to_json`] hands to the ds-core
-/// FFI (`ds_update_check_json`), which every host's UI reads to decide whether to show the
-/// "update available" pill next to the version number.
+/// Shape for `ds_update_check_json` / host "update available" UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
-    /// `true` when the latest GitHub release is a semver-newer version than `current_version`.
     pub update_available: bool,
-    /// The running version, normalized through `semver::Version` (so e.g. "0.1.0" round-trips
-    /// unchanged, but any leading `v` from the caller is stripped for consistency with
-    /// `latest_version`).
+    /// Normalized via `semver::Version` (leading `v` stripped).
     pub current_version: String,
-    /// The latest release's version, normalized the same way.
     pub latest_version: String,
-    /// The latest release's GitHub page — the "update available" pill's click-through target.
-    /// Empty if the release response carried no `html_url`.
+    /// Release page click-through; empty if response omitted `html_url`.
     pub html_url: String,
 }
 
 impl UpdateInfo {
-    /// Serialize to the JSON object the ds-core FFI hands the UI:
-    /// `{"update_available":bool,"current_version":str,"latest_version":str,"html_url":str}`.
+    /// `{"update_available","current_version","latest_version","html_url"}` for the FFI.
     pub fn to_json(&self) -> String {
         serde_json::json!({
             "update_available": self.update_available,
@@ -55,22 +32,16 @@ impl UpdateInfo {
     }
 }
 
-/// Check the real GitHub API for a release newer than `current_version` (pass the running
-/// `ds-core::VERSION`). See [`check_for_update_at`] for the exact request/parse/compare and its
-/// failure modes (network error, non-2xx, malformed JSON, a `tag_name`/`current_version` that
-/// isn't valid semver).
+/// Production check (pass running `ds-core::VERSION`). See [`check_for_update_at`].
 pub fn check_for_update(current_version: &str) -> std::io::Result<UpdateInfo> {
     check_for_update_at(GITHUB_API_BASE, current_version)
 }
 
-/// The GET + parse + compare half of [`check_for_update`], taking the API base as a parameter
-/// so tests can point it at a local mock server — everything below this is the exact
-/// production code path (same `http_get_builder`, same JSON shape, same semver compare).
+/// GET + parse + compare; `api_base` is mockable. Same path as production.
 pub fn check_for_update_at(api_base: &str, current_version: &str) -> std::io::Result<UpdateInfo> {
     let url = format!("{api_base}/repos/{REPO_SLUG}/releases/latest");
     let body = crate::download::http_get_builder(&url)
-        // GitHub's REST API rejects requests with no User-Agent header; identify ourselves
-        // rather than relying on attohttpc's generic "attohttpc/<ver>" default.
+        // GitHub rejects empty User-Agent.
         .header("User-Agent", "DontSpeak-update-check")
         .header("Accept", "application/vnd.github+json")
         .send()

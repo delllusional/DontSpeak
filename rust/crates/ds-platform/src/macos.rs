@@ -1,15 +1,10 @@
-//! macOS platform impl. Compile-verified on Apple Silicon (host build).
+//! macOS platform (Apple Silicon host-verified).
 //!
-//! * Caps key state: the physical key down/up via `IOHIDManager` (`iohid.rs`),
-//!   the robust path — the IOKit lock-state read never tracks toggles on this
-//!   host's external keyboard. IOKit (`iokit.rs`) is kept only for the §F LED
-//!   WRITE. (The IOHIDManager read needs only the Accessibility grant — which
-//!   subsumes Input Monitoring; see `iohid.rs`.)
-//! * Dictation key: `core-graphics` `CGEvent` keyboard events (modifiers carried
-//!   as flags on the base key), posted to the session event tap.
-//! * Frontmost app: `NSWorkspace.frontmostApplication.bundleIdentifier` via
-//!   objc2-app-kit, matched against [`crate::KNOWN_TERMINALS`].
-//! * Preflight: `AXIsProcessTrusted()` (read-only, no prompt).
+//! * Caps physical hold: `IOHIDManager` (`iohid.rs`); IOKit only for LED write.
+//!   Accessibility subsumes Input Monitoring (see `iohid.rs`).
+//! * Dictation: CGEvent key events to the session event tap.
+//! * Frontmost: `NSWorkspace` bundle id vs [`crate::KNOWN_TERMINALS`].
+//! * Preflight: `AXIsProcessTrusted()` (silent).
 
 mod capskey;
 mod iohid;

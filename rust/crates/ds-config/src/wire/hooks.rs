@@ -1,14 +1,6 @@
-//! Claude-contract JSON hook wiring — the SINGLE cross-platform source of truth for the
-//! DontSpeak voice hooks in any client using Claude Code's JSON hook contract: Claude
-//! Code's `~/.claude/settings.json` (args-array runner) and Qwen Code's
-//! `~/.qwen/settings.json` (inline-shell runner — see [`HookCommandStyle`]). Replaces the
-//! old per-platform copies (macOS claude/settings.snippet.json, Windows
-//! settings.snippet.json, linux/settings.snippet.json), which had drifted. PURE
-//! merge/strip here (no disk); the `dontspeak wire <client>` orchestrator (via the
-//! `dontspeak` crate's `wire::hooks::claude_json_hooks`) owns path resolution, backup, and
-//! the atomic write. Mirrors `merge_settings`' coerce-to-object / get-or-create / additive
-//! discipline so unrelated keys (the client's own hooks, permissions, model) are never
-//! clobbered.
+//! Claude-contract JSON hooks — single source for Claude Code (args array) and Qwen
+//! (inline shell; [`HookCommandStyle`]). Pure merge/strip; wire orchestrator owns disk.
+//! Additive: never clobbers unrelated keys.
 
 use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
 use super::registry::HookCommandStyle;

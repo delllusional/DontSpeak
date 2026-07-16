@@ -1,29 +1,17 @@
-//! ds-aec — acoustic-echo-cancelled duplex audio (see docs/AEC.md).
+//! Acoustic-echo-cancelled duplex audio (docs/AEC.md).
 //!
-//! One platform unit owns BOTH the speaker render and the mic capture, so the OS
-//! can subtract the played-back TTS (the far-end reference) from the captured mic
-//! signal — letting STT keep listening *while* TTS speaks (full-duplex) instead
-//! of the strict half-duplex gate (mic closed during TTS) we fall back to.
+//! One platform unit owns speaker + mic so the OS can subtract TTS (far-end reference)
+//! from the mic — full-duplex STT during TTS instead of half-duplex (mic closed during TTS).
 //!
-//!   * macOS — a single `kAudioUnitSubType_VoiceProcessingIO` AudioUnit. Apple's
-//!     built-in voice processing does the AEC; it owns both streams so there is
-//!     no delay/clock-drift alignment to do ourselves.
-//!   * Windows — a WASAPI capture client opened in the "Communications" category,
-//!     which engages the OS capture-side AEC APO. Capture-side only: rodio keeps
-//!     rendering TTS (`owns_render() == false`); the OS taps the render endpoint as
-//!     the echo reference itself.
-//!   * Linux — a PulseAudio/PipeWire `module-echo-cancel` cancelled source, opened by
-//!     name through the Pulse simple API (works on both servers). Capture-side only,
-//!     like Windows (`owns_render() == false`); rodio keeps rendering and the server's
-//!     WebRTC canceller references the render endpoint. (A future in-process WebRTC APM
-//!     backend — `owns_render() == true` — is the alternative noted in docs/AEC.md's
-//!     "Why native OS AEC" section.)
-//!   * other — an unsupported stub; the caller degrades to the half-duplex path.
+//! - **macOS** — one `kAudioUnitSubType_VoiceProcessingIO` unit (AEC built-in; both streams).
+//! - **Windows** — WASAPI Communications capture (capture-side AEC APO). `owns_render() == false`;
+//!   rodio renders; OS taps the render endpoint as reference.
+//! - **Linux** — PulseAudio/PipeWire `module-echo-cancel` source via Pulse simple API.
+//!   Capture-side only like Windows. (In-process WebRTC APM is a future option in docs/AEC.md.)
+//! - **other** — stub; caller degrades to half-duplex.
 //!
-//! [`DuplexAudio`] is `!Send` on macOS (the `AudioUnit`, like the cpal capture
-//! stream, is `!Send`): open and consume it on ONE thread (the helper's playback
-//! thread). Its render/input callbacks run on the CoreAudio realtime thread and
-//! talk to that thread through lock-free SPSC rings.
+//! macOS [`DuplexAudio`] is `!Send` (AudioUnit): open/consume on one helper thread.
+//! RT callbacks talk via lock-free SPSC rings.
 
 #[cfg(any(target_os = "macos", windows))]
 mod resample;
@@ -33,8 +21,7 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{CaptureHandle, DuplexAudio, RenderHandle};
 
-// The Windows + Linux backends share an identical `Mutex<VecDeque<f32>>`-backed
-// `CaptureHandle` and overflow-trim (macOS uses ringbuf, above) — both live in `shared`.
+// Win+Linux share Mutex+VecDeque CaptureHandle + overflow trim (macOS uses ringbuf).
 #[cfg(any(windows, target_os = "linux"))]
 mod shared;
 #[cfg(any(windows, target_os = "linux"))]

@@ -1,13 +1,8 @@
-//! Push-based logs-dir watch — the client-side analogue of
-//! `dontspeakd::config_watch` (that one watches config.toml's parent dir; this
-//! one watches the logs dir), but with no persistent state: `wait_logs_changed`
-//! spawns an EPHEMERAL watcher per call, blocks up to `timeout`, and returns.
-//! Callers loop: call → re-read `combined_log_json` → render → call again
-//! (mirrors how `ds_model_status_wait` is looped, but with no `since` token —
-//! the caller never diffs content, it always re-renders the full current tail,
-//! so a change landing in the tiny gap between one call returning and the next
-//! call's watcher attaching is only caught on the NEXT write — acceptable for a
-//! human-facing log viewer, not correctness-critical).
+//! Push-based logs-dir watch — client-side analogue of `dontspeakd::config_watch`,
+//! but ephemeral: each `wait_logs_changed` spawns a watcher, blocks up to `timeout`, returns.
+//! Callers loop (call → re-read `combined_log_json` → render). No `since` token — always
+//! re-render the full tail. A change in the gap between return and the next attach is only
+//! caught on the next write (acceptable for a human log viewer).
 
 use std::path::Path;
 use std::sync::mpsc;
@@ -15,20 +10,13 @@ use std::time::{Duration, Instant};
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
-/// Trailing-edge quiet window: once the first relevant event lands, keep
-/// draining for this long before returning, so a burst of rapid appends (many
-/// log lines in one flush) settles into one wake instead of one per line. Short
-/// on purpose — this is a live log view, not config.toml (whose own
-/// `RELOAD_QUIET_WINDOW` is 750ms); logs should feel closer to instant.
+/// Trailing-edge quiet window after the first relevant event — coalesces a burst into one
+/// wake. Short on purpose (live view; config.toml's window is 750ms).
 const LOG_WAIT_DEBOUNCE: Duration = Duration::from_millis(150);
 
-/// Block until the logs directory (`log_file`'s parent) has a relevant
-/// change — any `*.log` file created/modified/removed, including the unified
-/// log itself and every sibling aux log, but excluding rotated `*.log.N`
-/// (same predicate `combined_log_json_at` already uses: extension must be
-/// exactly `log`) — or until `timeout` elapses. Always returns; the caller
-/// re-reads `combined_log_json` unconditionally afterward (same content on a
-/// timeout as before the call, which is harmless).
+/// Block until `log_file`'s parent has a relevant `*.log` change (unified + aux; not
+/// `*.log.N` — extension must be exactly `log`, same as `combined_log_json_at`) or
+/// `timeout` elapses. Always returns; caller re-reads `combined_log_json` afterward.
 pub fn wait_logs_changed(log_file: &Path, timeout: Duration) {
     wait_logs_changed_at(log_file.parent(), timeout);
 }
@@ -50,10 +38,8 @@ fn wait_logs_changed_at(dir: Option<&Path>, timeout: Duration) {
     });
     let mut watcher = match watcher {
         Ok(w) => w,
-        // Graceful fallback: the watcher couldn't init (e.g. inotify fd
-        // exhaustion). Sleep out the timeout so the caller's loop just re-reads
-        // on its own cadence this one time — NOT a persistent poll timer, since
-        // the very next call retries a fresh watcher.
+        // Watcher init failed (e.g. inotify exhaustion): sleep once; next call retries.
+        // Not a persistent poll timer.
         Err(_) => {
             std::thread::sleep(timeout);
             return;
@@ -68,8 +54,7 @@ fn wait_logs_changed_at(dir: Option<&Path>, timeout: Duration) {
     if rx.recv_timeout(timeout).is_err() {
         return; // timed out with no event
     }
-    // Trailing-edge debounce, capped by the overall deadline so a hot log never
-    // blows past the caller's requested timeout.
+    // Debounce, capped by deadline so a hot log never exceeds the caller's timeout.
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let wait = LOG_WAIT_DEBOUNCE.min(remaining);
@@ -77,13 +62,11 @@ fn wait_logs_changed_at(dir: Option<&Path>, timeout: Duration) {
             break;
         }
     }
-    // `watcher` drops here — ephemeral by design (see module doc).
+    // `watcher` drops here — ephemeral by design (module doc).
 }
 
-/// Same relevance gate as `dontspeakd::config_watch::is_relevant` (duplicated,
-/// not shared: `ds-config` cannot depend on `dontspeakd`, which depends on
-/// `ds-config`) — a pure `Access` or the catch-all `Other` can't reflect a log
-/// write; `Create`/`Modify`/`Remove` all pass.
+/// Same gate as `dontspeakd::config_watch::is_relevant` (duplicated: cycle if shared via
+/// `ds-config` ↔ `dontspeakd`). Access/Other ignored; Create/Modify/Remove pass.
 fn is_relevant(kind: &EventKind) -> bool {
     matches!(
         kind,
@@ -91,11 +74,8 @@ fn is_relevant(kind: &EventKind) -> bool {
     )
 }
 
-/// Does any path in the event end in `.log`? Matches `combined_log_json_at`'s
-/// own aux-file filter exactly, so "what wakes the watcher" and "what the next
-/// read returns" never drift: this covers the unified log (`dontspeak.log`) AND
-/// every sibling aux log, and naturally excludes rotated `dontspeak.log.1`/`.2`
-/// (their extension is the numeral, not `log`).
+/// Path ends in `.log`? Matches `combined_log_json_at`'s aux filter so wake set and read set
+/// never drift (excludes rotated `dontspeak.log.1` — extension is the numeral).
 fn touches_a_log_file(paths: &[std::path::PathBuf]) -> bool {
     paths
         .iter()
@@ -106,17 +86,10 @@ fn touches_a_log_file(paths: &[std::path::PathBuf]) -> bool {
 mod tests {
     use super::*;
 
-    // No test exercises a real OS-delivered fs event end-to-end here, on purpose —
-    // matching `dontspeakd::config_watch`'s own test scope (it only tests its pure
-    // `is_relevant`/`event_touches_config` helpers, never a live cross-thread FSEvents
-    // round trip). Real event delivery timing is an OS/CFRunLoop concern outside this
-    // process's control and was confirmed flaky specifically under some `cargo test`
-    // child-process invocations in this workspace (a manually compiled + directly
-    // executed binary reliably saw the write in ~10-270ms; the identical code spawned
-    // as a `cargo test` child sometimes never received a callback at all) — a real
-    // dependency on OS-level event delivery, not a bug in `wait_logs_changed_at`
-    // itself. `times_out_with_no_write` below only depends on elapsed wall time, not
-    // on any event arriving, so it stays reliable.
+    // No live FS event e2e here — same scope as config_watch (pure helpers only).
+    // OS event delivery under `cargo test` child processes has been flaky in this workspace
+    // (direct binary fine; cargo test sometimes never gets the callback). Not a bug in
+    // wait_logs_changed_at. times_out_with_no_write only needs wall time.
 
     #[test]
     fn times_out_with_no_write() {

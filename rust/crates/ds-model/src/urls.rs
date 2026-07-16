@@ -413,32 +413,24 @@ pub const fn current_platform() -> Platform {
     }
 }
 
-/// A third-party project the app downloads at runtime: what it's for, its license,
-/// and the files it pulls. Pure data; `crate::libraries` collects it for the UI. The
-/// `files` list is empty for projects whose files are platform-selected (ONNX Runtime,
-/// CUDA, cuDNN) — those are assembled per-platform in the collector.
+/// Downloaded third-party project for the Libraries tab. `files` empty ⇒ platform-
+/// selected assets assembled in the collector (ORT / CUDA / cuDNN).
 #[derive(Debug, Clone, Copy)]
 pub struct Project {
-    /// Display name.
     pub name: &'static str,
-    /// One-line "what we use it for" (the UI subtitle).
+    /// UI subtitle.
     pub usage: &'static str,
-    /// Project homepage / model card.
     pub homepage: &'static str,
-    /// SPDX id where one exists (Apache-2.0, MIT, CC-BY-4.0); else the vendor license
-    /// NAME (NVIDIA's CUDA/cuDNN agreements aren't SPDX).
+    /// SPDX id when one exists; else vendor name (CUDA/cuDNN aren't SPDX).
     pub license: &'static str,
-    /// Canonical URL of the license text.
     pub license_url: &'static str,
-    /// The platforms this project applies to — the catalog shows it only on these. The
-    /// single source of the per-platform rule (see [`Platform`]).
+    /// Catalog filter — sole per-platform rule source (see [`Platform`]).
     pub platforms: &'static [Platform],
-    /// The downloads this project contributes (empty ⇒ platform-selected, see above).
+    /// Empty ⇒ platform-selected files assembled in collector.
     pub files: &'static [Download],
 }
 
 impl Project {
-    /// Whether this project is shown on `platform` (its applicability list contains it).
     pub fn runs_on(&self, platform: Platform) -> bool {
         self.platforms.contains(&platform)
     }

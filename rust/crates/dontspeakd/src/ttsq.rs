@@ -1,33 +1,12 @@
-//! Engine-owned audio queue — the single serializer for speech and earcons.
+//! Engine-owned audio queue — single serializer for speech and earcons.
 //!
-//! Producers enqueue speech blocks and session-scoped completion cues onto ONE bounded FIFO.
-//! There is no "reply vs narration" speech kind; what gets spoken is decided upstream by the
-//! `narrate` setting. ONE worker thread plays every action in order on the
-//! WARM child (`TtsManager`), so there is no per-block model reload — with one scoped
-//! exception: a needs-input cue under the background focus hold plays out of band (see
-//! [`TtsQueue::dispatch_earcon`]). The warm child stays
-//! DUMB: ordering, the mic feedback gate, and the barge/pause/resume policy all live here.
+//! Bounded FIFO; one worker on the warm child (`TtsManager`). No per-block model reload
+//! (exception: needs-input cue under focus hold — [`TtsQueue::dispatch_earcon`]).
+//! Ordering, mic gate, barge/pause live here; child stays dumb.
 //!
-//! Playback granularity: each block is sent to the warm child as ONE `tts.speak`. The
-//! child runs the shared Rust text-to-phoneme frontend once, transactionally prepares the
-//! same bounded phoneme batches through ONNX or Core ML, then begins playback — so there
-//! is no per-block reload or backend-specific pronunciation path here.
-//!
-//! Focus gate (cross-platform, only when the `pause_in_background` config is set):
-//! the engine poll thread publishes whether a terminal is frontmost via
-//! `set_terminal_front`; the worker HOLDS the whole queue (nothing dropped) while no
-//! terminal is frontmost — so narration pauses when you tab to a browser and resumes
-//! when you return. Self-arming: the gate only engages after a terminal has been seen
-//! frontmost once, so an unrecognized terminal emulator degrades to always-play
-//! rather than going mute.
-//!
-//! Record barge (mic goes active, HALF-DUPLEX only): the whole queue PAUSES —
-//! every item is kept, nothing is dropped — and resumes once the mic
-//! frees. The interrupted item is re-spoken from its top (a block plays continuously,
-//! so there is no mid-block offset to resume from). Full-duplex never pauses: the
-//! AEC mic stays open and you dictate over the reply.
-//!
-//! A hard barge (StopSpeech / long-press reset) still CLEARS the whole queue.
+//! Focus gate (`pause_in_background`): hold queue while no terminal frontmost; self-arms
+//! after first frontmost sighting. Record barge (half-duplex): pause all, resume from top;
+//! full-duplex never pauses. Hard barge clears the queue.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -72,18 +51,11 @@ impl Drop for InFlightGuard<'_> {
 /// Rotates greeting templates so consecutive opens don't repeat the same line.
 static GREET_ROTATION: AtomicUsize = AtomicUsize::new(0);
 
-/// Hard cap on `pool_assignments`: a client that never sends `SessionEnd` (a crashed
-/// hook, or one hammering `GreetSession`/`Speak` with fresh, client-supplied session
-/// strings) must not grow this map for the engine process's lifetime. On overflow the
-/// whole map is cleared rather than growing further — `pick_pool_voice` already
-/// tolerates a session's pick going stale and being re-derived (see
-/// `stale_assignment_is_dropped_when_voice_leaves_the_pool`), so this is safe: a live
-/// terminal just gets a (possibly different) pool voice on its NEXT reply.
+/// Cap `pool_assignments` (clients that never SessionEnd). Overflow clears map;
+/// `pick_pool_voice` re-derives safely.
 const POOL_ASSIGNMENTS_MAX: usize = 128;
 
-/// Admission IDs outlive queue playback so a producer that was interrupted between the
-/// engine's success response and its state-file commit can retry safely. SessionEnd removes
-/// scoped entries; this cap bounds clients that never send it.
+/// Admission IDs outlive playback for safe producer retry; SessionEnd prunes; cap bounds leaks.
 const ACCEPTED_NARRATION_IDS_MAX: usize = 8192;
 
 #[derive(Default)]
@@ -111,15 +83,10 @@ impl AcceptedNarrations {
     }
 }
 
-/// One item may carry at most 10 KiB of UTF-8 text, regardless of whether it arrived through
-/// IPC or the in-process Codex subscriber. Keeping the limit here prevents a producer from
-/// bypassing it by avoiding the wire protocol.
+/// Per-item text cap (IPC and in-process Codex) — enforced here so wire can't be bypassed.
 pub(crate) const MAX_SPEAK_BYTES: usize = 10 * 1024;
 
-/// Bound pending work so a stalled focus/microphone gate cannot retain unlimited audio.
-/// Speech and passive cues have separate item quotas: a cue burst must never consume the
-/// capacity reserved for text the user still needs to hear. The current action is tracked
-/// separately as `in_flight`.
+/// Pending bounds under stalled focus/mic. Speech and cues have separate quotas.
 const MAX_PENDING_ITEMS: usize = 128;
 const MAX_PENDING_CUES: usize = 64;
 const MAX_PENDING_BYTES: usize = 1024 * 1024;
@@ -159,39 +126,25 @@ fn greeting_line(name: Option<&str>, idx: usize) -> String {
     }
 }
 
-/// PURE pool pick: the voice `session` should get from `pool` given the CURRENT
-/// `assignments`. If already assigned, return it. Else pick the first pool voice not
-/// taken by another session (so terminals differ); when all are taken, round-robin by
-/// assignment count. `pool` must be non-empty.
+/// Pure pool pick: reuse assignment if still in pool; else first free voice; else RR.
+/// Stale assignments (pool edited without clear) must not linger.
 fn pick_pool_voice(
     assignments: &HashMap<String, String>,
     pool: &[String],
     session: &str,
 ) -> String {
-    // Reuse this session's prior pick ONLY if it's still in the live pool. The pool is
-    // `tts_built_in_voices`, which the user can change at runtime (set_config →
-    // hot-reload) WITHOUT clearing `pool_assignments`; a cached pick that's no longer
-    // configured must NOT linger, or the terminal keeps speaking a voice the user
-    // dropped (e.g. greets/replies in the old default `af_sarah` after switching to
-    // `af_nicole` — heard as "Sarah introduces herself as Nicole"). When the cached
-    // pick is stale we fall through and re-pick from the current pool; `assign_pool_voice`
-    // overwrites the stale map entry with this fresh pick, so the heal is permanent.
     if let Some(v) = assignments.get(session)
         && pool.iter().any(|p| p == v)
     {
         return v.clone();
     }
     pool.iter()
-        // Skip voices already CLAIMED by another live session (a stale self-entry for
-        // `session` isn't in `pool`, so it never blocks here) so terminals stay distinct.
         .find(|v| !assignments.iter().any(|(s, a)| s != session && a == *v))
         .cloned()
         .unwrap_or_else(|| pool[assignments.len() % pool.len()].clone())
 }
 
-/// Insert `session → voice` into `assignments`, then clear the whole map if it now
-/// exceeds `cap`. Pulled out of `assign_pool_voice` so the "never grows past cap"
-/// invariant is unit-testable without a live `TtsQueue`. PURE.
+/// Insert assignment; clear map if over `cap`. Pure (unit-testable without TtsQueue).
 fn record_pool_assignment(
     assignments: &mut HashMap<String, String>,
     session: &str,

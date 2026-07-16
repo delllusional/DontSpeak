@@ -1,16 +1,12 @@
-//! Implements the `log` crate's `Log` trait as a thin sink over `log_cached`, so callers
-//! use `log::info!`/`warn!`/`error!`/`debug!` instead of calling `ds_log::log_cached`
-//! directly. Does not touch `log.rs`'s engine (rotation, atomic writes, live watch).
+//! `log` crate sink over `log_cached` — use `log::info!`/… instead of calling `ds_log` directly.
+//! Does not touch rotation / atomic writes / live watch in `log.rs`.
 
 use crate::log::{LogLevel, log_cached};
 
-/// Pure `log::Record` → `(level, target, message)` mapping, factored out so it can be unit
-/// tested directly (constructing a real `log::Record`) without going through the global
-/// `log::set_logger`, which can only succeed once per process. Returns owned `String`s
-/// rather than borrowing from `record`: `log::Record`'s `target` and `args` fields share
-/// one lifetime parameter, so a borrowed return would tie `target` to `args`'s lifetime
-/// too — needlessly restrictive for callers (and awkward to construct in tests, since
-/// `format_args!`'s backing temporary only lives for the enclosing statement).
+/// Pure `log::Record` → `(level, target, message)`, factored for unit tests without
+/// `log::set_logger` (once per process). Owned `String`s: `Record`'s `target`/`args` share
+/// one lifetime, so borrowing would over-constrain callers (`format_args!` temps die at the
+/// enclosing statement).
 fn map_record(record: &log::Record) -> (LogLevel, String, String) {
     let level = match record.level() {
         log::Level::Error => LogLevel::Error,
@@ -40,11 +36,9 @@ impl log::Log for DsLogLogger {
 
 static LOGGER: DsLogLogger = DsLogLogger;
 
-/// Install the unified-log sink as this process's global `log` backend, at a baseline
-/// max level of `Info`. Idempotent (safe to call more than once per process — e.g.
-/// dontspeakd's engine can stop/restart within one long-lived host app; only the first
-/// call installs the logger). Callers with their own DONTSPEAK_DEBUG gate raise the level
-/// afterward via `log::set_max_level(log::LevelFilter::Debug)`.
+/// Install the unified-log sink as the process global `log` backend (baseline `Info`).
+/// Idempotent (engine stop/restart in one host). Raise via `log::set_max_level` when
+/// `DONTSPEAK_DEBUG` is set.
 pub fn init() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -60,8 +54,7 @@ mod tests {
     #[test]
     fn map_record_maps_level_target_and_message() {
         let mb = 12;
-        // `format_args!`'s backing temporary only lives for the enclosing statement, so
-        // build the record and call map_record within a single statement.
+        // `format_args!` temporary lives only for the enclosing statement.
         let (level, target, message) = map_record(
             &log::Record::builder()
                 .level(log::Level::Warn)

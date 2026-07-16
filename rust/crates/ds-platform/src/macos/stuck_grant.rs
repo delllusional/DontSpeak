@@ -1,21 +1,9 @@
-//! Shared "denied-while-already-trusted" stuck-grant counter/latch.
+//! Shared "denied while already trusted" latch for `IOHIDManagerOpen` (see `iohid.rs`).
 //!
-//! The bug class this exists for (see `iohid.rs`'s module doc for the full story): a
-//! macOS Accessibility grant made WHILE the process is already running does not
-//! retroactively unstick an already-open (or already-attempted) `IOHIDManagerOpen`
-//! handle in that SAME process — recreating the manager doesn't help either. Only a
-//! full quit + relaunch clears it. Any code that opens such a handle needs a way to
-//! tell "still waiting for the user to grant Accessibility" (normal, unbounded, silent
-//! wait) apart from "the grant landed, but THIS process's handle is stuck denied
-//! anyway" (needs the app to relaunch itself — see `dontspeakd::boot::engine_run`).
-//!
-//! Both `iohid.rs`'s caps-HID monitor and `led.rs`'s LED writer hit exactly this
-//! shape, so the counter/latch lives here once instead of twice. Each caller keeps its
-//! own retry MECHANISM (a dedicated thread blocked in a run loop for the HID monitor,
-//! which needs to stay open continuously to receive callbacks; a throttled retry on
-//! next use for the LED writer, which only needs to be open at the moment it's
-//! actually driven) — only the "how many denials while trusted, and when do we give
-//! up and latch" bookkeeping is shared.
+//! Mid-process Accessibility grant does not unstick open attempts in-process — only
+//! relaunch does. Distinguishes "waiting for grant" from "granted but stuck" (engine
+//! self-relaunch). Shared by caps-HID monitor and LED writer; each keeps its own retry
+//! loop, only the denial-while-trusted count lives here.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;

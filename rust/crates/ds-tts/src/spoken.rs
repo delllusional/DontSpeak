@@ -1,19 +1,16 @@
-//! Render agent text into the prose that the speech frontend should receive.
+//! Agent text → prose for the speech frontend.
 //!
-//! Markdown is structure, not pronunciation. Parsing it preserves visible labels and code
-//! while omitting formatting syntax, HTML tags, and link destinations. Bare URL tokens become
-//! the word "link" because reading them character-by-character is rarely useful narration.
+//! Markdown is structure, not pronunciation: keep labels/code; drop formatting,
+//! HTML tags, link destinations. Bare URLs → the word "link".
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
-/// Prose safe to pass to text normalization and grapheme-to-phoneme conversion.
+/// Prose safe for normalize + G2P.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpokenText(String);
 
-/// Agent replies are GitHub-flavored, not bare CommonMark. `Parser::new` enables NO
-/// extensions, so tables, `~~strike~~`, `- [x]` and `[^1]` survive as literal text and reach
-/// the number expander — a footnote marker came out as "Claim caret one" and a table was read
-/// as one run-on line of pipes and dashes. Enable exactly the constructs we then discard.
+/// GFM extensions (tables, strike, tasklists, footnotes) — bare CommonMark leaves
+/// them as literal text that reaches the number expander ("Claim caret one").
 fn markdown_options() -> Options {
     Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
@@ -42,7 +39,7 @@ impl SpokenText {
                 Event::Html(html) | Event::InlineHtml(html) => {
                     rendered.push_str(&strip_html_tags(&html));
                 }
-                // Footnote markers and checkbox glyphs are structure, not prose.
+                // Footnotes / checkboxes are structure, not prose.
                 _ => {}
             }
         }
@@ -95,9 +92,8 @@ fn is_block_end(tag: &TagEnd) -> bool {
     )
 }
 
-/// Drop `<...>` tag spans and `<!-- ... -->` comments from raw HTML, keeping the residual
-/// visible text. Speech-oriented, not an HTML parser: an unterminated `<` swallows the rest
-/// of the event, which for well-formed agent output only ever drops markup.
+/// Drop tags/comments; keep residual text. Not a real HTML parser: unterminated
+/// `<` swallows the rest (for agent output only drops markup).
 fn strip_html_tags(html: &str) -> String {
     let mut text = String::with_capacity(html.len());
     let mut rest = html;
@@ -126,21 +122,16 @@ fn omit_urls_and_collapse_whitespace(rendered: &str) -> String {
         .join(" ")
 }
 
-/// Replace a bare URL with the word "link", **keeping the punctuation wrapped around it**.
-/// Replacing the whole whitespace token swallowed the sentence's final stop
-/// ("See https://example.com." → "See link"), which fused two sentences into one run-on and
-/// destroyed the `.!?` boundaries `batch::pack_batches` prefers to break on.
+/// Bare URL → "link", **keeping wrapped punctuation** (else "See https://…." →
+/// "See link" fuses sentences and breaks `batch` `.!?` boundaries).
 fn spoken_token(token: &str) -> String {
     const OPENERS: &[char] = &['(', '[', '{', '<', '"', '\'', '‘', '“', '„', '«', '‹'];
-    // '“' is both an English OPENER and the German-style CLOSER („so“) — a token end is
-    // only ever the closing role, so listing it here is safe.
+    // '“' is English OPENER and German CLOSER — at token end only the closing role applies.
     const CLOSERS: &[char] = &[
         ')', ']', '}', '>', '"', '\'', '’', '”', '“', '»', '›', '.', ',', ';', ':', '!', '?', '…',
         '。', '，', '；', '：', '！', '？',
     ];
-    // In agent prose these commonly delimit the next sentence without whitespace. Raw URL
-    // path/query text can contain them, so this is intentionally a speech-oriented heuristic,
-    // not a general URL parser. Split at the first one instead of only trimming the token end.
+    // Speech heuristic: split at first unicode sentence boundary (may appear mid-URL).
     const UNICODE_BOUNDARIES: &[char] =
         &['’', '”', '»', '›', '…', '。', '，', '；', '：', '！', '？'];
 

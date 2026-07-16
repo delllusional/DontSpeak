@@ -1,19 +1,6 @@
-//! MCP server registration for TOML configs (Grok style `[mcp_servers.<name>]`).
-//!
-//! Pure shaper for `WireMechanism::TomlMcp`. Grok stores MCP servers in
-//! `~/.grok/config.toml` (and project `.grok/config.toml`) under a `[mcp_servers]` table.
-//! We register the same stdio `DontSpeak` entry as the JSON path.
-//!
-//! Additive + idempotent. `command`/`args` are updated in place so reinstalls
-//! re-point the binary. Other keys the user or Grok added on the entry (env,
-//! timeouts, etc.) are preserved. Invalid TOML is rejected with `Err` (by both
-//! merge and strip) rather than silently left alone or reported as changed — the
-//! caller (`wire::mcp::apply_toml`) turns that into a hard error, matching the
-//! JSON MCP path's `read_json_or_bail` convention.
-//! The public boundary deliberately remains `Result<String, String>`: its sole caller handles
-//! every failure identically, so there is no failure-kind branch for a typed error to serve.
-//!
-//! Uses `toml_edit` for format-preserving edits (comments, ordering).
+//! TOML MCP registration (`[mcp_servers.<name>]`, Grok). Pure additive/idempotent shaper.
+//! Updates command/args; preserves other keys. Invalid TOML → Err (not silent).
+//! `toml_edit` for format preservation. `Result<String, String>` matches sole caller's needs.
 
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 

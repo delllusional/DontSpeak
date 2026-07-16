@@ -1,4 +1,4 @@
-//! The mic-barge watcher thread that pauses TTS when a FOREIGN mic goes live.
+//! Mic-barge watcher: pause TTS when a FOREIGN mic goes live.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,21 +6,10 @@ use std::time::Duration;
 
 use crate::ttsq::TtsQueue;
 
-/// Auto-resume a foreign-mic barge after this many ticks (×150 ms ≈ 6 s) even if the
-/// mic STILL reads active. A warm/foreign capture session can stay `active`
-/// indefinitely (Windows WASAPI never flips it `Inactive`), which would latch
-/// `is_mic_active()` true and — with a purely edge-triggered resume — wedge the queue
-/// paused forever. Bounding the barge makes a stuck probe self-heal; ~6 s is long
-/// enough not to chop a genuine barge.
+/// Bound foreign-mic barge (~6 s) so sticky WASAPI `active` can't pause forever.
 const BARGE_MAX_TICKS: u32 = 40;
 
-/// How many ticks (×150 ms ≈ 600 ms) to withhold foreign-mic rising-edge detection after
-/// OUR dictation ends while the mic still reads active. `stop_recording`'s mic teardown
-/// (the helper-process `lstop`) is async and can plausibly leave `active` reading true
-/// for more than a single poll tick even with no foreign capture involved at all — so a
-/// fixed one-shot re-arm is not enough; we need an actual bounded window sized to ride
-/// out that lag. 600 ms is comfortably longer than the teardown lag observed in practice
-/// while still catching a genuinely overlapping foreign mic promptly once it expires.
+/// Withhold foreign rising-edge after OUR dictation ends (~600 ms) — async `lstop` lag.
 const TEARDOWN_GRACE_TICKS: u32 = 4;
 
 /// What a single watcher tick decides to do to the TTS queue. PURE result of

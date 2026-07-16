@@ -1,8 +1,7 @@
-//! Strict MCP 2025-11-25 / JSON-RPC 2.0 stdio boundary. Framing, envelope and
-//! lifecycle failures stay protocol errors; only failures from a valid tool
-//! invocation become `CallToolResult.isError`. Tool calls use a small bounded
-//! worker pool so cancellation notifications remain observable while `listen`
-//! is blocked on its streaming IPC connection.
+//! Strict MCP 2025-11-25 / JSON-RPC 2.0 stdio boundary. Framing, envelope, and
+//! lifecycle failures are protocol errors; only failures from a valid tool
+//! invocation become `CallToolResult.isError`. Bounded worker pool so
+//! cancellation stays observable while `listen` blocks on streaming IPC.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -557,8 +556,8 @@ fn initialize(message: &Value) -> Value {
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
     });
-    // Grok ignores passive-hook `additionalContext` (issue #95). Clients that honor MCP
-    // `initialize.instructions` still get the digest contract at connect when digests are on.
+    // Grok ignores passive-hook additionalContext (#95); MCP initialize.instructions still
+    // delivers the digest contract at connect when digests are on.
     if digests_narration_on() {
         result.as_object_mut().expect("object").insert(
             "instructions".into(),
@@ -568,8 +567,7 @@ fn initialize(message: &Value) -> Value {
     result
 }
 
-/// Whether digests narration is enabled in the live config. Best-effort: missing paths /
-/// config fail open to `false` so initialize never depends on a writable home.
+/// Digests on in live config. Missing paths/config → false (initialize must not need home).
 fn digests_narration_on() -> bool {
     let Some(paths) = ds_config::Paths::resolve() else {
         return false;

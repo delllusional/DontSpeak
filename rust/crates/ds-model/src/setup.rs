@@ -14,68 +14,40 @@ use crate::spec::{
     sepformer_spec,
 };
 
-/// One asset fetch in a set: download a single file, streaming its bytes through the
-/// callback the aggregator hands in. Boxed so a set's steps — the model files and the
-/// shared onnxruntime archive, which have DIFFERENT fetchers ([`ensure_with_progress`]
-/// vs [`ensure_onnxruntime_with_progress`]) — live in one uniform list.
-///
-/// `pub(crate)`: [`ort::ensure_cuda_runtime_with_progress`](crate::ort::ensure_cuda_runtime_with_progress)
-/// reuses this SAME aggregator (one `DownloadStep` per CUDA wheel) instead of inventing a
-/// second progress mechanism for the shared GPU runtime.
+/// One file fetch in a multi-step set (model + ORT fetchers share one list).
+/// Also used by CUDA wheel download (same aggregator).
 pub(crate) type DownloadStep = Box<dyn FnOnce(&dyn Fn(u64, u64)) -> std::io::Result<()>>;
 
-/// Run a whole asset set as ONE monotonic `(downloaded, total)` stream through a SINGLE
-/// callback path, reaching `total` EXACTLY when the last byte lands — "100% == downloaded"
-/// (the dot then leaves the ring for its solid-orange warming state, decided separately by
-/// the status machine; this function's job ends at bytes-on-disk).
-///
-/// `total` is the summed manifest size of the set. Each step reports its OWN file's live
-/// bytes; the aggregator rolls the ACTUAL transferred bytes of every completed file (for
-/// the onnxruntime step, the compressed-archive bytes — which equal that step's manifest
-/// slice) into a running `base` (never the manifest estimate — so a file whose real size
-/// differs from its estimate can't shift later files' baseline), clamps to `total`, and
-/// never emits a value below the last one. The net effect: the bar can only ever move
-/// forward. This is the ONE place `(done, total)` is synthesized for every asset set — the
-/// per-file offset stitching that used to let the bar jump backward at file boundaries is
-/// gone.
-///
-/// On a FULL fetch (fresh install — every file absent) this climbs smoothly 0→`total`. A
-/// step whose asset is ALREADY present streams nothing (its fetcher returns early), so
-/// `base` doesn't advance for it: a partial fetch (e.g. the shared onnxruntime dylib
-/// already on disk from the sibling engine) tracks only the bytes it actually pulls and
-/// then the forced final emit lands it on 100% — still monotonic, but the "missing" bytes
-/// resolve as one step to full at the end rather than a steady climb.
+/// Monotonic aggregate `(done, total)` across steps. `base` uses actual transferred
+/// bytes (not manifest estimates) so size drift can't regress the bar. Already-present
+/// steps stream nothing; forced final emit still lands on 100%. Sole progress synthesizer.
 pub(crate) fn run_download_set(
     progress: &dyn Fn(u64, u64),
     total: u64,
     steps: Vec<DownloadStep>,
 ) -> std::io::Result<()> {
     use std::cell::Cell;
-    let base = Cell::new(0u64); // actual bytes summed from files already finished
-    let cur = Cell::new(0u64); // max bytes seen for the file currently in flight
-    let last = Cell::new(0u64); // last value emitted (the monotonic guard)
+    let base = Cell::new(0u64);
+    let cur = Cell::new(0u64);
+    let last = Cell::new(0u64);
     for step in steps {
         cur.set(0);
         let emit = |done: u64, _total: u64| {
             if done > cur.get() {
                 cur.set(done);
             }
-            // Clamp to the total, then never go below what we've already shown.
             let v = (base.get() + done).min(total).max(last.get());
             last.set(v);
             progress(v, total);
         };
         step(&emit)?;
-        // Roll THIS file's real byte count into the base for the next file.
         base.set((base.get() + cur.get()).min(total));
     }
-    // The last byte has landed — report an exact 100% so "downloaded" is unambiguous.
     progress(total, total);
     Ok(())
 }
 
-/// Eager pre-download of the FULL Parakeet asset set: encoder, decoder, joiner,
-/// tokens, AND the shared onnxruntime dylib (route A). Returns the model dir on success.
+/// Full Parakeet set + shared ORT dylib. Returns model dir.
 pub fn run_setup_parakeet() -> std::io::Result<PathBuf> {
     ensure(&parakeet_encoder_spec())?;
     ensure(&parakeet_decoder_spec())?;
@@ -87,10 +59,7 @@ pub fn run_setup_parakeet() -> std::io::Result<PathBuf> {
     })
 }
 
-/// Like [`run_setup_parakeet`] but reports AGGREGATE byte-level progress across the whole
-/// asset set (encoder + decoder + joiner + tokens + onnxruntime dylib) as a single,
-/// monotonic `(downloaded, total)` stream via `run_download_set` — one bar that climbs
-/// steadily 0→100% and hits 100% exactly when the last byte lands.
+/// [`run_setup_parakeet`] with aggregate progress via [`run_download_set`].
 pub fn run_setup_parakeet_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
     let total: u64 = parakeet_files().iter().map(|f| f.size_bytes).sum();
     run_download_set(
@@ -109,10 +78,7 @@ pub fn run_setup_parakeet_with_progress(progress: &dyn Fn(u64, u64)) -> std::io:
     })
 }
 
-/// Eager pre-download of the full portable Kokoro set: synth graph, voices, OOV graphs, and
-/// ONNX Runtime. The lazy caller
-/// (`ds-helper` on first speak) uses [`crate::is_kokoro_present`] + these `ensure_*`
-/// directly. Returns the model path on success.
+/// Full portable Kokoro set + ORT. Lazy path (`ds-helper`) uses presence + `ensure_*` instead.
 pub fn run_setup_kokoro() -> std::io::Result<PathBuf> {
     let model = ensure(&kokoro_onnx_spec())?;
     ensure(&kokoro_voices_spec())?;
@@ -122,10 +88,7 @@ pub fn run_setup_kokoro() -> std::io::Result<PathBuf> {
     Ok(model)
 }
 
-/// Like [`run_setup_kokoro`] but reports AGGREGATE byte-level progress across the whole
-/// asset set (synth + voices + G2P + ORT) as a single, monotonic
-/// `(downloaded, total)` stream via `run_download_set` — one "X MB of Y MB" bar that
-/// advances steadily 0→100% and reaches 100% exactly when the last byte lands.
+/// [`run_setup_kokoro`] with aggregate progress via [`run_download_set`].
 pub fn run_setup_kokoro_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
     let total: u64 = kokoro_files().iter().map(|f| f.size_bytes).sum();
     run_download_set(
@@ -139,15 +102,12 @@ pub fn run_setup_kokoro_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::R
             Box::new(|p| ensure_onnxruntime_with_progress(p).map(|_| ())),
         ],
     )?;
-    // The onnx model is the set's principal artifact — resolve its path for the caller.
     model_path(&kokoro_onnx_spec().file_name).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve model_dir()")
     })
 }
 
-/// Eager pre-download of the SepFormer speaker-lock separator (`sepformer_int8.onnx`,
-/// ~29 MB) AND the shared onnxruntime dylib it runs on, with the same aggregate
-/// `(downloaded, total)` progress stream as its siblings. Returns the model path.
+/// SepFormer separator + shared ORT, with aggregate progress.
 pub fn run_setup_sepformer_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
     let total = crate::urls::SEPFORMER.size_bytes
         + if crate::ort::onnxruntime_dist().is_some() {
@@ -168,9 +128,7 @@ pub fn run_setup_sepformer_with_progress(progress: &dyn Fn(u64, u64)) -> std::io
     })
 }
 
-/// Ensure the assets shared by the Apple-native backend: voice tensors, the Rust frontend's
-/// unknown-word G2P graphs, and ORT. The 310 MB synthesis graph remains portable-backend-only.
-/// Returns the voices file path.
+/// Shared Kokoro frontend assets (voices + OOV G2P + ORT); not the 310 MB synth graph.
 pub fn run_setup_kokoro_frontend_with_progress(
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<PathBuf> {

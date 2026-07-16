@@ -1,29 +1,15 @@
-//! Shared IO core for the wire writers — the three flows every mechanism was repeating
-//! verbatim before this module existed: resolving the deployed `dontspeak` binary
-//! ([`resolve_dontspeak_bin`]), the lenient-but-never-clobbering JSON read
-//! ([`read_json_or_bail`]), and the backup → atomic-write → report tail
-//! ([`backup_then_write`]). The writers in [`hooks`](super::hooks) and [`mcp`](super::mcp)
-//! compose these; a new mechanism writer starts from here instead of copy-pasting them a
-//! fourth time.
+//! Shared wire-writer IO: bin resolve, never-clobber JSON read, backup→atomic-write tail.
 
 use ds_config::Paths;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// Resolve the deployed `dontspeak` binary — the ONE path hook commands and the MCP
-/// `command` field register.
+/// Deployed `dontspeak` path for hook/MCP registration.
 ///
-/// Prefer the stable install location (`~/.local/bin/dontspeak`) so wired configs survive
-/// rebuilds at the same path — this also lets a dev build run from `target/` wire configs at
-/// the DEPLOYED binary, not the build dir. NOT on Windows: the portable zip extracts the
-/// binary beside THIS exe, so a stale dev-deploy copy in `~/.local/bin` must not SHADOW the
-/// installed one. Fall back to this exe's own directory (the package lays the binaries down
-/// together, so the sibling path is correct even before it exists).
-///
-/// Every production caller (the `hooks` writers and the `mcp` writers) threads its own
-/// `paths: &Paths`, and a test passes a tempdir-rooted `Paths` — so NOTHING resolves the real
-/// `$HOME` implicitly here. `None` (no `$HOME`, or a caller deliberately withholds it) skips
-/// the unix stable-install-path check and falls straight to the sibling-of-this-exe fallback.
+/// Unix prefers `~/.local/bin/dontspeak` (wired configs survive rebuilds; dev `target/` wires
+/// the deployed bin). Windows never does — portable zip is beside this exe; a stale
+/// `~/.local/bin` must not shadow it. Else sibling of this exe. `paths: None` skips the unix
+/// stable path. macOS `.app` uses [`bundle_cli_path`] so reconcile doesn't churn every launch.
 pub(crate) fn resolve_dontspeak_bin_at(paths: Option<&Paths>) -> Option<String> {
     let file = format!("dontspeak{}", std::env::consts::EXE_SUFFIX);
     #[cfg(unix)]
@@ -34,27 +20,15 @@ pub(crate) fn resolve_dontspeak_bin_at(paths: Option<&Paths>) -> Option<String> 
         }
     }
     #[cfg(not(unix))]
-    let _ = paths; // unused on non-unix builds (Windows) — avoid an unused-variable warning
+    let _ = paths;
     let exe = std::env::current_exe().ok()?;
-    // macOS `.app` bundle boot: the engine runs from `<App>.app/Contents/MacOS/DontSpeak`,
-    // but the installer places the CLI at `<App>.app/Contents/Helpers/dontspeak` (see §H /
-    // `apps/macos/bundle-lib.sh`). Resolve THAT here so boot-time reconcile registers the same
-    // path the installer wrote — otherwise the sibling fallback below would yield the
-    // nonexistent `Contents/MacOS/dontspeak` (which case-insensitively aliases the app binary),
-    // churning every client config on each launch. Pure decision, so it's unit-tested on any OS;
-    // it only matches the macOS bundle layout, leaving Windows/dev/Linux resolution unchanged.
     if let Some(cli) = bundle_cli_path(&exe) {
         return Some(cli.to_string_lossy().into_owned());
     }
     Some(exe.parent()?.join(&file).to_string_lossy().into_owned())
 }
 
-/// PURE path decision for the macOS `.app` bundle layout: if `exe` is
-/// `<App>.app/Contents/MacOS/<binary>` (parent basename `MacOS`, grandparent basename
-/// `Contents`), the co-installed CLI is at `<App>.app/Contents/Helpers/dontspeak`. `None` for
-/// any other layout (dev builds, the Windows portable dir, Linux `~/.local/bin`), so those
-/// callers fall through to the sibling-of-this-exe default. No filesystem access — testable on
-/// every OS.
+/// macOS bundle: `Contents/MacOS/<bin>` → `Contents/Helpers/dontspeak`. Pure; `None` elsewhere.
 fn bundle_cli_path(exe: &Path) -> Option<PathBuf> {
     let macos_dir = exe.parent()?;
     if macos_dir.file_name()? != "MacOS" {
@@ -67,10 +41,7 @@ fn bundle_cli_path(exe: &Path) -> Option<PathBuf> {
     Some(contents.join("Helpers").join("dontspeak"))
 }
 
-/// Read a client's JSON config for editing. Missing or empty → `Value::Null` (treated as
-/// `{}` by every shaper). A present but MALFORMED file is the CLIENT's own config — report
-/// and `Err(())` so the caller bails with exit 1, leaving the file recoverable rather than
-/// clobbered.
+/// Missing/empty → `Null` (shapers treat as `{}`). Malformed → report + `Err` (never clobber).
 pub(crate) fn read_json_or_bail(tool: &str, cfg: &Path) -> Result<Value, ()> {
     match std::fs::read_to_string(cfg) {
         Err(_) => Ok(Value::Null),
@@ -84,18 +55,12 @@ pub(crate) fn read_json_or_bail(tool: &str, cfg: &Path) -> Result<Value, ()> {
     }
 }
 
-/// What [`backup_then_write`] puts on disk — pretty JSON or a pre-rendered string (the
-/// format-preserving TOML the `toml_edit` shaper produced).
 pub(crate) enum WriteBody<'a> {
     Json(&'a Value),
     Str(&'a str),
 }
 
-/// The write tail every mechanism shares: best-effort timestamped backup (a copy failure is
-/// surfaced, not swallowed — the user is warned the overwrite has no recoverable copy, rather
-/// than the write being silently blocked), then the atomic write, then the report line
-/// `"{tool}: {action} {file}"` — `action` is the caller's composed verb phrase (e.g.
-/// `"wired DontSpeak hooks ->"`). Returns the process exit code (0 ok, 1 write failure).
+/// Backup (warn on failure, still write) → atomic write → report. Exit 0/1.
 pub(crate) fn backup_then_write(
     tool: &str,
     cfg: &Path,
@@ -129,8 +94,6 @@ pub(crate) fn backup_then_write(
 mod tests {
     use super::*;
 
-    /// A synthetic `.app` bundle exe resolves the CLI to `Contents/Helpers/dontspeak`; a
-    /// non-bundle path yields `None` (fall through to the sibling default). Pure — runs on any OS.
     #[test]
     fn bundle_cli_path_resolves_helpers_dontspeak() {
         let exe = Path::new("/Applications/DontSpeak.app/Contents/MacOS/DontSpeak");
@@ -140,12 +103,10 @@ mod tests {
                 "/Applications/DontSpeak.app/Contents/Helpers/dontspeak"
             ))
         );
-        // A plain co-located layout (dev build / Windows portable dir) is NOT a bundle.
         assert_eq!(
             bundle_cli_path(Path::new("/home/alex/.local/bin/DontSpeak")),
             None
         );
-        // The grandparent must be `Contents`, not just any parent named `MacOS`.
         assert_eq!(bundle_cli_path(Path::new("/tmp/MacOS/DontSpeak")), None);
     }
 }

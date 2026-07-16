@@ -1,49 +1,16 @@
-//! Physical Caps-key monitor via `IOHIDManager` (the robust path).
+//! Physical Caps via `IOHIDManager` (HID usage 0x07/0x39). Lock-state reads and
+//! CGEvent FlagsChanged are unreliable on external keyboards / macOS 26 virtual HID.
 //!
-//! Why this exists: on this machine (macOS 26, external/Bluetooth keyboard) BOTH
-//! lock-state reads are blind to the Caps key:
-//!   * `IOHIDGetModifierLockState` poll (`iokit::CapsReader::read`) — never sees
-//!     a toggle (a 15 s probe toggling caps saw 0 changes).
-//!   * A CGEvent `FlagsChanged` AlphaShift tap — lock-coupled and unreliable; a
-//!     hold starting from lock-ON is invisible.
+//! **Permission:** Accessibility only — it subsumes Input Monitoring for
+//! `IOHIDManagerOpen`. No separate Input Monitoring row.
 //!
-//! `IOHIDManager` reads the PHYSICAL key value straight off the device's HID
-//! input reports (usage page 0x07 `kHIDPage_KeyboardOrKeypad`, usage 0x39
-//! `kHIDUsage_KeyboardCapsLock`; value 1 = down, 0 = up). It bypasses the
-//! virtual-HID layer entirely, so it is immune to the macOS 26 built-in→virtual
-//! HID regression.
+//! **Gotcha:** a grant while this process is already running does not unstick
+//! `IOHIDManagerOpen` in-process (even with a new manager; AX re-probe flips live).
+//! Only process relaunch clears the denial. Retry loop latches that shape via
+//! [`is_caps_hid_stuck`]; engine self-relaunches. `kIOReturnNotPermitted` (0xE00002E2)
+//! + dead hold → check relaunch path, not Input Monitoring.
 //!
-//! PERMISSION: only **Accessibility** is required — confirmed both empirically and
-//! by Apple's own dev-forum guidance: an app already trusted for Accessibility is
-//! automatically permitted to listen to input, i.e. **Accessibility SUBSUMES Input
-//! Monitoring** for `IOHIDManagerOpen`. The engine already holds the Accessibility
-//! grant for CGEventPost injection, so `IOHIDManagerOpen` succeeds with NO separate
-//! Input Monitoring grant or row — which is why the app tracks only Accessibility
-//! and does not surface a distinct Input Monitoring permission. IF YOU LAND HERE
-//! LATER because caps HOLD is dead: do NOT go looking for a separate Input
-//! Monitoring toggle in System Settings. DontSpeak has never needed one, it isn't
-//! listed there, and adding one would not fix anything (re-confirmed 2026-07-04
-//! chasing exactly this dead end before finding the real cause below).
-//!
-//! THE ACTUAL GOTCHA (found 2026-07-04): a grant made WHILE this process is
-//! already running does not retroactively unstick `IOHIDManagerOpen` in that SAME
-//! process — even though `AXIsProcessTrusted()` (`iokit::ax_is_process_trusted`)
-//! correctly flips live and the AX-gated caps-TOGGLE loop re-probes and turns on
-//! immediately (see `engine::refresh_caps_gate`). Building a brand-new
-//! `IOHIDManager` each retry (see `spawn_caps_hid_monitor`'s doc) does NOT pick up
-//! that fresh grant either — the denial is apparently cached per-process at a
-//! layer `AXIsProcessTrusted` doesn't see. Only a fresh process (full quit +
-//! relaunch) clears it. Rather than leave caps HOLD silently dead until the user
-//! notices and manually restarts, the retry loop below detects this exact shape
-//! (denied while AX is ALREADY trusted, repeatedly) and latches it via
-//! [`is_caps_hid_stuck`]; the engine (`boot::engine_run`) polls that next to its own
-//! AX re-probe and relaunches the whole process itself when it's set. If
-//! `IOHIDManagerOpen` ever returns `kIOReturnNotPermitted` (0xE00002E2) and caps
-//! HOLD never arms, THIS self-relaunch is the mechanism to check, not Input
-//! Monitoring.
-//!
-//! Symbols come from the IOKit framework (linked in build.rs); the CFRunLoop
-//! symbols come from CoreFoundation (also linked in build.rs).
+//! Frameworks linked in build.rs (IOKit, CoreFoundation).
 
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_uint};

@@ -1,43 +1,21 @@
-//! Hook-wiring building blocks for the [`wire`](crate) orchestrator — the two hook
-//! MECHANISMS of the client registry (`ds_config::WireMechanism`): Claude-contract hooks in a
-//! JSON settings file ([`claude_json_hooks`] — Claude Code's `~/.claude/settings.json`) and the
-//! same contract in a format-preserved TOML config ([`claude_toml_hooks`] — Codex's
-//! `~/.codex/config.toml`), plus the client-agnostic install housekeeping ([`seed_and_prune`]:
-//! seed our `config.toml`, prune stale binaries). Both writers take the TARGET FILE as a
-//! parameter — the registry resolves which client's file — so a new client reusing either
-//! contract (e.g. Qwen Code) is a registry entry, not a new writer. The hook SETS + merges are
-//! the ONE definition in `ds-config` (shared by every platform installer); binary-path
-//! resolution, the JSON read, and the backup+atomic-write tail are the shared
-//! `io` core (see `super::io`).
+//! Hook writers for the registry mechanisms: [`claude_json_hooks`], [`claude_toml_hooks`],
+//! [`grok_json_hooks`], plus [`seed_and_prune`]. Target file comes from the registry; hook
+//! sets/merges live in `ds-config`; path resolve / read / backup+write live in `super::io`.
 //!
-//! Safe by construction: additive + idempotent merge (never duplicates ours, never clobbers the
-//! user's own hooks/keys), a timestamped backup before writing, and a malformed OR unmergeable
-//! existing file is left completely untouched (non-fatal, reported) rather than destroyed or
-//! merged-as-empty. `print_only` emits the merged document without touching disk — when two
-//! surfaces share one file, `seed`/`capture` (see `crate::wire_surfaces_print_only`, issue #30)
-//! thread the merge between them instead of each independently re-reading disk.
+//! Additive, idempotent, backed-up. Malformed/unmergeable file left untouched (non-fatal).
+//! Print-only `seed`/`capture`: issue #30 / `crate::wire_surfaces_print_only`.
 
 use super::io::{self, WriteBody};
 use crate::PreviewDoc;
 use ds_config::{ClientSource, HookCommandStyle, HookSpec, INSTALLED_BINS, Paths};
 
-/// Binary names this app has shipped and later dropped or renamed. The single-binary
-/// consolidation replaced `ds-mcp`/`ds-speak`/`ds-narrate`; the standalone `dontspeakd` engine
-/// binary was folded into `dontspeak` itself. A FINITE, EXPLICIT list — see [`is_stale_ds_bin`]
-/// for why this is a list of known names rather than a `dontspeak*`/`ds-*` prefix match: a
-/// shared install dir (e.g. `~/.local/bin`) is NOT exclusively ours, so "starts with the
-/// prefix" is not an ownership signal. When a future bin is renamed/dropped, add its name here.
+/// Dropped binary names (single-binary consolidation + in-process engine). Explicit list —
+/// not a `dontspeak*`/`ds-*` prefix (shared install dir is not ours exclusively). Add here on
+/// rename/drop. See [`is_stale_ds_bin`].
 const KNOWN_LEGACY_BINS: &[&str] = &["ds-mcp", "ds-speak", "ds-narrate", "dontspeakd"];
 
-/// PURE decision: is `name` a KNOWN-STALE DontSpeak binary — an exact match (modulo this
-/// platform's exe suffix) against [`KNOWN_LEGACY_BINS`], and (defensively) not one of the
-/// current [`INSTALLED_BINS`]? Deliberately NOT a `dontspeak*`/`ds-*` prefix check: that used to
-/// flag ANY same-prefixed name not in the current-bins set as stale, which silently deleted
-/// this app's OWN `dontspeak-uninstall` script (placed executable in the same install dir by
-/// the installer, but not one of the four current bins) on every single wire, and would just as
-/// happily have deleted an unrelated user tool like `~/.local/bin/ds-sync` — sharing a name
-/// prefix is not an ownership check. Foreign tools, non-exe siblings (e.g. `ds_core.dll` on
-/// Windows — wrong suffix), and anything not on the explicit legacy list are kept.
+/// Exact match against [`KNOWN_LEGACY_BINS`] (modulo exe suffix), and not [`INSTALLED_BINS`].
+/// Prefix matching used to delete `dontspeak-uninstall` and would hit foreign `ds-sync` tools.
 fn is_stale_ds_bin(name: &str) -> bool {
     match name.strip_suffix(std::env::consts::EXE_SUFFIX) {
         // EXE_SUFFIX is "" on unix, so strip_suffix yields Some(name) there.
@@ -46,11 +24,8 @@ fn is_stale_ds_bin(name: &str) -> bool {
     }
 }
 
-/// Remove orphan DontSpeak binaries from the install dir (this binary's own directory) so a
-/// renamed/dropped executable can't shadow or be re-wired. Best-effort and SAFE: only regular
-/// files (subdirs like a `winui/` dev-deploy skipped), only names matching
-/// [`is_stale_ds_bin`], and on unix only files with the execute bit (never a stray data
-/// file). No-op when the dir isn't writable; a permission error there is logged, not fatal.
+/// Best-effort prune of known-legacy bins beside `current_exe`. Regular files only; unix
+/// requires execute bit. Permission errors logged, not fatal.
 fn prune_stale_bins() {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -62,7 +37,7 @@ fn prune_stale_bins() {
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
-            continue; // skip dirs (e.g. ~/.local/bin/winui/) and anything non-regular
+            continue;
         }
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -78,7 +53,7 @@ fn prune_stale_bins() {
                 .map(|m| m.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false);
             if !executable {
-                continue; // never delete a non-executable namesake (e.g. a lib/data file)
+                continue; // never delete non-executable namesakes
             }
         }
         match std::fs::remove_file(&path) {
@@ -88,12 +63,7 @@ fn prune_stale_bins() {
     }
 }
 
-/// Client-agnostic install housekeeping, run once on any real (non-remove, non-preview) wire:
-/// seed our `config.toml` with defaults if absent (a self-documenting file; the engine still
-/// fails-open to defaults without it) AND prune orphan/legacy DontSpeak binaries from the install
-/// dir so a renamed/dropped exe can't shadow or be re-wired (covers the legacy ds-mcp/-speak/
-/// -narrate). Idempotent — safe to run per client wired. Pruning no-ops when the install dir
-/// isn't writable (a permission error is logged, not fatal).
+/// Seed missing `config.toml` + prune known-legacy bins. Idempotent; interactive wire only.
 pub(crate) fn seed_and_prune(paths: &Paths) {
     if !paths.config_toml.exists() {
         if let Err(e) = ds_config::write_settings(paths, &ds_config::VoiceConfig::default()) {
@@ -109,22 +79,9 @@ pub(crate) fn seed_and_prune(paths: &Paths) {
     prune_stale_bins();
 }
 
-/// Wire (or strip / print) the DontSpeak voice hooks into `cfg`, a JSON settings file using
-/// Claude Code's hook contract (`WireMechanism::ClaudeJsonHooks` — today Claude Code's
-/// `~/.claude/settings.json` and Qwen Code's `~/.qwen/settings.json`; the registry names the
-/// file per client). `streaming` selects the hook set: `true` wires `MessageDisplay` for
-/// per-batch narration; `false` omits it, so the reply is voiced whole from `Stop`.
-/// `command_style` selects the command dialect: `ArgsArray`
-/// (Claude Code — bin + `args`, timeout in seconds) or `InlineShell` (Qwen Code — verbs
-/// inlined into the one command string its shell runner executes, timeout in ms). `client` is
-/// the client whose file this is — stamped into every wired verb slice as `--client <token>`,
-/// so the `dontspeak` binary the hook spawns knows who invoked it. Returns 0
-/// on success — including a malformed or unmergeable existing file, which is left
-/// byte-identical and reported, not treated as fatal (matching `claude_toml_hooks`) — or 1
-/// on a hard error (bin-resolution failure, write failure). `seed`, when `Some`, stands in for
-/// the disk read (a prior surface's merged doc sharing this file); `capture`, when `Some`,
-/// suppresses the preview print and stashes the merged doc there instead — both `None` on the
-/// real (non-preview) path; see `crate::wire_surfaces_print_only`.
+/// Claude-contract JSON hooks (`ClaudeJsonHooks`). `streaming` ⇒ `MessageDisplay`;
+/// `command_style` is ArgsArray vs InlineShell; `client` → `--client` on every verb.
+/// Malformed/unmergeable file left untouched (exit 0). `seed`/`capture`: print-only grouping.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn claude_json_hooks(
     cfg: &std::path::Path,
@@ -144,13 +101,11 @@ pub(crate) fn claude_json_hooks(
         }
         None => {
             let Ok(v) = io::read_json_or_bail("wire", cfg) else {
-                return 0; // malformed existing file is the user's own — leave it, don't fail
-                // the run, matching `claude_toml_hooks`'s convention below.
+                return 0; // user file: leave, don't fail (match toml writer)
             };
             v
         }
     };
-    // Keep a copy for the steady-state short-circuit below (strip/merge consume `existing`).
     let before = existing.clone();
 
     let merged = if remove {
@@ -175,8 +130,6 @@ pub(crate) fn claude_json_hooks(
         ds_config::merge_hooks(existing, &spec)
     };
 
-    // A malformed existing file (e.g. a non-array `hooks.<Event>` slot) is the user's own
-    // file — leave it, don't fail the run, matching `claude_toml_hooks`'s convention below.
     let merged = match merged {
         Ok(v) => v,
         Err(e) => {
@@ -203,8 +156,7 @@ pub(crate) fn claude_json_hooks(
             },
         }
     } else {
-        // Steady state (already wired / nothing to strip): write NOTHING and create NO `.bak`.
-        // LOAD-BEARING — the engine runs this every boot. (Order-independent `Value` equality.)
+        // Load-bearing: every-boot reconcile must be zero-write when unchanged.
         if merged == before {
             return 0;
         }
@@ -218,7 +170,6 @@ pub(crate) fn claude_json_hooks(
     }
 }
 
-/// The report verb for a hook write — shared by both hook mechanisms.
 fn hook_action(remove: bool) -> &'static str {
     if remove {
         "removed DontSpeak hooks from"
@@ -227,15 +178,8 @@ fn hook_action(remove: bool) -> &'static str {
     }
 }
 
-/// Wire (or strip / print) DontSpeak's narration hooks into `cfg`, a TOML config using Claude
-/// Code's hook contract (`WireMechanism::ClaudeTomlHooks` — today Codex's `~/.codex/config.toml`;
-/// the registry names the file per client) — `SessionStart`→`notify --greet-only` (spoken
-/// greeting, no streaming-witness seed), `UserPromptSubmit`→`notify` + `provide` (mark-active
-/// / engine session re-discovery, and the narration spec) and `Stop`→`notify` (speak the
-/// reply). Format-preserving (toml_edit). Returns 0 on
-/// success, 1 on a hard error; a malformed config is reported and left UNCHANGED (it's the
-/// user's file), which is non-fatal — same convention as `claude_json_hooks`. `seed`/`capture`:
-/// see `claude_json_hooks`'s doc (same print-only grouping contract, `PreviewDoc::Toml` side).
+/// Claude-contract TOML hooks (`ClaudeTomlHooks`, e.g. Codex). Format-preserving.
+/// Malformed config left unchanged (exit 0). `seed`/`capture`: same as JSON writer.
 pub(crate) fn claude_toml_hooks(
     cfg: &std::path::Path,
     client: ClientSource,
@@ -286,8 +230,7 @@ pub(crate) fn claude_toml_hooks(
             &WriteBody::Str(&merged),
             hook_action(remove),
         ),
-        Ok(_) => 0, // no change (already wired / nothing to strip)
-        // A malformed config is the user's own file — leave it, don't fail the run.
+        Ok(_) => 0,
         Err(e) => {
             eprintln!("wire: {} left unchanged ({e})", cfg.display());
             0
@@ -295,14 +238,8 @@ pub(crate) fn claude_toml_hooks(
     }
 }
 
-/// Wire (or strip / print) DontSpeak's native voice hooks into `cfg`, the DEDICATED JSON file
-/// DontSpeak owns for a client (`WireMechanism::GrokJsonHooks` — today Grok's
-/// `~/.grok/hooks/dontspeak.json`; the registry names the file per client). Unlike
-/// [`claude_json_hooks`], the file is EXCLUSIVELY ours, so there is nothing to merge or
-/// preserve: wire OVERWRITES the whole file with the rendered hook set (a timestamped backup is
-/// taken first via the shared write tail), and `--remove` DELETES it (backing it up first so
-/// the removal is recoverable). Returns 0 on success — including a `--remove` on a file that
-/// was never created — or 1 on a hard error (bin-resolution failure, write/remove failure).
+/// Own-the-file JSON hooks (`GrokJsonHooks`): overwrite on wire, delete on remove (backed up).
+/// No merge — file is exclusively ours.
 pub(crate) fn grok_json_hooks(
     cfg: &std::path::Path,
     remove: bool,
@@ -310,16 +247,13 @@ pub(crate) fn grok_json_hooks(
     paths: &Paths,
 ) -> i32 {
     if remove {
-        // Always clear the managed narrate rules section (issue #95), even when the hooks
-        // file was never created — digests injection must not linger after unwire.
+        // Issue #95: clear AGENTS.md digests even if hooks file was never created.
         if !print_only {
             sync_grok_narrate_rules(paths, /*digests_on*/ false);
         }
         if !cfg.exists() {
-            return 0; // nothing of ours on disk → clean no-op
+            return 0;
         }
-        // Back up before deleting so the removal is recoverable — mirrors the write path's
-        // pre-write backup (`io::backup_then_write`). A backup failure is a non-fatal warning.
         if let Err(e) = ds_config::backup_before_write(cfg, "json") {
             eprintln!(
                 "wire: WARNING: could not back up {} before removing ({e}); proceeding without a backup",
@@ -350,7 +284,6 @@ pub(crate) fn grok_json_hooks(
             cfg.display(),
             serde_json::to_string_pretty(&v).unwrap_or_default()
         );
-        // Preview the managed AGENTS.md inject path too (no write).
         let digests_on =
             ds_config::VoiceConfig::load(paths).narrates(ds_config::NarrateKind::Digests);
         if digests_on {
@@ -363,14 +296,11 @@ pub(crate) fn grok_json_hooks(
         return 0;
     }
 
-    // Grok ignores passive-hook `additionalContext`; keep global AGENTS.md in sync so digests
-    // actually reach the model (issue #95). Best-effort: hook wiring still succeeds if this fails.
+    // Issue #95: Grok ignores hook `additionalContext` — sync AGENTS.md digests (best-effort).
     let digests_on = ds_config::VoiceConfig::load(paths).narrates(ds_config::NarrateKind::Digests);
     sync_grok_narrate_rules(paths, digests_on);
 
-    // Steady state (already wired, shape-identical): write NOTHING and create NO `.bak`.
-    // LOAD-BEARING — the engine runs this every boot. A missing/malformed file compares
-    // unequal (order-independent `Value` equality), so a real first wire still writes.
+    // Load-bearing zero-write when already identical (every-boot reconcile).
     if std::fs::read_to_string(cfg)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -389,8 +319,7 @@ pub(crate) fn grok_json_hooks(
     )
 }
 
-/// Best-effort write/clear of the managed `~/.grok/AGENTS.md` narrate section. Never fails the
-/// caller: missing dirs, permission errors, etc. are reported on stderr only.
+/// Best-effort AGENTS.md narrate section; errors on stderr only.
 fn sync_grok_narrate_rules(paths: &Paths, digests_on: bool) {
     match ds_config::sync_grok_narrate_agents_md(&paths.grok_agents_md, digests_on) {
         Ok(true) if digests_on => {
@@ -424,47 +353,33 @@ mod tests {
         let ext = std::env::consts::EXE_SUFFIX; // ".exe" on Windows, "" on unix
         let f = |b: &str| format!("{b}{ext}");
 
-        // Known legacy names the single-binary consolidation replaced → prune.
         assert!(is_stale_ds_bin(&f("ds-mcp")));
         assert!(is_stale_ds_bin(&f("ds-speak")));
         assert!(is_stale_ds_bin(&f("ds-narrate")));
-        // The dropped `dontspeakd` binary → prune any leftover install.
         assert!(is_stale_ds_bin(&f("dontspeakd")));
 
-        // Current canonical binaries → keep (incl. the running dontspeak itself).
         assert!(!is_stale_ds_bin(&f("dontspeak")));
         assert!(!is_stale_ds_bin(&f("ds-helper")));
         assert!(!is_stale_ds_bin(&f("ds-winui")));
         assert!(!is_stale_ds_bin(&f("ds-gtk")));
 
-        // Regression test: this app's OWN `dontspeak-uninstall` script (placed executable in
-        // the install dir by the installer) is NOT a known legacy binary name → keep. A
-        // `dontspeak*`/`ds-*` prefix check used to flag it as stale and delete it on every wire.
+        // Regression: prefix match used to delete our own uninstall script every wire.
         assert!(!is_stale_ds_bin(&f("dontspeak-uninstall")));
-        // An unrelated user tool that merely shares the prefix is never mistaken for ours.
         assert!(!is_stale_ds_bin(&f("ds-sync")));
-        // Any OTHER same-prefixed name not on the explicit legacy list → keep (no more
-        // catch-all prefix match; a future rename/drop must be added to `KNOWN_LEGACY_BINS`).
         assert!(!is_stale_ds_bin(&f("ds-oldname")));
 
-        // Foreign tools sharing the dir → keep.
         assert!(!is_stale_ds_bin(&f("ripgrep")));
         assert!(!is_stale_ds_bin(&f("node")));
 
-        // On Windows a non-.exe namesake (the cdylib) has the wrong suffix → keep.
         #[cfg(windows)]
         assert!(!is_stale_ds_bin("ds_core.dll"));
     }
 
-    /// Parse a written `settings.json` (or `""` for a not-yet-created file) into a `Value`.
     fn read_json(cfg: &std::path::Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(cfg).unwrap()).unwrap()
     }
 
-    // Every test below now builds its own `Paths::rooted_at(dir.path())` (see each test) and
-    // threads it through `claude_json_hooks`/`claude_toml_hooks` into
-    // `io::resolve_dontspeak_bin_at`, so the unix stable-install-path check is scoped to the
-    // tempdir — none of these tests touch the real `$HOME`/`BaseDirs` any more.
+    // Tests use `Paths::rooted_at` — never real $HOME.
 
     #[test]
     fn claude_json_hooks_wires_and_is_idempotent() {

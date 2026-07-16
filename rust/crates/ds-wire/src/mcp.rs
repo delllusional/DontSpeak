@@ -1,17 +1,6 @@
-//! Shared MCP-registration core for the [`wire`](crate) orchestrator — the
-//! `WireMechanism::JsonMcp` writer of the client registry, used today by Claude Code
-//! (`~/.claude.json`) and Qwen Code (`~/.qwen/settings.json`, shared with its hooks surface).
-//! Every client registers
-//! the IDENTICAL stdio `mcpServers.DontSpeak` entry and differs only in WHICH config file, how
-//! it's detected, and the user-facing labels — all declared on the client's
-//! `ds_config::ClientSpec`, from which [`target_for`] builds the [`Target`] this one
-//! read → merge/strip → backup → atomic-write flow consumes. It reuses the SAME `ds-config`
-//! primitives the hook writers use (`merge_mcp_server`/`strip_mcp_server`,
-//! `backup_before_write`, `atomic_write_json`), so an MCP registration is crash-safe in exactly
-//! the way a settings.json hook write is. `print_only`'s `seed`/`capture` params are the
-//! `--print-only` grouping plumbing shared with `hooks.rs` (see `crate::wire_surfaces_print_only`,
-//! issue #30): when a client's hooks and MCP surfaces share one config file, they thread the
-//! merge between surfaces instead of each independently re-reading the (never-written) disk copy.
+//! MCP registration (`JsonMcp` / `TomlMcp`): identical stdio `DontSpeak` entry; file/labels
+//! from the registry via [`target_for`]. Shared `ds-config` merge/strip + backup/atomic write.
+//! `seed`/`capture`: print-only grouping (issue #30 / `crate::wire_surfaces_print_only`).
 
 use std::path::Path;
 
@@ -19,26 +8,17 @@ use super::io::{self, WriteBody};
 use crate::PreviewDoc;
 use ds_config::{ClientSpec, Paths, Surface};
 
-/// One client's registration target — the config file plus the client-specific gating and
-/// labels that specialize the shared flow. Built by each subcommand from its [`Paths`].
+/// Per-client MCP write target (file + presence gate + labels).
 pub struct Target<'a> {
-    /// Label for log lines (the `wire` orchestrator sets `"wire"`).
     pub tool: &'a str,
-    /// The config file to edit (Code's `~/.claude.json`).
     pub config: &'a Path,
-    /// Whether the client is installed. Gates a REAL write so we never scatter a stray config
-    /// on a machine without the client; consulted only for a non-remove, non-print wire.
+    /// Gates real writes so we never scatter config without the client installed.
     pub present: bool,
-    /// Message shown when `present` is false and we skip — e.g.
-    /// `"Claude Code not detected (/home/.claude)"`.
     pub absent_hint: String,
-    /// One-line hint printed after a successful wire (how to load the newly registered server).
     pub load_hint: &'a str,
 }
 
-/// Build the [`Target`] for one client's `JsonMcp` surface from its registry entry — the
-/// config file, presence probe, and labels all come from the [`ClientSpec`], so a new
-/// MCP-capable client is a registry entry, not a new constructor here.
+/// Build [`Target`] from registry entry + surface.
 pub fn target_for<'a>(
     spec: &'static ClientSpec,
     surface: &'static Surface,
@@ -59,16 +39,8 @@ pub fn target_for<'a>(
     }
 }
 
-/// Register (or, with `remove`, un-register) our stdio `mcpServers.DontSpeak` entry in
-/// `target.config`, or PREVIEW the result with `print_only`. The ONE flow every `JsonMcp`
-/// surface shares (the orchestrator builds the [`Target`] via [`target_for`]):
-///   presence-gate → parse (a malformed file is left UNTOUCHED and is non-fatal) →
-///   merge/strip via `ds-config`
-///   → either print, or back-up-then-atomic-write.
-/// Additive + idempotent (our entry is overwritten so a reinstall re-points `command`; every
-/// other server and top-level key is preserved). Returns a process exit code (0 ok, 1 hard error).
-/// `seed`/`capture`: see `hooks::claude_json_hooks`'s doc (same print-only grouping contract,
-/// `PreviewDoc::Json` side) — both `None` on the real (non-preview) path.
+/// Register/strip `mcpServers.DontSpeak` (or print-only). Malformed file left untouched.
+/// Additive + idempotent. `seed`/`capture`: print-only grouping (JSON).
 pub fn apply(
     target: &Target,
     remove: bool,
@@ -80,20 +52,14 @@ pub fn apply(
     let tool = target.tool;
     let cfg = target.config;
 
-    // A real wire (not removal/preview) requires the client present, so we never scatter a
-    // stray config on a machine that doesn't have it. A miss is a clean skip (exit 0), so the
-    // installer step that calls us never errors.
     if !remove && !print_only && !target.present {
         eprintln!("{tool}: {}; skipping registration", target.absent_hint);
         return 0;
     }
-    // Nothing to strip if the config was never created.
     if remove && !print_only && !cfg.exists() {
         return 0;
     }
 
-    // Missing/empty → `{}`; a MALFORMED file is left UNTOUCHED (it is the user's own client
-    // config — other MCP servers, and for `~/.claude.json` the project/session state).
     let existing = match seed {
         Some(PreviewDoc::Json(v)) => v,
         Some(PreviewDoc::Toml(_)) => {
@@ -101,14 +67,12 @@ pub fn apply(
         }
         None => {
             let Ok(v) = io::read_json_or_bail(tool, cfg) else {
-                // The malformed file is the user's own; match the hooks surface so clients
-                // sharing one file do not report contradictory outcomes.
+                // Match hooks: shared-file clients must not report contradictory outcomes.
                 return 0;
             };
             v
         }
     };
-    // Keep a copy for the steady-state short-circuit below (strip/merge consume `existing`).
     let before = existing.clone();
 
     let merged = if remove {
@@ -118,7 +82,7 @@ pub fn apply(
             eprintln!("{tool}: could not resolve the dontspeak binary path");
             return 1;
         };
-        // stdio server → no args (the no-arg mode IS the stdio MCP server).
+        // No-arg mode is the stdio MCP server.
         ds_config::merge_mcp_server(existing, crate::SERVER_NAME, &cmd, &[])
     };
 
@@ -141,9 +105,7 @@ pub fn apply(
         };
     }
 
-    // Steady state (idempotent re-point produced no change / nothing to strip): write NOTHING
-    // and create NO `.bak`. LOAD-BEARING — the engine runs this every boot, so a matching
-    // config must be a zero-write, zero-backup no-op. (Order-independent `Value` equality.)
+    // Load-bearing: every-boot reconcile must be zero-write when unchanged.
     if merged == before {
         return 0;
     }
@@ -160,9 +122,7 @@ pub fn apply(
     code
 }
 
-/// Same as `apply` but for TOML-based MCP configs (Grok `~/.grok/config.toml`).
-/// Uses `ds_config` TOML shapers and `WriteBody::Str` for format-preserving write.
-/// `seed`/`capture`: see `apply`'s doc (same contract, `PreviewDoc::Toml` side).
+/// TOML MCP configs (format-preserving). Same contract as [`apply`] (`PreviewDoc::Toml`).
 pub fn apply_toml(
     target: &Target,
     remove: bool,
@@ -225,8 +185,6 @@ pub fn apply_toml(
         };
     }
 
-    // Steady state (already wired / nothing to strip): write NOTHING and create NO `.bak`.
-    // LOAD-BEARING for the engine's every-boot reconcile — same guarantee as `apply`.
     if merged == existing {
         return 0;
     }
@@ -236,7 +194,6 @@ pub fn apply_toml(
     } else {
         "registered dontspeak MCP server ->"
     };
-    // "toml" label is informational; the actual write uses Str + atomic_write_str
     let code = io::backup_then_write(tool, cfg, "toml", &WriteBody::Str(&merged), action);
     if code == 0 && !remove {
         eprintln!("{tool}: {}", target.load_hint);
@@ -244,9 +201,7 @@ pub fn apply_toml(
     code
 }
 
-// FORMER leak, now closed: `apply`/`apply_toml` take an injectable `paths: &Paths` and resolve
-// the bin via `io::resolve_dontspeak_bin_at(Some(paths))`, so a test passing a tempdir-rooted
-// `Paths` never touches the real `$HOME`/`~/.local/bin`. Every test below threads such a `Paths`.
+// Tests inject tempdir `Paths` so bin resolution never hits real $HOME.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,10 +217,6 @@ mod tests {
         }
     }
 
-    /// A tempdir-rooted `Paths` for the writer tests — keeps bin resolution scoped to the
-    /// tempdir (never the real `$HOME`). The dir itself has no `~/.local/bin/dontspeak`, so the
-    /// resolver falls to the sibling-of-this-exe default; the resolved command is never asserted
-    /// on, only that our entry is present.
     fn rooted(dir: &Path) -> Paths {
         Paths::rooted_at(dir)
     }
@@ -279,7 +230,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
-        // First wire: file created, our entry present with a non-empty command, stdio (no args).
         assert_eq!(
             apply(&target(&cfg, true), false, false, &paths, None, None),
             0
@@ -292,7 +242,6 @@ mod tests {
                 .contains("dontspeak")
         );
         assert!(v["mcpServers"]["DontSpeak"].get("args").is_none());
-        // Re-wire: still exactly one entry (idempotent re-point, not a duplicate).
         assert_eq!(
             apply(&target(&cfg, true), false, false, &paths, None, None),
             0
@@ -319,9 +268,7 @@ mod tests {
             0
         );
         let v = read(&cfg);
-        // Ours added…
         assert!(v["mcpServers"]["DontSpeak"]["command"].is_string());
-        // …the sibling server AND the unrelated top-level key are untouched.
         assert_eq!(v["mcpServers"]["keepme"]["command"], "/usr/bin/keep");
         assert_eq!(v["projects"]["/x"]["history"], json!([]));
     }
@@ -359,7 +306,6 @@ mod tests {
             apply(&target(&cfg, true), false, false, &paths, None, None),
             0
         );
-        // The user's file is preserved byte-for-byte (recoverable), not clobbered.
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "{ this is not json");
     }
 
@@ -380,13 +326,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
-        // present=false → clean skip (exit 0), no stray config created.
         assert_eq!(
             apply(&target(&cfg, false), false, false, &paths, None, None),
             0
         );
         assert!(!cfg.exists());
-        // …but a PREVIEW still works without the client present.
         assert_eq!(
             apply(&target(&cfg, false), false, true, &paths, None, None),
             0

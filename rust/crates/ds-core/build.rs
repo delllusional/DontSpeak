@@ -1,18 +1,10 @@
-//! Build script for ds-core.
+//! When the `cbindgen` feature is on, regenerate committed `dontspeak.h` from the
+//! `extern "C"` surface into `apps/macos/Sources/CDontSpeak/include/dontspeak.h`.
 //!
-//! When the `cbindgen` feature is enabled (and the crate is available in the
-//! cargo cache), regenerate the committed C header `dontspeak.h` from the
-//! `extern "C"` surface and copy it next to the Swift module map at
-//! `apps/macos/Sources/CDontSpeak/include/dontspeak.h`.
-//!
-//! The header is COMMITTED, so the DEFAULT build (cbindgen feature off, e.g.
-//! offline CI or a box with no cbindgen) does nothing here and the Swift build
-//! still sees an up-to-date header. This decouples the Swift app build from
-//! having a cbindgen install — only a `--features cbindgen` regen touches it.
+//! Header is committed: default builds (feature off / offline) do nothing. Only
+//! `--features cbindgen` regenerates — Swift does not require cbindgen installed.
 
 fn main() {
-    // Always rebuild if the FFI surface changes (so a `--features cbindgen`
-    // build picks up edits).
     println!("cargo:rerun-if-changed=src/ffi.rs");
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
@@ -29,12 +21,8 @@ fn regenerate_header() {
     let config = match cbindgen::Config::from_file(Path::new(&crate_dir).join("cbindgen.toml")) {
         Ok(c) => c,
         Err(e) => {
-            // Non-fatal (mirrors the `generate()` failure path below): keep the committed
-            // header rather than regenerating it with cbindgen's own (C++-flavored, e.g.
-            // wrong usize/uintptr_t mapping) defaults. Previously this silently fell back to
-            // `Config::default()` via `unwrap_or_default()` while still printing "regenerated"
-            // on the next successful `generate()` call — a false success message for a header
-            // built from the wrong config.
+            // Keep committed header; do not fall back to Config::default() (wrong
+            // usize/uintptr_t mapping) while still claiming "regenerated".
             println!(
                 "cargo:warning=cbindgen.toml failed to parse ({e}); keeping committed dontspeak.h"
             );
@@ -49,14 +37,12 @@ fn regenerate_header() {
     {
         Ok(b) => b,
         Err(e) => {
-            // Non-fatal: keep the committed header. Print a warning only.
             println!("cargo:warning=cbindgen generate failed ({e}); keeping committed dontspeak.h");
             return;
         }
     };
 
-    // Compute the repo paths from CARGO_MANIFEST_DIR (…/rust/crates/ds-core).
-    //   parent() x3 → repo root → apps/macos/Sources/CDontSpeak/include/dontspeak.h
+    // CARGO_MANIFEST_DIR = …/rust/crates/ds-core → repo root (parent ×3).
     let manifest = Path::new(&crate_dir);
     let repo_root = manifest
         .parent() // crates

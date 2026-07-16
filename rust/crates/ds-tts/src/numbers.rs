@@ -1,23 +1,13 @@
-//! English number → words expansion for TTS.
+//! English number → words for TTS.
 //!
-//! WHY. Neither G2P path expands digits to words: the ONNX/`voice-g2p` (misaki)
-//! path drops digit chars at the vocab layer (silent), and FluidAudio's ANE path
-//! sends a bare digit run to its neural BART G2P fallback, which — trained only on
-//! alphabetic words — sounds `12` out as garbage (heard as the letter "X"). The
-//! lexicons never contain `"12"`, so nothing upstream ever turns it into "twelve".
+//! WHY: neither G2P expands digits — ONNX/misaki drops them at vocab (silent);
+//! ANE BART (alpha-only) turns `12` into garbage ("X"). Lexicons never have `"12"`.
 //!
-//! [`expand_numbers`] runs through [`crate::normalize_kokoro_text`] before text is
-//! split or phonemized. Both supported Kokoro frontends are English-only; unsupported
-//! non-English voice ids are rejected before synthesis.
+//! Runs via [`crate::normalize_kokoro_text`] before split/phonemize. English-only.
 //!
-//! Coverage: cardinals (`42` → "forty-two", `2025` → "two thousand twenty-five"),
-//! thousands-grouped (`1,000` → "one thousand"), decimals (`3.14` → "three point
-//! one four"), ordinals (`21st` → "twenty-first"), and a leading minus
-//! (`-5` → "minus five"). Dotted versions retain every separator (`0.2.2` → "zero
-//! point two point two"), and letters next to digits get an audible word boundary.
-//! A run with a leading zero (`007`, codes/IDs) and any
-//! run too long to name is read digit-by-digit. Anything that isn't a plain
-//! number token is passed through untouched.
+//! Cardinals, thousands-grouped, decimals, ordinals, leading minus; multi-dot
+//! keeps separators; alphanumerics get word boundaries; leading-zero / overlong
+//! runs digit-by-digit; non-number tokens pass through.
 
 /// `0..=19` spelled out (index = value).
 const ONES: [&str; 20] = [

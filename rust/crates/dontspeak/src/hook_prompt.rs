@@ -1,31 +1,22 @@
-//! The `prompt-context` subcommand for hook clients' `UserPromptSubmit` event.
+//! UserPromptSubmit `provide`: inject narration context when digests are on.
 
 use ds_ipc::{Request, Response};
 use serde_json::{Value, json};
 
-/// Pushed to the model when narration is on AND the engine is muted: the ONE voice signal
-/// it can't otherwise infer. The narrator speaks the model's blockquote, but while muted that
-/// playback is SILENT — and no tool call sits on the speaking path to report it — so without
-/// this the model narrates into a void and the user silently misses the reply. Injected as
-/// context (not spoken), so it survives the mute it is warning about.
+/// Pushed when narration is on AND the engine is muted: the one voice signal the model can't
+/// infer. Narrator speaks blockquotes, but muted playback is silent and no tool sits on that
+/// path to report it — without this the model narrates into a void. Injected as context
+/// (not spoken), so it survives the mute it warns about.
 const MUTED_NOTICE: &str = "\n\n## Voice state\nMUTED: speech and narration play silently. \
     Put anything important in text until unmuted.";
 
-/// The narration-context QUERY (UserPromptSubmit `provide`): when "digests" narration is ON,
-/// return the narration spec as `hookSpecificOutput.additionalContext` so the client leads every
-/// reply with spoken-line blockquotes the narrator reads verbatim. `None` when "digests" is
-/// off, so no instruction or blockquote consumes tokens.
-///
-/// When narration is on we ALSO fold in a live voice-state notice (currently: muted) probed
-/// from the engine — a PUSH of the one signal the model can't infer, since the speaking path
-/// never calls a tool that could report it. The probe is read-only and best-effort: a down or
-/// unreachable engine just omits the notice (never blocks the prompt).
-///
-/// The stdio `provide` subcommand prints this JSON to stdout.
+/// When digests are ON, return the narration spec as `hookSpecificOutput.additionalContext`.
+/// `None` when digests off (no instruction tokens). Also folds a best-effort mute notice
+/// from the engine — read-only; down/unreachable engine omits the notice, never blocks.
 pub(crate) fn narration_context() -> Option<Value> {
     let paths = ds_config::Paths::resolve()?;
     if !ds_config::VoiceConfig::load(&paths).narrates(ds_config::NarrateKind::Digests) {
-        return None; // "digests" off → inject no blockquote instruction
+        return None;
     }
     let spec = ds_config::DEFAULT_NARRATION_SPEC.to_string();
     let context = with_voice_state(spec, engine_muted(&paths));
@@ -37,9 +28,7 @@ pub(crate) fn narration_context() -> Option<Value> {
     }))
 }
 
-/// Read-only probe of the engine's global mute flag. `false` whenever the engine is down or
-/// unreachable (no socket, timeout, unexpected reply) — we omit the notice rather than block
-/// the prompt on a missing engine.
+/// Read-only mute probe. `false` when engine down/unreachable — omit notice, don't block.
 fn engine_muted(paths: &ds_config::Paths) -> bool {
     matches!(
         ds_ipc::request(&paths.engine_sock, &Request::Status),
@@ -47,8 +36,7 @@ fn engine_muted(paths: &ds_config::Paths) -> bool {
     )
 }
 
-/// PURE: fold the live voice-state notice into the narration spec. Split from the engine
-/// probe so the formatting is unit-testable without a running engine.
+/// Pure: fold mute notice into the narration spec (unit-testable without a running engine).
 fn with_voice_state(spec: String, muted: bool) -> String {
     if muted { spec + MUTED_NOTICE } else { spec }
 }

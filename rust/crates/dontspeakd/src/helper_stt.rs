@@ -1,17 +1,6 @@
-//! `HelperStt` — the dictation `Stt` engine backed by the warm helper child.
-//!
-//! Consolidation: Parakeet dictation no longer loads the model in-process. On
-//! Caps-ON `start()` spawns a thread that tells the helper to `listen` (it opens
-//! the mic + transcribes), streaming PARTIAL lines into the shared dictation
-//! buffer for the live confirm panel; on Caps-OFF `stop()` ends the listen,
-//! joins the FINAL transcript, and DEPOSITS it as `FinalState::Ready` for
-//! confirmation — it no longer pastes directly. Confirm-before-paste is
-//! unconditional: the ENGINE pastes the landed final on the user's confirm tap
-//! (focus-gated) and discards it on cancel. `abort()` (§F long-press reset) ends
-//! the listen and clears the buffer (no paste).
-//!
-//! The model lives in the one warm helper, not the engine; this type owns no
-//! platform handle anymore (the engine performs the gated paste).
+//! Dictation `Stt` via warm helper (Parakeet not in-process).
+//! `start` listens + streams PARTIALs; `stop` deposits final for confirm paste
+//! (engine pastes); `abort` discards.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

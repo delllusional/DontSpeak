@@ -1,13 +1,5 @@
-//! ds-aec-probe — M1 smoke test for the macOS VPIO duplex unit.
-//!
-//! Opens [`ds_aec::DuplexAudio`], renders a 440 Hz tone for a few seconds, and every
-//! 100 ms drains the echo-cancelled capture and prints its RMS. What to look for:
-//!   • `open` succeeds and `capture_rate` prints (the VPIO unit started),
-//!   • `cap_n` is non-zero each tick (the INPUT callback fires — capture works),
-//!   • with the tone playing OUT the speakers, capture RMS stays near the room
-//!     floor rather than spiking to the tone level (AEC is removing our render).
-//! Run on-device with a real mic + speakers (not headphones — the echo path needs
-//! the speaker→mic acoustic coupling to be worth cancelling).
+//! Smoke probe for duplex AEC: open, capture RMS, confirm echo stays near room floor.
+//! Needs real mic + speakers (not headphones — needs acoustic speaker→mic coupling).
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -25,14 +17,14 @@ fn main() {
     };
     println!("opened VPIO; capture_rate = {} Hz", dx.capture_rate());
 
-    // 100 ms tone chunks at the 24 kHz synth rate (render_push resamples up).
+    // 100 ms tone chunks at 24 kHz synth rate (render_push resamples up).
     const SYNTH_RATE: f32 = 24_000.0;
     const CHUNK: usize = 2_400; // 100 ms
     const FREQ: f32 = 440.0;
     let mut phase = 0.0f32;
 
     for tick in 0..40 {
-        // ~3 s of tone, then ~1 s of silence to compare floors.
+        // ~3 s tone, then ~1 s silence to compare floors.
         let mut chunk = Vec::with_capacity(CHUNK);
         let playing = tick < 30;
         for _ in 0..CHUNK {
@@ -69,10 +61,8 @@ fn main() {
     println!("done");
 }
 
-// Windows: capture-side AEC (no render_push — rodio renders TTS elsewhere). Open the
-// Communications-category capture and print its RMS every 100 ms. The echo-suppression
-// check (§9): play a tone / a TTS reply through the speakers WHILE this runs and confirm
-// the captured RMS stays near the no-playback floor (the APO is cancelling the render).
+// Capture-side only (no render_push). Play audio out speakers while running — RMS should
+// stay near the no-playback floor if the Communications APO is cancelling.
 #[cfg(windows)]
 fn main() {
     use std::time::Duration;

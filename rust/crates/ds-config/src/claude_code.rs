@@ -1,20 +1,16 @@
-//! Claude Code's voice-dictation config, READ from its own files — never written.
+//! Claude Code voice-dictation config — READ only, never written.
 
 use serde_json::Value;
 
 use crate::Paths;
 
-/// The `claude_code` STT engine uses it to (a) synthesize the right key and (b) report
-/// status (is CC voice on? which key?). All fields fail-open to Claude Code's documented
-/// defaults.
+/// Snapshot for `claude_code` STT (key synth + status). Fail-open to CC defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeCodeVoice {
-    /// `voice.enabled` in Claude Code's settings.json — is dictation turned on?
     pub enabled: bool,
-    /// `voice.mode` — hold/tap; defaults to "hold" (Claude Code's default) when absent.
+    /// hold/tap; default "hold".
     pub mode: String,
-    /// The key bound to `voice:pushToTalk` in keybindings.json, or "space" (Claude Code's
-    /// default) when unbound. The verbatim CC token, e.g. "ctrl+g", "space", "meta+k".
+    /// `voice:pushToTalk` binding, or "space" when unbound.
     pub key: String,
 }
 
@@ -28,10 +24,7 @@ impl Default for ClaudeCodeVoice {
     }
 }
 
-/// Read Claude Code's `voice` settings (`settings.json`) + the `voice:pushToTalk`
-/// keybinding (`keybindings.json`). READ-ONLY. Fail-open: missing/garbage files yield the
-/// defaults (voice off, "hold", "space"). `keybindings.json` is a SPARSE override file, so
-/// an absent binding means the default `space` — exactly Claude Code's own semantics.
+/// Read-only voice + pushToTalk binding. Fail-open to defaults; sparse keybindings = space.
 pub fn read_claude_code_voice(paths: &Paths) -> ClaudeCodeVoice {
     let mut v = ClaudeCodeVoice::default();
     // voice.{enabled,mode} from settings.json.

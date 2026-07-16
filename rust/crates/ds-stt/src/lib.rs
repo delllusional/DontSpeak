@@ -1,39 +1,33 @@
 //! ds-stt — pluggable speech-to-text engines for dontspeak (ARCHITECTURE §A.2).
 //!
-//! One trait [`Stt`] behind dynamic dispatch, selected by config enum via the
-//! `ds-engines` factory. The engine boundary lives INSIDE the engine's
-//! Caps-Lock state machine: the same OFF→ON / ON→OFF edges drive whichever
-//! engine is boxed.
+//! One trait [`Stt`] behind dynamic dispatch, selected by config via the
+//! `ds-engines` factory. The engine boundary lives INSIDE the Caps-Lock state
+//! machine: the same OFF→ON / ON→OFF edges drive whichever engine is boxed.
 //!
-//!   * [`claude_native::ClaudeNative`] — the DEFAULT: delegates dictation to
-//!     Claude Code's own voice (TAP mode). `start`/`stop` each tap its push-to-talk
-//!     key once, focus-gated to a terminal.
-//!   * [`system::SystemStt`] — inert in-process placeholder; the live macOS
-//!     `SFSpeechRecognizer` path runs in the warm helper.
+//!   * [`claude_native::ClaudeNative`] — DEFAULT: Claude Code's voice (TAP mode).
+//!   * [`system::SystemStt`] — inert in-process placeholder; live macOS
+//!     `SFSpeechRecognizer` runs in the warm helper.
+//!   * [`parakeet::ParakeetTranscriber`] — LOCAL on-device: mic → 16 kHz → streaming
+//!     FastConformer ([`streaming`]) over shared `ort`; paste via `KeyInjector`.
 //!
-//!   * [`parakeet::ParakeetTranscriber`] — LOCAL on-device STT: mic capture (cpal) → 16 kHz
-//!     (rubato) → the cache-aware streaming FastConformer ([`streaming`]) over the shared `ort`
-//!     runtime; pastes the transcript via `KeyInjector::type_text`.
-//!
-//! `Stt` is intentionally NOT `Send`: the engine drives it from its single poll
-//! thread, and `ClaudeNative` borrows the engine-owned platform (whose macOS
-//! CGEventSource is `!Send`). Keeping the trait non-`Send` avoids forcing an
-//! `unsafe impl Sync` on the platform — see the engine's ownership note.
+//! `Stt` is intentionally NOT `Send`: engine drives it from its single poll
+//! thread, and `ClaudeNative` borrows the engine-owned platform (macOS
+//! CGEventSource is `!Send`). Avoids forcing `unsafe impl Sync` on the platform.
 
-/// Live utterance segmentation (speech→silence boundaries) for streaming dictation.
+/// Live utterance segmentation (speech→silence) for streaming dictation.
 pub mod boundary;
 pub mod claude_native;
-/// Apple-native (FluidAudio Parakeet Core ML / ANE) STT. macOS only.
+/// FluidAudio Parakeet Core ML / ANE STT. macOS only.
 #[cfg(target_os = "macos")]
 pub mod coreml;
-/// Speaker diarization ("who spoke when") — trait + segments, Core ML backend (macOS).
+/// Speaker diarization ("who spoke when") — trait + Core ML backend (macOS).
 pub mod diarize;
 pub mod local;
 pub mod parakeet;
 pub mod separate;
-/// Cache-aware STREAMING Parakeet/FastConformer transducer over `ort` (each frame encoded once).
+/// Cache-aware STREAMING FastConformer over `ort` (each frame encoded once).
 pub mod streaming;
-/// System STT over macOS `SFSpeechRecognizer` (on-device). macOS only.
+/// System STT over macOS `SFSpeechRecognizer`. macOS only.
 #[cfg(target_os = "macos")]
 pub mod sysspeech;
 pub mod system;
@@ -48,8 +42,8 @@ pub use system::SystemStt;
 
 #[cfg(target_os = "macos")]
 pub use sysspeech::{SystemState, SystemStreamer};
-/// Usability of the System STT engine (Apple's on-device recognizer, en-US), mirroring the
-/// Parakeet present/warming/ready split for the status dot. Off macOS it's just a stub.
+/// System STT usability for the status dot (mirrors Parakeet present/warming/ready).
+/// Off macOS this is a stub.
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemState {
@@ -58,8 +52,8 @@ pub enum SystemState {
     Unavailable,
 }
 
-/// Current usability of system STT (ready / preparing / unavailable). Probes WITHOUT
-/// prompting (safe for the model-status poll). Always [`SystemState::Unavailable`] off macOS.
+/// System STT usability. Probes WITHOUT prompting (safe for model-status poll).
+/// Always [`SystemState::Unavailable`] off macOS.
 #[cfg(target_os = "macos")]
 pub fn system_state() -> SystemState {
     sysspeech::state()
@@ -69,8 +63,8 @@ pub fn system_state() -> SystemState {
     SystemState::Unavailable
 }
 
-/// Is on-device system STT usable at all right now (ready OR preparing — the model
-/// downloads on demand)? The `build_stt` gate. Always false off macOS.
+/// Usable now (ready OR preparing — model downloads on demand)? `build_stt` gate.
+/// Always false off macOS.
 #[cfg(target_os = "macos")]
 pub fn system_available() -> bool {
     sysspeech::available()
@@ -81,12 +75,9 @@ pub fn system_available() -> bool {
 }
 
 /// Request Speech Recognition authorization (prompts on first use), BLOCKING, then
-/// re-check. `Ok(())` when usable afterwards, else `Err(reason)`. Called both when a
-/// user explicitly opts into `stt_engine=system` (so enabling it verifies availability
-/// and never silently falls back) AND automatically at boot/reload when the config
-/// resolves to System via the default ladder without ever going through that explicit
-/// opt-in — see `dontspeakd::boot::authorize_system_stt_if_needed`. Always `Err` off
-/// macOS.
+/// re-check. Called on explicit `stt_engine=system` opt-in AND at boot/reload when
+/// the ladder resolves to System without that opt-in — see
+/// `dontspeakd::boot::authorize_system_stt_if_needed`. Always `Err` off macOS.
 #[cfg(target_os = "macos")]
 pub fn system_authorize() -> Result<(), String> {
     sysspeech::authorize()
@@ -96,45 +87,37 @@ pub fn system_authorize() -> Result<(), String> {
     Err("system speech recognition is macOS-only".into())
 }
 
-/// A speech-to-text backend. Object-safe so the factory hands back `Box<dyn Stt>`.
+/// Speech-to-text backend. Object-safe so the factory returns `Box<dyn Stt>`.
 ///
-/// The engine calls these on the Caps-Lock edges:
-///   OFF→ON  ⇒ `start()`
-///   ON→OFF  ⇒ `stop()`
-///   §F reset⇒ `abort()` (discard, do not inject) then the engine resets.
+/// Caps-Lock edges: OFF→ON ⇒ `start()`; ON→OFF ⇒ `stop()`; §F reset ⇒ `abort()`
+/// (discard, do not inject) then the engine resets.
 pub trait Stt {
-    /// Begin capture on Caps-ON. ClaudeNative emits the initial Ctrl+G down (if a
-    /// terminal is frontmost); local engines open the mic + start buffering.
-    /// Returns whether the engine considered itself started (informational).
+    /// Caps-ON. Returns whether the engine considered itself started (informational).
     fn start(&mut self) -> bool;
 
-    /// End capture on Caps-OFF. ClaudeNative emits Ctrl+G up (Claude submits);
-    /// local engines run the final transcription pass and inject the transcript.
+    /// Caps-OFF: end capture / inject as appropriate for the backend.
     fn stop(&mut self);
 
-    /// Abort the in-flight capture WITHOUT injecting (the §F long-press
-    /// force-reset path). DEFAULT delegates to `stop()`; the local engine overrides it
-    /// to DISCARD the in-flight capture (per §F.1 the reset must not inject).
+    /// Abort WITHOUT injecting (§F long-press force-reset). DEFAULT → `stop()`;
+    /// local engines override to DISCARD (per §F.1 reset must not inject).
     fn abort(&mut self) {
         self.stop();
     }
 
-    /// Whether this engine is usable right now (model present, supported OS).
-    /// The factory probes this and degrades to the default engine when false.
+    /// Usable right now (model present, supported OS). Factory degrades when false.
     fn is_available(&self) -> bool {
         true
     }
 
-    /// Debug tag for tests / logs (which concrete engine this box is).
+    /// Debug tag for tests / logs.
     fn kind(&self) -> &'static str {
         "stt"
     }
 
-    /// Whether this engine DEFERS the paste: it deposits the final transcript into
-    /// the shared dictation buffer ASYNCHRONOUSLY (so `stop()` never blocks the poll
-    /// thread on the slow final pass), and the engine auto-submits once it lands. True
-    /// for the local-transcript path (Parakeet helper). DEFAULT false — ClaudeNative
-    /// submits inline via Ctrl+G and has no deferred final.
+    /// DEFERS paste: final transcript lands in the shared dictation buffer
+    /// ASYNCHRONOUSLY (`stop()` never blocks the poll thread on the final pass);
+    /// engine auto-submits once it lands. True for local-transcript (Parakeet helper).
+    /// DEFAULT false — ClaudeNative submits inline via Ctrl+G.
     fn defers_paste(&self) -> bool {
         false
     }

@@ -15,38 +15,25 @@ use crate::hash::verify_sha256;
 use crate::model_path;
 use crate::spec::ModelSpec;
 
-/// Default download retry count.
 pub(crate) const DEFAULT_RETRIES: u32 = 3;
 
-/// Stall guards so a wedged CDN never hangs the caller (engine tick / GUI). A
-/// connect timeout + a per-read INACTIVITY timeout, NOT a whole-request timeout:
-/// a 150 MB–1.5 GB model can legitimately take minutes. `attohttpc`'s
-/// `read_timeout` sets the socket `SO_RCVTIMEO`, so it fires only when NO bytes
-/// arrive within the window — a slow-but-progressing download survives while a
-/// truly stalled socket aborts and the retry loop kicks in.
-// Connect stays short — it only catches an unreachable host (byte transfer is
-// bounded by the per-read timeout). 8s fails fast on a dead host without flapping
-// on a briefly-slow DNS/TLS handshake.
+// Connect: fail-fast on dead host. Read: per-read inactivity (SO_RCVTIMEO), not whole-request —
+// large models may take minutes; stalled CDN aborts when no bytes arrive for 60s.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-/// Prevent a compliant but pathological server from keeping one attempt alive with endless
-/// tiny successful ranges. Hitting the cap yields to the ordinary retry/backoff budget.
+/// Cap endless tiny successful ranges; then ordinary retry/backoff.
 const MAX_RANGE_SEGMENTS_PER_ATTEMPT: u32 = 64;
 
-/// The OS trust store, loaded ONCE, as attohttpc root certs. attohttpc's
-/// `tls-rustls-webpki-roots-ring` feature pulls the webpki-roots crate but NOT the feature
-/// flag its root-loading code is gated on, so its built-in store is EMPTY — every HTTPS GET
-/// would fail "no root trust anchors". We inject the OS roots ourselves; the rustls impl adds
-/// `add_root_certificate` entries to the store regardless of that broken cfg.
+/// OS trust store once. attohttpc's webpki-roots feature doesn't enable its root-loading
+/// cfg — built-in store is empty; inject native certs ourselves.
 fn os_root_certs() -> &'static [rustls_pki_types::CertificateDer<'static>] {
     use std::sync::OnceLock;
     static ROOTS: OnceLock<Vec<rustls_pki_types::CertificateDer<'static>>> = OnceLock::new();
     ROOTS.get_or_init(|| rustls_native_certs::load_native_certs().certs)
 }
 
-/// A GET builder with our stall-guard timeouts AND the OS trust roots injected — the SINGLE
-/// place every HTTPS download (ONNX assets, the ORT dylib, and the Core ML repos) is set up.
+/// Stall timeouts + OS roots — sole setup for every HTTPS download in this crate.
 pub(crate) fn http_get_builder(url: &str) -> attohttpc::RequestBuilder {
     let mut rb = attohttpc::get(url)
         .connect_timeout(CONNECT_TIMEOUT)
@@ -57,30 +44,22 @@ pub(crate) fn http_get_builder(url: &str) -> attohttpc::RequestBuilder {
     rb
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Installer prefetch source: when set, the low-level GET helpers COPY from a dir
-// of locally pre-downloaded files (keyed by URL basename) instead of hitting the
-// network. The installer fetches the assets itself and points this at its temp
-// dir; the verify + extract logic below is reused UNCHANGED. Unset in the normal
-// app/engine path.
-// ─────────────────────────────────────────────────────────────────────────────
+// Installer prefetch: copy from a local dir (URL basename) instead of network;
+// verify+extract reused. Unset on normal app/engine path.
 static PREFETCH_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-/// Point downloads at a dir of pre-fetched files (or `None` to disable). Files are
-/// matched by [`url_basename`]. Used by `ds-helper --install-prefetched`.
+/// Prefetch dir (`None` = off). Matched by [`url_basename`]. For `--install-prefetched`.
 pub fn set_prefetch_source(dir: Option<PathBuf>) {
     *PREFETCH_DIR.lock().unwrap() = dir;
 }
 
-/// The last path segment of `url` (query/fragment stripped) — the name a prefetched
-/// file is expected under, and the name the installer saves each download as.
+/// Last path segment of `url` (query/fragment stripped) — installer save key.
 pub fn url_basename(url: &str) -> &str {
     let no_query = url.split(['?', '#']).next().unwrap_or(url);
     let trimmed = no_query.trim_end_matches('/');
     trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
 
-/// If a prefetch dir is set and holds `url`'s file, return its path (else `None`).
 fn prefetch_local(url: &str) -> Option<PathBuf> {
     let guard = PREFETCH_DIR.lock().unwrap();
     let dir = guard.as_ref()?;
@@ -88,16 +67,8 @@ fn prefetch_local(url: &str) -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// In-flight file registry — ONE download per destination path, attach semantics.
-// Download targets now run in PARALLEL (each in its own thread), and two targets
-// can need the SAME file: both model setups ensure the shared onnxruntime dylib,
-// and the full-Kokoro set contains the frontend assets that `kokoro_frontend` also
-// fetches alone. The registry hands out one lock per final path; a second caller
-// blocks on it (attaching to the fetch already in flight), then re-checks
-// presence under the lock and returns without re-downloading. Entries are tiny
-// (a handful of model paths) and live for the process — no cleanup needed.
-// ─────────────────────────────────────────────────────────────────────────────
+// One in-flight download per dest path: parallel targets that share a file
+// (ORT dylib, kokoro_frontend subset) attach instead of double-fetching.
 pub(crate) fn file_flight(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -111,9 +82,7 @@ pub(crate) fn file_flight(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
         .clone()
 }
 
-/// Copy a prefetched file onto `dest` and report it as a completed transfer (so the
-/// caller's progress UI jumps to 100% for an instant local copy). Shared by the two
-/// download fns' installer fast-paths.
+/// Local copy + progress jump to 100% (installer fast-path).
 fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
     if local.metadata()?.len() > MAX_DOWNLOAD_BYTES {
         return Err(std::io::Error::new(
@@ -127,17 +96,12 @@ fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> st
     Ok(())
 }
 
-/// Ensure `spec`'s file exists locally and matches its SHA-256, downloading it
-/// if needed. Returns the final path on success.
-///
-/// If the final path already verifies, return it. Otherwise GET the URL into a
-/// sibling temp file, retaining validated partial bytes across transient retries,
-/// verify its SHA-256, then atomically persist it onto the final path.
+/// Verify local SHA-256 or download (range-resume + atomic rename). Returns final path.
 pub fn ensure(spec: &ModelSpec) -> std::io::Result<PathBuf> {
     ensure_with_retries(spec, DEFAULT_RETRIES, &|_, _| {})
 }
 
-/// Like [`ensure`] but reports `(downloaded_bytes, total_bytes)` during the fetch.
+/// [`ensure`] with live `(downloaded, total)` progress.
 pub fn ensure_with_progress(
     spec: &ModelSpec,
     progress: &dyn Fn(u64, u64),
@@ -160,21 +124,15 @@ fn ensure_with_retries(
     Ok(final_path)
 }
 
-/// The destination-explicit core of [`ensure_with_retries`] (split out so tests can
-/// drive it against a temp dir without touching the real `model_dir()`). Serialized
-/// per destination via [`file_flight`]: with download targets running in parallel, a
-/// concurrent request for the SAME file blocks here, then finds the file present at
-/// the verify below and returns — it ATTACHES to the finished fetch instead of
-/// re-downloading (or corrupting) it.
+/// Explicit-dest core of ensure (testable without `model_dir()`). Serialized by
+/// [`file_flight`] so parallel same-path callers attach to one fetch.
 fn ensure_at(
     final_path: &Path,
     spec: &ModelSpec,
     retries: u32,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
-    // Best-effort, once-per-process orphan sweep (see `sweep_orphans_once`) — run FIRST, on
-    // every call (not just ones that end up downloading), since a status-only check that finds
-    // everything already present is by far the most common call in a normal run.
+    // Once-per-process orphan sweep first (most calls are presence-only).
     if let Some(dir) = final_path.parent() {
         sweep_orphans_once(dir);
     }

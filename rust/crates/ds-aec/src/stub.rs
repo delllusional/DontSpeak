@@ -1,8 +1,5 @@
-//! Fallback for platforms other than macOS/Windows/Linux, which have their own native
-//! duplex AEC backends (see docs/AEC.md's per-platform sections). `open()` always fails
-//! here, so the caller degrades to the half-duplex
-//! cpal + rodio path. The method surface mirrors the macOS [`DuplexAudio`] so call
-//! sites compile cross-platform.
+//! Unsupported platforms: `open()` always fails → caller degrades to half-duplex.
+//! Method surface mirrors macOS [`DuplexAudio`] so call sites compile cross-platform.
 
 pub struct DuplexAudio {
     _private: (),
@@ -17,7 +14,6 @@ impl DuplexAudio {
         0
     }
 
-    /// No backend → never owns render (moot; `open()` always fails here).
     pub fn owns_render(&self) -> bool {
         false
     }
@@ -53,7 +49,6 @@ impl DuplexAudio {
     }
 }
 
-/// Non-macOS stub capture handle (no VPIO unit exists).
 #[derive(Clone)]
 pub struct CaptureHandle {
     _private: (),
@@ -68,7 +63,6 @@ impl CaptureHandle {
     }
 }
 
-/// Stub render handle (no render ring exists; `open()` always fails here).
 #[derive(Clone)]
 pub struct RenderHandle {
     _private: (),

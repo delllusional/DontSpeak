@@ -25,21 +25,16 @@ fn generation_stopped(stopped_through: &std::sync::atomic::AtomicU64, generation
     stopped_through.load(Ordering::SeqCst) >= generation
 }
 
-/// Control flags for the full-duplex concurrent listen thread (set by the stdin
-/// reader, polled by the thread). `start` opens a listen, `stop` (the `lstop` op)
-/// ends it, `quit` tears the thread down.
+/// Full-duplex listen thread control (reader sets; thread polls). `start` opens; `quit` tears down.
+/// Stop is via generation `stopped_through` (`lstop`).
 #[derive(Default)]
 pub(crate) struct ListenSig {
     pub(crate) start: Option<u64>,
     pub(crate) quit: bool,
 }
 
-/// The full-duplex CONCURRENT listen thread. Idles until `start`, runs a listen
-/// session (drain the echo-cancelled mic + stream partials) until `stop`, then
-/// idles again. Runs ALONGSIDE the playback thread's TTS render — that's coexist:
-/// the user dictates while the voice speaks, the AEC keeps the capture clean. Emits
-/// `LDONE` (not `DONE`) as its terminal so the engine can demux it from speak
-/// output, which shares the same stdout (println! is line-atomic across threads).
+/// Concurrent listen alongside TTS render (coexist). Terminal is `LDONE` (never `DONE`)
+/// so the engine demuxes dictation from speak on shared stdout.
 pub(crate) fn concurrent_listen_loop(
     capture: CaptureHandle,
     transcriber: std::sync::Arc<std::sync::Mutex<ds_stt::LocalTranscriber>>,
@@ -85,11 +80,7 @@ fn emit_empty_final() {
     let _ = std::io::stdout().flush();
 }
 
-/// Auto make-up gain for one captured utterance (`capture_gain = "auto"`): peak-
-/// normalize to a target so quiet AND hot mics both land where Parakeet recognizes
-/// best, with a noise-floor gate so pure silence / room hum is never amplified.
-/// Dictation is push-to-talk, so the full buffer is in hand — this is a one-shot
-/// measurement, no streaming AGC needed.
+/// One-shot peak-normalize for PTT (`capture_gain = "auto"`). Noise-floor gate: never amplify silence.
 fn auto_gain(buf: &[f32]) -> f32 {
     if buf.is_empty() {
         return 1.0;
@@ -101,34 +92,20 @@ fn auto_gain(buf: &[f32]) -> f32 {
     (AUTO_GAIN_TARGET_PEAK / peak).clamp(AUTO_GAIN_MIN, AUTO_GAIN_MAX)
 }
 
-/// Minimum 16 kHz length a segment must have for transcription. Mirrors FluidAudio's
-/// `ASRConstants.minimumAudioDurationSeconds` (0.3 s): the Parakeet guard throws
-/// `invalidAudioData` below it, and the ONNX path has no useful output on sub-frame audio
-/// either. 0.3 s × 16 000 Hz = 4800 samples.
+/// Min 16 kHz segment length (0.3 s = FluidAudio `minimumAudioDurationSeconds` / Parakeet guard).
 const MIN_TRANSCRIBE_SAMPLES_16K: usize = 4800;
 
-/// Max open-tail length (in device-rate samples) we re-transcribe for the live preview.
-///
-/// SINGLE source of truth: the VAD's force-split bound, [`ds_stt::boundary::MAX_SEGMENT_SECS`].
-/// The tail is force-committed once it reaches that length, so previewing up to *exactly*
-/// that length leaves no gap between "too long to preview cheaply" and "long enough to be
-/// committed". Those two used to be separate numbers (an 8 s preview cap vs a 20 s split);
-/// a pause-free phrase between them grew a tail too long to preview but too short to
-/// commit, so the overlay went blank until stop. Deriving the budget here keeps them one
-/// value — do NOT reintroduce a hardcoded seconds literal.
+/// Live-preview open-tail budget = VAD force-split ([`ds_stt::boundary::MAX_SEGMENT_SECS`]).
+/// Do not hardcode seconds: separate preview cap vs split used to blank the overlay mid-phrase.
 fn tail_preview_budget_samples(rate: u32) -> usize {
     ds_stt::boundary::MAX_SEGMENT_SECS * rate as usize
 }
 
-/// Whether the still-open tail (length in device-rate samples) is worth re-transcribing
-/// for this tick's live preview: non-empty and within [`tail_preview_budget_samples`].
 fn tail_previewable(tail_len: usize, rate: u32) -> bool {
     tail_len > 0 && tail_len <= tail_preview_budget_samples(rate)
 }
 
-/// Low-cost online capture conditioning for the true streaming path. Manual gain is exact.
-/// Auto gain follows a slowly-decaying speech peak and moves quickly away from clipping but
-/// gradually toward more amplification, avoiding per-block pumping. Silence is never amplified.
+/// Streaming capture gain: manual exact; auto decays peak, cuts hot fast / raises quiet slow (no pump).
 struct StreamingGain {
     mode: ds_config::CaptureGain,
     peak: f32,
@@ -157,7 +134,6 @@ impl StreamingGain {
             }
             self.peak = (self.peak * 0.995).max(block_peak);
             let wanted = (AUTO_GAIN_TARGET_PEAK / self.peak).clamp(AUTO_GAIN_MIN, AUTO_GAIN_MAX);
-            // Reduce hot input promptly; raise quiet input gradually so room noise does not pump.
             let blend = if wanted < self.gain { 0.65 } else { 0.15 };
             self.gain += (wanted - self.gain) * blend;
             self.gain
@@ -169,10 +145,7 @@ impl StreamingGain {
     }
 }
 
-/// Build the live `PARTIAL` overlay line from the already-committed segment texts plus an
-/// optional preview of the still-open tail, returning the text to emit — or `None` to skip
-/// this tick because nothing changed or the line is empty. Pure (no audio, no IPC) so the
-/// streaming-overlay contract is unit-testable.
+/// Pure PARTIAL line: committed segments + optional tail; `None` if unchanged/empty.
 fn next_overlay(committed: &[String], tail: Option<&str>, last_text: &str) -> Option<String> {
     let mut shown: Vec<&str> = committed.iter().map(String::as_str).collect();
     if let Some(t) = tail {
@@ -186,25 +159,9 @@ fn next_overlay(committed: &[String], tail: Option<&str>, last_text: &str) -> Op
     }
 }
 
-/// The SHARED listen loop, used by BOTH the half-duplex serve-loop listen
-/// ([`run_listen`]) and the full-duplex concurrent listen ([`run_concurrent_listen`])
-/// so the cadence / silence-trim / partial logic can't drift between modes. The two
-/// callers supply only what differs:
-///
-/// * `rate`       — the capture sample rate (cpal device-native vs VPIO 48 kHz),
-/// * `timeout`    — the hard session cap,
-/// * `label`      — the helper-log diagnostic tag,
-/// * `drain`      — pull newly-captured samples (cpal `drain_new` vs VPIO `drain`),
-/// * `stopped`    — end the session (speak-loop `cancel` flag vs the `lstop` sig),
-/// * `transcribe` — run Parakeet on trimmed 16 kHz PCM → flattened text (callers
-///   differ in `&mut` vs `&Mutex` access to the model).
-///
-/// Emits `LISTENING`, periodic `PARTIAL <text>` (~every 180 ms, de-duped), then a
-/// final `STTSTATS` + `FINAL <text>` + `LDONE`. The partial is the segments already
-/// finalized at speech→silence boundaries plus a cheap re-pass of the still-open tail;
-/// the final pass only transcribes the short remaining segment, not the whole buffer
-/// (see [`ds_stt::VadBoundaryDetector`]). `LDONE` (not `DONE`) lets the engine
-/// demux a listen from concurrent speak output.
+/// Shared offline-fallback listen loop for half- and full-duplex (no drift in cadence/trim/partials).
+/// Callers supply rate/timeout/drain/stopped/transcribe. Emits LISTENING → PARTIAL* → STTSTATS/FINAL/LDONE.
+/// Partials = closed VAD segments + open-tail re-pass; final = remaining segment only.
 fn transcribe_loop(
     rate: u32,
     timeout: std::time::Duration,
@@ -212,8 +169,7 @@ fn transcribe_loop(
     mut drain: impl FnMut() -> Vec<f32>,
     stopped: impl Fn() -> bool,
     mut transcribe: impl FnMut(&[f32]) -> Option<String>,
-    // Applied to the FINAL 16 kHz buffer only (partials stream unfiltered for latency):
-    // the speaker-lock filter that drops non-enrolled voices. Identity when lock is off.
+    // Final 16 kHz only (partials unfiltered): speaker-lock; identity when off.
     filter_final: impl Fn(&[f32]) -> Vec<f32>,
 ) {
     use std::io::Write;

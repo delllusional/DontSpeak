@@ -1,15 +1,13 @@
-//! Voice / language enumeration (reads the Kokoro voices bin + `say` directly; no
-//! engine and no config write). Used by the `list_voices` tool.
+//! Voice / language enumeration (Kokoro voices bin + `say` directly; no engine). Used by
+//! `list_voices`.
 
 use ds_config::TtsEngine;
 use ds_voices::enumerate;
 use serde_json::{Value, json};
 
-/// Build voice groups for `engine`, filtered to one `language` primary subtag. Each
-/// group is `(subtag, voices)`; an empty group (no voice matches) is dropped, so a
-/// language the engine doesn't offer yields no group. The voices carry no `language`
-/// field of their own — the group's subtag is the language. This build is English-only,
-/// so the sole caller passes `"en"`.
+/// Voice groups for `engine`, filtered to one `language` primary subtag. Empty groups dropped.
+/// Voices carry no own `language` field — the group's subtag is the language. Build is
+/// English-only; sole caller passes `"en"`.
 pub(crate) fn voice_groups(engine: TtsEngine, language: &str) -> Vec<(String, Vec<Value>)> {
     let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
     match engine {
@@ -62,10 +60,7 @@ mod tests {
 
     #[test]
     fn kokoro_language_matches_nothing_group_is_dropped() {
-        // Pins the "language matches nothing → group dropped" composition that
-        // `voice_groups`'s Kokoro arm relies on, driving the underlying PURE
-        // filter (`kokoro_choices_from`) directly with a synthetic id list and an
-        // unmatched language tag — fully pure/injected, no disk read.
+        // Pure filter: synthetic ids + unmatched language → empty (no disk).
         let ids: Vec<String> = ["af_sarah", "am_michael", "bm_george"]
             .iter()
             .map(|s| s.to_string())
@@ -75,11 +70,7 @@ mod tests {
 
     #[test]
     fn system_language_matches_nothing_group_is_dropped() {
-        // Same "language matches nothing → group dropped" branch for the System
-        // engine. Drives the PURE `system_choices_from` seam with an injected
-        // `SpeakerVoice` fixture rather than `voice_groups(TtsEngine::System, ..)`
-        // directly — the latter would call the real, unmocked
-        // `enumerate::system_voices()`, which shells out to `say -v ?` on macOS.
+        // Injected fixture — never call real `system_voices()` (shells out to `say -v ?`).
         let voices = vec![ds_voices::SpeakerVoice {
             id: "Samantha".into(),
             name: "Samantha".into(),

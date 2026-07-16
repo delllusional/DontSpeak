@@ -1,43 +1,26 @@
-//! The `notify`-side narration handlers — the CLAUDE CODE / QWEN CODE ADAPTER over the
-//! shared streaming-narration core (`ds-narrate`). Dispatched from
-//! [`crate::hook_core::notify`]. This file only: parses the hook payload, builds a
-//! client-neutral `ds_narrate::StreamBatch`, runs the shared file-backed step
-//! ([`ds_narrate::deliver_batch`]), and forwards each utterance to the engine.
+//! Notify-side narration — Claude/Qwen adapter over `ds-narrate`. Dispatched from
+//! [`crate::hook_core::notify`]. Parses hook payload → client-neutral `StreamBatch` →
+//! [`ds_narrate::deliver_batch`] → engine.
 //!
-//! [`message_display`] (`MessageDisplay`): runs once per streaming batch. Claude Code
-//! sends an incremental `delta` chunk keyed by content-block `index` (+ a sticky `final`
-//! flag); Qwen Code sends CUMULATIVE
-//! `displayed_text` snapshots + `is_final` — BOTH parse through the same
-//! [`MessageDisplayHook`] (serde aliases) and the same core. When `narrate` contains
-//! "digests", every top-level blockquote is spoken (verbatim, each once, in document
-//! order); "shorts" voices a short blockquote-less final reply whole. Fast +
-//! fire-and-forget so it never delays the display.
+//! [`message_display`]: Claude sends per-batch `delta` + `index` + sticky `final`; Qwen
+//! sends cumulative `displayed_text` + `is_final` — same [`MessageDisplayHook`] (serde
+//! aliases). digests → top-level blockquotes once each; shorts → short blockquote-less
+//! final whole. Fire-and-forget.
 //!
-//! [`speak_reply`] (`Stop`): the non-streaming analogue — voices the whole final reply,
-//! guarded by the streaming WITNESS so it never double-speaks what a streaming pass
-//! (MessageDisplay here, or the engine's Codex app-server subscriber —
-//! `dontspeakd::codex_stream`) already narrated. [`mark_streaming_session`]
-//! (`SessionStart`) seeds that witness for streaming hook clients (Claude Code and Qwen Code);
-//! non-streaming clients pass `--greet-only` to skip it. A Codex session gets its
-//! witness seeded BY THE ENGINE on a successful app-server `thread/resume` instead — a
-//! plain-TUI Codex session (not on the shared app-server) never seeds, so its `Stop`
-//! still speaks exactly as before.
+//! [`speak_reply`] (Stop): non-streaming final reply, gated by streaming witness so it
+//! never double-speaks MessageDisplay / Codex app-server narration. [`mark_streaming_session`]
+//! seeds the witness at SessionStart for streaming clients; non-streaming pass `--greet-only`.
+//! Codex witness is seeded by the engine on app-server `thread/resume` — plain-TUI keeps Stop.
 //!
-//! [`barge_session`] (`SessionEnd`): barge THIS session's engine playback (a scoped
-//! `StopSpeech{session}`) so closing a window silences its OWN reply, not another's. No
-//! payload → `None` session → the global barge.
-//!
-//! Settings (ds-config VoiceConfig): `narrate` is a SET of "digests"/"shorts".
+//! [`barge_session`] (SessionEnd): scoped barge for this session only (`None` → global).
+//! `narrate` is a set of "digests"/"shorts" (VoiceConfig).
 
 use ds_config::{ClientSource, NarrateKind, Paths, VoiceConfig};
 use ds_narrate::{BatchPayload, StreamBatch};
 use serde::Deserialize;
 use std::borrow::Cow;
 
-/// SessionEnd notify: barge ONLY this session's engine playback (so closing one window
-/// never silences another's reply). The `payload` is the hook JSON; no payload / no
-/// session id → `None` → the global barge. `client` is the `--client` token the wiring
-/// stamped, carried onto the request so the engine's log names who closed the window.
+/// SessionEnd: barge this session only (no id → global). Stamps `client` on the request.
 pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
     let session = crate::hook_core::session_id_from_payload(payload);
     let _ = ds_ipc::request(
@@ -47,16 +30,14 @@ pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
             source: client,
         },
     );
-    // Grok Stop digests are admitted under a sticky session tag (see `grok_stop_session_tag`)
-    // so MarkActive `input_clears=[current]` cannot prune them. SessionEnd must still barge
-    // that sticky queue — plain `SessionEnd{session}` only clears the real session id.
+    // Grok Stop digests use sticky session tag (see `grok_stop_session_tag`) so MarkActive
+    // cannot prune them; SessionEnd must barge that tag too (SessionEnd, not only StopSpeech,
+    // so pool / forget_narration_session state is reclaimed).
     if client == ClientSource::Grok {
         let sticky = session
             .as_deref()
             .map(grok_stop_session_tag)
             .unwrap_or_else(|| "grok-stop".into());
-        // SessionEnd (not only StopSpeech) so sticky tags reclaim pool assignment /
-        // forget_narration_session state the same way the real session does.
         let _ = ds_ipc::request(
             &paths.engine_sock,
             &ds_ipc::Request::SessionEnd {
@@ -68,72 +49,50 @@ pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
             let _ = std::fs::remove_file(last_spoken_fingerprint_path(paths, s));
         }
     }
-    // SessionEnd is terminal for this session (this path fires ONLY on SessionEnd — a
-    // mid-session barge uses `StopSpeech`), so the engine reclaims this session's voice
-    // maps, and here we reclaim its per-session display-state file and its lock/tmp
-    // siblings. Without this they accumulate one `narrate-display-<session>.json` per
-    // distinct session in the data dir forever. (Codex wires NO SessionEnd hook — its
-    // cleanup is owned by the engine's codex_stream supervisor.)
+    // Terminal for this session: reclaim display-state + lock/tmp or they accumulate forever.
+    // Codex has no SessionEnd hook — cleanup is engine codex_stream.
     if let Some(s) = &session {
         ds_narrate::clear_session_state(paths, s);
     }
 }
 
-/// SessionStart notify (the streaming-witness seed): pre-create THIS session's streaming
-/// state file so [`speak_reply`]'s `streamed` guard is reliably true before the first
-/// `Stop`, closing the only timing gap in the double-narration fix. The discriminator is
-/// the event wiring + the `--greet-only` flag (see [`crate::hook_core::notify`]):
-///   • Claude Code and Qwen Code wire `SessionStart` with plain `notify` and seed the witness.
-///   • OpenAI Codex likewise wires `SessionStart` with `--greet-only` (see `wire/codex.rs`):
-///     greet runs, seed skipped — its witness is instead seeded by the ENGINE on a successful
-///     app-server `thread/resume` (`dontspeakd::codex_stream`), so only sessions that are
-///     actually streamed mid-turn silence their `Stop`; a plain-TUI session keeps `Stop`.
-/// Idempotent + non-destructive: never clobbers real in-progress state (a re-fired
-/// SessionStart is a no-op), and the seeded default reads exactly like "no file yet" (fresh
-/// `Accum`), so streaming is unaffected.
+/// SessionStart: seed streaming witness so Stop's `streamed` guard is true before first Stop
+/// (closes double-narration race). Streaming clients wire plain notify; Codex uses
+/// `--greet-only` and engine seeds on app-server resume instead. Idempotent, non-destructive.
 pub fn mark_streaming_session(paths: &Paths, payload: &str) {
     let Some(session) = crate::hook_core::session_id_from_payload(payload) else {
-        return; // no session id ⇒ can't scope a witness (the per-batch write still covers it)
+        return; // no session id ⇒ can't scope a witness (per-batch write still covers it)
     };
     ds_narrate::seed_witness(paths, &session);
 }
 
-// ── Stop hook (speak the FINAL reply — non-streaming clients) ───────────────────
+// ── Stop (final reply — non-streaming) ──────────────────────────────────────────
 
-/// Stop hook payload subset. Claude Code, Codex, and Qwen Code supply
-/// `last_assistant_message`, which supports full-reply voicing for non-streaming clients.
-///
-/// Grok's Stop (live-verified) is metadata-only (`sessionId`, `reason`, `transcriptPath`,
-/// etc.) with no `lastAssistantMessage`. We fall back to reading the final assistant turn
-/// from the file named in `transcriptPath` (typically the session's chat_history.jsonl).
-/// The camelCase alias remains for forward-compat with any client that does supply direct text.
+/// Stop payload subset. CC/Codex/Qwen supply `last_assistant_message`. Grok is metadata-only
+/// (live-verified) — fall back to `transcriptPath` chat_history.jsonl. CamelCase aliases
+/// for forward-compat.
 #[derive(Debug, Deserialize, Default)]
 struct StopHook {
-    // Alias accepts camelCase alongside snake_case for clients that supply it.
     #[serde(default, alias = "lastAssistantMessage")]
     last_assistant_message: Option<String>,
     #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
     #[serde(default, alias = "transcriptPath")]
     transcript_path: Option<String>,
-    /// Per-turn identifier present in live Grok Stop payloads. Used to deduplicate direct
-    /// `lastAssistantMessage` payloads without suppressing identical text on a later turn.
+    /// Live Grok per-turn id — dedupe direct text without suppressing a later identical turn.
     #[serde(default, alias = "promptId")]
     prompt_id: Option<String>,
-    /// Working directory Grok reports on Stop (live: `"cwd":"C:\\Users\\usr"`). Used to
-    /// reconstruct `~/.grok/sessions/<encoded-cwd>/<sessionId>/chat_history.jsonl` when
-    /// `transcriptPath` is missing or does not point at a readable file.
+    /// Reconstruct `~/.grok/sessions/<encoded-cwd>/<sessionId>/chat_history.jsonl` when path missing.
     #[serde(default)]
     cwd: Option<String>,
 }
 
-/// Lightweight transcript entry for extracting the last assistant turn from a Grok
-/// chat_history.jsonl (or similar JSONL pointed at by transcriptPath).
+/// JSONL assistant/user line from Grok chat_history (or similar).
 #[derive(Debug, Deserialize, Default)]
 struct TranscriptEntry {
     #[serde(default, rename = "type")]
     r#type: Option<String>,
-    /// Grok stores plain string content; accept other JSON shapes without failing the line.
+    /// Plain string or content-block array; other shapes skip the line.
     #[serde(default)]
     content: Option<serde_json::Value>,
 }
@@ -143,7 +102,6 @@ impl TranscriptEntry {
         match &self.content {
             Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
             Some(serde_json::Value::Array(parts)) => {
-                // Content-block arrays: join text parts if present.
                 let mut out = String::new();
                 for part in parts {
                     if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
@@ -160,8 +118,7 @@ impl TranscriptEntry {
 }
 
 impl StopHook {
-    /// Return the best available final assistant text: direct field if present,
-    /// otherwise Grok's last non-empty assistant content from `transcriptPath` (if any).
+    /// Direct field, else Grok transcript fallback.
     fn last_assistant_text(&self, client: ClientSource, paths: &Paths) -> Option<Cow<'_, str>> {
         if let Some(t) = self
             .last_assistant_message
@@ -177,10 +134,7 @@ impl StopHook {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or("-");
-            // Digests preferred when enabled; this helper is used by tests and non-`speak_reply`
-            // paths that do not load VoiceConfig — assume digests on (live default).
-            // Re-resolves the transcript path on every retry attempt (updates.jsonl may
-            // exist before sibling chat_history.jsonl appears).
+            // Tests / non-speak_reply paths assume digests on (live default).
             return select_grok_stop_text(self, paths, session, true)
                 .map(|(text, _fp)| Cow::Owned(text));
         }
@@ -188,15 +142,13 @@ impl StopHook {
     }
 }
 
-/// Session key used to admit Grok Stop digests (and the co-queued reply_done earcon) so
-/// they survive MarkActive `input_clears=[current]` on the *real* session id, while
-/// remaining barge-able on SessionEnd via an extra `SessionEnd` for this tag.
+/// Sticky admit key for Grok Stop digests + reply_done so MarkActive cannot prune them;
+/// SessionEnd barges this tag explicitly.
 fn grok_stop_session_tag(session: &str) -> String {
     format!("grok-stop:{session}")
 }
 
-/// Percent-encode a cwd the way Grok names session folders (`C:\Users\usr` →
-/// `C%3A%5CUsers%5Cusr`). Unreserved ASCII is left alone; everything else is `%HH`.
+/// Grok session-folder cwd encoding (`C:\Users\usr` → `C%3A%5CUsers%5Cusr`).
 fn encode_grok_session_cwd(cwd: &str) -> String {
     let mut out = String::with_capacity(cwd.len() * 3);
     for &b in cwd.as_bytes() {
@@ -210,8 +162,7 @@ fn encode_grok_session_cwd(cwd: &str) -> String {
     out
 }
 
-/// If Grok points `transcriptPath` at a non-chat file (live: `updates.jsonl` — the ACP
-/// event stream, which has no `type:assistant` lines), prefer a sibling `chat_history.jsonl`.
+/// Prefer sibling `chat_history.jsonl` when path is live Grok `updates.jsonl` (no assistant lines).
 fn prefer_chat_history_transcript(path: std::path::PathBuf) -> std::path::PathBuf {
     let is_updates = path
         .file_name()
@@ -226,22 +177,15 @@ fn prefer_chat_history_transcript(path: std::path::PathBuf) -> std::path::PathBu
     path
 }
 
-/// True when `path` is still the ACP event stream (`updates.jsonl`) rather than chat history.
 fn is_updates_jsonl(path: &std::path::Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.eq_ignore_ascii_case("updates.jsonl"))
 }
 
-/// Resolve the on-disk Grok chat transcript for a Stop payload.
-///
-/// Order:
-///   1. `transcriptPath` when it names an existing file — but if that file is
-///      `updates.jsonl` (live Grok 0.2.x Stop), use sibling `chat_history.jsonl` instead.
-///      If the sibling is not present yet, do **not** treat bare `updates.jsonl` as terminal
-///      (fall through to cwd/session scan so a valid chat_history elsewhere can still win).
-///   2. `~/.grok/sessions/<encoded-cwd>/<sessionId>/chat_history.jsonl` from `cwd`+`sessionId`
-///   3. Any `~/.grok/sessions/*/<sessionId>/chat_history.jsonl` (cwd missing / encoding skew)
+/// Grok chat transcript path. Order: (1) transcriptPath, remapping updates.jsonl → sibling
+/// chat_history (bare updates is non-terminal — fall through); (2) encoded-cwd+session under
+/// `~/.grok/sessions`; (3) scan sessions/*/<sessionId>/chat_history (newest mtime on skew).
 fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::path::PathBuf> {
     if let Some(raw) = hook
         .transcript_path
@@ -252,13 +196,11 @@ fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::p
         let p = std::path::PathBuf::from(raw);
         if p.is_file() {
             let preferred = prefer_chat_history_transcript(p);
-            // Existing updates.jsonl without a sibling must not permanently shadow a
-            // valid ~/.grok/sessions/.../chat_history.jsonl for the whole Stop budget.
+            // Bare updates.jsonl must not shadow a valid sessions/.../chat_history for the budget.
             if !is_updates_jsonl(&preferred) {
                 return Some(preferred);
             }
         } else {
-            // Path may be stale or mis-named; still try the chat_history sibling.
             let chat = p.with_file_name("chat_history.jsonl");
             if chat.is_file() {
                 return Some(chat);
@@ -280,8 +222,6 @@ fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::p
             return Some(candidate);
         }
     }
-    // Encoding / cwd skew: scan one level of session parents for this session id.
-    // Prefer the newest mtime when multiple cwd folders share the same session id.
     let Ok(entries) = std::fs::read_dir(&sessions_root) else {
         return None;
     };
@@ -303,19 +243,14 @@ fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::p
     best.map(|(p, _)| p)
 }
 
-/// Whether `text` has at least one top-level `>` digest run (the same extractor Stop uses
-/// for digests mode). Used to prefer a digest-bearing assistant turn over a newer tool-status
-/// line that would otherwise win a pure "last non-empty" scan.
+/// Prefer digest-bearing assistant over a newer tool-status line in "last non-empty" scans.
 fn has_digest_blockquote(text: &str) -> bool {
     !ds_config::all_blockquotes(text).is_empty()
 }
 
-/// Fingerprint of a spoken digest for this turn so a re-fired Stop cannot re-voice the
-/// same digests while they remain on disk after a successful enqueue.
-///
-/// Transcript selections use the selected assistant line's **absolute file byte offset** so
-/// a later turn with identical digest body still speaks, while a sliding 256 KiB tail cannot
-/// change the identity when the user line leaves the scan window.
+/// Turn fingerprint so re-fired Stop does not re-voice after successful enqueue. Transcript
+/// selections use absolute assistant-line byte offset so identical body on a later turn still
+/// speaks, and a sliding 256 KiB tail cannot rewrite identity when the user line leaves the window.
 fn digest_fingerprint(
     last_user_text: &str,
     turn_byte_offset: Option<u64>,
@@ -358,33 +293,26 @@ fn store_last_spoken_fingerprint(paths: &Paths, session: &str, fp: u64) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Atomic replace: concurrent Stop hooks may race; temp+rename is best-effort on Windows.
+    // Concurrent Stop may race; temp+rename is best-effort (Windows rename-over may fail).
     let tmp = path.with_extension("fp.tmp");
     if std::fs::write(&tmp, fp.to_string()).is_ok() && std::fs::rename(&tmp, &path).is_err() {
-        // Windows: rename over existing may fail; fall back to write-in-place.
         let _ = std::fs::write(&path, fp.to_string());
         let _ = std::fs::remove_file(&tmp);
     }
 }
 
-/// One JSONL chat entry we care about for turn scoping and turn-keyed fingerprints.
 #[derive(Debug)]
 enum ChatRole {
-    /// User message text plus absolute file offset of the JSONL line start.
     User { text: String, byte_offset: u64 },
     Assistant {
         text: String,
-        /// Absolute file offset of the JSONL line start. This is the fallback turn identity
-        /// when a large tool result pushes the user marker outside the bounded tail.
+        /// Fallback turn identity when a large tool result pushes the user line out of the tail.
         byte_offset: u64,
     },
 }
 
-/// Tail the transcript file (JSONL) and return chat roles in chronological order (oldest
-/// first within the tail). Only the last complete JSONL entries within a bounded tail are
-/// considered so a long history is not fully parsed; the partial first line is discarded
-/// byte-wise because the seek may split a UTF-8 code point. Each user role carries the
-/// absolute file byte offset of its line for stable turn fingerprints.
+/// Bounded-tail JSONL roles (oldest first). Discards partial first line after seek (UTF-8 split).
+/// Offsets are absolute file positions for stable fingerprints.
 fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -421,14 +349,13 @@ fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
     let mut line_abs = complete_start_abs;
     for line in complete_lines.split(|byte| *byte == b'\n') {
         let line_start = line_abs;
-        // Advance past this line and its newline (split drops the delimiter).
         line_abs += line.len() as u64 + 1;
         let Ok(entry) = serde_json::from_slice::<TranscriptEntry>(line) else {
             continue;
         };
         match entry.r#type.as_deref() {
             Some("user") => {
-                // Keep the role even when text is empty so the turn boundary still moves.
+                // Keep empty text so the turn boundary still moves.
                 out.push(ChatRole::User {
                     text: entry.text_content().unwrap_or_default(),
                     byte_offset: line_start,
@@ -448,14 +375,10 @@ fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
     out
 }
 
-/// Assistants after the last user message (newest first) plus turn identity for fingerprints.
 #[derive(Debug, Default)]
 struct CurrentTurn {
-    /// Text of the last user message in the scanned tail (empty if none).
     last_user_text: String,
-    /// Absolute file byte offset of that user JSONL line, when present.
     last_user_byte_offset: Option<u64>,
-    /// Non-empty assistant texts and absolute line offsets for this turn, newest first.
     assistants_newest_first: Vec<CurrentAssistant>,
 }
 
@@ -465,9 +388,8 @@ struct CurrentAssistant {
     byte_offset: u64,
 }
 
-/// Current-turn assistants only (after the last user message), newest first.
-/// Never crosses into a previous user turn — that was the "played previous digests" live
-/// bug when Stop fired before the current assistant line was flushed.
+/// Assistants after the last user only (newest first). Never crosses into a previous turn —
+/// live bug was re-playing prior digests when Stop raced the chat_history flush.
 fn current_turn_from_path(path: &std::path::Path) -> CurrentTurn {
     let roles = chat_roles_chronological(path);
     let last_user_idx = roles
@@ -498,8 +420,7 @@ fn current_turn_from_path(path: &std::path::Path) -> CurrentTurn {
     }
 }
 
-/// Full retry budget while the path is missing or the current turn has no assistant yet
-/// (waiting for a late `chat_history` flush). Tests use a small count so they stay fast.
+/// Retry while path/turn empty (late chat_history flush). Tests use a small count.
 fn stop_retry_attempts() -> usize {
     #[cfg(test)]
     {
@@ -522,32 +443,16 @@ fn stop_retry_delay() -> std::time::Duration {
     }
 }
 
-/// Selected Grok Stop text plus an optional digest fingerprint to commit **only after**
-/// successful enqueue (mic gate / engine-down must not permanently skip a digest).
+/// Grok Stop selection; fingerprint committed only after enqueue success.
 struct GrokStopSelection {
     text: String,
-    /// Present when `text` is a digest-bearing assistant message.
     digest_fp: Option<u64>,
-    /// Resolved transcript path used for the selection (logging).
     path: std::path::PathBuf,
 }
 
-/// Grok Stop has no `lastAssistantMessage`; narration comes from `transcriptPath`.
-///
-/// Selection rules (live-hardened):
-///   1. Re-resolve the transcript path every attempt (updates.jsonl may exist before sibling
-///      chat_history.jsonl appears).
-///   2. Only consider assistants after the last user message (current turn). Never re-voice
-///      a previous turn's digests when Stop races the chat_history flush.
-///   3. When digests mode is on, prefer the newest current-turn assistant with a top-level
-///      `>` digest (skip tool-status lines that follow digests in agentic turns).
-///   4. Skip digests whose *turn-scoped* fingerprint matches the last *successfully spoken*
-///      Stop for this session; retry for a newer flush rather than re-playing.
-///   5. Fall back to the newest non-empty current-turn assistant for shorts-only replies.
-///   6. Full retry budget only while the path/turn is empty; once a non-digest assistant is
-///      visible, use a short secondary budget (or return immediately when digests are off).
-///
-/// Does **not** persist fingerprints — the caller commits after enqueue success.
+/// Grok Stop narration from transcript. Live rules: re-resolve path each attempt; current
+/// turn only; prefer digest-bearing assistant when digests on; skip last successfully-spoken
+/// fingerprint; shorts fallback; full budget while empty. Does not persist fingerprints.
 fn select_grok_stop_text(
     hook: &StopHook,
     paths: &Paths,
@@ -557,9 +462,7 @@ fn select_grok_stop_text(
     select_grok_stop_text_detailed(hook, paths, session, messages_on).map(|s| (s.text, s.digest_fp))
 }
 
-/// Pick the best shorts-fallback assistant body for the current turn.
-/// When digests mode is off, prefer a non-digest line so a status/short body wins over a
-/// digest-bearing final that would yield silence under shorts-only `stop_utterances`.
+/// Shorts fallback: when digests off, prefer non-digest line (digest-only would silence shorts).
 fn shorts_fallback_text(turn: &CurrentTurn, messages_on: bool) -> Option<String> {
     if messages_on {
         return turn
@@ -578,9 +481,7 @@ fn shorts_fallback_text(turn: &CurrentTurn, messages_on: bool) -> Option<String>
         })
 }
 
-/// Turn-aware admission fingerprint for a direct Grok reply. Live payloads carry `promptId`;
-/// transcript identity is the version-skew fallback, and text-only is the last resort when a
-/// future direct payload supplies neither.
+/// Direct Grok reply fingerprint: promptId, else transcript offset, else text-only.
 fn direct_grok_reply_fingerprint(hook: &StopHook, paths: &Paths, text: &str) -> u64 {
     if let Some(prompt_id) = hook
         .prompt_id
@@ -646,7 +547,6 @@ fn select_grok_stop_text_detailed_with_retry(
         };
         let turn = current_turn_from_path(&path);
 
-        // Digests mode: prefer newest digest-bearing assistant in the current turn.
         if messages_on
             && let Some(digest) = turn
                 .assistants_newest_first
@@ -661,8 +561,7 @@ fn select_grok_stop_text_detailed_with_retry(
                     path,
                 });
             }
-            // Same digest as last spoken: keep the full retry window available because a
-            // newer assistant flush may still land after an apparently stable interval.
+            // Same as last spoken: keep full retry (newer flush may still land).
         } else if let Some(text) = shorts_fallback_text(&turn, messages_on)
             && shorts_fallback.is_none()
         {
@@ -671,7 +570,6 @@ fn select_grok_stop_text_detailed_with_retry(
                 digest_fp: None,
                 path: path.clone(),
             });
-            // Digests disabled: no reason to wait for a `>` line we would ignore.
             if !messages_on {
                 return shorts_fallback;
             }
@@ -684,45 +582,25 @@ fn select_grok_stop_text_detailed_with_retry(
     shorts_fallback
 }
 
-/// Witness that a streaming pass ran for this session: its per-session state file exists
-/// (delegates to [`ds_narrate::witness_exists`]). The deterministic client-discriminator
-/// the `Stop` path needs (see [`speak_reply`]):
-///   • Claude Code and Qwen Code wire `MessageDisplay` and seed the file at SessionStart, so
-///     `Stop` must not repeat the streamed reply.
-///   • OpenAI Codex wires NO `MessageDisplay` hook; its file appears ONLY when the engine's
-///     app-server subscriber resumed this session's thread (mid-turn narration active) —
-///     otherwise `streamed = false` and `Stop` is its narration path, exactly as before.
-/// [`mark_streaming_session`] also SEEDS this file at `SessionStart` for STREAMING hook
-/// clients, so the witness is present from session open — closing the timing
-/// edge of a `Stop` racing the first batch's write.
-/// `pub(crate)` so `hook_core`'s greet-only tests can probe the witness directly.
+/// Streaming-pass witness for Stop: state file exists. CC/Qwen seed at SessionStart;
+/// Codex file appears only when engine app-server resumed the thread — else Stop narrates.
+/// `pub(crate)` for hook_core greet-only tests.
 pub(crate) fn streamed_via_message_display(paths: &Paths, session: &str) -> bool {
     ds_narrate::witness_exists(paths, session)
 }
 
-/// The pure Stop decision — re-exported from the shared core so `hook_core`'s tests keep
-/// driving it through this module (the seam the double-narration regression tests use).
+/// Pure Stop decision (re-export so hook_core double-narration tests keep this seam).
 pub(crate) use ds_narrate::stop_utterances;
 
-/// Stop notify: speak the FINAL assistant reply, once — the NON-STREAMING analogue of
-/// [`message_display`] for clients whose replies weren't streamed this session (notably
-/// plain-TUI Codex), whose hooks fire only at end-of-turn with the whole
-/// `last_assistant_message`. Claude Code and Qwen Code also wire `Stop`, so without a guard
-/// we'd re-voice every reply the
-/// streaming path already narrated (heard twice). Guard: [`streamed_via_message_display`]
-/// — a session with a streaming state file already narrated ⇒ stay silent. Pure decision
-/// in [`stop_utterances`]; this is the IO wrapper (config load, mic probe, witness,
-/// engine send).
-///
-/// Returns `Some(session)` when the caller should enqueue the reply_done earcon under that
-/// session (Grok sticky tag). Returns `None` to use the payload session via
-/// [`crate::hook_speak::engine_earcon`].
+/// Stop: voice final reply once when not already streamed. Guarded by
+/// [`streamed_via_message_display`]; pure decision in [`stop_utterances`].
+/// Returns `Some(session)` for reply_done under Grok sticky tag; `None` → payload session.
 pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option<Option<String>> {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests);
     let short_on = cfg.narrates(NarrateKind::Shorts);
     if !messages_on && !short_on {
-        return None; // narration off ⇒ stay silent (skip parsing + the witness stat)
+        return None;
     }
     let Ok(hook) = serde_json::from_str::<StopHook>(payload.trim()) else {
         return None;
@@ -730,9 +608,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     let session = hook.session_id.clone().filter(|s| !s.trim().is_empty());
     let streamed = streamed_via_message_display(paths, session.as_deref().unwrap_or_default());
 
-    // Stop is the hook route's final retry opportunity for work rejected while the queue
-    // was full. It retries the identified pending utterance, then the ordinary streaming
-    // witness still suppresses the whole-reply fallback.
+    // Final retry for queue-full rejections; witness still suppresses whole-reply fallback.
     if streamed {
         let session_id = session.as_deref().unwrap_or_default();
         if let Err(message) = ds_narrate::retry_pending(paths, session_id, |utterance| {
@@ -744,9 +620,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
 
     let mic_active = ds_platform::is_mic_active();
 
-    // Grok: prefer a direct lastAssistantMessage when present (forward-compat); otherwise
-    // re-resolve path + turn-scoped selection with deferred fingerprint commit.
-    // Other clients: last_assistant_message (or None).
+    // Grok: direct lastAssistantMessage if present; else turn-scoped transcript + deferred fp.
     let (assistant_text, grok_selection, direct_fp): (
         Option<String>,
         Option<GrokStopSelection>,
@@ -788,9 +662,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
         mic_active,
         streamed,
     );
-    // Grok Stop digests use a sticky session tag so MarkActive `input_clears=[current]` on
-    // the real session id cannot prune them (ding-only race). SessionEnd barges the sticky
-    // tag explicitly in `barge_session`. Non-Grok keeps the real session.
+    // Sticky tag: MarkActive cannot prune digests (ding-only race); barge_session clears it.
     let admit_session = if client == ClientSource::Grok {
         session
             .as_deref()
@@ -847,13 +719,11 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     }
     let mut any_enqueued = false;
     let mut any_failed = false;
-    // Deterministic ids so concurrent Stop hooks collapse at the engine admission boundary
-    // (fingerprint alone only gates sequential re-fires after a full successful enqueue).
+    // Deterministic ids collapse concurrent Stop at engine admission (fp alone is sequential).
     let narration_fp = direct_fp.or_else(|| grok_selection.as_ref().and_then(|s| s.digest_fp));
     let real_sess = session.as_deref().unwrap_or("-");
     for (i, line) in speak.into_iter().enumerate() {
         let narration_id = narration_fp.map(|fp| format!("grok-stop:{real_sess}:{fp}:{i}"));
-        // Surface a rejected enqueue from the non-streaming fallback.
         match ds_ipc::request(
             &paths.engine_sock,
             &ds_ipc::Request::SpeakNarration {
@@ -874,15 +744,14 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
             }
         }
     }
-    // Commit the turn fingerprint only after the full utterance list is admitted — a partial
-    // multi-line enqueue must not permanently skip remaining unspoken narration.
+    // Commit fingerprint only after full list admitted — partial multi-line must not skip rest.
     if any_enqueued
         && !any_failed
         && let (Some(fp), Some(s)) = (narration_fp, session.as_deref())
     {
         store_last_spoken_fingerprint(paths, s, fp);
     }
-    // Grok: co-queue reply_done under the sticky admit session so digests play before the ding.
+    // Grok: reply_done under sticky session so digests play before the ding.
     if client == ClientSource::Grok {
         Some(admit_session)
     } else {
@@ -890,51 +759,34 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     }
 }
 
-// ── MessageDisplay hook (speak-as-it-streams) ───────────────────────────────────
+// ── MessageDisplay (speak-as-it-streams) ────────────────────────────────────────
 
-/// The MessageDisplay hook payload — TWO clients' shapes through ONE struct:
-///   • Claude Code ≥ 2.1.x fires repeatedly while a message streams: an incremental
-///     `delta` chunk per batch (2.1.183, verified against a live payload), with some
-///     versions documented to send a cumulative `displayedText` instead — we accept either.
-///   • Qwen Code sends snake_case CUMULATIVE
-///     snapshots — `displayed_text` + `is_final` — which the serde ALIASES below parse
-///     through the SAME fields.
+/// Two clients, one struct: CC incremental `delta` (+ optional cumulative displayedText);
+/// Qwen cumulative snake_case via aliases.
 #[derive(Debug, Deserialize, Default, Clone)]
 struct MessageDisplayHook {
-    // Cumulative whole-text snapshot. CC's documented camelCase name, plus Qwen's
-    // snake_case alias.
     #[serde(default, rename = "displayedText", alias = "displayed_text")]
     displayed_text: Option<String>,
-    // The incremental text chunk for THIS streaming batch (what CC actually sends).
     #[serde(default)]
     delta: Option<String>,
     #[serde(default)]
     session_id: Option<String>,
-    // Stable per-message id — the new-message KEY (replacing the old first-48-chars
-    // fingerprint). NOT used for ordering; that's `index`.
+    // New-message key (not order — that's `index`).
     #[serde(default)]
     message_id: Option<String>,
-    // Content-block index within the message. NOT a key (keying on it would split one
-    // message into many false "new messages"), but ESSENTIAL for ORDER: Claude Code spawns
-    // a process per batch and they race, so they can reach us out of order.
+    // Order only: CC spawns a process per batch; they race.
     #[serde(default)]
     index: Option<u64>,
-    // True on the last batch of a message. CC's name is `final`; Qwen uses
-    // `is_final` — both accepted.
     #[serde(default, rename = "final", alias = "is_final")]
     is_final: Option<bool>,
 }
 
-/// First ~48 chars of the message — a cheap fingerprint to detect a new message
-/// stream (each message's opening text differs) when the client sends no `message_id`,
-/// so the core resets its accumulation.
+/// Fallback key when no `message_id` — opening text differs per message.
 fn message_key(s: &str) -> String {
     s.chars().take(48).collect()
 }
 
-/// Translate one parsed hook payload into the client-neutral [`StreamBatch`] the shared
-/// core consumes: the stable `message_id` (or the fingerprint fallback) becomes the key;
-/// a non-empty cumulative `displayed_text` wins over the per-index `delta`.
+/// Hook → client-neutral [`StreamBatch`]. Cumulative `displayed_text` wins over `delta`.
 fn batch_from_hook(hook: &MessageDisplayHook) -> StreamBatch {
     let key = match hook.message_id.as_deref().filter(|s| !s.is_empty()) {
         Some(id) => id.to_string(),
@@ -961,21 +813,14 @@ fn batch_from_hook(hook: &MessageDisplayHook) -> StreamBatch {
     }
 }
 
-/// MessageDisplay notify: narrate this streamed batch. `payload` is the hook JSON (already
-/// read by the transport, not stdin). The shared core accumulates the chunks into the
-/// cumulative text and returns each newly-completed blockquote run; we enqueue them on the
-/// warm engine.
-///
-/// Gates ONLY on `narrate` (on/off) and not-mid-recording — NOT on focus. Narration is
-/// forwarded TAGGED BY SESSION regardless of which app is frontmost; the ENGINE WORKER holds
-/// an inactive/backgrounded terminal's items (never dropped here) and plays them when that
-/// terminal is active + frontmost. Fast + fire-and-forget so it never delays the display.
+/// MessageDisplay: narrate this streamed batch. Gates on `narrate` + not-mid-recording —
+/// not focus; session-tagged, engine holds background terminals. Fire-and-forget.
 pub fn message_display(paths: &Paths, payload: &str, client: ClientSource) {
     let cfg = VoiceConfig::load(paths);
-    let messages_on = cfg.narrates(NarrateKind::Digests); // voice model-written summaries
-    let short_on = cfg.narrates(NarrateKind::Shorts); // voice a short blockquote-less reply whole
+    let messages_on = cfg.narrates(NarrateKind::Digests);
+    let short_on = cfg.narrates(NarrateKind::Shorts);
     if !messages_on && !short_on {
-        return; // narration off for messages ⇒ stay silent
+        return;
     }
     let Ok(hook) = serde_json::from_str::<MessageDisplayHook>(payload.trim()) else {
         return;
@@ -983,9 +828,7 @@ pub fn message_display(paths: &Paths, payload: &str, client: ClientSource) {
     let session = hook.session_id.clone().unwrap_or_default();
     let batch = batch_from_hook(&hook);
 
-    // The state transaction stays locked through the local admission round-trip: racing
-    // hook processes cannot both offer the same checkpoint, and rejected work remains
-    // pending instead of advancing the delivered high-water mark.
+    // Lock held through admission so races don't double-offer; rejected work stays pending.
     let session_tag = Some(session.clone()).filter(|s| !s.is_empty());
     if let Err(message) = ds_narrate::deliver_batch(
         paths,
@@ -1022,9 +865,7 @@ fn admit_narration(
     }
 }
 
-/// The test seam kept from the pre-extraction shape: hook payload in → the shared core's
-/// pure step. Production goes through [`ds_narrate::deliver_batch`] instead (same
-/// translation via [`batch_from_hook`]).
+/// Test seam: hook → pure step. Production uses [`ds_narrate::deliver_batch`].
 #[cfg(test)]
 fn step_display(
     prev: &ds_narrate::DisplayState,
@@ -1054,15 +895,9 @@ mod tests {
         assert_eq!(message_key("short"), "short");
     }
 
-    // ── MessageDisplay streaming: the leading blockquote must survive batching ───────
-    //
-    // CC fires MessageDisplay repeatedly as a message streams. The spoken line (leading
-    // blockquote) often lands in an EARLY batch and only becomes "complete" once a later
-    // batch adds the body line that terminates it. These tests pin that across-batch
-    // accumulation so the regression — keying state by `message_id#index`, which reset the
-    // accumulator every batch and silently dropped the blockquote — can't come back.
+    // MessageDisplay: leading blockquote must survive batching (regression: keying by
+    // message_id#index reset Accum every batch and dropped the quote).
 
-    /// One delta-mode batch: the incremental chunk CC actually sends (no cumulative text).
     fn delta(id: &str, chunk: &str, is_final: bool) -> MessageDisplayHook {
         MessageDisplayHook {
             delta: Some(chunk.into()),
@@ -1072,10 +907,7 @@ mod tests {
         }
     }
 
-    /// Feed a sequence of batches through the pure step, threading state as the real hook
-    /// would. Auto-assigns a per-message sequential `index` to any batch that lacks one (so
-    /// the in-order delta tests read naturally), mirroring how CC numbers content blocks.
-    /// Returns the final state and every line that would have been spoken, in order.
+    /// Pure step driver; auto-assigns sequential `index` when missing.
     fn drive(batches: &[MessageDisplayHook], mic_active: bool) -> (DisplayState, Vec<String>) {
         use std::collections::HashMap;
         let mut state = DisplayState::default();
@@ -1101,9 +933,7 @@ mod tests {
 
     #[test]
     fn out_of_order_batches_still_assemble_and_speak() {
-        // The race fix's core: batch-processes can reach us in ANY order. Reconstruction is
-        // keyed by `index` and `final` is sticky, so even body-first / quote-last / preamble-
-        // middle assembles the right cumulative text and speaks the line exactly once.
+        // Batches may arrive any order; index + sticky final assemble once.
         let b = |idx: u64, chunk: &str, fin: bool| MessageDisplayHook {
             delta: Some(chunk.into()),
             message_id: Some("m".into()),
@@ -1111,7 +941,7 @@ mod tests {
             is_final: Some(fin),
             ..Default::default()
         };
-        // Index order is preamble(0), quote(1), body(2,final); DELIVER them 2, 0, 1.
+        // Index order 0,1,2; deliver 2,0,1.
         let batches = [
             b(2, "\n\nBody after the quote.", true),
             b(0, "Prose preamble first.", false),
@@ -1124,8 +954,7 @@ mod tests {
 
     #[test]
     fn blockquote_split_across_batches_is_spoken_once() {
-        // THE regression: blockquote in batch 1, its terminating body line in batch 2.
-        // Must speak exactly once, when the body arrives. (Pre-fix: silence.)
+        // Quote in batch 1, body in batch 2 — speak once when body arrives (pre-fix: silence).
         let batches = [
             delta("m1", "> Spoken line here.", false),
             delta("m1", "\n\nNow the body of the reply.", false),
@@ -1138,8 +967,6 @@ mod tests {
 
     #[test]
     fn blockquote_streamed_char_by_char_still_completes() {
-        // Even when the blockquote itself is split mid-line across batches, accumulation
-        // must reassemble it and speak the whole line once the body terminates it.
         let batches = [
             delta("m1", "> Spoken ", false),
             delta("m1", "line ", false),
@@ -1152,8 +979,6 @@ mod tests {
 
     #[test]
     fn prose_preamble_before_blockquote_is_spoken_once() {
-        // A reply that opens with a little prose preamble BEFORE its spoken line must still
-        // narrate the topmost blockquote — and exactly once, when the body terminates it.
         let batches = [
             delta("m1", "Okay, here's what I found.", false),
             delta("m1", "\n\n> The spoken line.", false),
@@ -1166,7 +991,6 @@ mod tests {
 
     #[test]
     fn preamble_then_blockquote_streamed_char_by_char() {
-        // Preamble AND the quote both split across batches → reassemble and speak once.
         let batches = [
             delta("m1", "Let me ", false),
             delta("m1", "check.\n", false),
@@ -1180,8 +1004,6 @@ mod tests {
 
     #[test]
     fn preamble_only_until_final_stays_silent() {
-        // Preamble that never resolves into a blockquote → silence, even though early
-        // batches had no quote yet (must not latch silence prematurely, must not speak).
         let batches = [
             delta("m1", "Thinking about it", false),
             delta("m1", " some more", false),
@@ -1196,8 +1018,6 @@ mod tests {
 
     #[test]
     fn reply_without_blockquote_is_silent() {
-        // A reply that doesn't OPEN with a blockquote is never voiced — we never read raw
-        // replies. (This is the "it didn't play" case when Claude forgot the spoken line.)
         let batches = [
             delta("m1", "Just a plain reply, ", false),
             delta("m1", "no spoken line at all.", true),
@@ -1211,8 +1031,7 @@ mod tests {
 
     #[test]
     fn cumulative_displayed_text_mode_speaks() {
-        // Forward-compat: a CC version that sends cumulative `displayedText` instead of
-        // deltas must also reach the spoken line.
+        // Forward-compat for cumulative displayedText (vs deltas).
         let cum = |id: &str, text: &str, f: bool| MessageDisplayHook {
             displayed_text: Some(text.into()),
             message_id: Some(id.into()),
@@ -1229,7 +1048,6 @@ mod tests {
 
     #[test]
     fn final_flag_flushes_blockquote_with_no_body() {
-        // A reply that is ONLY a blockquote (no body) completes on the final batch.
         let batches = [
             delta("m1", "> Just the spoken line.", false),
             delta("m1", "", true),
@@ -1240,7 +1058,6 @@ mod tests {
 
     #[test]
     fn spoken_line_voiced_at_most_once_per_message() {
-        // Once spoken, every later batch of the same message is a no-op (no double-speak).
         let batches = [
             delta("m1", "> Hello.\n\nBody.", false),
             delta("m1", " more body.", false),
@@ -1252,8 +1069,7 @@ mod tests {
 
     #[test]
     fn new_message_id_resets_and_speaks_again() {
-        // Dropping the `#index` must NOT merge two separate messages: a new `message_id`
-        // still resets the accumulator so the next message's spoken line is voiced too.
+        // New message_id must not merge with prior message after dropping #index keying.
         let batches = [
             delta("m1", "> First.\n\nBody.", true),
             delta("m2", "> Second.\n\nBody.", true),
@@ -1264,8 +1080,6 @@ mod tests {
 
     #[test]
     fn multiple_blockquotes_speak_each_in_order() {
-        // A multi-point spoken digest: three top-level blockquotes separated by body prose.
-        // Each becomes its own utterance, voiced once, in order — including the closing one.
         let batches = [
             delta(
                 "m1",
@@ -1293,8 +1107,7 @@ mod tests {
 
     #[test]
     fn final_blockquote_with_no_body_after_it_still_speaks() {
-        // The last point ends the message with no trailing body line — it completes on the
-        // final batch, and must still be voiced (the "closing question went silent" guard).
+        // Closing quote with no trailing body — completes on final batch ("went silent" guard).
         let batches = [
             delta("m1", "> Opening point.\n\nBody.", false),
             delta("m1", "\n\n> Closing point.", false),
@@ -1309,8 +1122,7 @@ mod tests {
 
     #[test]
     fn mic_active_at_message_start_gates_whole_message() {
-        // If the mic was live when the message first appeared, the whole message stays
-        // gated even after the blockquote completes (decided once, cached per message_id).
+        // Mic live at first batch gates the whole message (cached per message_id).
         let batches = [
             delta("m1", "> Spoken.", false),
             delta("m1", "\n\nBody.", true),
@@ -1322,16 +1134,8 @@ mod tests {
         );
     }
 
-    // ── Qwen Code payload seam ───────────────────────────────────────────────────────
-    //
-    // Qwen's MessageDisplay payload is snake_case and cumulative:
-    // `{hook_event_name, message_id, displayed_text, is_final}` — debounced whole-text
-    // snapshots from ONE sequential in-process loop (no cross-process races; the lock
-    // idles). The serde aliases on `displayed_text` AND `is_final` route it through the
-    // SAME handler; these tests drive the exact sketched JSON.
+    // Qwen: snake_case cumulative snapshots via the same serde aliases.
 
-    /// Parse a raw Qwen-shaped payload string — through serde, exactly as
-    /// `message_display` would.
     fn qwen(payload: &str) -> MessageDisplayHook {
         serde_json::from_str(payload).expect("qwen payload parses")
     }
@@ -1349,7 +1153,6 @@ mod tests {
 
     #[test]
     fn qwen_cumulative_sequence_speaks_blockquote_once() {
-        // The sketched flow: debounced cumulative snapshots ending is_final=true.
         let batches = [
             qwen(r#"{"message_id":"qm1","displayed_text":"> Spoken","is_final":false}"#),
             qwen(r#"{"message_id":"qm1","displayed_text":"> Spoken line.","is_final":false}"#),
@@ -1384,30 +1187,20 @@ mod tests {
         assert_eq!(step.speak, vec!["Done — build is green.".to_string()]);
     }
 
-    // ── Stop hook: the double-narration guard (regression) ───────────────────────────
-    //
-    // The pure decision (`stop_utterances`) lives in ds-narrate with its own tests; here
-    // we pin the WITNESS half through this module's delegates against a tempdir.
+    // Stop double-narration witness (pure stop_utterances lives in ds-narrate).
 
-    /// A reply shaped like a spoken digest — what Stop would voice (or wrongly suppress).
     const DIGEST_REPLY: &str = "> First point.\n\nDetail.\n\n> Second point.\n\nMore.";
 
     #[test]
     fn streamed_witness_tracks_the_message_display_state_file() {
-        // The IO half of the guard: `streamed_via_message_display` is true exactly when this
-        // session's streaming state file exists, and is SESSION-SCOPED — a different session
-        // id (a fresh Codex session) reads false. Uses the SAME `display_state_path` the
-        // writer uses, so the witness can't drift from the writer.
+        // Session-scoped; same path as writer so witness can't drift.
         let dir = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(dir.path());
         let cc = "cc-session-aaaa";
         let codex = "codex-session-bbbb";
 
-        // No state file yet ⇒ not streamed (the pre-first-batch / Codex case).
         assert!(!streamed_via_message_display(&paths, cc));
 
-        // After a streamed batch persisted this session's state, the witness flips true —
-        // for THAT session only; an unrelated session still reads false.
         let batch = StreamBatch {
             key: "m1".into(),
             payload: BatchPayload::Delta {
@@ -1429,22 +1222,17 @@ mod tests {
 
     #[test]
     fn session_start_seed_closes_the_first_turn_race() {
-        // The hardening: SessionStart seeds the witness so `streamed` is already true before
-        // the first Stop, even if no MessageDisplay batch has landed yet — and it's
-        // SESSION-SCOPED (a Codex session's SessionStart is greet-only, so it never reaches
-        // `mark_streaming_session` and is never seeded).
+        // Seed before first Stop even with no MessageDisplay yet (session-scoped).
         let dir = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(dir.path());
         let session = "cc-session-cccc";
 
-        // Pre-seed: false until SessionStart runs.
         assert!(!streamed_via_message_display(&paths, session));
         mark_streaming_session(&paths, &format!(r#"{{"session_id":"{session}"}}"#));
         assert!(
             streamed_via_message_display(&paths, session),
             "SessionStart must seed the witness before any MessageDisplay batch"
         );
-        // A Stop arriving right after SessionStart (before any batch) is now correctly silent.
         assert!(
             stop_utterances(Some(DIGEST_REPLY), true, true, false, true).is_empty(),
             "seeded session ⇒ Stop stays silent"
@@ -1453,13 +1241,10 @@ mod tests {
 
     #[test]
     fn session_start_seed_is_non_destructive_and_needs_a_session() {
-        // It must NOT clobber real in-progress state (a re-fired SessionStart on an existing
-        // session), and a payload with no session id is a no-op (nothing to scope).
         let dir = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(dir.path());
         let session = "cc-session-dddd";
 
-        // Existing real state must survive a re-fired SessionStart verbatim.
         let path = ds_narrate::display_state_path(&paths, session);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1473,7 +1258,6 @@ mod tests {
             "seed must not clobber real in-progress message state"
         );
 
-        // No session id ⇒ no file created (nothing to scope a witness to).
         mark_streaming_session(&paths, "{}");
         assert!(
             !streamed_via_message_display(&paths, ""),
@@ -1483,8 +1267,7 @@ mod tests {
 
     #[test]
     fn barge_session_clears_the_state_file_trio() {
-        // SessionEnd reclaims the per-session display-state file and its lock/tmp siblings
-        // (the engine ping is a best-effort no-op against the tempdir's nonexistent socket).
+        // SessionEnd reclaims state + lock/tmp (engine ping is no-op on missing socket).
         let dir = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(dir.path());
         let session = "cc-session-eeee";
@@ -1503,7 +1286,7 @@ mod tests {
         assert!(!path.with_extension("tmp").exists(), "tmp removed");
     }
 
-    // ── Grok Stop payload (live-verified field names + event casing) ─────────────────
+    // Grok Stop (live-verified fields).
     #[test]
     fn camelcase_stop_aliases_remain_forward_compatible() {
         let dir = tempfile::tempdir().unwrap();
@@ -1528,7 +1311,7 @@ mod tests {
     fn real_grok_stop_is_metadata_only() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        // Sanitized from a live Grok 0.2.93 capture on 2026-07-13.
+        // Sanitized live Grok 0.2.93 capture (2026-07-13).
         let payload = r#"{"hookEventName":"stop","sessionId":"g-real","cwd":"C:\\Users\\usr","transcriptPath":"...","promptId":"p1","reason":"end_turn"}"#;
         assert_eq!(crate::hook_core::event_name(payload), "Stop");
         let hook: StopHook = serde_json::from_str(payload).expect("real Grok Stop parses");
@@ -1538,12 +1321,10 @@ mod tests {
             hook.last_assistant_message.is_none(),
             "Grok Stop carries no last* text"
         );
-        // transcriptPath "..." does not exist → no text extracted
         assert!(
             hook.last_assistant_text(ClientSource::Grok, &paths)
                 .is_none()
         );
-        // Consequently Stop contributes no narration text (earcon may still ring via the arm).
         assert!(
             stop_utterances(
                 hook.last_assistant_text(ClientSource::Grok, &paths)
@@ -1559,8 +1340,7 @@ mod tests {
 
     #[test]
     fn grok_transcript_path_fallback_extracts_last_assistant() {
-        // Fixture: sanitized live-style transcript (JSONL) as requested in #49.
-        // We only need a realistic tail with a final assistant turn containing a digest.
+        // #49: transcriptPath → last assistant digests.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         let tx_path = dir.path().join("chat_history.jsonl");
@@ -1581,7 +1361,6 @@ mod tests {
         assert!(text.contains("> Point one."));
         assert!(text.contains("> And the question?"));
 
-        // Feeding the extracted text through stop_utterances should yield the spoken lines.
         let spoken = stop_utterances(Some(&text), true, false, false, false);
         assert_eq!(
             spoken,
@@ -1611,7 +1390,6 @@ mod tests {
         let hook = StopHook {
             session_id: Some(session.into()),
             cwd: Some(cwd.into()),
-            // Missing / unusable path — live regressions omit or mis-point this field.
             transcript_path: Some("...".into()),
             ..StopHook::default()
         };
@@ -1623,8 +1401,7 @@ mod tests {
 
     #[test]
     fn grok_transcript_prefers_digest_assistant_over_newer_status_line() {
-        // Live agentic shape: digests final message, then a tool-status assistant without
-        // blockquotes. A pure "last non-empty" scan would silence digests (only the ding).
+        // Agentic: digests then tool-status — pure last-nonempty would ding-only.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         let tx_path = dir.path().join("chat_history.jsonl");
@@ -1684,8 +1461,7 @@ mod tests {
             true,
             3,
             |attempt| {
-                // The digest appears only after the second status observation. The old
-                // shortened status-line budget returned before this retry boundary.
+                // Digest lands after second observation; short status budget used to return early.
                 if attempt == 1 {
                     std::fs::write(&tx_path, complete).unwrap();
                 }
@@ -1725,8 +1501,7 @@ mod tests {
             true,
             3,
             |attempt| {
-                // Two identical observations look stable, but the completed flush lands at
-                // the next retry boundary. The old signature shortcut returned too early.
+                // Flush lands next boundary; old signature shortcut returned too early.
                 if attempt == 1 {
                     std::fs::write(&tx_path, complete).unwrap();
                 }
@@ -1738,8 +1513,7 @@ mod tests {
 
     #[test]
     fn grok_stop_does_not_revoice_previous_turn_digests() {
-        // Live: Stop races the chat_history flush and previously selected the prior turn's
-        // digests. Only assistants AFTER the last user message are eligible.
+        // Stop raced flush and re-played prior turn; only post-last-user assistants count.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         let tx_path = dir.path().join("chat_history.jsonl");
@@ -1750,7 +1524,6 @@ mod tests {
 "#;
         std::fs::write(&tx_path, transcript).unwrap();
 
-        // No digests in the current turn → must NOT fall back to previous turn.
         let hook = StopHook {
             session_id: Some("sess-prev".into()),
             transcript_path: Some(tx_path.to_string_lossy().into_owned()),
@@ -1767,7 +1540,6 @@ mod tests {
             "must not re-voice previous digests"
         );
 
-        // After current digests land, they win.
         let transcript2 = r#"{"type":"user","content":"first"}
 {"type":"assistant","content":"> Previous turn digests only."}
 {"type":"user","content":"second"}
@@ -1783,7 +1555,7 @@ mod tests {
 
     #[test]
     fn grok_stop_fingerprint_not_committed_by_selection_alone() {
-        // Selecting digests must not write the fingerprint; only successful enqueue does.
+        // Fingerprint only after successful enqueue, not on select.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         let tx_path = dir.path().join("chat_history.jsonl");
@@ -1807,10 +1579,7 @@ mod tests {
             "selection alone must not commit the fingerprint"
         );
         store_last_spoken_fingerprint(&paths, "fp-sess", fp.unwrap());
-        // After commit, same digests are skipped (shorts fallback empty / wait then status).
         let again = select_grok_stop_text(&hook, &paths, "fp-sess", true);
-        // Only digests in the turn; after fingerprint match, shorts_fallback stays None
-        // when the only assistant is digest-bearing (no non-digest fallback).
         assert!(
             again.is_none()
                 || again
@@ -1822,7 +1591,7 @@ mod tests {
 
     #[test]
     fn grok_stop_fingerprint_allows_identical_digests_on_a_new_turn() {
-        // Same digest body on a later user turn must still speak (turn-scoped fingerprint).
+        // Same body, later user turn — turn-scoped fp must still speak.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         let tx_path = dir.path().join("chat_history.jsonl");

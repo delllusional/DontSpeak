@@ -1,19 +1,16 @@
-//! The OS-default System-TTS voice's name — extracted from `ds-tts`'s `system.rs`
-//! (issue #5) since only [`crate::enumerate`]'s `voice_display_name` (System arm) needs
-//! it, and this crate carries no `ds-proc`/synth dependency. The REST of ds-tts's
-//! `system.rs` (`SystemTts`, `say_command`, `spawn`, `set_new_pgroup`,
-//! `open_voice_settings`) stays in `ds-tts` — those need `ds-proc` (pidfile, process
-//! groups) and are the real synth/spawn path, not enumeration.
+//! OS-default System-TTS voice name — extracted from `ds-tts`'s `system.rs`
+//! (issue #5) so [`crate::enumerate`]`::voice_display_name` (System arm) can use
+//! it without a `ds-proc`/synth dependency. Spawn/synth paths stay in `ds-tts`.
 
-/// The DEFAULT system-TTS voice's name as the OS reports it — what the System engine actually
-/// speaks with when `tts_system_voice` is empty. Used to NAME "who is speaking" (the greeting)
-/// for the OS-default voice. Returns the raw OS name (e.g. Windows `"Microsoft Hazel Desktop"`);
-/// the caller tidies it for display. `None` if it can't be resolved.
-/// * Windows → the `System.Speech` synthesizer's current voice (the SAME engine
-///   `ds_tts::system::say_command` speaks through, so the name always matches what's heard).
-/// * macOS   → the System Voice from Spoken Content (`SelectedVoiceName`, else a name
-///   derived from the `SelectedVoiceID` identifier — see [`default_voice_name`]).
-/// * Linux   → unresolved, so the greeting omits the voice name (issue #74).
+/// DEFAULT system-TTS voice name as the OS reports it — what System speaks with
+/// when `tts_system_voice` is empty. Used to NAME "who is speaking" for the
+/// greeting. Returns the raw OS name (e.g. Windows `"Microsoft Hazel Desktop"`);
+/// the caller tidies for display. `None` if unresolved.
+/// * Windows → `System.Speech` current voice (same engine `ds_tts::system::say_command`
+///   speaks through, so the name matches what's heard).
+/// * macOS → Spoken Content System Voice (`SelectedVoiceName`, else derived from
+///   `SelectedVoiceID` — see [`default_voice_name`]).
+/// * Linux → unresolved; greeting omits the voice name (issue #74).
 #[cfg(target_os = "windows")]
 pub fn default_voice_name() -> Option<String> {
     use std::os::windows::process::CommandExt;
@@ -36,13 +33,11 @@ pub fn default_voice_name() -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// macOS: the voice `say` speaks with by default — NSSpeechSynthesizer's selected voice,
-/// stored in the speech prefs (read via `defaults`, so no AppKit link). This is the System
-/// Voice set in Spoken Content, i.e. exactly what `say` (no `-v`) uses. Prefers the friendly
-/// `SelectedVoiceName`; falls back to a name DERIVED from the `SelectedVoiceID` identifier for
-/// selections that recorded only the id (e.g. migrated prefs). `None` if NEITHER is set (the OS
-/// then picks an unnamed built-in default — we'd rather greet name-lessly than name a voice we
-/// can't confirm is the one actually heard).
+/// macOS: voice `say` speaks with by default — NSSpeechSynthesizer's selected voice
+/// in speech prefs (via `defaults`, no AppKit). Prefers friendly `SelectedVoiceName`;
+/// falls back to a name DERIVED from `SelectedVoiceID` for selections that recorded
+/// only the id (migrated prefs). `None` if NEITHER is set (OS unnamed built-in —
+/// greet name-lessly rather than name a voice we can't confirm is heard).
 #[cfg(target_os = "macos")]
 pub fn default_voice_name() -> Option<String> {
     read_voice_pref("SelectedVoiceName").or_else(|| {
@@ -50,8 +45,7 @@ pub fn default_voice_name() -> Option<String> {
     })
 }
 
-/// Read one key from the macOS speech-voice prefs domain. `None` if the key/domain is absent,
-/// the read fails, or the value is empty.
+/// One key from the macOS speech-voice prefs domain. `None` if absent, failed, or empty.
 #[cfg(target_os = "macos")]
 fn read_voice_pref(key: &str) -> Option<String> {
     let out = std::process::Command::new("defaults")
@@ -65,18 +59,16 @@ fn read_voice_pref(key: &str) -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
-/// Derive a speakable voice name from a macOS voice IDENTIFIER — the trailing dot-segment of
-/// the reverse-DNS id: `com.apple.voice.compact.en-US.Samantha` → `"Samantha"`,
-/// `com.apple.speech.synthesis.voice.Alex` → `"Alex"`. A legacy all-lowercase segment
-/// (`…voice.fred`) is capitalized → `"Fred"`; an already-cased name (`Samantha`, `Ava`) is left
-/// as-is; an id with no dots is taken whole. `None` if the trailing segment is empty.
+/// Speakable name from a macOS voice IDENTIFIER — trailing dot-segment of the
+/// reverse-DNS id: `…en-US.Samantha` → `"Samantha"`. Legacy all-lowercase
+/// (`…voice.fred`) is capitalized → `"Fred"`; already-cased names left as-is;
+/// no dots → whole id. `None` if trailing segment empty.
 #[cfg(target_os = "macos")]
 fn name_from_voice_identifier(id: &str) -> Option<String> {
     let seg = id.trim().rsplit('.').next().unwrap_or("").trim();
     if seg.is_empty() {
         return None;
     }
-    // Capitalize a legacy lowercase token; leave already-cased names (Samantha, Ava) untouched.
     if seg.chars().all(|c| c.is_ascii_lowercase()) {
         let mut chars = seg.chars();
         let first = chars.next().unwrap().to_ascii_uppercase();
@@ -97,7 +89,6 @@ mod tests {
 
     #[test]
     fn voice_id_yields_trailing_name() {
-        // Modern reverse-DNS identifiers: the friendly name is the last dot-segment, already cased.
         for (id, want) in [
             ("com.apple.voice.compact.en-US.Samantha", "Samantha"),
             ("com.apple.voice.premium.en-US.Ava", "Ava"),
@@ -113,7 +104,6 @@ mod tests {
 
     #[test]
     fn voice_id_capitalizes_legacy_lowercase() {
-        // Legacy lowercase tokens are capitalized so the greeting reads naturally.
         assert_eq!(
             name_from_voice_identifier("com.apple.speech.synthesis.voice.fred").as_deref(),
             Some("Fred")
@@ -129,8 +119,8 @@ mod tests {
         assert_eq!(
             name_from_voice_identifier("Daniel").as_deref(),
             Some("Daniel")
-        ); // no dots
-        assert_eq!(name_from_voice_identifier("trailing."), None); // empty trailing segment
+        );
+        assert_eq!(name_from_voice_identifier("trailing."), None);
         assert_eq!(name_from_voice_identifier(""), None);
         assert_eq!(name_from_voice_identifier("   "), None);
     }

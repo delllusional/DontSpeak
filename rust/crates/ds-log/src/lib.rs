@@ -1,9 +1,8 @@
-//! The workspace-wide unified activity log — see `log.rs`'s module doc for the wire
-//! format and rotation scheme. Split out of `ds-config` (issue #6): this module's only
-//! real dependency was `Paths::log_file`, so its public API takes a plain `&Path`
-//! instead of `ds_config::Paths` — giving this crate ZERO dependency on `ds-config`,
-//! which lets `ds-config` depend on THIS crate for its own internal diagnostics
-//! (`VoiceConfig::load`'s "config.toml is not valid TOML" warning) without a cycle.
+//! Workspace unified activity log — wire format and rotation live in `log.rs`.
+//!
+//! Split from `ds-config` (issue #6): API takes `&Path` instead of `ds_config::Paths`,
+//! so this crate has zero dep on `ds-config` and `ds-config` can depend here for
+//! `VoiceConfig::load` diagnostics without a cycle.
 mod facade;
 mod log;
 mod log_watch;

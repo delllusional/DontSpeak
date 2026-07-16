@@ -1,11 +1,9 @@
 //! Managed Grok global-rules injection for the narration digest instruction.
 //!
-//! Grok's hook runner treats `UserPromptSubmit` as a passive event and **ignores stdout**,
-//! so the usual `hookSpecificOutput.additionalContext` path never reaches the model
-//! (issue #95). Grok *does* load global project rules from `~/.grok/AGENTS.md` at session
-//! start. This module owns a marker-bounded section in that file so DontSpeak can inject
-//! (and later remove) [`crate::DEFAULT_NARRATION_SPEC`] without clobbering the user's other
-//! rules.
+//! Grok treats `UserPromptSubmit` as passive and **ignores stdout**, so
+//! `hookSpecificOutput.additionalContext` never reaches the model (issue #95).
+//! It does load `~/.grok/AGENTS.md` at session start. This module owns a marker-bounded
+//! section there for [`crate::DEFAULT_NARRATION_SPEC`] without clobbering user rules.
 
 use std::path::Path;
 
@@ -17,12 +15,12 @@ pub const GROK_NARRATE_BEGIN: &str = "<!-- dontspeak-narrate:begin -->";
 /// End marker for the managed narrate section in `~/.grok/AGENTS.md`.
 pub const GROK_NARRATE_END: &str = "<!-- dontspeak-narrate:end -->";
 
-/// PURE: insert, replace, or remove the managed narrate section in an AGENTS.md body.
+/// PURE: insert, replace, or remove the managed narrate section.
 ///
-/// - `body = Some(spec)` → ensure exactly one managed section containing `spec` (trimmed).
-/// - `body = None` → strip any managed section; leave the rest of the file untouched.
+/// - `body = Some(spec)` → exactly one managed section with trimmed `spec`.
+/// - `body = None` → strip managed section; leave the rest.
 ///
-/// Idempotent: applying the same `body` twice yields the same string.
+/// Idempotent.
 pub fn apply_grok_narrate_section(existing: &str, body: Option<&str>) -> String {
     let stripped = strip_managed_section(existing);
     match body {
@@ -42,11 +40,9 @@ pub fn apply_grok_narrate_section(existing: &str, body: Option<&str>) -> String 
     }
 }
 
-/// Write or clear the managed narrate section in `agents_md` (typically `~/.grok/AGENTS.md`).
-///
-/// When `digests_on` is true, injects [`DEFAULT_NARRATION_SPEC`]; when false, removes the
-/// managed section. Deletes the file if it becomes empty after a strip. Returns `true` when
-/// the filesystem changed.
+/// Write or clear the managed section in `agents_md`.
+/// `digests_on` injects [`DEFAULT_NARRATION_SPEC`]; false strips. Deletes empty file.
+/// Returns whether the filesystem changed.
 pub fn sync_grok_narrate_agents_md(agents_md: &Path, digests_on: bool) -> std::io::Result<bool> {
     let existing = match std::fs::read_to_string(agents_md) {
         Ok(text) => text,
@@ -72,14 +68,13 @@ pub fn sync_grok_narrate_agents_md(agents_md: &Path, digests_on: bool) -> std::i
     Ok(true)
 }
 
-/// Best-effort sync using resolved paths + live voice config. No-ops when paths cannot be
-/// resolved. Failures are returned so callers can log; they never panic.
+/// Best-effort sync from paths + live voice config. No-op if paths unresolved; never panics.
 pub fn sync_grok_narrate_from_config(paths: &crate::Paths) -> std::io::Result<bool> {
     let digests_on = crate::VoiceConfig::load(paths).narrates(crate::NarrateKind::Digests);
     sync_grok_narrate_agents_md(&paths.grok_agents_md, digests_on)
 }
 
-/// Best-effort remove of the managed section (unwire). Ignores a missing file.
+/// Best-effort remove (unwire). Ignores missing file.
 pub fn clear_grok_narrate_agents_md(agents_md: &Path) -> std::io::Result<bool> {
     sync_grok_narrate_agents_md(agents_md, false)
 }
@@ -93,7 +88,7 @@ fn strip_managed_section(existing: &str) -> String {
         .find(GROK_NARRATE_END)
         .map(|rel| after_begin + rel + GROK_NARRATE_END.len())
         .unwrap_or(existing.len());
-    // Drop a single surrounding blank line so repeated inject/strip doesn't grow whitespace.
+    // Drop one surrounding blank so repeated inject/strip doesn't grow whitespace.
     let mut before = &existing[..start];
     let mut after = &existing[end..];
     if before.ends_with("\n\n") {
@@ -176,7 +171,6 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains(GROK_NARRATE_BEGIN));
         assert!(text.contains("Start every reply"));
-        // second write with same content is a no-op
         assert!(!sync_grok_narrate_agents_md(&path, true).unwrap());
         assert!(sync_grok_narrate_agents_md(&path, false).unwrap());
         assert!(!path.exists(), "empty managed-only file is removed");

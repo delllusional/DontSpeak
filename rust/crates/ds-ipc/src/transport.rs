@@ -1,28 +1,14 @@
-//! Transport seam for the RPC plane. Both ends (`server`, `client`) speak
-//! newline-delimited JSON over a byte stream supporting `Read`, `Write`,
-//! `try_clone()`, `set_read_timeout` and `set_write_timeout`. This module is the
-//! ONLY place that names the concrete OS transport, so the framing/timeout logic
-//! above it is platform-agnostic.
+//! Transport seam for the RPC plane. Server/client speak NDJSON over a byte stream with
+//! `Read`/`Write`/`try_clone`/`set_{read,write}_timeout`. Only place that names the OS
+//! transport — framing/timeouts above stay platform-agnostic.
 //!
-//! - unix (macOS/Linux): a filesystem Unix-domain socket — the current, shipping
-//!   transport, kept byte-identical (stale-socket unlink on bind, same accept
-//!   loop, same timeouts set by the client).
-//! - windows: a real AF_UNIX filesystem socket via the `uds_windows` crate
-//!   (Win10 1803+ ships AF_UNIX; std just doesn't expose it). Its
-//!   `UnixListener`/`UnixStream` mirror std's surface, so this arm is a
-//!   near-verbatim copy of the unix one and nothing above this module changes.
-//!   SECURITY: same filesystem-scoped `.sock` model as unix — the socket lives
-//!   under `ds_config::Paths::state_dir` (`engine_sock`), which varies per OS
-//!   (`$XDG_STATE_HOME/dontspeak` on Linux, `%LOCALAPPDATA%\DontSpeak` on
-//!   Windows, `~/Library/Application Support/DontSpeak` on macOS — see
-//!   `ds-config/src/paths.rs::state_root`) and is deliberately *not*
-//!   `~/.claude`, which is Claude Code's own tree and stays untouched. No
-//!   loopback-TCP + auth-token handshake is needed (which is why the earlier
-//!   TCP design was dropped) because both arms of `bind()` below now
-//!   explicitly enforce restrictive permissions rather than relying on the
-//!   process umask: 0700 on the socket's parent dir + 0600 on the socket file
-//!   itself on Unix, and an explicit owner+SYSTEM-only DACL on both, on
-//!   Windows.
+//! - **unix:** filesystem UDS; stale-socket unlink on bind; same accept loop/timeouts.
+//! - **windows:** AF_UNIX via `uds_windows` (Win10 1803+; std lacks it). Near-verbatim of unix.
+//!
+//! SECURITY: socket under `ds_config::Paths::state_dir` (`engine_sock`) — not `~/.claude`.
+//! Both `bind()` arms enforce restrictive permissions (not umask-dependent): Unix 0700 parent
+//! and 0600 socket; Windows owner+SYSTEM-only protected DACL on both. Earlier TCP+auth design
+//! dropped once UDS ACL hardening landed.
 
 use std::io;
 use std::path::Path;
@@ -33,18 +19,12 @@ mod imp {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
 
-    /// The connected byte stream (one per client connection).
     pub type Stream = UnixStream;
-    /// The accepting endpoint owned by the server.
     pub type Listener = UnixListener;
 
-    /// Bind the server endpoint at `path`. Removes a stale socket file from a
-    /// crashed run first (so a restart never fails with `EADDRINUSE`), creates
-    /// the parent dir, and explicitly hardens permissions: 0700 on the parent
-    /// dir (set before the socket file is created inside it, so no other local
-    /// user can even traverse into the dir during the gap before the file-level
-    /// chmod below runs) and 0600 on the socket file itself (belt-and-suspenders,
-    /// since Linux also enforces the file's own mode on `connect()`).
+    /// Bind at `path`: unlink stale socket, create parent, harden 0700 dir / 0600 file.
+    /// Dir mode set before the socket exists so no other user can traverse during the gap;
+    /// file mode is belt-and-suspenders (Linux also checks the file mode on `connect()`).
     pub fn bind(path: &Path) -> io::Result<Listener> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::remove_file(path);
@@ -57,7 +37,6 @@ mod imp {
         Ok(listener)
     }
 
-    /// Connect a client stream to the server endpoint at `path`.
     pub fn connect(path: &Path) -> io::Result<Stream> {
         UnixStream::connect(path)
     }
@@ -65,8 +44,7 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    // Real AF_UNIX filesystem socket via `uds_windows` — a near-verbatim mirror of
-    // the unix arm (same stale-socket unlink on bind, same parent-dir creation).
+    // AF_UNIX via `uds_windows` — same stale unlink + parent-dir creation as unix.
     use std::io;
     use std::path::Path;
     use uds_windows::{UnixListener, UnixStream};
@@ -80,21 +58,14 @@ mod imp {
     };
     use windows::core::{HSTRING, PCWSTR};
 
-    /// The connected byte stream (one per client connection).
     pub type Stream = UnixStream;
-    /// The accepting endpoint owned by the server.
     pub type Listener = UnixListener;
 
-    /// Harden `path`'s ACL to owner + SYSTEM only, with a protected (non-inherited)
-    /// DACL — NTFS has no chmod-bit model, so this is the Windows analogue of the
-    /// Unix side's `0700`/`0600`: an explicit, non-inherited grant to the object
-    /// owner and the SYSTEM account, nobody else (deliberately excluding
-    /// `BUILTIN\Administrators`, to match Unix's "only the owner, not even other
-    /// privileged accounts get an implicit grant" semantics).
+    /// Owner+SYSTEM only, protected (non-inherited) DACL — Windows analogue of Unix 0700/0600.
+    /// Deliberately excludes `BUILTIN\Administrators` to match Unix "owner only" semantics.
     fn harden(path: &Path) -> io::Result<()> {
-        // SAFETY: `sddl` is a valid NUL-terminated wide string for the lifetime of
-        // the call; `sd` is populated by the API and freed via `LocalFree` below
-        // once `SetFileSecurityW` has consumed it.
+        // SAFETY: `sddl` is a valid NUL-terminated wide string for the lifetime of the call;
+        // `sd` is populated by the API and freed via `LocalFree` after `SetFileSecurityW`.
         unsafe {
             let sddl = HSTRING::from("D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)");
             let mut sd = PSECURITY_DESCRIPTOR::default();
@@ -125,14 +96,7 @@ mod imp {
         Ok(())
     }
 
-    /// Bind the server endpoint at `path`. Removes a stale socket file from a
-    /// crashed run first (AF_UNIX bind fails if the path exists), creates the
-    /// parent dir, and explicitly hardens permissions: an owner+SYSTEM-only,
-    /// non-inherited DACL on the parent dir (set before the socket file is
-    /// created inside it — the file inherits the restrictive ACL via NTFS
-    /// `OICI` inheritance since it's created afterward) and again on the socket
-    /// file itself (defense-in-depth, mirroring the Unix side's belt-and-
-    /// suspenders file-level chmod).
+    /// Bind: unlink stale path, harden parent (before create — OICI inheritance), harden socket.
     pub fn bind(path: &Path) -> io::Result<Listener> {
         let _ = std::fs::remove_file(path);
         if let Some(dir) = path.parent() {
@@ -144,7 +108,6 @@ mod imp {
         Ok(listener)
     }
 
-    /// Connect a client stream to the server endpoint at `path`.
     pub fn connect(path: &Path) -> io::Result<Stream> {
         UnixStream::connect(path)
     }
@@ -152,12 +115,10 @@ mod imp {
 
 pub use imp::{Listener, Stream};
 
-/// Bind the server endpoint at `path` (see backend docs).
 pub fn bind(path: &Path) -> io::Result<Listener> {
     imp::bind(path)
 }
 
-/// Connect a client stream to the server endpoint at `path`.
 pub fn connect(path: &Path) -> io::Result<Stream> {
     imp::connect(path)
 }

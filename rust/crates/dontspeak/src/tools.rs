@@ -1,8 +1,6 @@
-//! The `tools/call` router and the individual `call_*` tool handlers (plus their
-//! strict arg structs). Most handlers bridge to the resident engine over
-//! `ds-ipc`; `list_voices`/`set_config`/`status`/`wire` read config or edit
-//! client files directly, never spawning the engine (set_config still best-effort-nudges
-//! a running one to Reload).
+//! `tools/call` router and `call_*` handlers (strict arg structs). Most bridge to the
+//! engine over `ds-ipc`; `list_voices`/`set_config`/`get_status` are config-direct and
+//! never spawn the engine (`set_config` still best-effort-nudges Reload).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,10 +16,8 @@ use crate::engine_launch::ensure_engine;
 use crate::mcp::{ok, structured_tool_result, tool_result};
 use crate::voices::voice_groups;
 
-/// `client` is WHO is calling — learned once from the MCP `initialize` handshake's
-/// `clientInfo.name` (see `mcp::client_from_initialize`) and stamped onto every engine request
-/// a tool sends, so the engine's activity log attributes a tool-driven `speak`/`stop_speech`
-/// to the right client. `Unknown` for a client whose name isn't in the registry's alias table.
+/// `client` from MCP `initialize` `clientInfo.name` (see `mcp::client_from_initialize`),
+/// stamped on every engine request so the activity log attributes tool-driven speech.
 #[cfg(test)]
 pub(crate) fn tools_call(
     id: Option<Value>,
@@ -32,8 +28,7 @@ pub(crate) fn tools_call(
     tools_call_cancellable(id, msg, sock, client, Arc::new(AtomicBool::new(false)))
 }
 
-/// Validate the protocol-level `tools/call` shape and the advertised schema
-/// before any handler, filesystem, process-launch, or IPC work occurs.
+/// Validate `tools/call` shape + advertised schema before any handler/FS/IPC work.
 pub(crate) fn validate_tools_call(msg: &Value) -> Result<(), String> {
     let params = msg
         .get("params")
@@ -95,29 +90,25 @@ pub(crate) fn tools_call_cancellable(
         .unwrap_or_else(|| json!({}));
 
     let result: Result<ToolSuccess, String> = match name {
-        // Read-only enumeration: reads the Kokoro voices bin + `say` directly, no engine.
+        // Config-direct; no engine.
         "list_voices" => match Paths::resolve() {
             Some(paths) => call_list_voices(&paths, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
-        // Persistent config write to config.toml; the engine applies it via its mtime-watch
-        // (or the best-effort Reload nudge). Doesn't require the engine to be up.
+        // config.toml write; engine mtime-watch or Reload nudge. Engine need not be up.
         "set_config" => match Paths::resolve() {
             Some(paths) => call_set_config(&paths, &args).map(ToolSuccess::Text),
             None => Err("Cannot resolve data paths.".into()),
         },
-        // Read-only introspection: config.toml + live engine state.
-        // Does NOT spawn the engine — a status check must not start playback.
+        // Read-only; must not spawn engine / start playback.
         "get_status" => match Paths::resolve() {
             Some(paths) => call_status(&paths, sock, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
-        // Stateful actions bridge to the resident engine.
         "speak" | "stop_speech" | "mute" | "listen" | "diarize" | "manage_speakers" => {
             let Some(sock) = sock else {
                 return ok(id, tool_result("Cannot resolve engine socket.".into(), true));
             };
-            // Make sure the engine is up (MCP clients may invoke us with none yet).
             ensure_engine(sock);
             match name {
                 "speak" => call_speak(sock, &args, client).map(ToolSuccess::Text),
@@ -142,11 +133,8 @@ enum ToolSuccess {
     Structured(Value),
 }
 
-// ── Tool argument structs ─────────────────────────────────────────────────────
-// Each arg-taking tool deserializes its `arguments` into one of these. `deny_unknown_fields`
-// rejects a typo'd key; `tts_engine` reuses ds_config's strict TtsEngine deserialize
-// (unknown token → error). The fields == the schema's properties, and the
-// `tool_schemas_match_arg_structs` test pins that parity by name AND type.
+// Arg structs: deny_unknown_fields; fields == schema properties (pinned by
+// tool_schemas_match_arg_structs). tts_engine reuses ds_config's strict TtsEngine.
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -198,17 +186,13 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
     let a: ListVoicesArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid list_voices arguments: {e}"))?;
     let cfg = VoiceConfig::load(paths);
-    // Which engine's voices to list: an explicit `tts_engine` arg, else the engine the TTS
-    // ladder RESOLVES to (Kokoro when spoken replies are off — there's still a voice catalog).
+    // Explicit arg, else resolved TTS ladder (still a catalog when spoken replies are off).
     let engine = a
         .tts_engine
         .or_else(|| cfg.resolved_tts())
         .unwrap_or(ds_config::TtsEngine::Kokoro);
-    // This build supports English only: always list English voices, regardless of any
-    // other languages present in the Kokoro pack (they are intentionally not surfaced).
+    // English-only build: never surface other Kokoro pack languages.
     let mut groups = voice_groups(engine, "en");
-    // Mark the configured voice active (a transient session override is reported
-    // separately by `status`, which probes the engine).
     let current = cfg.current_voice();
     let languages: Vec<Value> = groups
         .iter_mut()
@@ -232,21 +216,14 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
     Ok(out)
 }
 
-// ── Status (config read + read-only engine probe) ────────────────────────────
-
-/// Report configured engine/voice/rate (from config.toml) plus live engine
-/// playback state. With `detail`, ALSO fold in the deep
-/// per-engine model lifecycle + stats (the former `model_status` tool). Probes the
-/// engine read-only — never spawns it, so a status check can't start the warm child
-/// or any playback; the `detail` section degrades to a note when the engine is down.
+/// Configured engine/voice/rate + live playback. `detail` adds model lifecycle/stats
+/// (former `model_status`). Read-only probe — never spawns the engine.
 fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Value, String> {
     let a: StatusArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid get_status arguments: {e}"))?;
     let cfg = VoiceConfig::load(paths);
-    // Live engine playback state. Keyed as "state" (NOT "engine") so it doesn't
-    // collide with the configured-engine string below — serde_json keeps only the
-    // last value for a duplicate key, which previously silently dropped the engine
-    // name from the output.
+    // Keyed "state" not "engine" — serde_json keeps only the last of a duplicate key
+    // (previously silently dropped the configured engine name).
     let state = match sock {
         Some(sock) => match ds_ipc::request(sock, &Request::Status) {
             Ok(Response::Status {
@@ -255,10 +232,8 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
                 paused,
                 muted,
             }) => {
-                // `muted`: when true, replies/narration still queue but play SILENTLY — the
-                // reason the user may hear nothing. Surfaced here (not just in `detail`) so the
-                // model can notice it and tell the user, since the narration hook path that
-                // actually speaks replies never calls a tool that could report it.
+                // muted: queue still drains silently. Surfaced in concise status (not only
+                // detail) because the narration path never calls a tool that could report it.
                 json!({ "running": true, "tts_active": tts_active, "queued": queued, "paused": paused, "muted": muted })
             }
             Ok(_) => json!({ "running": true, "note": "unexpected engine response" }),
@@ -269,13 +244,11 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
     let mut out = json!({
         "engine": cfg.resolved_tts().map(|e| e.brand()).unwrap_or("off"),
         "voice": cfg.current_voice(),
-        // The Kokoro voice pool, shared by both TTS backends (no separate apple-native set).
+        // Shared Kokoro voice pool for both TTS backends.
         "voices": cfg.active_voices().to_vec(),
         "rate": cfg.tts_rate,
         "state": state,
     });
-    // `detail`: fold in the deep per-engine model lifecycle + stats (engine-sourced, so it
-    // degrades to a note when the engine is down).
     if a.detail.unwrap_or(false) {
         out["models"] = match sock {
             Some(sock) => match ds_ipc::request(sock, &Request::ModelStatus) {
@@ -291,27 +264,18 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
     Ok(out)
 }
 
-// ── Persistent config writes (config.toml is the source of truth; the engine is
-//    nudged to apply NOW, falling back to its mtime-watch if it's down) ──────────
+// config.toml is source of truth; engine Reload nudge (mtime-watch if down).
 
 fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
-    // Single source of truth: deserialize the inbound JSON args straight into
-    // SetConfigArgs. `deny_unknown_fields` rejects typos; enum/number/`capture_gain`
-    // values are validated strictly there. What's settable == that struct's fields, so
-    // this handler and the JSON schema (ds-tools) cannot drift apart.
+    // SetConfigArgs is the single settable surface — deny_unknown_fields + schema parity
+    // with ds-tools so handler and catalog cannot drift.
     let parsed: ds_tools::SetConfigArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid set_config arguments: {e}"))?;
 
-    // System STT opt-in gate: making `system` the ACTIVE dictation engine must be verified by
-    // the RUNNING engine — it owns the macOS on-device recognizer and runs the one-time
-    // first-use step (model download on macOS 26+, the Speech-Recognition permission
-    // prompt on 14–25); we refuse to PERSIST when it isn't usable, so `system`
-    // never silently degrades. Engine down ⇒ we can't verify, so we don't enable it blindly.
-    //
-    // KEY: gate on whether the new PREFERENCE RESOLVES to system on THIS machine — not merely
-    // whether the caller named `system`. `apply()` already statically rejects a `system` choice
-    // that's unusable on this platform/build (§3), so by the time we get here a `Some(pref)`
-    // that resolves to `System` really would become the active engine.
+    // System STT opt-in: only persist when the *running* engine can authorize on-device
+    // (model download / Speech permission). Gate on whether the new preference *resolves*
+    // to System on this machine — not merely whether the caller named `system`. Engine down
+    // ⇒ refuse (never enable blindly). apply() already rejects unusable static choices.
     let would_run_system = parsed.stt_engine.as_ref().is_some_and(|pref| {
         VoiceConfig {
             stt_engine: Some(pref.clone()),
@@ -335,7 +299,6 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
         }
     }
 
-    // Apply every provided VoiceConfig field to a fresh load, collecting the summary.
     let mut cfg = VoiceConfig::load(paths);
     let changes = parsed.apply(&mut cfg)?;
 
@@ -343,9 +306,6 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
         return Err("At least one setting required.".into());
     }
 
-    // Persist VoiceConfig and nudge the engine to Reload NOW (it falls back to its
-    // mtime-watch if down). config.toml stays the source of truth; the nudge only
-    // removes the poll latency.
     ds_config::write_settings(paths, &cfg)
         .map_err(|e| format!("set_config write failed: {e}"))?;
     let _ = ds_ipc::request(&paths.engine_sock, &ds_ipc::Request::Reload);
@@ -353,14 +313,9 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
     Ok(format!("Updated {}.", changes.join(", ")))
 }
 
-// ── Tool implementations (bridge to the engine over ds-ipc) ──────────────────
-
-/// Ambient Claude session id for THIS MCP process (stdio = one process per
-/// session). Claude Code sets `CLAUDE_CODE_SESSION_ID` in the spawned server's
-/// environment — undocumented for MCP but present in practice (see claude-code
-/// issue #41836). `None` when absent, so the engine treats it as the default,
-/// machine-global session and everything stays backward-compatible. It is NEVER a
-/// tool argument — the MCP protocol/tool schemas are untouched.
+/// Ambient Claude session for this MCP process (stdio = one process per session).
+/// Claude Code sets `CLAUDE_CODE_SESSION_ID` in the server env — undocumented for MCP but
+/// present in practice (claude-code #41836). Never a tool argument. `None` ⇒ machine-global.
 fn session_id() -> Option<String> {
     std::env::var("CLAUDE_CODE_SESSION_ID")
         .ok()
@@ -392,9 +347,8 @@ fn call_speak(sock: &Path, args: &Value, client: ClientSource) -> Result<String,
 }
 
 fn call_stop(sock: &Path, client: ClientSource) -> Result<String, String> {
-    // Scope the barge to the CALLING window (ambient session) so an agent in one
-    // terminal stops only its own voice, not another window's. A non-session caller
-    // (session_id() == None, e.g. the bare CLI) falls back to the global hard barge.
+    // Scope barge to ambient session so one terminal doesn't stop another's voice.
+    // session_id() None (e.g. bare CLI) → global hard barge.
     let session = session_id();
     let scoped = session.is_some();
     let response = ds_ipc::request(
@@ -419,20 +373,16 @@ fn stop_response(response: Response, scoped: bool) -> Result<String, String> {
     }
 }
 
-/// The `mute` tool: toggle the GLOBAL mute. Bridges to the engine over the SAME
-/// `SetMuted` request the app's tray checkbox / Caps-Lock toggle use (via `ds_core::ds_set_muted`)
-/// — one canonical path (`SetMuted` → `ttsq.set_muted` → `tts.set_muted`), so tool-driven and
-/// app-driven mute can't diverge. Distinct from `stop_speech`: mute silences future output too
-/// (the queue keeps draining, just inaudibly) until changed or the engine restarts.
+/// Global mute via the same `SetMuted` path as tray / Caps-Lock (`ds_core::ds_set_muted`) —
+/// one canonical path so tool- and app-driven mute cannot diverge. Unlike `stop_speech`,
+/// mute silences future output too (queue drains inaudibly) until changed or restart.
 fn call_mute(sock: &Path, args: &Value) -> Result<String, String> {
     let a: MuteArgs =
         serde_json::from_value(args.clone()).map_err(|e| format!("invalid mute arguments: {e}"))?;
     let Some(on) = a.on else {
         return Err("`on` is required.".into());
     };
-    // Plain state confirmation. The "user hears nothing, so put it in text" coaching lives in
-    // the UserPromptSubmit push-hook (fires when the user muted and the model is unaware) and
-    // the tool description — no need to repeat it here, where the model just caused the mute.
+    // Plain confirmation; "put it in text" coaching is UserPromptSubmit + tool description.
     match ds_ipc::request(sock, &Request::SetMuted { on }) {
         Ok(response) => mute_response(response, on),
         Err(e) => Err(format!("engine unavailable: {e}")),
@@ -448,9 +398,8 @@ fn mute_response(response: Response, on: bool) -> Result<String, String> {
     }
 }
 
-/// One-shot speaker diarization: record the mic for `seconds`, then return who spoke
-/// when. The engine blocks for the record window (≤60s, within the IPC read timeout),
-/// so a single request/response suffices — no streaming/stop dance like `listen`.
+/// One-shot diarization: record `seconds`, return who spoke when. Engine blocks ≤60s
+/// (within IPC timeout) — single request/response, no listen-style stream.
 fn call_diarize(sock: &Path, args: &Value) -> Result<String, String> {
     let a: DiarizeArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid diarize arguments: {e}"))?;
@@ -477,15 +426,11 @@ fn call_diarize(sock: &Path, args: &Value) -> Result<String, String> {
     }
 }
 
-/// The `speakers` tool: manage the enrolled-voiceprint library `diarize` labels with.
-/// `action` selects the operation; `name` is required for enroll/forget. Each branch is a
-/// thin bridge to the same engine requests the three former tools used (Enroll /
-/// ForgetSpeaker / ListSpeakers) — the protocol is unchanged.
+/// Enrolled voiceprints for `diarize` labels. Thin bridge to Enroll / ForgetSpeaker /
+/// ListSpeakers. Schema can't express "name only for enroll/forget" — validated per action.
 fn call_speakers(sock: &Path, args: &Value) -> Result<String, String> {
     let a: SpeakersArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid manage_speakers arguments: {e}"))?;
-    // Schema can't express "name required only for enroll/forget", so validate per action
-    // here (same approach as set_config's cross-field checks).
     let need_name = || -> Result<String, String> {
         let name = a.name.clone().unwrap_or_default().trim().to_string();
         if name.is_empty() {
@@ -505,8 +450,7 @@ fn call_speakers(sock: &Path, args: &Value) -> Result<String, String> {
     }
 }
 
-/// Enroll a voiceprint: record `seconds`, extract an embedding, persist it under `name`.
-/// Blocks for the record window (≤60s, within the IPC read timeout).
+/// Record `seconds`, extract embedding, persist under `name`. Blocks ≤60s.
 fn enroll_speaker(sock: &Path, name: String, seconds: u64) -> Result<String, String> {
     match ds_ipc::request(sock, &Request::Enroll { name, seconds }) {
         Ok(Response::Enrolled { name }) => Ok(format!("Enrolled \"{name}\".")),
@@ -516,7 +460,6 @@ fn enroll_speaker(sock: &Path, name: String, seconds: u64) -> Result<String, Str
     }
 }
 
-/// Remove an enrolled voiceprint by name (no-op if absent).
 fn forget_speaker(sock: &Path, name: String) -> Result<String, String> {
     match ds_ipc::request(sock, &Request::ForgetSpeaker { name: name.clone() }) {
         Ok(Response::Done) => Ok(format!("Removed \"{name}\" (if present).")),
@@ -526,7 +469,6 @@ fn forget_speaker(sock: &Path, name: String) -> Result<String, String> {
     }
 }
 
-/// List enrolled speaker names.
 fn list_speakers(sock: &Path) -> Result<String, String> {
     match ds_ipc::request(sock, &Request::ListSpeakers) {
         Ok(Response::Speakers { names }) => {
@@ -542,22 +484,15 @@ fn list_speakers(sock: &Path) -> Result<String, String> {
     }
 }
 
-/// Trailing-silence the `listen` tool waits for before it finalizes: once the speaker has
-/// started AND then gone quiet this long, the session is stopped and transcribed. Long
-/// enough that a between-sentence breath doesn't cut a multi-sentence answer short.
+/// Trailing silence before listen finalizes (after speech has started). Long enough that a
+/// between-sentence breath doesn't cut a multi-sentence answer short.
 const LISTEN_ENDPOINT_SILENCE: Duration = Duration::from_millis(1500);
 
-/// The `listen` tool: open the mic via a live Parakeet recognition session and return the
-/// final transcript. AUTO-STOPS when the speaker stops talking — so an agent can ask a
-/// question mid-turn and get the spoken answer back without the user pressing a key —
-/// behaving like Caps-Lock dictation rather than a blind fixed window.
-///
-/// End-of-speech is detected from the PARTIAL stream, not raw audio: the engine only emits
-/// a `Partial` when the transcript CHANGES, so partials simply stop arriving once the
-/// speaker pauses. A watchdog (on a second connection, since this one is busy streaming)
-/// sends `TestRecognitionStop` after [`LISTEN_ENDPOINT_SILENCE`] of no new partial — and,
-/// regardless, after the `seconds` hard cap for a user who never stops. This reuses the
-/// existing two-connection stop path; the helper/engine are untouched.
+/// Live Parakeet session → final transcript. Auto-stops on end-of-speech (like Caps-Lock
+/// dictation, not a blind fixed window). EOS from the Partial stream (engine emits Partial
+/// only when transcript *changes*); watchdog on a second connection sends
+/// `TestRecognitionStop` after [`LISTEN_ENDPOINT_SILENCE`] of no new partial, or after the
+/// `seconds` hard cap. Cancellable + joined so it cannot leak a late stop onto a later session.
 fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<String, String> {
     use std::sync::atomic::AtomicU64;
 
@@ -570,12 +505,8 @@ fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<
         .send(&Request::TestRecognitionStart)
         .map_err(|e| format!("listen failed to start: {e}"))?;
 
-    // Shared with the watchdog: `spoke` gates the silence rule so LEADING silence (the user
-    // hasn't started) never ends the session early; `quiet_since_ms` is the ms-since-start
-    // stamp of the last transcript change, which the recv loop bumps on every new partial.
-    // (Atomics keep it lock-free; a coarse ms epoch from one `Instant::now()` base is plenty
-    // for a 1.5 s threshold.) The watchdog is CANCELLABLE + JOINED so it can neither leak
-    // nor fire a stray stop onto a later, unrelated session — same contract as the old timer.
+    // `spoke` gates silence so leading quiet never ends early; last_change_ms resets on
+    // each non-empty Partial.
     let base = std::time::Instant::now();
     let now_ms = move || base.elapsed().as_millis() as u64;
     let spoke = Arc::new(AtomicBool::new(false));
@@ -586,8 +517,6 @@ fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<
     let watchdog = std::thread::spawn(move || {
         let hard_cap = Duration::from_secs(max_secs);
         loop {
-            // Poll ~10×/s, but exit the instant the recv loop drops `cancel_tx`
-            // (Disconnected) — the dictation already ended, so skip the stop.
             match cancel_rx.recv_timeout(Duration::from_millis(100)) {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 _ => return, // cancelled/finished
@@ -607,8 +536,6 @@ fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<
         }
     });
 
-    // Drain the stream to its terminal response, bumping the silence clock on every new,
-    // non-empty partial. THEN cancel + join the watchdog so it never outlives this call.
     let outcome = loop {
         match client.recv() {
             Ok(Response::Transcript { text }) => {
@@ -619,8 +546,6 @@ fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<
                 });
             }
             Ok(Response::Partial { text }) => {
-                // A changed transcript = the speaker is still talking: arm the silence rule
-                // and reset its clock. (The engine only sends a Partial on a real change.)
                 if !text.trim().is_empty() {
                     spoke.store(true, Ordering::Relaxed);
                     last_change_ms.store(now_ms(), Ordering::Relaxed);
@@ -628,12 +553,10 @@ fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<
                 continue;
             }
             Ok(Response::Error { message }) => break Err(format!("listen failed: {message}")),
-            Ok(_) => continue, // Listening — keep reading
+            Ok(_) => continue,
             Err(e) => break Err(format!("listen stream ended: {e}")),
         }
     };
-    // Cancel the pending watchdog (drop the sender) and join it so the thread is gone
-    // before we return — no leak, and no late stop landing on a future session.
     drop(cancel_tx);
     let _ = watchdog.join();
     outcome
@@ -643,18 +566,8 @@ fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<
 mod drift {
     use super::*;
 
-    /// ROUTER DRIFT GUARD: every tool in the canonical `ds_tools` catalog must be RECOGNIZED
-    /// by the dispatch router in `tools_call`. Adding or renaming a tool in `ds_tools::TOOLS`
-    /// without wiring a match arm here is a TEST FAILURE — nothing else ties the router's
-    /// hardcoded name arms to the catalog.
-    ///
-    /// We drive the REAL router (no extracted name list to duplicate) with a bogus argument
-    /// and NO engine socket, so every path is side-effect-free: the locally-handled tools
-    /// (`list_voices`/`set_config`/`status`/`wire`) trip their `deny_unknown_fields` arg
-    /// structs and error at DESERIALIZE — before any config write or IPC — while the
-    /// engine-bridged tools short-circuit on the `None` socket before `ensure_engine`. The
-    /// only outcome we reject is the router's distinguishable `unknown tool:` sentinel, which
-    /// proves the name reached a real arm rather than the catch-all.
+    /// Drift guard: every `ds_tools` catalog name must hit a real `tools_call` arm.
+    /// Bogus args + no socket keep paths side-effect-free; reject only `unknown tool:`.
     #[test]
     fn router_handles_every_catalog_tool() {
         let bogus = json!({ "__not_a_real_field__": true });
@@ -671,7 +584,6 @@ mod drift {
         }
     }
 
-    /// Map a JSON value to the JSON-Schema scalar `type` token it satisfies.
     fn json_type_of(v: &Value) -> &'static str {
         match v {
             Value::Bool(_) => "boolean",
@@ -689,11 +601,7 @@ mod drift {
         }
     }
 
-    /// Assert `schema` (a tool's `inputSchema`) matches `populated` (a fully-populated args
-    /// struct serialized to JSON) by NAME and declared scalar TYPE. Shared by
-    /// `assert_tool_matches` (the FILTERED, `catalog()`-based view) and
-    /// `assert_tool_matches_raw` (the RAW, `ds_tools::TOOLS`-based view that ignores
-    /// `DIARIZATION_ENABLED`).
+    /// Schema properties match populated args by name + scalar type (catalog or raw TOOLS).
     fn assert_schema_matches(tool: &str, schema: &Value, populated: Value) {
         let props = schema["properties"]
             .as_object()
@@ -722,8 +630,7 @@ mod drift {
         }
     }
 
-    /// Assert one tool's advertised inputSchema properties match `populated`, via the
-    /// FILTERED, user-facing `catalog()` (reflects `DIARIZATION_ENABLED`).
+    /// Via filtered `catalog()` (respects `DIARIZATION_ENABLED`).
     fn assert_tool_matches(tool: &str, populated: Value) {
         let cat = ds_tools::catalog();
         let entry = cat
@@ -735,21 +642,15 @@ mod drift {
         assert_schema_matches(tool, &entry["inputSchema"], populated);
     }
 
-    /// Assert one tool's advertised inputSchema properties match `populated`, via the RAW
-    /// `ds_tools::TOOLS` definition — bypassing the `DIARIZATION_ENABLED` visibility filter.
-    /// Used for `diarize`/`manage_speakers` so this schema/dispatch-parity regression test
-    /// keeps running unconditionally even while those tools are hidden from `catalog()` (a
-    /// VISIBILITY gate, not a functional rip-out — see `ds_tools::DIARIZATION_ENABLED`).
+    /// Via raw `ds_tools::TOOLS` — keeps diarize/manage_speakers parity even when hidden.
     fn assert_tool_matches_raw(tool: &str, populated: Value) {
         let schema =
             ds_tools::raw_input_schema(tool).unwrap_or_else(|| panic!("{tool} in ds_tools::TOOLS"));
         assert_schema_matches(tool, &schema, populated);
     }
 
-    /// DRIFT GUARD for the arg-taking tools (set_config has its own guard in ds-tools).
-    /// Each fully-populated literal is exhaustive (no `..`), so a new struct field also
-    /// breaks this at COMPILE time; a missing/renamed/mistyped schema property fails the
-    /// assertions. `rate` is non-integral so it reads as `number`, not `integer`.
+    /// Drift guard: exhaustive literals (no `..`) break compile on new fields; schema
+    /// name/type mismatch fails asserts. `rate` non-integral so it is `number` not `integer`.
     #[test]
     fn tool_schemas_match_arg_structs() {
         assert_tool_matches(
@@ -780,10 +681,7 @@ mod drift {
             "listen",
             serde_json::to_value(ListenArgs { seconds: Some(10) }).unwrap(),
         );
-        // diarize/manage_speakers are hidden from `catalog()` while `DIARIZATION_ENABLED` is
-        // false — check them against the RAW `ds_tools::TOOLS` schema instead so this
-        // schema/dispatch-parity coverage keeps running regardless of the gate (a visibility
-        // gate must not silently drop the only regression test proving dispatch still works).
+        // Hidden from catalog when DIARIZATION_ENABLED is false — still parity-check raw.
         assert_tool_matches_raw(
             "diarize",
             serde_json::to_value(DiarizeArgs { seconds: Some(10) }).unwrap(),
@@ -804,20 +702,16 @@ mod drift {
 mod status_output {
     use super::*;
 
-    /// CORR-1: `status` must emit BOTH the configured-engine string (`engine`) AND the
-    /// live playback state (`state`) — previously two `"engine"` keys collided and
-    /// serde_json silently kept only the last, dropping the engine name. Run with no
-    /// socket so no engine is contacted and a missing config falls back to defaults.
+    /// Regression: `engine` (config) and `state` (live) must both appear — two `"engine"`
+    /// keys used to collide and drop the configured name.
     #[test]
     fn status_has_distinct_engine_and_state_keys() {
-        // A nonexistent config path → VoiceConfig::load returns defaults (no file written).
         let dir = tempfile::tempdir().unwrap();
         let mut paths = Paths::rooted_at(dir.path());
         paths.config_toml = dir.path().join("config.toml");
 
         let v = call_status(&paths, None, &json!({})).expect("status builds");
 
-        // `engine` is the configured engine NAME (a string), not dropped by a key clash.
         let engine = v.get("engine").expect("`engine` key present");
         assert!(
             engine.is_string(),
@@ -828,7 +722,6 @@ mod status_output {
             "`engine` should be a known engine token, got {engine:?}"
         );
 
-        // `state` is the live engine-state object (running=false here, no socket).
         let state = v.get("state").expect("`state` key present");
         assert!(
             state.is_object(),
@@ -841,22 +734,19 @@ mod status_output {
         );
     }
 
-    /// `detail` is opt-in: the concise default omits the heavy `models` section, and
-    /// `detail: true` adds it (degrading to a note when no engine socket is available).
+    /// `detail` is opt-in; engine-down degrades `models` to a note.
     #[test]
     fn status_detail_gates_the_models_section() {
         let dir = tempfile::tempdir().unwrap();
         let mut paths = Paths::rooted_at(dir.path());
         paths.config_toml = dir.path().join("config.toml");
 
-        // Default (no detail): no `models` key.
         let concise = call_status(&paths, None, &json!({})).unwrap();
         assert!(
             concise.get("models").is_none(),
             "concise status omits `models`"
         );
 
-        // detail: true → a `models` object (here the engine-down note, since sock is None).
         let detailed = call_status(&paths, None, &json!({ "detail": true })).unwrap();
         let models = detailed
             .get("models")
@@ -867,14 +757,9 @@ mod status_output {
 
 #[cfg(test)]
 mod arg_validation {
-    //! Argument-validation branches of the engine-bridged tools: all pure `serde_json` +
-    //! string checks that error BEFORE any IPC call, so a dummy/nonexistent socket path is
-    //! fine — these must never actually dial it.
+    //! Validation branches that error before IPC — dummy socket must never be dialed.
     use super::*;
 
-    /// A socket path that resolves to nothing; if a validation test somehow contacted it,
-    /// the surrounding assertion on the exact error text would fail loudly instead of
-    /// silently hanging (connect on a missing path fails fast, no real engine needed).
     fn dead_sock() -> PathBuf {
         PathBuf::from("__dontspeak_test_never_dialed__.sock")
     }
@@ -884,7 +769,6 @@ mod arg_validation {
         let err = call_speak(&dead_sock(), &json!({}), ClientSource::ClaudeCode).unwrap_err();
         assert_eq!(err, "`text` is required.");
 
-        // Whitespace-only text is treated the same as absent.
         let err = call_speak(
             &dead_sock(),
             &json!({ "text": "   " }),
@@ -957,7 +841,6 @@ mod arg_validation {
         let err = call_speakers(&dead_sock(), &json!({ "action": "enroll" })).unwrap_err();
         assert_eq!(err, "manage_speakers: `name` is required for this action");
 
-        // A blank/whitespace name is treated the same as absent.
         let err =
             call_speakers(&dead_sock(), &json!({ "action": "enroll", "name": "  " })).unwrap_err();
         assert_eq!(err, "manage_speakers: `name` is required for this action");
@@ -972,15 +855,9 @@ mod arg_validation {
 
 #[cfg(test)]
 mod engine_unavailable {
-    //! The "engine unavailable" branch shared by `call_speak`/`call_stop`/`call_mute`/
-    //! `call_diarize`/`call_speakers`: point each at a socket path that doesn't exist —
-    //! this fails fast at `connect()`, no real engine needed — and confirm the fail-closed
-    //! error surfaces rather than a panic or a hang.
+    //! Unbound socket → connect fails fast; handlers must fail closed, not panic/hang.
     use super::*;
 
-    /// A socket path under a tempdir that was never bound — `connect()` fails fast
-    /// (ENOENT-style), which is exactly the "engine down" case these handlers must
-    /// fail closed on. The tempdir is returned too so it isn't dropped early.
     fn no_such_socket() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("no-such-engine.sock");
@@ -1044,9 +921,7 @@ mod engine_unavailable {
 
 #[cfg(test)]
 mod set_config_tests {
-    //! `call_set_config`'s pure paths: the `changes.is_empty()` rejection, and a normal
-    //! single-field change against `Paths::rooted_at`, proving the write + best-effort
-    //! `Reload` nudge (to a socket that doesn't exist) don't panic.
+    //! Empty-args rejection + single-field write; Reload to missing socket must not panic.
     use super::*;
 
     fn rooted_paths() -> (tempfile::TempDir, Paths) {
@@ -1061,7 +936,6 @@ mod set_config_tests {
         let (_dir, paths) = rooted_paths();
         let err = call_set_config(&paths, &json!({})).unwrap_err();
         assert_eq!(err, "At least one setting required.");
-        // The config file must NOT have been written on a no-op rejection.
         assert!(!paths.config_toml.exists());
     }
 
@@ -1075,7 +949,6 @@ mod set_config_tests {
         assert_eq!(msg, "Updated tts_rate=1.2.");
         assert!(paths.config_toml.exists(), "config.toml was written");
 
-        // The write actually persisted the new rate (round-trip through VoiceConfig::load).
         let cfg = VoiceConfig::load(&paths);
         assert_eq!(cfg.tts_rate, 1.2);
     }
@@ -1083,9 +956,7 @@ mod set_config_tests {
 
 #[cfg(test)]
 mod list_voices_tests {
-    //! `call_list_voices`: pure config + static catalog read, no IPC. Covers the
-    //! `tts_engine` argument override and that the configured current voice is marked
-    //! `active` in the returned catalog.
+    //! Pure config + catalog read (no IPC): engine override and `active` marking.
     use super::*;
 
     fn rooted_paths() -> (tempfile::TempDir, Paths) {
@@ -1098,25 +969,14 @@ mod list_voices_tests {
     #[test]
     fn tts_engine_argument_overrides_the_configured_engine() {
         let (_dir, paths) = rooted_paths();
-        // No config on disk: VoiceConfig defaults to Kokoro either way, so pass the
-        // OTHER cross-platform-safe engine token ("built_in"/Kokoro is already default —
-        // exercising the override path itself is what matters here) explicitly and check
-        // the response reflects it rather than any resolved default.
         let out = call_list_voices(&paths, &json!({ "tts_engine": "built_in" }))
             .expect("list_voices succeeds with no engine running");
         assert_eq!(out["engine"], json!("kokoro"));
         assert_eq!(out["language"], json!("en"));
     }
 
-    /// REGRESSION (deleting the `Off` token, §6.1 addendum): `list_voices`'s `tts_engine` arg
-    /// deserializes through `TtsEngine`'s shared strict `Deserialize` impl — the SAME one
-    /// `SetConfigArgs` uses. Before this change, `"off"` parsed successfully to
-    /// `TtsEngine::Off` and reached `voice_groups(Off, "en")` live, silently returning an EMPTY
-    /// voice-group list — even though the tool's own advertised schema
-    /// (`PType::Enum(&["built_in","system"])`) already excluded "off" as a documented value.
-    /// Now that `Off` is deleted as a token everywhere, the SAME call hard-errors at argument
-    /// deserialization instead — tightening actual behavior to match what the schema already
-    /// promised (not a bug this change introduces).
+    /// Regression: `"off"` used to deserialize to deleted `TtsEngine::Off` and return an
+    /// empty catalog; schema never listed it — now hard-errors at deserialize (parity).
     #[test]
     fn tts_engine_argument_off_is_now_a_hard_error_not_an_empty_list() {
         let (_dir, paths) = rooted_paths();
@@ -1133,7 +993,6 @@ mod list_voices_tests {
         let (_dir, paths) = rooted_paths();
         let out = call_list_voices(&paths, &json!({ "tts_engine": "built_in" }))
             .expect("list_voices succeeds with no engine running");
-        // Default config ⇒ current_voice() is the default Kokoro voice (`af_sarah`).
         let cfg = VoiceConfig::load(&paths);
         let current = cfg.current_voice();
 

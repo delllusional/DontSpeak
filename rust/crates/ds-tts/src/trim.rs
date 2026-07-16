@@ -1,27 +1,21 @@
-//! Silence trimming (`trimSilence`) — a port of kokoro-onnx `trim.py`
-//! (vendored librosa `effects.trim` defaults).
+//! Silence trim (`trimSilence`) — port of kokoro-onnx `trim.py` (librosa defaults).
 //!
-//! Strips leading/trailing audio quieter than `max − 60 dB`. Kokoro tends to
-//! emit ~2 s of leading silence per chunk, so this matters for snappy playback.
-//! PURE: f32 in, f32 out, no audio, no model — unit-tested with synthetic
-//! ramp/silence arrays.
+//! Strips leading/trailing quieter than `max − 60 dB`. Kokoro often emits ~2 s
+//! leading silence per chunk. PURE f32→f32; unit-tested with synthetic arrays.
 
 const FRAME_LENGTH: usize = 2048;
 const HOP_LENGTH: usize = 512;
 const TOP_DB: f64 = 60.0;
 
-/// Trim leading/trailing near-silence from `y`. Empty in → empty out; an
-/// all-silence input → empty out (trimSilence).
+/// Trim leading/trailing near-silence. Empty or all-silence → empty.
 pub fn trim_silence(y: &[f32]) -> Vec<f32> {
     if y.is_empty() {
         return Vec::new();
     }
-    // Centered RMS frames: pad frame_length/2 zeros both sides, window 2048,
-    // hop 512.
+    // Centered RMS: pad FRAME_LENGTH/2 each side, window 2048, hop 512.
     let pad = FRAME_LENGTH / 2;
     let padded_len = y.len() + 2 * pad;
     if padded_len < FRAME_LENGTH {
-        // Too short to form even one frame; nothing to trim.
         return y.to_vec();
     }
     let frames = 1 + (padded_len - FRAME_LENGTH) / HOP_LENGTH;
@@ -30,7 +24,6 @@ pub fn trim_silence(y: &[f32]) -> Vec<f32> {
         let mut sum = 0.0f64;
         let frame_start = t * HOP_LENGTH;
         for j in 0..FRAME_LENGTH {
-            // idx into y after removing the leading pad.
             let signed = frame_start as isize + j as isize - pad as isize;
             if signed >= 0 && (signed as usize) < y.len() {
                 let v = y[signed as usize] as f64;
@@ -39,8 +32,7 @@ pub fn trim_silence(y: &[f32]) -> Vec<f32> {
         }
         *slot = (sum / FRAME_LENGTH as f64).sqrt();
     }
-    // power_to_db(rms^2, ref=max(rms)^2, amin=1e-10):
-    //   10*log10(max(amin,p)) − 10*log10(max(amin,ref))
+    // power_to_db(rms^2, ref=max(rms)^2, amin=1e-10).
     let max_rms = rms.iter().cloned().fold(0.0f64, f64::max);
     let reference = max_rms * max_rms;
     let ref_db = 10.0 * f64::max(1e-10, reference).log10();

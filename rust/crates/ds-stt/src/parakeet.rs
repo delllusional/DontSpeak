@@ -1,36 +1,21 @@
-//! Parakeet — the portable local on-device STT engine: mic capture (cpal) → mono → 16 kHz
-//! (rubato) → the cache-aware streaming FastConformer transducer ([`crate::streaming`]) over the
-//! shared `ort` (load-dynamic) runtime, through the [`crate::Stt`] trait. The cross-platform
-//! sibling of the macOS-only Core ML / ANE Parakeet backend.
+//! Parakeet — portable local STT: mic (cpal) → mono → 16 kHz (rubato) → cache-aware
+//! streaming FastConformer ([`crate::streaming`]) over shared `ort`. Cross-platform
+//! sibling of the macOS Core ML / ANE backend.
 //!
-//! NOTE: this file owns the mic [`Capture`] + [`resample`] helpers and the [`ParakeetTranscriber`]
-//! whole-buffer adapter (one-shot over the streaming model, for segment-at-a-time callers). The
-//! live helper dictation drives [`crate::streaming::StreamingModel`] INCREMENTALLY for partials.
+//! This file owns mic [`Capture`] + [`resample`] and [`ParakeetTranscriber`] (one-shot
+//! whole-buffer adapter). Live helper dictation drives [`StreamingModel`] INCREMENTALLY.
 //!
-//! Unlike [`crate::claude_native::ClaudeNative`] (which drives Claude Code's
-//! built-in voice via a push-to-talk tap), this engine records the audio itself and
-//! INJECTS the transcript via the platform's clipboard-paste (`KeyInjector::type_text`),
-//! focus-gated so a transcript never leaks outside a terminal.
+//! Unlike ClaudeNative (PTT tap), this records audio and INJECTS via clipboard-paste
+//! (`KeyInjector::type_text`), focus-gated so text never leaks outside a terminal.
 //!
-//! Lifecycle on the engine's Caps-Lock edges:
-//!   * `start()`  — open the default input device and begin buffering mono PCM.
-//!   * `stop()`   — stop capture, resample to 16 kHz, run Parakeet, paste the text.
-//!   * `abort()`  — stop capture and DISCARD (the §F long-press reset must not
-//!     inject).
+//! Caps edges: `start` opens mic; `stop` resamples + transcribes + pastes; `abort`
+//! discards (§F long-press must not inject). Fail-quiets on device/model errors.
+//! Model loads LAZILY on first transcription (~137 MB int8) so selecting Parakeet
+//! never blocks config hot-reload.
 //!
-//! Everything fail-quiets: any device/model/inference error logs and drops the
-//! capture without injecting. The model is loaded LAZILY on the first transcription
-//! (~137 MB int8 ONNX), so selecting Parakeet never blocks the config hot-reload and
-//! the first dictation pays the one-time load.
-//!
-//! The reusable pieces — [`Capture`] (mic → 16 kHz mono PCM) and
-//! [`ParakeetTranscriber`] (PCM → text) — are public so the engine's in-process
-//! "test recognition" path can drive the SAME engine without the paste step.
-//!
-//! `Stt` is non-`Send`, and so is this engine: it borrows the engine-owned
-//! platform through an `Rc`. `ParakeetTranscriber` IS `Send` (the engine's test
-//! session holds it across threads), but the cpal `Stream` inside `Capture` is
-//! `!Send` on macOS — a `Capture` is therefore created and consumed on one thread.
+//! [`Capture`] and [`ParakeetTranscriber`] are public so "test recognition" can drive
+//! the same engine without paste. `Capture` is `!Send` (cpal `Stream` on macOS);
+//! `ParakeetTranscriber` is `Send`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,38 +30,31 @@ use rubato::{Async, FixedAsync, Indexing, PolynomialDegree, Resampler};
 
 use crate::streaming::StreamingModel;
 
-/// The sample rate Parakeet expects (16 kHz mono, f32 in [-1, 1]).
+/// Parakeet expects 16 kHz mono f32 in [-1, 1].
 const TARGET_RATE: u32 = 16_000;
 
-/// rubato fixed input-chunk size (frames per `process` call). 1024 keeps the
-/// resampler's internal buffers small while still amortizing the per-call cost.
+/// rubato fixed input-chunk size (frames per `process`).
 const RESAMPLE_CHUNK: usize = 1024;
-/// Bound callback-to-consumer capture buffering. Normal drains happen every ~50 ms; five
-/// seconds leaves generous room for scheduler/model hiccups without unbounded growth.
+/// Callback→consumer ring bound. Drains ~every 50 ms; 5 s room for hiccups without
+/// unbounded growth.
 const CAPTURE_BUFFER_SECS: usize = 5;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Capture — a live mic stream accumulating mono PCM, drained to 16 kHz on stop.
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Capture — live mic → mono PCM, drained / resampled on stop ───────────────
 
-/// An in-flight capture: the live cpal stream and the mono PCM it appends to, plus
-/// the device's native sample rate (for the stop-time resample to 16 kHz).
-///
-/// `!Send` (the cpal `Stream` is `!Send` on macOS): open and consume it on the
-/// same thread.
+/// In-flight capture: cpal stream + mono PCM ring + native rate for stop-time resample.
+/// `!Send` on macOS — open and consume on the same thread.
 pub struct Capture {
-    /// Held so the stream keeps running; dropping it stops capture.
+    /// Dropping stops capture.
     _stream: cpal::Stream,
-    /// Consumer side of the lock-free callback ring. The mutex is consumer-only interior
-    /// mutability (`drain_new(&self)`); the realtime producer never touches it.
+    /// Consumer of the lock-free callback ring. Mutex is consumer-only
+    /// (`drain_new(&self)`); realtime producer never touches it.
     buffer: Mutex<HeapCons<f32>>,
     dropped: Arc<AtomicU64>,
     input_rate: u32,
 }
 
 impl Capture {
-    /// Open the default input device and start buffering mono PCM. Returns an
-    /// error string (for fail-quiet logging) on any device error.
+    /// Open default input and start buffering. Error string for fail-quiet logging.
     pub fn open() -> Result<Capture, String> {
         let host = cpal::default_host();
         let device = host
@@ -112,10 +90,8 @@ impl Capture {
         })
     }
 
-    /// Drain the mono PCM accumulated since the last call (at the device's native
-    /// rate), leaving the stream RUNNING. Empty when no new audio has arrived. The
-    /// always-listening loop calls this each poll tick to feed the energy-VAD and
-    /// accumulate the current utterance, instead of the one-shot `into_pcm_16k`.
+    /// Drain mono PCM since last call (device native rate); stream stays RUNNING.
+    /// Always-listening loop uses this each poll tick (vs one-shot `into_pcm_16k`).
     pub fn drain_new(&self) -> Vec<f32> {
         let dropped = self.dropped.swap(0, Ordering::Relaxed);
         if dropped > 0 {
@@ -130,14 +106,12 @@ impl Capture {
         }
     }
 
-    /// The device's native input sample rate — needed to resample a drained
-    /// segment to 16 kHz (via [`resample_to_16k`]) and to time energy frames.
+    /// Device native rate — for [`resample_to_16k`] and energy-frame timing.
     pub fn input_rate(&self) -> u32 {
         self.input_rate
     }
 
-    /// Stop capture (drops the stream) and return the recorded audio as 16 kHz mono
-    /// f32 — ready for [`ParakeetTranscriber::transcribe_pcm_16k`].
+    /// Stop capture; return 16 kHz mono for [`ParakeetTranscriber::transcribe_pcm_16k`].
     pub fn into_pcm_16k(self) -> Vec<f32> {
         let Capture {
             _stream,
@@ -157,31 +131,22 @@ impl Capture {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Transcriber — owns the lazily-loaded Parakeet model; PCM (16 kHz mono) → text.
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Transcriber — lazy StreamingModel; 16 kHz mono PCM → text ────────────────
 
-/// The cross-platform ONNX on-device STT engine — now backed by the cache-aware streaming
-/// FastConformer ([`crate::streaming::StreamingModel`]), which REPLACED the old whole-buffer
-/// `transcribe-rs` Parakeet TDT engine. The name is kept
-/// because the `built_in` STT engine, its config provider tokens, and the model-asset wiring
-/// all still call it "parakeet". Exposes the same lazy-load + whole-buffer API; the helper's
-/// live dictation drives the streaming model INCREMENTALLY (per-chunk partials) instead — both
-/// share this one model. `Send`.
+/// Cross-platform ONNX STT via cache-aware streaming FastConformer
+/// ([`StreamingModel`]) — replaced the old whole-buffer `transcribe-rs` TDT engine.
+/// Name kept for `built_in` engine / provider tokens / asset wiring. Lazy-load +
+/// whole-buffer API; live helper drives incremental partials on the same model. `Send`.
 pub struct ParakeetTranscriber {
-    /// The flat `model_dir()` holding `encoder.int8.onnx` / `decoder.int8.onnx` /
-    /// `joiner.int8.onnx` / `tokens.txt`.
+    /// Flat dir: `encoder/decoder/joiner.int8.onnx` + `tokens.txt`.
     model_dir: PathBuf,
-    /// Explicit provider for in-process users; `None` keeps the helper env contract.
+    /// Explicit provider for in-process users; `None` keeps helper env contract.
     provider: Option<String>,
-    /// Lazily loaded on first use; cached for subsequent calls.
     model: Option<StreamingModel>,
 }
 
 impl ParakeetTranscriber {
-    /// Build a transcriber for the streaming model assets in `model_dir`. Cheap — the model is
-    /// not loaded until the first [`preload`](Self::preload) /
-    /// [`transcribe_pcm_16k`](Self::transcribe_pcm_16k).
+    /// Cheap: model not loaded until first preload/transcribe.
     pub fn new(model_dir: PathBuf) -> Self {
         Self {
             model_dir,
@@ -190,7 +155,7 @@ impl ParakeetTranscriber {
         }
     }
 
-    /// Build a transcriber pinned to a config-resolved provider token.
+    /// Pinned to a config-resolved provider token.
     pub fn for_provider(model_dir: PathBuf, provider: &str) -> Self {
         Self {
             model_dir,
@@ -199,9 +164,7 @@ impl ParakeetTranscriber {
         }
     }
 
-    /// Lazily load the streaming model (int8) over the shared onnxruntime (CPU EP — the int8
-    /// graph runs fast on CPU, and dynamic-quant ops aren't GPU-accelerated anyway). Points
-    /// `ort` (load-dynamic) at the dylib first.
+    /// Lazy load int8 over shared ort (CPU EP — dynamic-quant ops aren't GPU-accelerated).
     fn model(&mut self) -> Result<&mut StreamingModel, String> {
         if self.model.is_none() {
             self.model = Some(match &self.provider {
@@ -214,12 +177,12 @@ impl ParakeetTranscriber {
         Ok(self.model.as_mut().expect("model just loaded"))
     }
 
-    /// Force-load the model now (idempotent) so it's resident before the first transcription.
+    /// Force-load now (idempotent).
     pub fn preload(&mut self) -> Result<(), String> {
         self.model().map(|_| ())
     }
 
-    /// The realized ort EP the streaming model loaded on; CPU before it's loaded.
+    /// Realized ort EP; CPU before loaded.
     pub fn provider(&self) -> ds_config::RealizedProvider {
         self.model
             .as_ref()
@@ -227,15 +190,13 @@ impl ParakeetTranscriber {
             .unwrap_or(ds_config::RealizedProvider::Cpu)
     }
 
-    /// Free the cached model if loaded, returning whether anything was freed.
+    /// Free cached model if loaded; returns whether anything was freed.
     pub fn unload(&mut self) -> bool {
         self.model.take().is_some()
     }
 
-    /// Transcribe 16 kHz mono f32 PCM to trimmed text (whole-buffer / one-shot: feed it all
-    /// through the streaming model, then finalize). Empty input → empty string. Used by the
-    /// segment-at-a-time callers (hands-free listener, test recognition); the live helper
-    /// dictation uses the streaming model's incremental path directly.
+    /// Whole-buffer one-shot: accept all PCM then finalize. Empty → empty.
+    /// Segment callers use this; live helper uses incremental path directly.
     pub fn transcribe_pcm_16k(&mut self, pcm: &[f32]) -> Result<String, String> {
         if pcm.is_empty() {
             return Ok(String::new());
@@ -251,9 +212,7 @@ fn warn(msg: &str) {
     eprintln!("dontspeak/parakeet: {msg}");
 }
 
-/// Build a cpal input stream for `sample_format`, downmixing every frame to mono
-/// f32 and appending it to `buffer`. Dispatches the generic builder on the device
-/// sample format (the common PCM widths cpal can deliver).
+/// cpal input stream: downmix each frame to mono f32 into the ring.
 fn build_input_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -275,8 +234,6 @@ fn build_input_stream(
     r.map_err(|e| format!("build_input_stream: {e}"))
 }
 
-/// The monomorphized input-stream builder: each interleaved frame is averaged
-/// across channels into one mono f32 sample.
 fn build_typed<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -289,7 +246,7 @@ where
     f32: cpal::FromSample<T>,
 {
     let chans = channels.max(1);
-    // cpal 0.18 takes `StreamConfig` by value and errors with `cpal::Error`.
+    // cpal 0.18: StreamConfig by value; errors as cpal::Error.
     device.build_input_stream(
         *config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
@@ -308,28 +265,20 @@ where
     )
 }
 
-/// Resample a mono f32 buffer from `in_rate` to 16 kHz with rubato's polynomial
-/// (`PolyFixedInput`) resampler. Returns the input unchanged when already at
-/// 16 kHz. On any rubato error it logs and returns what was produced so far
-/// (fail-quiet — a partial transcript beats none).
-///
-/// Follows rubato 3.0's canonical whole-clip pattern (the `process_f64` example):
-/// drive fixed-size input chunks via `process_into_buffer` advancing an `Indexing`
-/// offset, finish with one `partial_len` chunk for the tail, then trim the
-/// resampler's `output_delay()` priming frames off the front.
+/// Mono f32 `in_rate` → 16 kHz. Unchanged if already 16 kHz. Fail-quiet on rubato
+/// error (partial beats none). rubato 3.0 whole-clip pattern: fixed chunks via
+/// `process_into_buffer`, `partial_len` tail, then trim `output_delay()` priming.
 pub fn resample_to_16k(input: &[f32], in_rate: u32) -> Vec<f32> {
     resample(input, in_rate, TARGET_RATE)
 }
 
-/// Resample a mono f32 buffer from `in_rate` to an arbitrary `out_rate` (the generic
-/// form of [`resample_to_16k`]). Used by the speaker-separation path to go 16 kHz →
-/// 8 kHz (the separator's native rate) and back. Same fail-quiet rubato pattern.
+/// Mono f32 `in_rate` → `out_rate`. Separation path uses 16 kHz ↔ 8 kHz.
 pub fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
     if in_rate == out_rate || input.is_empty() {
         return input.to_vec();
     }
     let ratio = out_rate as f64 / in_rate as f64;
-    const CHANNELS: usize = 1; // mono
+    const CHANNELS: usize = 1;
 
     let mut resampler = match Async::<f32>::new_poly(
         ratio,
@@ -346,9 +295,8 @@ pub fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
         }
     };
 
-    let in_frames = input.len(); // mono ⇒ frames == samples
-    // Generous output capacity (ideal count + a couple of chunks of slack for the
-    // priming delay + the final partial chunk).
+    let in_frames = input.len();
+    // Ideal count + slack for priming delay + final partial.
     let mut out = vec![0.0f32; (in_frames as f64 * ratio) as usize + 2 * RESAMPLE_CHUNK];
     let out_cap = out.len();
 
@@ -377,7 +325,6 @@ pub fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
     let mut frames_left = in_frames;
     let mut next_in = resampler.input_frames_next();
 
-    // Full fixed-size input chunks.
     while frames_left >= next_in {
         match resampler.process_into_buffer(&input_adapter, &mut output_adapter, Some(&indexing)) {
             Ok((nin, nout)) => {
@@ -392,14 +339,12 @@ pub fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
             }
         }
     }
-    // Final partial chunk (< one input chunk): the resampler zero-pads the rest.
     indexing.partial_len = Some(frames_left);
     match resampler.process_into_buffer(&input_adapter, &mut output_adapter, Some(&indexing)) {
         Ok((_nin, nout)) => indexing.output_offset += nout,
         Err(e) => warn(&format!("resample tail: {e}")),
     }
 
-    // Trim the resampler's priming delay off the front; the rest is real audio.
     let total = indexing.output_offset.min(out_cap);
     let start = delay.min(total);
     out.truncate(total);
@@ -424,14 +369,11 @@ mod tests {
 
     #[test]
     fn resample_48k_to_16k_thirds_the_length() {
-        // 48 kHz → 16 kHz is a 1:3 decimation; a 1 s ramp (~48000 samples) should
-        // come out ~16000 samples (allow a small resampler edge tolerance).
+        // 48→16 kHz is 1:3; poly resampler has delay/edge frames — allow ~5% slack.
         let n = 48_000usize;
         let pcm: Vec<f32> = (0..n).map(|i| (i as f32 / n as f32) * 2.0 - 1.0).collect();
         let out = resample_to_16k(&pcm, 48_000);
         let expected = n / 3;
-        // The polynomial resampler emits a few hundred extra delay/edge frames on
-        // flush; allow ~5% slack around the ideal 1:3 decimation.
         let tol = expected / 20;
         assert!(
             (out.len() as i64 - expected as i64).unsigned_abs() as usize <= tol,
@@ -442,8 +384,7 @@ mod tests {
 
     #[test]
     fn transcriber_empty_pcm_is_empty_text() {
-        // Empty PCM short-circuits before any model load, so this is network/model
-        // free and safe in tests.
+        // Short-circuits before model load — safe without network/assets.
         let mut t = ParakeetTranscriber::new(PathBuf::from("/nonexistent"));
         assert_eq!(t.transcribe_pcm_16k(&[]).unwrap(), "");
     }

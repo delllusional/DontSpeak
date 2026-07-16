@@ -1,9 +1,7 @@
-//! Tiny BART unknown-word inference for the shared English Kokoro frontend.
+//! Tiny BART OOV inference for the English Kokoro frontend.
 //!
-//! The model is intentionally narrower than a text frontend: it sees one unresolved word and
-//! emits Kokoro/Misaki IPA. Tokenization, lexicon lookup, homographs, initialisms, numbers, and
-//! punctuation stay in [`super`]. The encoder/decoder assets are ordinary checksum-pinned model
-//! downloads in `ds-model`; no Python or external phonemizer runs in production.
+//! One unresolved word → Kokoro/Misaki IPA. Tokenization/lexicon/numbers stay in
+//! [`super`]. Assets are checksum-pinned via `ds-model`; no Python/espeak in production.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};

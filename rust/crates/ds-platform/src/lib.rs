@@ -1,20 +1,9 @@
 //! Platform abstraction for the dontspeak engine.
 //!
-//! Three capability traits split the OS-specific surface the engine needs:
-//!   * [`KeyInjector`]     — synthesize the dictation key tap (down+up) that toggles recording.
-//!   * [`FrontmostWindow`] — is a terminal the frontmost app? (focus gate)
-//!   * [`CapsKeyMonitor`]  — physical Caps key down/up edges (the gesture source) + the
-//!     Caps LED write (driven as a pure output).
-//!
-//! [`Platform`] aggregates all three plus a one-time `preflight()` (permission
-//! check). The free functions [`current()`] (the platform impl for the build
-//! target) and [`is_mic_active()`] (system mic-in-use probe) dispatch to the per-OS
-//! modules. The OS-independent [`KeyChord`]/[`KeyBase`] keybinding parser lives in
-//! the `chord` module.
-//!
-//! All three ports are implemented, each behind its `cfg(target_os=…)`, and are
-//! built + tested per-OS in CI (the release full matrix: Linux, Windows, macOS;
-//! per-commit CI covers Linux only).
+//! Capability traits: [`KeyInjector`] (dictation key tap), [`FrontmostWindow`] (terminal
+//! focus gate), [`CapsKeyMonitor`] (physical Caps edges + LED). [`Platform`] aggregates
+//! them plus `preflight()`. [`current()`] / [`is_mic_active()`] dispatch per OS; [`KeyChord`]
+//! lives in `chord`. All three ports behind `cfg(target_os=…)`; full matrix in release CI.
 
 use std::error::Error;
 use std::fmt;
@@ -23,61 +12,38 @@ use std::time::Instant;
 mod chord;
 pub use chord::{KeyBase, KeyChord};
 
-/// One physical Caps-Lock key transition, captured the instant the OS reports it.
-/// An event-driven platform (Windows' low-level keyboard hook) records these into a
-/// queue the engine drains each tick — so a tap whose down AND up both land inside a
-/// single poll gap is still replayed as a real down+up pair (never dropped). `at` is
-/// the moment the edge occurred, used for the long-press threshold against the down.
+/// One physical Caps transition. Event-driven ports queue these so a down+up inside
+/// one poll gap still replays. `at` is for long-press threshold vs the down edge.
 #[derive(Clone, Copy, Debug)]
 pub struct CapsEdge {
-    /// `true` = key went DOWN, `false` = key came UP.
+    /// `true` = DOWN, `false` = UP.
     pub down: bool,
-    /// When the transition was observed (hook-callback time).
     pub at: Instant,
 }
 
-/// Injects the keypress that drives Claude Code voice dictation: TAP — one keypress
-/// toggles recording on, the next toggles it off. The key is whatever Claude Code's
-/// `voice:pushToTalk` is bound to (default `Space`), read from its config.
+/// Inject Claude Code voice dictation keypresses (TAP toggles recording; key from
+/// `voice:pushToTalk`, default Space).
 pub trait KeyInjector {
-    /// Synthesize ONE discrete key tap (down then up) for `chord`. DEFAULT no-op so the
-    /// Win/Linux stubs + minimal test fakes compile unchanged; the macOS impl overrides
-    /// it. The CALLER (ds-stt) gates this on `is_terminal_frontmost()` so the key never
-    /// leaks outside a terminal. An unsupported chord is logged + skipped by the impl.
+    /// One discrete tap (down+up). Default no-op. Caller (ds-stt) gates on
+    /// `is_terminal_frontmost()`. Unsupported chords: log + skip.
     fn tap_key(&self, _chord: &KeyChord) {}
 
-    /// Inject `text` into the focused app (§C.3) — used by the local STT engines
-    /// (Parakeet) to deliver a transcript. macOS prefers a clipboard-paste
-    /// (arboard set + synth Cmd+V) over per-character Unicode events.
-    ///
-    /// DEFAULT no-op so MockPlatform in the engine tests + the Win/Linux stubs
-    /// keep compiling unchanged; only the macOS impl overrides it. The CALLER
-    /// (ds-stt) gates this on `is_terminal_frontmost()` so a transcript never leaks.
+    /// Inject transcript text into focused app. Default no-op; caller gates frontmost.
     fn type_text(&self, _text: &str) {}
 
-    /// Press Return/Enter once (key down+up, no modifiers) — used by the
-    /// always-listening loop to SUBMIT the prompt after the stopword fires.
-    /// DEFAULT no-op (Win/Linux stubs + MockPlatform); the macOS impl overrides
-    /// it. The CALLER gates this on `is_terminal_frontmost()`.
+    /// Press Enter once (always-listening submit). Default no-op; caller gates frontmost.
     fn press_enter(&self) {}
 }
 
-/// Log the single shared "can't synthesize the dictation key" error. Each port's
-/// [`KeyInjector::tap_key`] calls this when its keycode map (Windows VK / macOS keycode /
-/// Linux uinput) has no entry for the configured chord's base key — one user-facing
-/// message, one source of truth instead of the same `eprintln!` copied into all three ports.
+/// Shared "can't synthesize dictation key" warning (one message for all ports).
 pub fn warn_unsupported_dictation_key(base: &KeyBase) {
     eprintln!(
         "dontspeak: can't synthesize claude_code dictation key {base:?} — bind voice:pushToTalk to Space or a Ctrl+<letter>"
     );
 }
 
-/// Restore the user's clipboard after a transcript paste ([`KeyInjector::type_text`]), OFF
-/// the caller's thread. Every port's clipboard-paste delivery (Windows Ctrl+V / macOS Cmd+V
-/// / Linux Ctrl+Shift+V) ends identically: spawn a thread, wait for the async paste to read
-/// what we set, then put back the snapshot (`Some`) or clear what we left (`None`). Before
-/// restoring, verify that the clipboard still contains our transcript: if the user or
-/// another app copied something newer during the delay, that newer value wins.
+/// Restore clipboard after paste, off the caller thread. Wait for async paste, then put
+/// back snapshot (`Some`) or clear (`None`) only if clipboard still holds our transcript.
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub fn restore_clipboard_after_paste(prev: Option<String>, pasted: String) {
     std::thread::spawn(move || {
@@ -98,153 +64,79 @@ pub fn restore_clipboard_after_paste(prev: Option<String>, pasted: String) {
     });
 }
 
-/// Focus gate: only synthesize the dictation key / transcript while a terminal is
-/// frontmost so the keystroke never leaks into another app.
+/// Focus gate: only inject dictation/transcript while a terminal is frontmost.
 pub trait FrontmostWindow {
     fn is_terminal_frontmost(&self) -> bool;
 
-    /// The localized name of the frontmost application (e.g. "Ghostty",
-    /// "Terminal"), captured on the Caps OFF→ON edge so the dictation confirm
-    /// panel can show the paste target ("→ Terminal"). DEFAULT None so the
-    /// Win/Linux stubs and the engine-test MockPlatform keep compiling; only the
-    /// macOS impl overrides it.
+    /// Frontmost app name for the confirm panel ("→ Terminal"). Default None.
     fn frontmost_app_name(&self) -> Option<String> {
         None
     }
 
-    /// Whether the current focus appears able to accept pasted text.
-    ///
-    /// This is a best-effort presentation signal: the engine samples it while the
-    /// dictation panel is visible and warns when false. It never gates delivery; a
-    /// confirmed transcript is pasted into whatever is focused. Default `true` so
-    /// platforms without a reliable probe fail open; macOS and Windows override it.
+    /// Best-effort: can focus accept paste? Warn-only, never gates delivery. Default true.
     fn has_paste_target(&self) -> bool {
         true
     }
 
-    /// Add the user's extra terminal identifiers (config.toml `extra_terminals`) to this
-    /// platform's `KNOWN_TERMINALS` union, in THIS OS's native form. Called once right
-    /// after platform construction (`Engine::assemble`) and again on every
-    /// `Engine::reload` (config.toml is mtime-watched, so a hand-edit + save takes effect
-    /// live, no restart) — REPLACES the whole list each call, not additive. DEFAULT no-op
-    /// so the engine-test `MockPlatform`/`ds-stt`'s own mocks and any future stub keep
-    /// compiling unchanged; only the three OS impls override it.
+    /// Replace config.toml `extra_terminals` union (assemble + every reload). Default no-op.
     fn set_extra_terminals(&self, _extra: Vec<String>) {}
 
-    /// Add the user's extra custom-text-editor identifiers (config.toml
-    /// `extra_custom_text_editors`) — mirrors `set_extra_terminals` but widens
-    /// `has_paste_target()`'s custom-drawn-editor exemption instead of
-    /// `is_terminal_frontmost()`'s table. Effective on Windows (`CUSTOM_TEXT_EXES`) and
-    /// macOS (`CUSTOM_TEXT_BUNDLES`); Linux accepts-and-ignores the call because its
-    /// `has_paste_target` is the always-true trait default (nothing to exempt), keeping
-    /// the config field uniformly settable regardless of OS. DEFAULT no-op.
+    /// Replace `extra_custom_text_editors` for `has_paste_target` exemption (Win/macOS;
+    /// Linux no-op — default always-true). Default no-op.
     fn set_extra_custom_text_editors(&self, _extra: Vec<String>) {}
 }
 
-/// Physical Caps-Lock key down-duration + LED write — the signal §F needs for
-/// long-press detection (measured off how long the physical key is held), plus
-/// the Caps LED output the engine drives on each gesture edge.
+/// Physical Caps hold + LED write (long-press + recording indicator).
 pub trait CapsKeyMonitor {
-    /// Whether the Caps Lock key is physically held *right now*, independent of
-    /// the LED/toggle state. The engine stamps the first true and fires a reset
-    /// if it stays true past `long_press_ms`.
+    /// Physical hold, independent of LED/toggle. Engine uses for long-press reset.
     fn is_caps_physically_down(&self) -> bool;
-    /// Force the Caps Lock LED/lock state (the drift-recovery write used by the
-    /// long-press reset to drive the LED OFF, `set_caps_lock(false)`).
+    /// Force Caps LED/lock (e.g. long-press drift recovery OFF).
     fn set_caps_lock(&self, on: bool);
 
-    /// Whether ANY of the platform's `IOHIDManagerOpen`-gated resources is confirmed
-    /// STUCK: denied by the OS even though the permission it needs is already
-    /// granted, in a way that won't self-heal without a fresh process. Default
-    /// `false` — only macOS has this failure mode (see
-    /// `ds_platform::macos::iohid`'s module doc); Windows' low-level hook and
-    /// Linux's evdev read don't. On macOS this ORs together TWO independent call
-    /// sites that each hit it (the caps-HID physical-key monitor, `iohid.rs`, AND
-    /// the Caps-Lock LED writer, `led.rs`) — either one being stuck is reason
-    /// enough to relaunch. The engine polls this next to its own permission
-    /// re-probe and relaunches itself on `true` (see `dontspeakd::boot::engine_run`,
-    /// which logs [`caps_monitor_stuck_detail`](Self::caps_monitor_stuck_detail)
-    /// rather than this bare bool, so the log names which resource was actually
-    /// responsible).
+    /// macOS-only: IOHID/LED resource stuck denied despite grant (needs process relaunch).
+    /// Default false. Engine polls + relaunches; prefer [`caps_monitor_stuck_detail`].
     fn caps_monitor_stuck(&self) -> bool {
         false
     }
 
-    /// Human-readable detail for when [`caps_monitor_stuck`](Self::caps_monitor_stuck)
-    /// is `true` — which resource(s), for logging. `None` when not stuck (or on
-    /// platforms where `caps_monitor_stuck` is always `false`). This exists because
-    /// each resource's own low-level warning is an `eprintln!` to raw process
-    /// stderr — NOT the same destination as `dontspeakd`'s structured `log()`
-    /// (`~/Library/Logs/DontSpeak/dontspeak.log`), and for a GUI-launched app
-    /// stderr typically isn't captured anywhere a user or developer would see it.
-    /// So the ONE line that reliably lands in the persisted log (the engine's own,
-    /// via this detail) needs to be self-sufficient, not a pointer to a sibling
-    /// line that may not exist anywhere visible.
+    /// Which resource is stuck for the persisted engine log (stderr often invisible).
     fn caps_monitor_stuck_detail(&self) -> Option<&'static str> {
         None
     }
 
-    /// Whether this platform delivers Caps transitions as a lossless EVENT STREAM
-    /// (drained via [`drain_caps_events`](Self::drain_caps_events)) rather than the
-    /// engine sampling [`is_caps_physically_down`](Self::is_caps_physically_down) once per
-    /// tick. Windows' low-level hook returns `true`; the polled platforms (macOS,
-    /// Linux) and the test mock keep the DEFAULT `false`, so the engine drives them
-    /// off the sampled boolean exactly as before. An event-driven platform fully
-    /// SUPPRESSES the key (no OS caps TOGGLE, so no capitals), but `set_caps_lock`
-    /// still drives the physical LED out-of-band as the dictation indicator — on
-    /// Windows via `IOCTL_KEYBOARD_SET_INDICATORS`, matching the polled ports.
+    /// True when Caps edges come from a lossless event stream ([`drain_caps_events`])
+    /// rather than sampling [`is_caps_physically_down`]. Windows hook = true; polled
+    /// ports default false. Event-driven ports suppress OS Caps toggle but still drive
+    /// the LED via `set_caps_lock`.
     fn is_caps_event_driven(&self) -> bool {
         false
     }
 
-    /// Drain every Caps transition observed since the last call, oldest first. Only
-    /// meaningful when [`is_caps_event_driven`](Self::is_caps_event_driven) is `true`; the
-    /// DEFAULT returns empty so polled platforms and the mock are untouched.
+    /// Drain Caps edges since last call (oldest first). Meaningful only if event-driven.
     fn drain_caps_events(&self) -> Vec<CapsEdge> {
         Vec::new()
     }
 
-    /// First phase of [`acquire_caps_key`]: establish any suppression that must be live
-    /// before the existing logical Caps state is cleared. macOS installs its `hidutil`
-    /// remap here; Windows installs and waits for its low-level hook; Linux uses the
-    /// default because its synthetic normalization tap must still reach XKB. Return
-    /// `false` when ownership could not be prepared; the shared acquisition sequence
-    /// then skips normalization and completion. DEFAULT: ready with no work.
+    /// [`acquire_caps_key`] phase 1: suppression that must be live before clearing logical
+    /// Caps (macOS hidutil / Windows hook). false → skip normalize+finish. Default ready.
     fn begin_caps_key_acquisition(&self) -> bool {
         true
     }
 
-    /// Second, mandatory phase of [`acquire_caps_key`]: clear any logical Caps state
-    /// that predates DontSpeak's ownership and leave the indicator dark. The shared
-    /// acquisition sequence calls this on every startup and OFF→ON acquisition, so a
-    /// platform cannot install suppression while accidentally preserving capitals.
-    /// DEFAULT: the platform's ordinary OFF writer; Linux and Windows override because
-    /// their indicator writers are deliberately decoupled from the logical toggle.
+    /// Phase 2: clear pre-existing logical Caps, indicator off. Default `set_caps_lock(false)`.
     fn normalize_caps_lock(&self) {
         self.set_caps_lock(false);
     }
 
-    /// Final phase of [`acquire_caps_key`]: install suppression that must happen after
-    /// normalization. Linux applies XKB `caps:none` here, after its synthetic Caps tap;
-    /// macOS and Windows use the default no-op because they suppress in the first phase.
+    /// Phase 3: post-normalize suppression (Linux XKB `caps:none`). Default no-op.
     fn finish_caps_key_acquisition(&self) {}
 
-    /// Release ownership taken by [`acquire_caps_key`],
-    /// restoring the key's native OS behavior. Idempotent — safe to call when not
-    /// currently owned (including at startup if caps dictation starts disabled).
-    /// Called on every ON→OFF live toggle and at final shutdown. Implementations
-    /// MUST also discard any already-queued-but-undelivered Caps edges (Windows'
-    /// `drain_caps_events` backlog) — otherwise a burst of presses made while
-    /// released replays in full the instant the key is re-acquired, desyncing the
-    /// tap/double-tap gesture state machine. DEFAULT no-op.
+    /// Release ownership; restore native Caps. Idempotent. MUST discard queued Caps edges
+    /// (else re-acquire replays them). Default no-op.
     fn release_caps_key(&self) {}
 }
 
-/// Take ownership of the physical Caps key through one shared cross-platform sequence:
-/// prepare suppression where required, normalize any pre-existing logical Caps state,
-/// then finish suppression where normalization had to run first. This is the only
-/// acquisition entry point; platforms implement the phase primitives above rather than
-/// duplicating (and potentially omitting) the normalization policy.
+/// Shared Caps ownership: begin → normalize → finish. Only acquisition entry point.
 pub fn acquire_caps_key(monitor: &(impl CapsKeyMonitor + ?Sized)) {
     if !monitor.begin_caps_key_acquisition() {
         return;
@@ -309,18 +201,12 @@ mod caps_key_acquisition_tests {
     }
 }
 
-/// One platform's full capability set.
+/// Full OS capability set.
 pub trait Platform: KeyInjector + FrontmostWindow + CapsKeyMonitor {
-    /// One-time startup check (e.g. macOS Accessibility trust). Returns an
-    /// error the engine prints before exiting non-zero. SILENT and repeatable —
-    /// the caps re-probe loop calls it on a timer, so it must never prompt.
+    /// Silent, repeatable permission check (re-probe safe; never prompt).
     fn preflight(&self) -> Result<(), PreflightError>;
 
-    /// One-time startup PROMPT for the OS permissions the engine needs (macOS
-    /// Accessibility). Unlike [`Platform::preflight`] this MAY pop a system dialog
-    /// and register the app in the permission list, so it must be called exactly
-    /// ONCE at startup — never from the re-probe loop. Default: no-op (Linux/Windows
-    /// grant input access via udev / no prompt).
+    /// One-shot permission prompt at startup only (macOS Accessibility). Default no-op.
     fn request_permissions(&self) {}
 }
 
@@ -334,17 +220,14 @@ impl fmt::Display for PreflightError {
 }
 impl Error for PreflightError {}
 
-// ---- per-OS modules --------------------------------------------------------
-// Key synthesis (`KeyInjector`) + Caps-Lock LED (`CapsKeyMonitor`) are
-// implemented NATIVELY per OS below — one correct, self-maintained impl each, no library.
+// Native KeyInjector + CapsKeyMonitor per OS (no shared input library).
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::MacOsPlatform;
 
-// Cross-platform mic-in-use watcher (push interface; CoreAudio listener on macOS, poll
-// thread elsewhere). Lives above the per-OS modules so it can dispatch to `is_mic_active()`.
+// Mic-in-use watcher (dispatches to `is_mic_active()`).
 mod mic_watch;
 pub use mic_watch::{MicState, MicWatcher};
 
@@ -358,7 +241,7 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::LinuxPlatform;
 
-/// Construct the platform impl for the current build target.
+/// Platform for this build target.
 #[cfg(target_os = "macos")]
 pub fn current() -> Result<MacOsPlatform, PreflightError> {
     MacOsPlatform::new()
@@ -374,16 +257,9 @@ pub fn current() -> Result<LinuxPlatform, PreflightError> {
     LinuxPlatform::new()
 }
 
-/// One entry in the shared "known terminal" table — the apps whose main text surface
-/// isn't visible to at least one OS's accessibility API, so `is_terminal_frontmost()`
-/// still treats a synthetic paste/tap as landing on a valid target. `name` is for
-/// readability/debugging only and is never matched against anything; each platform
-/// field is `Some` only where this app needs (and has) an identifier on that OS — a
-/// platform-only terminal (PowerShell, GNOME Terminal) leaves the other two `None`.
-/// An app that ships TWO identifiers on the SAME OS (WezTerm's modern vs. legacy exe/
-/// wm_class, Ghostty's two Linux wm_class spellings) gets one extra row rather than a
-/// list-valued field, since every platform's lookup just filters non-`None` values
-/// across ALL rows regardless of how many rows one logical app spans.
+/// One row in the shared terminal table for `is_terminal_frontmost()`. `name` is
+/// debug-only. Platform fields are `Some` only where that OS has an id; dual ids on
+/// one OS (WezTerm, Ghostty) use two rows.
 pub struct KnownTerminal {
     pub name: &'static str,
     pub windows_exe: Option<&'static str>,
@@ -391,15 +267,8 @@ pub struct KnownTerminal {
     pub linux_wm_class: Option<&'static str>,
 }
 
-/// The single shared source of truth for "which app counts as a terminal" across all
-/// three platforms' `is_terminal_frontmost()`. Covers exactly the identifiers
-/// previously hand-maintained as three separate flat lists (Windows's old `TERM_EXES`,
-/// macOS's old `TERM_BUNDLES`, Linux's old `TERM_WM_CLASSES` — see each platform
-/// module's golden-list test, which pins this table against those pre-refactor
-/// literals). Adding a new cross-platform terminal with ONE identifier per OS is one
-/// row here instead of up to three separate edits. A user can extend this table without a
-/// code change via config.toml's `extra_terminals` (see [`FrontmostWindow::set_extra_terminals`]) —
-/// unioned in at lookup time on each platform, never merged into this compiled-in slice.
+/// Single source for terminal ids (was three per-OS lists). Extend via config.toml
+/// `extra_terminals` ([`FrontmostWindow::set_extra_terminals`]), not this slice.
 pub const KNOWN_TERMINALS: &[KnownTerminal] = &[
     // ---- cross-platform ---------------------------------------------------------
     KnownTerminal {
@@ -614,49 +483,31 @@ pub const KNOWN_TERMINALS: &[KnownTerminal] = &[
     },
 ];
 
-// ── Microphone-in-use probe (TTS feedback gate) ──────────────────────────────
-//
-// Whether the default audio INPUT device is capturing RIGHT NOW (the mic is in
-// use anywhere on the system) — true while Claude Code's voice dictation, the
-// engine's own Parakeet STT, or any other app is recording. The TTS paths use
-// this to hold/skip playback so speech never feeds back into a live recording.
-//
-// Claude Code exposes no recording-state hook/signal, so we read it from the OS.
-// macOS: CoreAudio `kAudioDevicePropertyDeviceIsRunningSomewhere` on the default
-// input device. Windows: a WASAPI capture-session probe. Linux has no probe yet →
-// `false` (no gate), which degrades to always-play.
+// Mic-in-use probe: TTS holds/skips while any app records (no Claude Code signal).
+// macOS CoreAudio / Windows WASAPI; Linux → false (always play).
 
-/// Whether the default microphone is currently capturing (per-OS probe).
-///
-/// Thin dispatch to the per-OS probe (CoreAudio on macOS, WASAPI on Windows, a
-/// no-gate fallback elsewhere); the implementation for each target lives in that
-/// OS's module.
+/// Default mic currently capturing?
 #[cfg(target_os = "macos")]
 pub fn is_mic_active() -> bool {
     macos::is_mic_active()
 }
 
-/// Whether the default microphone is currently capturing (per-OS probe).
 #[cfg(windows)]
 pub fn is_mic_active() -> bool {
     windows::is_mic_active()
 }
 
-/// Stub for platforms with no mic probe yet (Linux): never gate TTS (always play).
+/// No mic probe: never gate TTS.
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn is_mic_active() -> bool {
     false
 }
 
-/// Detach this process from any console it inherited or was implicitly given (Windows
-/// only; a no-op elsewhere — only Windows ties a console-subsystem process to an
-/// auto-created window). See `windows::detach_console` for why `dontspeak.exe` needs this
-/// for its non-interactive roles.
+/// Detach inherited/auto console (Windows only; see `windows::detach_console`).
 #[cfg(windows)]
 pub fn detach_console() {
     windows::detach_console();
 }
 
-/// No-op on platforms with no console/subsystem distinction.
 #[cfg(not(windows))]
 pub fn detach_console() {}

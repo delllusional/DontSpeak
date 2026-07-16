@@ -64,14 +64,10 @@ fn copy_bounded_with_limit(
     Ok(copied)
 }
 
-/// Extract the onnxruntime shared library from the downloaded archive onto
-/// `dest`. Per-platform because Microsoft ships a `.tgz` on macOS and a `.zip`
-/// on Windows.
+/// Extract onnxruntime shared lib onto `dest` (Microsoft `.zip` on Windows / `.tgz` elsewhere).
 #[cfg(target_os = "windows")]
 pub(crate) fn extract_runtime_member(zip_path: &Path, dest: &Path) -> std::io::Result<()> {
-    // The win-x64 .zip holds lib/onnxruntime.dll (the runtime we want) AND
-    // lib/onnxruntime_providers_shared.dll — match the base name exactly so we
-    // pull only onnxruntime.dll. Atomic temp + rename onto `dest`.
+    // Exact base name: zip also has onnxruntime_providers_shared.dll.
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(std::io::Error::other)?;
     let dir = dest
@@ -101,17 +97,14 @@ pub(crate) fn extract_runtime_member(zip_path: &Path, dest: &Path) -> std::io::R
     ))
 }
 
-/// Non-Windows: the archive is a gzip'd tar; pull the dylib/.so member.
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn extract_runtime_member(tgz_path: &Path, dest: &Path) -> std::io::Result<()> {
     extract_dylib_member(tgz_path, dest)
 }
 
-/// Extract the FIRST `*.dylib`/`*.so`/`*.dll` member of a gzip'd tar onto
-/// `dest` (atomic temp + rename). Mirrors `ort-sys`'s own dylib-copy heuristic
-/// (it scans for entries whose path contains `.dll`/`.so`/`.dylib`).
-/// `#[allow(dead_code)]`: on Windows the zip path above is used instead, but the
-/// parity test still exercises this function.
+/// First real `libonnxruntime.*` shared lib from a gzip'd tar (atomic temp+rename).
+/// Skips `.dSYM`, symlinks, and `libonnxruntime_providers_*`. Dead on Windows zip path;
+/// kept for parity tests (`#[allow(dead_code)]`).
 #[allow(dead_code)]
 pub(crate) fn extract_dylib_member(tgz_path: &Path, dest: &Path) -> std::io::Result<()> {
     let file = std::fs::File::open(tgz_path)?;
@@ -122,20 +115,11 @@ pub(crate) fn extract_dylib_member(tgz_path: &Path, dest: &Path) -> std::io::Res
         .ok_or_else(|| std::io::Error::other("dest has no parent"))?;
     for entry in archive.entries()? {
         let mut entry = entry?;
-        // Own the path first so the mutable `entry` borrow below (io::copy) is OK.
+        // Own path before mutable entry borrow for io::copy.
         let path = entry.path()?.into_owned();
-        // Pick the real shared library: a regular FILE whose name ends in the
-        // platform ext. Exclude debug bundles (a .dSYM dir path also contains
-        // ".dylib") and the unversioned symlink (not a regular file). E.g. the
-        // Microsoft archive holds lib/libonnxruntime.1.22.0.dylib (real),
-        // lib/libonnxruntime.dylib (symlink), and a .dSYM bundle — only the first
-        // must be extracted.
         let is_regular = entry.header().entry_type().is_file();
-        // Match the CORE runtime only. macOS ships lib/libonnxruntime.1.27.0.dylib; Linux ships
-        // lib/libonnxruntime.so.1.27.0 (a versioned soname — note it does NOT end in ".so", and
-        // the bare libonnxruntime.so / .so.1 are SYMLINKS excluded by `is_regular`). Anchoring on
-        // the "libonnxruntime." prefix (DOT, not the "_" in libonnxruntime_providers_shared.so)
-        // excludes the provider shim that also ships in the linux tgz's lib/.
+        // Prefix "libonnxruntime." (dot) excludes providers_shared; versioned .so.N
+        // doesn't end in ".so" — match via `.so.` too. Bare .so / .so.1 are symlinks.
         let name_matches = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -162,10 +146,7 @@ pub(crate) fn extract_dylib_member(tgz_path: &Path, dest: &Path) -> std::io::Res
     ))
 }
 
-/// Extract EVERY `*.dll` member of a wheel (zip) into `dir`, flattened (atomic per
-/// file). The nvidia wheels hold their DLLs under `nvidia/<lib>/bin/`; the
-/// onnxruntime wheel under `onnxruntime/capi/` — flattening collects exactly the
-/// runtime set.
+/// Flatten every `*.dll` from a CUDA/ORT wheel into `dir` (nvidia `bin/`, ort `capi/`).
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub(crate) fn extract_all_dlls(zip_path: &Path, dir: &Path) -> std::io::Result<()> {
     let file = std::fs::File::open(zip_path)?;

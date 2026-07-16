@@ -1,14 +1,9 @@
-//! Apple-native Kokoro TTS backend (macOS).
+//! Apple-native Kokoro TTS (macOS): `dlopen` `libsmkokoro.dylib` (FluidAudio ANE
+//! Core ML) → 24 kHz mono f32. Same [`crate::g2p`] chunks as ONNX (no platform
+//! pronunciation drift).
 //!
-//! `dlopen`s `libsmkokoro.dylib` — a Swift `@_cdecl` shim over FluidAudio's
-//! ANE-resident Core ML Kokoro — and synthesizes Kokoro-compatible IPA phonemes to
-//! 24 kHz mono f32 PCM. Both this and the ONNX path consume the exact same output
-//! from [`crate::g2p`], so platform choice cannot change pronunciation or chunking.
-//!
-//! Selected when `DONTSPEAK_PROVIDER=apple-native`; the helper falls back to the ONNX
-//! CPU path if the dylib or models are unavailable. The dylib is located via
-//! `SMKOKORO_DYLIB_PATH` (set by the macOS app, mirroring `ORT_DYLIB_PATH`). DontSpeak
-//! pre-downloads the models; the shim loads them offline. See `apps/macos/SmKokoro/include/smkokoro.h`.
+//! `DONTSPEAK_PROVIDER=apple-native`; fallback ONNX CPU if dylib/models missing.
+//! Dylib via `SMKOKORO_DYLIB_PATH`. See `apps/macos/SmKokoro/include/smkokoro.h`.
 
 use std::ffi::{CString, c_char, c_void};
 

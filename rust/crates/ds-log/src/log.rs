@@ -1,44 +1,27 @@
-//! Unified activity log — one readable file with lean in-process rotation.
+//! Unified activity log — one file, leveled format, lean in-process rotation.
 //!
-//! One file (the caller's `log_file`, e.g. macOS `~/Library/Logs/DontSpeak/dontspeak.log`), one leveled format,
-//! shared by every process (engine + hooks + mcp). Each call opens the file
-//! `O_APPEND` and writes the whole line in a SINGLE `write_all`; POSIX guarantees
-//! an append write lands atomically at EOF, so concurrent writers never interleave.
+//! Shared by engine + hooks + mcp. Each call opens `O_APPEND` and `write_all`s one line;
+//! append-at-EOF is atomic on POSIX and on Windows (`FILE_APPEND_DATA`), so concurrent
+//! multi-process writers (engine, CLI hooks/MCP, `ds-helper`) never interleave.
 //!
-//! Rotation is IN-PROCESS and size-based, done by RENAME (never truncate — the old
-//! truncate-rewrite was the race that concatenated timestamps). When the file
-//! reaches `LOG_MAX_BYTES` the writer shifts `dontspeak.log` → `.1` → `.2` (oldest
-//! dropped) and a fresh file is recreated on the next append. No `newsyslog`, no
-//! sudo. Concurrent rename at the threshold is rare and non-fatal (atomic rename;
-//! at worst a couple of lines land in the rotated file).
+//! Rotation is size-based by RENAME (never truncate — truncate-rewrite concatenated
+//! timestamps). At `LOG_MAX_BYTES`: `dontspeak.log` → `.1` → `.2` (oldest dropped). No
+//! `newsyslog`/sudo. Concurrent rename at threshold is rare and non-fatal.
 //!
 //! Wire format: `[<epoch_seconds>] <LEVEL> <source> <message>\n`
 //!   e.g. `[1781700000] INFO engine started build=ab12cd`
-//! `source` is one token: engine, tts, stt, caps, hook, mcp, helper — the SUBSYSTEM that
-//! emitted the line (it is `log::Record::target()` from the facade, and every UI's Logs tab
-//! derives its filter set from it).
+//! `source` is the subsystem token (`log::Record::target()`); UIs filter on it.
 //!
-//! WHICH CLIENT caused a line is a DIFFERENT axis, and it rides as a trailing `client=<token>`
-//! key INSIDE the message (the log's existing k=v idiom, cf. `started build=ab12cd`), never as
-//! a fourth positional field:
+//! Client identity is a different axis: trailing `client=<token>` k=v inside the message
+//! (existing k=v idiom), never a fourth positional field:
 //!
 //! ```text
-//! [<epoch>] <LEVEL> <source> <message>                 # client == DontSpeak (us)
-//! [<epoch>] <LEVEL> <source> <message> client=codex    # any other client, incl. `unknown`
+//! [<epoch>] <LEVEL> <source> <message>                 # client == DontSpeak
+//! [<epoch>] <LEVEL> <source> <message> client=codex    # any other client, incl. unknown
 //! ```
 //!
-//! So `parse_unified_line`'s `splitn(3, ' ')` and `combined_log_json`'s `{source, level, text}`
-//! shape are unchanged — no UI, FFI or Logs-tab work — and `client=` present is the greppable
-//! "an external client caused this" signal, while the engine's own high-volume lines don't grow
-//! a redundant `client=dontspeak` suffix. See [`log_from`].
-//!
-//! `log()`'s single `write_all` is atomic on more than just POSIX: Rust's
-//! `OpenOptions::append(true)` maps to a `FILE_APPEND_DATA`-only handle on Windows, which gives
-//! the same single-write-lands-atomically-at-EOF guarantee there too. That matters because this
-//! file is now a genuinely multi-process append target — the long-lived engine, short-lived
-//! `dontspeak` CLI invocations (hooks/MCP), and the long-lived `ds-helper` child can all be
-//! appending concurrently — so concurrent cross-process appends are safe on all three OSes, not
-//! just POSIX ones.
+//! So `parse_unified_line` / `combined_log_json` stay shape-stable; `client=` greps as
+//! "external client caused this"; engine lines skip a redundant `client=dontspeak`. See [`log_from`].
 
 use ds_client::ClientSource;
 use std::path::{Path, PathBuf};
@@ -60,16 +43,15 @@ fn is_symlink(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Rotate when the active log file reaches this size (~5 MiB).
+/// Rotate threshold (~5 MiB).
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
-/// How many rotated files to keep (`dontspeak.log.1` .. `.LOG_KEEP_OLD`).
+/// Rotated files kept (`dontspeak.log.1` .. `.LOG_KEEP_OLD`).
 const LOG_KEEP_OLD: usize = 2;
 
-/// Severity for a unified-log line, rendered as a fixed token (INFO/WARN/ERROR).
+/// Severity token on a unified-log line (INFO/WARN/ERROR/DEBUG).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
-    /// Verbose per-event telemetry (per-utterance TTS timing, etc.). Written only when the
-    /// caller opts in (the engine gates it on `DONTSPEAK_DEBUG`), so normal logs stay clean.
+    /// Verbose telemetry; engine gates on `DONTSPEAK_DEBUG` so normal logs stay clean.
     Debug,
     Info,
     Warn,
@@ -94,16 +76,14 @@ fn epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// `path` with a `.<n>` suffix appended (`dontspeak.log` → `dontspeak.log.1`).
 fn rotated_path(path: &std::path::Path, n: usize) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(format!(".{n}"));
     PathBuf::from(s)
 }
 
-/// Best-effort, race-tolerant size rotation by RENAME (never truncate). No-op until the file
-/// reaches `LOG_MAX_BYTES`. PUBLIC so non-`log()` writers (e.g. a spawned child's inherited
-/// stderr sink) get the SAME rotation as the engine log instead of growing unbounded.
+/// Best-effort size rotation by RENAME. Public so non-`log()` writers (child stderr sinks)
+/// share the same bound — see drift-guard test.
 pub fn rotate_if_large(path: &Path) {
     let too_big = std::fs::metadata(path)
         .map(|m| m.len() >= LOG_MAX_BYTES)
@@ -118,18 +98,13 @@ pub fn rotate_if_large(path: &Path) {
     let _ = std::fs::rename(path, rotated_path(path, 1));
 }
 
-/// An auxiliary log file's path — a sibling of the unified engine log with the given
-/// `file_name`. THE single way to place an extra log, so every log shares one per-OS
-/// logs dir and none drift to a second location (`with_file_name` keeps the engine log's dir).
+/// Sibling of the engine log with `file_name` — single placement rule so aux logs never drift.
 pub fn aux_log_path(engine_log: &Path, file_name: &str) -> PathBuf {
     engine_log.with_file_name(file_name)
 }
 
-/// Open an auxiliary append log beside the engine log — the ONE entry point for any non-`log()`
-/// log sink (e.g. a spawned child's stderr). Ensures the shared logs dir exists, size-rotates
-/// the file FIRST (so a long-lived sink that inherits the handle starts bounded), then opens it
-/// `O_APPEND`. Returns the open file, or `None` on any IO error. Use this for EVERY new log so
-/// location + rotation stay consistent across platforms — see the drift-guard test.
+/// Open an aux append log: ensure dir, rotate first (bounded long-lived handles), then `O_APPEND`.
+/// `None` on any IO error. Use for every non-`log()` sink.
 pub fn open_aux_log(log_file: &Path, file_name: &str) -> Option<std::fs::File> {
     let path = aux_log_path(log_file, file_name);
     if let Some(dir) = path.parent() {
@@ -139,27 +114,16 @@ pub fn open_aux_log(log_file: &Path, file_name: &str) -> Option<std::fs::File> {
     open_append_private(&path).ok()
 }
 
-/// Append one line to the unified activity log. `source` is the SUBSYSTEM token
-/// (engine, tts, stt, caps, hook, mcp, helper). Fail-quiet: any IO error is a no-op —
-/// logging must never take down a hook or the engine.
-///
-/// Attributed to DontSpeak itself — i.e. `log_from(.., ClientSource::DontSpeak, ..)`, which
-/// renders no `client=` suffix. Use [`log_from`] when a CLIENT (Claude Code, Codex, …) caused
-/// the line.
+/// Append one unified-log line. `source` = subsystem token. Fail-quiet (never take down hooks/engine).
+/// Attributed to DontSpeak (no `client=`). Use [`log_from`] for a client-caused line.
 pub fn log(log_file: &Path, level: LogLevel, source: &str, msg: &str) {
     log_from(log_file, level, source, ClientSource::DontSpeak, msg);
 }
 
-/// [`log()`], attributed to the CLIENT that caused the line. Any client other than
-/// [`ClientSource::DontSpeak`] appends a trailing ` client=<token>` k=v to the MESSAGE (see the
-/// module docs) — the positional `[ts] LEVEL source …` fields are untouched, so the parsed log
-/// shape every UI's Logs tab reads is byte-compatible and a `DontSpeak` line is byte-identical
-/// to what plain `log()` has always written.
-///
-/// This is the ONLY client-attributed logger, and it takes the log-file PATH: every caller
-/// therefore has a `Paths` in scope (a tempdir-rooted one under test). There is deliberately
-/// no cached client-attributed variant: it would offer unit tests a tempting path to the real
-/// `$HOME` log instead of requiring their tempdir-rooted path.
+/// Client-attributed [`log`]: non-`DontSpeak` appends ` client=<token>` to the message
+/// (positional fields untouched — UI shape stays byte-compatible). Takes the log PATH so
+/// tests must pass a tempdir; deliberately no cached client-attributed variant (would tempt
+/// real-`$HOME` writes).
 pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: ClientSource, msg: &str) {
     use std::io::Write;
     if let Some(dir) = log_file.parent() {
@@ -168,12 +132,12 @@ pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: ClientSo
     rotate_if_large(log_file);
     let source = source.replace(['\n', '\r'], " ");
     let msg = msg.replace(['\n', '\r'], " ");
-    // The client rides as a trailing k=v inside the message; US ⇒ no suffix at all.
+    // Client as trailing k=v; DontSpeak ⇒ no suffix.
     let suffix = match client {
         ClientSource::DontSpeak => String::new(),
         c => format!(" client={}", c.as_str()),
     };
-    // One formatted line, one write_all → atomic append (no interleave).
+    // One line, one write_all → atomic append.
     let line = format!(
         "[{}] {} {source} {msg}{suffix}\n",
         epoch_secs(),
@@ -184,30 +148,20 @@ pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: ClientSo
     }
 }
 
-/// Re-derive the per-OS default unified-log path, WITHOUT depending on `ds-config`.
+/// Per-OS default log path without depending on `ds-config`.
 ///
-/// `ds-log` cannot depend on `ds_config::Paths` for this: `ds-config`'s own `voice.rs`
-/// (`VoiceConfig::load`) calls this crate's `log()` for an internal diagnostic, so if
-/// `ds-log` also depended on `ds-config` (for `Paths`), that would be a Cargo workspace
-/// dependency cycle — a hard build error. So this is a small, deliberate duplicate of
-/// `ds_config::paths::log_path`/`state_root`/`APP_DIR` (same per-OS convention, same
-/// `directories::BaseDirs` primitive), kept in sync by convention rather than by a shared
-/// dependency. Mirrors the existing precedent in `log_watch.rs`'s `is_relevant` helper,
-/// which duplicates `dontspeakd::config_watch` logic for the same reason (a real cross-
-/// crate cycle, not laziness).
+/// Cycle: `VoiceConfig::load` calls this crate's `log()`, so `ds-log` cannot take
+/// `ds_config::Paths`. Deliberate duplicate of `ds_config::paths::log_path` / `state_root` /
+/// `APP_DIR` (same `directories::BaseDirs` convention); kept in sync by convention. Same
+/// pattern as `log_watch::is_relevant` vs `dontspeakd::config_watch`.
 ///
 ///   macOS:   `~/Library/Logs/DontSpeak/dontspeak.log`
 ///   Windows: `%LOCALAPPDATA%\DontSpeak\logs\dontspeak.log`
 ///   Linux:   `$XDG_STATE_HOME`/`~/.local/state/dontspeak/logs/dontspeak.log`
 ///
-/// `DONTSPEAK_LOG_FILE`, if set, overrides the path outright — the ONLY way an
-/// integration test that spawns the real `dontspeak`/`ds-helper` binary (so it runs the
-/// real `ds_log::init()`, with no in-process seam to hand it a tempdir path) can stay
-/// isolated from the real per-OS log file cross-platform. `HOME`/`XDG_STATE_HOME` env
-/// overrides work for `directories::BaseDirs` on macOS/Linux, but Windows resolves
-/// `%LOCALAPPDATA%` via the native known-folder API (`SHGetKnownFolderPath`), which
-/// ignores a child process's overridden `LOCALAPPDATA` env var — this override is a
-/// deliberate escape hatch that isn't OS-API dependent.
+/// `DONTSPEAK_LOG_FILE` overrides outright — needed for integration tests that spawn real
+/// binaries (`ds_log::init()`) with no in-process path seam. `HOME`/`XDG_*` work on
+/// macOS/Linux; Windows known-folder APIs ignore child `LOCALAPPDATA` env overrides.
 fn default_log_file() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("DONTSPEAK_LOG_FILE") {
         return Some(PathBuf::from(p));
@@ -249,28 +203,13 @@ fn default_log_file() -> Option<PathBuf> {
 
 static CACHED_LOG_FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
-/// Convenience wrapper over `log()` for callers with no log-file path of their own in scope
-/// (the dontspeak CLI's hook/MCP paths, ds-helper's diagnostics) — resolves+caches the
-/// default per-OS log file once per process so callers don't each reimplement the same
-/// OnceLock cache. Fail-quiet: a no-op if `$HOME` can't resolve.
+/// `log()` with process-cached default path (CLI hooks/MCP, helper). Fail-quiet if `$HOME`
+/// unresolved. Callers with a tempdir path must use `log()` — this always hits the real
+/// per-OS path and would leak test writes.
 ///
-/// Callers that already have a resolved log-file path in scope (e.g. anything reached from
-/// a test harness rooted at a tempdir) must call `log()` directly instead — this function
-/// always resolves the REAL per-OS path via `default_log_file()` and ignores any caller-local
-/// path, so using it from a path that's supposed to stay test-isolated would silently leak
-/// writes into the real `$HOME`-based log directory.
-///
-/// THE RULE (issue #26): `log_cached` must stay unreachable from any unit test. Today it is,
-/// because its ONLY caller is the `log::Log` sink in `facade.rs`, and that sink is installed
-/// only by `ds_log::init()` — which no test calls, so `log::info!` is a silent no-op under
-/// `cargo test`. This is now a CI gate, not just convention: `.github/workflows/ci.yml`'s
-/// "verify tests didn't leak into the real log file" step fails the build if a test run leaves
-/// a file at the real per-OS path, which is the only way `log_cached` (as opposed to
-/// `log`/`log_from`, which take a caller-supplied path) can write. There is deliberately NO
-/// `log_cached_from`: a
-/// client-attributed cached logger would be a brand-new, tempting call site that writes to the
-/// dev's/CI runner's REAL `$HOME` log. Client-attributed logging goes through [`log_from`],
-/// which takes the path — see its doc.
+/// Issue #26: unreachable from unit tests (only via facade sink installed by `init()`, which
+/// tests never call). CI "verify tests didn't leak into the real log file" enforces it.
+/// No `log_cached_from` by design — client attribution goes through [`log_from`] with a path.
 pub(crate) fn log_cached(level: LogLevel, source: &str, msg: &str) {
     match CACHED_LOG_FILE.get_or_init(default_log_file) {
         Some(log_file) => log(log_file, level, source, msg),
@@ -281,10 +220,8 @@ pub(crate) fn log_cached(level: LogLevel, source: &str, msg: &str) {
     }
 }
 
-/// The last `max_bytes` of a log file as UTF-8 (lossy), for a read-only in-app log view. Opens
-/// SHARED-read so it works while the engine is appending; if the window starts mid-file the
-/// (likely partial) first line is dropped so the view begins on a clean line. Empty string if
-/// the file is absent/unreadable. Cross-platform — every UI's Logs tab reads through this.
+/// Last `max_bytes` of a log as UTF-8 (lossy), shared-read while the engine appends.
+/// Mid-file start drops the partial first line. Empty if absent/unreadable.
 pub fn log_tail(path: &Path, max_bytes: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
     if is_symlink(path) {
@@ -303,7 +240,7 @@ pub fn log_tail(path: &Path, max_bytes: u64) -> String {
         return String::new();
     }
     let mut s = String::from_utf8_lossy(&buf).into_owned();
-    // Started mid-file ⇒ the first line is likely partial — drop through the first newline.
+    // Mid-file window ⇒ drop partial first line.
     if start > 0
         && let Some(nl) = s.find('\n')
     {
@@ -312,8 +249,7 @@ pub fn log_tail(path: &Path, max_bytes: u64) -> String {
     s
 }
 
-/// Parse one unified-log line `[<epoch>] <LEVEL> <source> <message…>` into
-/// `(ts, level, source, message)`. `None` if it doesn't match the wire format.
+/// Parse `[<epoch>] <LEVEL> <source> <message…>` → `(ts, level, source, message)`.
 fn parse_unified_line(line: &str) -> Option<(u64, String, String, String)> {
     let rest = line.strip_prefix('[')?;
     let (ts_str, rest) = rest.split_once(']')?;
@@ -325,11 +261,8 @@ fn parse_unified_line(line: &str) -> Option<(u64, String, String, String)> {
     Some((ts, level, source, msg))
 }
 
-/// Erase the on-disk log entirely — the unified log, its rotated backups (`.1`..`.LOG_KEEP_OLD`),
-/// and every sibling auxiliary log — for the Logs tab's Clear button. Removal (not truncation) so
-/// the next `log()`/`open_aux_log()` call recreates a fresh file. Fail-quiet per file (a file may
-/// already be gone, or another process may hold it open on Windows); irreversible, so the UI must
-/// confirm before calling. Cross-platform — every UI's Clear button goes through this.
+/// Erase unified log, rotations, and sibling `*.log` aux files (Logs tab Clear).
+/// Remove, not truncate, so next write recreates fresh. Fail-quiet per file; UI must confirm.
 pub fn clear_logs(log_file: &Path) {
     clear_logs_at(log_file);
 }
@@ -359,14 +292,9 @@ fn clear_logs_at(unified_log: &Path) {
     }
 }
 
-/// The COMBINED tail of every log in the logs dir, as a JSON array of
-/// `{source, level, text}` in rough chronological order — for the UI's Logs tab. Combines the
-/// unified activity log (each line already tagged with its in-process `source`: engine/tts/stt/
-/// caps/hook/mcp/config) with each sibling AUXILIARY log (e.g. `ds-helper.log`, the
-/// out-of-process warm-synth helper's stderr), tagging aux lines with the file's short name
-/// (`ds-helper.log` → `helper`) at the file's mtime. Rotated files (`*.log.N`) are
-/// excluded. So the UI gets ALL distinct log types in one list, and can derive the filter set
-/// from the distinct `source` values. `max_bytes` caps the tail read PER file.
+/// Combined tail of every log in the dir as JSON `[{source, level, text}, …]` (Logs tab).
+/// Unified lines keep their own source; aux siblings tag by file stem (`ds-helper.log` →
+/// `helper`) at file mtime. Excludes `*.log.N`. `max_bytes` is per file.
 pub fn combined_log_json(log_file: &Path, max_bytes: u64) -> String {
     combined_log_json_at(log_file, max_bytes)
 }
@@ -375,7 +303,6 @@ fn combined_log_json_at(unified_log: &Path, max_bytes: u64) -> String {
     // (ts, source, level, text) — ts only for ordering.
     let mut lines: Vec<(u64, String, String, String)> = Vec::new();
 
-    // The unified log: parse each line's own source/level; keep unparseable lines verbatim.
     for l in log_tail(unified_log, max_bytes).lines() {
         if l.is_empty() {
             continue;
@@ -386,8 +313,7 @@ fn combined_log_json_at(unified_log: &Path, max_bytes: u64) -> String {
         }
     }
 
-    // Sibling auxiliary logs: every `*.log` in the dir that isn't the unified log itself and
-    // isn't a rotated `*.log.N` (those have extension `N`, not `log`, so they're already out).
+    // Sibling `*.log` (not unified; `*.log.N` already filtered by extension).
     if let Some(dir) = unified_log.parent() {
         let unified_name = unified_log
             .file_name()
@@ -425,8 +351,7 @@ fn combined_log_json_at(unified_log: &Path, max_bytes: u64) -> String {
         }
     }
 
-    // Stable sort by ts so the unified lines stay chronological and aux blocks land near their
-    // file mtime (stderr without per-line timestamps keeps file order).
+    // Stable by ts; aux blocks land near file mtime.
     lines.sort_by_key(|(ts, ..)| *ts);
 
     let arr: Vec<serde_json::Value> = lines
@@ -451,10 +376,8 @@ mod tests {
         assert!(parse_unified_line("not a log line").is_none());
     }
 
-    /// The `(level, source, message)` of the ONE line in a freshly written log — i.e. the wire
-    /// format WITHOUT its `[<epoch>] ` prefix. Comparing whole raw bytes across two `log_from`
-    /// calls would flake whenever the pair straddles a second boundary (the timestamp differs),
-    /// so every client-suffix assertion below goes through the parser instead.
+    /// Parsed `(level, source, message)` of the sole line — avoid raw-byte compares that flake
+    /// across a second boundary on the `[<epoch>]` prefix.
     fn only_line(path: &Path) -> (String, String, String) {
         let raw = std::fs::read_to_string(path).expect("log written");
         let line = raw.lines().next().expect("one line");
@@ -464,9 +387,7 @@ mod tests {
 
     #[test]
     fn log_from_appends_the_client_as_a_trailing_kv() {
-        // Every non-DontSpeak client renders ` client=<token>` at the END of the MESSAGE — the
-        // positional fields (level, source) are untouched, which is exactly why no UI/FFI work
-        // is needed. `unknown` is a real client value here, not an "omit it" signal.
+        // Non-DontSpeak → ` client=<token>` at end of message; positional fields untouched.
         let dir = tempfile::tempdir().unwrap();
         for (client, want) in [
             (
@@ -488,10 +409,7 @@ mod tests {
 
     #[test]
     fn dontspeak_client_renders_no_suffix_and_matches_plain_log() {
-        // OUR OWN lines stay byte-compatible with what `log()` has always written — no
-        // redundant `client=dontspeak` on the engine's high-volume lines. Asserted on the
-        // PARSED (level, source, message) rather than raw bytes: the two calls carry their own
-        // `[<epoch>]` prefixes and would differ across a second boundary.
+        // Own lines stay compatible with plain `log()` — no `client=dontspeak`.
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.log");
         let b = dir.path().join("b.log");
@@ -516,7 +434,7 @@ mod tests {
             b"[1000] INFO engine started\n[1002] WARN config bad value\n",
         )
         .unwrap();
-        // A sibling aux log (raw stderr, no timestamps) + a rotated file that must be ignored.
+        // Aux sibling + rotated file that must be ignored.
         std::fs::write(
             dir.path().join("ds-helper.log"),
             b"listen-debug: rms=0.02\n",
@@ -554,9 +472,7 @@ mod tests {
         let p = dir.path().join("dontspeak.log");
         assert_eq!(log_tail(&p, 100), "", "absent file → empty");
         std::fs::write(&p, b"line1\nline2\nline3\n").unwrap();
-        // Whole file fits the window → returned verbatim.
         assert_eq!(log_tail(&p, 1000), "line1\nline2\nline3\n");
-        // Small window → the partial leading line is dropped; the view starts clean.
         let tail = log_tail(&p, 11);
         assert!(
             tail.ends_with("line3\n"),
@@ -576,7 +492,7 @@ mod tests {
         std::fs::write(dir.path().join("dontspeak.log.1"), b"old rotated\n").unwrap();
         std::fs::write(dir.path().join("dontspeak.log.2"), b"older rotated\n").unwrap();
         std::fs::write(dir.path().join("ds-helper.log"), b"helper stderr\n").unwrap();
-        // A non-.log file in the same dir must survive (only *.log siblings are in scope).
+        // Non-.log sibling must survive.
         std::fs::write(dir.path().join("notes.txt"), b"keep me\n").unwrap();
 
         clear_logs_at(&unified);
@@ -609,8 +525,7 @@ mod tests {
 
     #[test]
     fn aux_log_is_a_sibling_of_the_engine_log() {
-        // DRIFT GUARD: any auxiliary log shares the engine log's directory — only the file name
-        // differs. So a new log added via `open_aux_log`/`aux_log_path` can't land elsewhere.
+        // Drift guard: aux log shares engine log's directory.
         let engine = Path::new("/x/state/logs/dontspeak.log");
         let aux = aux_log_path(engine, "ds-helper.log");
         assert_eq!(aux.parent(), engine.parent(), "shares the engine log's dir");
@@ -621,14 +536,12 @@ mod tests {
     fn rotate_if_large_shifts_by_rename_at_the_threshold() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("aux.log");
-        // Below threshold → no rotation.
         std::fs::write(&p, b"small").unwrap();
         rotate_if_large(&p);
         assert!(
             p.is_file() && !dir.path().join("aux.log.1").exists(),
             "small file untouched"
         );
-        // At/over threshold → current renamed to `.1`, active gone (recreated on next open).
         std::fs::write(&p, vec![0u8; LOG_MAX_BYTES as usize]).unwrap();
         rotate_if_large(&p);
         assert!(dir.path().join("aux.log.1").is_file(), "rotated to .1");

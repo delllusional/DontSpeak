@@ -1,36 +1,13 @@
-//! Linux platform impl — behind cfg(target_os="linux").
+//! Linux platform (cfg target_os=linux). Caps ownership like macOS (XKB), not Win hook.
 //!
-//! Mirrors the macOS design (LED poll + keymap-level Caps ownership), NOT the Windows
-//! key-suppress hook:
+//! * Caps: `capskey` sets XKB `caps:none` (GNOME/KDE/setxkbmap; other DEs → logged
+//!   config hint). Physical hold: EV_KEY/KEY_CAPSLOCK drain (needs `input` group).
+//! * LED: EV_LED/LED_CAPSL as recording indicator only (after one normalize probe).
+//! * Dictation: uinput VirtualDevice; paste via clipboard + Ctrl+Shift+V.
+//! * Frontmost: X11 `_NET_ACTIVE_WINDOW`+WM_CLASS; Wayland fails open.
 //!
-//! * Own the Caps key (`capskey`): like the other platforms, a Caps press must never
-//!   toggle capitals — `capskey.rs` adds the `caps:none` XKB option through the
-//!   session's own settings channel (GNOME gsettings / KDE kxkbrc / setxkbmap; other
-//!   Wayland compositors are DEGRADED to a logged config instruction). XKB sits above
-//!   evdev, so the physical-key read below is unaffected.
-//! * Caps LED (`set_caps_lock`): after one pre-ownership normalization probe, the engine
-//!   writes EV_LED/LED_CAPSL on each gesture edge (lit = recording) and never reads it
-//!   back as runtime state. With the caps toggle neutralized the compositor stops driving
-//!   this LED too, so it is solely ours as the recording indicator. Reading the physical
-//!   Caps key (below) needs membership in the `input` group (udev-rule.txt).
-//! * Physical down (`is_caps_physically_down`, §F long-press): the LED can't tell hold
-//!   duration, so we drain EV_KEY/KEY_CAPSLOCK events (non-blocking) each tick and cache
-//!   the last down/up — the macOS IOHIDManager analogue.
-//! * Dictation key / transcript (`KeyInjector`): synthesize via an evdev
-//!   `uinput::VirtualDevice` — press the chord's modifiers + base key, then release.
-//!   `type_text` pastes through the clipboard (arboard) + a synthesized Ctrl+Shift+V
-//!   (the clipboard paste in VTE/konsole/kitty/alacritty terminals), like the other ports.
-//! * Frontmost (`is_terminal_frontmost`): under X11, `x11rb` reads `_NET_ACTIVE_WINDOW` +
-//!   that window's `WM_CLASS` and matches a terminal list. Under WAYLAND there is no
-//!   portable active-window API; behaviour is DEGRADED — the gate fails OPEN (always
-//!   emits), acceptable because Wayland compositors already isolate input per surface.
-//!
-//! Construction NEVER fails: like the macOS port, `new()` always returns a platform and
-//! the capability check (keyboard + /dev/uinput access) is reported by `preflight()` as a
-//! NON-FATAL warning — so the engine stays up as the resident RPC/TTS/STT service even
-//! when the input devices are unavailable (no `input`-group membership yet, or a headless/
-//! WSL/container host with no real keyboard). Caps dictation simply self-gates OFF, and a
-//! later `usermod` + reload (the engine re-probes) enables it without a restart.
+//! `new()` never fails; preflight warns non-fatally if keyboard/uinput missing so the
+//! engine stays up (WSL/container). Caps self-gates until access + reload.
 
 mod capskey;
 

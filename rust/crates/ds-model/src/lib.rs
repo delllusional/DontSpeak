@@ -28,49 +28,28 @@
 //! request. Download progress is exposed by the engine. The pure fns below are network-free
 //! and unit-tested; `ensure` is exercised by localhost fixtures (no real CDN).
 //!
-//! ## Module map
-//! - [`hash`] — SHA-256 + checksum verify (pure).
-//! - [`spec`] — the asset catalog (URLs + pinned digests + sizes), presence
-//!   probes, and the installer prefetch list.
-//! - [`download`] — the network engine: atomic temp+rename, retry, sha-verify,
-//!   and the installer prefetch fast-path.
-//! - `archive` — extract the onnxruntime lib / CUDA DLLs from the archives.
-//! - [`ort`] — onnxruntime dylib resolve + version gate + fetch + the CUDA runtime.
-//! - `read_retry` — [`read_model_file`], a bounded retry-on-transient-`NotFound` file
-//!   read shared by every model loader (a momentary AV/EDR scan/indexer touch on an
-//!   already-downloaded file must not surface as a load failure).
-//! - [`setup`] — eager pre-download orchestrators with aggregate progress.
-//! - [`update_check`] — startup check for a newer GitHub release (unrelated to model assets,
-//!   but lives here since it reuses the same HTTP GET plumbing as the rest of the crate).
+//! Modules of note: [`read_retry`] (AV/EDR transient-`NotFound` race on present files);
+//! [`update_check`] (GitHub release check — lives here for shared HTTP GET plumbing).
 
 use std::path::{Path, PathBuf};
 
 mod archive;
-/// Self-managed FluidAudio (Core ML / ANE) downloads at pinned revisions (see module docs).
 pub mod coreml_repo;
 pub mod download;
 pub mod hash;
-/// Third-party libraries catalog (the downloaded models + runtime + their licenses),
-/// collected from the [`urls`] registry for the UI's Libraries tab (see the module docs).
 pub mod libraries;
 pub mod ort;
 mod read_retry;
 pub mod setup;
-/// Shared loader for the FluidAudio Core ML / ANE shim dylib (`libsmkokoro`), used by the
-/// apple-native STT backends (`ds-stt`) AND the apple-native Kokoro TTS backend (`ds-tts`) —
-/// housed here so neither speech crate has to depend on the other for it. macOS only.
+/// FluidAudio Core ML shim loader shared by `ds-stt` + `ds-tts` (neither depends on the other).
 #[cfg(target_os = "macos")]
 pub mod shim;
 pub mod spec;
-/// The canonical [`DownloadTarget`] enum — the single definition of every download/prefetch
-/// target token, parsed-to and matched-on by all three dispatchers (see the module docs).
 pub mod target;
-/// Startup update check (latest GitHub release vs. the running version) — see the module docs.
 pub mod update_check;
-/// THE single registry of every download URL + SHA-256 + size (see the module docs).
 pub mod urls;
 
-// Flat facade: every public item keeps its historical `ds_model::<item>` path.
+// Flat facade: historical `ds_model::<item>` paths.
 pub use download::{ensure, ensure_with_progress, set_prefetch_source, url_basename};
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
 pub use ort::{

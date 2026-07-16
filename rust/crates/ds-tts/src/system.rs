@@ -1,14 +1,9 @@
-//! SystemTts — the OS's built-in speech synthesizer.
+//! SystemTts — OS built-in speech synthesizer.
 //!
-//!   * macOS (COMPILED here): `say -r <wpm> [-v <name>] <text>`, spawned in its own
-//!     process group, pgid recorded in the pidfile. `voices()` delegates to the
-//!     canonical [`crate::enumerate::system_voices`] (`say -v ?`).
-//!     `manage_voices()` opens the Accessibility / Spoken-Content settings pane.
-//!   * Windows (cfg, NOT built): PowerShell `System.Speech.Synthesis`
-//!     `SelectVoice` + `Rate(-10..10)` mapped from `rate`; `manage_voices`
-//!     `ms-settings:speech`.
-//!   * Linux (cfg, NOT built): `spd-say -r <-100..100>`;
-//!     `voices()` best-effort empty; no `manage_voices_hint`.
+//!   * macOS (compiled): `say -r <wpm> [-v <name>] <text>`, own process group + pidfile.
+//!     `voices()` → [`crate::enumerate::system_voices`]; manage → Spoken Content.
+//!   * Windows (cfg): PowerShell `System.Speech`; manage → `ms-settings:speech`.
+//!   * Linux (cfg): `spd-say`; voices empty; no manage.
 
 use std::process::Command;
 
@@ -16,7 +11,7 @@ use ds_config::Paths;
 
 use crate::{SpeakHandle, SpeakerVoice, Tts};
 
-/// The system TTS engine.
+/// System TTS engine.
 pub struct SystemTts {
     paths: Paths,
 }
@@ -26,22 +21,19 @@ impl SystemTts {
         Self { paths }
     }
 
-    /// Is a system TTS backend available on THIS build target? macOS always has `say`;
-    /// Windows always has PowerShell `System.Speech.Synthesis`. Linux stays unavailable
-    /// (its Speech Dispatcher path isn't wired into the engine yet).
+    /// Available on this build target? macOS/Windows yes; Linux not wired yet.
     pub fn available() -> bool {
         cfg!(any(target_os = "macos", target_os = "windows"))
     }
 }
 
-/// Set the spawned child into its own session/process group so the recorded pgid
-/// kills the whole tree on barge-in. Shared with `kokoro::spawn`.
+/// Own session/process group so recorded pgid kills the whole tree on barge-in.
+/// Shared with `kokoro::spawn`.
 #[cfg(unix)]
 pub(crate) fn set_new_pgroup(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
-    // SAFETY: the pre_exec closure runs in the forked child before exec; setsid is
-    // async-signal-safe, and the closure captures nothing, allocates nothing, and takes
-    // no locks — meeting pre_exec's contract.
+    // SAFETY: pre_exec in forked child before exec; setsid is async-signal-safe;
+    // closure captures nothing, allocates nothing, takes no locks.
     unsafe {
         cmd.pre_exec(|| {
             nix::unistd::setsid()
@@ -51,15 +43,11 @@ pub(crate) fn set_new_pgroup(cmd: &mut Command) {
     }
 }
 
-/// Open the OS's system-voice settings page — the ONE cross-platform seam behind every UI's
-/// System-TTS "Manage voices" affordance, so macOS / Windows / Linux all launch the right
-/// page from a single call (exposed to the apps as `ds_open_voice_settings`). Returns
-/// true if a page was launched.
-/// - macOS → System Settings ▸ Accessibility ▸ Spoken Content (where the `say` voices and
-///   per-language packs live): the modern anchor, then the legacy one.
-/// - Windows → Settings ▸ Time & language ▸ Speech (`ms-settings:speech` — the only Settings
-///   deep link Windows exposes for TTS voices; its "Manage voices" adds voices).
-/// - Linux → unavailable; Speech Dispatcher has no portable settings page (issue #74).
+/// OS system-voice settings — ONE cross-platform seam for every UI's "Manage voices"
+/// (`ds_open_voice_settings`). Returns true if a page was launched.
+/// - macOS → Accessibility ▸ Spoken Content (modern then legacy anchor)
+/// - Windows → `ms-settings:speech` (only TTS deep link Windows exposes)
+/// - Linux → unavailable (issue #74)
 #[cfg(target_os = "macos")]
 pub fn open_voice_settings() -> bool {
     for uri in [
@@ -99,12 +87,9 @@ pub fn open_voice_settings() -> bool {
     false
 }
 
-/// Build a `say` command with `-r <wpm>` (via [`crate::rate_to_wpm`]) and, when
-/// non-empty, `-v <voice>`, plus all three null Stdio streams. Does NOT append
-/// the text, set a process group, spawn, or touch the pidfile — each call site
-/// adds `.arg(text)`, optional pgroup, and spawns/records itself. The single
-/// source of the `say` argument vector so all three say spawners (free `spawn`,
-/// `SystemTts::speak`, dontspeakd::speak_system) agree on flags + rate math.
+/// `say` flags: `-r <wpm>` ([`crate::rate_to_wpm`]), optional `-v`, null Stdio.
+/// Does NOT append text / pgroup / spawn / pidfile — call sites do. Single source
+/// so free `spawn`, `SystemTts::speak`, and dontspeakd::speak_system agree.
 #[cfg(target_os = "macos")]
 pub fn say_command(voice: Option<&str>, rate: f32) -> Command {
     use std::process::Stdio;
@@ -120,11 +105,8 @@ pub fn say_command(voice: Option<&str>, rate: f32) -> Command {
     cmd
 }
 
-/// Spawn the macOS `say` speaker as a live `Child` in its own process group,
-/// record the pgid, and return `(Child, pgid)` — the spawn-helper counterpart to
-/// `kokoro::spawn` so a foreground hook (ds-speak) can keep
-/// owning + waiting on the child while still going through engine selection.
-/// `voice_id`/`rate` map exactly as in the `Tts::speak` body.
+/// Spawn macOS `say` as live `Child` in own process group; return `(Child, pgid)`.
+/// Counterpart to `kokoro::spawn` for foreground hooks that keep the Child.
 #[cfg(target_os = "macos")]
 pub fn spawn(
     paths: &ds_config::Paths,
@@ -136,8 +118,7 @@ pub fn spawn(
     cmd.arg(txt);
     set_new_pgroup(&mut cmd);
     let child = cmd.spawn()?;
-    // SACRED single-speaker post-spawn contract (ARCHITECTURE §0.2) — see
-    // ds_proc::record_or_kill.
+    // SACRED single-speaker post-spawn (ARCHITECTURE §0.2) — ds_proc::record_or_kill.
     let pgid = ds_proc::record_or_kill(&paths.pidfile, &child)?;
     Ok((child, pgid))
 }
@@ -153,8 +134,7 @@ impl Tts for SystemTts {
         set_new_pgroup(&mut cmd);
 
         let child = cmd.spawn()?;
-        // SACRED single-speaker post-spawn contract (ARCHITECTURE §0.2) — see
-        // ds_proc::record_or_kill. The trait path then drops the Child; the
+        // SACRED single-speaker post-spawn (ARCHITECTURE §0.2). Trait path drops Child;
         // caller waits by pgid / pidfile.
         let pgid = ds_proc::record_or_kill(&self.paths.pidfile, &child)?;
         drop(child);
@@ -162,7 +142,6 @@ impl Tts for SystemTts {
     }
 
     fn voices(&self) -> Vec<SpeakerVoice> {
-        // Single canonical `say -v ?` enumeration (self-cfg-gated off-host).
         crate::enumerate::system_voices()
     }
 
@@ -171,7 +150,6 @@ impl Tts for SystemTts {
     }
 
     fn manage_voices(&self) {
-        // Open Accessibility ▸ Spoken Content via the shared cross-platform seam (§B.3).
         let _ = open_voice_settings();
     }
 
@@ -188,18 +166,9 @@ impl Tts for SystemTts {
 // Windows (cfg, NOT built on the macOS host)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Build the Windows system-TTS command: PowerShell driving `System.Speech.Synthesis`
-/// with `SelectVoice` (when non-empty), `Rate` mapped from `rate` (0.5..=2.0 → -10..10,
-/// 1.0 → 0), and `Speak(text)`. Single quotes are doubled for PowerShell escaping;
-/// `CREATE_NO_WINDOW` keeps a console from flashing. Does NOT spawn — each call site spawns
-/// and tracks the child itself. The single source of the Windows say invocation, shared by
-/// the library `SystemTts` and dontspeakd::speak_system so they agree on rate math + escaping
-/// (the macOS counterpart of the same name takes no `text` — it appends it via `.arg`).
-/// Double every code point PowerShell's tokenizer accepts as a single quote — U+0027 plus the
-/// smart-quote variants U+2018..=U+201B. Any of them terminates a `'…'` literal, so doubling
-/// only the ASCII apostrophe let a curly apostrophe ("don’t", ubiquitous in agent prose, and
-/// deliberately preserved by the Markdown frontend) break the script — and a crafted
-/// `x’); <cmd>; (‘y` payload escape the string into executable position.
+/// Double every code point PowerShell tokenizes as a single quote — U+0027 plus
+/// smart quotes U+2018..=U+201B. Any of them ends a `'…'` literal; doubling only
+/// ASCII apostrophe broke ordinary "don’t" and allowed injection (`x’); <cmd>`).
 #[cfg(target_os = "windows")]
 fn ps_squote_escape(text: &str) -> String {
     const PS_SINGLE_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
@@ -217,13 +186,9 @@ fn ps_squote_escape(text: &str) -> String {
 pub fn say_command(voice: Option<&str>, rate: f32, text: &str) -> Command {
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
-    // System.Speech.Synthesis: Rate is -10..10; map 0.5..=2.0 with 1.0 -> 0.
-    //
-    // The 0.5..1.0 (slow) and 1.0..2.0 (fast) halves span the SAME 10-point half-range
-    // of Rate (-10..0 and 0..10 respectively) but cover DIFFERENT-sized `rate` spans
-    // (0.5 vs 1.0), so a single `(r - 1.0) * k` slope can't hit both ends: `k = 10`
-    // reaches +10 at r=2.0 but only -5 at r=0.5 (half the intended slow-down range).
-    // Piecewise-linear with a steeper slope below 1.0 hits the documented floor too.
+    // SAPI Rate -10..10 from rate 0.5..=2.0 (1.0 → 0). Slow/fast halves span the
+    // same Rate half-range but different `rate` spans, so one slope can't hit both
+    // ends (k=10 → +10 at 2.0 but only -5 at 0.5). Piecewise: steeper below 1.0.
     let r = rate.clamp(0.5, 2.0);
     let ps_rate = if r < 1.0 {
         ((r - 1.0) * 20.0).round() as i32 // 0.5->-10 .. 1.0->0
@@ -254,15 +219,13 @@ impl Tts for SystemTts {
     fn speak(&self, text: &str, voice_id: Option<&str>, rate: f32) -> std::io::Result<SpeakHandle> {
         let mut cmd = say_command(voice_id, rate, text);
         let child = cmd.spawn()?;
-        // SACRED single-speaker post-spawn contract (ARCHITECTURE §0.2) — see
-        // ds_proc::record_or_kill.
+        // SACRED single-speaker post-spawn (ARCHITECTURE §0.2).
         let pgid = ds_proc::record_or_kill(&self.paths.pidfile, &child)?;
         drop(child);
         Ok(SpeakHandle { pgid })
     }
 
     fn voices(&self) -> Vec<SpeakerVoice> {
-        // Single canonical enumeration entry (self-cfg-gated; empty off-macOS).
         crate::enumerate::system_voices()
     }
 
@@ -270,7 +233,6 @@ impl Tts for SystemTts {
         true
     }
     fn manage_voices(&self) {
-        // Open Time & language ▸ Speech via the shared cross-platform seam.
         let _ = open_voice_settings();
     }
     fn manage_voices_hint(&self) -> Option<&str> {
@@ -293,10 +255,8 @@ impl Tts for SystemTts {
         rate: f32,
     ) -> std::io::Result<SpeakHandle> {
         use std::process::Stdio;
-        // Same piecewise mapping as the Windows SAPI branch above, and for the same
-        // reason: 0.5..1.0 and 1.0..2.0 both need to span the full -100..0 / 0..100
-        // half-range despite covering different-sized `rate` spans, so a single
-        // slope can't reach -100 at the documented slowest setting (r=0.5).
+        // Same piecewise map as Windows SAPI (full -100..100; single slope can't
+        // hit -100 at r=0.5).
         let r = rate.clamp(0.5, 2.0);
         let spd_rate = if r < 1.0 {
             ((r - 1.0) * 200.0).round() as i32 // 0.5->-100 .. 1.0->0
@@ -310,19 +270,17 @@ impl Tts for SystemTts {
             .stderr(Stdio::null());
         set_new_pgroup(&mut cmd);
         let child = cmd.spawn()?;
-        // SACRED single-speaker post-spawn contract (ARCHITECTURE §0.2) — see
-        // ds_proc::record_or_kill.
+        // SACRED single-speaker post-spawn (ARCHITECTURE §0.2).
         let pgid = ds_proc::record_or_kill(&self.paths.pidfile, &child)?;
         drop(child);
         Ok(SpeakHandle { pgid })
     }
 
     fn voices(&self) -> Vec<SpeakerVoice> {
-        // Single canonical enumeration entry (self-cfg-gated; empty off-macOS).
         crate::enumerate::system_voices()
     }
 
-    // No system voice installer on Linux (§B.3): no manage_voices / hint.
+    // No installer on Linux (§B.3).
     fn kind(&self) -> &'static str {
         "system"
     }

@@ -1,97 +1,59 @@
-//! Well-known paths resolved once from `$HOME`, plus the per-OS data/model dirs.
+//! Well-known paths from `$HOME`, plus per-OS data/model dirs.
 
 use std::path::{Path, PathBuf};
 
 use directories::BaseDirs;
 
-/// All the well-known paths, resolved once from $HOME.
+/// Well-known paths, resolved once from $HOME.
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub home: PathBuf,
     pub claude_dir: PathBuf,
-    /// Speaker pidfile (`speak-hook.pid` in the local `state_dir`) — the TTS
-    /// process-group id for the single-speaker barge-in contract.
+    /// Speaker pidfile — TTS process-group id (single-speaker barge-in).
     pub pidfile: PathBuf,
-    /// The ONE unified activity log every dontspeak process appends to (per-OS logs dir,
-    /// e.g. macOS `~/Library/Logs/DontSpeak/dontspeak.log`): engine + hooks + mcp share it via `ds_log`,
-    /// one leveled format, with sudo-free in-process size rotation.
+    /// Unified activity log (per-OS logs dir); shared via `ds_log`.
     pub log_file: PathBuf,
     pub settings_json: PathBuf,
-    /// Claude Code's `keybindings.json` (`~/.claude/keybindings.json`) — READ-ONLY for the
-    /// `claude_code` STT engine to learn which key `voice:pushToTalk` is bound to. DontSpeak
-    /// never writes it.
+    /// Claude Code keybindings — READ-ONLY for `claude_code` STT (`voice:pushToTalk`).
     pub keybindings_json: PathBuf,
-    /// Claude CODE's user-scope config (`~/.claude.json`) — where `wire claude_code` adds (or
-    /// removes) the `mcpServers.DontSpeak` stdio entry so the `claude` CLI and Claude Code
-    /// sessions spawn our MCP bridge and can call `speak`/`listen`/… as tools. This is the MCP
-    /// half of `wire claude_code` (the other half being the `settings_json` hooks). (Distinct
-    /// from `claude_dir`, the `~/.claude` DIRECTORY.)
+    /// `~/.claude.json` — MCP half of `wire claude_code` (hooks are in `settings_json`).
     pub claude_code_config: PathBuf,
-    /// Side file holding the running `ds-narrate` pid (for `--stop`).
+    /// Running `ds-narrate` pid.
     pub narrate_pid: PathBuf,
-    /// Side file holding the running engine pid (for the GUI's reload nudge +
-    /// liveness probe). DISTINCT from the SPEAKER
-    /// `pidfile` (a TTS pgid) and the `narrate_pid` (the narrator pid).
+    /// Engine pid (reload/liveness). Not the speaker `pidfile` or `narrate_pid`.
     pub engine_pid: PathBuf,
-    /// Unix-domain socket the engine listens on for RPC (`ds-ipc`). Clients (the
-    /// SwiftUI app via ds-core, and the speak/narrate hooks) connect here;
-    /// absence means "engine down" so clients fall back to their legacy path.
+    /// Engine IPC socket (`ds-ipc`); absence ⇒ engine down.
     pub engine_sock: PathBuf,
-    /// `stats.toml` in the local state dir — persisted lifetime usage totals (`tts_secs`,
-    /// `stt_secs`) shown under the Status panel's "DontSpeak" row. Written atomically after
-    /// each utterance.
+    /// Lifetime usage totals (`tts_secs`/`stt_secs`).
     pub stats_toml: PathBuf,
-    /// OUR roaming SETTINGS root — see [`data_dir`]. Holds the user-portable config
-    /// (`config.toml`, `speakers.json`). Per-OS idiomatic:
-    /// `%APPDATA%\DontSpeak` (Windows), `~/Library/Application Support/DontSpeak` (macOS),
-    /// `$XDG_CONFIG_HOME`/`~/.config/dontspeak` (Linux). A neutral home, NOT tied to any
-    /// one client, so a user's config doesn't squat in `~/.claude`.
+    /// Roaming settings root (`config.toml`, `speakers.json`) — see [`data_dir`].
     pub config_dir: PathBuf,
-    /// OUR local STATE/runtime root — machine-specific, NEVER roamed. Holds `stats.toml`,
-    /// the pidfiles, and the IPC socket. Per-OS idiomatic: `%LOCALAPPDATA%\DontSpeak`
-    /// (Windows), `~/Library/Application Support/DontSpeak` (macOS — same as config; macOS
-    /// has no roaming/local split), `$XDG_STATE_HOME`/`~/.local/state/dontspeak` (Linux).
-    /// Downloaded models live separately under [`model_dir`] (the OS CACHE dir).
+    /// Local state root (pidfiles, socket, stats). Models under [`model_dir`].
     pub state_dir: PathBuf,
-    /// `config.toml` in [`data_dir`] — the single source of truth for DontSpeak's own
-    /// settings (voice, narration, engines, MCP-HTTP). Replaces the old `dontspeak`
-    /// block in `~/.claude/settings.json`. The engine watches it for changes, with an
-    /// mtime backstop.
+    /// Our settings single source (`config.toml`); engine watches it.
     pub config_toml: PathBuf,
-    /// `speakers.json` in the roaming `config_dir` ([`data_dir`]) — enrolled speaker
-    /// voiceprints (name → WeSpeaker embedding) used to label diarization output by name.
-    /// Written atomically on each `enroll`/`forget_speaker`. See [`crate::speakers`].
+    /// Enrolled voiceprints — see [`crate::speakers`].
     pub speakers_json: PathBuf,
-    /// OpenAI Codex CLI's config dir (`~/.codex`). Its existence is how `wire codex`
-    /// presence-gates the narration-hook wiring (a clean skip when Codex isn't installed).
+    /// `~/.codex` — presence-gate for `wire codex`.
     pub codex_dir: PathBuf,
-    /// Codex's `~/.codex/config.toml` — where `wire codex` adds (or removes) the
-    /// `UserPromptSubmit`→`provide` (narration spec) and `Stop`→`notify` (speak reply) hooks.
+    /// Codex hooks file.
     pub codex_config: PathBuf,
-    /// Qwen Code CLI's config dir (`~/.qwen`). Its existence is how `wire qwen_code`
-    /// presence-gates the wiring (a clean skip when Qwen Code isn't installed).
+    /// `~/.qwen` — presence-gate for `wire qwen_code`.
     pub qwen_dir: PathBuf,
-    /// Qwen Code's `~/.qwen/settings.json` — where `wire qwen_code` adds (or removes) BOTH
-    /// the voice hooks (non-streaming: no `MessageDisplay`) and the `mcpServers.DontSpeak`
-    /// stdio entry, since Qwen Code keeps hooks + MCP in one file.
+    /// Qwen hooks + MCP (one file).
     pub qwen_settings: PathBuf,
-    /// Grok CLI (Grok Build) config dir (`~/.grok`). Its existence is how `wire grok`
-    /// presence-gates the MCP wiring (a clean skip when Grok isn't installed).
+    /// `~/.grok` — presence-gate for `wire grok`.
     pub grok_dir: PathBuf,
-    /// Grok's `~/.grok/config.toml` — where `wire grok` adds (or removes) the
-    /// `mcp_servers.DontSpeak` stdio entry.
+    /// Grok MCP entry.
     pub grok_config: PathBuf,
-    /// Grok's `~/.grok/hooks/dontspeak.json` — the dedicated file `wire grok` owns for
-    /// native voice hooks; unwire deletes it.
+    /// Grok dedicated hooks file (unwire deletes).
     pub grok_hooks_json: PathBuf,
-    /// Grok's global rules file (`~/.grok/AGENTS.md`). Loaded at session start as project
-    /// instructions. DontSpeak maintains a marker-bounded narrate section here because Grok
-    /// ignores passive-hook stdout (`UserPromptSubmit` provide → `additionalContext`).
+    /// Grok global rules; managed narrate section (hook stdout ignored — issue #95).
     pub grok_agents_md: PathBuf,
 }
 
 impl Paths {
-    /// Resolve from the current user's home. Fails only if $HOME is unset.
+    /// Resolve from $HOME. Fails only if unset.
     pub fn resolve() -> Option<Self> {
         let base = BaseDirs::new()?;
         let home = base.home_dir().to_path_buf();
@@ -136,13 +98,8 @@ impl Paths {
         })
     }
 
-    /// Build a `Paths` rooted at an explicit `home` dir WITHOUT reading or writing
-    /// any environment variable. The env-free fallback for when [`resolve`](Paths::resolve)
-    /// returns `None` (no `$HOME`): the engine factory returns an INERT engine box that
-    /// fail-quiets at speak time, so it must NOT mutate the process environment (a
-    /// `set_var("HOME", …)` is unsound once other threads are running). Every file is
-    /// rooted under `home` so the result is total; this path is never used to write a
-    /// real session, so the exact (non-OS-conventional) layout here is immaterial.
+    /// Env-free Paths under `home` when [`resolve`](Paths::resolve) is None (inert engine).
+    /// Must not `set_var` (unsound with other threads). Layout immaterial — not a real session.
     pub fn rooted_at(home: &Path) -> Self {
         let home = home.to_path_buf();
         let claude_dir = home.join(".claude");
@@ -226,15 +183,8 @@ fn model_dir_under(cache_dir: &Path) -> PathBuf {
     cache_dir.join(APP_DIR).join("models")
 }
 
-/// The Homebrew-installed onnxruntime dylib on **Intel macOS**, or `None` elsewhere / when no
-/// suitable keg is installed. Intel is the one shipped platform with NO pinned dist to download
-/// (Microsoft publishes arm64-only macOS archives since 1.2x), so the built-in ONNX engines fall
-/// back to a Homebrew build. Lives in ds-config (the lowest crate) so the runtime loader
-/// (`ds_model::onnxruntime_dylib_path`) AND the engine-usability gate
-/// (`enums::intel_mac_builtin_ort_available`) resolve it from ONE place. Picks the VERSIONED file
-/// (`libonnxruntime.<ver>.dylib`) at/above the 1.27 pin floor — older loaders deadlock on the
-/// SepFormer graph; `ort`'s api-24 handshake + the major-only id scan guard the ceiling. The `opt`
-/// symlink is version-stable across `/usr/local` (Intel prefix) and `/opt/homebrew`.
+/// Homebrew onnxruntime dylib on Intel mac (None elsewhere). Single source for loader +
+/// `intel_mac_builtin_ort_available`. Versioned file ≥ 1.27 (older deadlocks on SepFormer).
 pub fn brew_onnxruntime_dylib() -> Option<PathBuf> {
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
@@ -281,21 +231,13 @@ fn parse_dylib_version(v: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-/// The FluidAudio Core ML / ANE model cache (Kokoro TTS, Parakeet STT, diarization), a
-/// `coreml/` subdir under [`model_dir`]. We pass this EXPLICITLY to the shim's
-/// `smk_*_init` so FluidAudio downloads here instead of its own scattered defaults
-/// (`~/.cache/fluidaudio/Models` for Kokoro, `~/Library/Application Support/FluidAudio` for
-/// ASR/diarization) — so every download lives under the one DontSpeak cache folder that the
-/// uninstaller removes wholesale. FluidAudio creates its per-model subdirs under it.
-///   macOS: `~/Library/Caches/DontSpeak/models/coreml`
+/// FluidAudio Core ML cache under [`model_dir`]/coreml` — explicit so downloads aren't
+/// scattered; uninstaller removes the whole DontSpeak cache.
 pub fn coreml_dir() -> Option<PathBuf> {
     Some(model_dir()?.join("coreml"))
 }
 
-/// Whether a FluidAudio Core ML model whose subdir name contains `needle` is fully present in
-/// `dir`: a non-empty matching subdir = installed; absent/empty = still fetching / not there.
-/// PURE (the disk read is the only effect), so it's unit-testable against a temp dir. Shared
-/// by the warm helper (to emit "downloading") and the engine status (diarization presence).
+/// Non-empty subdir whose name contains `needle`? Pure; shared by helper + status.
 pub fn coreml_model_present_in(dir: &Path, needle: &str) -> bool {
     let needle = needle.to_ascii_lowercase();
     let nonempty = |p: &Path| {

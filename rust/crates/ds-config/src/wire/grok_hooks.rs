@@ -1,42 +1,10 @@
-//! Grok CLI native voice hooks (`~/.grok/hooks/dontspeak.json`).
+//! Grok native hooks (`~/.grok/hooks/dontspeak.json`) — dedicated file we own (overwrite /
+//! delete; no merge). Bare binary command so Grok dedupes with imported Claude wiring
+//! (compat adapter drops `args`). `GROK_HOOK_EVENT` distinguishes hook vs MCP launch.
 //!
-//! Grok reads per-file hook definitions out of `~/.grok/hooks/*.json` (and project
-//! `.grok/hooks/*.json`) using Claude-compatible configuration event names. Runtime payloads
-//! use camelCase keys and lowercase-snake event values; live Grok 0.2.93 Stop captures carry
-//! end-turn metadata but no final assistant text. The same `dontspeak` binary still serves
-//! the lifecycle hooks. Unlike the
-//! Codex/Qwen hook surfaces, we do NOT merge into a file the client also owns: DontSpeak
-//! writes its OWN dedicated file (`dontspeak.json`) that it owns outright, so wiring is a
-//! whole-file overwrite (a backup is taken first) and unwiring simply DELETES the file. No
-//! `toml_edit`/`merge` machinery is needed — there is nothing of the user's to preserve in
-//! a file that is exclusively ours.
-//!
-//! Grok also imports `~/.claude/settings.json` by default, but its compatibility adapter
-//! ignores Claude Code's `args` array. A Claude DontSpeak entry therefore collapses to the
-//! bare binary path. Native Grok entries deliberately use that exact same bare command:
-//! Grok deduplicates identical command targets across sources, so native + compatibility
-//! wiring becomes one process per event instead of two registrations. The hook runner's
-//! reserved `GROK_HOOK_EVENT` environment variable lets the no-argument binary distinguish
-//! this launch from its normal no-argument MCP-server role and dispatch the command side
-//! effect plus compatibility output for `UserPromptSubmit`.
-//!
-//! The per-event set covers the five useful lifecycle signals. Grok has no `MessageDisplay`
-//! stream and its Stop payload has no direct final text, so Stop narration reads the final
-//! assistant entry from the payload's `transcriptPath` JSONL file:
-//!
-//!   * `SessionStart` → notify, greet-only — the spoken greeting without seeding the
-//!     streaming witness, which would incorrectly mark a non-streaming session narrated.
-//!   * `SessionEnd` → `notify` — barge this session's playback on close.
-//!   * `UserPromptSubmit` → notify + compatibility provide output in one process. Native
-//!     passive-hook stdout is ignored by Grok (issue #95), so digests also sync into
-//!     `~/.grok/AGENTS.md`; imported Claude-hook compatibility may still consume provide stdout.
-//!   * `Stop` → `notify` — narrate from `transcriptPath`, then play the reply-done earcon.
-//!   * `Notification` → `notify` — the needs-input earcon.
-//!
-//! Rendered as one group and one handler per event:
-//!   { "hooks": { "Stop": [ { "hooks": [ { "type": "command",
-//!                                         "command": "…/dontspeak",
-//!                                         "timeout": 1800 } ] } ] } }
+//! No MessageDisplay; Stop reads final text from `transcriptPath` JSONL.
+//! Events: SessionStart greet-only; SessionEnd barge; UserPromptSubmit notify (+ AGENTS.md
+//! digests — stdout ignored, issue #95); Stop narrate+earcon; Notification needs-input.
 
 use serde_json::{Map, Value, json};
 

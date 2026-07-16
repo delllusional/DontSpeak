@@ -1,10 +1,7 @@
 #![no_main]
 
-//! The untrusted-input side of the wire boundary: any local process that can reach
-//! `dontspeak.sock` sends bytes that `server.rs::handle_conn` parses as a `Request`.
-//! Fuzz arbitrary bytes straight through the same deserializer to catch panics
-//! (not just parse errors, which are already handled) hiding in serde's derive or
-//! in a future hand-written `Deserialize` impl.
+//! Untrusted input: any process that can reach `dontspeak.sock` is parsed as `Request`.
+//! Fuzz for panics in serde/hand-written `Deserialize` (parse errors are already handled).
 
 use libfuzzer_sys::fuzz_target;
 

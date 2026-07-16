@@ -118,11 +118,10 @@ impl VadBoundaryDetector {
             i += fs;
 
             if self.in_speech && !now_speech {
-                // Speech region just closed → boundary at the end of this frame.
                 boundaries.push(self.pos);
                 self.seg_start = self.pos;
             } else if now_speech && self.pos - self.seg_start >= max {
-                // Pause-free monologue: force-split to bound transcription work.
+                // Force-split pause-free monologue (see MAX_SEGMENT_SECS).
                 boundaries.push(self.pos);
                 self.seg_start = self.pos;
             }
@@ -140,8 +139,7 @@ mod tests {
     const RATE: u32 = 16_000;
 
     fn speech(frames: usize) -> Vec<f32> {
-        // Above SPEECH_RMS: a 0.2-amplitude tone-ish ramp.
-        vec![0.2f32; frames * (RATE as usize * FRAME_MS / 1000)]
+        vec![0.2f32; frames * (RATE as usize * FRAME_MS / 1000)] // above SPEECH_RMS
     }
     fn silence(frames: usize) -> Vec<f32> {
         vec![0.0f32; frames * (RATE as usize * FRAME_MS / 1000)]
@@ -150,9 +148,7 @@ mod tests {
     #[test]
     fn no_boundary_until_speech_then_silence() {
         let mut d = VadBoundaryDetector::new(RATE);
-        // Speech alone: onset fires but no closing boundary yet.
         assert!(d.feed(&speech(10)).is_empty());
-        // Enough silence to exhaust the hangover → exactly one boundary.
         let b = d.feed(&silence(HANGOVER_FRAMES + 5));
         assert_eq!(b.len(), 1, "one speech→silence boundary");
     }
@@ -208,12 +204,11 @@ mod tests {
     fn sub_frame_blocks_reassemble_across_feeds() {
         let mut d = VadBoundaryDetector::new(RATE);
         let frame = RATE as usize * FRAME_MS / 1000;
-        // Feed speech one odd-sized sliver at a time (smaller than a frame).
+        // Sub-frame slivers must reassemble across feeds.
         let sp = speech(10);
         for chunk in sp.chunks(frame / 3 + 1) {
             d.feed(chunk);
         }
-        // Then silence, likewise slivered, should still close exactly one segment.
         let si = silence(HANGOVER_FRAMES + 5);
         let mut total = 0;
         for chunk in si.chunks(frame / 3 + 1) {

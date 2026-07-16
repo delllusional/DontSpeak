@@ -11,20 +11,17 @@ use crate::model_path;
 use crate::ort::{onnxruntime_dist, onnxruntime_dylib_file, onnxruntime_dylib_path};
 use crate::target::DownloadTarget;
 
-/// A single downloadable asset: its on-disk file name, source URL, and pinned
-/// SHA-256 (lowercase hex). A human size label, when shown, is formatted from the
-/// manifest's `size_bytes` at the display site — not carried here.
+/// On-disk name + URL + pinned SHA-256. Size labels come from manifest `size_bytes` at display.
 #[derive(Debug, Clone)]
 pub struct ModelSpec {
     pub file_name: String,
     pub url: String,
-    /// Pinned lowercase-hex SHA-256. Real model specs always pin a digest.
+    /// Lowercase-hex; real specs always pin a digest.
     pub sha256: String,
 }
 
 impl ModelSpec {
-    /// Build a spec from a registry [`crate::urls::Download`] entry — the single source of
-    /// every URL/digest (see `urls.rs`).
+    /// From registry [`crate::urls::Download`] (sole URL/digest source).
     fn of(d: crate::urls::Download) -> ModelSpec {
         ModelSpec {
             file_name: d.file_name.to_string(),
@@ -42,12 +39,10 @@ pub use crate::urls::{
     SEPFORMER_FILE,
 };
 
-/// [`ModelSpec`] for `kokoro-v1.0.onnx` (~310 MB).
 pub fn kokoro_onnx_spec() -> ModelSpec {
     ModelSpec::of(crate::urls::KOKORO_ONNX)
 }
 
-/// [`ModelSpec`] for `voices-v1.0.bin` (~28 MB).
 pub fn kokoro_voices_spec() -> ModelSpec {
     ModelSpec::of(crate::urls::KOKORO_VOICES)
 }
@@ -60,7 +55,6 @@ pub fn kokoro_g2p_decoder_spec() -> ModelSpec {
     ModelSpec::of(crate::urls::KOKORO_G2P_DECODER)
 }
 
-/// Is the shared unknown-word G2P runtime present and checksum-valid?
 pub fn is_kokoro_g2p_present() -> bool {
     let graphs_ok = [kokoro_g2p_encoder_spec(), kokoro_g2p_decoder_spec()]
         .iter()
@@ -72,8 +66,7 @@ pub fn is_kokoro_g2p_present() -> bool {
     graphs_ok && crate::ort::is_onnxruntime_dylib_version_ok()
 }
 
-/// Are all assets shared by the Kokoro synthesis backends present and checksum-valid?
-/// This includes the version-checked ORT dylib required by unknown-word G2P.
+/// Shared Kokoro frontend assets (voices + G2P + version-checked ORT).
 pub fn is_kokoro_frontend_present() -> bool {
     let voices = kokoro_voices_spec();
     let voices_ok = model_path(&voices.file_name)
@@ -82,11 +75,7 @@ pub fn is_kokoro_frontend_present() -> bool {
     voices_ok && is_kokoro_g2p_present()
 }
 
-/// Is the full portable Kokoro asset set present and checksum-valid (synth, voices, G2P, ORT)?
-/// The TTS factory uses this as the
-/// network-free availability probe so it can fail-quiet when assets are absent.
-/// Every model graph and the voices are verified against pinned SHA-256; the dylib is
-/// version-gated (see `is_onnxruntime_dylib_version_ok`).
+/// Full portable Kokoro set present (SHA + ORT version-gate). TTS factory fail-quiet probe.
 pub fn is_kokoro_present() -> bool {
     let onnx = kokoro_onnx_spec();
     let model_ok = model_path(&onnx.file_name)

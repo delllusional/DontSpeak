@@ -1,10 +1,6 @@
-//! Push-based config-file watch. Replaces the per-tick `stat()` poll with a native
-//! filesystem watcher — FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW on
-//! Windows (selected per-OS by the `notify` crate) — that flips `reload_requested` the
-//! instant the config changes. The boot loop keeps a COARSE `stat()` backstop (see
-//! `MTIME_CHECK_INTERVAL`) for the rare case the watcher can't start or a filesystem
-//! drops an event — a native watch and a stat fallback COMPLEMENT each other rather
-//! than one replacing the other.
+//! Push-based config watch (`notify` crate: FSEvents / inotify / ReadDirectoryChangesW).
+//! Flips `reload_requested` on change. Boot keeps a coarse `stat()` backstop
+//! (`MTIME_CHECK_INTERVAL`) if the watcher fails or drops events.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -13,16 +9,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
-/// Spawn a filesystem watcher that sets `reload_requested` whenever `config_path` is
-/// created / modified / removed / renamed. Returns the live watcher handle — the caller
-/// MUST keep it alive (dropping it stops the watch). `None` if the watcher can't start,
-/// in which case the boot loop's `stat()` backstop is the sole reload trigger.
+/// Watch `config_path` parent dir; set `reload_requested` on create/modify/remove/rename.
+/// Caller MUST keep the handle (drop stops the watch). `None` if watcher can't start.
 ///
-/// We watch the PARENT DIRECTORY, not the file itself: config.toml is written
-/// atomically (temp + rename), which replaces the inode, so a watch bound to the original
-/// file would go deaf after the first save. Watching the dir and filtering by file name
-/// survives the rename. Coalescing of the burst an editor/atomic-save emits is left to the
-/// boot loop's existing `RELOAD_QUIET_WINDOW` trailing-edge debounce.
+/// Watch the PARENT, not the file: atomic temp+rename replaces the inode, so a file
+/// watch goes deaf after the first save. Burst coalescing is `RELOAD_QUIET_WINDOW`.
 pub(crate) fn spawn(
     config_path: &Path,
     reload_requested: Arc<AtomicBool>,
@@ -40,8 +31,7 @@ pub(crate) fn spawn(
         if !is_relevant(&event.kind) {
             return;
         }
-        // Atomic-rename saves report the dir plus the temp/target paths; match by file
-        // name so a sibling file's write in the same dir doesn't trigger a reload.
+        // Match by file name — atomic-rename lists temp + target; ignore siblings.
         let touches_config = event_touches_config(&event.paths, file_name.as_os_str());
         if touches_config {
             reload_requested.store(true, Ordering::Relaxed);
@@ -66,10 +56,7 @@ pub(crate) fn spawn(
     Some(watcher)
 }
 
-/// Gate out the events that can't reflect an edit: a pure `Access` (open/read) and the
-/// catch-all `Other`. `Create`/`Modify`/`Remove` all pass — including `Modify(Metadata)`, a
-/// mere attribute touch, which at worst triggers one extra idempotent reload (cheaper than
-/// risking a missed save on a filesystem that reports a content change as metadata).
+/// Drop Access/Other; keep Create/Modify/Remove (incl. metadata — cheap extra reload).
 fn is_relevant(kind: &EventKind) -> bool {
     matches!(
         kind,
@@ -77,10 +64,7 @@ fn is_relevant(kind: &EventKind) -> bool {
     )
 }
 
-/// Does any path in an event match the watched file by NAME (not full path)? Atomic-rename
-/// saves report the dir plus the temp/target paths; matching by name (rather than requiring
-/// an exact path) is what lets this survive the rename while still ignoring a sibling file's
-/// unrelated write in the same watched directory.
+/// Match watched file by name (survives atomic-rename; ignores sibling writes).
 fn event_touches_config(paths: &[PathBuf], file_name: &OsStr) -> bool {
     paths.iter().any(|p| p.file_name() == Some(file_name))
 }
@@ -101,8 +85,6 @@ mod tests {
 
     #[test]
     fn atomic_rename_shape_matches_by_name() {
-        // Atomic-save events report both the temp/staging path and the real target path;
-        // matching should succeed on the real target name regardless of what else is listed.
         let paths = vec![
             PathBuf::from("/home/user/.config/dontspeak/config.toml.tmp12345"),
             PathBuf::from("/home/user/.config/dontspeak/config.toml"),

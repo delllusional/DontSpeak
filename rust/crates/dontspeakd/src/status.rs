@@ -1,4 +1,4 @@
-//! The `model_status` aggregator + the caps-event status channel.
+//! `model_status` aggregator + caps-event status channel.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,33 +30,21 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// A single caps-trigger event surfaced to the app over `model_status` (the
-/// engine → app status channel). `kind` is a stable machine token the app maps to
-/// a label: "press" / "release" / "start" / "stop" / "reset".
+/// Caps event for `model_status` (`kind`: press/release/start/stop/reset).
 #[derive(Clone)]
 pub(crate) struct CapsEvent {
     pub ts_ms: u64,
     pub kind: &'static str,
 }
 
-/// Shared, bounded log of recent caps events (newest last). Cloned into both the
-/// engine's poll loop (writer) and the RPC status handler (reader).
+/// Bounded caps log (newest last); engine writes, RPC status reads.
 pub(crate) type CapsLog = Arc<Mutex<VecDeque<CapsEvent>>>;
-/// Keep only the most recent N events — this is a live status panel, not history.
 pub(crate) const CAPS_LOG_MAX: usize = 50;
 
-/// A monotonically-incrementing status SEQUENCE + a condvar, so a client can BLOCK
-/// until ANY `model_status`-relevant state actually changes instead of polling for it.
-/// Every component that flips a status flag [`bump`](StatusGate::bump)s it right after
-/// the flip: the engine on dictation-preview changes (live partial, awaiting-confirm,
-/// paste target) and recording start/stop; the TTS queue on playback start/stop
-/// (`tts_active`); the listener on hands-free recording (`stt_active`); the
-/// [`TtsManager`] on global mute; and engine start/stop (engineRunning transitions).
-/// The `WaitModelStatus` IPC handler [`wait_changed`](StatusGate::wait_changed)s on it.
-/// This turns the engine→app status transport from a 120 ms poll into a ~0-jitter PUSH
-/// (the app calls the blocking FFI on a dedicated thread; see `ds_model_status_wait`).
+/// Status sequence + condvar: clients block until a real `model_status` change
+/// (push via `WaitModelStatus` / `ds_model_status_wait`). Bump after every flip
+/// (dictation, tts_active, stt_active, mute, engineRunning).
 pub(crate) struct StatusGate {
-    /// Current sequence number; bumped on every status-affecting change.
     seq: Mutex<u64>,
     cv: Condvar,
 }

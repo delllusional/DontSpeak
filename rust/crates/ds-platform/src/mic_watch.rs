@@ -1,20 +1,9 @@
-//! Cross-platform microphone-in-use WATCHER with a uniform PUSH interface.
+//! Continuous mic-in-use watcher: cached state + on-change push (vs one-shot
+//! [`is_mic_active`](crate::is_mic_active)).
 //!
-//! Where [`is_mic_active`](crate::is_mic_active) is a one-shot probe (an OS query per call), a
-//! [`MicWatcher`] tracks the state continuously and exposes it as a cheap cached read plus
-//! an on-change callback, so consumers (the TTS barge gate, the worker focus-hold) react to
-//! an EVENT instead of querying the device on a timer.
-//!
-//! Backends:
-//! * **macOS** — a native CoreAudio property listener on
-//!   `kAudioDevicePropertyDeviceIsRunningSomewhere` (zero polling), re-registered onto the
-//!   new device when the default input changes. Uses the FUNCTION-POINTER listener API
-//!   (`AudioObjectAddPropertyListener`), NOT the block API: block-based REMOVAL is known to
-//!   be unreliable, and we must detach cleanly on drop. Falls back to the poll thread below
-//!   if registration fails.
-//! * **Windows / Linux** — one centralized poll thread reusing [`is_mic_active`]. (Windows has
-//!   a real WASAPI probe; Linux currently has none, so the watcher stays `false` — no gate,
-//!   same as today.) Centralizing it means consumers no longer each poll the device.
+//! * **macOS** — CoreAudio `DeviceIsRunningSomewhere` function-pointer listener (not
+//!   block API — removal is unreliable); re-register on default-input change; poll fallback.
+//! * **Windows/Linux** — one poll thread over `is_mic_active` (Linux always false).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

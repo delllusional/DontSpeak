@@ -1,12 +1,6 @@
-//! Live TTS engine stats for the app's "Engine stats" view (ARCHITECTURE: the
-//! engine measures, the app renders). The warm Kokoro child emits a `STATS …`
-//! line per utterance (synth time, audio produced, time-to-first-audio); the
-//! `TtsManager` parses it and records here. Surfaced via `model_status`'s `stats`
-//! key (polled), so there is no extra IPC/FFI.
-//!
-//! The headline number is the **realtime factor** (synth_ms / audio_ms): < 1.0
-//! means faster than real time. We keep min/avg/max realtime + time-to-first-audio,
-//! lifetime totals, and a failure count.
+//! Live TTS/STT stats for the app's "Engine stats" view (engine measures, app renders).
+//! Warm child `STATS …` lines feed `TtsManager` → here → `model_status.stats`.
+//! Headline: realtime factor (synth_ms / audio_ms); also TTFA min/avg/max, totals, failures.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -37,8 +31,7 @@ impl TtsStats {
         Self::default()
     }
 
-    /// Reset all counters (called when the execution provider changes, so the
-    /// range bars reflect only the new provider).
+    /// Reset counters (provider change — range bars reflect only the new provider).
     pub fn reset(&self) {
         *self.inner.lock().unwrap() = Inner::default();
     }
@@ -54,8 +47,7 @@ impl TtsStats {
         s.total_audio_ms += audio_ms;
         s.total_synth_ms += synth_ms;
         s.total_first_ms += first_ms;
-        // Seed min/max on the first utterance (defaults are 0.0, which would
-        // otherwise pin the minimum at zero forever).
+        // Seed min/max on first utterance (default 0.0 would pin the min forever).
         if s.utterances == 1 {
             s.rtf_min = rtf;
             s.rtf_max = rtf;

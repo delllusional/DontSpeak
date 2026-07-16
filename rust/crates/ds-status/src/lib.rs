@@ -1,56 +1,43 @@
-//! The typed `model_status` schema — THE single source of truth for the engine → app
-//! status contract.
+//! Typed `model_status` schema — single source for the engine → app status contract.
 //!
-//! The engine (`dontspeakd::status`) BUILDS a [`ModelStatus`] and serializes it to the
-//! `model_status` JSON. The C ABI (`ds_core`) ships that JSON to each platform's UI,
-//! which deserializes it into ITS OWN hand-written DTOs (winui `Native.cs`, macOS) that mirror
-//! THIS shape. So the Rust side has one definition; the per-platform mirrors are hand-kept in
-//! lockstep with it (reviewed against this file), with the round-trip contract test below
-//! pinning the wire byte-shape — a deliberately small, dependency-free boundary for a
-//! ~20-function surface, instead of a codegen toolchain.
+//! Engine (`dontspeakd::status`) builds [`ModelStatus`]; `ds_core` ships the JSON; platform
+//! UIs hand-mirror the shape (winui `Native.cs`, macOS Swift). Round-trip test pins wire
+//! byte-shape (no codegen for a ~20-fn surface).
 //!
-//! serde field names ARE the wire keys. `Option<String>` serializes to JSON `null`
-//! (never omitted): the apps read every key unconditionally.
+//! serde field names are wire keys. `Option<String>` → JSON `null` (never omitted); apps
+//! read every key unconditionally.
 
 mod dictation_state;
 mod state;
 pub use dictation_state::DictationState;
 pub use state::EngineState;
 
-/// Serialize an f64, replacing NaN/Infinity with 0.0. `serde_json` normally maps
-/// non-finite floats to JSON `null`; that is valid JSON, but it violates this wire
-/// schema's numeric-field contract and makes the apps' non-optional numeric DTOs
-/// reject the whole status snapshot. Keep the fallback at the schema boundary even
-/// though producers also avoid non-finite values in normal operation.
+/// f64 → JSON number; NaN/Infinity become 0.0. Default serde_json would emit `null`, which
+/// violates this numeric wire contract and breaks apps' non-optional float DTOs.
 mod finite_f64_or_zero {
     pub fn serialize<S: serde::Serializer>(value: &f64, ser: S) -> Result<S::Ok, S::Error> {
         serde::Serialize::serialize(&sanitize(*value), ser)
     }
 
-    /// Preserve the numeric wire shape with a stable fallback downstream DTOs accept.
     fn sanitize(v: f64) -> f64 {
         if v.is_finite() { v } else { 0.0 }
     }
 }
 
-/// One engine row (Kokoro / Parakeet / diarization / system / claude_code /
-/// tts_system). `state` is the lifecycle token the app maps 1:1 to a status dot; its
-/// canonical vocabulary is [`EngineState`] (the producer stores `EngineState::as_str`
-/// here, Rust consumers route the token back through [`EngineState::parse`]).
+/// One engine row. `state` is an [`EngineState`] wire token (status-dot mapping).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EngineObj {
     pub present: bool,
     pub removable: bool,
     pub state: String,
-    /// Overall download fraction 0..1 — byte-weighted across the WHOLE model set (a single
-    /// global percent, NOT per-file). `0.0` unless the row is `downloading`.
+    /// Download fraction 0..1, byte-weighted across the whole model set (not per-file).
+    /// `0.0` unless `downloading`.
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub progress: f64,
-    /// `null` when there is no error.
     pub error: Option<String>,
 }
 
-/// The flat "running" map the MCP `status`/`model_status` tools read.
+/// Flat "running" map for MCP `status`/`model_status`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Running {
     pub caps: bool,
@@ -65,42 +52,34 @@ pub struct Running {
     pub claude_code: bool,
 }
 
-/// Dictation confirm-panel state.
+/// Dictation confirm-panel fields (booleans + canonical [`DictationState`] token).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Dictation {
     pub recording: bool,
     pub awaiting_confirm: bool,
     pub text: String,
-    /// `null` when no paste target was captured.
     pub target: Option<String>,
     pub local_stt: bool,
     pub has_paste_target: bool,
     pub prompt_glow: bool,
-    /// A dictation START was just REFUSED because the selected engine can't transcribe yet
-    /// (model missing / still downloading / warm helper loading). True for a short window
-    /// after the refused Caps tap; every overlay shows the panel washed in the same warning
-    /// glow as `has_paste_target == false` — the shared "this didn't work" cue. `default`
-    /// so a payload from an older engine still parses (reads as false).
+    /// START refused (engine can't transcribe yet). Short window after Caps tap; same warning
+    /// glow as `has_paste_target == false`. `#[serde(default)]` for older engines → false.
     #[serde(default)]
     pub refused: bool,
-    /// The canonical confirm-panel state token — its vocabulary is [`DictationState`]
-    /// (the producer stores `DictationState::as_str`, Rust consumers route the token back
-    /// through [`DictationState::parse`]). Every host shows the panel exactly when the
-    /// token is not `"hidden"`, instead of re-deriving visibility from the booleans above.
-    /// `default` so a payload from an older engine (key absent) still parses — it reads as
-    /// `""` and consumers fall back to the legacy boolean derivation.
+    /// [`DictationState`] token; panel shown when not `"hidden"`. Absent key → `""` (legacy
+    /// boolean fallback). `#[serde(default)]` for older engines.
     #[serde(default)]
     pub state: String,
 }
 
-/// Which models are currently resident in the warm helper.
+/// Models resident in the warm helper.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Loaded {
     pub tts: bool,
     pub stt: bool,
 }
 
-/// Diarization stats for the Settings row's expansion.
+/// Diarization stats (Settings expansion).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiarStats {
     pub enabled: bool,
@@ -113,7 +92,7 @@ pub struct DiarStats {
     pub speaker_threshold: f64,
 }
 
-/// Live TTS realtime-factor / time-to-first-audio stats (`stats.tts`).
+/// Live TTS RTF / TTFA stats (`stats.tts`).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TtsSnapshot {
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
@@ -134,7 +113,7 @@ pub struct TtsSnapshot {
     pub failures: u64,
 }
 
-/// Live Parakeet STT realtime-factor stats (`stats.stt`).
+/// Live STT RTF stats (`stats.stt`).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SttSnapshot {
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
@@ -149,16 +128,14 @@ pub struct SttSnapshot {
     pub failures: u64,
 }
 
-/// Persisted lifetime usage totals (`stats.lifetime`): whole seconds spoken + heard,
-/// summed across every session.
+/// Lifetime usage totals (`stats.lifetime`): whole seconds spoken + heard.
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LifetimeSnapshot {
     pub tts_secs: u64,
     pub stt_secs: u64,
 }
 
-/// The `stats` sub-object: TTS/STT realtime factors, lifetime totals, which models are
-/// resident in the warm helper, and diarization settings.
+/// `stats` sub-object (RTF, lifetime, loaded models, diarization).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     pub tts: TtsSnapshot,
@@ -168,15 +145,14 @@ pub struct Stats {
     pub diarization: DiarStats,
 }
 
-/// A single caps-trigger event for the app's live status panel. `kind` is a stable
-/// machine token: "press" / "release" / "start" / "stop" / "reset".
+/// Caps-trigger event for the live status panel. `kind`: press/release/start/stop/reset.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CapsEvent {
     pub ts: u64,
     pub kind: String,
 }
 
-/// The full `model_status` payload — the engine → app status contract.
+/// Full `model_status` payload — engine → app status contract.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelStatus {
     pub kokoro: EngineObj,
@@ -186,10 +162,10 @@ pub struct ModelStatus {
     pub claude_code: EngineObj,
     pub tts_system: EngineObj,
     pub stt_engine: String,
-    /// `null` for the system/claude_code engines.
+    /// `null` for system/claude_code engines.
     pub stt_provider: Option<String>,
     pub tts_engine: String,
-    /// `null` for the system (`say`) / off engines.
+    /// `null` for system (`say`) / off engines.
     pub tts_provider: Option<String>,
     /// `null` unless claude_code is selected and usable.
     pub claude_code_key: Option<String>,
@@ -279,10 +255,7 @@ mod tests {
         }
     }
 
-    /// Round-trip the schema through JSON and assert the byte-shape: every nullable
-    /// field serializes to `null` (never omitted — the apps read keys unconditionally),
-    /// the stats nest under `stats`, and a deserialize reconstructs an equal value.
-    /// Guards the wire contract against drift now that there is ONE definition.
+    /// Pin wire byte-shape: nullable fields → `null` (never omitted), stats nested, round-trip.
     #[test]
     fn json_contract_round_trips() {
         let v = serde_json::to_value(sample()).unwrap();
@@ -316,9 +289,7 @@ mod tests {
         assert!(v["stats"]["diarization"]["speakers"].is_array());
         assert!(v["caps_events"][0]["kind"].is_string());
 
-        // `dictation.refused` was added AFTER the first release: a payload from an older
-        // engine omits the key, so it must still parse (the `#[serde(default)]` contract)
-        // and read as false — the fail-quiet direction (no spurious refusal glow).
+        // Additive fields: absent key must still parse (`#[serde(default)]`).
         let mut old = v.clone();
         old["dictation"].as_object_mut().unwrap().remove("refused");
         let old: ModelStatus = serde_json::from_value(old).unwrap();
@@ -327,9 +298,6 @@ mod tests {
             "absent dictation.refused reads false"
         );
 
-        // `dictation.state` was also added after a release: a payload from an older engine
-        // omits the key, so it must still parse (`#[serde(default)]`) and read as "" —
-        // the signal for consumers to fall back to the legacy boolean derivation.
         let mut old = v.clone();
         old["dictation"].as_object_mut().unwrap().remove("state");
         let old: ModelStatus = serde_json::from_value(old).unwrap();
@@ -338,7 +306,6 @@ mod tests {
             "absent dictation.state reads \"\""
         );
 
-        // A deserialize off the same bytes reconstructs the value (the FFI path).
         let back: ModelStatus = serde_json::from_value(v).unwrap();
         assert_eq!(back.stt_engine, "built_in");
         assert!(back.stt_provider.is_none());
@@ -353,7 +320,7 @@ mod tests {
         s.stats.tts.audio_secs = f64::INFINITY;
         s.stats.stt.rtf_max = f64::NAN;
         s.kokoro.progress = f64::INFINITY;
-        // serde_json would normally emit null; every guarded wire field stays numeric.
+        // Guarded fields stay numeric (serde_json would emit null for non-finite).
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["stats"]["tts"]["rtf_avg"].as_f64().unwrap(), 0.0);
         assert_eq!(v["stats"]["tts"]["rtf_min"].as_f64().unwrap(), 0.0);
@@ -362,28 +329,18 @@ mod tests {
         assert_eq!(v["kokoro"]["progress"].as_f64().unwrap(), 0.0);
     }
 
-    // ── Property-based round-trip over the generated domain ─────────────────────
-    //
-    // `sample()`/`json_contract_round_trips` above pin ONE hand-picked value. The
-    // strategies below generate many more `ModelStatus` values (bounded so
-    // `serde_json` never sees a NaN/Infinity float — a JSON-representability limit,
-    // not a real wire-contract gap) and assert the same round-trip + null-not-omitted
-    // shape holds across that domain.
+    // Property tests: same null-not-omitted + round-trip as above, over many values.
+    // Strategies stay finite (serde_json can't represent NaN/Infinity).
     use proptest::prelude::*;
 
-    /// Numeric range wide enough to exercise real values (negative RTF deltas, large
-    /// counters as floats, etc.) while staying finite for `serde_json`.
     fn finite_f64() -> impl Strategy<Value = f64> {
         -1.0e6..1.0e6
     }
 
-    /// `progress`/threshold-shaped fields are documented fractions.
     fn unit_f64() -> impl Strategy<Value = f64> {
         0.0..=1.0
     }
 
-    /// Short bounded strings — enough alphabet to catch encoding edge cases without
-    /// making each generated case slow.
     fn short_string() -> impl Strategy<Value = String> {
         "[a-zA-Z0-9_ -]{0,16}"
     }
@@ -615,8 +572,7 @@ mod tests {
     }
 
     proptest! {
-        /// Same byte-shape + round-trip contract as `json_contract_round_trips`, but
-        /// over the generated domain above instead of one hand-picked sample.
+        /// Same wire contract as `json_contract_round_trips`, over generated values.
         #[test]
         fn json_contract_round_trips_arbitrary_values(status in model_status_strategy()) {
             let v = serde_json::to_value(status.clone()).unwrap();
@@ -630,7 +586,6 @@ mod tests {
                 "tts_system",
             ] {
                 prop_assert!(v[eng]["state"].is_string(), "{eng}.state");
-                // Present unconditionally (null or string), never omitted.
                 prop_assert!(v[eng].get("error").is_some(), "{eng}.error present");
             }
             prop_assert!(v.get("stt_provider").is_some(), "stt_provider present");
@@ -646,7 +601,6 @@ mod tests {
             prop_assert!(v["stats"]["lifetime"]["tts_secs"].is_u64());
             prop_assert!(v["stats"]["diarization"]["speakers"].is_array());
 
-            // A deserialize off the same bytes reconstructs the value (the FFI path).
             let back: ModelStatus = serde_json::from_value(v).unwrap();
             prop_assert_eq!(back, status);
         }

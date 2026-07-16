@@ -1,26 +1,17 @@
-//! Linux PipeWire/PulseAudio `module-echo-cancel` duplex audio (capture-side AEC).
+//! Linux PipeWire/PulseAudio `module-echo-cancel` (capture-side AEC).
 //!
-//! Like Windows WASAPI (and unlike macOS VPIO, which owns BOTH render and capture on one
-//! clock), the Linux native AEC is **capture-side**: the sound server runs the WebRTC
-//! canceller in `module-echo-cancel` and exposes a **cancelled virtual source** that
-//! references the system render endpoint *itself*. So we do NOT route TTS through this
-//! unit — rodio keeps rendering normally ([`owns_render`](DuplexAudio::owns_render) is
-//! `false`) and this backend only opens that echo-cancelled source.
+//! Like Windows WASAPI (unlike macOS VPIO), AEC is **capture-side**: the sound server's
+//! WebRTC canceller in `module-echo-cancel` exposes a cancelled virtual source that
+//! references the render endpoint. TTS stays on rodio (`owns_render() == false`); this
+//! backend only opens that source.
 //!
-//! We open it through the **PulseAudio simple API**, which talks to PulseAudio AND PipeWire
-//! (via `pipewire-pulse`), so one path covers both servers. The source is selected by name:
-//! `$DONTSPEAK_AEC_SOURCE`, else our shipped config drop-in's `ds_ec_source`, else the
-//! common `echo-cancel-source`. Any connect/format failure is fail-quiet — `open()` returns
-//! `Err` and the caller degrades to the half-duplex cpal + rodio path.
+//! Opened via the Pulse simple API (works with Pulse and PipeWire/`pipewire-pulse`).
+//! Source name: `$DONTSPEAK_AEC_SOURCE`, else `ds_ec_source`, else `echo-cancel-source`.
+//! Connect/format failure → `open()` Err → half-duplex. (In-process WebRTC APM is a
+//! future option in docs/AEC.md.)
 //!
-//! (A future deterministic alternative — linking the WebRTC APM in-process with a TTS render
-//! tap, `owns_render() == true` — is the alternative noted in docs/AEC.md's "Why native OS
-//! AEC" section; this server-module path ships first as the recommended primary on modern
-//! distros.)
-//!
-//! Threading mirrors Windows: a dedicated thread owns the blocking `Simple` record stream,
-//! reads ~20 ms chunks (so it re-checks `stop` promptly), and pushes echo-cancelled mono
-//! f32 into a shared bounded buffer a [`CaptureHandle`] drains.
+//! Dedicated thread owns the blocking `Simple` stream, reads ~20 ms chunks, pushes mono
+//! f32 into a bounded buffer a [`CaptureHandle`] drains.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,16 +24,14 @@ use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::Direction;
 use libpulse_simple_binding::Simple;
 
-/// Negotiated capture rate. We ask the server for 48 kHz mono f32 (it resamples the
-/// already-cancelled source for us); the helper resamples 48 k → 16 k before Parakeet.
+/// Ask for 48 kHz mono f32 (server resamples cancelled source); helper does 48k→16k.
 const CAPTURE_RATE: u32 = 48_000;
-/// ~2 s cap: the helper drains every poll tick; if a listen stalls, drop OLDEST samples.
+/// ~2 s cap; drop oldest if listen stalls.
 const CAPTURE_SECS: usize = 2;
-/// 20 ms read chunk (frames) so the blocking read loop re-checks `stop` promptly.
+/// 20 ms read chunk so the blocking loop re-checks `stop` promptly.
 const CHUNK_FRAMES: usize = CAPTURE_RATE as usize / 50;
 
-/// Source names to try, in order: explicit env override, our shipped config drop-in's
-/// name, then the common PipeWire/Pulse default. First that connects wins.
+/// Try order: env override, shipped drop-in name, common default. First connect wins.
 fn candidate_sources() -> Vec<String> {
     let mut v = Vec::new();
     if let Ok(s) = std::env::var("DONTSPEAK_AEC_SOURCE")
@@ -75,24 +64,20 @@ fn connect_capture(spec: &Spec) -> Result<(String, Simple), String> {
     Err(last_err)
 }
 
-/// Live echo-cancelled capture from the server's cancelled source. The `Simple` stream
-/// lives entirely on the capture thread; this struct holds only cross-thread handles.
+/// Live echo-cancelled capture. `Simple` lives on the capture thread; this holds
+/// cross-thread handles only.
 pub struct DuplexAudio {
     capture_rate: u32,
-    /// Echo-cancelled mono f32, pushed by the capture thread, drained by the helper's
-    /// concurrent-listen thread (via a [`CaptureHandle`]). Bounded to `CAPTURE_SECS`.
+    /// Mono f32 from capture thread; drained via [`CaptureHandle`]. Bounded to `CAPTURE_SECS`.
     cap: Arc<Mutex<VecDeque<f32>>>,
-    /// Set on `Drop` to stop the capture thread.
     stop: Arc<AtomicBool>,
-    /// Explicit stop/cancel signal (parity with macOS). Render is on rodio here, so this
-    /// is informational only — the helper drains rodio directly.
+    /// Stop/cancel signal (parity with macOS); render is rodio — informational only.
     barge: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl DuplexAudio {
-    /// Open the cancelled source. Fail-quiet (`Err`) on any connect/format error; the caller
-    /// then falls back to the half-duplex cpal + rodio path.
+    /// Open cancelled source. Fail-quiet `Err` → half-duplex cpal + rodio.
     pub fn open() -> Result<Self, String> {
         let spec = Spec {
             format: Format::F32le,
@@ -103,8 +88,7 @@ impl DuplexAudio {
             return Err("invalid pulse sample spec".into());
         }
 
-        // Connect on THIS thread so a failure (no cancelled source) returns synchronously and
-        // the caller degrades immediately — no thread left spinning. Try each candidate name.
+        // Connect on this thread so failure returns synchronously (no orphan thread).
         let (_name, simple) = connect_capture(&spec).map_err(|last_err| {
             format!(
                 "no PulseAudio/PipeWire echo-cancel source reachable ({last_err}) — load \
@@ -123,7 +107,6 @@ impl DuplexAudio {
             .name("ds-pulse-aec".into())
             .spawn(move || capture_thread(simple, cap_t, stop_t, ready_tx))
             .map_err(|e| format!("spawn capture thread: {e}"))?;
-        // The thread signals once it's entered the read loop (the stream is already open).
         let _ = ready_rx.recv();
 
         Ok(Self {
@@ -135,58 +118,45 @@ impl DuplexAudio {
         })
     }
 
-    /// A `Send`+`Sync` handle to the echo-cancelled capture buffer, so the helper's
-    /// concurrent listen thread can drain the mic while rodio renders TTS.
+    /// Send+Sync handle so concurrent listen can drain while rodio renders.
     pub fn capture_handle(&self) -> CaptureHandle {
         CaptureHandle::new(self.cap.clone(), self.capture_rate)
     }
 
-    /// The negotiated capture sample rate. Drain a `capture_rate()`→16 kHz resampler
-    /// before Parakeet.
     pub fn capture_rate(&self) -> u32 {
         self.capture_rate
     }
 
-    /// Capture-side AEC: the server's canceller references the render endpoint itself, so
-    /// rodio keeps rendering TTS. We do NOT own render.
+    /// Capture-side: server references render endpoint; rodio keeps TTS. No render ownership.
     pub fn owns_render(&self) -> bool {
         false
     }
 
-    /// No-op: render stays on rodio (the server taps the render endpoint as the AEC
-    /// reference, so we never feed PCM here).
     pub fn render_push(&self, _pcm_24k: &[f32]) {}
 
-    /// Always empty (rodio renders, drained directly by the helper).
     pub fn render_pending(&self) -> bool {
         false
     }
 
-    /// No render ring: rodio owns output on this capture-side backend.
     pub fn render_buffered(&self) -> std::time::Duration {
         std::time::Duration::ZERO
     }
 
-    /// No-op (no render ring to flush; the helper stops the rodio player on barge).
     pub fn render_clear(&self) {}
 
-    /// No-op: render-time mute is macOS-only (rodio's player volume mutes here).
+    /// Mute is macOS-only; rodio player volume mutes here.
     pub fn set_muted(&self, _on: bool) {}
 
-    /// No-op render handle (rodio owns output; parity with macOS keeps the helper's
-    /// feeder path cfg-free).
+    /// No-op render handle — keeps helper feeder path cfg-free.
     pub fn render_handle(&self) -> RenderHandle {
         RenderHandle::new()
     }
 
-    /// Drain the echo-cancelled mono f32 captured since the last call. Empty when no
-    /// new audio has arrived.
     pub fn capture_drain(&self) -> Vec<f32> {
         let mut q = self.cap.lock().unwrap();
         q.drain(..).collect()
     }
 
-    /// A `Send` barge handle for the explicit stop/cancel path (parity with macOS).
     pub fn barge_flag(&self) -> Arc<AtomicBool> {
         self.barge.clone()
     }
@@ -201,11 +171,8 @@ impl Drop for DuplexAudio {
     }
 }
 
-// `CaptureHandle` is shared with the Windows backend — see `crate::shared`.
-
-/// The capture thread: blocking-read 20 ms chunks of echo-cancelled mono f32 and push them
-/// into the shared buffer until `stop`. A server-side read error ends the loop quietly (the
-/// next listen re-opens or degrades to half-duplex).
+/// Blocking-read 20 ms mono f32 chunks into the shared buffer until `stop`.
+/// Read error → reconnect with backoff (or stop).
 fn capture_thread(
     mut simple: Simple,
     cap: Arc<Mutex<VecDeque<f32>>>,
@@ -254,10 +221,7 @@ fn capture_thread(
 mod candidate_sources_tests {
     use super::*;
 
-    /// `candidate_sources()` reads a process-wide env var, so serialize the tests
-    /// that touch it — `cargo test` runs test functions concurrently on separate
-    /// threads within one process, and a set/remove in one test would otherwise
-    /// race a read in another.
+    /// `candidate_sources` reads process env — serialize mutations across concurrent tests.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     const VAR: &str = "DONTSPEAK_AEC_SOURCE";
@@ -265,7 +229,7 @@ mod candidate_sources_tests {
     #[test]
     fn no_override_falls_back_to_both_defaults_in_order() {
         let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above).
+        // SAFETY: test-only env mutation under ENV_LOCK.
         unsafe { std::env::remove_var(VAR) };
         assert_eq!(
             candidate_sources(),
@@ -276,11 +240,10 @@ mod candidate_sources_tests {
     #[test]
     fn explicit_override_is_tried_first_then_both_defaults() {
         let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above); removed
-        // again below.
+        // SAFETY: test-only env mutation under ENV_LOCK; cleared below.
         unsafe { std::env::set_var(VAR, "my-custom-source") };
         let got = candidate_sources();
-        // SAFETY: still under ENV_LOCK; clears the var this test set above.
+        // SAFETY: still under ENV_LOCK.
         unsafe { std::env::remove_var(VAR) };
         assert_eq!(
             got,
@@ -295,14 +258,11 @@ mod candidate_sources_tests {
     #[test]
     fn empty_override_is_guarded_out_not_tried_as_a_source_name() {
         let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above); removed
-        // again below.
+        // SAFETY: test-only env mutation under ENV_LOCK; cleared below.
         unsafe { std::env::set_var(VAR, "") };
         let got = candidate_sources();
-        // SAFETY: still under ENV_LOCK; clears the var this test set above.
+        // SAFETY: still under ENV_LOCK.
         unsafe { std::env::remove_var(VAR) };
-        // The empty string must NOT appear as a (bogus) first candidate — same
-        // fallback list as if the var were unset entirely.
         assert_eq!(
             got,
             vec!["ds_ec_source".to_string(), "echo-cancel-source".to_string()]

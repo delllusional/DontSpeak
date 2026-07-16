@@ -1,14 +1,7 @@
-//! Config serialization — `VoiceConfig` (de)serializes via its serde derive, so the
-//! field set has ONE source of truth (no hand-maintained list to drift). Two consumers:
-//!   • the config FILE — `write_settings` serializes the typed struct straight to TOML
-//!     (`our config.toml`), merged over the existing table to keep sibling keys;
-//!   • the IPC wire — `voice_to_value` / `merge_settings` produce the same JSON object
-//!     the engine ⇄ app socket carries. A `write → load` round-trip is identity: each
-//!     enum serializes to its `as_str()` token, exactly what its `parse()` accepts.
-//! Claude Code's own `voice` block is the user's — DontSpeak never writes it (read-only).
-//!
-//! The atomic-write + timestamped-backup helpers also live here: they are the crash-safe
-//! primitives shared by `write_settings` and the `wire <client>` orchestrator's hook + MCP writes.
+//! VoiceConfig (de)serialize — serde derive is the field single source.
+//! File: TOML via `write_settings` (merge sibling keys). IPC: JSON via `voice_to_value`.
+//! Round-trip identity via enum tokens. Never writes Claude Code's `voice` block.
+//! Also: atomic-write + backup helpers for wire.
 
 use std::io::{self, Write};
 

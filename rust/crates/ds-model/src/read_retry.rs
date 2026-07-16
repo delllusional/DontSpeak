@@ -13,22 +13,18 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-/// Read `path` fully, retrying up to 3 times (150ms apart) on a transient `NotFound`.
-/// See the module docs for why `NotFound` specifically is retried and nothing else.
+/// Read fully; retry up to 3× (150ms) on transient `NotFound` only (see module docs).
 pub fn read_model_file(path: &Path) -> Result<Vec<u8>, String> {
     read_model_file_with(path, 3, Duration::from_millis(150))
 }
 
-/// [`read_model_file`], then decode as UTF-8 — for text model assets (e.g. a tokenizer's
-/// `tokens.txt`) that sit in the exact same AV-scan-race window as the binary model files,
-/// but are consumed as `String` rather than raw bytes.
+/// [`read_model_file`] + UTF-8 — same AV-scan race window for text assets (`tokens.txt`, …).
 pub fn read_model_file_to_string(path: &Path) -> Result<String, String> {
     let bytes = read_model_file(path)?;
     String::from_utf8(bytes).map_err(|e| format!("read {}: not valid utf-8: {e}", path.display()))
 }
 
-/// The retry loop, parameterized by attempt count + delay so tests run fast and
-/// deterministic instead of waiting on the real production timing.
+/// Parameterized attempts/delay so tests stay fast.
 pub(crate) fn read_model_file_with(
     path: &Path,
     attempts: u32,
@@ -57,7 +53,6 @@ mod tests {
         let path = dir.path().join("appears-late.bin");
         let path2 = path.clone();
         let handle = std::thread::spawn(move || {
-            // Give the reader a couple of NotFound attempts before the file lands.
             std::thread::sleep(Duration::from_millis(80));
             std::fs::write(&path2, b"hello").unwrap();
         });
@@ -82,8 +77,7 @@ mod tests {
         let path = dir.path().join("present.bin");
         std::fs::write(&path, b"already here").unwrap();
         let t0 = std::time::Instant::now();
-        // A huge delay would make this test take forever if a retry were incorrectly
-        // triggered on the happy path.
+        // Huge delay: would hang if the happy path incorrectly retried.
         let bytes = read_model_file_with(&path, 3, Duration::from_secs(5)).expect("first try ok");
         assert_eq!(bytes, b"already here");
         assert!(
@@ -95,8 +89,7 @@ mod tests {
     #[test]
     fn a_non_not_found_error_is_not_retried() {
         let dir = tempfile::tempdir().unwrap();
-        // Reading a directory as a file gives a distinct, non-NotFound io error kind
-        // (e.g. `IsADirectory`/`PermissionDenied` depending on platform) — must NOT retry.
+        // Directory-as-file → non-NotFound kind; must not retry.
         let t0 = std::time::Instant::now();
         let err = read_model_file_with(dir.path(), 3, Duration::from_secs(5))
             .expect_err("reading a directory as a file must fail");

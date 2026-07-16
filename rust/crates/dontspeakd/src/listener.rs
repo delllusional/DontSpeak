@@ -1,13 +1,6 @@
-//! Always-listening (hands-free) runtime glue — the I/O layer over the pure
-//! [`crate::listen`] state machines. See docs/ALWAYS-LISTENING.md.
-//!
-//! Driven once per engine poll tick, but capture, endpointing, and model inference run on
-//! dedicated workers. The poll thread only drains ordered text/control events, feeds the pure
-//! TurnLogic, and executes `Paste`/`Submit` actions into the focused prompt.
-//!
-//! Half-duplex play-gate: while the TTS queue is busy (speaking or pending) the
-//! mic is CLOSED; when it goes idle the mic reopens. The platform `Rc` remains on the engine
-//! thread; no native recognizer or audio operation can stall that thread.
+//! Always-listening runtime glue over pure [`crate::listen`]. docs/ALWAYS-LISTENING.md.
+//! Capture/endpoint/infer on workers; poll thread drains events + paste/submit.
+//! Half-duplex: mic closed while TTS busy.
 
 use std::path::PathBuf;
 use std::rc::Rc;

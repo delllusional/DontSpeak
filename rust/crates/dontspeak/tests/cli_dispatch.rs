@@ -1,24 +1,18 @@
-//! CLI front-door dispatch: an UNRECOGNIZED first argument must FAIL FAST (exit 2), never
-//! fall through to the stdio MCP server — that mode blocks on stdin forever. Regression test
-//! for the hang where `dontspeak <typo>` (or an OLD binary handed the newer `wire` subcommand)
-//! silently became the stdin-blocking server instead of erroring.
+//! Unrecognized first argument must fail fast (exit 2), never fall through to the stdio MCP
+//! server (blocks on stdin forever). Regression for `dontspeak <typo>` / old binary + newer
+//! `wire` subcommand silently becoming the stdin-blocking server.
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-/// Spawn the built `dontspeak` binary with `args` (stdin closed), waiting up to `timeout`.
-/// Returns its exit code, or PANICS if it does not exit in time — that panic IS the hang
-/// regression (the server never returns). stdin is `null` so a regressed build that falls
-/// into `mcp::serve()` reads EOF and exits (code != 2), which the assertions still catch.
+/// Spawn built `dontspeak` with `args` (stdin closed), wait up to `timeout`. Panic if it
+/// does not exit — that panic *is* the hang regression. stdin null so a regressed build that
+/// falls into `mcp::serve()` reads EOF and exits (code != 2); assertions still catch it.
 ///
-/// This is a REAL subprocess running the production `main()`, which unconditionally calls
-/// `ds_log::init()` and logs the "unknown subcommand" error — unlike in-process unit tests,
-/// there is no seam to hand it a tempdir `log_file`, so it falls through to `log_cached`'s
-/// real per-OS path (see issue #26). `DONTSPEAK_LOG_FILE` redirects that path straight into a
-/// tempdir for the child; a `HOME`/`LOCALAPPDATA` env override doesn't work cross-platform —
-/// Windows resolves `%LOCALAPPDATA%` via the native known-folder API, which ignores an
-/// overridden env var for a child process.
+/// Real subprocess → production `main()` → `ds_log::init()`. `DONTSPEAK_LOG_FILE` redirects
+/// the log into a tempdir (HOME/LOCALAPPDATA overrides don't work cross-platform — Windows
+/// known-folder API ignores child env for LOCALAPPDATA). See issue #26.
 fn run_bounded(args: &[&str], timeout: Duration) -> i32 {
     let home = tempfile::tempdir().expect("tempdir");
     let mut child = Command::new(env!("CARGO_BIN_EXE_dontspeak"))
@@ -47,9 +41,9 @@ fn run_bounded(args: &[&str], timeout: Duration) -> i32 {
     }
 }
 
-/// Run the no-argument binary with one stdin document. This pins the environment-only Grok
-/// hook discriminator without touching a real engine: the same JSON-RPC ping is an MCP reply
-/// in normal mode and a no-op unknown hook event when Grok's reserved marker is present.
+/// No-arg binary with one stdin document. Pins the Grok env-only hook discriminator without
+/// a real engine: same JSON-RPC ping is an MCP reply unmarked, a no-op unknown hook when
+/// GROK_HOOK_EVENT is set.
 fn run_no_args_with_input(grok_hook: bool, input: &str) -> Output {
     let home = tempfile::tempdir().expect("tempdir");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dontspeak"));
@@ -73,7 +67,7 @@ fn run_no_args_with_input(grok_hook: bool, input: &str) -> Output {
 
 #[test]
 fn unknown_subcommand_exits_fast_not_hangs() {
-    // Exit 2, quickly. The pre-fix bug fell through to `mcp::serve()` and blocked on stdin.
+    // Exit 2, quickly. Pre-fix fell through to mcp::serve() and blocked on stdin.
     assert_eq!(
         run_bounded(&["definitely-not-a-subcommand"], Duration::from_secs(10)),
         2
@@ -83,8 +77,7 @@ fn unknown_subcommand_exits_fast_not_hangs() {
 
 #[test]
 fn recognized_subcommand_still_dispatches() {
-    // Guard that the new leftover-argument check didn't shadow the real subcommands:
-    // `wire --help` prints usage and exits 0.
+    // Leftover-arg check must not shadow real subcommands: wire --help → 0.
     assert_eq!(run_bounded(&["wire", "--help"], Duration::from_secs(10)), 0);
 }
 

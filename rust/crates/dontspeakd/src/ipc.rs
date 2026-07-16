@@ -10,14 +10,8 @@ use crate::status::{EngineShared, model_status_json};
 use crate::stt_test::TestSession;
 use crate::ttsq::TtsQueue;
 
-/// Log one CLIENT-ORIGINATED request at INFO, attributed to the client that sent it — the
-/// activity-log line then ends in ` client=<token>` (`client=dontspeak` renders nothing; a
-/// client-originated request never carries that value in practice).
-///
-/// Always `ds_log::log_from` against `paths.log_file`, NEVER `ds_log::log_cached*`: the cached
-/// logger resolves the REAL per-OS `$HOME` log path, so a single call from engine code would
-/// write into the dev's / CI runner's actual log dir the moment any test reached it (see
-/// `ds_log::log_cached`'s doc; issue #26 turned this into a CI gate, not just convention).
+/// INFO log for a client-originated request (` client=<token>`). Always `log_from`
+/// against `paths.log_file` — never `log_cached*` (that resolves real `$HOME`; issue #26).
 fn log_client(paths: &Paths, client: ClientSource, msg: &str) {
     ds_log::log_from(
         &paths.log_file,
@@ -28,38 +22,21 @@ fn log_client(paths: &Paths, client: ClientSource, msg: &str) {
     );
 }
 
-/// Whether a `MarkActive` (UserPromptSubmit fires for EVERY submit, typed or dictated)
-/// should cancel speech per the user's `input_clears` preference. `was_voice` is true
-/// when a voice submit JUST pressed Enter via the engine itself — this hook is that
-/// submit's own echo, so it must NOT also count as a separate, genuine submit (else it
-/// would immediately re-cancel speech the voice path already handled directly). PURE.
+/// Cancel on MarkActive? Skip voice-submit echoes (engine already applied `input_clears`).
 pub(crate) fn should_cancel_on_submit(was_voice: bool, scope_configured: bool) -> bool {
     !was_voice && scope_configured
 }
 
-/// Old hook binaries did not send an earcon session. Keep those cues on the active stream
-/// instead of treating them as global audio, which could overtake a held background session.
+/// Legacy hooks omit earcon session — keep cues on the active stream (not global).
 fn earcon_session(ttsq: &TtsQueue, requested: Option<String>) -> Option<String> {
     requested.or_else(|| ttsq.active_session())
 }
 
-/// Apply a `MarkActive` ping (UserPromptSubmit hook — every submit: typed, dictated,
-/// or, when `synthetic`, a harness-injected continuation Claude Code auto-re-invokes,
-/// e.g. a background-task `<task-notification>` re-invocation — issue #11).
+/// UserPromptSubmit MarkActive (typed/dictated, or `synthetic` harness continuation — #11).
 ///
-/// The `codex_sessions` nudge ALWAYS runs, `synthetic` or not: it's pure
-/// session-liveness bookkeeping (this session id is still alive), not a claim about
-/// human intent, and it doubles as `codex_stream` RE-discovery after an engine
-/// restart.
-///
-/// Everything else is the "you just moved your attention here" half of `MarkActive`
-/// — claiming active-terminal status (`set_active_session`) and applying
-/// `input_clears` — and is skipped ENTIRELY when `synthetic`: a harness continuation
-/// expresses no human "I've moved on" intent, so it must neither steal active-terminal
-/// status from whatever real terminal the user is actually in, nor prune/cancel
-/// in-flight speech the user may be mid-listen to. See
-/// `dontspeak::hook_speak::is_synthetic_continuation`, the hook-side classifier that
-/// sets this flag from the prompt body's shape.
+/// `codex_sessions` nudge always runs (liveness + codex_stream re-discovery after restart).
+/// Active-terminal claim + `input_clears` skipped when `synthetic` (no human "I've moved on").
+/// Classifier: `dontspeak::hook_speak::is_synthetic_continuation`.
 fn handle_mark_active(
     ttsq: &TtsQueue,
     codex_sessions: &crate::codex_stream::SessionRegistry,
@@ -67,51 +44,31 @@ fn handle_mark_active(
     session: Option<String>,
     synthetic: bool,
 ) {
-    // The nudge doubles as codex_stream session RE-discovery after an engine restart
-    // (SessionStart won't re-fire mid-session), and re-arms a negative-cached
-    // resolution. Runs unconditionally: session-liveness, not human intent.
+    // Unconditional liveness nudge (+ re-discovery / negative-cache re-arm).
     if let Some(s) = &session {
         codex_sessions.nudge(s);
     }
     if synthetic {
-        // A harness-injected continuation carries no "I've moved on" human intent:
-        // don't steal active-terminal status, don't touch the TTS queue at all.
-        return;
+        return; // no active-terminal steal, no TTS queue touch
     }
-    // UserPromptSubmit → this terminal is now the active one. The queue speaks only
-    // its items and holds the rest until they're active.
     ttsq.set_active_session(session.clone());
-    // The UserPromptSubmit hook fires for EVERY genuine submit (typed OR dictated), so
-    // this is where a genuinely-typed submit is caught. BUT a VOICE submit also
-    // pressed Enter via the engine — de-dup so that auto-Enter isn't treated as a
-    // second, separate submit: if a voice submit just happened, this hook is its echo
-    // (the voice path already applied `input_clears` directly), so skip. Read config
-    // live so a runtime `set_config` change takes effect without an engine restart.
+    // Voice-submit echo: engine already applied input_clears; skip re-cancel.
     let was_voice = ttsq.take_recent_voice_submit();
-    // Short-circuit: skip the config.toml read entirely when `was_voice` already
-    // decides it (`should_cancel_on_submit` would read `false` either way, but
-    // there's no reason to load config to learn that).
+    // Skip config read when was_voice already forces no cancel.
     if !was_voice {
         let scopes = VoiceConfig::load(paths).input_clears;
         if should_cancel_on_submit(was_voice, scopes.contains(&CancelSpeechScope::Current)) {
             ttsq.clear_session(session.clone());
         }
         if should_cancel_on_submit(was_voice, scopes.contains(&CancelSpeechScope::Other)) {
-            // Pass this REQUEST's own `session` as the target directly, rather than
-            // re-deriving "active" via `ttsq.active_session()` — `set_active_session`
-            // above already set it to exactly this session, but re-reading it would
-            // reopen a window for a concurrent MarkActive from another terminal to
-            // land in between and be treated as "other" instead of this one.
+            // Use this request's session, not re-read active (concurrent MarkActive race).
             ttsq.cancel_for_submit(session.clone(), false, true);
         }
     }
 }
 
-/// Host the RPC socket on a dedicated thread (blocking accept loop), dispatching
-/// each request inline. A `Reload` (the MCP/GUI wrote config.toml and asks us to
-/// apply it) flips `reload_requested` so the poll loop reloads config surgically
-/// via `Engine::reload`; the other arms drive the TTS queue, model status, the STT
-/// test, the provider switch, and speaker enroll/diarize.
+/// RPC accept loop on a dedicated thread. `Reload` flips `reload_requested`; other arms
+/// drive TTS queue, status, STT test, provider, enroll/diarize.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_ipc_server(
     shared: EngineShared,
@@ -125,22 +82,14 @@ pub(crate) fn spawn_ipc_server(
 ) {
     let sock = paths.engine_sock.clone();
     std::thread::spawn(move || {
-        // The bad-request sink (see `ds_ipc::serve`). A line that fails to decode never
-        // reaches the handler below, and every hook call site DISCARDS the `bad request: …`
-        // reply it gets back — so without this, a rejection is invisible everywhere. The one
-        // way it happens in practice is a deploy skew: a stale `dontspeak` CLI (no `--client`
-        // verb ⇒ no `source` on the wire) against a rebuilt engine, which silently drops the
-        // whole voice loop. This WARN is the only diagnostic that says so, hence the pointer
-        // to the doc that explains the lockstep. `log_from` against `paths.log_file`, never
-        // `log_cached*` — see `log_client` above.
+        // Bad-request sink: hooks discard the reply, so without this WARN deploy skew
+        // (stale CLI missing `--client`) silently kills the voice loop. See log_client.
         let log_paths = paths.clone();
         let on_bad_request = move |detail: &str| {
             ds_log::log_from(
                 &log_paths.log_file,
                 ds_log::LogLevel::Warn,
                 "engine",
-                // Not attributable: the line that would have named the client is the very
-                // line that failed to decode.
                 ClientSource::Unknown,
                 &format!(
                     "{detail} — caller and engine are out of sync; \

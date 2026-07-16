@@ -1,60 +1,37 @@
-//! Engine-ping side effects for two `notify` events (dispatched from [`crate::hook_core`]).
-//! Both are tiny best-effort pings to the warm engine over the IPC socket; neither blocks
-//! Claude and neither synthesizes here (the engine owns playback).
+//! Engine-ping side effects for `notify` events (dispatched from [`crate::hook_core`]).
+//! Best-effort IPC pings; neither blocks the client nor synthesizes here (engine owns playback).
 //!
-//! [`Ping`] variants:
-//!   Greet       — SessionStart. A new terminal opened → `GreetSession`, so the engine greets
-//!                 in this session's pool voice IF `greet_on_open` is set (engine self-gates).
-//!   MarkActive  — UserPromptSubmit. You just prompted HERE → `MarkActive`, so the TTS queue
-//!                 speaks only this terminal's items and HOLDS the rest until they become
-//!                 active (narration follows the terminal you're working in). EXCEPT: when
-//!                 the prompt body is classified [`is_synthetic_continuation`] — a
-//!                 harness-injected continuation (e.g. Claude Code auto-re-invoking the agent
-//!                 with a `<task-notification>` block after a background task finishes), not
-//!                 something a human typed and submitted — the "you just moved your attention
-//!                 here" side effects (claiming active-terminal status, cancelling stale
-//!                 narration on submit) are skipped engine-side; only session-liveness
-//!                 bookkeeping still happens. See issue #11.
+//! [`Ping`]:
+//!   Greet       — SessionStart → `GreetSession` (engine self-gates on `greet_on_open`).
+//!   MarkActive  — UserPromptSubmit → `MarkActive` so TTS follows this terminal. EXCEPT when
+//!                 the prompt is [`is_synthetic_continuation`] (harness-injected, e.g. Claude
+//!                 Code `<task-notification>` after a background task) — then skip
+//!                 claim-active / cancel-on-submit side effects engine-side; only liveness
+//!                 bookkeeping. See issue #11.
 //!
-//! Spoken REPLIES and tool-step narration are NOT here: for streaming clients (Claude Code)
-//! every assistant message rides the ONE `MessageDisplay` → `hook_narrate::message_display`
-//! pipeline — the final reply is just another streamed message. Non-streaming clients (Codex)
-//! get their final reply voiced from the Stop handler in `hook_core`.
+//! Spoken replies are not here: streaming clients use MessageDisplay →
+//! `hook_narrate::message_display`; non-streaming final replies use Stop in `hook_core`.
 
 use ds_config::{ClientSource, Paths};
 use serde::Deserialize;
 
 /// Which best-effort engine ping a notify event maps to.
 pub enum Ping {
-    /// SessionStart → greet in this session's pool voice (engine self-gates on `greet_on_open`).
+    /// SessionStart → greet in this session's pool voice (engine self-gates).
     Greet,
     /// UserPromptSubmit → mark THIS terminal active so narration follows it.
     MarkActive,
 }
 
-/// Prompt-body markers that identify a harness-injected CONTINUATION — Claude Code
-/// auto-re-invoking the agent with a synthetic user-turn message — rather than
-/// something a human actually typed and submitted. Checked as a PREFIX (after
-/// trimming leading whitespace), never a substring: a harness continuation IS the
-/// entire synthetic prompt (nothing human precedes it), so `starts_with` can't
-/// misfire on a human prompt that merely mentions or pastes the tag partway through
-/// (e.g. "why did narration cut off — I see `<task-notification>` in the log?").
+/// Prefix markers (after leading whitespace) for harness-injected continuations — never
+/// substring, so a human prompt that merely mentions the tag mid-text isn't misclassified.
 ///
-/// Only ONE entry is confirmed today: `<task-notification>`, captured live from a
-/// background Bash task's completion re-invoking Claude Code (issue #11, DontSpeak
-/// v0.2.2, macOS). Docs research for this fix (Agent Teams' teammate/idle-message
-/// delivery, `/loop`/cron scheduled-task wakeups) confirms OTHER harness
-/// continuations exist — they also inject between turns with no human present — but
-/// Anthropic does not publish their literal wrapper text, so guessing one here would
-/// risk either missing real occurrences or matching human text by accident. Add an
-/// entry the moment a sibling shape is actually observed (a captured payload, or a
-/// documented format) — this table exists precisely so that's a one-line change.
+/// Only `<task-notification>` confirmed today (issue #11). Other harness shapes exist
+/// (Agent Teams, `/loop`) but Anthropic doesn't publish wrapper text — add entries only
+/// when observed or documented.
 const SYNTHETIC_PROMPT_MARKERS: &[&str] = &["<task-notification>"];
 
-/// PURE: does `prompt` (the `UserPromptSubmit` hook's `prompt` field) look like a
-/// harness-injected continuation rather than a genuine human submit? See
-/// [`SYNTHETIC_PROMPT_MARKERS`] for the marker table and the prefix-vs-contains
-/// rationale.
+/// Pure: is this UserPromptSubmit `prompt` a harness continuation? See markers above.
 fn is_synthetic_continuation(prompt: &str) -> bool {
     let trimmed = prompt.trim_start();
     SYNTHETIC_PROMPT_MARKERS
@@ -62,9 +39,7 @@ fn is_synthetic_continuation(prompt: &str) -> bool {
         .any(|m| trimmed.starts_with(m))
 }
 
-/// The `UserPromptSubmit` hook's `prompt` field (fail-open: absent/malformed JSON or
-/// a non-string value reads as `""`, same idiom as [`crate::hook_core::event_name`] /
-/// [`crate::hook_core::session_id_from_payload`]).
+/// UserPromptSubmit `prompt` field (fail-open: absent/malformed → `""`).
 #[derive(Deserialize, Default)]
 struct PromptEnvelope {
     #[serde(default)]
@@ -77,10 +52,7 @@ fn prompt_from_payload(payload: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Build the `MarkActive` request for a `UserPromptSubmit` `payload`: the ambient
-/// session id, the synthetic classification of the prompt body, and the CLIENT that invoked
-/// the hook. Split out from [`engine_ping`] so payload → wire-request shape is unit-testable
-/// without a socket.
+/// Build `MarkActive` from payload — split from [`engine_ping`] so shape is unit-testable.
 fn mark_active_request(payload: &str, client: ClientSource) -> ds_ipc::Request {
     ds_ipc::Request::MarkActive {
         session: crate::hook_core::session_id_from_payload(payload),
@@ -89,11 +61,8 @@ fn mark_active_request(payload: &str, client: ClientSource) -> ds_ipc::Request {
     }
 }
 
-/// Fire ONE best-effort ping to the warm engine from a hook `payload` (the Claude Code hook
-/// JSON, already read from stdin by the `notify` dispatch — NOT re-read here). Pulls the
-/// ambient `session_id` so the engine scopes the greet / active-mark to the right session, and
-/// stamps `client` (the `--client` token the wiring embedded) so the engine + its activity log
-/// know WHICH client is talking. Engine down ⇒ no-op; never blocks or fails the hook.
+/// One best-effort ping from hook `payload` (already read by notify — not re-read). Scopes
+/// by ambient `session_id` and stamps `client`. Engine down ⇒ no-op.
 pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str, client: ClientSource) {
     let req = match ping {
         Ping::Greet => ds_ipc::Request::GreetSession {
@@ -117,17 +86,13 @@ fn earcon_request(payload: &str, event: &str, client: ClientSource) -> ds_ipc::R
     }
 }
 
-/// Ask the warm engine to enqueue an audible earcon (`event` = `"reply_done"` /
-/// `"needs_input"`) behind this session's earlier speech. Engine down ⇒ no-op.
+/// Enqueue earcon (`reply_done` / `needs_input`) behind this session's speech. Engine down ⇒ no-op.
 pub fn engine_earcon(paths: &Paths, event: &str, payload: &str, client: ClientSource) {
     let _ = ds_ipc::request(&paths.engine_sock, &earcon_request(payload, event, client));
 }
 
-/// Like [`engine_earcon`], but the session is supplied by the caller (e.g. Grok Stop uses the
-/// sticky `grok-stop:<session>` tag so reply_done queues behind sticky digests under the same
-/// session tag — ordered relative to each other; the tag is not the real session id so
-/// MarkActive current-clear cannot prune them, while `select_pos` still prefers
-/// `grok-stop:<active>` with the active terminal).
+/// Like [`engine_earcon`] with an explicit session (Grok Stop uses sticky `grok-stop:<session>`
+/// so reply_done queues behind sticky digests; MarkActive current-clear cannot prune the tag).
 pub fn engine_earcon_for_session(
     paths: &Paths,
     event: &str,
@@ -144,19 +109,16 @@ pub fn engine_earcon_for_session(
     );
 }
 
-/// The `Notification` hook payload (subset): which kind of notification Claude Code surfaced.
+/// Notification hook subset: which kind Claude Code surfaced.
 #[derive(Debug, Deserialize, Default)]
 struct NotificationHook {
-    // Grok sends camelCase (`notificationType`); the alias accepts it alongside Claude's snake_case.
+    // Grok camelCase alias.
     #[serde(default, alias = "notificationType")]
     notification_type: String,
 }
 
-/// PURE: does this `Notification` hook `payload` warrant the needs-input earcon? Only the
-/// "waiting on you" notifications (a permission prompt or an idle prompt) do. Other types
-/// (auth success, MCP elicitation chatter), a missing field, or malformed JSON all read as
-/// "no" so the cue stays meaningful. Split from [`notification_earcon`] so the parse+gate
-/// logic is unit-testable without an engine socket.
+/// Pure gate: only `permission_prompt` / `idle_prompt` warrant needs-input. Other types,
+/// missing field, or bad JSON → no (cue stays meaningful).
 fn wants_needs_input_earcon(payload: &str) -> bool {
     let kind = serde_json::from_str::<NotificationHook>(payload.trim())
         .map(|h| h.notification_type)
@@ -164,9 +126,7 @@ fn wants_needs_input_earcon(payload: &str) -> bool {
     matches!(kind.as_str(), "permission_prompt" | "idle_prompt")
 }
 
-/// `Notification` notify: ring the needs-input earcon — but ONLY for the "waiting on you"
-/// notifications (a permission prompt or an idle prompt). Other types (auth success, MCP
-/// elicitation chatter) are ignored so the cue stays meaningful. `payload` is the hook JSON.
+/// Notification notify: needs-input earcon only for "waiting on you" types.
 pub fn notification_earcon(paths: &Paths, payload: &str, client: ClientSource) {
     if wants_needs_input_earcon(payload) {
         engine_earcon(paths, "needs_input", payload, client);
@@ -218,10 +178,7 @@ mod tests {
         assert!(!wants_needs_input_earcon(""));
     }
 
-    /// Smoke tests: pointed at a `Paths::rooted_at` tempdir with no socket present at the
-    /// resulting `engine_sock`, `engine_ping`/`engine_earcon` must not panic and must return
-    /// promptly (the connect-fails-fast branch). The connect-succeeds branch needs a live
-    /// engine socket and is out of scope here.
+    /// No socket at tempdir engine_sock: connect fails fast; no panic / hang.
     #[test]
     fn engine_ping_with_no_socket_returns_promptly() {
         let dir = tempfile::tempdir().unwrap();

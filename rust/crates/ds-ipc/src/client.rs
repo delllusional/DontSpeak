@@ -1,7 +1,5 @@
-//! Blocking RPC client over the [`crate::transport`] byte stream, used by
-//! `ds-core` (for the SwiftUI app), the `dontspeak` MCP server, and the Claude
-//! Code hooks. Every call is fallible by design: a missing socket means "engine
-//! down", and callers fall back to their legacy path.
+//! Blocking RPC client over [`crate::transport`]. Used by `ds-core`, the MCP server, and hooks.
+//! Fallible by design: missing socket ⇒ engine down; callers fall back.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -10,13 +8,11 @@ use std::{io, time::Duration};
 use crate::protocol::{Request, Response};
 use crate::transport::{self, Stream};
 
-/// Connect to the engine socket at `sock_path`. Err ⇒ engine not running.
+/// Connect to the engine socket. Err ⇒ engine not running.
 pub fn connect(sock_path: &Path) -> io::Result<Client> {
     let stream = transport::connect(sock_path)?;
-    // Don't let a wedged engine hang a client forever, but stay generous for
-    // STREAMING reads: a `dictate`/test-recognition session can listen up to ~60s
-    // (possibly silent, so no partials arrive) before its final transcript, which a
-    // shorter timeout would falsely abort. 120s covers the longest dictate + final pass.
+    // 120s covers longest STREAMING dictate (~60s silence possible) + final pass; shorter
+    // would abort a quiet session. Write stays tight.
     stream.set_read_timeout(Some(Duration::from_secs(120)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     Ok(Client {
@@ -25,23 +21,20 @@ pub fn connect(sock_path: &Path) -> io::Result<Client> {
     })
 }
 
-/// Fire-and-forget convenience: connect, send one request, read until the
-/// terminal response, return it. Err if the engine is down or the link breaks.
+/// Connect, one request, drain to terminal response. Err if engine down or link breaks.
 pub fn request(sock_path: &Path, req: &Request) -> io::Result<Response> {
     let mut c = connect(sock_path)?;
     c.send(req)?;
     c.recv_terminal()
 }
 
-/// A connected client. Streaming responses are drained line by line via
-/// [`Client::recv`].
+/// Connected client. Stream intermediates via [`Client::recv`].
 pub struct Client {
     writer: Stream,
     reader: BufReader<Stream>,
 }
 
 impl Client {
-    /// Write one request line.
     pub fn send(&mut self, req: &Request) -> io::Result<()> {
         let mut s = serde_json::to_string(req)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -50,7 +43,7 @@ impl Client {
         self.writer.flush()
     }
 
-    /// Read one response line. Err on EOF (engine closed) or a parse failure.
+    /// One response line. Err on EOF (engine closed) or parse failure.
     pub fn recv(&mut self) -> io::Result<Response> {
         let mut line = String::new();
         let n = self.reader.read_line(&mut line)?;
@@ -63,9 +56,7 @@ impl Client {
         serde_json::from_str(line.trim()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    /// Read lines until a terminal response, returning that terminal line. For
-    /// streaming requests, intermediate non-terminal lines are dropped — use
-    /// [`Client::recv`] in a loop if you need them.
+    /// Drain until a terminal response (drops intermediates). Use [`recv`] in a loop for partials.
     pub fn recv_terminal(&mut self) -> io::Result<Response> {
         loop {
             let resp = self.recv()?;
@@ -81,9 +72,7 @@ mod tests {
     use super::*;
     use std::thread;
 
-    /// A real connected (client, server) stream pair over a throwaway
-    /// temp-dir socket, so tests can script a fake engine peer without
-    /// running the actual daemon.
+    /// Throwaway socket pair so tests can script a fake engine without the daemon.
     fn socket_pair() -> (Stream, Stream) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("dontspeak.sock");
@@ -94,10 +83,7 @@ mod tests {
         (client, server)
     }
 
-    /// Build a `Client` directly from a raw stream with a caller-chosen read
-    /// timeout, bypassing `connect()`'s hardcoded 120s. That real timeout is
-    /// otherwise untestable in a reasonable amount of time — this makes the
-    /// timeout path exercisable with a short one instead.
+    /// Bypass `connect()`'s 120s read timeout so the timeout path is testable quickly.
     fn client_with_timeout(stream: Stream, read_timeout: Duration) -> Client {
         stream.set_read_timeout(Some(read_timeout)).unwrap();
         stream
@@ -109,9 +95,7 @@ mod tests {
         }
     }
 
-    /// Finding: "zero tests for EOF-on-recv". The engine closing the
-    /// connection mid-wait must come back as a clear error, not a hang or a
-    /// panic.
+    /// Engine close mid-wait must surface as UnexpectedEof, not hang/panic.
     #[test]
     fn recv_errs_on_eof() {
         let (client_stream, server_stream) = socket_pair();
@@ -123,7 +107,6 @@ mod tests {
         assert!(err.to_string().contains("engine closed the connection"));
     }
 
-    /// Finding: "zero tests for ... garbled response lines".
     #[test]
     fn recv_errs_on_a_garbled_non_json_response_line() {
         let (client_stream, mut server_stream) = socket_pair();
@@ -134,15 +117,11 @@ mod tests {
         let err = client
             .recv()
             .expect_err("a garbled response line must be an error, not Ok");
-        // Wrapped via `io::Error::other` around the serde_json parse failure,
-        // not an I/O-level failure.
+        // serde parse failure → InvalidData, not an I/O-level failure.
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
-    /// Finding: "recv_terminal's unbounded loop over non-terminal responses".
-    /// Several non-terminal lines (`Listening`, `Partial`) must be silently
-    /// skipped, and the loop must stop at (and return) the first terminal
-    /// line (`Transcript`).
+    /// Non-terminal lines (`Listening`/`Partial`) skipped; first terminal (`Transcript`) returned.
     #[test]
     fn recv_terminal_skips_non_terminal_lines_then_returns_the_terminal_one() {
         let (client_stream, mut server_stream) = socket_pair();
@@ -175,10 +154,7 @@ mod tests {
         }
     }
 
-    /// Finding: recv_terminal is "bounded only by an untested 120s timeout".
-    /// Makes the timeout path reachable in a fast test by injecting a short
-    /// read timeout instead of the real 120s one; a silent peer must
-    /// eventually error rather than hang.
+    /// Short injected timeout: silent peer must error (not hang on real 120s).
     #[test]
     fn recv_times_out_when_the_peer_goes_silent() {
         let (client_stream, server_stream) = socket_pair();
@@ -193,8 +169,7 @@ mod tests {
             "the injected short timeout should fire quickly, took {:?}",
             started.elapsed()
         );
-        // A `set_read_timeout` expiry is platform-dependent between these two
-        // kinds (e.g. WouldBlock/EAGAIN on some platforms, TimedOut on others).
+        // Platform-dependent: WouldBlock/EAGAIN vs TimedOut.
         assert!(
             matches!(
                 err.kind(),
@@ -202,6 +177,6 @@ mod tests {
             ),
             "expected a timeout-flavored error, got: {err:?}"
         );
-        drop(server_stream); // keep the peer alive until here so this is a real timeout, not EOF
+        drop(server_stream); // keep peer alive until here so this is timeout, not EOF
     }
 }

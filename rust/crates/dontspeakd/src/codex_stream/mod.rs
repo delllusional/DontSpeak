@@ -1,33 +1,11 @@
-//! The Codex app-server SUBSCRIBER — mid-turn narration for OpenAI Codex sessions
-//! (issue delllusional/DontSpeak#10). Codex has no `MessageDisplay` hook stream, so no
-//! per-batch hook process can exist; instead the ENGINE (the one long-lived resident
-//! process) attaches to the user's shared codex app-server (the daemon behind
-//! `codex --remote`), subscribes to the threads that belong to REGISTERED DontSpeak
-//! sessions, and translates `item/agentMessage/delta` / `item/completed` into the same
-//! `ds_narrate::StreamBatch`es the Claude Code / Qwen Code hook adapters feed — one
-//! shared core, three thin adapters (docs/STREAMING-NARRATION.md).
+//! Codex app-server subscriber — mid-turn narration (no MessageDisplay hooks; #10).
+//! Engine attaches to shared app-server, resumes registered sessions only, feeds
+//! `ds_narrate::StreamBatch`es (docs/STREAMING-NARRATION.md).
 //!
-//! Scope guarantees:
-//!   * **Session-keyed, never narrate-everything** — only threads whose id maps
-//!     ([`proto::session_for_thread`]) to a session the hooks registered (GreetSession /
-//!     MarkActive over IPC) are resumed; a Codex Desktop / third-party thread on the same
-//!     daemon is never narrated, and CC/Qwen session ids simply never match.
-//!   * **Witness parity** — a successful `thread/resume` seeds the session's streaming
-//!     witness ([`ds_narrate::seed_witness`]), so `Stop` stays silent for streamed
-//!     sessions with ZERO changes to the Stop path; a plain-TUI session (no `--remote`)
-//!     never resumes → no witness → `Stop` speaks exactly as today.
-//!   * **Never double-speak** — every flush goes through [`ds_narrate::deliver_batch`],
-//!     whose on-disk high-water mark makes reconnect/replay dedup-safe. On transient
-//!     disconnects state files are KEPT (documented tradeoff: narration for turns during
-//!     an app-server outage is lost rather than double-spoken).
-//!   * **Cleanup is owned here** — Codex wires no `SessionEnd` hook, so the supervisor
-//!     deletes the state/lock/tmp trio on eviction (thread gone from the daemon's loaded
-//!     list, or a long idle TTL) and sweeps crash-orphaned state files at start.
-//!
-//! Config (`config.toml`, re-read per loop pass — no restart needed): `codex_stream`
-//! (master switch, default on), `codex_stream_daemon_start` (persistent proactive
-//! lifecycle; `dontspeak codex` can request the same path without changing it),
-//! `codex_app_server_url` (loopback `ws://` override), and `codex_bin`.
+//! Guarantees: session-keyed (never narrate-everything); witness parity so Stop stays
+//! silent for streamed sessions; never double-speak ([`ds_narrate::deliver_batch`] HWM);
+//! cleanup here (no SessionEnd hook). Config re-read per loop: `codex_stream`,
+//! `codex_stream_daemon_start`, `codex_app_server_url`, `codex_bin`.
 
 mod client;
 mod proto;

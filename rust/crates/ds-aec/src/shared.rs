@@ -1,13 +1,11 @@
-//! Capture-side AEC pieces shared by the Windows (WASAPI Communications APO) and Linux
-//! (PulseAudio/PipeWire `module-echo-cancel`) backends. Both feed a `Mutex<VecDeque<f32>>`
-//! bounded ring that a [`CaptureHandle`] drains while rodio renders TTS. macOS instead uses
-//! a lock-free `ringbuf` SPSC, so it keeps its own `CaptureHandle` and overflow handling.
+//! Capture-side AEC pieces shared by Windows (WASAPI Communications APO) and Linux
+//! (Pulse `module-echo-cancel`). Both feed a bounded `Mutex<VecDeque<f32>>` that
+//! [`CaptureHandle`] drains while rodio renders. macOS uses lock-free ringbuf instead.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-/// A `Send`+`Sync` drain handle for an echo-cancelled capture buffer (see
-/// `DuplexAudio::capture_handle`). Identical for the Windows and Linux backends.
+/// Send+Sync drain handle for an echo-cancelled capture buffer.
 #[derive(Clone)]
 pub struct CaptureHandle {
     cap: Arc<Mutex<VecDeque<f32>>>,
@@ -15,26 +13,24 @@ pub struct CaptureHandle {
 }
 
 impl CaptureHandle {
-    /// Build a handle over a backend's shared capture buffer + its negotiated rate.
     pub fn new(cap: Arc<Mutex<VecDeque<f32>>>, rate: u32) -> Self {
         Self { cap, rate }
     }
 
-    /// The negotiated capture sample rate (feed through a `rate`→16 kHz resampler).
+    /// Negotiated capture rate (feed through rate→16 kHz resampler for Parakeet).
     pub fn capture_rate(&self) -> u32 {
         self.rate
     }
 
-    /// Drain the echo-cancelled mono f32 captured since the last call.
+    /// Echo-cancelled mono f32 since last call.
     pub fn drain(&self) -> Vec<f32> {
         let mut q = self.cap.lock().unwrap();
         q.drain(..).collect()
     }
 }
 
-/// Render-side no-op twin of [`CaptureHandle`] for the capture-side backends
-/// (`owns_render()` is `false` — rodio renders TTS). Exists so the helper's duplex
-/// feeder compiles without cfg on every OS; it never receives samples here.
+/// Render-side no-op for capture-side backends (`owns_render() == false`; rodio renders).
+/// Keeps the helper's duplex feeder cfg-free on every OS.
 #[derive(Clone)]
 pub struct RenderHandle {
     _private: (),
@@ -51,14 +47,11 @@ impl RenderHandle {
         std::time::Duration::ZERO
     }
 
-    /// Render-time mute is macOS-only (VPIO owns render there); these capture-side
-    /// backends keep rodio output, muted via the player's volume instead.
+    /// Mute is macOS-only (VPIO owns render); here rodio volume mutes.
     pub fn set_muted(&self, _on: bool) {}
 }
 
-/// Append `samples` to the shared capture buffer, dropping the oldest f32 once it grows past
-/// `cap_limit` — a stalled listen must never grow the ring without bound. The single
-/// overflow-trim rule for both capture threads.
+/// Append samples; drop oldest if over `cap_limit` (stalled listen must not grow unbounded).
 pub fn enqueue_bounded(cap: &Arc<Mutex<VecDeque<f32>>>, samples: &[f32], cap_limit: usize) {
     let mut q = cap.lock().unwrap();
     q.extend(samples.iter().copied());
@@ -98,7 +91,6 @@ mod enqueue_bounded_tests {
     fn one_over_the_bound_drops_the_single_oldest_sample() {
         let cap = ring(&[]);
         enqueue_bounded(&cap, &[1.0, 2.0, 3.0, 4.0], 3);
-        // Oldest (1.0) is dropped; the newest 3 survive, order preserved.
         assert_eq!(contents(&cap), vec![2.0, 3.0, 4.0]);
     }
 
@@ -112,9 +104,7 @@ mod enqueue_bounded_tests {
 
     #[test]
     fn preexisting_samples_plus_a_new_chunk_drops_the_oldest_first() {
-        // Simulates a stalled listen: the ring already holds samples from earlier
-        // pushes, and a new chunk tips it over `cap_limit` — the OLDEST
-        // (pre-existing) samples must be the ones dropped, never the newest.
+        // Stalled listen: pre-existing samples + new chunk → drop oldest, keep newest.
         let cap = ring(&[1.0, 2.0]);
         enqueue_bounded(&cap, &[3.0, 4.0, 5.0], 3);
         assert_eq!(contents(&cap), vec![3.0, 4.0, 5.0]);

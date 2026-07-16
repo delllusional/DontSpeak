@@ -1,16 +1,14 @@
-//! System STT — Apple's on-device speech recognition on macOS. Windows and Linux support
-//! is tracked in issue #75. The real recognition
-//! runs through the warm helper (mic capture → `crate::sysspeech::SystemTranscriber`),
-//! exactly like Parakeet; this `SystemStt` is the INERT in-process placeholder the
-//! `ds-engines` factory returns for the helper-less / unavailable case.
+//! System STT — Apple's on-device speech recognition on macOS. Windows/Linux: issue #75.
+//! Live recognition runs in the warm helper (`crate::sysspeech::SystemTranscriber`);
+//! this `SystemStt` is the INERT in-process placeholder the factory returns when the
+//! helper path is unavailable.
 //!
-//! It is deliberately inert (never grabs Caps, never injects) so that selecting
-//! `stt_engine=system` when it can't run does NOT silently fall back to Claude-native
-//! dictation — the engine surfaces "unavailable" instead.
+//! Deliberately inert (never grabs Caps, never injects) so selecting `stt_engine=system`
+//! when it can't run does NOT silently fall back to Claude-native — surfaces "unavailable".
 
 use crate::Stt;
 
-/// Inert in-process System STT placeholder (the live path is the warm helper).
+/// Inert in-process System STT placeholder (live path is the warm helper).
 #[derive(Default)]
 pub struct SystemStt;
 
@@ -19,8 +17,7 @@ impl SystemStt {
         SystemStt
     }
 
-    /// Is on-device system STT usable right now? Real probe on macOS (no prompt),
-    /// false elsewhere. Used by the engine's availability gate.
+    /// Usable right now? Real probe on macOS (no prompt); false elsewhere.
     pub fn available() -> bool {
         crate::system_available()
     }
@@ -28,8 +25,8 @@ impl SystemStt {
 
 impl Stt for SystemStt {
     fn start(&mut self) -> bool {
-        // Inert: the live recognizer runs in the warm helper, not here. Returning false
-        // means a Caps press does nothing in this box (no silent claude_native fallback).
+        // Inert: live recognizer is in the warm helper. false ⇒ Caps does nothing here
+        // (no silent claude_native fallback).
         false
     }
     fn stop(&mut self) {}

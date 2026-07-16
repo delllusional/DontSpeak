@@ -1,15 +1,9 @@
-//! Brands the `ds-helper.exe` Windows version resource so Task Manager / Explorer "Details"
-//! show "DontSpeak" instead of the bare "ds-helper" exe name — the Rust counterpart to the
-//! WinUI app's `<AssemblyTitle>/<Product>` (apps/windows/winui/DontSpeak.WinUI.csproj).
-//!
-//! Windows-only and best-effort: the `winresource` build-dep is pulled only on a Windows HOST
-//! (see Cargo.toml's `cfg(windows)` build-dependencies), and we additionally gate on a Windows
-//! TARGET, so this build script is an empty no-op for every macOS/Linux build and never needs
-//! rc.exe there. A missing rc.exe only drops the metadata (a warning), never fails the build.
+//! Brands `ds-helper.exe` Windows version resource (Task Manager "DontSpeak") —
+//! counterpart to WinUI `<AssemblyTitle>/<Product>`. Windows host+target only
+//! (`cfg(windows)` build-dep + target gate); no-op elsewhere. Missing rc.exe → warning only.
 
 fn main() {
-    // Narrow cargo's default rescan-the-whole-package behavior: this script reads no
-    // other file (CARGO_CFG_TARGET_OS/CARGO_PKG_* are already fingerprint inputs).
+    // Script reads no other files (CARGO_CFG_*/CARGO_PKG_* are fingerprint inputs).
     println!("cargo:rerun-if-changed=build.rs");
     #[cfg(windows)]
     {

@@ -1,29 +1,21 @@
-//! Enrolled-speaker store — the persistent voiceprints that let diarization label
-//! segments by NAME instead of "Speaker 1".
+//! Enrolled-speaker store — voiceprints so diarization labels by name, not "Speaker 1".
 //!
-//! One JSON file at [`crate::Paths::speakers_json`] (in the roaming config dir):
-//! a list of `{name, embedding}` where `embedding` is a WeSpeaker voiceprint
-//! (~256 `f32`s) extracted once at enroll time. The engine owns this file (single
-//! writer); the diarize path loads it and cosine-matches each speaker cluster's
-//! embedding against the enrolled set.
-//!
-//! Load is fail-open (a missing/corrupt file → empty store, never an error — the
-//! same discipline as the rest of the config layer); save is atomic (temp + rename
-//! via [`crate::atomic_write_json`]).
+//! JSON at [`crate::Paths::speakers_json`]: `{name, embedding}` (WeSpeaker ~256 f32).
+//! Engine is sole writer; diarize path cosine-matches clusters against the set.
+//! Load fail-open (missing/corrupt → empty); save atomic via [`crate::atomic_write_json`].
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// One enrolled person: a display name and their voiceprint embedding.
+/// One enrolled person: display name + voiceprint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Speaker {
     pub name: String,
     pub embedding: Vec<f32>,
 }
 
-/// The whole enrolled set. `#[serde(default)]` on the field so an empty/partial file
-/// still deserializes to an empty store.
+/// Full enrolled set. `#[serde(default)]` so empty/partial files deserialize.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpeakerStore {
     #[serde(default)]
@@ -31,8 +23,7 @@ pub struct SpeakerStore {
 }
 
 impl SpeakerStore {
-    /// Load the store from `path`, failing OPEN: a missing or corrupt file yields an
-    /// empty store rather than an error (mirrors `LifetimeSeconds::load`).
+    /// Fail-open load: missing/corrupt → empty (mirrors `VoiceConfig::load`).
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
             .ok()
@@ -40,14 +31,14 @@ impl SpeakerStore {
             .unwrap_or_default()
     }
 
-    /// Atomically persist the store to `path` (temp file in the same dir + rename).
+    /// Atomic persist (temp + rename).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let value = serde_json::to_value(self)
             .map_err(|e| std::io::Error::other(format!("serialize speakers: {e}")))?;
         crate::atomic_write_json(path, &value)
     }
 
-    /// Add or replace the voiceprint for `name` (case-sensitive exact match).
+    /// Add or replace voiceprint for `name` (case-sensitive).
     pub fn upsert(&mut self, name: impl Into<String>, embedding: Vec<f32>) {
         let name = name.into();
         if let Some(s) = self.speakers.iter_mut().find(|s| s.name == name) {
@@ -57,24 +48,22 @@ impl SpeakerStore {
         }
     }
 
-    /// Remove the speaker named `name`; returns whether one was removed.
+    /// Remove by name; returns whether one was removed.
     pub fn remove(&mut self, name: &str) -> bool {
         let before = self.speakers.len();
         self.speakers.retain(|s| s.name != name);
         self.speakers.len() != before
     }
 
-    /// Enrolled names, in insertion order.
+    /// Enrolled names, insertion order.
     pub fn names(&self) -> Vec<String> {
         self.speakers.iter().map(|s| s.name.clone()).collect()
     }
 
-    /// Number of enrolled speakers.
     pub fn len(&self) -> usize {
         self.speakers.len()
     }
 
-    /// Whether no speakers are enrolled.
     pub fn is_empty(&self) -> bool {
         self.speakers.is_empty()
     }
@@ -90,7 +79,6 @@ mod tests {
         s.upsert("Alex", vec![1.0, 2.0]);
         s.upsert("Sam", vec![3.0]);
         assert_eq!(s.len(), 2);
-        // upsert replaces, not duplicates.
         s.upsert("Alex", vec![9.0]);
         assert_eq!(s.len(), 2);
         assert_eq!(

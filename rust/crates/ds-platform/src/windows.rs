@@ -1,14 +1,9 @@
-//! Windows platform impl — behind cfg(target_os="windows"). Built + tested on
-//! Windows in CI (the release full matrix).
+//! Windows platform (cfg target_os=windows; release CI matrix).
 //!
-//! * Caps LED: `set_caps_lock` drives the physical Caps light out-of-band via
-//!   `IOCTL_KEYBOARD_SET_INDICATORS` — a pure recording-state output. The logical
-//!   toggle is read only while the shared key-acquisition sequence normalizes startup.
-//! * Dictation key: `SendInput` presses the chord (modifiers + base key) then
-//!   releases — one discrete tap that toggles recording.
-//! * Frontmost: `GetForegroundWindow` + `GetWindowThreadProcessId`, then resolve
-//!   the process image name and match a terminal list (WindowsTerminal.exe,
-//!   conhost.exe, powershell.exe, pwsh.exe, cmd.exe, alacritty.exe, ...).
+//! * Caps LED: `IOCTL_KEYBOARD_SET_INDICATORS` as pure recording-state output; logical
+//!   toggle only during shared acquisition normalize.
+//! * Dictation: `SendInput` chord press+release.
+//! * Frontmost: `GetForegroundWindow` → image basename vs terminal list.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -144,20 +139,9 @@ fn frontmost_process_basename() -> Option<String> {
     }
 }
 
-// ── Caps-Lock low-level keyboard hook ────────────────────────────────────────
-//
-// We OWN the Caps key. A `WH_KEYBOARD_LL` hook (installed on a dedicated thread
-// with its own message pump — the OS calls a low-level hook on the installing
-// thread, which MUST pump) fires on every physical Caps transition and SUPPRESSES
-// it (returns 1), so Windows never toggles capitals or the LED. This replaces the
-// old 30 ms `GetAsyncKeyState` poll, whose sampling gap silently dropped any tap
-// faster than the interval — the cause of "tapping Caps to submit does nothing".
-//
-// Each transition is latched into `CAPS_DOWN` (the live held state) AND pushed onto
-// `CAPS_EDGES` (a lossless queue the engine drains each tick), so a down+up that
-// both land inside one tick still replays as a real tap. The callback is trivial
-// (set an atomic + push one edge) to stay well under `LowLevelHooksTimeout`. This
-// mirrors the macOS CGEventTap that latches `caps_down` — the two ports converge.
+// Caps WH_KEYBOARD_LL on a dedicated pump thread: suppress Caps (no OS toggle/LED),
+// latch CAPS_DOWN + CAPS_EDGES (lossless vs old 30 ms poll drop). Keep callback cheap
+// (LowLevelHooksTimeout). Mirrors macOS CGEventTap.
 
 /// Live physical-held state of the Caps key, written by the hook callback.
 static CAPS_DOWN: AtomicBool = AtomicBool::new(false);

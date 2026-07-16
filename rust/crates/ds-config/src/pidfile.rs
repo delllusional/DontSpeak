@@ -1,29 +1,12 @@
-//! Engine pidfile (§E.4 hot-reload) — read/parse half (PURE) + liveness probe +
-//! the single-instance guard.
-//!
-//! The engine writes `std::process::id()` to `paths.engine_pid` on startup so a NEWLY
-//! starting engine can evict an older one ([`evict_stale_engine`]) and probe its
-//! liveness. The PARSE is
-//! pure (no signals, no processes) so it unit-tests on a tempdir file; the
-//! liveness/terminate primitives are the cross-platform ones in `ds_proc`. Liveness
-//! alone is NOT identity: a crash can leave a stale pidfile whose pid the OS later
-//! recycles to an unrelated process, so [`evict_stale_engine`] additionally confirms
-//! the live pid is running the SAME executable as us before it ever signals it.
+//! Engine pidfile — pure parse + liveness + single-instance guard ([`evict_stale_engine`]).
+//! Liveness alone is not identity (PID recycle after crash) — eviction confirms same exe.
 
-/// Read the engine pid recorded in `path`, if present and well-formed.
-///
-/// PURE: returns `None` on ANY failure (missing file, empty, garbage,
-/// non-positive) so a stale/garbage pidfile never yields a bogus pid the caller
-/// might signal. No signals, no processes. Delegates to the canonical pidfile
-/// codec [`ds_proc::read_pid`] so the read/parse rule lives in one place.
+/// Pure parse; `None` on any failure (never a bogus pid to signal). Via [`ds_proc::read_pid`].
 pub fn read_engine_pid(path: &std::path::Path) -> Option<i32> {
     ds_proc::read_pid(path)
 }
 
-/// Is the pid recorded in the engine pidfile still alive? Reads + parses the
-/// pidfile (PURE half) then probes liveness. Returns false on a missing/garbage
-/// pidfile OR a dead pid — so the single-instance guard never targets a stale pid the
-/// OS may have recycled to an unrelated process. Cross-platform via [`is_pid_alive`].
+/// Pidfile pid still alive? False on missing/garbage/dead.
 pub fn is_engine_pid_alive(path: &std::path::Path) -> bool {
     match read_engine_pid(path) {
         Some(pid) => is_pid_alive(pid),
@@ -31,9 +14,7 @@ pub fn is_engine_pid_alive(path: &std::path::Path) -> bool {
     }
 }
 
-/// Is a single process alive? Delegates to [`ds_proc::pid_alive`] — the
-/// EPERM-means-alive (unix) / QUERY_LIMITED_INFORMATION-or-access-denied (windows)
-/// probe, so this contract lives in ONE place across the platforms.
+/// Process alive? Via [`ds_proc::pid_alive`] (EPERM-means-alive / access-denied contracts).
 pub fn is_pid_alive(pid: i32) -> bool {
     ds_proc::pid_alive(pid)
 }
@@ -112,12 +93,7 @@ fn exe_basename_for_pid(_pid: i32) -> Option<String> {
     None
 }
 
-/// Does the still-live `pid` look like OUR OWN engine binary — i.e. does it share
-/// this process's executable basename? This is the identity check that closes the
-/// PID-recycling hole: liveness alone can't tell our old engine apart from whatever
-/// unrelated process the OS has since handed that same numeric pid to. `false`
-/// on ANY uncertainty (can't resolve our own exe, or can't resolve the target's) —
-/// never claims a match it can't back up.
+/// Same executable basename as us? Closes PID-recycle hole; false on any uncertainty.
 fn is_same_engine_binary(pid: i32) -> bool {
     let Some(want) = std::env::current_exe()
         .ok()
@@ -128,24 +104,11 @@ fn is_same_engine_binary(pid: i32) -> bool {
     exe_basename_for_pid(pid).is_some_and(|got| got.eq_ignore_ascii_case(&want))
 }
 
-/// Single-instance guard: evict an OLDER engine before this one binds the socket.
+/// Evict an older same-binary engine before binding the socket.
 ///
-/// There is no portable OS singleton we can lean on — the engine runs IN-PROCESS
-/// inside the GUI host, so no OS process manager arbitrates it on any platform. Worse,
-/// `ds_ipc::bind` unlinks + rebinds the socket, so a second engine STEALS the
-/// path from a still-running first one instead of failing — leaving TWO engines that
-/// both narrate, which is heard as the same reply spoken twice after a reinstall or
-/// upgrade. So a starting engine reads the recorded pid and, if it is a DIFFERENT
-/// live process THAT IS CONFIRMED TO BE THE SAME ENGINE BINARY (`is_same_engine_binary`),
-/// asks it to exit first: SIGTERM on unix (the old engine's handler
-/// runs its clean shutdown, reaping its warm helper); `TerminateProcess` on Windows
-/// (the old helper then self-exits on stdin EOF). Returns the pid evicted, if any.
-///
-/// A hard crash can leave a stale pidfile whose pid the OS later recycles to an
-/// unrelated process; liveness alone can't distinguish that from our own old engine,
-/// so a live-but-unconfirmed pid is NEVER signalled — the pidfile is treated as
-/// garbage and removed instead, and this returns `None`. Never targets our own pid,
-/// and is a no-op when the recorded engine is already gone.
+/// No portable singleton; engine is in-process in the GUI host. `ds_ipc::bind` unlinks+
+/// rebinds, so a second start steals the socket → double narration. Signals only when
+/// live pid is confirmed same exe; otherwise drops garbage pidfile. Never targets self.
 pub fn evict_stale_engine(path: &std::path::Path, self_pid: u32) -> Option<i32> {
     let pid = read_engine_pid(path)?;
     if pid as u32 == self_pid || !is_pid_alive(pid) {

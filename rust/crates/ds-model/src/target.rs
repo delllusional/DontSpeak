@@ -1,69 +1,36 @@
-//! The canonical set of download / installer-prefetch targets.
+//! Canonical download / installer-prefetch targets.
 //!
-//! Historically each dispatcher — the installer prefetch list ([`crate::spec::prefetch_items`]),
-//! the ds-helper `run_prefetch`, and the engine's background download manager — re-spelled the
-//! same bare `&str` tokens ("onnx", "kokoro", "parakeet", …) in its own `match`, with no shared
-//! definition. A typo or a renamed token would silently fall through to a default arm. This enum
-//! is the ONE definition every dispatcher matches on, so the wire tokens live in a single place
-//! and an exhaustive `match` forces every target to be considered. String conversion happens
-//! ONLY at the true process boundary — the ds-helper CLI (`--prefetch` / `--print-manifest` /
-//! `--install-prefetched`) parses its argv token once; every in-process API (the engine's
-//! `start_download`, [`crate::spec::prefetch_items`], the status rows) takes the enum, and
-//! [`as_str`](DownloadTarget::as_str) is emitted only into logs/CLI output.
-//!
-//! Naming convention: per-model targets are `<brand>_<flavor>` (`kokoro_model` = the ONNX
-//! flavor, `kokoro_coreml` = the apple-native Core ML flavor, …); shared runtimes and
-//! installer groups are bare nouns (`onnxruntime`, `cuda`, `models`, …). Platform support
-//! lives in ONE predicate, [`is_supported_on_this_host`](DownloadTarget::is_supported_on_this_host),
-//! which every dispatcher's `cfg`-gated fetch arms must mirror.
+//! ONE enum every dispatcher matches (`prefetch_items`, `run_prefetch`, engine download
+//! manager) so wire tokens can't typo-fallthrough. Parse only at the process boundary
+//! (CLI); in-process APIs take the enum. Naming: `<brand>_<flavor>` for models,
+//! bare nouns for runtimes/groups. Platform gate: [`is_supported_on_this_host`](DownloadTarget::is_supported_on_this_host).
 
-/// A single download / prefetch target, plus retained legacy installer tokens. The
-/// [`as_str`](DownloadTarget::as_str) token is the stable wire form passed across the
-/// IPC / CLI / installer boundary.
+/// Download/prefetch target. [`as_str`](DownloadTarget::as_str) is the stable wire form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DownloadTarget {
-    /// The shared onnxruntime dylib — the base ORT runtime every ONNX model runs on.
-    /// Wire token `"onnxruntime"` (not the bare format name "onnx", which elsewhere
-    /// means a MODEL flavor — e.g. the `kokoro_model`/`parakeet_model` ONNX sets).
+    /// Shared ORT dylib. Wire `"onnxruntime"` (not bare `"onnx"` — that means a model flavor).
     Onnxruntime,
-    /// The full portable Kokoro set: synth graph, voices, shared OOV G2P graphs, and ORT.
-    /// Wire token `"kokoro_model"` — the `_model` suffix disambiguates this download target
-    /// from the engine brand "kokoro".
+    /// Full portable Kokoro + ORT. Wire `"kokoro_model"` (not brand `"kokoro"`).
     KokoroModel,
-    /// Assets both Kokoro synthesis backends share: voices, OOV G2P graphs, and ORT.
-    /// Wire token `"kokoro_frontend"` names the bundle by its role rather than one file in it.
+    /// Voices + OOV G2P + ORT (shared by both Kokoro backends). Wire `"kokoro_frontend"`.
     KokoroFrontend,
-    /// The apple-native Kokoro Core ML sets — the runtime ANE chain PLUS the G2P/lexicon
-    /// sub-models ([`crate::coreml_repo::KOKORO_COREML_SET`]). macOS-only (ANE shim); fetched
-    /// into the dirs the shim loads from offline, like [`DiarizationCoreml`](Self::DiarizationCoreml).
+    /// Apple-native Kokoro Core ML set ([`crate::coreml_repo::KOKORO_COREML_SET`]). macOS.
     KokoroCoreml,
-    /// The FULL Parakeet streaming-STT asset set (encoder + decoder + joiner + tokens, plus
-    /// the shared onnxruntime dylib on supported platforms). Wire token `"parakeet_model"` —
-    /// the `_model` suffix disambiguates this download target from the engine brand "parakeet".
+    /// Full Parakeet streaming set + ORT. Wire `"parakeet_model"`.
     ParakeetModel,
-    /// The apple-native Parakeet Core ML sets — the streaming EOU set PLUS the offline
-    /// sliding-window fallback ([`crate::coreml_repo::PARAKEET_COREML_SET`]). macOS-only.
+    /// Apple-native Parakeet Core ML set ([`crate::coreml_repo::PARAKEET_COREML_SET`]). macOS.
     ParakeetCoreml,
-    /// The SepFormer speech-separation model (`sepformer_int8.onnx`, ~29 MB) for the
-    /// dictation speaker-lock, plus the shared onnxruntime dylib it runs on. macOS-only —
-    /// the speaker-lock path that consumes it is macOS code. Wire token
-    /// `"sepformer_model"`, the `_model` suffix like its ONNX siblings.
+    /// SepFormer speaker-lock + ORT. macOS. Wire `"sepformer_model"`.
     SepformerModel,
-    /// The shared GPU runtime (~1.4 GB CUDA EP wheels) — drives BOTH engines (x86_64
-    /// Windows/Linux only).
+    /// CUDA EP wheels (~1.4 GB). x86_64 Windows/Linux only.
     Cuda,
-    /// The speaker-diarization Core ML models (the macOS ANE-shim path; fetched into the
-    /// dir the shim loads from offline). The `_coreml` suffix marks the apple-native
-    /// flavor, like its [`KokoroCoreml`](Self::KokoroCoreml)/[`ParakeetCoreml`](Self::ParakeetCoreml)
-    /// siblings (there is no ONNX diarization flavor).
+    /// Speaker-diarization Core ML (macOS). Wire `"diarization_coreml"`.
     DiarizationCoreml,
-    /// Both ONNX models (Kokoro + Parakeet) — the installer's "models" component group.
+    /// Installer group: Kokoro + Parakeet ONNX.
     Models,
-    /// Legacy Windows .NET Desktop Runtime wire token. The self-contained package no
-    /// longer fetches this mutable prerequisite; retained only for wire compatibility.
+    /// Legacy Windows .NET Desktop Runtime token (no-op; wire compat only).
     Dotnet,
-    /// Legacy Windows App Runtime wire token. The self-contained package no longer
-    /// fetches this mutable prerequisite; retained only for wire compatibility.
+    /// Legacy Windows App Runtime token (no-op; wire compat only).
     Winapp,
 }
 

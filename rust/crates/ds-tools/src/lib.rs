@@ -42,21 +42,14 @@ const HIDDEN_SET_CONFIG_PARAMS: &[&str] = &[
 
 /// The JSON-Schema shape of a tool parameter.
 enum PType {
-    /// A free-form string.
     Str,
-    /// A string constrained to a fixed set of tokens.
     Enum(&'static [&'static str]),
-    /// A number with an inclusive `[min, max]`.
     Num(f64, f64),
-    /// An integer with an inclusive `[min, max]`.
     Int(i64, i64),
-    /// A boolean flag.
     Bool,
-    /// An array of strings.
     StrArray,
-    /// An array whose items are constrained to a fixed token set (e.g. `narrate`).
     EnumArray(&'static [&'static str]),
-    /// `capture_gain`: the string `"auto"` OR a number `0.5–20` (a JSON-Schema `oneOf`).
+    /// `capture_gain`: `"auto"` OR a number `0.5–20` (JSON-Schema `oneOf`).
     Gain,
 }
 
@@ -68,8 +61,7 @@ struct Param {
     description: &'static str,
 }
 
-/// One tool: name, description, its ordered params, and whether at least one property is
-/// required (`minProperties: 1`, for `set_config`).
+/// One tool. `min_one` ⇒ `minProperties: 1` (for `set_config`).
 struct Tool {
     name: &'static str,
     description: &'static str,
@@ -118,7 +110,6 @@ const fn p(name: &'static str, ty: PType, required: bool, description: &'static 
 /// speaker diarization (diarize · manage_speakers — the voiceprint library it labels with),
 /// and finally the rare admin tool (set_config) in the low-attention tail.
 static TOOLS: &[Tool] = &[
-    // Core action: say something.
     Tool {
         name: "speak",
         description: SPEAK,
@@ -131,7 +122,6 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(false, false, false),
         output: None,
     },
-    // Core action: hear something back (dictation).
     Tool {
         name: "listen",
         description: LISTEN,
@@ -140,7 +130,6 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(true, false, false),
         output: None,
     },
-    // Interrupt spoken output.
     Tool {
         name: "stop_speech",
         description: STOP_SPEECH,
@@ -149,7 +138,7 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(false, true, true),
         output: None,
     },
-    // Persistent silence toggle for all spoken output (the global mute the app also drives).
+    // Global mute — same switch the app drives.
     Tool {
         name: "mute",
         description: MUTE,
@@ -158,8 +147,6 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(false, false, true),
         output: None,
     },
-    // Read-only introspection: current runtime state, then the voices replies can use (the
-    // voice itself is a persistent setting — see `set_config`'s tts_built_in_voices).
     Tool {
         name: "get_status",
         description: GET_STATUS,
@@ -181,7 +168,7 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(true, false, true),
         output: Some(Output::Voices),
     },
-    // ── Speaker diarization (who spoke when) + voiceprint enrollment ──
+    // Hidden when `DIARIZATION_ENABLED` is false (visibility only — see that flag).
     Tool {
         name: "diarize",
         description: DIARIZE,
@@ -190,8 +177,7 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(true, false, false),
         output: None,
     },
-    // Manage the enrolled-voiceprint library that diarize uses to put names to speakers:
-    // one action-dispatched tool (list / enroll / forget) instead of three.
+    // One action-dispatched tool (list / enroll / forget) instead of three.
     Tool {
         name: "manage_speakers",
         description: MANAGE_SPEAKERS,
@@ -209,12 +195,10 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(false, true, false),
         output: None,
     },
-    // Persistent settings, then one-time client wiring.
     Tool {
         name: "set_config",
         description: SET_CONFIG,
-        // Grouped by concern (TTS output · narration · STT/dictation · compute · diarization ·
-        // UI) so related knobs sit together — this order is what the Tools window shows.
+        // Grouped by concern — this order is what the Tools window shows.
         params: &[
             // ── TTS output ──
             p(
@@ -298,7 +282,7 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_PROVIDER,
             ),
-            // ── Diarization ──
+            // ── Diarization (hidden when gate is off) ──
             p(
                 "diarizer_provider",
                 PType::EnumArray(&["apple_native"]),
@@ -337,14 +321,10 @@ static TOOLS: &[Tool] = &[
     },
 ];
 
-/// Whether `t` should appear on user-facing surfaces (tools/list, catalog_ui, the schema)
-/// given the current `DIARIZATION_ENABLED` gate.
 fn is_visible(t: &Tool) -> bool {
     DIARIZATION_ENABLED || !HIDDEN_TOOLS.contains(&t.name)
 }
 
-/// `t`'s params filtered to what's visible on user-facing surfaces: everything, unless a
-/// param is one of the hidden diarization knobs and the gate is off.
 fn visible_params(t: &Tool) -> Vec<&Param> {
     t.params
         .iter()
@@ -352,15 +332,13 @@ fn visible_params(t: &Tool) -> Vec<&Param> {
         .collect()
 }
 
-/// The canonical tool names, in catalog (display) order. The single accessor the MCP
-/// dispatch router pins itself against (see the `router_handles_every_catalog_tool` drift
-/// test in `dontspeak::tools`) so a tool added/renamed here can't silently go unrouted.
+/// Catalog (display) order. MCP dispatch pins against this via
+/// `router_handles_every_catalog_tool` in `dontspeak::tools`.
 pub fn tool_names() -> impl Iterator<Item = &'static str> {
     TOOLS.iter().filter(|t| is_visible(t)).map(|t| t.name)
 }
 
-/// Validate one invocation against the exact definition used to advertise its
-/// `inputSchema`. Unknown or currently-hidden tools are rejected as unavailable.
+/// Validate against the advertised `inputSchema`. Unknown/hidden tools → unavailable.
 pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), String> {
     let tool = TOOLS
         .iter()
@@ -444,7 +422,6 @@ fn validate_param(param: &Param, value: &Value) -> Result<(), String> {
     }
 }
 
-/// The MCP catalog, generated from `TOOLS`.
 pub fn catalog() -> Value {
     Value::Array(
         TOOLS
@@ -539,7 +516,6 @@ fn output_schema_for(output: Output) -> Value {
     }
 }
 
-/// The advertised output schema for a visible structured-result tool.
 pub fn output_schema(name: &str) -> Option<Value> {
     TOOLS
         .iter()
@@ -548,19 +524,14 @@ pub fn output_schema(name: &str) -> Option<Value> {
         .map(output_schema_for)
 }
 
-/// The RAW `inputSchema` for one tool by name, looked up directly in `TOOLS` — ignoring
-/// `DIARIZATION_ENABLED`/`HIDDEN_TOOLS` entirely. Exists so callers that need to verify
-/// schema/dispatch parity for a tool REGARDLESS of whether it's currently hidden from
-/// user-facing surfaces (e.g. the `diarize`/`manage_speakers` regression coverage in
-/// `dontspeak::tools`) don't have to go through the filtered `catalog()`.
+/// RAW `inputSchema` by name, ignoring `DIARIZATION_ENABLED` — so hidden-tool
+/// schema/dispatch parity tests don't go through filtered `catalog()`.
 pub fn raw_input_schema(name: &str) -> Option<Value> {
     TOOLS.iter().find(|t| t.name == name).map(input_schema)
 }
 
-/// The app/UI catalog: `[{ name, description, params: [...] }]` with the params as an
-/// ORDERED ARRAY (authored order), generated from `TOOLS`. The SwiftUI Tools window
-/// renders this directly so argument order is the authored order — not whatever a JSON
-/// object's key iteration yields.
+/// App/UI catalog: params as an ORDERED array (authored order), not JSON-Schema
+/// `properties` object key order. Tools window renders this directly.
 pub fn catalog_ui() -> Value {
     Value::Array(
         TOOLS
@@ -577,7 +548,6 @@ pub fn catalog_ui() -> Value {
     )
 }
 
-/// Build one tool's JSON-Schema `inputSchema` from its params.
 fn input_schema(t: &Tool) -> Value {
     let params = visible_params(t);
     let mut schema = Map::new();
@@ -603,7 +573,6 @@ fn input_schema(t: &Tool) -> Value {
     Value::Object(schema)
 }
 
-/// One param's JSON-Schema property object (for `inputSchema.properties`).
 fn param_schema(param: &Param) -> Value {
     let d = param.description;
     match &param.ty {
@@ -630,8 +599,7 @@ fn param_schema(param: &Param) -> Value {
     }
 }
 
-/// One param's UI object (for the ordered `params` array): the raw type + constraints the
-/// Tools window needs to render a name/type/required line and a detail (enum / range).
+/// UI param object for the ordered `params` array (type + enum/range for Tools window).
 fn param_ui(param: &Param) -> Value {
     let mut o = Map::new();
     o.insert("name".into(), json!(param.name));
@@ -666,7 +634,6 @@ fn param_ui(param: &Param) -> Value {
             o.insert("enum".into(), json!(vals));
         }
         PType::Gain => {
-            // "auto" or a 0.5–20 multiplier.
             o.insert("type".into(), json!("number_or_enum"));
             o.insert("enum".into(), json!(["auto"]));
             o.insert("minimum".into(), json!(0.5));
@@ -971,9 +938,7 @@ mod tests {
         }
     }
 
-    /// The UI catalog mirrors the MCP catalog tool-for-tool, but carries params as an
-    /// ORDERED array — the authored order, which is the whole point (the MCP inputSchema's
-    /// `properties` object can't convey order).
+    /// UI catalog params are an ORDERED array (MCP `properties` can't convey order).
     #[test]
     fn catalog_ui_params_are_ordered() {
         let ui = catalog_ui();

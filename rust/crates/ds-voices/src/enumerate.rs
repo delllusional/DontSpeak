@@ -1,39 +1,33 @@
 //! Voice enumeration for the CURRENTLY-SELECTED engine, filtered to a language.
 //!
-//! A small, dependency-light home for "what voices can I pick right now?" so it
-//! is shared by every consumer instead of re-derived:
-//!   - the SwiftUI/Slint picker (`ds-core` delegates its `kokoro_ids` /
-//!     `system_voices` here), and
-//!   - the MCP server's `list_voices` tool (which has no access to the FFI
-//!     `ds-core` crate).
+//! Shared by the host picker (`ds-core` delegates `kokoro_ids` / `system_voices`
+//! here) and the MCP `list_voices` tool (no access to FFI `ds-core`).
 //!
 //! Two engines, two id conventions:
-//!   - Kokoro: opaque `<lang><gender>_name` ids read from `voices-v1.0.bin` when
-//!     present (NEVER downloaded here), else a static fallback set. The leading
-//!     char is the language family (`a` American + `b` British English; Kokoro
-//!     ships no German voices, so German is intentionally absent for now), the
-//!     second is the gender (`f`/`m`).
-//!   - System: `say -v ?` (macOS) → [`SpeakerVoice`] carrying a BCP-47
-//!     `language_tag` (`en-US`, `de-DE`, …); empty off-host.
+//!   - Kokoro: opaque `<lang><gender>_name` ids from `voices-v1.0.bin` when present
+//!     (NEVER downloaded here), else a static fallback. Leading char = language
+//!     family (`a` American + `b` British English; Kokoro ships no German voices,
+//!     so German is intentionally absent), second char = gender (`f`/`m`).
+//!   - System: `say -v ?` (macOS) → [`SpeakerVoice`] with BCP-47 `language_tag`;
+//!     empty off-host.
 //!
-//! Everything except the disk read (`kokoro_voice_ids`) and the `say` shell-out
-//! (`system_voices`) is PURE and unit-tested with no model, no audio, no network.
+//! Everything except disk read (`kokoro_voice_ids`) and `say` shell-out
+//! (`system_voices`) is PURE and unit-tested (no model, audio, or network).
 
 use ds_config::{TtsEngine, VoiceConfig};
 
 use crate::{Gender, Quality, SpeakerVoice, say, voices};
 
-/// One pickable voice for the current engine+language: the opaque engine `id`
-/// (handed back to `speak`/`settings.json`) and a tidy human `label`.
+/// One pickable voice: opaque engine `id` (handed back to `speak`/`settings.json`)
+/// and a tidy human `label`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceChoice {
     pub id: String,
     pub label: String,
 }
 
-/// A small fallback Kokoro id set shown when `voices-v1.0.bin` is absent, so the
-/// list is never empty and the well-known English defaults always appear. Kokoro
-/// ships no German voices, so none are listed here.
+/// Fallback Kokoro ids when `voices-v1.0.bin` is absent, so the list is never empty
+/// and well-known English defaults always appear. No German (Kokoro ships none).
 pub const KOKORO_FALLBACK_IDS: &[&str] = &[
     "af_sarah",
     "af_heart",
@@ -43,24 +37,20 @@ pub const KOKORO_FALLBACK_IDS: &[&str] = &[
     "bm_george",
 ];
 
-/// The Kokoro voices asset's bare on-disk file name — a DELIBERATE duplicate of just the
-/// name, NOT a new source of truth. `ds_model::KOKORO_VOICES_FILE` remains the single
-/// source of truth for the actual download pin (URL + SHA-256 + size); this crate is not
-/// allowed to depend on `ds-model` as a real (non-dev) dependency (issue #5's whole
-/// point), so it can't read that constant at build time. The dev-only test
-/// `kokoro_voices_filename_matches_ds_model_registry` below is the drift guard that keeps
-/// this literal honest without pulling `ds-model` (and its attohttpc/ort/flate2/tar) into
-/// this crate's real dependency graph.
+/// Bare on-disk filename for the Kokoro voices asset — a DELIBERATE name-only
+/// duplicate, NOT a new source of truth. `ds_model::KOKORO_VOICES_FILE` remains
+/// the download pin (URL + SHA-256 + size); this crate must not depend on
+/// `ds-model` as a real dep (issue #5). Dev-only test
+/// `kokoro_voices_filename_matches_ds_model_registry` is the drift guard.
 const KOKORO_VOICES_FILE: &str = "voices-v1.0.bin";
 
 // ── Kokoro id parsing (PURE) ─────────────────────────────────────────────────
 
-/// The language subtag a Kokoro id belongs to, from its leading family char
-/// (`af_sarah` → "en"). Unknown shapes → "other". German is intentionally NOT
-/// mapped: Kokoro ships no German voices, so the `d` family stays "other" for now.
+/// Language subtag from a Kokoro id's leading family char (`af_sarah` → "en").
+/// Unknown shapes → "other". German (`d`) intentionally unmapped for now.
 pub fn kokoro_language(id: &str) -> &'static str {
     match id.as_bytes().first() {
-        // `a` American + `b` British English both reply in "en".
+        // `a` American + `b` British both → "en".
         Some(b'a') | Some(b'b') => "en",
         Some(b'e') => "es",
         Some(b'f') => "fr",
@@ -73,9 +63,8 @@ pub fn kokoro_language(id: &str) -> &'static str {
     }
 }
 
-/// The full BCP-47 tag a Kokoro id implies. The English families carry a region
-/// (`a` American → "en-US", `b` British → "en-GB"); every other family has no
-/// region in Kokoro's ids, so it falls back to the bare [`kokoro_language`] subtag.
+/// Full BCP-47 tag. English families carry region (`a` → "en-US", `b` → "en-GB");
+/// others fall back to the bare [`kokoro_language`] subtag.
 pub fn kokoro_language_tag(id: &str) -> String {
     match id.as_bytes().first() {
         Some(b'a') => "en-US".to_string(),
@@ -84,8 +73,7 @@ pub fn kokoro_language_tag(id: &str) -> String {
     }
 }
 
-/// The gender a Kokoro id encodes in its second char (`af_…` Female, `am_…`
-/// Male). Unknown shapes → `None`.
+/// Gender from second char (`af_…` Female, `am_…` Male). Unknown → `None`.
 pub fn kokoro_gender(id: &str) -> Option<Gender> {
     let bytes = id.as_bytes();
     if bytes.len() >= 3 && bytes[2] == b'_' {
@@ -98,8 +86,7 @@ pub fn kokoro_gender(id: &str) -> Option<Gender> {
     None
 }
 
-/// A short accent hint for the English families (`a` American, `b` British);
-/// `None` for every other family (the language already says it).
+/// Accent hint for English families only (`a` American, `b` British).
 fn kokoro_accent(id: &str) -> Option<&'static str> {
     match id.as_bytes().first() {
         Some(b'a') => Some("American"),
@@ -108,7 +95,7 @@ fn kokoro_accent(id: &str) -> Option<&'static str> {
     }
 }
 
-/// Turn a Kokoro id into a tidy display name (`af_sarah` → "Sarah").
+/// Display name from a Kokoro id (`af_sarah` → "Sarah").
 pub fn kokoro_display_name(id: &str) -> String {
     let raw = id.split_once('_').map(|(_, n)| n).unwrap_or(id);
     let mut chars = raw.chars();
@@ -118,7 +105,7 @@ pub fn kokoro_display_name(id: &str) -> String {
     }
 }
 
-/// A human label for a Kokoro id, e.g. "Sarah (American, Female)".
+/// Human label, e.g. "Sarah (American, Female)".
 fn kokoro_label(id: &str) -> String {
     let name = kokoro_display_name(id);
     let mut parts: Vec<&str> = Vec::new();
@@ -137,7 +124,7 @@ fn kokoro_label(id: &str) -> String {
     }
 }
 
-/// The serialized gender word for a [`Gender`] (`"female"`/`"male"`), or `None`.
+/// Serialized gender word (`"female"`/`"male"`), or `None`.
 pub fn gender_str(g: Option<Gender>) -> Option<&'static str> {
     match g {
         Some(Gender::Female) => Some("female"),
@@ -148,8 +135,8 @@ pub fn gender_str(g: Option<Gender>) -> Option<&'static str> {
 
 // ── Engine voice id sources (disk / shell — the only impure bits) ────────────
 
-/// Read Kokoro voice ids from the downloaded `voices-v1.0.bin` if it is present;
-/// otherwise return the static fallback set. NEVER downloads. Probes disk only.
+/// Kokoro voice ids from `voices-v1.0.bin` if present; else static fallback.
+/// NEVER downloads. Probes disk only.
 pub fn kokoro_voice_ids() -> Vec<String> {
     if let Some(path) = ds_config::model_dir().map(|d| d.join(KOKORO_VOICES_FILE))
         && path.is_file()
@@ -162,8 +149,7 @@ pub fn kokoro_voice_ids() -> Vec<String> {
     KOKORO_FALLBACK_IDS.iter().map(|s| s.to_string()).collect()
 }
 
-/// Enumerate System voices via `say -v ?` (macOS) — empty off-host. Shells out
-/// to `say` (no network).
+/// System voices via `say -v ?` (macOS) — empty off-host. No network.
 pub fn system_voices() -> Vec<SpeakerVoice> {
     #[cfg(target_os = "macos")]
     {
@@ -185,8 +171,7 @@ pub fn system_voices() -> Vec<SpeakerVoice> {
 
 // ── Language-filtered choice lists (PURE over the fetched ids/voices) ─────────
 
-/// The BCP-47 primary subtag of a tag (`en-US` → "en"); the whole string if it
-/// has no `-`. Lower-cased so comparisons are case-insensitive.
+/// BCP-47 primary subtag (`en-US` → "en"); whole string if no `-`. Lower-cased.
 pub fn primary_subtag(tag: &str) -> String {
     tag.split(['-', '_'])
         .next()
@@ -194,14 +179,12 @@ pub fn primary_subtag(tag: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Kokoro voices for `language` (e.g. "en", "de"), sorted by label. Reads the
-/// voices bin once (or the fallback set).
+/// Kokoro voices for `language`, sorted by label.
 pub fn kokoro_choices(language: &str) -> Vec<VoiceChoice> {
     kokoro_choices_from(&kokoro_voice_ids(), language)
 }
 
-/// PURE filter+label+sort of Kokoro `ids` to `language` (factored out of
-/// [`kokoro_choices`] so it is unit-tested without the disk read).
+/// PURE filter+label+sort of Kokoro `ids` (unit-tested without the disk read).
 pub fn kokoro_choices_from(ids: &[String], language: &str) -> Vec<VoiceChoice> {
     let want = language.to_ascii_lowercase();
     let mut out: Vec<VoiceChoice> = ids
@@ -216,14 +199,13 @@ pub fn kokoro_choices_from(ids: &[String], language: &str) -> Vec<VoiceChoice> {
     out
 }
 
-/// System voices for `language`, sorted by label. Reads `say -v ?` once. The
-/// label carries an Enhanced/Premium quality hint where the OS reports one.
+/// System voices for `language`, sorted by label. Label carries Enhanced/Premium
+/// where the OS reports it.
 pub fn system_choices(language: &str) -> Vec<VoiceChoice> {
     system_choices_from(&system_voices(), language)
 }
 
-/// PURE filter+label+sort of System `voices` to `language` (factored out of
-/// [`system_choices`] so it is unit-tested without the `say` shell-out).
+/// PURE filter+label+sort of System `voices` (unit-tested without `say`).
 pub fn system_choices_from(voices: &[SpeakerVoice], language: &str) -> Vec<VoiceChoice> {
     let want = primary_subtag(language);
     let mut out: Vec<VoiceChoice> = voices
@@ -238,7 +220,7 @@ pub fn system_choices_from(voices: &[SpeakerVoice], language: &str) -> Vec<Voice
     out
 }
 
-/// A human label for a System voice ("Samantha", "Ava (Premium)").
+/// System voice label ("Samantha", "Ava (Premium)").
 fn system_label(v: &SpeakerVoice) -> String {
     match v.quality {
         Some(Quality::Enhanced) if !v.name.contains("Enhanced") => format!("{} (Enhanced)", v.name),
@@ -247,12 +229,11 @@ fn system_label(v: &SpeakerVoice) -> String {
     }
 }
 
-// ── Current voice NAME for the active engine (the single cross-platform resolver) ─────────
+// ── Current voice NAME for the active engine (single cross-platform resolver) ─
 
-/// Tidy a raw System-TTS voice name into a short, speakable form for the greeting/UI: drop the
-/// `"Microsoft "` vendor prefix and the legacy `" Desktop"` suffix, plus any trailing
-/// ` (Quality)` parenthetical — so `"Microsoft Hazel Desktop"` → `"Hazel"`, `"Ava (Premium)"`
-/// → `"Ava"`, and a plain `"Samantha"` is unchanged.
+/// Tidy a raw System-TTS name for greeting/UI: drop `"Microsoft "` prefix,
+/// legacy `" Desktop"` suffix, and trailing ` (Quality)` — so
+/// `"Microsoft Hazel Desktop"` → `"Hazel"`, `"Ava (Premium)"` → `"Ava"`.
 pub fn friendly_system_name(raw: &str) -> String {
     let s = raw.trim();
     let s = s.strip_prefix("Microsoft ").unwrap_or(s);
@@ -261,11 +242,11 @@ pub fn friendly_system_name(raw: &str) -> String {
     s.trim().to_string()
 }
 
-/// The DISPLAY name of a resolved `(engine, voice)` — the ONE place that turns "what is
-/// speaking" into a short, speakable name, shared by the greeting and the UI:
-/// * Kokoro → the voice id's friendly name (`af_sarah` → "Sarah").
-/// * System → the configured voice tidied, or — when empty — the OS DEFAULT voice's
-///   name (the exact voice narration uses), tidied. `None` if the default can't be read.
+/// DISPLAY name of a resolved `(engine, voice)` — the ONE place that turns "what
+/// is speaking" into a short speakable name (greeting + UI):
+/// * Kokoro → friendly name (`af_sarah` → "Sarah").
+/// * System → configured voice tidied, or — when empty — OS DEFAULT voice tidied.
+///   `None` if the default can't be read.
 pub fn voice_display_name(engine: TtsEngine, voice: &str) -> Option<String> {
     match engine {
         TtsEngine::Kokoro => Some(kokoro_display_name(voice)),
@@ -281,12 +262,11 @@ pub fn voice_display_name(engine: TtsEngine, voice: &str) -> Option<String> {
     }
 }
 
-/// The name of the voice CURRENTLY selected for the active engine — the single source the UI
-/// shows and the greeting names. Thin wrapper over [`voice_display_name`] for the engine's
-/// default/current voice (Kokoro: `current_voice()`; System: `tts_system_voice`, else the OS
-/// default).
+/// Voice CURRENTLY selected for the active engine — single source the UI shows
+/// and the greeting names. Wrapper over [`voice_display_name`] for the engine's
+/// current voice (Kokoro: `current_voice()`; System: `tts_system_voice`, else OS default).
 pub fn current_voice_name(cfg: &VoiceConfig) -> Option<String> {
-    // The active engine is the `tts_engine` ladder's first usable rung (None ⇒ TTS off).
+    // First usable rung of `tts_engine` ladder (None ⇒ TTS off).
     let engine = cfg.resolved_tts()?;
     let voice = match engine {
         TtsEngine::Kokoro => cfg.current_voice(),
@@ -301,9 +281,8 @@ mod tests {
 
     #[test]
     fn kokoro_voices_filename_matches_ds_model_registry() {
-        // Dev-only drift guard (see KOKORO_VOICES_FILE's doc comment): keeps this crate's
-        // local duplicate byte-for-byte in sync with ds-model's real download-registry
-        // pin, without ds-model ever becoming a real (non-dev) dependency of this crate.
+        // Drift guard (see KOKORO_VOICES_FILE): keep the local duplicate in sync
+        // without making ds-model a real dependency.
         assert_eq!(KOKORO_VOICES_FILE, ds_model::KOKORO_VOICES_FILE);
     }
 
@@ -312,7 +291,7 @@ mod tests {
         assert_eq!(kokoro_language("af_sarah"), "en");
         assert_eq!(kokoro_language("bm_george"), "en");
         assert_eq!(kokoro_language("ef_dora"), "es");
-        // German is removed for now: the `d` family is not mapped to a language.
+        // German removed for now: `d` family not mapped.
         assert_eq!(kokoro_language("df_anna"), "other");
         assert_eq!(kokoro_language("dm_klaus"), "other");
         // Unknown shapes never panic.
@@ -322,10 +301,10 @@ mod tests {
 
     #[test]
     fn kokoro_language_tag_carries_english_region() {
-        assert_eq!(kokoro_language_tag("af_sarah"), "en-US"); // American
+        assert_eq!(kokoro_language_tag("af_sarah"), "en-US");
         assert_eq!(kokoro_language_tag("am_adam"), "en-US");
-        assert_eq!(kokoro_language_tag("bm_george"), "en-GB"); // British
-        assert_eq!(kokoro_language_tag("ef_dora"), "es"); // no region for other families
+        assert_eq!(kokoro_language_tag("bm_george"), "en-GB");
+        assert_eq!(kokoro_language_tag("ef_dora"), "es");
         assert_eq!(kokoro_language_tag("weird"), "other");
     }
 
@@ -341,14 +320,13 @@ mod tests {
     fn kokoro_label_reads_naturally() {
         assert_eq!(kokoro_label("af_sarah"), "Sarah (American, Female)");
         assert_eq!(kokoro_label("bm_george"), "George (British, Male)");
-        // A non-English family (no accent hint): just the gender is shown.
+        // Non-English family: gender only (no accent hint).
         assert_eq!(kokoro_label("ef_dora"), "Dora (Female)");
     }
 
     #[test]
     fn kokoro_choices_filter_by_language_and_sort() {
-        // Drive the PURE filter/label/sort over a fixed id set (no disk read, so
-        // the assertion holds regardless of which voices bin is installed).
+        // Fixed id set so the assertion is independent of which voices bin is installed.
         let ids: Vec<String> = ["am_michael", "af_sarah", "df_anna", "bm_george"]
             .iter()
             .map(|s| s.to_string())
@@ -357,14 +335,13 @@ mod tests {
         let en = kokoro_choices_from(&ids, "en");
         assert!(en.iter().all(|c| kokoro_language(&c.id) == "en"));
         assert!(en.iter().any(|c| c.id == "af_sarah"));
-        assert!(en.iter().all(|c| c.id != "df_anna")); // the `d` family is excluded.
-        // Sorted by label.
+        assert!(en.iter().all(|c| c.id != "df_anna")); // `d` family excluded.
         let labels: Vec<&str> = en.iter().map(|c| c.label.as_str()).collect();
         let mut sorted = labels.clone();
         sorted.sort();
         assert_eq!(labels, sorted);
 
-        // German is removed for now: no language selects the `d` family.
+        // German removed for now: no language selects the `d` family.
         assert!(kokoro_choices_from(&ids, "de").is_empty());
     }
 
@@ -391,7 +368,7 @@ mod tests {
             mk("Anna", "de-DE"),
         ];
         let en = system_choices_from(&voices, "en");
-        assert_eq!(en.len(), 2); // both en-US and en-GB match "en".
+        assert_eq!(en.len(), 2); // en-US and en-GB both match "en".
         assert!(en.iter().all(|c| c.id != "Anna"));
         let de = system_choices_from(&voices, "de");
         assert_eq!(de.len(), 1);
@@ -446,12 +423,11 @@ mod tests {
 
     #[test]
     fn voice_display_name_per_engine() {
-        // Kokoro id → friendly first name.
         assert_eq!(
             voice_display_name(TtsEngine::Kokoro, "af_sarah").as_deref(),
             Some("Sarah")
         );
-        // System with an EXPLICIT voice tidies it (no OS-default query path).
+        // Explicit System voice tidies without the OS-default query path.
         assert_eq!(
             voice_display_name(TtsEngine::System, "Microsoft Zira Desktop").as_deref(),
             Some("Zira")
@@ -460,17 +436,16 @@ mod tests {
 
     #[test]
     fn current_voice_name_off_and_resolved_engine() {
-        // Off (empty `tts_engine_ladder`, preference unset) never names a voice — on every
-        // platform.
+        // Empty ladder + unset preference never names a voice (every platform).
         let off = VoiceConfig {
             tts_engine_ladder: Vec::new(),
             ..Default::default()
         };
         assert_eq!(current_voice_name(&off), None);
 
-        // A single-rung ladder names that engine's voice WHERE the rung is usable here, else
-        // resolves to off → None. Asserting against `resolved_tts()` keeps this platform-robust
-        // (Kokoro isn't usable on x86_64 macOS; System isn't wired on Linux).
+        // Single-rung ladder names that engine's voice where usable, else off → None.
+        // Assert against `resolved_tts()` for platform-robustness (Kokoro unusable on
+        // x86_64 macOS; System unwired on Linux).
         #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
         {
             let kokoro = VoiceConfig {

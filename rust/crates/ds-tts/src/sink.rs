@@ -1,27 +1,16 @@
-//! Incremental rodio playback sink — 24 kHz mono f32, one per speak request.
+//! Incremental rodio sink — 24 kHz mono f32, one per speak.
 //!
-//! Owns the three behaviours the warm serve loop (`ds-helper --serve`) and the
-//! non-macOS one-shot player ([`crate::play`]) share:
+//! Shared by warm serve (`ds-helper --serve`) and non-macOS one-shot ([`crate::play`]):
 //!
-//!   * **Onset lead silence.** A short silent buffer is prepended whenever the sink
-//!     starts (or restarts) from drained, so the output-stream RESUME latency (rodio
-//!     pauses the CoreAudio output when idle) is absorbed by silence instead of
-//!     clipping the speech onset — the "first speak, purple icon, no sound" fix.
-//!   * **Wall-clock drain detection.** rodio's `empty()` lies on WASAPI (it reports
-//!     true before the mixer consumed freshly appended buffers), so drained-ness is
-//!     computed deterministically from wall time vs. appended audio (`AppendClock`).
-//!   * **Played-batch accounting.** Each appended PCM batch records the cumulative
-//!     queued duration at its end; [`played_batches`](crate::sink::IncrementalSink::played_batches)
-//!     estimates how many batches have fully sounded by a given instant — the basis
-//!     for batch-granular resume after a barge (lead silence is never counted as a
-//!     batch).
+//!   * **Onset lead silence** — prepend when starting from drained so output-stream
+//!     RESUME latency is silence, not clipped onset ("purple icon, no sound").
+//!   * **Wall-clock drain** — rodio `empty()` lies on WASAPI; use wall time vs
+//!     appended audio (`AppendClock`).
+//!   * **Played-batch accounting** — cumulative queued duration per batch for
+//!     barge resume ([`played_batches`]; lead silence not a batch).
 //!
-//! NO-AUDIO DISCIPLINE: unit tests construct via
-//! [`IncrementalSink::connect_to`](crate::sink::IncrementalSink::connect_to) on a
-//! detached `rodio::mixer::Mixer` (no output device) and drive the clock with injected
-//! instants; [`IncrementalSink::open_default`](crate::sink::IncrementalSink::open_default)
-//! opens a real device and is exercised
-//! only by the ds-helper binary.
+//! NO-AUDIO: tests use [`connect_to`](IncrementalSink::connect_to) on a detached
+//! mixer + injected instants; [`open_default`] only in ds-helper.
 
 use std::num::NonZero;
 use std::sync::Arc;
@@ -32,27 +21,19 @@ use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
 
 use crate::vocab::SAMPLE_RATE;
 
-/// Leading silence prepended whenever the sink starts from drained (first append, or
-/// synthesis fell behind real time mid-utterance), so the output-stream resume never
-/// clips an onset. Pure + unit-tested so it can't silently regress to 0 samples
-/// (which would re-break the onset).
+/// Lead silence when starting from drained (first append or synth fell behind).
+/// Unit-tested so it can't silently regress to 0 (re-break onset).
 const LEAD_SILENCE_MS: u32 = 80;
 
-// Compile-time invariant: too little lead won't cover the rodio output-stream
-// resume latency.
+// Too little lead won't cover rodio resume latency.
 const _: () = assert!(LEAD_SILENCE_MS >= 40);
 
-/// `LEAD_SILENCE_MS` of mono silence at `srate_hz`. See [`LEAD_SILENCE_MS`].
 fn leading_silence_pcm(srate_hz: u32) -> Vec<f32> {
     vec![0.0f32; srate_hz as usize * LEAD_SILENCE_MS as usize / 1000]
 }
 
-/// Wall-clock drain detector for the incremental rodio path. `empty()` lies on WASAPI
-/// (see the module doc), so drained-ness is deterministic: once more wall time has
-/// elapsed in this playback run than audio was appended, the sink idled and the next
-/// append needs a fresh leading silence to absorb the output-stream resume (the
-/// "purple icon, no sound" clip, reachable mid-utterance because batches stream while
-/// later inference runs).
+/// Wall-clock drain detector. When wall time ≥ appended audio, sink idled → next
+/// append needs fresh lead silence (mid-utterance too: batches stream while synth runs).
 #[derive(Default)]
 struct AppendClock {
     started: Option<Instant>,
@@ -75,8 +56,7 @@ impl AppendClock {
     }
 }
 
-/// A per-request incremental playback sink: append validated PCM batches as they are
-/// committed, then [`wait`](Self::wait) for the tail (or [`stop`](Self::stop) on barge).
+/// Per-request sink: append committed PCM batches, then [`wait`] / [`stop`] on barge.
 pub struct IncrementalSink {
     // `player` must drop before `_device` — declare it first.
     player: Arc<Player>,

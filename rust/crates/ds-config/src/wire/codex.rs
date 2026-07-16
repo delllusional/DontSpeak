@@ -1,43 +1,13 @@
-//! OpenAI Codex CLI hooks (`~/.codex/config.toml`).
+//! OpenAI Codex CLI hooks (`~/.codex/config.toml`) — same event/stdin contract as Claude Code;
+//! TOML via `toml_edit`. Quote-free Windows commands ([`cmdline`](super::cmdline)).
 //!
-//! Codex grew a hooks system with the SAME contract as Claude Code's — events routed by
-//! `hook_event_name`, one JSON object on stdin, `Stop` carrying `last_assistant_message`,
-//! `UserPromptSubmit` honouring `hookSpecificOutput.additionalContext` — so the SAME
-//! `dontspeak notify` / `dontspeak provide` binary handles them. Only two things differ from
-//! the Claude Code wiring: the file is TOML (so we edit it with `toml_edit` to preserve the
-//! user's tables + comments), and the per-event set is Codex-shaped:
+//! Events:
+//! - `SessionStart` → `notify --greet-only` (plain `notify` would seed the streaming witness
+//!   and suppress Stop on hook-only clients; mid-turn uses `codex_stream` instead).
+//! - `UserPromptSubmit` → `notify` (MarkActive + session re-discovery) + `provide` (spec).
+//! - `Stop` → `notify` for non-streamed sessions (streamed witness stays silent).
 //!
-//!   * `SessionStart` → `dontspeak notify --greet-only` — the spoken greeting when a session
-//!     opens. `--greet-only` because Codex has no `MessageDisplay` hook stream: the plain
-//!     `notify` would seed the streaming witness, which on a hook-only client marks every
-//!     session "already narrated" and suppresses the `Stop` narration entirely. (Mid-turn
-//!     Codex narration exists, but rides the engine's app-server subscriber —
-//!     `dontspeakd::codex_stream` — which seeds the witness itself on a successful
-//!     `thread/resume`, so only actually-streamed sessions silence their `Stop`.)
-//!   * `UserPromptSubmit` → ONE group with TWO inner hooks (Codex launches all matching
-//!     hooks for an event concurrently):
-//!       - `dontspeak notify` — `MarkActive{session}`: per-terminal active routing +
-//!         `input_clears` parity for mid-turn narration, AND the engine's session
-//!         re-discovery after a restart (the codex_stream supervisor otherwise only learns
-//!         session ids at SessionStart's greet).
-//!       - `dontspeak provide` — inject the narration spec so Codex WRITES the spoken-line
-//!         blockquotes (without this it has nothing to speak).
-//!   * `Stop` → `dontspeak notify` — speak the final reply for sessions NOT streamed via the
-//!     app-server (plain-TUI); a streamed session's witness keeps this silent.
-//!
-//! Written as (POSIX shown; on Windows `command` is the QUOTE-FREE form — Codex hands the
-//! whole string to `cmd.exe /C` as one argv element, where an embedded `"` cannot survive.
-//! See [`cmdline`](super::cmdline)):
-//!   [[hooks.Stop]]
-//!   [[hooks.Stop.hooks]]
-//!   type = "command"
-//!   command = "\"…/dontspeak\" notify"
-//!   timeout = 1800
-//!
-//! Additive + idempotent, mirroring `merge_hooks`: a group is "ours" if one of its inner
-//! hook commands invokes the `dontspeak` binary — identified precisely by the command's
-//! binary basename (see `command_is_ours`), the same discipline the Claude Code JSON path
-//! uses (`command_is_ours` there), NOT a substring match on the rendered command string.
+//! Additive/idempotent: "ours" = basename is `dontspeak` (`command_is_ours`), not substring.
 
 use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
 use ds_client::ClientSource;

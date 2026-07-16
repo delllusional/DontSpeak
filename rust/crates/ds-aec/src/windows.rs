@@ -1,24 +1,13 @@
-//! Windows WASAPI "Communications" duplex audio (capture-side AEC).
+//! Windows WASAPI Communications capture-side AEC.
 //!
-//! Unlike macOS VPIO (which owns BOTH render and capture on one clock), Windows
-//! native AEC is **capture-side**: the OS audio engine's Communications APO (+ Win11
-//! Voice Clarity) taps the system render endpoint as the echo reference *itself*. So
-//! we do NOT route TTS through this unit — rodio keeps rendering normally
-//! ([`owns_render`](DuplexAudio::owns_render) is `false`) and this backend only opens
-//! an echo-cancelled microphone stream.
+//! Unlike macOS VPIO, AEC is **capture-side**: Communications APO (+ Win11 Voice Clarity)
+//! taps the render endpoint as echo reference. TTS stays on rodio (`owns_render() == false`).
 //!
-//! The trick is opening the capture client in the Communications category
-//! (`IAudioClient2::SetClientProperties` with `AudioCategory_Communications` BEFORE
-//! `Initialize`), which engages the capture-side AEC APO. We must NOT set
-//! `AUDCLNT_STREAMOPTIONS_RAW` — RAW opts *out* of all processing. `cpal` cannot set
-//! `SetClientProperties`, which is why this is a direct WASAPI capture rather than a
-//! cpal stream.
+//! Open capture with `AudioCategory_Communications` BEFORE `Initialize` (not RAW —
+//! RAW opts out of processing). cpal can't SetClientProperties → direct WASAPI.
 //!
-//! Threading: a dedicated thread does ALL the COM work (apartment-local) — it
-//! negotiates the format, runs the event-driven capture loop, and pushes
-//! echo-cancelled mono f32 into a shared buffer. `open()` blocks until that thread
-//! reports the negotiated rate (or an error, → half-duplex). Any COM/format failure
-//! is fail-quiet: `open()` returns `Err` and the caller degrades to half-duplex.
+//! Dedicated COM thread negotiates format, runs event-driven capture, pushes mono f32.
+//! `open()` waits for rate or Err → half-duplex.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,44 +34,32 @@ const WAVE_FORMAT_PCM: u16 = 0x0001;
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 
-/// Cap the capture buffer at ~2 s of audio. The helper drains it every poll tick;
-/// if a listen stalls we drop the OLDEST samples rather than grow unbounded.
+/// ~2 s capture cap; drop oldest if listen stalls.
 const CAPTURE_SECS: usize = 2;
 
-/// Live echo-cancelled WASAPI capture. The COM objects live entirely on the capture
-/// thread; this struct only holds the cross-thread handles (the drained buffer, the
-/// stop/barge flags, the join handle).
+/// Live echo-cancelled WASAPI capture. COM stays on the capture thread; this holds
+/// cross-thread handles only.
 pub struct DuplexAudio {
     capture_rate: u32,
-    /// Echo-cancelled mono f32, pushed by the capture thread, drained by the helper's
-    /// concurrent-listen thread (via a [`CaptureHandle`]). Bounded to `CAPTURE_SECS`.
+    /// Mono f32 from capture thread; drained via [`CaptureHandle`]. Bounded to `CAPTURE_SECS`.
     cap: Arc<Mutex<VecDeque<f32>>>,
-    /// Set on `Drop` to stop the capture thread.
     stop: Arc<AtomicBool>,
-    /// Explicit stop/cancel signal (parity with the macOS barge flag). Render is on
-    /// rodio here, so this is informational only — the helper drains rodio directly.
+    /// Stop/cancel (macOS barge parity); render is rodio — informational only.
     barge: Arc<AtomicBool>,
-    /// The most recent mid-stream capture failure (e.g. a device unplug), if any,
-    /// set by the capture thread and cleared on a successful reconnect. `open()`
-    /// failures are NOT recorded here — those already return synchronously via
-    /// `open()`'s `Result`. Lets a caller poll for "capture is degraded/reconnecting"
-    /// instead of only finding out by silence (see [`Self::last_error`]).
+    /// Mid-stream failure while reconnecting (not open() failures). See [`Self::last_error`].
     last_error: Arc<Mutex<Option<String>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl DuplexAudio {
-    /// Open an echo-cancelled WASAPI capture stream in the Communications category.
-    /// Returns an error string (fail-quiet logging) on any COM/format error; the
-    /// caller then falls back to the half-duplex cpal + rodio path.
+    /// Open Communications-category capture. COM/format error → half-duplex.
     pub fn open() -> Result<Self, String> {
         let cap: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let barge = Arc::new(AtomicBool::new(false));
         let last_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
-        // The thread reports the negotiated rate (or an open error) back here so
-        // `open()` can return synchronously, matching the macOS contract.
+        // Sync open() with macOS contract: wait for rate or error.
         let (tx, rx) = mpsc::channel::<Result<u32, String>>();
         let cap_t = cap.clone();
         let stop_t = stop.clone();
@@ -107,74 +84,54 @@ impl DuplexAudio {
                 Err(e)
             }
             Err(_) => {
-                // Thread died before reporting — treat as open failure.
                 let _ = thread.join();
                 Err("WASAPI capture thread exited before init".into())
             }
         }
     }
 
-    /// A `Send`+`Sync` handle to the echo-cancelled capture buffer, so the helper's
-    /// concurrent listen thread can drain the mic while rodio renders TTS.
     pub fn capture_handle(&self) -> CaptureHandle {
         CaptureHandle::new(self.cap.clone(), self.capture_rate)
     }
 
-    /// The negotiated capture sample rate (the WASAPI mix-format rate). Drain a
-    /// `capture_rate()`→16 kHz resampler before Parakeet.
     pub fn capture_rate(&self) -> u32 {
         self.capture_rate
     }
 
-    /// Capture-side AEC: the OS Communications APO references the system render
-    /// endpoint itself, so rodio keeps rendering TTS. We do NOT own render.
+    /// Capture-side: OS references render endpoint; rodio keeps TTS.
     pub fn owns_render(&self) -> bool {
         false
     }
 
-    /// No-op: render stays on rodio (the OS taps the render endpoint as the AEC
-    /// reference, so we never feed PCM here).
     pub fn render_push(&self, _pcm_24k: &[f32]) {}
 
-    /// Always empty (rodio renders, drained directly by the helper).
     pub fn render_pending(&self) -> bool {
         false
     }
 
-    /// No render ring: rodio owns output on this capture-side backend.
     pub fn render_buffered(&self) -> std::time::Duration {
         std::time::Duration::ZERO
     }
 
-    /// No-op (no render ring to flush; the helper stops the rodio player on barge).
     pub fn render_clear(&self) {}
 
-    /// No-op: render-time mute is macOS-only (rodio's player volume mutes here).
     pub fn set_muted(&self, _on: bool) {}
 
-    /// No-op render handle (rodio owns output; parity with macOS keeps the helper's
-    /// feeder path cfg-free).
+    /// No-op (rodio owns output); keeps helper feeder path cfg-free.
     pub fn render_handle(&self) -> RenderHandle {
         RenderHandle::new()
     }
 
-    /// Drain the echo-cancelled mono f32 captured since the last call. Empty when no
-    /// new audio has arrived.
     pub fn capture_drain(&self) -> Vec<f32> {
         let mut q = self.cap.lock().unwrap();
         q.drain(..).collect()
     }
 
-    /// A `Send` barge handle for the explicit stop/cancel path (parity with macOS).
     pub fn barge_flag(&self) -> Arc<AtomicBool> {
         self.barge.clone()
     }
 
-    /// The most recent mid-stream capture failure (e.g. the capture device was
-    /// unplugged and `AUDCLNT_E_DEVICE_INVALIDATED` came back), if the capture
-    /// thread is currently degraded/reconnecting. `None` once a reconnect
-    /// succeeds. Lets a caller surface "echo-cancelled capture dropped out" in a
-    /// status/health display instead of only noticing dictation went silent.
+    /// Mid-stream capture failure while degraded/reconnecting (`None` after success).
     pub fn last_error(&self) -> Option<String> {
         self.last_error.lock().unwrap().clone()
     }
@@ -191,32 +148,19 @@ impl Drop for DuplexAudio {
 
 // `CaptureHandle` is shared with the Linux backend — see `crate::shared`.
 
-/// The capture thread: init COM, open the Communications-category capture client,
-/// negotiate the format, report the rate back, then run the event-driven loop until
-/// `stop`. All COM objects stay local to this thread (the apartment is thread-bound).
+/// COM-init + Communications capture + event loop until `stop`. COM stays on this thread.
 ///
-/// A mid-stream COM error (e.g. `AUDCLNT_E_DEVICE_INVALIDATED` on a capture device
-/// unplug) used to propagate straight out of the loop via `?` and end the thread —
-/// silently and permanently killing echo-cancelled capture with zero logging and no
-/// recovery (full-duplex dictation went silently deaf until the whole helper
-/// process restarted). Now such an error is logged and the thread re-opens the
-/// default communications endpoint and resumes, retrying with a short backoff
-/// until `stop` is set. An error while establishing the VERY FIRST connection is
-/// NOT retried here — it is reported back through `tx` so `open()` returns
-/// synchronously and the caller falls back to half-duplex immediately, unchanged.
+/// Mid-stream errors (e.g. device unplug) reconnect with backoff instead of killing the
+/// thread forever. First-open failure is reported via `tx` (no retry) so open() → half-duplex.
 fn capture_thread(
     cap: Arc<Mutex<VecDeque<f32>>>,
     stop: Arc<AtomicBool>,
     tx: mpsc::Sender<Result<u32, String>>,
     last_error: Arc<Mutex<Option<String>>>,
 ) {
-    // SAFETY: COM FFI confined to this dedicated capture thread — CoInitializeEx runs
-    // first, every COM object created below (via open_capture) lives and dies on this
-    // thread, and CoUninitialize only balances an init that returned S_OK/S_FALSE
-    // (`did_init`).
+    // SAFETY: COM FFI on this capture thread only; CoUninitialize only if did_init.
     unsafe {
-        // MTA on this thread. S_OK/S_FALSE ⇒ we balance with CoUninitialize;
-        // RPC_E_CHANGED_MODE (err) ⇒ COM already up elsewhere — proceed, don't uninit.
+        // MTA: S_OK/S_FALSE → we uninit; RPC_E_CHANGED_MODE → COM already up, don't uninit.
         let did_init = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
 
         let mut opened = match open_capture() {
@@ -225,8 +169,7 @@ fn capture_thread(
                 o
             }
             Err(e) => {
-                // Initial open failure: report it out (this reaches `open()`; the
-                // caller degrades to half-duplex) and do not retry.
+                // First open only — report to open(), no retry.
                 let _ = tx.send(Err(e));
                 if did_init {
                     CoUninitialize();
@@ -236,9 +179,7 @@ fn capture_thread(
         };
         let published_rate = opened.rate;
         let mut rate_converter = None;
-        // The latest sample handed to the published-rate stream. Keep it even when
-        // no converter is active so the FIRST rate-changing reconnect can seed its
-        // new converter instead of starting with a discontinuity.
+        // Last sample into published-rate stream — seeds first rate-changing reconnect.
         let mut stream_tail = None;
 
         while !stop.load(Ordering::Acquire) {
@@ -257,8 +198,6 @@ fn capture_thread(
                          reconnecting to the default communications endpoint"
                     );
                     *last_error.lock().unwrap() = Some(e);
-                    // Drop the failed COM objects (Stop + CloseHandle) before
-                    // reopening.
                     drop(opened);
 
                     let reopened = loop {
@@ -295,10 +234,7 @@ fn capture_thread(
                             rate_converter = (o.rate != published_rate).then(|| {
                                 let mut rs =
                                     crate::resample::LinearResampler::new(o.rate, published_rate);
-                                // Seed from the old resampler's last sample so the
-                                // interpolation interval continues smoothly — a fresh
-                                // resampler starts at zero and produces an audible click
-                                // at the exact moment new audio resumes.
+                                // Seed to avoid click at resume.
                                 if let Some(prev) = stream_tail {
                                     rs.seed_prev(prev);
                                 }
@@ -319,9 +255,7 @@ fn capture_thread(
     }
 }
 
-/// The COM objects for one live capture session. `Drop` stops the client and
-/// closes the event handle, so replacing `opened` on a reconnect (or falling off
-/// the end of `capture_thread`) always tears the old session down cleanly.
+/// One live capture session; Drop stops client + closes event (reconnect-safe).
 struct OpenedCapture {
     client: IAudioClient2,
     capture_client: IAudioCaptureClient,
@@ -333,8 +267,7 @@ struct OpenedCapture {
 
 impl Drop for OpenedCapture {
     fn drop(&mut self) {
-        // SAFETY: `client` is a live COM interface owned by this struct, and `event` is
-        // the handle CreateEventW returned in open_capture — closed exactly once, here.
+        // SAFETY: client owned here; event from CreateEventW — closed once here.
         unsafe {
             let _ = self.client.Stop();
             let _ = CloseHandle(self.event);
@@ -342,24 +275,15 @@ impl Drop for OpenedCapture {
     }
 }
 
-/// Enumerate the default Communications-category capture endpoint, negotiate its
-/// mix format, and start the capture client. Called once for the initial open and
-/// again (from scratch — a fresh enumerator/device/client) for every reconnect
-/// attempt after a mid-stream failure, so a replaced/re-plugged device is picked
-/// up the same way a first launch would.
+/// Default Communications capture endpoint, mix format, start client.
+/// Fresh enum/device/client on every call (initial open + reconnect).
 unsafe fn open_capture() -> Result<OpenedCapture, String> {
-    // `&'static str` context so the returned closure owns no borrow (call sites pass
-    // string literals).
     let map = |ctx: &'static str| move |e: windows::core::Error| format!("{ctx}: {e}");
-    // SAFETY: COM/WASAPI FFI on the caller's (COM-initialized) capture thread. `pwfx`
-    // is null-checked before the `&*pwfx` deref, reinterpreted as WAVEFORMATEXTENSIBLE
-    // only when wFormatTag says the buffer has that layout, and freed via CoTaskMemFree
-    // on every path once Initialize has copied it; `event` ownership moves into
-    // OpenedCapture, whose Drop closes it.
+    // SAFETY: COM-init capture thread. pwfx null-checked; EXTENSIBLE only when tag says so;
+    // CoTaskMemFree after Initialize copies format; event owned by OpenedCapture::Drop.
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(map("enumerator"))?;
-        // The Communications capture endpoint (the comms-tuned default mic).
         let device = enumerator
             .GetDefaultAudioEndpoint(eCapture, eCommunications)
             .map_err(map("default capture endpoint"))?;
@@ -367,8 +291,7 @@ unsafe fn open_capture() -> Result<OpenedCapture, String> {
             .Activate(CLSCTX_ALL, None)
             .map_err(map("activate IAudioClient2"))?;
 
-        // Communications category BEFORE Initialize → engages the capture-side AEC APO
-        // (+ Win11 Voice Clarity). `Options: NONE` (NOT RAW — RAW opts out of processing).
+        // Communications BEFORE Initialize → AEC APO. Options NONE (not RAW).
         let props = AudioClientProperties {
             cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
             bIsOffload: false.into(),
@@ -379,7 +302,6 @@ unsafe fn open_capture() -> Result<OpenedCapture, String> {
             .SetClientProperties(&props)
             .map_err(map("set communications category"))?;
 
-        // Negotiated shared-mode mix format (usually 48 kHz float, 1–2 ch).
         let pwfx = client.GetMixFormat().map_err(map("get mix format"))?;
         if pwfx.is_null() {
             return Err("mix format is null".into());
@@ -388,8 +310,7 @@ unsafe fn open_capture() -> Result<OpenedCapture, String> {
         let rate = wfx.nSamplesPerSec;
         let channels = wfx.nChannels as usize;
         let bits = wfx.wBitsPerSample;
-        // Float vs PCM: tag 3 = IEEE float; for EXTENSIBLE inspect the SubFormat GUID
-        // (Data1 == 3 ⇒ IEEE float, == 1 ⇒ PCM). Anything else we treat by bit depth.
+        // Float vs PCM: tag / EXTENSIBLE SubFormat; else bit depth.
         let is_float = match wfx.wFormatTag {
             WAVE_FORMAT_IEEE_FLOAT => true,
             WAVE_FORMAT_PCM => false,
@@ -406,8 +327,7 @@ unsafe fn open_capture() -> Result<OpenedCapture, String> {
             ));
         }
 
-        // Event-driven shared-mode capture. Buffer duration 0 ⇒ the engine uses its
-        // default device period (the event fires once per period).
+        // Event-driven shared mode; buffer 0 → default device period.
         let init = client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
@@ -439,10 +359,7 @@ unsafe fn open_capture() -> Result<OpenedCapture, String> {
     }
 }
 
-/// Run the event-driven read loop against an already-open capture session until
-/// `stop` is set (returns `Ok(())`) or a COM call fails mid-stream (returns
-/// `Err`, e.g. `AUDCLNT_E_DEVICE_INVALIDATED` on a device unplug) — the caller
-/// then logs it and reconnects via [`open_capture`].
+/// Event-driven read until `stop` (`Ok`) or mid-stream COM error (`Err` → reconnect).
 unsafe fn run_capture_loop(
     opened: &OpenedCapture,
     cap: &Arc<Mutex<VecDeque<f32>>>,
@@ -452,21 +369,17 @@ unsafe fn run_capture_loop(
     stream_tail: &mut Option<f32>,
 ) -> Result<(), String> {
     let map = |ctx: &'static str| move |e: windows::core::Error| format!("{ctx}: {e}");
-    // SAFETY: WASAPI FFI against the live session in `opened` (COM initialized on this
-    // thread by capture_thread). GetBuffer's out-params are stack locals it fills
-    // before we read them, every GetBuffer is paired with a ReleaseBuffer, and `pdata`
-    // is dereferenced (in downmix) only when non-null, for exactly the `nframes` the
-    // driver reported.
+    // SAFETY: live session COM on this thread; GetBuffer/ReleaseBuffer paired;
+    // pdata only when non-null for nframes.
     unsafe {
         let cap_limit = published_rate as usize * CAPTURE_SECS;
         let mut acc: Vec<f32> = Vec::new();
         let mut converted: Vec<f32> = Vec::new();
         while !stop.load(Ordering::Acquire) {
-            // Wake on the period event (200 ms guard so we re-check `stop`).
+            // Period event; 200 ms so we re-check stop.
             if WaitForSingleObject(opened.event, 200) != WAIT_OBJECT_0 {
                 continue;
             }
-            // Drain every queued packet.
             loop {
                 let packet = opened
                     .capture_client
@@ -495,7 +408,6 @@ unsafe fn run_capture_loop(
                     .ReleaseBuffer(nframes)
                     .map_err(map("release buffer"))?;
 
-                // Push to the shared buffer, dropping oldest if a listen stalls.
                 if let Some(converter) = rate_converter.as_deref_mut() {
                     converted.clear();
                     converter.process(&acc, &mut converted);
@@ -513,8 +425,7 @@ unsafe fn run_capture_loop(
     }
 }
 
-/// Downmix an interleaved WASAPI packet (`frames` × `channels`, f32 or i16) to
-/// mono f32, appending to `out`.
+/// Interleaved WASAPI packet → mono f32 appended to `out`.
 unsafe fn downmix(
     pdata: *mut u8,
     frames: usize,
@@ -525,9 +436,7 @@ unsafe fn downmix(
     let total = frames * channels;
     let inv = 1.0 / channels as f32;
     if is_float {
-        // SAFETY: the caller got `pdata` + `frames` from GetBuffer — a valid packet of
-        // `frames * channels` interleaved f32 samples (the negotiated format when
-        // `is_float`), alive until ReleaseBuffer runs after this returns.
+        // SAFETY: GetBuffer packet of frames*channels f32 until ReleaseBuffer.
         let s = unsafe { std::slice::from_raw_parts(pdata as *const f32, total) };
         for f in 0..frames {
             let base = f * channels;
@@ -538,8 +447,7 @@ unsafe fn downmix(
             out.push(sum * inv);
         }
     } else {
-        // SAFETY: as above, but the negotiated format is 16-bit PCM, so the packet
-        // holds `frames * channels` interleaved i16 samples.
+        // SAFETY: same packet lifetime; interleaved i16 PCM.
         let s = unsafe { std::slice::from_raw_parts(pdata as *const i16, total) };
         for f in 0..frames {
             let base = f * channels;

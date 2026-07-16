@@ -1,40 +1,31 @@
-//! The canonical dictation confirm-panel state — THE single source of truth for the
-//! `dictation.state` wire token.
+//! Canonical dictation confirm-panel state — single source for the `dictation.state` wire token.
 //!
-//! The engine derives one [`DictationState`] per status snapshot (the producer derivation
-//! lives in `dontspeakd::status::dictation_state`, precedence
-//! `awaiting_confirm > (recording && local_stt) > refused > hidden`) and stores its
-//! [`DictationState::as_str`] into [`crate::Dictation::state`] (a `String`) — an ADDITIVE
-//! wire change: the legacy boolean fields stay. Every Rust consumer that classifies the
-//! token (the Linux GTK host's panel show gate) routes through [`DictationState::parse`]
-//! instead of re-matching raw `&str` literals.
+//! Producer (`dontspeakd::status::dictation_state`) derives one [`DictationState`] per snapshot
+//! with precedence `awaiting_confirm > (recording && local_stt) > refused > hidden`, stores
+//! [`DictationState::as_str`] in [`crate::Dictation::state`] (additive; legacy booleans stay).
+//! Rust consumers classify via [`DictationState::parse`], not raw `&str` matching.
 //!
-//! The per-platform UIs (macOS Swift, Windows C#) mirror these token *values* by hand
-//! across the C ABI; the [`tests::tokens_are_the_exact_wire_strings`] test pins each
-//! `as_str` value so those hand mirrors can never silently drift. An absent/unknown token
-//! (older engine payload) makes each host fall back to the legacy boolean derivation —
-//! never to hidden — so version skew can't silently kill the dictation panel.
+//! Platform UIs (Swift/C#) hand-mirror token values across the C ABI; the pinning test below
+//! blocks silent drift. Absent/unknown token ⇒ fall back to legacy booleans (never straight to
+//! hidden), so version skew cannot kill the panel.
 
 use std::str::FromStr;
 
-/// One dictation confirm-panel state. Maps 1:1 to the `dictation.state` wire token; every
-/// host shows the panel exactly when the state is not [`DictationState::Hidden`]. See the
-/// module docs for the producer precedence and the version-skew fallback.
+/// Dictation confirm-panel state; 1:1 with `dictation.state`. Panel shown when not `hidden`.
+/// Producer precedence and skew fallback: module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DictationState {
-    /// No panel: idle, or a recording whose engine shows no panel (ClaudeNative).
+    /// Idle, or recording whose engine shows no panel (ClaudeNative).
     Hidden,
-    /// Actively capturing on a local-transcript engine (live partials in the panel).
+    /// Local-transcript engine actively capturing (live partials in panel).
     Recording,
-    /// Transcript finalized, waiting for the Caps confirm tap.
+    /// Transcript finalized; waiting for Caps confirm tap.
     AwaitingConfirm,
-    /// A dictation START was just refused (engine can't transcribe yet) — the panel
-    /// shows the warning glow for the refusal window.
+    /// Dictation START refused (engine can't transcribe yet); warning glow for the refusal window.
     Refused,
 }
 
 impl DictationState {
-    /// Every variant, in declaration order. Lets consumers/tests enumerate the vocabulary.
     pub const ALL: [DictationState; 4] = [
         DictationState::Hidden,
         DictationState::Recording,
@@ -42,8 +33,7 @@ impl DictationState {
         DictationState::Refused,
     ];
 
-    /// The wire token. These exact strings are the engine→app contract the per-platform UIs
-    /// mirror — do not change them without updating every mirror (and the pinning test).
+    /// Wire token — engine→app contract; change only with every platform mirror + pinning test.
     pub fn as_str(self) -> &'static str {
         match self {
             DictationState::Hidden => "hidden",
@@ -53,8 +43,7 @@ impl DictationState {
         }
     }
 
-    /// Parse a wire token back into a variant; `None` for anything unrecognized (consumers
-    /// fall back to the legacy boolean derivation on `None` — never straight to hidden).
+    /// Wire token → variant; `None` if unrecognized (consumers use legacy booleans, never hidden).
     pub fn parse(s: &str) -> Option<DictationState> {
         Some(match s {
             "hidden" => DictationState::Hidden,
@@ -99,13 +88,11 @@ mod tests {
 
     #[test]
     fn tokens_are_the_exact_wire_strings() {
-        // Pin the wire token values: the Swift/C# UIs mirror these by hand across the C ABI,
-        // so a change here that wasn't mirrored would silently break a platform's panel.
+        // Pin wire tokens: Swift/C# UIs hand-mirror these across the C ABI.
         assert_eq!(DictationState::Hidden.as_str(), "hidden");
         assert_eq!(DictationState::Recording.as_str(), "recording");
         assert_eq!(DictationState::AwaitingConfirm.as_str(), "awaiting_confirm");
         assert_eq!(DictationState::Refused.as_str(), "refused");
-        // ...and the full set, as a defense against an added/removed variant.
         let all: Vec<&str> = DictationState::ALL.iter().map(|v| v.as_str()).collect();
         assert_eq!(all, ["hidden", "recording", "awaiting_confirm", "refused"]);
     }

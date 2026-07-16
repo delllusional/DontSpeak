@@ -1,58 +1,32 @@
-//! Engine-selection token enums and their fail-open, strict, and serialization
-//! plumbing.
+//! Engine-selection token enums and fail-open / strict / serialize-as-token plumbing.
 //!
-//! This module is declared FIRST in `lib.rs` so the declarative macros it defines
-//! (`fail_open_de!`, `serialize_as_str!`, `strict_de!`) are textually in scope for
-//! everything that follows. The macros are kept private to the crate (textual scope
-//! via `#[macro_use]` on the `mod enums;` declaration).
+//! Declared FIRST in `lib.rs` so `fail_open_de!`, `serialize_as_str!`, `strict_de!` are
+//! textually in scope (`#[macro_use]`).
 
 use ds_client::ClientSource;
 use serde::{Deserialize, Deserializer};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Engine selection enums
-//
-// The scalar engine enums (`SttEngine`, `TtsEngine`, `ListenMode`) are `#[default]`-tagged
-// and parsed through a fail-open `de_*` deserializer so an absent OR typo'd value degrades
-// to the default rather than erroring the whole config block — preserving the "unset ==
-// today" invariant for hand-edited config files. The set/ladder fields (`narrate`,
-// `tray_indicator`, `provider`, `diarizer_provider`, `input_clears`) are `Vec`s with
-// their own fail-open Vec deserializers (`de_narrate` &c.); the element enums here (incl.
-// `CancelSpeechScope`) are their building blocks.
-// ─────────────────────────────────────────────────────────────────────────────
+// Scalar engine enums: fail-open `de_*` (typo/absent → default). Set/ladder fields are
+// Vecs with their own deserializers; element enums here are the building blocks.
 
-/// STT backend token. The enum-level [`Default`] is `BuiltIn`; [`crate::VoiceConfig`]'s
-/// out-of-box engine selection instead walks `stt_engine_ladder` (system → built-in →
-/// Claude Code). "Off" is structural, not a token: the `stt_engine` preference is
-/// `Option<Vec<SttEngine>>`, with `Some(vec![])` meaning explicit off.
+/// STT backend token. Enum [`Default`] is `BuiltIn`; out-of-box walks `stt_engine_ladder`.
+/// Off is structural: `stt_engine = Some(vec![])`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SttEngine {
-    /// DontSpeak's BUILT-IN local STT: a cache-aware streaming FastConformer transducer. The
-    /// RUNTIME (cross-platform ONNX via `ort`, or macOS FluidAudio Core ML / ANE) is
-    /// selected by the shared [`Provider`] — exactly as it drives Kokoro TTS. The factory
-    /// degrades it to ClaudeCode when the model is unavailable. Token `built_in`; the
-    /// enum-level default (not necessarily the first rung in the configured ladder).
+    /// Built-in local STT (FastConformer). Runtime via shared [`Provider`]. Token `built_in`.
+    /// Factory degrades to ClaudeCode if the model is missing.
     #[default]
     BuiltIn,
-    /// Local on-device STT via the OS recognizer: macOS `SFSpeechRecognizer` (en-US,
-    /// `requiresOnDeviceRecognition`), run through the warm helper like Parakeet.
-    /// Availability is gated on the recognizer being authorized + on-device-capable; the
-    /// engine returns the INERT `SystemStt` (never claude_code) when unavailable, so
-    /// selecting it never silently degrades. Deferred on Windows/Linux (unavailable).
+    /// OS on-device STT (macOS SFSpeechRecognizer). Inert when unavailable — never silent
+    /// degrade to claude_code. Deferred on Windows/Linux.
     System,
-    /// Delegate to Claude Code's built-in voice dictation: DontSpeak READS Claude Code's
-    /// `keybindings.json` for the key bound to `voice:pushToTalk` (default `Space`) and
-    /// synthesizes it — never writing Claude Code's config. Claude Code does the (cloud)
-    /// transcription. Token `claude_code`. (Last — the only non-on-device, non-symmetric
-    /// option; `off`/`built_in`/`system` mirror `tts_engine`.)
+    /// Claude Code dictation: READ keybindings for `voice:pushToTalk`, never write CC config.
+    /// Token `claude_code`.
     ClaudeCode,
 }
 
 impl SttEngine {
-    /// All variants in canonical-token order — the single source the tool-catalog parity
-    /// test checks schema `enum` arrays against. Ordered to mirror `tts_engine`
-    /// (built_in · system), with `claude_code` appended (STT-only). All settable via
-    /// set_config; `system` is additionally availability-gated at the MCP layer.
+    /// All variants, canonical-token order — single source for catalog parity tests.
     pub const ALL: &'static [SttEngine] =
         &[SttEngine::BuiltIn, SttEngine::System, SttEngine::ClaudeCode];
 
@@ -65,10 +39,7 @@ impl SttEngine {
         }
     }
 
-    /// The canonical snake_case token this engine serializes to. EXACTLY one of
-    /// the values `parse()` accepts, so a `write_settings` → `load` round-trip is
-    /// identity. Single source of truth shared by the writer and the GUI's
-    /// segmented-index mapping.
+    /// Canonical token (round-trips through `parse()`).
     pub fn as_str(self) -> &'static str {
         match self {
             SttEngine::ClaudeCode => "claude_code",
@@ -77,18 +48,11 @@ impl SttEngine {
         }
     }
 
-    /// Whether this engine can serve STT on the CURRENT build/platform — the predicate the
-    /// `stt_engine` preference ladder is walked with (see [`crate::VoiceConfig::resolved_stt`]).
-    /// A STATIC preference (like `Provider::is_stt_usable`): runtime model/authorization gating
-    /// still applies downstream, but a rung that can NEVER run in this build is skipped so the
-    /// ladder falls through to the next. `built_in` (Parakeet) needs the ONNX/Core-ML stack,
-    /// absent on x86_64 macOS; `system` (Apple's on-device recognizer) is macOS-only;
-    /// `claude_code` always works (it delegates to Claude Code, no native deps). `off` never
-    /// appears in a resolved ladder.
+    /// Usable on this build/platform? Ladder predicate ([`crate::VoiceConfig::resolved_stt`]).
+    /// Static only — runtime model/auth still apply. `built_in` needs ONNX/Core-ML; `system`
+    /// macOS-only; `claude_code` always.
     pub fn is_stt_usable(self) -> bool {
-        // Intel macOS: built-in (Parakeet) ONNX STT is a RUNTIME capability (an onnxruntime dylib —
-        // Homebrew keg / ORT_DYLIB_PATH), invisible to the static `(os, arch)` matrix. Absent ⇒ this
-        // rung is skipped and the ladder falls through to `claude_code`.
+        // Intel mac: built-in ONNX is runtime (Homebrew/ORT_DYLIB_PATH), not in (os,arch).
         let intel_mac_ort_available = cfg!(all(target_os = "macos", target_arch = "x86_64"))
             && matches!(self, SttEngine::BuiltIn)
             && intel_mac_builtin_ort_available();
@@ -112,8 +76,7 @@ impl SttEngine {
         }
     }
 
-    /// [`is_stt_usable`](SttEngine::is_stt_usable) as a pure function of the target `(os, arch)` —
-    /// the single source the resolver and the cross-platform tests both walk.
+    /// Pure `(os, arch)` form of [`is_stt_usable`](SttEngine::is_stt_usable).
     pub(crate) fn stt_usable_on(self, os: &str, arch: &str) -> bool {
         match self {
             SttEngine::BuiltIn => built_in_usable_on(os, arch),
@@ -123,14 +86,8 @@ impl SttEngine {
     }
 }
 
-/// TTS backend selection. Default is the native in-process neural engine.
-///
-/// Its config TOKEN is `built_in` — the speech-OUT mirror of [`SttEngine::BuiltIn`]
-/// (system × built_in for both STT and TTS). `kokoro` stays the MODEL / voice-family
-/// brand name (voice listings, the `model_status` row, the GUI label), exactly as
-/// `parakeet` is the BuiltIn STT engine's model name. So the *setting* is `built_in`
-/// while the voices remain "Kokoro". The variant keeps the brand name (`Kokoro`) since
-/// most code reads it as the model identity; only `as_str` maps it to the token.
+/// TTS backend. Config TOKEN is `built_in` (mirror of STT); brand/model name stays `kokoro`
+/// in listings/`model_status`. Variant is `Kokoro` (model identity); only `as_str` → token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TtsEngine {
     #[default]
@@ -139,7 +96,7 @@ pub enum TtsEngine {
 }
 
 impl TtsEngine {
-    /// All variants (canonical-token order); single source for the catalog parity test.
+    /// All variants, canonical-token order — catalog parity single source.
     pub const ALL: &'static [TtsEngine] = &[TtsEngine::Kokoro, TtsEngine::System];
 
     pub(crate) fn parse(s: &str) -> Option<Self> {
@@ -150,9 +107,7 @@ impl TtsEngine {
         }
     }
 
-    /// The canonical lowercase config TOKEN this engine serializes to (round-trips
-    /// through `parse()`). The neural engine is `built_in`; "kokoro" is its MODEL/brand
-    /// name, surfaced separately (voice listings, `model_status`) — not this token.
+    /// Config TOKEN (`built_in` / `system`); brand name is [`brand`](TtsEngine::brand).
     pub fn as_str(self) -> &'static str {
         match self {
             TtsEngine::Kokoro => "built_in",
@@ -160,16 +115,10 @@ impl TtsEngine {
         }
     }
 
-    /// Whether this engine can serve TTS on the CURRENT build/platform — the predicate the
-    /// `tts_engine`/`tts_engine_ladder` preference is walked with (see
-    /// [`crate::VoiceConfig::resolved_tts`]). A STATIC preference (like
-    /// `Provider::is_tts_usable`). `built_in` (Kokoro) needs the ONNX/Core-ML stack, absent
-    /// on x86_64 macOS; `system` (macOS `say` / Windows SAPI) is available on macOS + Windows
-    /// (no system synth wired on Linux).
+    /// Usable on this build/platform? ([`crate::VoiceConfig::resolved_tts`]).
+    /// `built_in` needs ONNX/Core-ML; `system` macOS+Windows only.
     pub fn is_tts_usable(self) -> bool {
-        // Intel macOS: built-in (Kokoro) ONNX TTS is a RUNTIME capability (an onnxruntime dylib —
-        // Homebrew keg / ORT_DYLIB_PATH), invisible to the static `(os, arch)` matrix. Absent ⇒ this
-        // rung is skipped and the ladder falls through to `system` (`say`).
+        // Intel mac: Kokoro ONNX is runtime (Homebrew/ORT_DYLIB_PATH), not in (os,arch).
         let intel_mac_ort_available = cfg!(all(target_os = "macos", target_arch = "x86_64"))
             && matches!(self, TtsEngine::Kokoro)
             && intel_mac_builtin_ort_available();
@@ -193,8 +142,7 @@ impl TtsEngine {
         }
     }
 
-    /// [`is_tts_usable`](TtsEngine::is_tts_usable) as a pure function of the target `(os, arch)` —
-    /// the single source the resolver and the cross-platform tests both walk.
+    /// Pure `(os, arch)` form of [`is_tts_usable`](TtsEngine::is_tts_usable).
     pub(crate) fn tts_usable_on(self, os: &str, arch: &str) -> bool {
         match self {
             TtsEngine::Kokoro => built_in_usable_on(os, arch),
@@ -202,11 +150,7 @@ impl TtsEngine {
         }
     }
 
-    /// The voice-facing BRAND name (`"kokoro"`/`"system"`) used in voice listings, the
-    /// session-voice snapshot/protocol, and `status` output — the MODEL/voice-family
-    /// identity, distinct from [`as_str`](TtsEngine::as_str)'s config TOKEN (which is
-    /// `built_in` for the neural engine). Single source of truth: both the MCP client and
-    /// the engine read this so the brand never drifts.
+    /// Brand/model name for listings and status (`kokoro`/`system`) — not the config token.
     pub fn brand(self) -> &'static str {
         match self {
             TtsEngine::Kokoro => "kokoro",
@@ -215,10 +159,8 @@ impl TtsEngine {
     }
 }
 
-/// Voice input mode (§always-listening). Default `RecordSubmit` == today's
-/// Caps-Lock push-to-talk (record then submit). `Always` is the hands-free
-/// continuous loop: mic open whenever Kokoro isn't speaking, submit driven by a
-/// stopword + trailing-silence confirmation. See docs/ALWAYS-LISTENING.md.
+/// Voice input mode. Default `RecordSubmit` (Caps PTT). `Always` = hands-free loop
+/// (see docs/ALWAYS-LISTENING.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ListenMode {
     #[default]
@@ -235,8 +177,7 @@ impl ListenMode {
         }
     }
 
-    /// The canonical snake_case token this mode serializes to (round-trips through
-    /// `parse()`).
+    /// Canonical token (round-trips through `parse()`).
     pub fn as_str(self) -> &'static str {
         match self {
             ListenMode::RecordSubmit => "record_submit",
@@ -245,22 +186,17 @@ impl ListenMode {
     }
 }
 
-/// One rung of the speaker-diarization runtime ladder — the "who spoke when" analogue of
-/// [`Provider`]. The model pair (Pyannote segmentation + WeSpeaker embeddings) runs through
-/// FluidAudio's Core ML / ANE engine. The `diarizer_provider` field is a
-/// `Vec<DiarizerProvider>` ladder that doubles as the on/off switch: EMPTY = diarization off
-/// (the default), non-empty = on, with the first platform-usable rung winning (see
-/// `default_diarizer_provider` and [`crate::VoiceConfig::resolved_diarizer_provider`]). There is NO
-/// separate enable flag. Diarization is macOS-only for now (the single `apple_native` rung).
+/// Diarization runtime rung. `diarizer_provider: Vec` is also on/off: empty = off; first
+/// usable rung wins ([`crate::VoiceConfig::resolved_diarizer_provider`]). macOS-only today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DiarizerProvider {
-    /// macOS: FluidAudio's Core ML / ANE diarizer. Not usable off macOS (skip it there).
+    /// FluidAudio Core ML / ANE (macOS only).
     #[default]
     AppleNative,
 }
 
 impl DiarizerProvider {
-    /// All variants (canonical-token order); single source for the catalog parity test.
+    /// All variants — catalog parity single source.
     pub const ALL: &'static [DiarizerProvider] = &[DiarizerProvider::AppleNative];
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -270,16 +206,14 @@ impl DiarizerProvider {
         }
     }
 
-    /// The canonical token this provider serializes to (round-trips through `parse()`).
+    /// Canonical token (round-trips through `parse()`).
     pub fn as_str(self) -> &'static str {
         match self {
             DiarizerProvider::AppleNative => "apple_native",
         }
     }
 
-    /// Whether this rung can run diarization on the CURRENT platform — the predicate the
-    /// `diarizer_provider` priority array is walked with (see
-    /// [`crate::VoiceConfig::resolved_diarizer_provider`]). `apple_native` is macOS-only.
+    /// Platform usable? (`apple_native` = macOS only.)
     pub(crate) fn is_diarizer_usable(self) -> bool {
         match self {
             DiarizerProvider::AppleNative => cfg!(target_os = "macos"),
@@ -287,38 +221,25 @@ impl DiarizerProvider {
     }
 }
 
-/// One rung of the SHARED on-device compute ladder for BOTH the Kokoro TTS and Parakeet
-/// STT models (§A.1). The `provider` field is a `Vec<Provider>` priority ladder (default
-/// ANE → CUDA → CPU, see `default_provider`); each engine walks it and skips rungs it
-/// can't use on this platform (macOS STT lands on ANE; Windows/Linux x86_64 STT follows CUDA →
-/// CPU like TTS, since Parakeet gained a CUDA EP). The `Ort*` variants are ONNX Runtime execution
-/// providers (Kokoro drives its own ort session, so each is a real choice): `OrtCuda`
-/// (NVIDIA GPU) triggers a one-time ~1.4 GB GPU-runtime download; `OrtCoreMl` is the ort
-/// CoreML EP (macOS). `Ane` is the one NON-ort backend (FluidAudio native Core ML on the
-/// Apple Neural Engine). The element default is `OrtCpu` (the always-available rung).
+/// Shared on-device compute rung for Kokoro TTS and Parakeet STT. `provider: Vec` is a priority
+/// ladder (default ANE → CUDA → CPU). `Ort*` = ONNX Runtime EPs; `Ane` = FluidAudio native ANE
+/// (non-ort). Element default `OrtCpu`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Provider {
-    /// ONNX Runtime, CPU execution provider.
+    /// ONNX Runtime CPU EP — always available.
     #[default]
     OrtCpu,
-    /// ONNX Runtime, CUDA execution provider (NVIDIA GPU) — drives BOTH ort engines over the
-    /// shared warm-helper runtime: Kokoro TTS (`synth.rs`) and the streaming Parakeet STT runner
-    /// (`streaming.rs`), each registering the CUDA EP best-effort with a CPU fallback. (STT ships
-    /// int8 models, so ORT places what it can on the GPU and runs the int8 ops it can't per-op on
-    /// CPU — the token is still the realized runtime, gated on the GPU runtime being present.)
+    /// ONNX Runtime CUDA EP (NVIDIA). Both TTS and STT; may trigger GPU-runtime download.
+    /// STT int8 models may partially fall back per-op to CPU.
     OrtCuda,
-    /// ONNX Runtime, CoreML execution provider (macOS) — ort offloading ops to Core ML.
-    /// TTS only; explicit (NOT in the default ladder, as it benches slower than CPU for
-    /// Kokoro). STT has no CoreML EP.
+    /// ONNX Runtime CoreML EP (macOS). TTS only; explicit (slower than CPU for Kokoro).
     OrtCoreMl,
-    /// macOS: FluidAudio's native Core ML model pinned to the Apple Neural Engine (ANE) —
-    /// a NATIVE backend, distinct from `OrtCoreMl` (the ort CoreML EP); it bypasses ONNX
-    /// Runtime entirely. Used by BOTH engines on macOS. Falls back to ort CPU off macOS.
+    /// FluidAudio native Core ML on ANE — not `OrtCoreMl`. Both engines on macOS.
     Ane,
 }
 
 impl Provider {
-    /// All variants (canonical-token order); single source for the catalog parity test.
+    /// All variants — catalog parity single source.
     pub const ALL: &'static [Provider] = &[
         Provider::Ane,
         Provider::OrtCuda,
@@ -336,8 +257,7 @@ impl Provider {
         }
     }
 
-    /// The canonical lowercase token (round-trips through `parse()`, and is the exact
-    /// string the warm child's `DONTSPEAK_PROVIDER` env expects).
+    /// Canonical token (warm child `DONTSPEAK_PROVIDER` env).
     pub fn as_str(self) -> &'static str {
         match self {
             Provider::OrtCpu => "cpu",
@@ -347,20 +267,12 @@ impl Provider {
         }
     }
 
-    /// Whether this rung can serve STT on the CURRENT platform — the predicate the
-    /// `provider` priority array is walked with (see [`crate::VoiceConfig::resolved_stt_provider`]).
-    /// macOS: ANE (FluidAudio native) or CPU. Windows/Linux: CUDA (Parakeet GPU EP) or CPU.
-    /// Elsewhere: CPU only. (`OrtCoreMl` is TTS-only — never STT.)
+    /// STT usable on this platform? (`OrtCoreMl` never STT.) See `resolved_stt_provider`.
     pub(crate) fn is_stt_usable(self) -> bool {
         self.stt_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
-    /// [`is_stt_usable`](Provider::is_stt_usable) as a PURE function of the target `(os, arch)` — the
-    /// single source the resolver and the cross-platform fallback tests both walk (so an `cuda`
-    /// first rung is provably skipped off Windows on a single host). Provider-keyed so the ANE
-    /// Apple-Silicon rule ([`ane_usable_on`]) is SHARED with [`tts_usable_on`] and the two
-    /// can't drift. `OrtCpu` runs everywhere; `OrtCuda` is the Windows/Linux GPU EP;
-    /// `OrtCoreMl` is TTS-only (never STT).
+    /// Pure `(os, arch)` form of STT usability — shares [`ane_usable_on`] with TTS.
     pub(crate) fn stt_usable_on(self, os: &str, arch: &str) -> bool {
         match self {
             Provider::OrtCpu => true,
@@ -370,15 +282,12 @@ impl Provider {
         }
     }
 
-    /// Whether this rung can serve TTS (Kokoro) on the CURRENT platform. macOS: ANE
-    /// (native), the ort CoreML EP, or CPU. Windows/Linux: CUDA or CPU. Elsewhere: CPU only.
+    /// TTS usable on this platform?
     pub(crate) fn is_tts_usable(self) -> bool {
         self.tts_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
-    /// [`is_tts_usable`](Provider::is_tts_usable) as a PURE function of the target `(os, arch)` — see
-    /// [`stt_usable_on`](Provider::stt_usable_on). Same shape, plus the macOS-only `OrtCoreMl`
-    /// EP; the ANE Apple-Silicon rule is the SAME [`ane_usable_on`] the STT path uses.
+    /// Pure `(os, arch)` form of TTS usability (incl. macOS `OrtCoreMl`).
     pub(crate) fn tts_usable_on(self, os: &str, arch: &str) -> bool {
         match self {
             Provider::OrtCpu => true,
@@ -389,50 +298,34 @@ impl Provider {
     }
 }
 
-/// ANE (FluidAudio's Core ML on the Neural Engine) is Apple-Silicon ONLY — Intel Macs have
-/// no Neural Engine and ship no arm64 shim, so the FluidAudio backend can't load there. The
-/// SINGLE source of this rule for BOTH [`Provider::stt_usable_on`] and
-/// [`Provider::tts_usable_on`]: when they diverged, an Intel mac's default
-/// `["ane", …]` ladder resolved to the dead `ane` rung and silently fell back to a slower
-/// path (offline STT loop / ONNX TTS), so they must stay in lockstep.
+/// ANE is Apple-Silicon only. Single source for STT and TTS usability — when they diverged,
+/// Intel mac ladders hit a dead `ane` rung and silently slowed down.
 fn ane_usable_on(os: &str, arch: &str) -> bool {
     os == "macos" && arch == "aarch64"
 }
 
-/// Whether an execution-provider PREFERENCE token (the `DONTSPEAK_PROVIDER` /
-/// `DONTSPEAK_STT_PROVIDER` value a warm child reads) requests the NVIDIA GPU. THE single
-/// definition, shared by Kokoro TTS and Parakeet STT so the "wants CUDA?" decision can't drift per
-/// engine (`ds_model::cuda_session_builder` and both engines' load paths route through it).
+/// Does a preference token request NVIDIA GPU? Shared by TTS and STT load paths.
 pub fn provider_pref_wants_gpu(pref: &str) -> bool {
     pref.eq_ignore_ascii_case("cuda") || pref.eq_ignore_ascii_case("auto")
 }
 
-/// The REALIZED on-device execution provider a warm-child engine ACTUALLY loaded on — the SINGLE
-/// source of truth for the "what actually ran" token vocabulary that Kokoro TTS and Parakeet STT
-/// report across the process boundary (the child's `PROVIDER` / `STT_PROVIDER` stdout line).
-///
-/// Distinct from [`Provider`] (the config PREFERENCE ladder, lowercase tokens): this is the realized
-/// backend — it includes `CoreMlAne`/`System`, which have no config-ladder rung — and serializes as
-/// the canonical UPPERCASE token via [`as_str`](RealizedProvider::as_str). Producers return this
-/// enum and stringify ONCE at the IPC edge; the status layer [`parse`](RealizedProvider::parse)s it
-/// back and maps to a config [`Provider`] via [`to_provider`](RealizedProvider::to_provider) — so a
-/// token typo is a compile error, not a silent "UI claims CUDA but runs CPU" mislabel.
+/// Realized backend a warm child actually loaded (`PROVIDER` / `STT_PROVIDER` wire).
+/// Distinct from config [`Provider`] (preference ladder); UPPERCASE tokens. Stringify once at
+/// IPC; status [`parse`]s and maps via [`to_provider`] so token typos are compile errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RealizedProvider {
-    /// ONNX Runtime CUDA execution provider (NVIDIA GPU).
     Cuda,
-    /// ONNX Runtime CPU execution provider — the universal fallback.
+    /// Universal fallback.
     Cpu,
-    /// ONNX Runtime CoreML execution provider (macOS ort offload).
     CoreMl,
-    /// FluidAudio native Core ML on the Apple Neural Engine (macOS).
+    /// FluidAudio native ANE (macOS).
     CoreMlAne,
-    /// macOS on-device `SFSpeechRecognizer` (the `system` STT engine; no ort runtime).
+    /// System STT recognizer (no ort).
     System,
 }
 
 impl RealizedProvider {
-    /// The canonical UPPERCASE wire token (round-trips through [`parse`](RealizedProvider::parse)).
+    /// UPPERCASE wire token (round-trips through `parse`).
     pub fn as_str(self) -> &'static str {
         match self {
             RealizedProvider::Cuda => "CUDA",
@@ -443,8 +336,7 @@ impl RealizedProvider {
         }
     }
 
-    /// Parse a wire token; anything unrecognized → [`Cpu`](RealizedProvider::Cpu) (a missing/renamed
-    /// token degrades to CPU, never a false GPU claim).
+    /// Wire token → self; unknown → Cpu (never a false GPU claim).
     pub fn parse(s: &str) -> Self {
         match s {
             "CUDA" => RealizedProvider::Cuda,
@@ -455,8 +347,7 @@ impl RealizedProvider {
         }
     }
 
-    /// Map to the config [`Provider`] token vocabulary for the status row (`System` has no ort rung,
-    /// so it reads as CPU — the OS recognizer isn't an ort runtime).
+    /// Map to config [`Provider`] (`System` → OrtCpu for status).
     pub fn to_provider(self) -> Provider {
         match self {
             RealizedProvider::Cuda => Provider::OrtCuda,
@@ -468,29 +359,24 @@ impl RealizedProvider {
 }
 
 impl std::fmt::Display for RealizedProvider {
-    /// Writes the canonical wire token — so `println!("PROVIDER {}", p)` and the like stay terse.
+    /// Writes the wire token.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-/// Which live state colors the menu-bar icon AND whether it breathes — a SET (config
-/// `tray_indicator = ["stt", "tts_animated"]`). Each state (mic `stt` / voice `tts`) appears
-/// in at most ONE form: the plain token colors the pill STATICALLY, the `_animated` token
-/// colors it AND pulses (breathing). DEFAULT = `["stt", "tts_animated"]` (mic static, voice
-/// animated); `[]` = never color. The app reads the set (the engine passes it through in
-/// `model_status` — it never acts on it). Animation is currently a macOS effect; other UIs
-/// just treat the `_animated` tokens as colored.
+/// Menu-bar color/breathe set (`tray_indicator`). At most one form per state; animated wins.
+/// Default `["stt", "tts_animated"]`; `[]` = never color. Engine passes through only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayKind {
-    Stt,         // mic / recording — colored, static
-    Tts,         // voice / speaking — colored, static
-    SttAnimated, // recording — colored + breathing
-    TtsAnimated, // speaking — colored + breathing
+    Stt,         // mic static
+    Tts,         // voice static
+    SttAnimated, // mic + breathe
+    TtsAnimated, // voice + breathe
 }
 
 impl TrayKind {
-    /// All variants (canonical-token order); single source for the catalog parity test.
+    /// All variants — catalog parity single source.
     pub const ALL: &'static [TrayKind] = &[
         TrayKind::Stt,
         TrayKind::Tts,
@@ -508,7 +394,7 @@ impl TrayKind {
         }
     }
 
-    /// The canonical lowercase token (round-trips through `parse()`).
+    /// Canonical token (round-trips through `parse()`).
     pub fn as_str(self) -> &'static str {
         match self {
             TrayKind::Stt => "stt",
@@ -518,19 +404,17 @@ impl TrayKind {
         }
     }
 
-    /// The mic/recording state (static or animated form); else it's the voice/speaking state.
+    /// Mic/recording state (vs voice).
     pub(crate) fn is_stt(self) -> bool {
         matches!(self, TrayKind::Stt | TrayKind::SttAnimated)
     }
-    /// Whether this entry breathes (the `_animated` form).
+    /// `_animated` form.
     pub(crate) fn animated(self) -> bool {
         matches!(self, TrayKind::SttAnimated | TrayKind::TtsAnimated)
     }
 }
 
-/// Normalize a tray-indicator set to at most ONE token per state, in canonical order
-/// (stt, then tts), with the ANIMATED form winning if both forms of a state are present.
-/// `[]` stays empty (never color). Used by both the config deserialize and `set_config`.
+/// At most one token per state (animated wins); stt then tts. `[]` stays empty.
 pub fn normalize_tray_indicator(kinds: Vec<TrayKind>) -> Vec<TrayKind> {
     let mut stt: Option<bool> = None; // Some(animated?)
     let mut tts: Option<bool> = None;
@@ -559,17 +443,9 @@ pub fn normalize_tray_indicator(kinds: Vec<TrayKind>) -> Vec<TrayKind> {
     out
 }
 
-/// WHOSE still-pending speech a submit cancels — a SET (config
-/// `input_clears = ["current", "other"]`), not a single mode. ANY submit (typed +
-/// Enter, or a Caps-Lock dictation / hands-free submit — how you submitted no longer
-/// matters) triggers the check. The cancel is permanent (pruned + the in-flight item
-/// cancelled, not paused/resumable). Two INDEPENDENT members:
-///   `current` — cancel the SUBMITTING window's own pending speech.
-///   `other`   — cancel every OTHER session's pending speech, INCLUDING untagged/global
-///               audio (e.g. the MCP `speak` tool with no session) — "other" means
-///               "everything that isn't current".
-/// An EMPTY set means submitting never cancels anything; pending speech plays to the
-/// end. See [`crate::VoiceConfig::input_clears`].
+/// Whose pending speech a submit cancels (`input_clears` set). Any submit triggers permanent
+/// cancel. `current` = submitting session; `other` = everything else (incl. untagged MCP).
+/// Empty = never cancel. See [`crate::VoiceConfig::input_clears`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelSpeechScope {
     Current,
@@ -577,7 +453,7 @@ pub enum CancelSpeechScope {
 }
 
 impl CancelSpeechScope {
-    /// All variants (canonical-token order); single source for the catalog parity test.
+    /// All variants — catalog parity single source.
     pub const ALL: &'static [CancelSpeechScope] =
         &[CancelSpeechScope::Current, CancelSpeechScope::Other];
 
@@ -589,7 +465,7 @@ impl CancelSpeechScope {
         }
     }
 
-    /// The canonical lowercase token (round-trips through `parse()`).
+    /// Canonical token (round-trips through `parse()`).
     pub fn as_str(self) -> &'static str {
         match self {
             CancelSpeechScope::Current => "current",
@@ -598,13 +474,8 @@ impl CancelSpeechScope {
     }
 }
 
-/// What narration speaks — a SET (config `narrate = ["shorts", "digests"]`), not a single
-/// mode. Two INDEPENDENT options that combine: `Digests` voices the model's spoken-summary
-/// blockquotes (and injects the narration spec asking for them, so long replies get a digest);
-/// `Shorts` voices a SHORT reply that has NO blockquote — on its own, lightly cleaned — so brief
-/// one-liners are heard even when there's no digest. Both ⇒ everything is spoken. An EMPTY set
-/// means narrate nothing (the old "off"). `Digests` is also what gates the injected spec —
-/// without it `provide` returns nothing.
+/// Narration set (`narrate`). `Digests` = blockquotes + injects spec; `Shorts` = short
+/// no-blockquote replies. Empty = off. `Digests` gates the injected provide spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NarrateKind {
     Digests,
@@ -612,7 +483,7 @@ pub enum NarrateKind {
 }
 
 impl NarrateKind {
-    /// All variants (canonical-token order); single source for the catalog parity test.
+    /// All variants — catalog parity single source.
     pub const ALL: &'static [NarrateKind] = &[NarrateKind::Digests, NarrateKind::Shorts];
 
     pub(crate) fn parse(s: &str) -> Option<Self> {
@@ -631,19 +502,11 @@ impl NarrateKind {
     }
 }
 
-// The client IDENTITY enum (`ClientSource`) that used to live here as `WireTarget` now lives
-// in the `ds-client` leaf crate — `ds-log` and `ds-ipc` both need it, and neither may depend
-// on `ds-config` (ds-config depends on ds-log ⇒ a cycle). `ds-config` re-exports it from
-// `lib.rs`, so `ds_config::ClientSource` keeps working for every downstream crate.
-//
-// It is no longer a CLIENT-only enum: `ClientSource::CLIENTS` is the wire-able subset (the
-// four clients the registry pins), and `DontSpeak` / `Unknown` are members too. Any path that
-// means "a client we wire" must therefore gate on `is_client()` — see `de_exclude_clients`
-// below, and `ds_wire::run`'s registry-lookup guard.
+// `ClientSource` lives in `ds-client` (cycle avoidance); re-exported from `lib.rs`.
+// Wire-able subset is `CLIENTS`; gate "a client we wire" with `is_client()` (see
+// `de_exclude_clients`, `ds_wire::run`).
 
-/// Parse an array of enum tokens in order, dropping unknowns and duplicates. `None` preserves
-/// the distinction between a non-array value (use the field's fail-open fallback) and an empty
-/// or all-unknown array (whose meaning differs by field).
+/// Parse enum-token array in order (drop unknown/dup). `None` = non-array (field fallback).
 macro_rules! fail_open_vec {
     ($value:expr, $ty:ty, $parse:expr) => {{
         match $value {
@@ -663,17 +526,10 @@ macro_rules! fail_open_vec {
     }};
 }
 
-/// Fail-open deserialize for `exclude_clients` (config-file). A present ARRAY ⇒
-/// `Some(known CLIENT tokens, in order, deduped; unknown/non-client tokens dropped)`.
-/// A present NON-array value ⇒ `None` (defer to all-supported). ABSENT ⇒ `None` via the
-/// field's serde default. Modeled on [`de_narrate`], wrapped in `Option` to preserve the
-/// tri-state (`None` = all supported vs `Some([])` = none).
-///
-/// The `is_client()` filter is LOAD-BEARING, not decoration: `ClientSource::parse` now accepts
-/// `dontspeak` and `unknown` (where the old `WireTarget::parse` returned `None` for both), so
-/// without it `exclude_clients = ["dontspeak"]` would put DontSpeak itself into a set that is
-/// only ever consulted to decide which CLIENT to unwire. Pinned by
-/// `exclude_clients_drops_non_client_tokens`.
+/// Fail-open `exclude_clients`: array → `Some` known *clients* (deduped); non-array/`None` =
+/// all supported; `Some([])` = none. **`is_client()` is load-bearing** — without it
+/// `exclude_clients = ["dontspeak"]` would unwire ourselves (parse accepts non-clients).
+/// Pinned by `exclude_clients_drops_non_client_tokens`.
 pub(crate) fn de_exclude_clients<'de, D>(d: D) -> Result<Option<Vec<ClientSource>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -684,17 +540,11 @@ where
     }))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Macros: fail-open deserialize, serialize-as-token, strict deserialize.
-// (Textually scoped — see the module doc on why `enums` is declared first in `lib.rs`.)
-// ─────────────────────────────────────────────────────────────────────────────
+// Macros: fail-open / serialize-as-token / strict (textually scoped — see module doc).
 
 macro_rules! fail_open_de {
     ($fn_name:ident, $ty:ty) => {
-        /// Fail-open deserialize: any unknown / wrong-typed value degrades to the
-        /// type's `Default` rather than erroring the whole block. Uses `toml::Value`
-        /// as the format-agnostic scratch (the config file is TOML); a value that
-        /// can't be represented — or isn't a string token — falls back to default.
+        /// Fail-open: unknown/wrong type → `Default` (hand-edited config must not brick).
         pub(crate) fn $fn_name<'de, D>(d: D) -> Result<$ty, D::Error>
         where
             D: Deserializer<'de>,
@@ -706,20 +556,12 @@ macro_rules! fail_open_de {
 }
 
 fail_open_de!(de_listen_mode, ListenMode);
-/// Default `input_clears` (when the config key is ABSENT): cancel the CURRENT
-/// session's speech on any submit, so starting a new prompt (typed or spoken) silences
-/// that terminal's still-pending reply, while every other terminal plays on. An explicit
-/// `input_clears = []` still means "never cancel" (plays to the end).
+/// Default when `input_clears` absent: cancel current session only. Explicit `[]` = never.
 pub(crate) fn default_input_clears() -> Vec<CancelSpeechScope> {
     vec![CancelSpeechScope::Current]
 }
-/// Fail-open array deserialize for `input_clears` (config file): an ARRAY keeps its
-/// known tokens in order (deduped) and drops unknown ones; an EMPTY array means never
-/// cancel (plays to the end). Any NON-array value (an absent field is handled by the
-/// serde default; a stray wrong-typed TOML value) fails open to
-/// [`default_input_clears`] (`[Current]`) — matching the documented default and the
-/// same fail-open convention every sibling ladder field in this file uses, rather than
-/// silently degrading to "never cancel", the semantic opposite of the default.
+/// Fail-open `input_clears`: array keeps known tokens; empty = never cancel; non-array →
+/// [`default_input_clears`] (not empty — that would invert the default).
 pub(crate) fn de_input_clears<'de, D>(d: D) -> Result<Vec<CancelSpeechScope>, D::Error>
 where
     D: Deserializer<'de>,
@@ -731,9 +573,7 @@ where
     )
 }
 
-/// Serialize an enum as its canonical `as_str()` token — the inverse of the
-/// `parse()` the fail-open deserializers use, so a `VoiceConfig` round-trips through
-/// TOML. (`CaptureGain` has its own Serialize: a string `"auto"` or a number.)
+/// Serialize as `as_str()` token (round-trip with fail-open `parse`).
 macro_rules! serialize_as_str {
     ($ty:ty) => {
         impl serde::Serialize for $ty {
@@ -752,16 +592,10 @@ serialize_as_str!(TrayKind);
 serialize_as_str!(CancelSpeechScope);
 serialize_as_str!(DiarizerProvider);
 serialize_as_str!(NarrateKind);
-// NOTE: `ClientSource` (the old `WireTarget`) is NOT in this list — it owns its Serialize in
-// `ds-client` (same as-the-token behaviour, hand-written so that leaf crate needs no macro).
+// `ClientSource` Serialize lives in `ds-client` (no macro there).
 
-/// STRICT `Deserialize` for a token enum: an unrecognized value ERRORS (listing the
-/// valid tokens) instead of failing open to the default. This is the opposite of the
-/// `fail_open_de!` deserializers above — and deliberately so. The config FILE wants
-/// fail-open (a hand-edited typo shouldn't brick the whole block), but `set_config`
-/// wants strict (the caller should be TOLD a value was rejected, not silently snapped
-/// to a default). Only `SetConfigArgs` (in `ds_tools`) uses this impl; `VoiceConfig`'s fields pin
-/// `deserialize_with = "de_*"`, so the file path is unchanged.
+/// Strict Deserialize: unknown → error (for `set_config`). Opposite of fail-open file path;
+/// only `SetConfigArgs` uses this; VoiceConfig fields pin `de_*`.
 macro_rules! strict_de {
     ($ty:ty, $valid:literal) => {
         impl<'de> serde::Deserialize<'de> for $ty {
@@ -783,18 +617,12 @@ strict_de!(CancelSpeechScope, "current|other");
 strict_de!(DiarizerProvider, "apple_native");
 strict_de!(NarrateKind, "digests|shorts");
 
-/// The default narration set: `shorts` first, then `digests` — both on, so a brief
-/// blockquote-less reply is heard whole AND longer replies get their spoken-line digest.
-/// An EMPTY `narrate` array is the way to opt OUT.
+/// Default narrate: shorts + digests. Empty array opts out.
 pub(crate) fn default_narrate() -> Vec<NarrateKind> {
     vec![NarrateKind::Shorts, NarrateKind::Digests]
 }
 
-/// Fail-open deserialize for `narrate` — a SET of [`NarrateKind`] tokens (config
-/// `narrate = ["shorts", "digests"]`). An ARRAY keeps its known tokens in order (deduped) and
-/// drops unknown ones; an EMPTY array means narrate nothing. Any NON-array value (an absent
-/// field is handled by the serde default; a stray `true`/`"all"` bool/string) fails open to
-/// [`default_narrate`]. Only the canonical `digests` / `shorts` tokens are accepted.
+/// Fail-open `narrate`: array of known tokens; empty = off; non-array → [`default_narrate`].
 pub(crate) fn de_narrate<'de, D>(d: D) -> Result<Vec<NarrateKind>, D::Error>
 where
     D: Deserializer<'de>,
@@ -803,18 +631,13 @@ where
     Ok(fail_open_vec!(&v, NarrateKind, NarrateKind::parse).unwrap_or_else(default_narrate))
 }
 
-/// The default tray-indicator set: the mic (`stt`) colors STATICALLY and the voice (`tts`)
-/// colors AND breathes (`tts_animated`).
+/// Default tray: stt static + tts_animated.
 pub(crate) fn default_tray_indicator() -> Vec<TrayKind> {
     vec![TrayKind::Stt, TrayKind::TtsAnimated]
 }
 
-/// Fail-open deserialize for `tray_indicator` — now a SET of [`TrayKind`] tokens (config
-/// `tray_indicator = ["stt", "tts_animated"]`). An ARRAY keeps its known tokens in order (deduped)
-/// and drops unknown ones; an EMPTY array means never color the icon (the old "none"). Any
-/// NON-array value (an absent field is handled by the serde default; a legacy `"both"`/
-/// `"none"` string) fails open to [`default_tray_indicator`] — there is NO legacy token
-/// migration (clean rename, no compat shim).
+/// Fail-open `tray_indicator`: array of known tokens (then normalize); empty = never color;
+/// non-array → default. No legacy token migration.
 pub(crate) fn de_tray_indicator<'de, D>(d: D) -> Result<Vec<TrayKind>, D::Error>
 where
     D: Deserializer<'de>,
@@ -825,20 +648,12 @@ where
     Ok(normalize_tray_indicator(parsed))
 }
 
-/// The default compute-provider PRIORITY ladder: ANE (macOS native) → CUDA (Windows GPU) →
-/// CPU. Each engine walks it and picks the first rung usable on this platform (see
-/// [`crate::VoiceConfig::resolved_stt_provider`] / `resolved_tts_provider`). `OrtCoreMl` is
-/// intentionally NOT in the default — it's explicit-only (slower than CPU for Kokoro).
+/// Default provider ladder: ANE → CUDA → CPU. `OrtCoreMl` explicit-only (not default).
 pub fn default_provider() -> Vec<Provider> {
     vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]
 }
 
-/// Fail-open deserialize for `provider` — now an ORDERED PRIORITY array of [`Provider`] rungs
-/// (config `provider = ["ane", "cuda", "cpu"]`); the first rung usable on this
-/// platform wins. Keeps known tokens in order (deduped), drops unknown ones. Unlike the
-/// narrate/tray sets, an EMPTY result is NOT "disabled" — there is always a compute backend —
-/// so an empty array, an all-unknown array, or any non-array value falls open to
-/// [`default_provider`]. NO legacy `auto` migration (clean rename, no compat shim).
+/// Fail-open `provider` ladder. Empty/unknown/non-array → [`default_provider`] (always a backend).
 pub(crate) fn de_provider<'de, D>(d: D) -> Result<Vec<Provider>, D::Error>
 where
     D: Deserializer<'de>,
@@ -849,19 +664,12 @@ where
         .unwrap_or_else(default_provider))
 }
 
-/// The default diarizer ladder: EMPTY = diarization OFF. Diarization is opt-in (it powers the
-/// on-demand `diarize`/`enroll` tools + speaker-lock), so the default is "no runtime, disabled".
-/// A non-empty ladder both ENABLES it and sets the runtime priority — the on/off flag and the
-/// runtime choice are ONE field (there is no separate `diarization_enabled`).
+/// Default diarizer ladder: empty = off (opt-in; no separate enable flag).
 pub(crate) fn default_diarizer_provider() -> Vec<DiarizerProvider> {
     Vec::new()
 }
 
-/// Fail-open deserialize for `diarizer_provider` — an ORDERED PRIORITY array of
-/// [`DiarizerProvider`] rungs (config `diarizer_provider = ["apple_native"]`); the
-/// first rung usable on this platform wins. Keeps known tokens in order (deduped), drops
-/// unknown ones. An EMPTY array means diarization is OFF (the default). Any non-array value
-/// also reads as OFF. NO legacy `auto` migration (clean rename, no compat shim).
+/// Fail-open `diarizer_provider`: empty/non-array = off.
 pub(crate) fn de_diarizer_provider<'de, D>(d: D) -> Result<Vec<DiarizerProvider>, D::Error>
 where
     D: Deserializer<'de>,
@@ -870,82 +678,43 @@ where
     Ok(fail_open_vec!(&v, DiarizerProvider, DiarizerProvider::parse).unwrap_or_default())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Engine selection: an automatic LADDER (`tts_engine_ladder` / `stt_engine_ladder`,
-// config-file only) plus a user PREFERENCE (`tts_engine` / `stt_engine`, settable via
-// `set_config`).
-//
-// The LADDER is an ORDERED Vec of engine rungs (the speech-out / speech-in analogue of the
-// `provider` and `diarizer_provider` ladders). EMPTY = that role is OFF; otherwise the first
-// rung usable on THIS build/platform wins (see `*_usable` above and
-// `VoiceConfig::resolved_tts` / `resolved_stt`). There is no `off` TOKEN any more — "off" is
-// structural (an empty array), never a string a rung can carry.
-//
-// The PREFERENCE is `Option<Vec<Engine>>`, tri-state: `None` = unset (defer to the ladder),
-// `Some(vec![])` = explicit off, `Some(vec![engine])` = force exactly that engine (no
-// automatic substitution — an unusable choice resolves to off, never a different engine). See
-// `VoiceConfig::resolved_tts` / `resolved_stt` for how the two combine.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// The platform predicates as PURE functions of (os, arch) — `os`/`arch` are
-// `std::env::consts::OS`/`ARCH` strings ("macos"/"windows"/"linux", "x86_64"/"aarch64").
-// Splitting them out lets the cross-platform engine-selection logic be unit-tested for EVERY
-// target on a single host (the `_on` callers above pin the compile target).
+// Engine LADDER (config-file Vec; empty = off; first usable rung wins) + PREFERENCE
+// (`Option<Vec>` tri-state: None=ladder, Some([])=off, Some([e])=force, no auto-sub).
+// See VoiceConfig::resolved_tts / resolved_stt. Pure (os, arch) helpers for cross-platform tests.
 fn built_in_usable_on(os: &str, arch: &str) -> bool {
     !(os == "macos" && arch == "x86_64")
 }
 
-/// The ONE runtime fact the static `(os, arch)` matrix above can't see: whether the built-in ONNX
-/// engines (Kokoro TTS / Parakeet STT) can actually run on **Intel macOS**. Every other platform
-/// either ships a pinned onnxruntime dist or has none at all; Intel is unique in needing an
-/// out-of-band runtime — a Homebrew keg ([`crate::brew_onnxruntime_dylib`]) or an explicit
-/// `ORT_DYLIB_PATH`. Only the runtime `is_tts_usable`/`is_stt_usable` consult this (NOT the pure `_on`
-/// matrix), so with the runtime present Intel resolves to `built_in` like every other platform,
-/// and without it the ladders fall through to `system` (`say`) / `claude_code` rather than
-/// resolving to an engine that can't load.
+/// Intel-mac runtime fact: can built-in ONNX load? (Homebrew or `ORT_DYLIB_PATH`.) Not in the
+/// pure `(os,arch)` matrix — without it ladders skip `built_in`.
 pub fn intel_mac_builtin_ort_available() -> bool {
     std::env::var_os("ORT_DYLIB_PATH")
         .map(|p| std::path::Path::new(&p).is_file())
         .unwrap_or(false)
         || crate::brew_onnxruntime_dylib().is_some()
 }
-/// The `system` STT engine (Apple's on-device recognizer) is macOS-any-arch: the shim
-/// serves SpeechAnalyzer on macOS 26+ and legacy SFSpeechRecognizer on 14–25, and both
-/// build for arm64 AND x86_64. A machine where the recognizer still can't run (locale,
-/// permission, missing shim) is caught by the runtime probe, not this static matrix.
+/// System STT is macOS-any-arch (static); runtime probe handles auth/locale.
 fn system_stt_buildable_on(os: &str, arch: &str) -> bool {
     let _ = arch;
     os == "macos"
 }
-/// Whether the `system` TTS synth (`say` / SAPI) exists on this OS — macOS + Windows; no
-/// system synth is wired on Linux (built-in Kokoro covers it there).
+/// System TTS (`say`/SAPI) on macOS+Windows only.
 fn system_tts_buildable_on(os: &str) -> bool {
     os == "macos" || os == "windows"
 }
 
-/// The default TTS engine LADDER: built-in (Kokoro) first, then the system synth — so an
-/// arm64 mac / Windows / Linux uses Kokoro while an x86_64 mac (no Kokoro stack) falls through
-/// to the system `say` voice. `[]` opts TTS out entirely.
+/// Default TTS ladder: built_in → system. `[]` = off.
 pub(crate) fn default_tts_engine_ladder() -> Vec<TtsEngine> {
     vec![TtsEngine::Kokoro, TtsEngine::System]
 }
 
-/// The default STT engine LADDER: system (Apple's on-device recognizer) → built-in
-/// (Parakeet) → claude_code (delegate to Claude Code's dictation), in descending
-/// preference. `system` is macOS-only-usable, so this only changes the default on
-/// macOS (any arch) — it now prefers the OS recognizer over Parakeet there; Windows and
-/// Linux still land on `built_in` first since `system` is never usable off macOS.
-/// `claude_code` is LAST and always usable, so a machine where neither on-device engine
-/// can run still gets working dictation. `[]` opts dictation out (Caps still silences).
+/// Default STT ladder: system → built_in → claude_code. `system` macOS-only usable;
+/// `claude_code` always last. `[]` = off (Caps still silences).
 pub(crate) fn default_stt_engine_ladder() -> Vec<SttEngine> {
     vec![SttEngine::System, SttEngine::BuiltIn, SttEngine::ClaudeCode]
 }
 
-/// Fail-open deserialize for `tts_engine_ladder` — an ORDERED preference ladder. ARRAYS ONLY:
-///   • an ARRAY of tokens (`["built_in","system"]`) — known tokens kept in order (deduped); an
-///     empty / all-unknown array ⇒ EMPTY (= off);
-///   • anything else (a scalar string, or a wrong-typed value) ⇒ the default ladder. A bare
-///     scalar string is NO LONGER a one-rung shorthand — `[]` is the only way to disable.
+/// Fail-open `tts_engine_ladder`: arrays only (empty = off); scalar/wrong type → default ladder.
 pub(crate) fn de_tts_engine_ladder<'de, D>(d: D) -> Result<Vec<TtsEngine>, D::Error>
 where
     D: Deserializer<'de>,
@@ -954,8 +723,7 @@ where
     Ok(parse_tts_ladder(&v))
 }
 
-/// Fail-open deserialize for `stt_engine_ladder` — see [`de_tts_engine_ladder`]; same rules,
-/// STT rungs.
+/// Fail-open `stt_engine_ladder` — same rules as [`de_tts_engine_ladder`].
 pub(crate) fn de_stt_engine_ladder<'de, D>(d: D) -> Result<Vec<SttEngine>, D::Error>
 where
     D: Deserializer<'de>,
@@ -972,10 +740,7 @@ pub(crate) fn parse_stt_ladder(v: &toml::Value) -> Vec<SttEngine> {
     fail_open_vec!(v, SttEngine, SttEngine::parse).unwrap_or_else(default_stt_engine_ladder)
 }
 
-/// Fail-open TOML deserialize for the `tts_engine` PREFERENCE (config-file path, distinct from
-/// the ladder above): a scalar string is the forced single choice, an empty array is explicit
-/// off, and anything else (absent key, wrong-typed value, unrecognized string) is `None` (unset
-/// — defer to the ladder).
+/// Fail-open `tts_engine` preference: scalar = force; `[]` = off; else `None` (use ladder).
 pub(crate) fn de_tts_engine_pref<'de, D>(d: D) -> Result<Option<Vec<TtsEngine>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -988,8 +753,7 @@ where
     })
 }
 
-/// Fail-open TOML deserialize for the `stt_engine` PREFERENCE — see [`de_tts_engine_pref`];
-/// same rules, STT tokens.
+/// Fail-open `stt_engine` preference — see [`de_tts_engine_pref`].
 pub(crate) fn de_stt_engine_pref<'de, D>(d: D) -> Result<Option<Vec<SttEngine>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -1002,9 +766,7 @@ where
     })
 }
 
-/// Serialize the `tts_engine` PREFERENCE back to TOML: an explicit single choice as its
-/// scalar token, explicit off as `[]`. `None` is never reached — the field's
-/// `skip_serializing_if = "Option::is_none"` filters it before this runs.
+/// Serialize `tts_engine` preference: single token or `[]`. (`None` skipped by serde attr.)
 pub(crate) fn se_tts_engine_pref<S: serde::Serializer>(
     v: &Option<Vec<TtsEngine>>,
     s: S,
@@ -1019,7 +781,7 @@ pub(crate) fn se_tts_engine_pref<S: serde::Serializer>(
     }
 }
 
-/// Serialize the `stt_engine` PREFERENCE — see [`se_tts_engine_pref`]; same rules, STT tokens.
+/// Serialize `stt_engine` preference — see [`se_tts_engine_pref`].
 pub(crate) fn se_stt_engine_pref<S: serde::Serializer>(
     v: &Option<Vec<SttEngine>>,
     s: S,
@@ -1034,12 +796,8 @@ pub(crate) fn se_stt_engine_pref<S: serde::Serializer>(
     }
 }
 
-/// STRICT (JSON) deserialize for `set_config`'s `tts_engine` PREFERENCE: a plain scalar
-/// string — one of the real engine tokens (forces exactly that engine) or the literal
-/// `"off"` (explicit off; NOT a real `TtsEngine` value, handled directly here since the
-/// enum itself carries no `Off` variant). Any other shape (array, wrong type) or an
-/// unrecognized token is a hard ERROR (unlike the fail-open config-file path). `None`
-/// when the field is absent.
+/// Strict JSON for `set_config` `tts_engine`: engine token or `"off"`; wrong shape/token errors.
+/// Absent → `None`. (No `Off` enum variant.)
 pub fn de_opt_pref_tts_engine<'de, D>(d: D) -> Result<Option<Vec<TtsEngine>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -1057,8 +815,7 @@ where
     }
 }
 
-/// STRICT (JSON) deserialize for `set_config`'s `stt_engine` PREFERENCE — see
-/// [`de_opt_pref_tts_engine`]; same rules, STT tokens.
+/// Strict JSON for `set_config` `stt_engine` — see [`de_opt_pref_tts_engine`].
 pub fn de_opt_pref_stt_engine<'de, D>(d: D) -> Result<Option<Vec<SttEngine>>, D::Error>
 where
     D: Deserializer<'de>,

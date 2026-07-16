@@ -41,12 +41,8 @@ unsafe extern "C" {
     pub(crate) fn _exit(code: i32) -> !;
 }
 
-/// Whether verbose per-utterance/per-session diagnostics should be logged — mirrors the
-/// engine's own `DONTSPEAK_DEBUG` gate (`dontspeakd`'s `config_gate::debug_enabled`) so
-/// ds-helper's routine per-listen `log::debug!` lines stay off by default too, one env var
-/// away when diagnosing. Feeds `log::set_max_level` once at startup (see `main`) — the
-/// `log` crate's own max-level check lazily skips evaluating every `debug!` call's
-/// `format_args!` when this is off, so call sites no longer need their own guard.
+/// Mirrors the engine's `DONTSPEAK_DEBUG` gate so helper `log::debug!` stays off by default.
+/// Fed into `log::set_max_level` once at startup (skips format_args when off).
 pub(crate) fn debug_enabled() -> bool {
     std::env::var("DONTSPEAK_DEBUG").as_deref() == Ok("1")
 }
@@ -71,25 +67,19 @@ fn main() {
     }
 
     if first == "--prefetch" {
-        // Installer hook: download model assets and/or the Windows CUDA runtime via
-        // ds-model — the SINGLE source of the pinned URLs/SHAs, so the installer never
-        // hardcodes or drifts from them. `what` = "models" | "cuda" | a per-model token;
-        // the no-arg "all" default (not a DownloadTarget) ⇒ models + CUDA in run_prefetch.
+        // Installer hook via ds-model (single source of pinned URLs/SHAs).
+        // `what` default "all" (not a DownloadTarget) ⇒ models + CUDA in run_prefetch.
         let what = args.next().unwrap_or_else(|| "all".to_string());
-        // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
-        // destructors is deliberate (see this file's top comment — ort/cpal abort on
-        // teardown).
+        // SAFETY: deliberate `_exit` teardown (ort/cpal abort on Drop); see crate doc.
         unsafe { _exit(setup::run_prefetch(&what)) };
     }
 
     if first == "--print-manifest" {
-        // Tooling hook: write a component's STILL-NEEDED download list to a file
-        // (GUI subsystem ⇒ no stdout for a GUI caller to read). Lines: `url|file_name|sha`.
-        // URLs come from ds-model, so the caller never hardcodes them.
+        // Still-needed downloads to a file (GUI subsystem has no usable stdout).
+        // Lines: `url|file_name|sha` from ds-model.
         let what = args.next().unwrap_or_else(|| "all".to_string());
         let out = args.next().unwrap_or_default();
-        // The ONE wire-token parse for this hook — the library API is typed, so an
-        // unknown token (incl. the no-arg "all" default) ⇒ an empty manifest, here.
+        // Sole wire-token parse for this hook; unknown (incl. "all") ⇒ empty manifest.
         let items = ds_model::DownloadTarget::parse(&what)
             .map(ds_model::prefetch_items)
             .unwrap_or_default();
@@ -105,20 +95,16 @@ fn main() {
                 1
             }
         };
-        // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
-        // destructors is deliberate (see this file's top comment).
+        // SAFETY: deliberate `_exit` teardown; see crate doc.
         unsafe { _exit(code) };
     }
 
     if first == "--install-prefetched" {
-        // Installer hook: verify + place/extract a component from a dir the installer
-        // already downloaded into (no network). `<dir> <what>`. Reuses the normal
-        // ensure_* paths via the prefetch source set below.
+        // Place/extract from an already-downloaded dir (no network). `<dir> <what>`.
         let dir = args.next().unwrap_or_default();
         let what = args.next().unwrap_or_else(|| "all".to_string());
         ds_model::set_prefetch_source(Some(std::path::PathBuf::from(dir)));
-        // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
-        // destructors is deliberate (see this file's top comment).
+        // SAFETY: deliberate `_exit` teardown; see crate doc.
         unsafe { _exit(setup::run_prefetch(&what)) };
     }
 
@@ -135,8 +121,7 @@ fn main() {
     let rate: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0_f32);
 
     if text.trim().is_empty() {
-        // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
-        // destructors is deliberate (see this file's top comment).
+        // SAFETY: deliberate `_exit` teardown; see crate doc.
         unsafe { _exit(0) };
     }
 
@@ -150,7 +135,6 @@ fn main() {
             1
         }
     };
-    // SAFETY: `_exit` takes only an exit code and never returns; skipping Rust
-    // destructors is deliberate (see this file's top comment).
+    // SAFETY: deliberate `_exit` teardown; see crate doc.
     unsafe { _exit(code) };
 }

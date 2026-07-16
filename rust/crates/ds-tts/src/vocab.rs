@@ -1,27 +1,20 @@
-//! Kokoro phoneme→token vocabulary + tokenizer (port of the Kokoro vocab + tokenizer).
+//! Kokoro phoneme→token vocabulary + tokenizer.
 //!
-//! `KOKORO_VOCAB` is the kokoro-onnx `config.json "vocab"` (n_token = 178),
-//! copied VERBATIM from the kokoro-onnx config: id 0 is the pad token reused as BOS/EOS,
-//! there is no ASCII `g` (only ɡ U+0261), no apostrophe, the combining tilde is
-//! U+0303, primary stress ˈ = 156, etc.
+//! `KOKORO_VOCAB` is kokoro-onnx `config.json "vocab"` (n_token = 178) VERBATIM:
+//! id 0 = pad reused as BOS/EOS; no ASCII `g` (only ɡ U+0261); no apostrophe;
+//! combining tilde U+0303; primary stress ˈ = 156; etc.
 //!
-//! [`tokenize`] maps a phoneme string to token ids, silently dropping any char
-//! the vocab doesn't contain (like kokoro-onnx `tokenizer.py`): anything
-//! `voice-g2p` emits that Kokoro can't say is dropped, never a panic. Batching a
-//! long phoneme string at sentence marks under [`MAX_PHONEME_LENGTH`] (port of
-//! `splitPhonemes`) lives in [`crate::batch`].
+//! [`tokenize`] drops unknown chars (never panics) — matches kokoro-onnx
+//! `tokenizer.py`. Clause batching under [`MAX_PHONEME_LENGTH`] is in [`crate::batch`].
 
-/// Maximum phoneme-character count shared by both synthesis backends. Vocabulary filtering
-/// maps each retained character to one token, so a batch also contains at most 509 tokens.
-/// Kokoro's 510-row voice-style table is indexed by token count, making row 509 the last valid
-/// selection; this limit also remains within FluidAudio's 510-phoneme bound.
+/// Max phoneme chars per batch (both synth backends). One retained char → one token;
+/// Kokoro style table has 510 rows (0..=509); also within FluidAudio's 510-phoneme bound.
 pub const MAX_PHONEME_LENGTH: usize = 509;
-/// Kokoro output sample rate (24 kHz mono).
+/// Kokoro output: 24 kHz mono.
 pub const SAMPLE_RATE: u32 = 24_000;
 
-/// The phoneme→token id table, ported char-for-char from the Kokoro vocab.
-/// Lookup is a linear scan over this 114-entry `const` slice, once per phoneme;
-/// no map allocation, no `phf` dep.
+/// Phoneme→token ids, char-for-char from Kokoro. Linear scan over 114 entries;
+/// no map / `phf`.
 pub const KOKORO_VOCAB: &[(char, i64)] = &[
     (';', 1),
     (':', 2),

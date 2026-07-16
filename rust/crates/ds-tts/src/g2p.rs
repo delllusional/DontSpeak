@@ -1,12 +1,8 @@
-//! The single English text frontend for both Kokoro synthesis backends.
+//! Single English text frontend for both Kokoro backends.
 //!
-//! The released `voice-g2p` crate provides Misaki's contextual tokenizer, tagger, lexicon,
-//! number handling, and morphology. DontSpeak disables its optional external `espeak-ng`
-//! process and injects a small ONNX BART pronunciation only for unresolved words.
-//!
-//! The final stage drops unsupported characters with a warning, then creates model-bounded
-//! [`KokoroPhonemeChunk`] values from the Kokoro-safe remainder. ONNX and Apple Core ML consume
-//! those exact chunks; neither backend owns a second text frontend.
+//! `voice-g2p` (Misaki tokenizer/tagger/lexicon) with espeak-ng disabled; ONNX BART
+//! only for unresolved words. Final stage drops unsupported chars, emits model-bounded
+//! [`KokoroPhonemeChunk`]s shared by ONNX and Core ML.
 
 mod bart;
 
@@ -15,9 +11,7 @@ use std::sync::{Mutex, OnceLock};
 
 const MAX_OOV_CACHE: usize = 512;
 
-/// DontSpeak-owned pronunciations that are more authoritative than a generic OOV heuristic.
-/// These are injected into the contextual upstream pipeline instead of rebuilding an utterance
-/// word by word after a miss.
+/// DontSpeak pronunciations injected into the upstream pipeline (not post-miss rebuild).
 const OVERRIDES: &[(&str, &str)] = &[
     ("nicole", "nɪkˈOl"),
     ("aoede", "Aˈidi"),
@@ -31,8 +25,7 @@ struct OovEntry {
     phonemes: String,
     override_key: String,
     replacement: Option<String>,
-    /// The spelling fallback came from a BART error, so a later occurrence must retry the
-    /// model instead of treating this degraded pronunciation as a successful cache hit.
+    /// BART error produced spelling fallback — later occurrences must retry, not cache-hit.
     retry_bart: bool,
 }
 

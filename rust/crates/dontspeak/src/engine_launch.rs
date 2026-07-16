@@ -1,6 +1,5 @@
-//! Engine (RPC host) spawn/detach lifecycle. The tools that bridge to the resident
-//! engine call [`ensure_engine`] first, since an MCP client may invoke us with no
-//! engine running yet.
+//! Engine (RPC host) spawn/detach. Tools that bridge to the resident engine call
+//! [`ensure_engine`] first — an MCP client may invoke us with no engine running yet.
 
 use std::path::Path;
 #[cfg(not(target_os = "macos"))]
@@ -11,11 +10,9 @@ use ds_ipc::Request;
 
 use crate::mcp::log;
 
-/// Detach a spawned host into its own process group so it survives this short-lived
-/// MCP shim exiting (and isn't killed by a Ctrl-C to our pgroup). Linux uses
-/// `process_group(0)`; the Windows equivalent (CREATE_NEW_PROCESS_GROUP/
-/// DETACHED_PROCESS). macOS launches via `open`, which detaches for us.
-/// macOS launches via `open`, which detaches for us, so it needs no `detach`.
+/// Detach the spawned host into its own process group so it survives this short-lived MCP
+/// shim exiting (and isn't killed by Ctrl-C to our pgroup). Linux: `process_group(0)`;
+/// Windows: CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS. macOS uses `open`, which detaches.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn detach(cmd: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -29,13 +26,10 @@ fn detach(cmd: &mut std::process::Command) {
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
 
-/// Ensure the engine (RPC host) is up. The engine has NO headless mode — it only ever
-/// runs IN-PROCESS inside the platform's resident host app, so `ensure_engine` launches
-/// that app (bringing up the engine + its socket under one process, never a second
-/// conflicting one) and waits for the socket. There is exactly one host per platform:
-/// macOS DontSpeak.app, Windows the WinUI app (`ds-winui.exe`, P/Invokes ds_core.dll),
-/// Linux the GTK app (`ds-gtk`, links ds-core). With no host installed, tools stay
-/// unavailable until the user launches it.
+/// Ensure the engine is up. No headless mode — engine only runs in-process inside the
+/// platform host (macOS DontSpeak.app, Windows `ds-winui.exe`, Linux `ds-gtk`), so we launch
+/// that app and wait for the socket. One host per platform; no host installed ⇒ tools fail
+/// until the user launches it.
 pub(crate) fn ensure_engine(sock: &Path) -> bool {
     if ds_ipc::request(sock, &Request::Ping).is_ok() {
         return true;
@@ -44,8 +38,7 @@ pub(crate) fn ensure_engine(sock: &Path) -> bool {
         log("no DontSpeak host app installed; tools fail until it runs");
         return false;
     }
-    // Wait up to ~5s for the socket (host launch + engine start takes a moment; the
-    // engine binds the socket before warming Kokoro, so it answers early).
+    // ~5s: host launch + engine start; engine binds the socket before warming Kokoro.
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(100));
         if ds_ipc::request(sock, &Request::Ping).is_ok() {
@@ -56,13 +49,11 @@ pub(crate) fn ensure_engine(sock: &Path) -> bool {
     false
 }
 
-/// Launch the resident host app that owns the in-process engine + its socket. Returns
-/// whether a launch was ISSUED (not that the engine is ready — the caller then polls the
-/// socket). `false` ⇒ no host app installed.
+/// Launch the resident host. Returns whether a launch was *issued* (caller polls the socket).
+/// `false` ⇒ no host app installed.
 #[cfg(target_os = "macos")]
 fn launch_host() -> bool {
-    // `-g` background, `-b` by bundle id (LaunchServices finds the installed
-    // DontSpeak.app, which is also the login item).
+    // `-g` background, `-b` by bundle id (LaunchServices finds DontSpeak.app / login item).
     std::process::Command::new("/usr/bin/open")
         .args(["-g", "-b", "app.dontspeak.org"])
         .status()
@@ -83,11 +74,8 @@ fn launch_host() -> bool {
     cmd.spawn().is_ok()
 }
 
-/// Locate the resident host-app binary. Windows: `ds-winui.exe` (P/Invokes ds_core.dll,
-/// which must sit beside it). Linux: `ds-gtk` (links the ds-core staticlib and hosts the
-/// engine in-process — the analogue of DontSpeak.app). Checks, in order: next to this
-/// binary (the packaged single-dir install, where every bin lands together) and the
-/// `~/.local/bin` layout the installers publish to. `None` ⇒ not installed.
+/// Locate the host binary. Windows: `ds-winui.exe` (ds_core.dll beside it). Linux: `ds-gtk`.
+/// Order: next to this binary (packaged single-dir), then `~/.local/bin` install layout.
 #[cfg(not(target_os = "macos"))]
 fn host_app_bin() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe()
@@ -99,10 +87,8 @@ fn host_app_bin() -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
-/// Build the ordered list of candidate host-app-binary paths from an already-resolved
-/// `exe_dir` (this process' own directory) and `home` (the user's home dir, as in
-/// `ds_config::Paths::home`) — pure composition, no filesystem checks. See
-/// [`host_app_bin`] for the real callers and what each candidate corresponds to.
+/// Ordered candidate paths from already-resolved `exe_dir` / `home` — pure composition,
+/// no filesystem checks. See [`host_app_bin`] for what each candidate is.
 #[cfg(not(target_os = "macos"))]
 fn host_app_candidates(exe_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
@@ -112,14 +98,13 @@ fn host_app_candidates(exe_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathB
 
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = exe_dir {
-        candidates.push(dir.join(APP)); // packaged single-dir install (all bins together)
+        candidates.push(dir.join(APP)); // packaged single-dir (all bins together)
         #[cfg(target_os = "windows")]
-        candidates.push(dir.join("winui").join(APP)); // a winui\ subdir beside us
+        candidates.push(dir.join("winui").join(APP)); // winui\ subdir beside us
     }
     if let Some(home) = home {
-        // The `~/.local/bin` install layout: on Linux install-gui.sh installs `ds-gtk`
-        // directly here. (Windows: the `winui/` subdir is a legacy dev-deploy fallback —
-        // the portable zip now lays every bin together beside this exe, caught above.)
+        // Linux install-gui.sh: `ds-gtk` in ~/.local/bin. Windows portable zip is single-dir
+        // (above); winui/ under home is a legacy dev-deploy fallback.
         #[cfg(target_os = "windows")]
         candidates.push(home.join(".local/bin/winui").join(APP));
         #[cfg(not(target_os = "windows"))]
@@ -132,10 +117,8 @@ fn host_app_candidates(exe_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathB
 mod tests {
     use super::*;
 
-    // These tests exercise ONLY the pure `host_app_candidates` composition with
-    // synthetic inputs. They must never call `host_app_bin`, `launch_host`, or
-    // `ensure_engine` — those reach the real `ds_config::Paths::resolve()` (the actual
-    // OS data dir on this machine) and could spawn the real installed host app.
+    // Pure `host_app_candidates` only — never call host_app_bin / launch_host / ensure_engine
+    // (those hit real Paths::resolve and could spawn the installed host).
 
     #[cfg(target_os = "windows")]
     const APP: &str = "ds-winui.exe";

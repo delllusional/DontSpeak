@@ -1,16 +1,12 @@
-//! `SttResidencySlot` — the STT (Parakeet) load-claim state machine that replaces
-//! `serve.rs`'s old `stt_claimed: Arc<AtomicBool>`.
+//! `SttResidencySlot` — STT load-claim state machine replacing `serve.rs`'s old
+//! `stt_claimed: Arc<AtomicBool>`.
 //!
-//! The old flag had exactly one problem: a failed load released the claim (so a
-//! retry could happen), but nothing enforced that "claimed" could ONLY be exited via
-//! either a successful load or an explicit failure/unload path — a future call site
-//! could `swap(true, ..)` and just... never release it on some other exit. This type
-//! makes that structurally impossible: the only way out of `Loading` is
-//! [`resolve_ok`](SttResidencySlot::resolve_ok) or
-//! [`mark_unloaded`](SttResidencySlot::mark_unloaded), and the only way out of
-//! `Loaded` is `mark_unloaded` too. There is no other transition to reach from either
-//! state, so a caller cannot leave the claim stuck true after this refactor the way
-//! it did before 4ef3013 fixed the specific failed-load-then-never-retries case.
+//! The bool could release on failed load (retry OK) but nothing forced "claimed"
+//! to exit only via success or explicit failure/unload — a call site could
+//! `swap(true)` and never release. Here the only exits from `Loading` are
+//! [`resolve_ok`](SttResidencySlot::resolve_ok) / [`mark_unloaded`](SttResidencySlot::mark_unloaded),
+//! and from `Loaded` only `mark_unloaded` — so the claim can't stick true the way
+//! it did before 4ef3013 (failed load then never retries).
 
 use std::sync::Mutex;
 
@@ -28,9 +24,7 @@ impl SttResidencySlot {
         Self(Mutex::new(SttResidency::Idle))
     }
 
-    /// `Idle -> Loading`, returns `true` (claimed). A no-op (`false`) from
-    /// `Loading`/`Loaded` — the caller must skip its own load attempt in that case
-    /// (the model is already resident, or another load is already in flight).
+    /// `Idle -> Loading` (`true`). No-op (`false`) from `Loading`/`Loaded` — caller must skip load.
     pub(crate) fn try_claim(&self) -> bool {
         let mut guard = self.0.lock().unwrap();
         if *guard == SttResidency::Idle {
@@ -46,11 +40,8 @@ impl SttResidencySlot {
         *self.0.lock().unwrap() = SttResidency::Loaded;
     }
 
-    /// `-> Idle` unconditionally, from ANY state. Call on a load FAILURE (so a later
-    /// `load stt` can retry) AND on an explicit `unload stt`. This is what makes the
-    /// claim structurally unable to get stuck: there is no other way to leave
-    /// `Loading` except [`resolve_ok`](Self::resolve_ok), and no way to leave `Loaded`
-    /// except this.
+    /// `-> Idle` from any state. On load failure (so later `load stt` can retry) and on
+    /// `unload stt`. Structural unstick: only exit from `Loading`/`Loaded` (with `resolve_ok`).
     pub(crate) fn mark_unloaded(&self) {
         *self.0.lock().unwrap() = SttResidency::Idle;
     }
@@ -86,14 +77,13 @@ mod tests {
         let slot = SttResidencySlot::new();
         assert!(slot.try_claim());
         slot.resolve_ok();
-        // Loaded now blocks a further claim — indirect proof `resolve_ok` landed.
+        // Loaded blocks further claim — proof resolve_ok landed.
         assert!(!slot.try_claim());
     }
 
     #[test]
     fn mark_unloaded_resets_from_every_state() {
-        // The literal regression test for "stuck true forever after unload+reload" — the
-        // actual bug 4ef3013 fixed, now made structurally impossible by this type.
+        // Regression: "stuck true forever after unload+reload" (4ef3013), now structural.
         let idle = SttResidencySlot::new();
         idle.mark_unloaded();
         assert!(

@@ -10,22 +10,20 @@
 //!
 //! Strategy:
 //!   1. Split on the FIRST `#` — the sample (right) is discarded.
-//!   2. On the left, the locale is the LAST whitespace-delimited token (e.g.
-//!      `en_US`, `en_IN`); the name is everything before it, trimmed.
-//!   3. A trailing `(Enhanced)` / `(Premium)` on the name → [`Quality`]; any
-//!      other trailing paren group (e.g. `(English (India))`) is a descriptor and
-//!      kept as part of the id/name (NOT a quality). Default quality = `Default`.
+//!   2. On the left, the locale is the LAST whitespace-delimited token; the name
+//!      is everything before it, trimmed.
+//!   3. A trailing `(Enhanced)` / `(Premium)` on the name → [`Quality`]; any other
+//!      trailing paren group (e.g. `(English (India))`) is a descriptor kept as
+//!      part of the id/name (NOT a quality). Default quality = `Default`.
 //!   4. `language_tag` = locale with `_`→`-` (`en_US` → `en-US`).
 //!   5. `id` = the full name INCLUDING any quality suffix — what `say -v` expects
-//!      back. `gender` is unknown from `say` ⇒ `None`. `downloadable` = false
-//!      (already installed).
+//!      back. `gender` is unknown from `say` ⇒ `None`. `downloadable` = false.
 //!
 //! Malformed lines (no locale token, blank) are skipped.
 
 use crate::{Quality, SpeakerVoice};
 
-/// Parse the full `say -v ?` output into voices. Lines that don't fit the
-/// `name … locale # sample` shape are skipped.
+/// Parse the full `say -v ?` output into voices.
 pub fn parse_say_voices(out: &str) -> Vec<SpeakerVoice> {
     out.lines().filter_map(parse_line).collect()
 }
@@ -36,7 +34,6 @@ fn parse_line(raw: &str) -> Option<SpeakerVoice> {
     if line.trim().is_empty() {
         return None;
     }
-    // Drop the sample after the first '#'.
     let left = match line.split_once('#') {
         Some((l, _)) => l,
         None => line, // some lines may lack a sample; still try.
@@ -46,15 +43,13 @@ fn parse_line(raw: &str) -> Option<SpeakerVoice> {
         return None;
     }
 
-    // The locale is the LAST whitespace-delimited token on the left.
     let mut it = left.rsplitn(2, char::is_whitespace);
     let locale = it.next()?.trim();
     let name_region = it.next()?.trim();
     if locale.is_empty() || name_region.is_empty() {
         return None;
     }
-    // A locale token must look like a locale (letters, then `_`/`-`, letters):
-    // reject anything else so a name with no real locale column is skipped.
+    // Reject non-locale last tokens so a name with no real locale column is skipped.
     if !looks_like_locale(locale) {
         return None;
     }
@@ -90,14 +85,12 @@ fn looks_like_locale(tok: &str) -> bool {
     true
 }
 
-/// Detect a trailing `(Enhanced)` / `(Premium)` quality suffix on the name.
-/// Returns the quality (Default if none) and the name with the suffix removed.
-/// A non-quality trailing paren group (descriptor) is left intact → Default.
+/// Detect a trailing `(Enhanced)` / `(Premium)` quality suffix.
+/// Non-quality trailing paren groups (descriptors) are left intact → Default.
 fn split_quality(name: &str) -> (Quality, String) {
     let trimmed = name.trim_end();
     if let Some(open) = trimmed.rfind('(') {
-        // Only treat it as a quality if the paren group is the LAST thing and
-        // closes at the end of the string.
+        // Only a quality if the paren group is the last thing and closes at EOL.
         if trimmed.ends_with(')') {
             let inner = trimmed[open + 1..trimmed.len() - 1].trim();
             let q = match inner {
@@ -142,11 +135,10 @@ mod tests {
 
     #[test]
     fn multi_word_and_nested_paren_name() {
-        // "Bad News" — multi-word name, default quality.
         let bn = parse_line("Bad News            en_US    # Hi.").unwrap();
         assert_eq!(bn.name, "Bad News");
         assert_eq!(bn.quality, Some(Quality::Default));
-        // "Aman (English (India))" — descriptor paren, NOT a quality.
+        // Descriptor paren, NOT a quality.
         let aman = parse_line("Aman (English (India)) en_IN    # Hi.").unwrap();
         assert_eq!(aman.id, "Aman (English (India))");
         assert_eq!(aman.language_tag, "en-IN");
@@ -166,9 +158,7 @@ mod tests {
     fn skips_malformed_lines() {
         assert!(parse_line("").is_none());
         assert!(parse_line("   ").is_none());
-        // No locale-looking token before the '#'.
         assert!(parse_line("JustAName # sample").is_none());
-        // Only one token, no locale.
         assert!(parse_line("Lonely").is_none());
     }
 
@@ -182,7 +172,7 @@ Anna                de_DE    # Hallo! Ich heiße Anna.
 garbage line with no hash and no locale-token-shape !!!
 Ava (Premium)       en_US    # Hello! My name is Ava.";
         let voices = parse_say_voices(out);
-        // Blank + the truly-malformed line are skipped; 4 real voices remain.
+        // Blank + malformed line skipped; 4 real voices remain.
         assert_eq!(voices.len(), 4);
         assert_eq!(voices[0].name, "Agnes");
         assert_eq!(voices[1].quality, Some(Quality::Enhanced));

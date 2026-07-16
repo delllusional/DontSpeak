@@ -1,23 +1,9 @@
-//! MCP server registration: the `mcpServers.<name>` JSON shaper.
-//!
-//! [`merge_mcp_server`] / [`strip_mcp_server`] are the generic `mcpServers.<name>` JsonMcp
-//! shaper used by any JSON-MCP client — currently Claude Code's `~/.claude.json` and Qwen
-//! Code's `~/.qwen/settings.json`. It registers
-//! the stdio MCP bridge as a server so the client can call speak/listen/… on demand. The
-//! config is the standard MCP shape:
-//!   { "mcpServers": { "DontSpeak": { "command": "`<abs path>`", "args": [...] } } }
-//! We edit it the same way as settings.json: additive (preserve other servers/keys), our
-//! entry's `command`/`args` UPDATED IN PLACE (not the whole object replaced) so a reinstall
-//! re-points `command` while any sibling key already on our entry survives, malformed file
-//! left to the caller to bail on. PURE — no disk.
+//! JSON MCP shaper (`mcpServers.<name>`) for Claude Code / Qwen. Pure, additive:
+//! updates `command`/`args` in place so reinstall re-points; preserves sibling keys.
 
 use serde_json::{Map, Value, json};
 
-/// Merge an MCP stdio server entry under `mcpServers.<name>`, PRESERVING every other
-/// server and top-level key. `command`/`args` are UPDATED (not skipped-if-present) so a
-/// reinstall at a new path re-points `command` — idempotent and self-healing. Unlike a
-/// whole-object replace, an EXISTING entry's other keys (e.g. a user- or host-added
-/// `disabled` flag) are preserved: only `command` and `args` are ours to rewrite. PURE.
+/// Merge stdio MCP entry under `mcpServers.<name>`. Updates command/args only; pure.
 pub fn merge_mcp_server(mut root: Value, name: &str, command: &str, args: &[&str]) -> Value {
     if !root.is_object() {
         root = Value::Object(Map::new());

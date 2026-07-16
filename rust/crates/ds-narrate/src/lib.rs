@@ -1,24 +1,14 @@
-//! ds-narrate — the SHARED streaming-narration core: one invariant pipeline behind every
-//! client adapter. Given a stream of per-message text batches ([`StreamBatch`]) it decides
-//! which top-level blockquote runs become speakable (each verbatim, exactly once, in
-//! document order — with the "shorts" fallback for a short blockquote-less final reply),
-//! and persists the per-session progress through the SAME on-disk state file
-//! (`narrate-display-<session>.json`) that doubles as the cross-process **streaming
-//! witness** keeping the `Stop` hook silent for sessions that already narrated mid-turn.
+//! Shared streaming-narration core — one pipeline for every client adapter.
 //!
-//! Three thin adapters feed it (see `docs/STREAMING-NARRATION.md`):
-//!   * **Claude Code** — per-batch `notify` hook processes; DELTA chunks keyed by
-//!     content-block `index` (racing processes serialized by the state-file lock).
-//!   * **Qwen Code** — the same hook route with CUMULATIVE `displayed_text` snapshots.
-//!   * **OpenAI Codex** — the engine's long-lived app-server subscriber
-//!     (`dontspeakd::codex_stream`), translating `item/agentMessage/delta` /
-//!     `item/completed` in-process.
+//! From [`StreamBatch`]s: emit each top-level blockquote run verbatim, exactly once,
+//! in document order (plus "shorts" for a blockquote-less final reply). Progress lives
+//! in `narrate-display-<session>.json`, which is also the cross-process **streaming
+//! witness** that keeps `Stop` silent after mid-turn narration.
 //!
-//! Every adapter persists through [`deliver_batch`], so the witness comes for free for
-//! all three and a reconnect/restart can never double-speak (the `offset` high-water
-//! mark is on disk). Extracted from the `dontspeak` crate (`narrate.rs` +
-//! `hook_narrate.rs`) so BOTH the CLI hooks and the engine can depend on it without the
-//! CLI growing an engine dependency.
+//! Adapters (see `docs/STREAMING-NARRATION.md`): Claude Code (delta by content-block
+//! `index`, racing processes + state lock), Qwen Code (cumulative snapshots), OpenAI
+//! Codex (`dontspeakd::codex_stream`, in-process). All use [`deliver_batch`] so the
+//! on-disk `offset` prevents double-speak on reconnect.
 
 mod accum;
 mod stream;

@@ -1,28 +1,19 @@
-//! Key-chord parsing for Claude Code's `voice:pushToTalk` keybinding grammar.
-//!
-//! Pure, OS-independent string parsing: a `"+"`-separated keybinding string
-//! (`"ctrl+g"`, `"space"`, `"meta+k"`, …) becomes a [`KeyChord`] (modifier flags
-//! + a [`KeyBase`]). Each [`crate::KeyInjector`] maps the base to its OS keycode.
+//! OS-independent Claude Code `voice:pushToTalk` keybinding parse → [`KeyChord`].
 
-/// The base (non-modifier) key of a [`KeyChord`]. Only the keys DontSpeak can reliably
-/// synthesize as one discrete terminal keypress are modeled; anything else parses to
-/// `Unsupported` so the caller WARNS + skips rather than emitting the wrong key.
+/// Base key of a chord. Unsynthesizable keys → `Unsupported` (warn + skip).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyBase {
     Space,
     Enter,
     Tab,
     Escape,
-    /// A letter `a`–`z` (lowercased).
+    /// Letter `a`–`z` (lowercased).
     Letter(char),
-    /// A key we don't synthesize yet (function keys, arrows, punctuation, …) — kept as
-    /// the original token for the warning/UI.
+    /// Original token for warning/UI.
     Unsupported(String),
 }
 
-/// A keystroke to synthesize: a base key plus modifier flags, parsed from a Claude Code
-/// keybinding string (e.g. `"ctrl+g"`, `"space"`, `"meta+k"`). The `claude_code` STT engine
-/// reads Claude Code's `voice:pushToTalk` binding into one of these and taps it.
+/// Base + modifiers from a Claude Code keybinding (`"ctrl+g"`, `"space"`, …).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyChord {
     pub ctrl: bool,
@@ -33,7 +24,7 @@ pub struct KeyChord {
 }
 
 impl Default for KeyChord {
-    /// Claude Code's default `voice:pushToTalk` key — bare `Space`.
+    /// Default `voice:pushToTalk` — bare Space.
     fn default() -> Self {
         KeyChord {
             ctrl: false,
@@ -46,10 +37,8 @@ impl Default for KeyChord {
 }
 
 impl KeyChord {
-    /// Parse a Claude Code keybinding string (`"ctrl+g"`, `"space"`, `"meta+k"`, …). The
-    /// LAST `+`-separated token is the base key; the rest are modifiers (matching Claude
-    /// Code's grammar: `ctrl|control`, `shift`, `alt|opt|option|meta`, `cmd|command|super|win`).
-    /// An unknown modifier or base yields `KeyBase::Unsupported` so callers can warn.
+    /// Last `+` token = base; rest = modifiers (`ctrl|control`, `shift`,
+    /// `alt|opt|option|meta`, `cmd|command|super|win`). Unknown → Unsupported.
     pub fn parse(s: &str) -> Self {
         let parts: Vec<&str> = s
             .split('+')

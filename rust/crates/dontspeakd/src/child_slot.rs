@@ -1,58 +1,30 @@
-//! `ChildSlot` — the warm `ds-helper` child's process-lifecycle slot.
+//! Warm `ds-helper` process-lifecycle slot: handle + generation + deliberate-EOF
+//! marker as one type (was three hand-synced primitives).
 //!
-//! `tts.rs` used to track the child's lifecycle as three independent primitives —
-//! a `Mutex<Option<Child>>` handle, an `AtomicU64` incarnation counter, and an
-//! `AtomicBool` deliberate-teardown marker — kept coherent by hand at every call
-//! site. Collapsing them into one type turns three convention-locked couplings
-//! into structure:
-//!
-//! 1. *"bump the generation WHILE holding the `child` lock"* — the generation now
-//!    lives INSIDE the same mutex as the handle, so [`ChildSlot::install`] is one
-//!    atomic write (formerly a comment-enforced block at the `start_locked` call
-//!    site).
-//! 2. *"reset `expected_eof` on every successful start"* — [`ChildSlot::install`]
-//!    does it unconditionally (formerly a separate store a future edit could drop).
-//! 3. *"set `expected_eof` before killing"* — [`ChildSlot::reap`] re-asserts the
-//!    flag before taking the child, so it is impossible to remove a child from the
-//!    slot without marking its EOF deliberate.
+//! Couplings made structural: generation bumps with handle under one mutex;
+//! [`install`] always clears `expected_eof`; [`reap`] re-asserts it before take
+//! so a child never leaves without a deliberate EOF mark.
 
 use std::process::Child;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The warm ds-helper child's process-lifecycle slot: the live handle, its
-/// incarnation number, and the deliberate-teardown marker — one type so the three
-/// can no longer drift apart by convention (see the module doc's couplings).
-///
-/// Locking discipline: every method holds the cell mutex only briefly (O(1) work
-/// plus a non-blocking `try_wait`) — never across `kill()`/`wait()` (those happen
-/// on the value [`reap`](Self::reap) returns, outside any lock), never across a
-/// `Condvar` wait (the slot contains none). Callers serialize lifecycle
-/// TRANSITIONS with `TtsManager`'s outer `lifecycle` lock; this mutex is the
-/// innermost.
+/// Handle + generation + deliberate-EOF (see module doc). Cell mutex is brief only —
+/// never across kill/wait; outer `lifecycle` serializes transitions.
 pub(crate) struct ChildSlot {
-    /// The handle and its generation INSIDE one mutex: installing a child and
-    /// bumping its incarnation are one atomic write, so anyone who next observes
-    /// the child is guaranteed (by the mutex's own happens-before edge) to see the
-    /// new generation too.
+    /// Handle + generation under one mutex (install is one atomic write).
     cell: Mutex<ChildCell>,
-    /// Deliberate-teardown marker. Stays an ATOMIC — not a mutex-guarded variant —
-    /// on purpose: the reader thread classifies an EOF lock-free after the pipe
-    /// closes ([`eof_was_expected`](Self::eof_was_expected)), and must never block
-    /// behind a teardown path that is mid `kill()`/`wait()`.
+    /// Atomic so reader classifies EOF lock-free (never blocks on kill/wait).
     expected_eof: AtomicBool,
 }
 
 struct ChildCell {
-    /// The live `ds-helper --serve` child (`None` when not warm).
     child: Option<Child>,
-    /// The child's incarnation number, bumped by every [`ChildSlot::install`].
-    /// (Named `generation` in full — `gen` is a reserved keyword in edition 2024.)
+    /// Bumped by [`install`] (`gen` is reserved in edition 2024).
     generation: u64,
 }
 
 impl ChildSlot {
-    /// An empty slot: no child, generation 0, EOF not expected.
     pub(crate) fn new() -> Self {
         Self {
             cell: Mutex::new(ChildCell {
@@ -63,13 +35,7 @@ impl ChildSlot {
         }
     }
 
-    /// Install a freshly READY child: handle + generation bump + expected-EOF reset
-    /// as ONE transition. Call only under the caller's `lifecycle` lock, after the
-    /// previous reader thread has been joined and before the new one is spawned —
-    /// no reader exists in that window, so folding the flag reset in here is
-    /// order-insensitive. From this point an EOF is a CRASH unless a deliberate
-    /// teardown ([`begin_deliberate_stop`](Self::begin_deliberate_stop)) re-marks
-    /// it expected before killing.
+    /// READY child: handle + gen bump + clear expected-EOF. Under `lifecycle`; no reader yet.
     pub(crate) fn install(&self, child: Child) {
         {
             let mut cell = self.cell.lock().unwrap();
@@ -79,46 +45,33 @@ impl ChildSlot {
         self.expected_eof.store(false, Ordering::Release);
     }
 
-    /// Mark the teardown that is about to happen DELIBERATE, so the reader doesn't
-    /// report the resulting EOF as a crash. Call FIRST on a teardown path — before
-    /// the stdin drop that can already make the child exit.
+    /// Mark upcoming teardown deliberate (before stdin drop can exit the child).
     pub(crate) fn begin_deliberate_stop(&self) {
         self.expected_eof.store(true, Ordering::Release);
     }
 
-    /// Take the child out of the slot for the caller to kill/wait/log — OUTSIDE any
-    /// lock (this method has already released the cell mutex when it returns).
-    /// Re-asserts the deliberate-teardown marker first (idempotent belt-and-braces —
-    /// both teardown paths already ran [`begin_deliberate_stop`](Self::begin_deliberate_stop)),
-    /// so a child can never leave the slot without its EOF being marked deliberate.
+    /// Take child for kill/wait outside locks; re-asserts deliberate EOF.
     pub(crate) fn reap(&self) -> Option<Child> {
         self.expected_eof.store(true, Ordering::Release);
         self.cell.lock().unwrap().child.take()
     }
 
-    /// True when a warm child is installed.
     pub(crate) fn is_running(&self) -> bool {
         self.cell.lock().unwrap().child.is_some()
     }
 
-    /// The current generation of the RUNNING child, or `None` when the slot is
-    /// empty — one acquisition for the callers (`play`) that need both facts.
+    /// Generation of running child, or None if empty.
     pub(crate) fn running_gen(&self) -> Option<u64> {
         let cell = self.cell.lock().unwrap();
         cell.child.is_some().then_some(cell.generation)
     }
 
-    /// The current generation, whether or not a child is installed — for
-    /// `mark_dead_if_current`'s staleness compare (which must also match against
-    /// an already-emptied slot).
+    /// Generation even if empty (`mark_dead_if_current` staleness).
     pub(crate) fn generation(&self) -> u64 {
         self.cell.lock().unwrap().generation
     }
 
-    /// `(present, exited)`: is a child installed, and has it already exited?
-    /// `try_wait` Err ⇒ treat as exited — the handle is unusable either way. Feeds
-    /// [`crate::config_gate::warm_child_heal_action`] unchanged. Peek only: never
-    /// takes/kills the child.
+    /// `(present, exited)` peek for heal decisions; never takes/kills.
     pub(crate) fn probe(&self) -> (bool, bool) {
         match self.cell.lock().unwrap().child.as_mut() {
             Some(c) => (true, !matches!(c.try_wait(), Ok(None))),
@@ -126,17 +79,12 @@ impl ChildSlot {
         }
     }
 
-    /// Was the EOF the reader just saw marked deliberate? Lock-free (atomic load) —
-    /// the reader's EOF classification must never block behind a teardown path
-    /// that is mid `kill()`/`wait()`.
+    /// Deliberate EOF? Lock-free for reader classification.
     pub(crate) fn eof_was_expected(&self) -> bool {
         self.expected_eof.load(Ordering::Acquire)
     }
 
-    /// Peek the child's exit status if it has already exited (`None` when the slot
-    /// is empty, the child is still alive, or `try_wait` errs). Peek only — never
-    /// takes/kills, so a later `mark_dead`/`restart_if_crashed` still owns the
-    /// actual reap.
+    /// Peek exit status without taking the child.
     pub(crate) fn peek_exit_status(&self) -> Option<std::process::ExitStatus> {
         self.cell
             .lock()

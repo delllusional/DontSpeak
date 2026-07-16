@@ -1,317 +1,181 @@
-//! The RPC wire protocol: one JSON [`Request`] per line in, one-or-more JSON
-//! [`Response`] lines out. A streaming request (STT test-recognition) emits several
-//! non-terminal `Response` lines and ends with a terminal one.
+//! RPC wire protocol: one JSON [`Request`] per line in, one-or-more JSON [`Response`]
+//! lines out. Streaming (STT test-recognition) emits non-terminal lines then a terminal.
 //!
-//! Config is carried as the `serde_json::Value` produced by
-//! `ds_config::voice_to_value` / `voice_from_value`, so neither side needs a
-//! parallel serializable mirror of `VoiceConfig`.
+//! Config rides as `serde_json::Value` from `ds_config::voice_to_value` /
+//! `voice_from_value` — no parallel `VoiceConfig` mirror.
 
 use ds_client::ClientSource;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// A client → engine request. `#[serde(tag = "cmd")]` so each line is a small
-/// self-describing object, e.g. `{"cmd":"ping"}` or `{"cmd":"speak","text":"hi"}`.
+/// Client → engine request (`#[serde(tag = "cmd")]`, snake_case).
 ///
-/// ## The `source` field
+/// ## `source` field
 ///
-/// Every CLIENT-ORIGINATED request — one the `dontspeak` binary sends on a client's behalf and
-/// the engine routes per-session or logs — carries a REQUIRED `source: ClientSource` naming
-/// WHICH client it came from: the hook's `--client <token>` verb, or the MCP `initialize`
-/// handshake's `clientInfo`. Those seven are [`Request::GreetSession`], [`Request::MarkActive`],
-/// [`Request::SessionEnd`], [`Request::StopSpeech`], [`Request::Speak`],
-/// [`Request::SpeakNarration`] and [`Request::Earcon`].
+/// Seven **client-originated** variants require `source: ClientSource` (hook `--client` or
+/// MCP `initialize` `clientInfo`): [`GreetSession`], [`MarkActive`], [`SessionEnd`],
+/// [`StopSpeech`], [`Speak`], [`SpeakNarration`], [`Earcon`]. No `#[serde(default)]` /
+/// `Option` — absent field is a hard decode error (CLI/engine/wiring ship together; stale
+/// hooks are rejected, not mis-attributed). Unrecognised *token* → `ClientSource::Unknown`
+/// (forward-open, like [`Response::Unknown`]). Guard:
+/// `request_without_source_is_a_hard_decode_error`.
 ///
-/// The rest DELIBERATELY do NOT carry it, and that is a decision, not an oversight:
-/// [`Request::SetMuted`] is also sent by the app's own tray via `ds-core` (there is no client
-/// there at all); the STT/diarization requests (`TestRecognitionStart`/`Stop`, `Diarize`,
-/// `Enroll`, `ForgetSpeaker`, `ListSpeakers`) and every app/engine control request
-/// (`SetProvider`, `Reload`, `ModelStatus`, `WaitModelStatus`, `EnsureKokoroFrontend`,
-/// `EnsureCodexStream`, `AuthorizeSystemStt`, `Shutdown`, `Ping`, `Status`) are the APP or
-/// the ENGINE talking to
-/// itself, not a client. Keeping `source` off them is also what lets `ds-core/src/ffi.rs`
-/// compile untouched — it constructs `SetMuted`/`ModelStatus`/`WaitModelStatus`/`SetProvider`
-/// and none of the seven.
+/// All other variants deliberately omit `source` (app tray / engine self-talk / STT tools);
+/// that keeps `ds-core` FFI constructors unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
-    /// Liveness/health probe → [`Response::Pong`].
+    /// → [`Response::Pong`].
     Ping,
-    /// Snapshot of the TTS queue's playback state → [`Response::Status`]. Read-only.
+    /// TTS queue snapshot → [`Response::Status`].
     Status,
-    /// Ensure the shared Kokoro frontend assets (voices, OOV G2P graphs, and ORT) are present,
-    /// downloading them in the background if needed. Returns immediately — does NOT wait for
-    /// the single-flight download. → [`Response::Done`].
+    /// Ensure Kokoro frontend assets (voices, OOV G2P, ORT); returns immediately (download is
+    /// single-flight background). → [`Response::Done`].
     EnsureKokoroFrontend,
-    /// Make the Codex app-server observation path ready for an interactive
-    /// `dontspeak codex` launch. The engine owns any process it must start and returns only
-    /// after its subscriber has initialized, closing the race where the TUI could begin a
-    /// turn before narration was attached. The engine owns a direct Windows child and
-    /// coordinates the managed Unix daemon. → [`Response::CodexStreamReady`] or
-    /// [`Response::Error`].
+    /// Ready the Codex app-server observation path for `dontspeak codex`. Returns only after
+    /// the narration subscriber is attached (closes TUI-starts-before-narration race).
+    /// → [`Response::CodexStreamReady`] / [`Response::Error`].
     EnsureCodexStream,
-    /// Set global MUTE (the tray checkbox; the Caps-tap toggles it engine-side). Speech keeps
-    /// draining silently; queued cues are suppressed and an active cue stops. → [`Response::Done`].
+    /// Global mute (tray / Caps). Speech drains silently; cues suppressed. → [`Response::Done`].
     SetMuted { on: bool },
-    /// A terminal/session just opened (SessionStart hook). If `greet_on_open` is set,
-    /// the engine claims this session's pool voice and speaks a short greeting in it.
-    /// No-op when greeting is off. `session` is ambient (the hook's `session_id`).
-    /// → [`Response::Done`].
+    /// SessionStart: optional pool-voice greeting when `greet_on_open`. → [`Response::Done`].
     GreetSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        /// WHICH client this request came from ([`ds_client::ClientSource`]) — the hook's
-        /// `--client` verb, or the MCP `initialize` handshake's `clientInfo`.
-        ///
-        /// REQUIRED: every client-originated request names its source. No `#[serde(default)]`,
-        /// no `Option`, no `skip_serializing_if`. Backward compatibility with a hook binary
-        /// that predates the verb is explicitly OUT OF SCOPE — the CLI, the engine and the
-        /// wiring ship together and the engine re-wires every client at boot, so there is no
-        /// supported skew; a stale hook's line is REJECTED (`bad request: missing field
-        /// `source``) rather than silently mis-attributed, which is the point.
-        ///
-        /// An UNRECOGNISED token still decodes to `ClientSource::Unknown` (fail-open
-        /// `Deserialize`, mirroring [`Response::Unknown`]'s `#[serde(other)]`) — that is
-        /// FORWARD robustness against a client we have not wired YET, not legacy support. An
-        /// ABSENT `source` is a hard decode error, deliberately: see
-        /// `request_without_source_is_a_hard_decode_error`, which exists to fail loudly if
-        /// anyone ever reaches for `#[serde(default)]` here to make another test go green.
+        /// Required client origin — see enum-level `source` docs.
         source: ClientSource,
     },
-    /// Mark this session as the ACTIVE terminal — the one you just submitted a prompt
-    /// to (UserPromptSubmit hook). The TTS queue then speaks only this session's items
-    /// and HOLDS the others (paused, not dropped) until they become active, so
-    /// narration follows the terminal you're working in. `session` is ambient (the
-    /// hook's `session_id`); absent ⇒ the default/global session. → [`Response::Done`].
+    /// UserPromptSubmit: mark active terminal; other sessions' TTS is held (not dropped).
     MarkActive {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        /// True when the hook classified the `UserPromptSubmit` prompt body as a
-        /// harness-injected CONTINUATION rather than something a human typed and
-        /// submitted — e.g. Claude Code auto-re-invoking the agent with a
-        /// `<task-notification>` block after a background task finishes (issue #11).
-        /// No human expressed "I've moved on" here, so a synthetic ping registers
-        /// session-liveness bookkeeping ONLY: it must NOT claim active-terminal status
-        /// and must NOT apply `input_clears`. See
-        /// `dontspeak::hook_speak::is_synthetic_continuation` for the classifier that sets
-        /// this on the wire.
-        ///
-        /// `#[serde(default)]` is a WIRE-COMPACTNESS affordance, nothing more: the hook omits
-        /// the key when it's `false` (the common case), keeping the line short, and an omitted
-        /// key decodes as `false` — the conservative default, since a synthetic ping must never
-        /// be *assumed*. It is NOT a backward-compat shim for an old hook build: since `source`
-        /// became required, such a build's line is rejected for the missing `source` before
-        /// `synthetic` is ever considered, so this default can never fire for a stale client.
+        /// Harness-injected continuation (issue #11), not a human submit — liveness only:
+        /// must NOT claim active-terminal or apply `input_clears`. Classifier:
+        /// `dontspeak::hook_speak::is_synthetic_continuation`.
+        /// `#[serde(default)]` = wire compactness (omit when false), not legacy-hook compat
+        /// (stale hooks fail on missing `source` first).
         #[serde(default)]
         synthetic: bool,
-        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED.
         source: ClientSource,
     },
-    /// Speak `text` as a Reply on the engine's TTS queue (survives a record-barge when
-    /// the resume policy is set). Used by the MCP `speak` tool for explicit, model-driven
-    /// speech; assistant-reply narration goes through `SpeakNarration` instead.
-    /// `voice`/`rate` override config.
+    /// MCP `speak` tool: Reply on the TTS queue (survives record-barge when resume policy set).
+    /// Narration uses [`SpeakNarration`]. `voice`/`rate` override config.
     Speak {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         voice: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rate: Option<f32>,
-        /// The Claude session this reply belongs to (ambient; see [`Request::MarkActive`]).
-        /// The engine tags the queued item with it so per-session playback routing (active
-        /// window, pool voice) resolves correctly.
+        /// Ambient session for per-session playback routing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED. For the
-        /// MCP `speak` tool this is the `initialize` handshake's mapped `clientInfo.name`.
         source: ClientSource,
     },
-    /// Enqueue `text` as mid-turn NARRATION on the engine's TTS queue (dropped
-    /// first on a record-barge / skip-ahead). The engine splits it into
-    /// sentences and plays them on the warm child — replaces the old cold
-    /// per-block spawn so there is no model reload between blocks.
+    /// Mid-turn narration (dropped first on barge/skip-ahead); sentence-split on warm child.
     SpeakNarration {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        /// Stable producer identity for admission retries. New engines deduplicate it;
-        /// `None` preserves compatibility with older hook binaries.
+        /// Producer id for admission dedup; `None` for older hooks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         narration_id: Option<String>,
-        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED — it
-        /// rides the wire even though the engine does not LOG this variant (it fires per
-        /// blockquote and would spam the activity log).
+        /// Required even though the engine does not log this variant (blockquote spam).
         source: ClientSource,
     },
-    /// Barge-in: stop in-flight speech. `session` scopes it to ONE window (Claude
-    /// session): only that session's queued items are dropped, and the playing item
-    /// is cancelled only if it belongs to that session — other windows keep talking.
-    /// `None` (absent on the wire) is the GLOBAL hard barge: drop the whole queue and
-    /// cancel whatever is playing (caps long-press / a non-session CLI caller).
-    /// `session` is ambient (see [`Request::MarkActive`]), never a tool argument.
+    /// Barge-in. `Some(session)` scopes drop/cancel to that window; `None` = global hard barge.
     StopSpeech {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED.
         source: ClientSource,
     },
-    /// A window/terminal closed for good (Claude Code `SessionEnd`). Like a per-window
-    /// [`StopSpeech`](Request::StopSpeech) (drop this session's queued + in-flight speech),
-    /// but ALSO reclaims the session's transient voice state — its preferred-pool
-    /// assignment — so that map doesn't grow one entry per session for the engine's
-    /// lifetime. `None` (no session id) is the global hard barge, same as
-    /// `StopSpeech { None }`, and forgets nothing session-scoped.
+    /// SessionEnd: per-window [`StopSpeech`] plus reclaim pool-voice map entry.
     SessionEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED.
         source: ClientSource,
     },
-    /// Start a live Parakeet "test recognition" session. The engine streams
-    /// [`Response::Listening`], ending with [`Response::Transcript`] (terminal)
-    /// when the session stops.
+    /// Stream Listening/partials, then terminal [`Response::Transcript`].
     TestRecognitionStart,
-    /// Stop the active test-recognition session (sent on a SECOND connection,
-    /// since the first is busy streaming). The session then runs its final pass
-    /// and emits its terminal `Transcript` on the streaming connection.
+    /// Stop test-recognition on a *second* connection (first is busy streaming).
     TestRecognitionStop,
-    /// One-shot speaker diarization: record the mic for `seconds`, then return who
-    /// spoke when. Unlike test-recognition this is NOT streamed — the engine records
-    /// a fixed window on the warm helper, runs the diarizer, and replies with a single
-    /// terminal [`Response::Diarization`]. On-demand (the `diarize` MCP tool).
+    /// One-shot diarization (not streamed) → [`Response::Diarization`].
     Diarize { seconds: u64 },
-    /// Enroll a voiceprint: record the mic for `seconds`, extract a WeSpeaker embedding,
-    /// and persist it under `name` so future [`Diarize`](Request::Diarize) labels that
-    /// person by name. Replies [`Response::Enrolled`]. (the `manage_speakers` enroll action).
+    /// Enroll WeSpeaker voiceprint → [`Response::Enrolled`].
     Enroll { name: String, seconds: u64 },
-    /// Remove an enrolled voiceprint by name → [`Response::Done`] (no-op if absent).
+    /// → [`Response::Done`] (no-op if absent).
     ForgetSpeaker { name: String },
-    /// List enrolled speaker names → [`Response::Speakers`].
+    /// → [`Response::Speakers`].
     ListSpeakers,
-    /// Ask the engine for model presence + removability. The engine is the
-    /// authority because it knows what it has loaded: a model is `removable` only
-    /// if present AND not currently running in the engine (e.g. the warm Kokoro
-    /// child). Download/delete file IO stays in the app. → [`Response::ModelStatus`].
+    /// Model presence/removability. Engine is authority (`removable` only if present and not
+    /// loaded). File IO stays in the app. → [`Response::ModelStatus`].
     ModelStatus,
-    /// Like [`ModelStatus`](Request::ModelStatus) but BLOCKS until the engine's status
-    /// sequence differs from `since`, or `timeout_ms` elapses — then replies with the
-    /// current [`Response::ModelStatus`] (whose JSON carries the new `seq`). This is the
-    /// PUSH transport for the dictation overlay: the app calls it on a dedicated thread
-    /// and re-renders the instant a partial lands, instead of polling on a timer. Pass
-    /// `since = 0` for the first call (replies immediately with the current state + seq).
+    /// Block until status `seq` differs from `since` or `timeout_ms` (push for dictation
+    /// overlay). `since = 0` replies immediately.
     WaitModelStatus { since: u64, timeout_ms: u64 },
-    /// Set the TTS execution provider for THIS session and RESTART the warm Kokoro
-    /// child so the new ONNX session uses it; the engine resets its TTS stats so the
-    /// app's range bars reflect only the new provider. `provider` = "cpu" | "cuda" |
-    /// "coreml" | "ane" | "auto". Transient (not persisted). → [`Response::Done`].
+    /// Session-local TTS provider (`cpu`/`cuda`/`coreml`/`ane`/`auto`); restarts warm Kokoro,
+    /// resets TTS stats. Not persisted. → [`Response::Done`].
     SetProvider { provider: String },
-    /// Ask the engine to exit cleanly over IPC; replies [`Response::Done`] just
-    /// before shutting down. NOTE: the engine runs in-process inside the native
-    /// app, so the real shutdown on quit is the FFI `ds_engine_stop` (clears
-    /// the run flag, joins the thread) — no current client sends this request; the
-    /// handler is kept for an out-of-process / socket-driven stop.
+    /// IPC exit path; real quit is FFI `ds_engine_stop`. Kept for out-of-process stop.
     Shutdown,
-    /// Apply `config.toml` now — the explicit reload nudge. The MCP/GUI writes
-    /// config.toml (the source of truth), then sends this so the engine
-    /// reloads immediately and surgically via `Engine::reload` instead of waiting
-    /// for the mtime poll. Same effect as an mtime-triggered reload; debounced with it.
-    /// → [`Response::Done`].
+    /// Explicit config reload (same as mtime poll, debounced with it). → [`Response::Done`].
     Reload,
-    /// Enqueue an audible EARCON. `event` is `"reply_done"` (the Stop
-    /// hook — Claude finished its turn) or `"needs_input"` (the Notification hook — a
-    /// permission prompt / idle). The engine resolves the configured-or-introspected sound
-    /// and plays it on the warm helper's audio output after earlier queue actions for this
-    /// session, honoring the configured sound and global mute. Unknown/disabled ⇒ silent
-    /// no-op. → [`Response::Done`].
+    /// Earcon: `"reply_done"` (Stop) or `"needs_input"` (Notification). Unknown/disabled ⇒ no-op.
     Earcon {
         event: String,
-        /// The session whose ordered speech stream this cue terminates. Optional for backward
-        /// compatibility with hook binaries that predate queued earcons.
+        /// Session whose ordered speech this cue terminates. Optional for older hooks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        /// WHICH client sent this (see [`Request::GreetSession::source`]). REQUIRED.
         source: ClientSource,
     },
-    /// Verify (and, if needed, REQUEST) authorization for the System STT engine
-    /// (macOS on-device `SFSpeechRecognizer`). The engine prompts on first use — so the
-    /// TCC prompt is attributed to DontSpeak.app — then re-checks on-device capability.
-    /// `set_config stt_engine=system` sends this BEFORE persisting, and refuses to enable
-    /// (no fallback) when it isn't usable. → [`Response::Done`] when usable, else
-    /// [`Response::Error`] with the reason.
+    /// macOS System STT TCC + capability check before persisting `stt_engine=system`.
+    /// → [`Response::Done`] / [`Response::Error`].
     AuthorizeSystemStt,
 }
 
-/// An engine → client response line. `#[serde(tag = "ok")]` keeps lines small and
-/// unambiguous. Test-recognition emits `Listening`/`Partial` lines then a terminal
-/// `Transcript` (or `Error`).
+/// Engine → client response (`#[serde(tag = "ok")]`). Streaming: `Listening`/`Partial` then
+/// terminal `Transcript`/`Error`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "ok", rename_all = "snake_case")]
 pub enum Response {
-    /// Reply to [`Request::Ping`].
     Pong,
-    /// Reply to [`Request::Status`] (TERMINAL): live TTS-queue playback state.
-    /// `paused` is set during a record-barge hold; `muted` is the global mute
-    /// (the same flag the tray checkbox / Caps-Lock toggle / `SetMuted` drive) —
-    /// when true, output keeps queuing but plays SILENTLY.
+    /// TTS queue snapshot. `paused` = record-barge hold; `muted` = silent play-through.
     Status {
         tts_active: bool,
         queued: usize,
         paused: bool,
         muted: bool,
     },
-    /// Generic success terminator for a request that returns no payload.
     Done,
-    /// Endpoint an interactive Codex TUI should receive through `--remote`. Returned only
-    /// after the resident engine's narration subscriber is attached to the same app-server.
+    /// Codex TUI `--remote` endpoint after narration subscriber is attached.
     CodexStreamReady { endpoint: String },
-    /// Test recognition: mic open, speak now (non-terminal).
+    /// Non-terminal: mic open.
     Listening,
-    /// Test recognition: live partial transcript (non-terminal).
+    /// Non-terminal: live partial.
     Partial { text: String },
-    /// Test recognition: final transcript (TERMINAL).
+    /// Terminal: final transcript.
     Transcript { text: String },
-    /// Diarization result (TERMINAL): `segments` is the JSON array
-    /// `[{"speaker","start","end","name"?}, ...]` (seconds), in time order; `name` is
-    /// the enrolled person a cluster matched, when present.
+    /// Terminal: `[{"speaker","start","end","name"?}, ...]` (seconds).
     Diarization { segments: Value },
-    /// Enrollment succeeded (TERMINAL): echoes the enrolled `name`.
     Enrolled { name: String },
-    /// Enrolled-speaker names (TERMINAL).
     Speakers { names: Vec<String> },
-    /// Model presence + removability + per-subsystem running state (TERMINAL).
-    /// `status` is a JSON object:
-    /// `{ "kokoro": {"present":bool,"removable":bool}, "onnx": {...},
-    ///    "parakeet": {"present":bool,"removable":bool},
-    ///    "running": {"caps":bool,"kokoro":bool,"parakeet":bool} }`.
+    /// Terminal model presence / removability / running map JSON.
     ModelStatus { status: Value },
-    /// Terminal error for any request.
     Error { message: String },
-    /// Forward-compat fallback for version skew: chosen when the `ok` tag on
-    /// the wire doesn't match any variant this build knows about (e.g. an
-    /// older CLI/client talking to a newer daemon that has grown a new
-    /// response). Without this, an unrecognized tag hard-errors
-    /// [`crate::client::Client::recv`], which can make a caller abandon a
-    /// streaming session (e.g. never sending `TestRecognitionStop`) instead of
-    /// reacting to a well-formed-but-unknown terminal value. Treated as
-    /// TERMINAL (see [`Response::is_terminal`]) for the same reason: it stops
-    /// the read loop deterministically via `Ok`, so normal cleanup on the
-    /// caller side still runs, rather than looping forever waiting for a
-    /// variant that will never come. Never constructed deliberately by this
-    /// crate's own encoder — `#[serde(other)]` only engages on decode.
+    /// Version-skew fallback: unknown `ok` tag. TERMINAL so `Client::recv` can clean up instead
+    /// of hard-erroring mid-stream (e.g. never sending `TestRecognitionStop`). Decode-only
+    /// (`#[serde(other)]`); never encoded by this crate.
     #[serde(other)]
     Unknown,
 }
 
 impl Response {
-    /// Convenience constructor for an error terminator.
     pub fn error(msg: impl Into<String>) -> Self {
         Response::Error {
             message: msg.into(),
         }
     }
 
-    /// Is this a terminal line (client may stop reading)? `Listening`/`Partial`
-    /// are STREAMING (non-terminal); `Transcript` ends a recognition session.
+    /// Terminal line (client may stop reading)? `Listening`/`Partial` are non-terminal.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -381,8 +245,6 @@ mod tests {
                 synthetic: true,
                 source: ClientSource::ClaudeCode,
             },
-            // The two client-originated variants the case list never covered before; all seven
-            // that gained a required `source` are now here.
             Request::GreetSession {
                 session: Some("sess-1".into()),
                 source: ClientSource::Grok,
@@ -408,7 +270,6 @@ mod tests {
             let line = serde_json::to_string(&req).unwrap();
             assert!(!line.contains('\n'), "a request must be a single line");
             let back: Request = serde_json::from_str(&line).unwrap();
-            // Re-serializing the parsed value must be byte-identical.
             assert_eq!(serde_json::to_string(&back).unwrap(), line);
         }
     }
@@ -458,12 +319,7 @@ mod tests {
         assert!(!Response::Partial { text: "x".into() }.is_terminal());
     }
 
-    /// Conservative-default guard (issue #11): the hook OMITS `synthetic` when it's false (the
-    /// common case, keeping the line short), so an absent key must decode as `false` — a
-    /// synthetic ping is never *assumed*. This is about wire compactness, NOT about an old hook
-    /// build: since `source` became required, a stale hook's line is rejected for the missing
-    /// `source` long before `synthetic` is considered (see
-    /// `request_without_source_is_a_hard_decode_error`), which is why the line below carries one.
+    /// Absent `synthetic` → false (issue #11; never assume continuation). See field docs.
     #[test]
     fn mark_active_synthetic_defaults_to_false_when_absent_on_the_wire() {
         let line = r#"{"cmd":"mark_active","session":"sess-1","source":"claude_code"}"#;
@@ -478,28 +334,11 @@ mod tests {
         ));
     }
 
-    /// GUARD AGAINST A `#[serde(default)]` REGRESSION. `source` is REQUIRED on every
-    /// client-originated request: a line that omits it must be a HARD DECODE ERROR, not a
-    /// silent fallback to `Unknown`/`ClaudeCode` — the engine rejects the request outright
-    /// rather than mis-attributing it. If someone adds `#[serde(default)]` to `source` to make
-    /// some other test go green, THIS test is what fails and tells them not to.
-    ///
-    /// What that rejection is (and is NOT) visible as, since the whole "the three pieces
-    /// deploy together" story leans on it: the engine replies `bad request: missing field
-    /// `source`` on the socket AND writes a WARN to the activity log naming the rejected `cmd`
-    /// (`ds_ipc::serve`'s `on_bad_request` sink, wired in `dontspeakd::ipc`). It is NOT visible
-    /// at the terminal: every hook call site discards the reply and exits 0, so a stale CLI
-    /// against a rebuilt engine drops the voice loop with nothing on screen — the activity-log
-    /// WARN is the only place it surfaces. Deploy the CLI and the engine together
-    /// (docs/BUILD-DEPLOY.md).
-    ///
-    /// Note the asymmetry, and it is deliberate: an unrecognised TOKEN fails OPEN to `Unknown`
-    /// (forward robustness — see `unknown_client_token_decodes_to_unknown`), but an ABSENT
-    /// FIELD fails CLOSED.
+    /// Guard: absent `source` is a hard decode error (not silent default). Unrecognised
+    /// *token* fails open (`unknown_client_token_decodes_to_unknown`). Rejection is socket
+    /// `bad request` + activity-log WARN via `on_bad_request` — hooks discard the reply.
     #[test]
     fn request_without_source_is_a_hard_decode_error() {
-        // Every one of the seven client-originated variants, each with a valid line for its
-        // OTHER fields and `source` omitted.
         let cases = [
             r#"{"cmd":"greet_session"}"#,
             r#"{"cmd":"mark_active","session":"sess-1"}"#,
@@ -519,12 +358,7 @@ mod tests {
         }
     }
 
-    /// FORWARD-SKEW robustness (NOT backward compat): a client we have not wired YET sends a
-    /// `source` token this build doesn't know. It must decode to `ClientSource::Unknown` rather
-    /// than hard-erroring the whole line — the same idiom as `Response::Unknown`'s
-    /// `#[serde(other)]`. Read this together with
-    /// `request_without_source_is_a_hard_decode_error`: an unrecognised TOKEN fails open, an
-    /// ABSENT FIELD does not.
+    /// Unrecognised `source` token → `Unknown` (forward-open); contrast absent-field fail-closed.
     #[test]
     fn unknown_client_token_decodes_to_unknown() {
         let req: Request = serde_json::from_str(r#"{"cmd":"greet_session","source":"gemini_cli"}"#)
@@ -536,7 +370,6 @@ mod tests {
                 ..
             }
         ));
-        // …and a KNOWN token still lands on its client (the positive half of the same decode).
         let req: Request =
             serde_json::from_str(r#"{"cmd":"earcon","event":"reply_done","source":"codex"}"#)
                 .unwrap();
@@ -572,11 +405,7 @@ mod tests {
         assert!(matches!(old, Request::Earcon { session: None, .. }));
     }
 
-    /// Version-skew regression guard: a future response variant this build
-    /// doesn't know about must deserialize into `Response::Unknown` (and be
-    /// terminal), not fail with a hard parse error. See `Response::Unknown`'s
-    /// doc comment for why a hard error here is dangerous (it made
-    /// `Client::recv` abort a streaming session without cleanup).
+    /// Unknown `ok` tag → terminal `Response::Unknown` (see variant docs).
     #[test]
     fn unrecognized_response_tag_falls_back_to_unknown_instead_of_erroring() {
         let future_line = r#"{"ok":"some_future_variant","extra":"field","n":42}"#;

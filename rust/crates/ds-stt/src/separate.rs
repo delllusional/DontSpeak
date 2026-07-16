@@ -1,72 +1,55 @@
-//! Speaker SEPARATION for the dictation speaker-lock — the "talk over a YouTube video"
-//! case that frame-gating (diarization) can't solve.
+//! Speaker SEPARATION for speaker-lock — "talk over YouTube" that frame-gating
+//! (diarization) can't solve.
 //!
-//! A pretrained SepFormer (wsj0-2mix, 8 kHz, 2 sources), exported to int8 ONNX, splits a
-//! single-mic mixture into its constituent voices. The caller then embeds each stream with
-//! the existing WeSpeaker diarizer and keeps the one matching the enrolled user, so the
-//! co-channel background voice is removed (not merely gated) before Parakeet transcribes.
-//!
-//! The model is fixed at 8 kHz mono; capture is 16 kHz, so we resample 16 k → 8 k in and
-//! 8 k → 16 k out (via [`crate::resample`]). Runs on the shared `ort` runtime — CoreML EP
-//! on macOS, CPU elsewhere — exactly like the Kokoro synth session.
+//! SepFormer (wsj0-2mix, 8 kHz, 2 sources, int8 ONNX) splits a single-mic mixture.
+//! Caller embeds each stream with WeSpeaker and keeps the enrolled match so background
+//! is removed (not merely gated) before Parakeet. Capture is 16 kHz — resample via
+//! [`crate::resample`].
 
 use ort::session::Session;
 use ort::value::Tensor;
 
-/// The separator's native sample rate (wsj0-2mix SepFormer is 8 kHz).
+/// Separator native rate (wsj0-2mix SepFormer).
 const SEP_RATE: u32 = 8_000;
 
-/// A loaded speaker-separation model. One `ort` session; `separate_16k` is the whole API.
+/// Loaded separation model. One ort session; `separate_16k` is the whole API.
 pub struct Separator {
     session: Session,
     input_name: String,
-    /// The model's single output name (resolved at load), so `run` extraction indexes it
-    /// directly instead of borrowing through a temporary output iterator.
+    /// Resolved at load so `run` indexes by name without temp iterators.
     output_name: String,
-    /// Active execution provider ("CoreML" / "CPU"), for logging.
     provider: &'static str,
 }
 
 impl Separator {
-    /// Load the int8 SepFormer ONNX at `model_path` on the CPU execution provider.
+    /// Load int8 SepFormer on CPU.
     ///
-    /// DELIBERATELY CPU, not CoreML: the separator has a DYNAMIC time axis (variable
-    /// utterance length), and the CoreML EP recompiles the model for every new input
-    /// length — measured at >120 s per call on-device (effectively a hang). The CPU EP
-    /// handles dynamic shapes natively and benches at RTF ~0.4 (a 7 s utterance separates
-    /// in ~3 s) — and dictation separation is OFFLINE (record-then-submit), so that's
-    /// plenty. (The Kokoro/Parakeet models keep CoreML because their shapes are static.)
+    /// DELIBERATELY CPU, not CoreML: dynamic time axis → CoreML recompiles every
+    /// length (>120 s/call on-device). CPU handles dynamic shapes, RTF ~0.4; separation
+    /// is OFFLINE. Kokoro/Parakeet keep CoreML (static shapes).
     pub fn load(model_path: &std::path::Path) -> Result<Self, String> {
-        // Ensure the onnxruntime dylib is resolved + `ORT_DYLIB_PATH` set BEFORE the first
-        // session build. On Apple Silicon, TTS/STT run on Core ML (FluidAudio), so NOTHING
-        // else initializes onnxruntime — the separator is the only ort user, and without
-        // this the load-dynamic `ort` has no dylib to dlopen. Prefers an already-set path
-        // (the bundled dylib in a dist build), else resolves the downloaded copy.
+        // Resolve ort dylib BEFORE first session. On Apple Silicon TTS/STT use Core ML,
+        // so separator may be the only ort user — without this load-dynamic has nothing
+        // to dlopen.
         ds_model::ensure_ort_dylib()?;
         let provider = "CPU";
         let mut builder = Session::builder().map_err(|e| format!("ort session builder: {e}"))?;
-        // DISABLE graph optimization: onnxruntime 1.24's optimizer hangs (does not return)
-        // while loading this SepFormer graph — both fp32 and int8, isolated from the engine.
-        // Level-0 (no optimization) loads in well under a second and runs fine; the model
-        // was already constant-folded at export, so we lose little. (Kokoro/Parakeet keep
-        // full optimization — only this transformer graph trips the 1.24 optimizer.)
+        // DISABLE graph opt: ort 1.24 optimizer hangs on this SepFormer graph.
+        // Level-0 loads fast; model already constant-folded at export.
         use ort::session::builder::GraphOptimizationLevel;
         builder = builder
             .with_optimization_level(GraphOptimizationLevel::Disable)
             .map_err(|e| format!("ort opt level: {e}"))?;
-        // Single-threaded, no spinning: onnxruntime 1.24's intra-op thread pool deadlocks
-        // on a dispatch semaphore while LOADING this graph (sampled: blocked in
-        // semaphore_wait at 0 % CPU). Forcing one intra-op thread + disabling spin sidesteps
-        // the pool-init deadlock; separation is offline so single-thread throughput is fine.
+        // Single-thread + no spin: ort 1.24 intra-op pool deadlocks on dispatch
+        // semaphore while LOADING this graph. Offline so throughput is fine.
         builder = builder
             .with_intra_threads(1)
             .map_err(|e| format!("ort intra threads: {e}"))?;
         builder = builder
             .with_config_entry("session.intra_op.allow_spinning", "0")
             .map_err(|e| format!("ort intra spinning: {e}"))?;
-        // Read the model bytes and `commit_from_memory` (NOT `commit_from_file`): the latter
-        // deadlocks under ort 2.0-rc + load-dynamic on macOS, mirroring the Kokoro synth
-        // session which loads from memory for the same reason.
+        // commit_from_memory (NOT commit_from_file): latter deadlocks under ort 2.0-rc
+        // + load-dynamic on macOS (same as Kokoro synth).
         let model_bytes =
             ds_model::read_model_file(model_path).map_err(|e| format!("read separator: {e}"))?;
         let session = builder
@@ -90,15 +73,12 @@ impl Separator {
         })
     }
 
-    /// The active execution provider ("CoreML" / "CPU").
     pub fn provider(&self) -> &'static str {
         self.provider
     }
 
-    /// Separate a 16 kHz mono mixture into its constituent voices, each 16 kHz mono.
-    /// Resamples to the model's 8 kHz, runs the net, splits the `[1, T, n_src]` output
-    /// into per-source channels, and resamples each back to 16 kHz. `Err` on any model
-    /// error (the caller fails OPEN — transcribes the mixture unfiltered).
+    /// 16 kHz mono mixture → per-source 16 kHz mono. Resample 16→8, run, split
+    /// `[1, T, n_src]`, resample 8→16. `Err` → caller fails open (unfiltered mixture).
     pub fn separate_16k(&mut self, pcm_16k: &[f32]) -> Result<Vec<Vec<f32>>, String> {
         if pcm_16k.is_empty() {
             return Ok(Vec::new());

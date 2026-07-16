@@ -1,12 +1,9 @@
-//! `ds-ipc` — newline-delimited-JSON RPC between the in-process engine (server)
-//! and its clients (the SwiftUI app via `ds-core`, the `dontspeak` MCP server, and
-//! the `dontspeak notify`/`provide` Claude Code hooks).
+//! `ds-ipc` — newline-delimited JSON RPC between the in-process engine (server) and clients
+//! (`ds-core`/host UI, `dontspeak` MCP server, Claude Code hooks).
 //!
-//! The byte transport lives behind [`transport`]: a filesystem Unix-domain socket —
-//! native on macOS/Linux, and via `uds_windows` (AF_UNIX) on Windows. The engine owns
-//! all model/engine state; clients never load a model. A missing socket means "engine
-//! down", and every client call is fallible so callers fall back to their legacy path
-//! (hooks spawn `ds-helper`; the UI shows stopped).
+//! Byte transport is [`transport`]: filesystem Unix-domain socket (native macOS/Linux;
+//! `uds_windows` on Windows). Engine owns all model state; clients never load a model.
+//! Missing socket ⇒ "engine down"; every call is fallible so callers use their legacy path.
 
 pub mod client;
 pub mod protocol;

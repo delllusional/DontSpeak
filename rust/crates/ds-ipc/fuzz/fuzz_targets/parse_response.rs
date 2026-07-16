@@ -1,9 +1,6 @@
 #![no_main]
 
-//! Client-side defense-in-depth: the app/hooks parse `Response` lines coming back
-//! from the engine. Lower-stakes than `parse_request` (the engine is our own code,
-//! not an arbitrary local process), but the same hand-tagged serde enum, so fuzz it
-//! too rather than assume it's fine by symmetry.
+//! Client-side defense: fuzz `Response` the same way as `Request` (same hand-tagged serde enum).
 
 use libfuzzer_sys::fuzz_target;
 

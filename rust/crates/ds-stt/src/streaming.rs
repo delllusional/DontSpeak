@@ -1,16 +1,13 @@
 //! Cache-aware STREAMING Parakeet/FastConformer transducer over `ort`.
 //!
-//! The offline [`crate::parakeet`] path re-encodes the whole buffer on every preview tick
-//! (`transcribe-rs` `ParakeetModel`, `supports_streaming: false`). This module instead feeds
-//! audio to a *cache-aware* NeMo FastConformer encoder in fixed chunks, threading the encoder
-//! cache so each frame is encoded EXACTLY ONCE.
+//! Offline path re-encodes the whole buffer every preview tick. Here: fixed chunks into a
+//! cache-aware NeMo FastConformer so each frame is encoded EXACTLY ONCE.
 //!
-//! Model: `sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-*` (encoder + decoder(LSTM) +
-//! joiner ONNX + `tokens.txt`).
+//! Model: `sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-*` (encoder +
+//! decoder LSTM + joiner ONNX + `tokens.txt`).
 //!
-//! Feature extraction is kaldi log-mel fbank (80 bins, 25/10 ms, dither 0, snip_edges false,
-//! `use_energy` off) over the waveform in [-1, 1] — NO 32768 scaling, NO CMVN. This exactly
-//! reproduces the reference; the wrong scaling/normalization yields all-blank output.
+//! Features: kaldi log-mel fbank (80 bins, 25/10 ms, dither 0, snip_edges false,
+//! `use_energy` off) over [-1, 1] — NO 32768 scaling, NO CMVN. Wrong scaling → all-blank.
 
 use std::path::Path;
 use std::time::Instant;
@@ -25,52 +22,49 @@ use rubato::{Async, FixedAsync, Indexing, PolynomialDegree, Resampler};
 /// One decoder step's result: (decoder_out column, next LSTM `h`, next LSTM `c`).
 type DecoderStep = (Vec<f32>, Vec<f32>, Vec<f32>);
 
-/// Number of mel bins the encoder expects (`audio_signal` channel dim).
 const MEL_BINS: usize = 80;
-/// Greedy decode cap: max non-blank symbols emitted per encoder output frame.
+/// Max non-blank symbols per encoder output frame (greedy decode cap).
 const MAX_SYMBOLS_PER_FRAME: usize = 10;
 
-/// Encoder metadata (read at load — never hardcode; the 80/480/1040 ms variants differ).
+/// Encoder metadata (read at load — never hardcode; 80/480/1040 ms variants differ).
 struct Meta {
-    window_size: usize, // feature frames fed per encoder step
-    chunk_shift: usize, // feature frames advanced per step (overlap = window - shift)
+    window_size: usize, // feature frames per encoder step
+    chunk_shift: usize, // frames advanced per step (overlap = window - shift)
     blank_id: i32,      // = vocab_size; tokens.txt has vocab_size + 1 entries
-    pred_hidden: usize, // decoder LSTM hidden size (state dim)
-    pred_layers: usize, // decoder LSTM layers (state dim 0)
-    c1: [i64; 4],       // cache_last_channel shape [1, d1, d2, d3]
-    c2: [i64; 4],       // cache_last_time shape    [1, d1, d2, d3]
+    pred_hidden: usize,
+    pred_layers: usize,
+    c1: [i64; 4], // cache_last_channel [1, d1, d2, d3]
+    c2: [i64; 4], // cache_last_time
 }
 
-/// A loaded streaming model: the three `ort` sessions + parsed metadata + token table.
+/// Loaded streaming model: three ort sessions + meta + tokens.
 pub struct StreamingModel {
     encoder: Session,
     decoder: Session,
     joiner: Session,
-    /// Decoder output names (index 2/3 are the next LSTM states; index-3's name is unstable).
+    /// Index 2/3 = next LSTM states; index-3 name is unstable across exports.
     dec_out_names: Vec<String>,
-    /// Decoder input names in semantic export order: targets, length, h, c.
+    /// Semantic export order: targets, length, h, c.
     dec_in_names: Vec<String>,
     meta: Meta,
     tokens: Vec<String>,
-    /// The REALIZED ort execution provider — what the sessions ACTUALLY loaded on, CPU fallback
-    /// included. Reported up (via `STT_PROVIDER`) so the STT status row shows the same realized
-    /// token TTS does, from the same [`ds_model::cuda_session_builder`] path. Shared type.
+    /// REALIZED EP (incl. CPU fallback). Same [`ds_model::cuda_session_builder`] path as TTS
+    /// so STT/TTS status tokens can't drift.
     provider: ds_config::RealizedProvider,
 }
 
-/// Per-utterance streaming state: feature buffer, encoder cache, decoder LSTM state, and the
-/// hypothesis so far. One per dictation; `StreamingModel::new_state` seeds it.
+/// Per-utterance state. One per dictation; seeded by `StreamingModel::new_state`.
 pub struct StreamingState {
     fbank: OnlineFeature,
-    feat_off: usize, // feature frames already consumed by an encoder step
+    feat_off: usize, // frames already consumed by an encoder step
     cache1: Vec<f32>,
     cache2: Vec<f32>,
     cache_len: i64,
-    dec_out: Vec<f32>, // [pred_hidden] current decoder output column
+    dec_out: Vec<f32>, // [pred_hidden]
     h: Vec<f32>,       // [pred_layers, 1, pred_hidden]
     c: Vec<f32>,
     hyp: Vec<i32>,
-    transcribe_ms: f64, // cumulative encoder+decode model time (for STTSTATS)
+    transcribe_ms: f64, // cumulative model time for STTSTATS
 }
 
 fn meta_str(s: &Session, key: &str) -> Option<String> {
@@ -82,12 +76,9 @@ fn meta_usize(s: &Session, key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// Build one streaming session for `path` via the ONE GPU-aware builder shared with Kokoro TTS
-/// ([`ds_model::cuda_session_builder`]): registers the CUDA EP when `want_gpu` (the shared
-/// `provider` ladder resolved STT to `cuda`, carried in `DONTSPEAK_STT_PROVIDER`), best-effort with
-/// a silent CPU fallback. Returns the session AND the realized [`RealizedProvider`] — the same
-/// shared type Kokoro reports, so STT and TTS report through ONE path and can't drift. (int8 ops
-/// ORT can't place on CUDA fall back to CPU per-op; the graph parts it can offload run on GPU.)
+/// One session via the GPU-aware builder shared with Kokoro
+/// ([`ds_model::cuda_session_builder`]). Returns session + realized EP so STT/TTS
+/// report through ONE path. int8 ops ORT can't place on CUDA fall back per-op.
 fn build(path: &Path, want_gpu: bool) -> Result<(Session, ds_config::RealizedProvider), String> {
     let bytes = ds_model::read_model_file(path)?;
     let (mut builder, realized) = ds_model::cuda_session_builder(want_gpu)?;
@@ -98,10 +89,8 @@ fn build(path: &Path, want_gpu: bool) -> Result<(Session, ds_config::RealizedPro
 }
 
 impl StreamingModel {
-    /// Load the encoder/decoder/joiner ONNX (int8 by default) + `tokens.txt` from `dir`, honoring
-    /// the resolved STT provider (`DONTSPEAK_STT_PROVIDER`). Mirrors Kokoro TTS's CPU RETRY: if the
-    /// GPU load fails (e.g. a device-init failure that surfaces at session-commit, Win32 1114), it
-    /// retries on CPU so dictation never dies where CPU would have worked.
+    /// Load encoder/decoder/joiner + `tokens.txt`. Honors `DONTSPEAK_STT_PROVIDER`.
+    /// Mirrors Kokoro: GPU load failure retries on CPU (e.g. Win32 1114).
     pub fn load(dir: &Path, int8: bool) -> Result<Self, String> {
         let want_gpu = ds_config::provider_pref_wants_gpu(
             &std::env::var("DONTSPEAK_STT_PROVIDER").unwrap_or_default(),
@@ -109,8 +98,7 @@ impl StreamingModel {
         Self::load_with_gpu_preference(dir, int8, want_gpu)
     }
 
-    /// Load using an explicit resolved provider token. In-process users cannot rely on
-    /// the helper child's environment contract.
+    /// Explicit provider token (in-process users can't rely on helper env).
     pub fn load_for_provider(dir: &Path, int8: bool, provider: &str) -> Result<Self, String> {
         Self::load_with_gpu_preference(dir, int8, ds_config::provider_pref_wants_gpu(provider))
     }
@@ -126,13 +114,11 @@ impl StreamingModel {
         }
     }
 
-    /// The actual load, on the EXPLICIT `want_gpu`. Routes the ort bootstrap through the GPU-aware
-    /// entry so STT and TTS pick the SAME onnxruntime (first engine to warm wins the shared runtime).
+    /// Load with explicit `want_gpu`. Shared ort bootstrap with TTS (first warm wins).
     fn load_on(dir: &Path, int8: bool, want_gpu: bool) -> Result<Self, String> {
         ds_model::ensure_ort_dylib_gpu(want_gpu)?;
         let sfx = if int8 { ".int8" } else { "" };
-        // All three sessions build over the SAME shared ort runtime, so they realize the same EP;
-        // the encoder's is representative.
+        // Same shared runtime → same realized EP; encoder's is representative.
         let (encoder, provider) = build(&dir.join(format!("encoder{sfx}.onnx")), want_gpu)?;
         let (decoder, _) = build(&dir.join(format!("decoder{sfx}.onnx")), want_gpu)?;
         let (joiner, _) = build(&dir.join(format!("joiner{sfx}.onnx")), want_gpu)?;
@@ -214,13 +200,11 @@ impl StreamingModel {
         })
     }
 
-    /// The REALIZED ort execution provider these sessions loaded on.
     pub fn provider(&self) -> ds_config::RealizedProvider {
         self.provider
     }
 
-    /// Build the kaldi log-mel fbank matching the reference (Slaney mel default; only `use_energy`
-    /// is overridden off, plus dither 0 / snip_edges off / 80 bins).
+    /// Kaldi log-mel fbank matching reference (use_energy off, dither 0, snip_edges off, 80 bins).
     fn new_fbank() -> Result<OnlineFeature, String> {
         let mut opts = FbankOptions::default();
         opts.frame_opts.samp_freq = 16_000.0;
@@ -232,11 +216,10 @@ impl StreamingModel {
         Ok(OnlineFeature::new(FeatureComputer::Fbank(comp)))
     }
 
-    /// Start a new dictation: zeroed encoder cache + decoder LSTM state, seeded by one decoder
-    /// step on the blank/SOS token (mirrors the reference). Audio fed to [`accept_16k`](Self::accept_16k)
-    /// must already be 16 kHz mono (the device-rate → 16 kHz resample lives in [`StreamSession`]).
+    /// New utterance: zeroed caches, decoder seeded on blank/SOS (reference).
+    /// [`accept_16k`] expects 16 kHz mono (resample is in [`StreamSession`]).
     pub fn new_state(&mut self) -> Result<StreamingState, String> {
-        // Copy the (Copy) metadata out so the &self.meta borrow doesn't span the &mut run_decoder.
+        // Copy meta so &self.meta doesn't span &mut run_decoder.
         let (blank_id, state_len, c1, c2) = {
             let m = &self.meta;
             (m.blank_id, m.pred_layers * m.pred_hidden, m.c1, m.c2)
@@ -258,8 +241,7 @@ impl StreamingModel {
         })
     }
 
-    /// Feed a chunk of 16 kHz mono PCM into the fbank, run any newly-available encoder windows,
-    /// and return the hypothesis text so far. Empty input just returns the current hypothesis.
+    /// Feed 16 kHz mono; run ready encoder windows; return hypothesis so far.
     pub fn accept_16k(
         &mut self,
         state: &mut StreamingState,
@@ -272,15 +254,14 @@ impl StreamingModel {
         Ok(self.text(state))
     }
 
-    /// Flush: run the remaining (zero-padded) windows and return the final text.
+    /// Flush remaining (zero-padded) windows → final text.
     pub fn finalize(&mut self, state: &mut StreamingState) -> Result<String, String> {
         state.fbank.input_finished();
         self.drain_windows(state, true)?;
         Ok(self.text(state))
     }
 
-    /// Run encoder steps while a full `window_size` of features is available (or, on `flush`, pad
-    /// the final partial window). Each step advances `feat_off` by `chunk_shift`.
+    /// Encoder steps while a full window is ready (or pad partial on flush).
     fn drain_windows(&mut self, state: &mut StreamingState, flush: bool) -> Result<(), String> {
         let (window, shift) = (self.meta.window_size, self.meta.chunk_shift);
         loop {
@@ -289,7 +270,7 @@ impl StreamingModel {
             if have == 0 || (!flush && have < window) {
                 break;
             }
-            // Gather `window` feature frames (channel-major [80, window]); zero-pad on flush.
+            // Channel-major [80, window]; zero-pad on flush.
             let mut audio = vec![0.0f32; MEL_BINS * window];
             for i in 0..window {
                 let fi = state.feat_off + i;
@@ -313,8 +294,7 @@ impl StreamingModel {
         Ok(())
     }
 
-    /// One encoder forward over a `[1, 80, window]` feature block: thread the 3 cache tensors and
-    /// greedily decode every output column.
+    /// One encoder forward; thread caches; greedy-decode every output column.
     fn run_encoder_step(
         &mut self,
         state: &mut StreamingState,
@@ -343,7 +323,7 @@ impl StreamingModel {
                 "cache_last_channel_len" => clen_t,
             })
             .map_err(|e| format!("encoder run: {e}"))?;
-        // outputs[0]=encoded [1,512,T'], [2]=cache1_next, [3]=cache2_next, [4]=cache_len_next.
+        // [0]=encoded, [2]=cache1_next, [3]=cache2_next, [4]=cache_len_next.
         let (enc_shape, enc_data) = outputs[0]
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("encoder out extract: {e}"))?;
@@ -369,7 +349,7 @@ impl StreamingModel {
             .unwrap_or(0);
         drop(outputs);
 
-        // Greedy transducer decode over each encoder output column (channel-major: enc[ch*T'+t]).
+        // Greedy decode per column (channel-major: enc[ch*T'+t]).
         let mut col = vec![0.0f32; d];
         for t in 0..t_out {
             for (ch, slot) in col.iter_mut().enumerate() {
@@ -397,7 +377,6 @@ impl StreamingModel {
         Ok(())
     }
 
-    /// Run the decoder (prediction LSTM) for one token, returning (decoder_out, h_next, c_next).
     fn run_decoder(&mut self, token: i32, h: Vec<f32>, c: Vec<f32>) -> Result<DecoderStep, String> {
         let m = &self.meta;
         let sh = vec![m.pred_layers as i64, 1, m.pred_hidden as i64];
@@ -416,7 +395,7 @@ impl StreamingModel {
                 self.dec_in_names[3].as_str() => c_t,
             })
             .map_err(|e| format!("decoder run: {e}"))?;
-        // outputs[0]=decoder_out [1,640,1], [2]=h_next, [3]=c_next (index-3 name is unstable).
+        // [0]=decoder_out, [2]=h_next, [3]=c_next (index-3 name unstable).
         let dec_out = outputs[0]
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("decoder out: {e}"))?
@@ -435,7 +414,6 @@ impl StreamingModel {
         Ok((dec_out, h_next, c_next))
     }
 
-    /// Run the joiner on one encoder column + the current decoder column; return argmax token id.
     fn run_joiner(&mut self, enc_col: &[f32], dec_out: &[f32]) -> Result<i32, String> {
         let enc_t = Tensor::from_array((vec![1i64, enc_col.len() as i64, 1], enc_col.to_vec()))
             .map_err(|e| format!("joiner enc tensor: {e}"))?;
@@ -459,7 +437,7 @@ impl StreamingModel {
         Ok(best)
     }
 
-    /// The hypothesis so far, detokenized (BPE `▁` → space).
+    /// Hypothesis detokenized (BPE `▁` → space).
     fn text(&self, state: &StreamingState) -> String {
         let mut s = String::new();
         for &t in &state.hyp {
@@ -473,7 +451,7 @@ impl StreamingModel {
     }
 }
 
-/// Parse `tokens.txt`: each line `token<space>id`; index = id (line order is id order here).
+/// `tokens.txt`: lines `token<space>id`; index = id.
 fn parse_tokens(text: &str) -> Result<Vec<String>, String> {
     let mut parsed = Vec::new();
     let mut max_id = 0usize;
@@ -500,50 +478,39 @@ fn parse_tokens(text: &str) -> Result<Vec<String>, String> {
         .collect())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared streaming layer — reused by EVERY streaming STT backend (ONNX here, the
-// macOS Core ML / FluidAudio backend in `crate::coreml`). Only the per-backend
-// inference differs (the `StreamingStt` trait); the resampling, tail-withholding,
-// audio accounting (`StreamSession`) and the helper's drain→partial→finalize loop
-// + STTSTATS schema are common.
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Shared streaming layer (ONNX here; Core ML in `crate::coreml`) ────────────
+// Only per-backend inference differs (`StreamingStt`); resampling, tail-withholding,
+// StreamSession accounting, helper drain→partial→finalize + STTSTATS are common.
 
-/// A streaming speech-to-text backend: fed 16 kHz mono PCM incrementally, yields a growing
-/// hypothesis, and flushes a final transcript. The ONE backend-specific surface — everything
-/// around it (resampling, cadence, partial/STTSTATS emission) is shared.
+/// Incremental 16 kHz mono STT. The ONE backend-specific surface — resampling,
+/// cadence, partial/STTSTATS emission are shared.
 pub trait StreamingStt: Send {
-    /// Begin a NEW utterance: clear per-utterance state (caches, hypothesis, timers) while keeping
-    /// the loaded model resident, so a cached backend is reused across dictations without reloading.
+    /// New utterance: clear caches/hypothesis/timers; keep model resident.
     fn reset(&mut self) -> Result<(), String>;
-    /// Feed 16 kHz mono PCM (may be empty); return the hypothesis text so far.
+    /// Feed 16 kHz mono (may be empty); hypothesis so far.
     fn accept_16k(&mut self, pcm_16k: &[f32]) -> Result<String, String>;
-    /// Flush remaining audio and return the final transcript.
+    /// Flush → final transcript.
     fn finalize(&mut self) -> Result<String, String>;
-    /// Cumulative model-inference time (ms), for the STTSTATS `transcribe_ms` field.
+    /// Cumulative model time (ms) for STTSTATS.
     fn transcribe_ms(&self) -> f64 {
         0.0
     }
-    /// The execution provider this concrete streaming backend actually loaded on.
     fn provider(&self) -> ds_config::RealizedProvider {
         ds_config::RealizedProvider::Cpu
     }
 }
 
-/// Run `call`, returning its result alongside the wall-clock time it took (ms). Shared by every
-/// FFI-backed [`StreamingStt`] impl that times its push/finalize calls for the STTSTATS
-/// `transcribe_ms` field (originally `CoremlStreamer`'s private helper — relocated here so
-/// `crate::sysspeech::SystemStreamer` reuses the SAME implementation instead of a third copy).
-/// Pure (no FFI/self dependency), so it's unit-testable without a real backend; callers add the
-/// elapsed time to their own accumulator only when `call` succeeds (mirroring
-/// `OnnxStreamer::run_encoder_step`, where an early `?` bail-out skips the accumulate line too).
+/// Wall-clock ms alongside `call`'s result. Shared by FFI-backed [`StreamingStt`]
+/// impls (STTSTATS `transcribe_ms`). Relocated from coreml so sysspeech reuses the
+/// same helper. Callers accumulate only on success (mirrors early `?` skip in
+/// `OnnxStreamer::run_encoder_step`).
 pub fn timed<T>(call: impl FnOnce() -> Result<T, String>) -> (Result<T, String>, f64) {
     let t0 = Instant::now();
     let out = call();
     (out, t0.elapsed().as_secs_f64() * 1000.0)
 }
 
-/// The ONNX cache-aware streaming backend bound into one owner (model + per-utterance state) so it
-/// fits the [`StreamingStt`] trait object the helper drives.
+/// ONNX streaming backend as one owner (model + utterance state) for [`StreamingStt`].
 pub struct OnnxStreamer {
     model: StreamingModel,
     state: StreamingState,

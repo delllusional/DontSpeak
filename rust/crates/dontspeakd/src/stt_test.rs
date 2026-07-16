@@ -1,13 +1,6 @@
-//! TestSession — the engine's "test recognition" / live-transcription owner.
-//!
-//! It runs the SAME local Parakeet engine the dictation path uses, through the
-//! warm helper child (not in-process). It streams live `Partial` lines and a
-//! terminal `Transcript`.
-//!
-//! Flow: `run()` (on the streaming connection's thread) tells the helper to
-//! `listen` and relays its `PARTIAL`s as [`Response::Partial`]; `stop()` (from a
-//! SECOND connection) ends the helper's listen, after which `run()` emits the
-//! final [`Response::Transcript`].
+//! Settings "test recognition": same warm-helper Parakeet as dictation.
+//! `run()` (streaming conn) listens + relays `Partial`; `stop()` (second conn)
+//! ends listen so `run()` emits terminal `Transcript`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

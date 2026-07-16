@@ -1,24 +1,18 @@
-//! Claude Code hook dispatch behind the two stdio entries (`dontspeak notify` /
-//! `dontspeak provide`). The whole interaction is just "event name + payload JSON in →
-//! optional JSON out".
+//! Claude Code hook dispatch behind `dontspeak notify` / `dontspeak provide`.
+//! Interaction is "event name + payload JSON in → optional JSON out".
 //!
-//! The split is by CONTRACT (command vs query), not by event:
-//!   • [`notify`]  — COMMAND: the client notifies us of an event; we run the side effect
-//!                   and reply with NOTHING. Fire-and-forget, never blocks, errors ignored.
-//!                   (MessageDisplay, SessionStart, SessionEnd, UserPromptSubmit→mark-active,
-//!                   and Stop→speak-the-final-reply for non-streaming clients like Codex.)
-//!                   These are wired `async`, so Claude Code discards their stdout — fine, they
-//!                   reply with nothing.
-//!   • [`provide`] — QUERY: Claude Code asks us for input and WAITS; we return JSON it renders.
-//!                   (UserPromptSubmit → the narration spec.)
+//! Split by **contract** (command vs query), not by event:
+//!   • [`notify`]  — COMMAND: side effect, reply nothing. Fire-and-forget; wired `async`
+//!                   so Claude Code discards stdout. (MessageDisplay, SessionStart/End,
+//!                   UserPromptSubmit→mark-active, Stop→final reply for non-streaming clients.)
+//!   • [`provide`] — QUERY: Claude waits; we return JSON it renders.
+//!                   (UserPromptSubmit → narration spec.)
 //!
-//! A single CC event can ride BOTH (UserPromptSubmit marks the terminal active AND provides
-//! the spec) — they're two different interaction kinds that happen to share the event.
+//! One CC event can ride both (UserPromptSubmit marks active AND provides the spec).
 //!
-//! The SessionStart GREETING is voice-only. A visible banner used to ride a synchronous
-//! `provide` twin, but CC 2.1+ drops a SessionStart hook's `systemMessage` and the
-//! `terminalSequence` OSC notification only fires on terminals that implement it — so it
-//! never reliably surfaced and was removed. The greeting is just the engine voice greet.
+//! SessionStart greeting is voice-only. A visible banner used to ride a synchronous
+//! `provide` twin, but CC 2.1+ drops SessionStart `systemMessage` and the OSC path only
+//! fires on terminals that implement it — removed as unreliable.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -28,14 +22,13 @@ use crate::{hook_narrate, hook_prompt, hook_speak};
 /// The one field every Claude Code hook payload carries that we route on.
 #[derive(Deserialize, Default)]
 struct EventEnvelope {
-    // Grok sends the camelCase key; Claude-compatible clients send the snake_case key.
+    // Grok: camelCase; Claude-compatible: snake_case.
     #[serde(default, alias = "hookEventName")]
     hook_event_name: String,
 }
 
-/// Convert Grok's lowercase-snake event values to the Claude-compatible PascalCase dialect.
-/// Applying it to an already-PascalCase value is an identity operation, and doing this
-/// mechanically keeps new upstream event names from requiring a hand-maintained match table.
+/// Grok lowercase-snake → Claude PascalCase. Identity on already-PascalCase; mechanical so
+/// new upstream names need no hand-maintained match table.
 fn normalize_event_name(raw: &str) -> String {
     let mut normalized = String::with_capacity(raw.len());
     let mut capitalize = true;
@@ -52,9 +45,7 @@ fn normalize_event_name(raw: &str) -> String {
     normalized
 }
 
-/// Pull the event name out of a raw hook payload, returning an empty string when absent or
-/// malformed. Grok's live-verified lowercase-snake values are normalized to the PascalCase
-/// contract used by the dispatch arms; Claude-compatible values pass through unchanged.
+/// Event name from raw hook payload; empty when absent/malformed. Grok values normalized.
 pub fn event_name(payload: &str) -> String {
     let raw = serde_json::from_str::<EventEnvelope>(payload.trim())
         .map(|e| e.hook_event_name)
@@ -62,19 +53,15 @@ pub fn event_name(payload: &str) -> String {
     normalize_event_name(&raw)
 }
 
-/// The `session_id` every Claude Code hook payload carries. Parsed ambiently so callers
-/// ([`hook_speak::engine_ping`], [`hook_narrate::barge_session`],
-/// [`hook_narrate::mark_streaming_session`]) can scope the greet / active-mark / barge /
-/// streaming-witness to the right Claude session.
+/// `session_id` for scoping greet / active-mark / barge / streaming-witness.
 #[derive(Deserialize, Default)]
 struct SessionEnvelope {
-    // Grok sends camelCase `sessionId` (live-verified); Claude-compatible clients use snake_case.
+    // Grok: camelCase `sessionId` (live-verified); Claude-compatible: snake_case.
     #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
 }
 
-/// Pull the Claude `session_id` out of any hook JSON, ignoring an empty/whitespace-only one —
-/// every caller treats that as "unscoped".
+/// Claude `session_id` from any hook JSON; empty/whitespace ⇒ "unscoped".
 pub fn session_id_from_payload(payload: &str) -> Option<String> {
     serde_json::from_str::<SessionEnvelope>(payload.trim())
         .ok()
@@ -82,14 +69,9 @@ pub fn session_id_from_payload(payload: &str) -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
-/// COMMAND: run the side effect for `event` from its `payload`; no reply. Unknown events are
-/// ignored (forward-compatible — a newly-wired event we don't handle yet is a no-op).
-/// `greet_only` is the `dontspeak notify --greet-only` flag, wired on SessionStart for
-/// non-streaming hook clients (currently OpenAI Codex): greet, but skip the streaming-witness seed — see
-/// [`notify_at`]. `client` is the `--client <token>` the wiring stamped (see
-/// `client_from_argv`): it rides onto every `ds-ipc` request this dispatch sends, so the engine
-/// and its activity log know WHICH client caused the event. Resolves the real `Paths` and
-/// delegates to the injectable core.
+/// COMMAND: side effect for `event`; no reply. Unknown events ignored (forward-compatible).
+/// `greet_only` = `notify --greet-only` (non-streaming SessionStart — see [`notify_at`]).
+/// `client` from wiring stamps every ds-ipc request so the activity log knows who caused it.
 pub fn notify(event: &str, payload: &str, greet_only: bool, client: ds_config::ClientSource) {
     let Some(paths) = ds_config::Paths::resolve() else {
         return;
@@ -97,9 +79,7 @@ pub fn notify(event: &str, payload: &str, greet_only: bool, client: ds_config::C
     notify_at(&paths, event, payload, greet_only, client);
 }
 
-/// Injectable core of [`notify`] — takes `paths` so tests drive it against a
-/// tempdir-rooted `Paths` (never the real `$HOME`; the engine pings are best-effort
-/// no-ops against the tempdir's nonexistent socket).
+/// Injectable [`notify`] core — tests use tempdir-rooted `Paths` (engine pings are no-ops).
 pub(crate) fn notify_at(
     paths: &ds_config::Paths,
     event: &str,
@@ -110,28 +90,22 @@ pub(crate) fn notify_at(
     match event {
         "SessionStart" => {
             hook_speak::engine_ping(paths, hook_speak::Ping::Greet, payload, client);
-            // Seed the witness before a streaming client's first batch. `--greet-only`
-            // skips it for clients that depend on Stop narration.
+            // Seed witness before first streaming batch; `--greet-only` skips for Stop clients.
             if !greet_only {
                 hook_narrate::mark_streaming_session(paths, payload);
             }
-            // Greeting is voice-only (the engine greet above); no visible banner — see module docs.
         }
         "UserPromptSubmit" => {
             hook_speak::engine_ping(paths, hook_speak::Ping::MarkActive, payload, client)
         }
         "SessionEnd" => hook_narrate::barge_session(paths, payload, client),
         "MessageDisplay" => hook_narrate::message_display(paths, payload, client),
-        // Multiple clients send Stop, handled by ONE arm:
-        //  • Plain-TUI Codex has no MessageDisplay stream, so speak_reply voices
-        //    `last_assistant_message`.
-        //  • Claude Code and Qwen Code stream via MessageDisplay, so speak_reply self-gates
-        //    on the session witness to avoid repeating the final reply.
-        //  • Grok Stop is metadata-only; speak_reply now falls back to the `transcriptPath`
-        //    file (chat_history.jsonl etc.) to obtain the final assistant text (#49).
-        // The reply-done earcon then queues behind this session's admitted narration, so it
-        // never mixes over speech already waiting in the engine. Grok may return a sticky
-        // admit session so digests and ding share one queue key (see `grok_stop_session_tag`).
+        // Stop: one arm, multi-client —
+        //  • Plain-TUI Codex: no MessageDisplay → speak_reply voices `last_assistant_message`.
+        //  • Claude/Qwen: MessageDisplay stream → speak_reply self-gates on witness.
+        //  • Grok: metadata-only Stop; falls back to transcriptPath file (#49).
+        // reply_done earcon queues behind admitted narration. Grok may return a sticky admit
+        // session so digests and ding share one queue key (see `grok_stop_session_tag`).
         "Stop" => {
             let earcon_session = hook_narrate::speak_reply(paths, payload, client);
             match earcon_session {
@@ -141,16 +115,13 @@ pub(crate) fn notify_at(
                 None => hook_speak::engine_earcon(paths, "reply_done", payload, client),
             }
         }
-        // A permission prompt / idle notification → the needs-input earcon (the handler filters
-        // to just the "waiting on you" notification types).
+        // Permission / idle only — handler filters "waiting on you" types.
         "Notification" => hook_speak::notification_earcon(paths, payload, client),
         _ => {}
     }
 }
 
-/// QUERY: return the `hookSpecificOutput` JSON Claude Code should inject for `event`, or
-/// `None` when this event owes no reply (or narration is off). `payload` is reserved for
-/// future per-event queries that need it.
+/// QUERY: `hookSpecificOutput` JSON for `event`, or `None` when no reply / narration off.
 pub fn provide(event: &str, _payload: &str) -> Option<Value> {
     match event {
         "UserPromptSubmit" => hook_prompt::narration_context(),
@@ -179,20 +150,16 @@ mod tests {
 
     #[test]
     fn session_start_owes_no_provide_reply() {
-        // The greeting is voice-only — SessionStart no longer returns a visible banner from the
-        // sync `provide` path (CC 2.1+ drops a SessionStart hook's stdout; see module docs).
+        // Greeting is voice-only; SessionStart no longer returns a banner (CC 2.1+).
         assert!(provide("SessionStart", "{}").is_none());
     }
 
-    /// A reply shaped like a spoken digest — what Stop would voice (or wrongly suppress).
+    /// Digest-shaped reply — what Stop would voice (or wrongly suppress).
     const DIGEST_REPLY: &str = "> First point.\n\nDetail.";
 
     #[test]
     fn greet_only_session_start_skips_witness_so_stop_still_voices() {
-        // A non-streaming client's `notify --greet-only` greets without seeding the witness;
-        // otherwise Stop, its only narration path, would be silenced. Driven against a
-        // tempdir-rooted `Paths`: the SessionStart engine ping is a best-effort no-op on the
-        // tempdir's nonexistent socket (see hook_speak's engine_ping_with_no_socket test).
+        // Non-streaming `notify --greet-only` must not seed the witness or Stop is silenced.
         let dir = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(dir.path());
         let session = "qwen-session-aaaa";
@@ -219,8 +186,7 @@ mod tests {
 
     #[test]
     fn plain_session_start_seeds_witness_so_stop_stays_silent() {
-        // Counterpart: the streaming wiring (plain `notify`, Claude Code) DOES seed the
-        // witness, so Stop never double-speaks what MessageDisplay already narrated.
+        // Streaming wiring (plain notify) seeds so Stop never double-speaks MessageDisplay.
         let dir = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(dir.path());
         let session = "cc-session-bbbb";

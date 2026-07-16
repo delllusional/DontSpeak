@@ -1,7 +1,5 @@
-//! Pure config predicates + reload-decision functions for the engine.
-//!
-//! Everything here is side-effect-light (`reconcile_helper_models` touches the
-//! warm helper; the rest are pure) and unit-testable in isolation.
+//! Pure config predicates + reload decisions. Side-effect-light
+//! (`reconcile_helper_models` touches the warm helper; rest pure).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -16,35 +14,27 @@ use crate::tts;
 /// §F physical-hold threshold default.
 pub(crate) const DEFAULT_LONG_PRESS_MS: u64 = 600;
 
-/// Normalize a configured `long_press_ms`: 0 means "use the default", any other
-/// value is honored verbatim. Factored out so startup AND `Engine::reload` apply
-/// it identically. PURE + unit-tested.
+/// `0` → default; else honor. Shared by startup and `Engine::reload`.
 pub(crate) fn normalize_long_press(ms: u64) -> u64 {
     if ms == 0 { DEFAULT_LONG_PRESS_MS } else { ms }
 }
 
-/// Whether the Caps-Lock dictation loop should run. Gated solely by the
-/// `caps_enabled` toggle. PURE + unit-tested.
+/// Caps-Lock dictation loop gated by `caps_enabled`.
 pub(crate) fn caps_loop_enabled(cfg: &VoiceConfig) -> bool {
     cfg.caps_enabled
 }
 
-/// The warm helper must run when EITHER engine is in use — it hosts both Kokoro
-/// (TTS) and Parakeet (STT). PURE.
+/// Warm helper needed when either Kokoro TTS or local STT is in use.
 pub(crate) fn helper_needed(cfg: &VoiceConfig) -> bool {
     helper_uses_tts(cfg) || helper_uses_stt(cfg)
 }
 
-/// Does the helper's Kokoro (TTS) model serve the current config? (Kokoro implies TTS on.)
-/// Reads the RESOLVED engine — the first usable rung of the `tts_engine` ladder.
+/// Resolved TTS is Kokoro (helper hosts the model).
 pub(crate) fn helper_uses_tts(cfg: &VoiceConfig) -> bool {
     cfg.resolved_tts() == Some(ds_config::TtsEngine::Kokoro)
 }
 
-/// Does the helper serve local STT for the current config? Both LOCAL STT engines run
-/// through the warm helper: Parakeet (ONNX/CPU or FluidAudio Core ML / ANE) and System
-/// (macOS SpeechAnalyzer). ClaudeCode (Claude Code's own voice) and Off do not. Reads the
-/// RESOLVED engine — the first usable rung of the `stt_engine` ladder.
+/// Resolved STT is BuiltIn or System (both run through the warm helper).
 pub(crate) fn helper_uses_stt(cfg: &VoiceConfig) -> bool {
     matches!(
         cfg.resolved_stt(),
@@ -52,9 +42,7 @@ pub(crate) fn helper_uses_stt(cfg: &VoiceConfig) -> bool {
     )
 }
 
-/// Is the shared apple-native shim available right now? This checks only macOS plus the
-/// `libsmkokoro` dylib path set by the app. Callers must combine it with the relevant
-/// DontSpeak-managed Core ML or shared-G2P asset gate before advertising a runnable backend.
+/// macOS + `SMKOKORO_DYLIB_PATH` present. Combine with model-asset gates before advertising.
 #[cfg(target_os = "macos")]
 pub(crate) fn apple_native_shim_available() -> bool {
     std::env::var_os("SMKOKORO_DYLIB_PATH")
@@ -66,22 +54,13 @@ pub(crate) fn apple_native_shim_available() -> bool {
     false
 }
 
-/// Is the apple-native Parakeet STT backend usable right now? The shim dylib must be
-/// loadable AND its Core ML model sets on disk (the ENGINE's download manager fetches them —
-/// target `parakeet_coreml` — and FluidAudio only LOADS in `offlineMode`; so "shim present"
-/// alone no longer implies runnable). Presence uses the SAME revision-pinned completion
-/// markers the downloader writes, so this gate and the fetch can never disagree.
+/// ANE Parakeet usable: shim + Core ML sets (same revision markers as the downloader).
 pub(crate) fn parakeet_available() -> bool {
     apple_native_shim_available()
         && ds_model::coreml_repo::is_coreml_set_present(&ds_model::coreml_repo::PARAKEET_COREML_SET)
 }
 
-/// PROVIDER-AWARE Parakeet availability — the right gate for "can dictation run?".
-/// The raw `ds_model::is_parakeet_present()` only knows the ONNX model FILES, so on the
-/// ANE (FluidAudio Core ML) path — where those files are never downloaded — it wrongly
-/// reports "missing" and blocks dictation even though Core ML is ready. This honors the
-/// RESOLVED runtime: ONNX (CPU/CUDA) needs the downloaded ONNX files; ANE needs the shim
-/// plus ITS downloaded Core ML sets. Use this at every Parakeet readiness gate.
+/// Provider-aware Parakeet readiness: ONNX files vs ANE shim+Core ML (not raw ONNX-only).
 pub(crate) fn parakeet_present_for(cfg: &VoiceConfig) -> bool {
     if stt_uses_onnx_runtime(cfg.resolved_stt_provider(), apple_native_shim_available()) {
         ds_model::is_parakeet_present() // ONNX-CPU/CUDA: needs the downloaded model FILES
@@ -90,55 +69,30 @@ pub(crate) fn parakeet_present_for(cfg: &VoiceConfig) -> bool {
     }
 }
 
-/// Does the built-in (Parakeet) STT run on the ONNX runtime (needs the downloaded model files)
-/// rather than genuine ANE Core ML? PURE — the shared runtime-truth used by both
-/// [`parakeet_present_for`] and `status.rs`'s `stt_uses_onnx`. `resolved_stt_provider()` returns
-/// `Ane` arch-BLINDLY on ANY macOS, so ANE is only REAL when the FluidAudio shim is present;
-/// without it (Intel, or no `SMKOKORO_DYLIB_PATH`) an `Ane` preference DOWNGRADES to ONNX-CPU.
-/// `OrtCpu`/`OrtCuda` are always ONNX. Gating raw on `provider == Ane` (the old bug) checked Core
-/// ML availability on Intel and reported Parakeet "missing" even with the ONNX files downloaded,
-/// so `build_stt` degraded dictation to the Claude Code fallback though Parakeet ran on CPU.
+/// Built-in STT on ONNX (needs model files) vs real ANE. `Provider::Ane` is arch-blind —
+/// real only when shim present; else downgrades to ONNX-CPU. Shared by presence + status.
 pub(crate) fn stt_uses_onnx_runtime(provider: ds_config::Provider, shim_available: bool) -> bool {
     !(provider == ds_config::Provider::Ane && shim_available)
 }
 
-/// Whether TTS runs the GENUINE apple-native (FluidAudio Core ML / ANE) Kokoro path right now:
-/// the arch-blind `uses_apple_native_model()` preference AND the shim actually present. The TTS
-/// twin of `!stt_uses_onnx_runtime(...)`; the single definition shared by the download gate
-/// (`auto_download_missing`) and the status Kokoro row so they can't drift.
+/// Genuine apple-native Kokoro: preference + shim (TTS twin of `!stt_uses_onnx_runtime`).
 pub(crate) fn apple_native_tts_active(cfg: &VoiceConfig) -> bool {
     cfg.uses_apple_native_model() && apple_native_shim_available()
 }
 
-/// Is the System STT engine (macOS on-device `SFSpeechRecognizer`) usable right now?
-/// Probes the shim WITHOUT prompting — authorized + on-device-capable + recognizer live.
-/// False off macOS / without the shim. Drives both the build_stt gate and the
-/// model_status `system` row.
+/// System STT usable (probe, no prompt). `build_stt` + status row.
 pub(crate) fn system_stt_available() -> bool {
     ds_stt::system_available()
 }
 
-/// Does the config's resolved STT engine (System) still need an authorization ATTEMPT —
-/// i.e. it isn't already fully `Ready`? Gates the boot/reload-time authorize nudge
-/// (`boot::authorize_system_stt_if_needed`) so it fires once per real transition into an
-/// unauthorized/preparing System rather than on every single boot/reload while System
-/// stays selected and already usable — an already-`Ready` recognizer would otherwise pay
-/// for a spurious thread + (on macOS <26) a real on-device smoke-transcribe every time.
-/// `Preparing`/`Unavailable` both count as "needs it": the former is the not-yet-decided
-/// or still-downloading case authorize should advance, the latter is a previously denied/
-/// unsupported case worth one more attempt per boot/reload in case it was granted
-/// out-of-band (System Settings) since the recognizer's live TCC state can change without
-/// our config changing. PURE (probes without prompting) + unit-tested.
+/// System selected but not Ready — authorize on boot/reload once per transition
+/// (skip every reload when already Ready; Preparing/Unavailable still try).
 pub(crate) fn system_stt_needs_authorization(cfg: &VoiceConfig) -> bool {
     cfg.resolved_stt() == Some(ds_config::SttEngine::System)
         && ds_stt::system_state() != ds_stt::SystemState::Ready
 }
 
-/// The local-STT backend token the warm helper should run, derived from the engine +
-/// provider: `"system"` (SFSpeechRecognizer) when the System engine is selected, else
-/// the resolved Parakeet runtime (`onnx`/`apple-native`). Carried to the helper via
-/// `DONTSPEAK_STT_PROVIDER` (see [`tts::TtsManager::set_stt_provider_pref`]); System and
-/// the Parakeet runtimes are mutually exclusive, so one token selects the backend.
+/// Helper STT token: `"system"` or resolved Parakeet runtime (`DONTSPEAK_STT_PROVIDER`).
 pub(crate) fn helper_stt_provider(cfg: &VoiceConfig) -> &'static str {
     match cfg.resolved_stt() {
         Some(ds_config::SttEngine::System) => "system",
@@ -146,10 +100,7 @@ pub(crate) fn helper_stt_provider(cfg: &VoiceConfig) -> &'static str {
     }
 }
 
-/// CHEAP, is_file()-only presence of the Kokoro ONNX asset set (synth model, voices, shared
-/// OOV graphs, and onnxruntime dylib) — no sha256 (see [`kokoro_present_for`]'s doc for why). Shared
-/// by `status.rs::model_status_json`'s Kokoro row AND `tts::TtsManager::start_locked`'s spawn
-/// gate, so the two can never drift into two copies of the same logic.
+/// Cheap Kokoro ONNX file presence (no sha256). Shared by status row + spawn gate.
 pub(crate) fn kokoro_onnx_files_present() -> bool {
     let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
     exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
@@ -165,11 +116,7 @@ pub(crate) fn kokoro_g2p_files_present() -> bool {
         && exists(ds_model::onnxruntime_dylib_path())
 }
 
-/// CHEAP, is_file()-only presence of the Parakeet ONNX asset set (encoder, decoder, joiner,
-/// tokens, and the shared onnxruntime dylib) — the STT counterpart of
-/// [`kokoro_onnx_files_present`]. Currently consumed only by `status.rs`'s Parakeet row (NOT
-/// by any spawn gate — Parakeet's absence is non-fatal to the warm child, see
-/// `tts::TtsManager::start_locked`'s doc).
+/// Cheap Parakeet ONNX file presence (status row; absence non-fatal to warm child).
 pub(crate) fn parakeet_onnx_files_present() -> bool {
     let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
     exists(ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE))
@@ -179,41 +126,20 @@ pub(crate) fn parakeet_onnx_files_present() -> bool {
         && exists(ds_model::onnxruntime_dylib_path())
 }
 
-/// Whether the Kokoro-TTS status row should read "present", per the ACTIVE backend
-/// (mirrors the Parakeet STT row). `files` is the ACTIVE backend's on-disk model gate —
-/// the downloaded Core ML sets (revision-pinned completion markers) on the apple-native
-/// path, the downloaded model+voices+runtime on the ONNX providers. apple-native
-/// additionally requires the shim dylib (the loader).
+/// Kokoro status "present": ONNX needs files; apple-native needs shim + files.
 pub(crate) fn kokoro_present_for(apple_native: bool, shim: bool, files: bool) -> bool {
     if apple_native { shim && files } else { files }
 }
 
-/// Should the warm helper run in full-duplex AEC mode? Only when the user opted in
-/// AND the helper is doing BOTH sides locally — Parakeet STT (we own the mic) and
-/// Kokoro TTS (there is something to echo-cancel). With TTS off there is no echo to
-/// cancel, so opening the echo-cancelled unit would seize the output device and
-/// take the mic gain hit for nothing; with Claude Code STT, Claude Code owns the mic.
-/// Works wherever `ds-aec` has a backend (macOS VPIO, Windows WASAPI Communications);
-/// elsewhere the helper's `DuplexAudio::open()` fails and it degrades to half-duplex.
-/// See docs/AEC.md.
+/// Full-duplex AEC: opted in + BuiltIn Parakeet + Kokoro TTS (not System STT). docs/AEC.md.
 pub(crate) fn full_duplex_wanted(cfg: &VoiceConfig) -> bool {
-    // Parakeet-only: the AEC duplex path is wired for Parakeet capture; the System
-    // (SFSpeechRecognizer) engine stays half-duplex (it owns its own recognition), so
-    // gate on the Parakeet engine specifically rather than `helper_uses_stt` (which now
-    // also covers System).
+    // Parakeet-only AEC path; System stays half-duplex (owns its own recognition).
     cfg.full_duplex
         && cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
         && helper_uses_tts(cfg)
 }
 
-/// Reconcile the warm helper's resident models with the config: eagerly LOAD the
-/// model for each selected engine and UNLOAD the deselected one. This keeps a single
-/// residency truth (the helper's `Option`s, mirrored in each `TtsManager` `ModelSlot`)
-/// that BOTH the status-dot and the stats screen read — so "loaded" means the same thing
-/// everywhere, a selected engine is resident before first use (Parakeet is
-/// otherwise lazy), and a deselected model's RAM is reclaimed while the helper stays
-/// warm for the other. No-op when the helper isn't running; when neither engine
-/// needs it the helper is stopped elsewhere and all its memory goes with the process.
+/// Eager load/unload helper models to match config (single residency truth for status/stats).
 pub(crate) fn reconcile_helper_models(tts: &Arc<tts::TtsManager>, cfg: &VoiceConfig) {
     if !helper_needed(cfg) || !tts.is_running() {
         return;
@@ -230,12 +156,7 @@ pub(crate) fn reconcile_helper_models(tts: &Arc<tts::TtsManager>, cfg: &VoiceCon
     }
 }
 
-/// Build the dictation `Stt`: Parakeet now runs THROUGH the warm helper
-/// (`HelperStt`) so the model isn't loaded in-process; everything else (ClaudeCode,
-/// System) comes from the `ds-engines` factory. Falls back to the factory when the
-/// helper isn't available (e.g. tests) or Parakeet isn't present — the factory has
-/// NO silent substitution: BuiltIn with no local model degrades to the same inert
-/// placeholder `None`/off uses, never to ClaudeCode.
+/// Dictation `Stt`: local helper when available; else `ds-engines` (no silent sub).
 pub(crate) fn build_stt<P: Platform + 'static>(
     cfg: &VoiceConfig,
     plat: std::rc::Rc<P>,
@@ -265,31 +186,19 @@ pub(crate) fn build_stt<P: Platform + 'static>(
     ds_engines::make_stt_at(cfg, plat, &ds_engines::RealAvailability, paths)
 }
 
-/// Whether the SELECTED STT engine can run LOCALLY right now (Parakeet model resident, or
-/// System recognizer authorized) — i.e. whether `build_stt` uses the warm-helper path vs the
-/// `ds-engines` factory (which, for BuiltIn with no local model, is now INERT — no silent
-/// substitution to ClaudeCode). Shared by `build_stt` AND `Daemon::reload`: a fresh-install
-/// model download flips this true WITHOUT changing the engine SELECTION, so reload must
-/// rebuild `self.stt` when THIS changes, else dictation stays inert though the model is now
-/// present + loaded. PURE-ish (reads model presence / recognizer state), NOT a config-only diff.
+/// Selected STT can run locally now. Reload must rebuild `stt` when this flips (download
+/// without selection change). Not a config-only diff.
 pub(crate) fn local_stt_available(cfg: &VoiceConfig) -> bool {
     match cfg.resolved_stt() {
-        // Built-in Parakeet: provider-aware (ONNX files vs the ANE shim).
         Some(ds_config::SttEngine::BuiltIn) => parakeet_present_for(cfg),
-        // System (Apple's on-device recognizer): authorized + on-device-capable. When false, `build_stt`
-        // falls to the INERT SystemStt — NOT the ClaudeNative tap (no silent fallback).
+        // System not ready → inert SystemStt, never ClaudeNative.
         Some(ds_config::SttEngine::System) => system_stt_available(),
         _ => false,
     }
 }
 
-/// Whether a REFUSED dictation start (a Caps tap while [`stt_can_start`] says the engine
-/// can't transcribe yet) should surface the refusal cue (`dictation.refused` → the overlay's
-/// warning wash). Only the engines with a RUNTIME readiness gate qualify — BuiltIn (model
-/// missing / downloading / warm helper loading) and System (recognizer not ready): there the
-/// user asked for dictation and got nothing, the fresh-install silent-no-op trap. ClaudeCode
-/// is always startable (never refused), and `None` means dictation is deliberately
-/// disabled — that tap is the documented pause/resume gesture, not an error. PURE.
+/// Surface refusal cue on failed Caps start for BuiltIn/System only (ClaudeCode always
+/// startable; Off is pause/resume, not an error).
 pub(crate) fn refusal_cue_on_refused_start(resolved: Option<ds_config::SttEngine>) -> bool {
     matches!(
         resolved,

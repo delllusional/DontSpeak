@@ -1,19 +1,9 @@
-//! TtsManager — the engine's warm Kokoro owner.
+//! Warm `ds-helper --serve` owner (Kokoro + Parakeet residency).
 //!
-//! The engine supervises ONE long-lived `ds-helper --serve` child that holds
-//! the ~325 MB model warm, so no reply pays the cold model-load cost. Enabling TTS
-//! spawns the child; disabling KILLS it (freeing the model with no ONNX-teardown
-//! crash, since a killed process runs no destructors). Speak/preview/stop are
-//! mediated over the child's stdio with the protocol documented in
-//! `ds_helper/main.rs`.
-//!
-//! Concurrency (full-duplex coexist): ONE persistent reader thread owns the
-//! child's stdout and DEMUXES its lines into two slots — a [`SpeakSlot`] (DONE/
-//! STATS/ERR) and a [`ListenSlot`] (LISTENING/PARTIAL/FINAL/STTSTATS/
-//! STTERR/LDONE). A `speak` waits on the speak slot while a `listen` drains the
-//! listen slot AT THE SAME TIME — neither holds stdout, so they run concurrently
-//! (dictate while the voice talks). `stop` only takes the brief `stdin` lock, so
-//! barge-in still works while a speak is mid-flight.
+//! One long-lived child; enable spawns, disable kills (no ONNX teardown). Stdio
+//! protocol: `ds_helper/main.rs`. Full-duplex: one reader demuxes stdout into
+//! [`SpeakSlot`] / [`ListenSlot`] so speak and listen run concurrently; `stop`
+//! only needs the brief stdin lock.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -32,53 +22,22 @@ mod reader;
 use reader::*;
 
 const SPEAK_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-/// Bound on the CUEDONE wait, separate from [`SPEAK_TERMINAL_TIMEOUT`]: a stale helper
-/// binary predating CUEDONE (a dev partial rebuild — see docs/BUILD-DEPLOY.md) never
-/// answers at all, and riding the 600 s speak timeout wedged the audio queue for 10
-/// minutes per earcon before the child was killed. The bound must EXCEED any legitimate
-/// custom sound: CUEDONE arrives only after the cue plays to completion, and ds-earcon's
-/// allowed dirs include user-writable locations with no duration validation anywhere —
-/// at 30 s a long custom cue tripped the timeout arm and killed the HEALTHY warm child
-/// (dropping the resident models) on every cue. 120 s still cuts the stale-helper wedge
-/// 5×, and the reap-on-timeout must stay: it is what closes the late-CUEDONE
-/// cross-satisfaction path (see `cue_validated`'s lease comment).
+/// CUEDONE wait (not speak timeout): stale helpers never answer; must exceed long custom
+/// cues (30 s killed healthy children). Reap-on-timeout closes late-CUEDONE races.
 const CUE_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const CAPTURE_TERMINAL_GRACE: u64 = 25;
-/// Upper bound on the spawned child's pre-READY handshake. Generous — a first-run
-/// CoreML/ANE compile or cold ORT provider init can take tens of seconds — but finite:
-/// a child that stays alive without ever printing READY (issue #59) is killed at this
-/// bound instead of blocking `start_locked` (and the `lifecycle` lock) forever.
+/// Pre-READY handshake bound (issue #59: alive-but-silent child must not hold lifecycle forever).
 const READY_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Where the warm child's stderr is sent (the app has no console, so anything that lands here
-/// must go to a file). Routed through the shared `open_aux_log` so it sits BESIDE the engine's
-/// unified log in the one per-OS logs dir AND is size-rotated like it (never a second location,
-/// never unbounded). Null only if it can't open.
-///
-/// Routine `ds-helper` diagnostics (load attempts, unload confirmations, capture stats,
-/// full-duplex active, wav dump ok, separator loaded, stream picked, and failure/fallback
-/// conditions) now go through the unified activity log (source `helper`) via `ds-helper`'s own
-/// `log::` macros, NOT this raw stderr redirect. This redirect is retained purely as a
-/// last-resort safety net for anything that bypasses explicit logging entirely — a native-
-/// library abort, an unhandled panic, or a startup failure before `ds_log::log_cached` can
-/// even initialize.
-///
-/// The engine log path is resolved once by the caller and injected with the helper binary,
-/// so tests can use a tempdir without a test-only branch in this production path.
+/// Last-resort helper stderr → rotated aux log beside the engine log (native abort /
+/// panic / pre-init failure). Routine diagnostics use unified activity log (`helper`).
 fn helper_stderr(engine_log_file: &std::path::Path) -> Stdio {
     ds_log::open_aux_log(engine_log_file, "ds-helper.log")
         .map(Stdio::from)
         .unwrap_or_else(Stdio::null)
 }
 
-/// The daemon→helper env contract, resolved from the warm child's spawn prefs. Every flag is
-/// returned as `Some(value)` to SET or `None` to CLEAR, so [`TtsManager::start`] applies the
-/// whole set with ONE uniform set-or-remove pass. Clearing is the point: the two conditional
-/// flags (`FULL_DUPLEX`, `STT_PRELOAD`) are `None` when off and get `env_remove`d, so an
-/// inherited ambient value (e.g. the daemon itself was launched with `DONTSPEAK_FULL_DUPLEX=1`)
-/// can NEVER leak into the child and override the config-resolved intent. The two provider
-/// tokens are always `Some` (always overwritten), so a new conditional flag can't reintroduce
-/// the leak — it just joins the table and inherits the clear-when-absent behaviour.
+/// Daemon→helper env: `Some` set, `None` clear (so ambient `DONTSPEAK_*` can't leak).
 fn child_env(prefs: &SpawnPrefs) -> [(&'static str, Option<String>); 5] {
     [
         ("DONTSPEAK_PROVIDER", Some(prefs.provider.clone())),
@@ -98,33 +57,19 @@ fn child_env(prefs: &SpawnPrefs) -> [(&'static str, Option<String>); 5] {
     ]
 }
 
-/// The next warm child's spawn preferences — what [`child_env`] resolves into the
-/// daemon→helper env contract. Bundled into one struct behind one `Mutex` because every
-/// reader (`start_locked`, assembling the spawn env) and every writer (`set_provider`/
-/// `set_full_duplex_pref`/`set_stt_provider_pref`/`set_stt_wanted`) always touches the
-/// whole logical "next child's prefs" value — four independent locks around four
-/// fields that only ever change and get read together was needless ceremony (and four
-/// separate acquisitions where one now suffices).
+/// Next child's spawn prefs (one mutex — always read/written together). See [`child_env`].
 #[derive(Clone)]
 struct SpawnPrefs {
-    /// The user's provider PREFERENCE ("auto"|"cpu"|"cuda"|"coreml"|"ane") — drives the
-    /// `DONTSPEAK_PROVIDER` env when (re)starting the warm child.
+    /// TTS provider preference → `DONTSPEAK_PROVIDER`.
     provider: String,
-    /// The local STT backend the next warm child should use — the resolved provider
-    /// token ("cpu"|"cuda"|"ane"|"system"), from `helper_stt_provider`. Drives the
-    /// `DONTSPEAK_STT_PROVIDER` env when (re)starting.
+    /// Local STT backend token → `DONTSPEAK_STT_PROVIDER`.
     stt_provider: String,
-    /// Whether the next warm child should run in full-duplex AEC mode — the engine
-    /// sets this to `full_duplex && stt provider == cpu`. Drives the
-    /// `DONTSPEAK_FULL_DUPLEX` env when (re)starting the child.
+    /// Full-duplex AEC → `DONTSPEAK_FULL_DUPLEX`.
     full_duplex: bool,
-    /// Whether STT (Parakeet) should be PRELOADED in the warm child — `helper_uses_stt(cfg)`,
-    /// i.e. STT is the built-in engine. `stt_provider` is NOT a usable on/off signal (it
-    /// resolves to "cpu" even for Off/ClaudeCode), so this is tracked separately and
-    /// drives `DONTSPEAK_STT_PRELOAD`, which gates the helper's parallel STT-preload thread.
+    /// Parakeet preload (`helper_uses_stt`) → `DONTSPEAK_STT_PRELOAD` (provider alone
+    /// is not on/off — resolves "cpu" even for Off/ClaudeCode).
     stt_preload: bool,
-    /// Whether Kokoro TTS should be loaded and an output device opened. An STT-only
-    /// helper must not depend on either resource.
+    /// Load Kokoro + open output (STT-only helper must not).
     tts_preload: bool,
 }
 

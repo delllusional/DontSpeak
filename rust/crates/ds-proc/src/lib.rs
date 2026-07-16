@@ -1,17 +1,16 @@
 //! Single-speaker arbitration + barge-in for dontspeak.
 //!
-//! The contract (shared with the engine's caps-ON barge-in):
+//! Contract (shared with the engine's caps-ON barge-in):
 //!   * `~/.claude/speak-hook.pid` holds the **process-GROUP id** of the current
-//!     speaker. On unix the speaker runs in its own process group (the shell
-//!     used `set -m`; our Rust executor calls `setsid`/`setpgid` so the spawned
-//!     `uv`/`python`/`afplay` tree shares one pgid).
-//!   * To preempt, send SIGTERM to the **negative** pgid (`killpg`) so the whole
-//!     tree dies — mirrors `kill -TERM -- -<pgid>`.
-//!   * The pidfile is written **atomically** (tempfile in the same dir + rename)
-//!     so a reader never sees a half-written value.
+//!     speaker. On unix the speaker runs in its own process group (`set -m` /
+//!     `setsid`/`setpgid` so the `uv`/`python`/`afplay` tree shares one pgid).
+//!   * To preempt, SIGTERM the **negative** pgid (`killpg`) — mirrors
+//!     `kill -TERM -- -<pgid>`.
+//!   * Pidfile written **atomically** (tempfile + rename) so readers never see a
+//!     half-written value.
 //!
-//! Windows has no POSIX process groups; its implementation uses
-//! `OpenProcess`/`TerminateProcess` on the recorded leaf PID.
+//! Windows has no POSIX process groups; uses `OpenProcess`/`TerminateProcess` on
+//! the recorded leaf PID.
 
 use std::fs;
 use std::io::Write;
@@ -19,19 +18,15 @@ use std::path::{Path, PathBuf};
 
 use tempfile::NamedTempFile;
 
-/// Canonical pidfile reader: read the file, trim, parse a positive `i32`.
-///
-/// PURE: returns `None` on ANY failure (missing file, empty, garbage,
-/// non-positive) so a stale/garbage pidfile never yields a bogus pid a caller
-/// might signal. This is the single home of the pidfile codec — both the speaker
-/// pidfile and ds-config's engine pidfile read through it.
+/// Canonical pidfile reader. PURE: `None` on ANY failure so a stale/garbage file
+/// never yields a bogus pid to signal. Shared codec for speaker + engine pidfiles.
 pub fn read_pid(pidfile: &Path) -> Option<i32> {
     let s = fs::read_to_string(pidfile).ok()?;
     let n: i32 = s.trim().parse().ok()?;
     if n > 0 { Some(n) } else { None }
 }
 
-/// Atomically write `pgid` to the pidfile (tempfile in the same dir + rename).
+/// Atomically write `pgid` (tempfile in same dir + rename).
 pub fn write_speaker(pidfile: &Path, pgid: i32) -> std::io::Result<()> {
     let dir: PathBuf = pidfile
         .parent()
@@ -46,18 +41,14 @@ pub fn write_speaker(pidfile: &Path, pgid: i32) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Record an ALREADY-spawned speaker's pgid in the pidfile, or kill it.
+/// Record an already-spawned speaker's pgid, or kill it.
 ///
-/// The SACRED single-speaker post-spawn contract (ARCHITECTURE §0.2): the pgid
-/// MUST be recorded before the speaker makes sound, else a later spawn could
-/// overwrite the pidfile and two speakers play at once. On write failure we kill
-/// the just-spawned group and propagate the error, so a spawn that can't be
-/// tracked never leaves an orphan sounding. Returns the recorded pid on success.
-///
-/// The caller owns the `Child` (drop it to wait by pgid, or keep it to wait
-/// directly) — this only writes-or-kills.
+/// SACRED post-spawn contract (ARCHITECTURE §0.2): pgid MUST be recorded before
+/// sound, else a later spawn overwrites the pidfile and two speakers play. On
+/// write failure, kill the just-spawned group and propagate — untracked spawn
+/// never leaves an orphan sounding. Caller owns the `Child`.
 pub fn record_or_kill(pidfile: &Path, child: &std::process::Child) -> std::io::Result<i32> {
-    // setsid => the child is its own group leader, so pgid == pid.
+    // setsid => child is its own group leader, so pgid == pid.
     let pid = child.id() as i32;
     if let Err(e) = write_speaker(pidfile, pid) {
         kill_group(pid);
@@ -66,13 +57,12 @@ pub fn record_or_kill(pidfile: &Path, child: &std::process::Child) -> std::io::R
     Ok(pid)
 }
 
-/// Best-effort removal of the pidfile (speaker finished).
+/// Best-effort pidfile removal (speaker finished).
 pub fn clear_speaker(pidfile: &Path) {
     let _ = fs::remove_file(pidfile);
 }
 
-/// Preempt the speaker recorded in the pidfile, if it is still alive.
-/// Returns the pgid that was signalled, or None if there was nothing to kill.
+/// Preempt the recorded speaker if still alive. Returns the signalled pgid, or None.
 pub fn barge_in(pidfile: &Path) -> Option<i32> {
     let pgid = read_pid(pidfile)?;
     if group_alive(pgid) {
@@ -102,17 +92,13 @@ mod imp {
         let _ = killpg(Pid::from_raw(pgid), Signal::SIGTERM);
     }
 
-    /// Is a SINGLE process alive? `kill(pid, 0)` — Ok ⇒ exists & signalable; EPERM
-    /// ⇒ exists but not ours to signal (still ALIVE). Any other errno (ESRCH) ⇒ dead.
-    /// Unlike [`group_alive`] this is the leaf-PID probe (no pgid), so it is the right
-    /// liveness test for the engine pidfile, whose recorded id is a plain pid.
+    /// Leaf-PID liveness (`kill(pid, 0)`). Ok or EPERM ⇒ alive; ESRCH ⇒ dead.
+    /// Use this for the engine pidfile (plain pid), not [`group_alive`].
     pub fn pid_alive(pid: i32) -> bool {
         matches!(kill(Pid::from_raw(pid), None), Ok(()) | Err(Errno::EPERM))
     }
 
-    /// SIGTERM a SINGLE process (not its group), so the engine's own signal handler
-    /// runs its clean shutdown (which reaps the warm helper) rather than the helper
-    /// being torn out from under it.
+    /// SIGTERM a single process so the engine's own handler can reap the warm helper.
     pub fn terminate_pid(pid: i32) {
         let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
     }
@@ -120,11 +106,8 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    // Windows has no killpg. The "pgid" stored in the pidfile is the speaker's
-    // leaf PID; barge-in does a single-PID OpenProcess/TerminateProcess on it.
-    // Current Windows speakers (inline PowerShell System.Speech; native
-    // in-process ds-helper) are single-process, so killing the leaf PID
-    // tears down the whole speaker — no Job Object is needed yet.
+    // No killpg: pidfile holds the leaf PID. Current speakers are single-process
+    // (PowerShell System.Speech / in-process ds-helper) — no Job Object yet.
     use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError};
     use windows::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
@@ -132,8 +115,7 @@ mod imp {
     };
 
     pub fn group_alive(pid: i32) -> bool {
-        // SAFETY: OpenProcess/CloseHandle take no pointers; the handle is closed in the
-        // same arm that received it, before we return.
+        // SAFETY: OpenProcess/CloseHandle take no pointers; handle closed before return.
         unsafe {
             match OpenProcess(PROCESS_TERMINATE, false, pid as u32) {
                 Ok(h) if !h.is_invalid() => {
@@ -146,8 +128,7 @@ mod imp {
     }
 
     pub fn kill_group(pid: i32) {
-        // SAFETY: `h` is used only after OpenProcess returns it Ok and non-invalid, with
-        // the PROCESS_TERMINATE right TerminateProcess needs; it is closed exactly once.
+        // SAFETY: `h` used only after OpenProcess Ok+valid; closed exactly once.
         unsafe {
             if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid as u32)
                 && !h.is_invalid()
@@ -158,18 +139,12 @@ mod imp {
         }
     }
 
-    /// Is a SINGLE process alive? Open with QUERY_LIMITED_INFORMATION (the least
-    /// right that still works on processes we don't own) and read its exit code:
-    /// `STILL_ACTIVE` (259) ⇒ running. If the open is DENIED the process exists but
-    /// is not openable by us ⇒ treat as alive (the Windows analogue of unix EPERM,
-    /// honoring the same "permission error means alive" contract); any other failure
-    /// (no such pid) ⇒ dead. Deliberately NOT `group_alive`, which opens with
-    /// PROCESS_TERMINATE and reads access-denied as DEAD — wrong for a liveness probe.
+    /// Leaf-PID liveness via QUERY_LIMITED_INFORMATION + STILL_ACTIVE (259).
+    /// ACCESS_DENIED ⇒ alive (Windows analogue of unix EPERM). Deliberately not
+    /// [`group_alive`], which opens with TERMINATE and reads denied as dead.
     pub fn pid_alive(pid: i32) -> bool {
         const STILL_ACTIVE: u32 = 259;
-        // SAFETY: `code` is a stack local that outlives the GetExitCodeProcess call
-        // writing it; `h` is closed exactly once in the arm that received it;
-        // GetLastError reads only thread-local state.
+        // SAFETY: `code` outlives GetExitCodeProcess; `h` closed once; GetLastError is TLS.
         unsafe {
             match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid as u32) {
                 Ok(h) if !h.is_invalid() => {
@@ -183,10 +158,8 @@ mod imp {
         }
     }
 
-    /// Terminate a SINGLE process. Windows has no graceful per-process signal, so
-    /// this is the same leaf-PID `TerminateProcess` as [`kill_group`]; the warm
-    /// helper child is not orphaned because it exits on its stdin EOF when the
-    /// engine's pipe write-end closes (see ds_helper serve loop).
+    /// No graceful per-process signal on Windows — same leaf TerminateProcess as
+    /// [`kill_group`]. Warm helper exits on stdin EOF when the engine pipe closes.
     pub fn terminate_pid(pid: i32) {
         kill_group(pid);
     }
@@ -194,8 +167,7 @@ mod imp {
 
 pub use imp::{group_alive, kill_group, pid_alive, terminate_pid};
 
-// `mic_active` (the CoreAudio TTS-feedback gate) lives in ds-platform, the OS
-// boundary; use ds_platform::mic_active.
+// `mic_active` lives in ds-platform (OS boundary): use ds_platform::mic_active.
 
 #[cfg(test)]
 mod tests {
@@ -233,7 +205,6 @@ mod tests {
     fn record_or_kill_writes_pid_and_returns_it() {
         let dir = tempfile::tempdir().unwrap();
         let pf = dir.path().join("speak-hook.pid");
-        // A short-lived child whose pid we can record; portable across unix and Windows.
         #[cfg(unix)]
         let mut child = std::process::Command::new("true").spawn().unwrap();
         #[cfg(windows)]

@@ -1,24 +1,7 @@
-//! The CLIENT REGISTRY — the ONE declarative catalog of every AI client DontSpeak wires
-//! into. Each [`ClientSpec`] separates the three questions the wiring used to answer
-//! implicitly, per client, in scattered `match` arms:
-//!
-//!   * WHO — the client ([`ClientSource`] token, display name, [`ClientKind`]: terminal CLI
-//!     vs desktop app, plus the `clientInfo.name` prefix it announces itself with over MCP —
-//!     [`ClientSpec::mcp_client_prefix`], the other half of the client-identity story the
-//!     hooks' `--client` token covers);
-//!   * WHERE — the platform surface it's installed on: the presence probe
-//!     ([`ClientSpec::present`]/[`ClientSpec::detect_dir`]) and each config file the wire
-//!     edits ([`Surface::config_file`]), both resolved per-OS by [`Paths`];
-//!   * HOW — the [`WireMechanism`] each surface is written with (Claude-contract JSON
-//!     hooks, Claude-contract TOML hooks, or an MCP entry), the [`LaunchSpec`] exposed by
-//!     `dontspeak <client>`, plus the OFFICIAL documentation ([`DocRef`]) the wiring
-//!     contracts were derived from.
-//!
-//! The `dontspeak wire` orchestrator iterates a spec's surfaces and dispatches on the
-//! mechanism — so adding a client (e.g. Qwen Code, whose hooks reuse Claude Code's wire
-//! protocol, or Gemini CLI) is ONE new `ClientSource::CLIENTS` member + `Paths` fields + a
-//! registry entry, not a new code path. The pure merge/strip shapers stay in the sibling
-//! modules; this file holds no IO.
+//! Client registry — declarative catalog of wireable AI clients.
+//! Each [`ClientSpec`]: WHO ([`ClientSource`], kind, MCP name), WHERE (presence + config
+//! files via [`Paths`]), HOW ([`WireMechanism`], [`LaunchSpec`], [`DocRef`]).
+//! `wire` iterates surfaces and dispatches; add a client = CLIENTS + Paths + entry (no IO here).
 
 use std::path::Path;
 
@@ -429,11 +412,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
     },
 ];
 
-/// Look up the registry entry for a client token. Returns `Some` for every
-/// [`ClientSource::CLIENTS`] member — so callers that iterate `CLIENTS` can `expect` a hit —
-/// and `None` for `ClientSource::DontSpeak` / `ClientSource::Unknown`, BY DESIGN: neither is
-/// a client we wire anything into, and that `None` is what makes `dontspeak wire dontspeak`
-/// a clean "unknown client" error instead of a panic (see `ds_wire::run`'s parse arm).
+/// Spec for a wireable client; `None` for DontSpeak/Unknown (by design — not wireable).
 pub fn client_spec(target: ClientSource) -> Option<&'static ClientSpec> {
     CLIENT_REGISTRY.iter().find(|s| s.target == target)
 }
