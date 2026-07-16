@@ -274,6 +274,9 @@ pub(crate) fn spawn_ipc_server(
                     // current item). Some(s) = per-window: prune only that session's
                     // items and cancel playback only if it's that session's, so one
                     // terminal's preempt/close never silences another's.
+                    // Also clear the Grok sticky sibling (`grok-stop:<id>`): MarkActive
+                    // current-clear leaves sticky intact by design, but an explicit stop
+                    // must silence digests + ding co-queued under that tag.
                     log_client(
                         &paths,
                         source,
@@ -281,7 +284,11 @@ pub(crate) fn spawn_ipc_server(
                     );
                     match session {
                         None => ttsq.clear(),
-                        Some(_) => ttsq.clear_session(session),
+                        Some(s) => {
+                            let sticky = format!("grok-stop:{s}");
+                            ttsq.clear_session(Some(s));
+                            ttsq.clear_session(Some(sticky));
+                        }
                     }
                     emit(&ds_ipc::Response::Done);
                 }

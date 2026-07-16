@@ -222,11 +222,20 @@ fn prefer_chat_history_transcript(path: std::path::PathBuf) -> std::path::PathBu
     path
 }
 
+/// True when `path` is still the ACP event stream (`updates.jsonl`) rather than chat history.
+fn is_updates_jsonl(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("updates.jsonl"))
+}
+
 /// Resolve the on-disk Grok chat transcript for a Stop payload.
 ///
 /// Order:
 ///   1. `transcriptPath` when it names an existing file — but if that file is
-///      `updates.jsonl` (live Grok 0.2.x Stop), use sibling `chat_history.jsonl` instead
+///      `updates.jsonl` (live Grok 0.2.x Stop), use sibling `chat_history.jsonl` instead.
+///      If the sibling is not present yet, do **not** treat bare `updates.jsonl` as terminal
+///      (fall through to cwd/session scan so a valid chat_history elsewhere can still win).
 ///   2. `~/.grok/sessions/<encoded-cwd>/<sessionId>/chat_history.jsonl` from `cwd`+`sessionId`
 ///   3. Any `~/.grok/sessions/*/<sessionId>/chat_history.jsonl` (cwd missing / encoding skew)
 fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::path::PathBuf> {
@@ -238,12 +247,18 @@ fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::p
     {
         let p = std::path::PathBuf::from(raw);
         if p.is_file() {
-            return Some(prefer_chat_history_transcript(p));
-        }
-        // Path may be stale or mis-named; still try the chat_history sibling.
-        let chat = p.with_file_name("chat_history.jsonl");
-        if chat.is_file() {
-            return Some(chat);
+            let preferred = prefer_chat_history_transcript(p);
+            // Existing updates.jsonl without a sibling must not permanently shadow a
+            // valid ~/.grok/sessions/.../chat_history.jsonl for the whole Stop budget.
+            if !is_updates_jsonl(&preferred) {
+                return Some(preferred);
+            }
+        } else {
+            // Path may be stale or mis-named; still try the chat_history sibling.
+            let chat = p.with_file_name("chat_history.jsonl");
+            if chat.is_file() {
+                return Some(chat);
+            }
         }
     }
     let session = hook
@@ -297,14 +312,19 @@ fn has_digest_blockquote(text: &str) -> bool {
 /// Fingerprint of a spoken digest for this turn so a re-fired Stop cannot re-voice the
 /// same digests while they remain on disk after a successful enqueue.
 ///
-/// Includes the last user text and its position in the transcript tail so a **later**
-/// turn that happens to emit identical digest body is not treated as already spoken.
-fn digest_fingerprint(last_user_text: &str, last_user_pos: Option<usize>, digest_text: &str) -> u64 {
+/// Includes last user text and the **absolute file byte offset** of that user line so a
+/// later turn with identical digest body still speaks, and so a sliding 256 KiB tail does
+/// not renumber a stable turn into a different fingerprint.
+fn digest_fingerprint(
+    last_user_text: &str,
+    last_user_byte_offset: Option<u64>,
+    digest_text: &str,
+) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     last_user_text.trim().hash(&mut h);
-    last_user_pos.hash(&mut h);
+    last_user_byte_offset.hash(&mut h);
     digest_text.trim().hash(&mut h);
     h.finish()
 }
@@ -351,15 +371,16 @@ fn store_last_spoken_fingerprint(paths: &Paths, session: &str, fp: u64) {
 /// One JSONL chat entry we care about for turn scoping and turn-keyed fingerprints.
 #[derive(Debug)]
 enum ChatRole {
-    /// User message text (may be empty after trim if the line had no usable content).
-    User(String),
+    /// User message text plus absolute file offset of the JSONL line start.
+    User { text: String, byte_offset: u64 },
     Assistant(String),
 }
 
 /// Tail the transcript file (JSONL) and return chat roles in chronological order (oldest
 /// first within the tail). Only the last complete JSONL entries within a bounded tail are
 /// considered so a long history is not fully parsed; the partial first line is discarded
-/// byte-wise because the seek may split a UTF-8 code point.
+/// byte-wise because the seek may split a UTF-8 code point. Each user role carries the
+/// absolute file byte offset of its line for stable turn fingerprints.
 fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -380,26 +401,34 @@ fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
     if file.take(TAIL_BYTES).read_to_end(&mut tail).is_err() {
         return Vec::new();
     }
-    let complete_lines = if start == 0 {
-        tail.as_slice()
+    let (complete_lines, complete_start_abs) = if start == 0 {
+        (tail.as_slice(), 0u64)
     } else {
         let Some(first_newline) = tail.iter().position(|byte| *byte == b'\n') else {
             return Vec::new();
         };
-        &tail[first_newline + 1..]
+        (
+            &tail[first_newline + 1..],
+            start + (first_newline as u64) + 1,
+        )
     };
 
     let mut out = Vec::new();
+    let mut line_abs = complete_start_abs;
     for line in complete_lines.split(|byte| *byte == b'\n') {
+        let line_start = line_abs;
+        // Advance past this line and its newline (split drops the delimiter).
+        line_abs += line.len() as u64 + 1;
         let Ok(entry) = serde_json::from_slice::<TranscriptEntry>(line) else {
             continue;
         };
         match entry.r#type.as_deref() {
             Some("user") => {
                 // Keep the role even when text is empty so the turn boundary still moves.
-                out.push(ChatRole::User(
-                    entry.text_content().unwrap_or_default(),
-                ));
+                out.push(ChatRole::User {
+                    text: entry.text_content().unwrap_or_default(),
+                    byte_offset: line_start,
+                });
             }
             Some("assistant") => {
                 if let Some(text) = entry.text_content() {
@@ -417,8 +446,8 @@ fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
 struct CurrentTurn {
     /// Text of the last user message in the scanned tail (empty if none).
     last_user_text: String,
-    /// Index of that user role in the chronological tail, when present.
-    last_user_pos: Option<usize>,
+    /// Absolute file byte offset of that user JSONL line, when present.
+    last_user_byte_offset: Option<u64>,
     /// Non-empty assistant texts for this turn only, newest first.
     assistants_newest_first: Vec<String>,
 }
@@ -428,13 +457,16 @@ struct CurrentTurn {
 /// bug when Stop fired before the current assistant line was flushed.
 fn current_turn_from_path(path: &std::path::Path) -> CurrentTurn {
     let roles = chat_roles_chronological(path);
-    let last_user_pos = roles
+    let last_user_idx = roles
         .iter()
-        .rposition(|r| matches!(r, ChatRole::User(_)));
-    let after = last_user_pos.map(|i| i + 1).unwrap_or(0);
-    let last_user_text = last_user_pos
+        .rposition(|r| matches!(r, ChatRole::User { .. }));
+    let after = last_user_idx.map(|i| i + 1).unwrap_or(0);
+    let (last_user_text, last_user_byte_offset) = last_user_idx
         .and_then(|i| match &roles[i] {
-            ChatRole::User(t) => Some(t.clone()),
+            ChatRole::User {
+                text,
+                byte_offset,
+            } => Some((text.clone(), Some(*byte_offset))),
             _ => None,
         })
         .unwrap_or_default();
@@ -443,12 +475,12 @@ fn current_turn_from_path(path: &std::path::Path) -> CurrentTurn {
         .rev()
         .filter_map(|r| match r {
             ChatRole::Assistant(t) => Some(t.clone()),
-            ChatRole::User(_) => None,
+            ChatRole::User { .. } => None,
         })
         .collect();
     CurrentTurn {
         last_user_text,
-        last_user_pos,
+        last_user_byte_offset,
         assistants_newest_first,
     }
 }
@@ -577,8 +609,11 @@ fn select_grok_stop_text_detailed(
                 .iter()
                 .find(|t| has_digest_blockquote(t))
         {
-            let fp =
-                digest_fingerprint(&turn.last_user_text, turn.last_user_pos, digest);
+            let fp = digest_fingerprint(
+                &turn.last_user_text,
+                turn.last_user_byte_offset,
+                digest,
+            );
             if last_fp != Some(fp) {
                 return Some(GrokStopSelection {
                     text: digest.clone(),
@@ -773,14 +808,19 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     }
     let mut any_enqueued = false;
     let mut any_failed = false;
-    for line in speak {
+    // Deterministic ids so concurrent Stop hooks collapse at the engine admission boundary
+    // (fingerprint alone only gates sequential re-fires after a full successful enqueue).
+    let digests_fp = grok_selection.as_ref().and_then(|s| s.digest_fp);
+    let real_sess = session.as_deref().unwrap_or("-");
+    for (i, line) in speak.into_iter().enumerate() {
+        let narration_id = digests_fp.map(|fp| format!("grok-stop:{real_sess}:{fp}:{i}"));
         // Surface a rejected enqueue from the non-streaming fallback.
         match ds_ipc::request(
             &paths.engine_sock,
             &ds_ipc::Request::SpeakNarration {
                 text: line,
                 session: admit_session.clone(),
-                narration_id: None,
+                narration_id,
                 source: client,
             },
         ) {
@@ -1808,6 +1848,42 @@ mod tests {
             .last_assistant_text(ClientSource::Grok, &paths)
             .expect("digests from chat_history");
         assert!(text.contains("> From chat_history not updates."));
+    }
+
+    #[test]
+    fn grok_stop_updates_without_sibling_falls_through_to_cwd_chat_history() {
+        // Bare updates.jsonl (sibling not flushed yet / mislocated) must not shadow a
+        // valid ~/.grok/sessions/<cwd>/<session>/chat_history.jsonl.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let cwd = r"C:\Users\usr";
+        let session = "sess-fallthrough";
+        let orphan = dir.path().join("orphan");
+        std::fs::create_dir_all(&orphan).unwrap();
+        let updates = orphan.join("updates.jsonl");
+        std::fs::write(&updates, r#"{"timestamp":1}"#).unwrap();
+
+        let chat_dir = paths
+            .grok_dir
+            .join("sessions")
+            .join(encode_grok_session_cwd(cwd))
+            .join(session);
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        let chat = chat_dir.join("chat_history.jsonl");
+        std::fs::write(
+            &chat,
+            r#"{"type":"assistant","content":"> Via cwd not orphan updates."}"#,
+        )
+        .unwrap();
+
+        let hook = StopHook {
+            session_id: Some(session.into()),
+            cwd: Some(cwd.into()),
+            transcript_path: Some(updates.to_string_lossy().into_owned()),
+            ..StopHook::default()
+        };
+        let resolved = resolve_grok_transcript_path(&hook, &paths).expect("cwd fallthrough");
+        assert_eq!(resolved, chat);
     }
 
     #[test]

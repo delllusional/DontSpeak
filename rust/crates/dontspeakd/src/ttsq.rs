@@ -273,19 +273,68 @@ impl ActiveSel {
     }
 }
 
+/// Grok Stop sticky tag prefix. Digests/earcons admit under `grok-stop:<real>` so MarkActive
+/// `input_clears=[current]` (exact prune of the real id) cannot drop them. Sticky is still the
+/// *same terminal* for pool voice, `input_clears=[other]` keep, and active-session priority.
+const GROK_STOP_STICKY_PREFIX: &str = "grok-stop:";
+
+/// Real session id used for Kokoro pool assignment (strip sticky prefix when present).
+fn pool_session_key(session: &str) -> &str {
+    session
+        .strip_prefix(GROK_STOP_STICKY_PREFIX)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(session)
+}
+
+/// Sticky sibling tag for a real session id (`abc` → `grok-stop:abc`). Already-sticky tags
+/// and the bare `grok-stop` sentinel return `None` (no further sibling).
+fn grok_stop_sticky_sibling(session: &str) -> Option<String> {
+    if session.starts_with(GROK_STOP_STICKY_PREFIX) || session == "grok-stop" {
+        None
+    } else {
+        Some(format!("{GROK_STOP_STICKY_PREFIX}{session}"))
+    }
+}
+
+/// Whether `item` is the Grok sticky tag for real session `keep` (or exact match).
+/// Used by `input_clears=[other]` so sticky digests of the submitting terminal are kept.
+fn session_is_keep_or_sticky(item: &Option<String>, keep: &Option<String>) -> bool {
+    if item == keep {
+        return true;
+    }
+    match (item.as_deref(), keep.as_deref()) {
+        (Some(i), Some(k)) => i.strip_prefix(GROK_STOP_STICKY_PREFIX) == Some(k),
+        _ => false,
+    }
+}
+
+/// Whether in-flight / preferred playback under `session` belongs to real terminal `target`
+/// (exact id or sticky sibling). Does **not** treat real as belonging to a sticky target.
+fn session_belongs_to_real(session: &Option<String>, target: &str) -> bool {
+    match session.as_deref() {
+        Some(s) if s == target => true,
+        Some(s) => s.strip_prefix(GROK_STOP_STICKY_PREFIX) == Some(target),
+        None => false,
+    }
+}
+
 /// Drop a single window's items, keeping every OTHER session's (and untagged global)
 /// item in place — the per-window barge for `StopSpeech { session }`. Split out so the
-/// "keep other terminals' queue" invariant is unit-testable without a live engine. An
-/// item is this window's iff its `session` tag equals `target`. PURE.
+/// "keep other terminals' queue" invariant is unit-testable without a live engine.
+///
+/// Exact-match only: sticky `grok-stop:<id>` is intentionally NOT pruned when `target` is
+/// the real id, so MarkActive `input_clears=[current]` cannot ding-only a Grok Stop that
+/// just enqueued digests. Callers that must silence sticky too (StopSpeech, SessionEnd)
+/// also clear the sticky sibling tag.
 fn prune_session(q: &mut VecDeque<Item>, target: &Option<String>) {
     q.retain(|it| &it.session != target);
 }
 
 /// The inverse of [`prune_session`]: keep ONLY `keep`'s items, dropping every other
-/// session's AND every untagged/global item — the `input_clears` `other` scope. An
-/// item is kept iff its `session` tag equals `keep`. PURE.
+/// session's AND every untagged/global item — the `input_clears` `other` scope.
+/// Keeps exact `keep` and its Grok sticky sibling `grok-stop:<keep>` (same terminal).
 fn retain_only_session(q: &mut VecDeque<Item>, keep: &Option<String>) {
-    q.retain(|it| &it.session == keep);
+    q.retain(|it| session_is_keep_or_sticky(&it.session, keep));
 }
 
 /// Whether a queued item's session tag is preferred under the active terminal.
@@ -301,7 +350,7 @@ fn session_preferred_for_active(item_session: &Option<String>, active: &str) -> 
         None => true,
         Some(s) if s == active => true,
         Some(s) => s
-            .strip_prefix("grok-stop:")
+            .strip_prefix(GROK_STOP_STICKY_PREFIX)
             .is_some_and(|real| real == active),
     }
 }
@@ -931,6 +980,12 @@ impl TtsQueue {
         if cancel_current {
             let mut items = self.items.lock().unwrap();
             prune_session(&mut items, &Some(target.clone()));
+            // Voice/dictation submit applies current-scope clear via this path (not
+            // MarkActive's exact clear_session). Drop sticky digests of the same terminal
+            // too so a new submit cannot leave a prior Grok Stop ringing behind the prompt.
+            if let Some(sticky) = grok_stop_sticky_sibling(&target) {
+                prune_session(&mut items, &Some(sticky));
+            }
             self.hard_cancel_in_flight_locked(&items);
         }
         if cancel_other {
@@ -938,12 +993,13 @@ impl TtsQueue {
             // before taking `items` allowed the worker to claim another session in between and
             // start it after this submit returned.
             let mut items = self.items.lock().unwrap();
+            // Sticky digests for `target` are the same terminal — not "other".
             let playing_is_other = self
                 .playing_session
                 .lock()
                 .unwrap()
                 .as_ref()
-                .is_some_and(|session| session.as_deref() != Some(target.as_str()));
+                .is_some_and(|session| !session_belongs_to_real(session, target.as_str()));
             retain_only_session(&mut items, &Some(target));
             if playing_is_other {
                 self.hard_cancel_in_flight_locked(&items);
@@ -1242,7 +1298,13 @@ impl TtsQueue {
     pub fn end_session(&self, session: Option<String>) {
         self.clear_session(session.clone());
         if let Some(s) = &session {
-            self.pool_assignments.lock().unwrap().remove(s);
+            let mut map = self.pool_assignments.lock().unwrap();
+            // Pool keys are always the real session id (sticky is stripped on assign).
+            map.remove(pool_session_key(s));
+            map.remove(s);
+            if let Some(sticky) = grok_stop_sticky_sibling(s) {
+                map.remove(&sticky);
+            }
         }
     }
 
@@ -1250,9 +1312,10 @@ impl TtsQueue {
     /// [`pick_pool_voice`]), recording the pick so it's stable per session. `pool`
     /// must be non-empty (caller checks).
     fn assign_pool_voice(&self, session: &str, pool: &[String]) -> String {
+        let key = pool_session_key(session);
         let mut map = self.pool_assignments.lock().unwrap();
-        let voice = pick_pool_voice(&map, pool, session);
-        record_pool_assignment(&mut map, session, voice.clone(), POOL_ASSIGNMENTS_MAX);
+        let voice = pick_pool_voice(&map, pool, key);
+        record_pool_assignment(&mut map, key, voice.clone(), POOL_ASSIGNMENTS_MAX);
         voice
     }
 
@@ -1260,7 +1323,8 @@ impl TtsQueue {
     /// worker agree on "what speaks". The engine is the resolved `tts_engine` ladder rung; the
     /// voice is the System voice, or this terminal's CLAIMED Kokoro pool voice (locking the
     /// per-terminal assignment; the global/empty session and an empty pool fall back to
-    /// `current_voice()`). `None` when TTS is off — no usable rung — so the caller skips/no-ops.
+    /// `current_voice()`). Sticky `grok-stop:<id>` reuses the real session's pool voice.
+    /// `None` when TTS is off — no usable rung — so the caller skips/no-ops.
     fn resolve_engine_voice(
         &self,
         cfg: &VoiceConfig,
@@ -1272,8 +1336,9 @@ impl TtsQueue {
             ds_config::TtsEngine::Kokoro => {
                 let pool = cfg.active_voices();
                 let sess = vkey(session);
-                if !pool.is_empty() && !sess.is_empty() {
-                    self.assign_pool_voice(&sess, pool)
+                let pool_key = pool_session_key(&sess);
+                if !pool.is_empty() && !pool_key.is_empty() {
+                    self.assign_pool_voice(pool_key, pool)
                 } else {
                     cfg.current_voice()
                 }
@@ -2070,6 +2135,38 @@ mod tests {
         retain_only_session(&mut q, &Some("a".into()));
         let kept: Vec<_> = q.iter().map(|it| it.session.clone()).collect();
         assert_eq!(kept, vec![Some("a".into()), Some("a".into())]);
+    }
+
+    #[test]
+    fn retain_only_session_keeps_grok_stop_sticky_of_target() {
+        // Sticky digests for the submitting terminal must survive input_clears=[other].
+        let mut q = deque(&[
+            Some("a"),
+            Some("grok-stop:a"),
+            Some("b"),
+            None,
+            Some("grok-stop:b"),
+        ]);
+        retain_only_session(&mut q, &Some("a".into()));
+        let kept: Vec<_> = q.iter().map(|it| it.session.clone()).collect();
+        assert_eq!(
+            kept,
+            vec![Some("a".into()), Some("grok-stop:a".into())],
+            "sticky sibling of keep must be retained; other sticky must drop"
+        );
+    }
+
+    #[test]
+    fn prune_session_leaves_sticky_for_mark_active_current() {
+        // MarkActive current-clear uses exact prune so Grok sticky digests survive.
+        let mut q = deque(&[Some("a"), Some("grok-stop:a"), Some("b")]);
+        prune_session(&mut q, &Some("a".into()));
+        let kept: Vec<_> = q.iter().map(|it| it.session.clone()).collect();
+        assert_eq!(
+            kept,
+            vec![Some("grok-stop:a".into()), Some("b".into())],
+            "exact prune must not drop sticky sibling"
+        );
     }
 
     #[test]
@@ -2889,6 +2986,33 @@ mod tests {
             "playing the target itself is left alone"
         );
         assert!(q2.tts_active.load(Ordering::SeqCst));
+
+        // Playing sticky digests for the target → also not "other".
+        let q3 = mk_queue();
+        q3.items
+            .lock()
+            .unwrap()
+            .extend([narr(Some("a")), narr(Some("grok-stop:a")), narr(Some("b"))]);
+        q3.tts_active.store(true, Ordering::SeqCst);
+        *q3.playing_session.lock().unwrap() = Some(Some("grok-stop:a".into()));
+        let gen_before3 = q3.generation.load(Ordering::SeqCst);
+        q3.cancel_for_submit(Some("a".into()), false, true);
+        let kept3: Vec<_> = q3
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|it| it.session.clone())
+            .collect();
+        assert_eq!(
+            kept3,
+            vec![Some("a".into()), Some("grok-stop:a".into())]
+        );
+        assert_eq!(
+            q3.generation.load(Ordering::SeqCst),
+            gen_before3,
+            "playing sticky of target must not cancel"
+        );
     }
 
     #[test]
@@ -3706,6 +3830,22 @@ mod tests {
             q.pool_assignments.lock().unwrap().get("sess-1"),
             Some(&voice)
         );
+        // Sticky Grok Stop tag reuses the real session's pool voice (no second claim).
+        let (engine2, voice2) = q
+            .resolve_engine_voice(&cfg, &Some("grok-stop:sess-1".to_string()))
+            .expect("Kokoro sticky");
+        assert_eq!(engine2, ds_config::TtsEngine::Kokoro);
+        assert_eq!(voice2, voice, "sticky must share the real session pool voice");
+        assert_eq!(
+            q.pool_assignments.lock().unwrap().len(),
+            1,
+            "sticky must not create a second pool map key"
+        );
+        assert!(!q
+            .pool_assignments
+            .lock()
+            .unwrap()
+            .contains_key("grok-stop:sess-1"));
     }
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
