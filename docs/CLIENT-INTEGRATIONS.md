@@ -25,7 +25,7 @@ terminal after first install for PATH.
 | Client | Mid-turn digest | End-of-turn fallback | MCP | Launcher |
 |---|---|---|---|---|
 | Claude Code | Yes (`MessageDisplay`) | N/A (`Stop` = earcon) | Yes | Direct `claude` |
-| OpenAI Codex | Yes if `dontspeak codex` interactive | Yes for plain local TUI | Yes | Engine app-server + `codex --remote` |
+| OpenAI Codex | Yes for an app-server remote TUI | Yes for plain local TUI | Yes | Engine app-server + `codex --remote` |
 | Qwen Code 0.19.10 | Yes (`MessageDisplay`) | Witness suppresses duplicate `Stop` speech | Yes | Direct `qwen` |
 | Grok 0.2.101 | No stream | Yes from `Stop.transcriptPath` | Yes | Direct `grok` |
 
@@ -47,6 +47,15 @@ No `MessageDisplay`. Interactive TUI / resume / fork handshake:
 Windows: engine owns kill-on-close Job listener. Unix: managed control socket. Non-TUI
 commands (`exec`, `review`, `mcp`, …) pass through. Caller `--remote` rejected —
 use bare `codex` or set `codex_app_server_url` loopback `ws://`.
+
+`dontspeak codex` normally prepares the shared app-server and adds `--remote`. On
+Unix it starts a missing server with `codex app-server daemon start`, which Codex
+0.144.5 supports only for its standalone installation. Homebrew installations need
+an externally managed `codex app-server --listen unix://` plus a direct
+`codex --remote unix://` launch. See
+[Streaming narration — Launches](STREAMING-NARRATION.md#launches) for the macOS
+LaunchAgent setup. Without a remote app-server, hooks still provide end-of-turn
+narration but cannot expose mid-turn deltas.
 
 ### Qwen Code
 

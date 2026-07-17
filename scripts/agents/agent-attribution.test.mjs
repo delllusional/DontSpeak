@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -248,7 +249,8 @@ test("a linked worktree does not chain to the main worktree's managed hook", (t)
   );
   assert.equal(resolvedCommon.status, 0, resolvedCommon.stderr);
   const neutralHooks = resolve(linked, resolvedCommon.stdout.trim(), "hooks");
-  assert.equal(readFileSync(join(linkedHooks, "upstream-hooks-path"), "utf8").trim(), neutralHooks);
+  const recordedHooks = readFileSync(join(linkedHooks, "upstream-hooks-path"), "utf8").trim();
+  assert.equal(realpathSync(recordedHooks), realpathSync(neutralHooks));
 });
 
 test("a captured Codex commit is rewritten end to end", (t) => {

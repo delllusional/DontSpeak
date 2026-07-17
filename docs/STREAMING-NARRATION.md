@@ -44,12 +44,67 @@ No `MessageDisplay` / `SessionEnd` / `Notification`. Supervisor thread:
 `dontspeak codex` for TUI / resume / fork — attach first, then `--remote`. Plain
 `codex` TUI stays Stop-fallback. User rules: [CLIENT-INTEGRATIONS.md](CLIENT-INTEGRATIONS.md).
 
+On Unix, an absent default control socket makes DontSpeak run
+`codex app-server daemon start`. Codex 0.144.5 restricts that managed-daemon command
+to the standalone installation under `~/.codex/packages/standalone`; a Homebrew
+Codex binary exits instead. DontSpeak then launches the TUI without `--remote`, so
+end-of-turn `Stop` narration still works but mid-turn streaming does not.
+
+Homebrew users can run the ordinary app-server as an external user service instead:
+
+```sh
+codex app-server --listen unix://
+codex --remote unix://
+```
+
+The first command must stay running. Set `codex_stream_daemon_start = true` so the
+DontSpeak supervisor attaches before the remote TUI starts; with the external server
+already present, DontSpeak observes it rather than starting another one. A macOS
+LaunchAgent can keep the server available at login:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>org.dontspeak.codex-app-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/codex</string>
+    <string>app-server</string>
+    <string>--listen</string>
+    <string>unix://</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+```
+
+Save it as `~/Library/LaunchAgents/org.dontspeak.codex-app-server.plist`, replacing
+the executable with the absolute path from `command -v codex` (`/opt/homebrew/bin`
+is common on Apple Silicon), then load it:
+
+```sh
+launchctl bootstrap gui/"$(id -u)" \
+  "$HOME/Library/LaunchAgents/org.dontspeak.codex-app-server.plist"
+```
+
+Launch the TUI or a desktop shortcut with `codex --remote unix://`. This is the same
+stream transport as `dontspeak codex`, but the app-server lifetime is external to
+DontSpeak. The app-server control socket is user-only; do not expose an unauthenticated
+listener beyond the local machine.
+
 ### Config (`config.toml`, live re-read)
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `codex_stream` | `true` | Subscriber on; set `false` to opt out |
-| `codex_stream_daemon_start` | `false` | Opt-in managed daemon start |
+| `codex_stream_daemon_start` | `false` | Keep the subscriber active and opt into managed daemon start when the socket is absent |
 | `codex_app_server_url` | `""` | Empty = default UDS/loopback; else loopback `ws://` |
 | `codex_bin` | `"codex"` | Binary for lazy start |
 
