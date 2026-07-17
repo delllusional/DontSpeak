@@ -43,6 +43,12 @@ enum Subcommand<'a> {
     Wire(&'a [String]),
     /// Registry client + trailing args.
     Launch(ClientSource, &'a [String]),
+    /// `-V` / `--version` / `version` — host probes (MCP clients, shells) hit these.
+    Version,
+    /// `-h` / `--help` / `help`.
+    Help,
+    /// `status` — soft probe; points at MCP `get_status` (no engine round-trip here).
+    Status,
     /// No argv\[1\]: stdio MCP server (or Grok bare hook).
     Server,
     Unknown(String),
@@ -70,6 +76,11 @@ fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
         Some("notify") => Subcommand::Notify,
         Some("provide") => Subcommand::Provide,
         Some("wire") => Subcommand::Wire(&argv[2..]),
+        // Common binary probes (Grok MCP host, shells). Must not ERROR-log as unknown
+        // subcommands — live log saw `--version`/`--help`/`status`/`version` spam.
+        Some("-V" | "--version" | "version") => Subcommand::Version,
+        Some("-h" | "--help" | "help") => Subcommand::Help,
+        Some("status") => Subcommand::Status,
         Some(name) if ds_config::client_spec_for_launch(name).is_some() => Subcommand::Launch(
             ds_config::client_spec_for_launch(name)
                 .expect("the guarded registry lookup must still resolve")
@@ -80,6 +91,26 @@ fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
         None => Subcommand::Server,
     }
 }
+
+const USAGE: &str = "\
+dontspeak — local voice layer (MCP + hooks + client launchers)
+
+Usage:
+  dontspeak                 stdio MCP server (or Grok hook when GROK_HOOK_EVENT is set)
+  dontspeak claude [args…]  launch Claude Code (starts host if needed)
+  dontspeak codex  [args…]  launch Codex
+  dontspeak qwen   [args…]  launch Qwen Code
+  dontspeak grok   [args…]  launch Grok
+  dontspeak wire   [args…]  wire/unwire client hooks + MCP
+  dontspeak notify          command-hook executor (stdin JSON)
+  dontspeak provide         query-hook executor (stdin JSON)
+  dontspeak --version       print package version
+  dontspeak --help          this help
+  dontspeak status          how to query runtime status (MCP get_status)
+
+Hooks and MCP talk to the resident engine over a local socket. Speech config is
+config.toml under the OS data dir — never client settings files.
+";
 
 /// Detach every role except `Launch` (only Launch needs the console for the interactive child).
 fn should_detach_console(subcommand: &Subcommand) -> bool {
@@ -157,13 +188,30 @@ fn main() {
                 .expect("every launchable client is a registry client");
             std::process::exit(client_launch::run(spec, args));
         }
+        Subcommand::Version => {
+            // stdout only — probes scrape this; no ERROR log.
+            println!("dontspeak {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        Subcommand::Help => {
+            print!("{USAGE}");
+            std::process::exit(0);
+        }
+        Subcommand::Status => {
+            // Soft probe (seen from Grok host). Runtime state is MCP `get_status` / host UI.
+            println!(
+                "dontspeak {}: runtime status is via MCP tool get_status (or the host app UI)",
+                env!("CARGO_PKG_VERSION")
+            );
+            std::process::exit(0);
+        }
         // Unrecognized argv\[1\] must not fall through to MCP (blocks on stdin forever —
         // typo or old binary handed a newer subcommand). MCP is no-argument only.
         Subcommand::Unknown(sub) => {
             let msg = format!(
                 "dontspeak: unknown subcommand {sub:?}; expected `claude`, `codex`, `qwen`, \
-                 `grok`, `notify`, `provide`, or `wire` (run with no arguments for the stdio \
-                 MCP server)"
+                 `grok`, `notify`, `provide`, `wire`, `--version`, or `--help` (run with no \
+                 arguments for the stdio MCP server)"
             );
             eprintln!("{msg}");
             log::error!(target: "hook", "{msg}");
@@ -257,12 +305,34 @@ mod tests {
             Subcommand::Notify,
             Subcommand::Provide,
             Subcommand::Wire(&[]),
+            Subcommand::Version,
+            Subcommand::Help,
+            Subcommand::Status,
             Subcommand::Server,
             Subcommand::Unknown("bogus".to_string()),
         ] {
             assert!(
                 should_detach_console(&subcommand),
                 "{subcommand:?} must detach"
+            );
+        }
+    }
+
+    #[test]
+    fn version_help_and_status_probes_resolve() {
+        for (tok, want) in [
+            ("-V", Subcommand::Version),
+            ("--version", Subcommand::Version),
+            ("version", Subcommand::Version),
+            ("-h", Subcommand::Help),
+            ("--help", Subcommand::Help),
+            ("help", Subcommand::Help),
+            ("status", Subcommand::Status),
+        ] {
+            assert_eq!(
+                resolve_subcommand(&argv(&["dontspeak", tok])),
+                want,
+                "{tok}"
             );
         }
     }

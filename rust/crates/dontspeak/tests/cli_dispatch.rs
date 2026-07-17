@@ -82,6 +82,28 @@ fn recognized_subcommand_still_dispatches() {
 }
 
 #[test]
+fn version_help_and_status_probes_exit_zero_not_error() {
+    // Grok MCP host (and shells) probe the wired binary with these; must not ERROR-log
+    // as unknown subcommands (exit 2).
+    for args in [
+        &["--version"][..],
+        &["-V"],
+        &["version"],
+        &["--help"],
+        &["-h"],
+        &["help"],
+        &["status"],
+    ] {
+        assert_eq!(
+            run_bounded(args, Duration::from_secs(10)),
+            0,
+            "probe {:?} must exit 0",
+            args
+        );
+    }
+}
+
+#[test]
 fn grok_marker_routes_bare_launch_to_hook_while_unmarked_bare_launch_stays_mcp() {
     let ping = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
 
