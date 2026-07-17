@@ -76,6 +76,9 @@ verify_sha() {  # $1 = file, $2 = checksums url
   [ -n "$sums_url" ] || die "release is missing checksums.txt"
   sums=$(http_get "$sums_url") || die "cannot download checksums.txt"
   [ -n "$sums" ] || die "checksums.txt is empty"
+  # A release manifest may be uploaded from Windows. Strip CR before the
+  # end-anchored filename match so CRLF and LF manifests verify identically.
+  sums=$(printf '%s\n' "$sums" | tr -d '\015')
   # Match either sha256sum format: text "<hash>  name" or binary "<hash> *name" — i.e. the
   # separator right before the basename is a space or a '*'.
   want=$(printf '%s\n' "$sums" | grep -E "[ *]$base\$" | awk '{print $1}' | head -n1)

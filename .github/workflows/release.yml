@@ -397,7 +397,10 @@ jobs:
           : > checksums.txt
           for f in "${FILES[@]}"; do
             [ -f "$f" ] || continue
-            ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) >> "$GITHUB_WORKSPACE/checksums.txt"
+            hash=$(sha256sum "$f" | awk '{print $1}')
+            # printf pins the published manifest to LF even if this step is later
+            # moved to a runner or shell with Windows-native text output.
+            printf '%s  %s\n' "$hash" "$(basename "$f")" >> "$GITHUB_WORKSPACE/checksums.txt"
           done
           TITLE="DontSpeak ${TAG}"
           if [ ${#DRAFT_ARGS[@]} -gt 0 ]; then
