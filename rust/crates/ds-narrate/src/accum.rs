@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn no_blockquote_is_silent() {
+    fn feed_prose_only_emits_nothing() {
         let mut a = Accum::default();
         assert!(
             a.feed(0, "Just prose, ", None, false, true, false)

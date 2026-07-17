@@ -104,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn no_blockquote_is_silent() {
+    fn all_blockquotes_empty_on_prose_only() {
         assert!(all_blockquotes("just prose").is_empty());
         assert!(all_blockquotes("line one\nline two\n").is_empty());
         assert!(all_blockquotes("").is_empty());

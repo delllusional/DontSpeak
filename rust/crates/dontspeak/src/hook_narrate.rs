@@ -870,19 +870,55 @@ mod tests {
         assert_eq!(message_key("short"), "short");
     }
 
-    // MessageDisplay: leading blockquote must survive batching (regression: keying by
-    // message_id#index reset Accum every batch and dropped the quote).
+    // Adapter-only: hook payload → StreamBatch. Accum/stream speaking lives in ds-narrate.
 
-    fn delta(id: &str, chunk: &str, is_final: bool) -> MessageDisplayHook {
-        MessageDisplayHook {
-            delta: Some(chunk.into()),
-            message_id: Some(id.into()),
-            is_final: Some(is_final),
+    #[test]
+    fn batch_from_hook_prefers_message_id_and_maps_delta() {
+        let batch = batch_from_hook(&MessageDisplayHook {
+            delta: Some("> Spoken.".into()),
+            message_id: Some("m1".into()),
+            index: Some(2),
+            is_final: Some(true),
             ..Default::default()
+        });
+        assert_eq!(batch.key, "m1");
+        assert!(batch.is_final);
+        match batch.payload {
+            BatchPayload::Delta { index, text } => {
+                assert_eq!(index, Some(2));
+                assert_eq!(text, "> Spoken.");
+            }
+            other => panic!("expected delta, got {other:?}"),
         }
     }
 
-    /// Pure step driver; auto-assigns sequential `index` when missing.
+    #[test]
+    fn batch_from_hook_falls_back_to_message_key_without_id() {
+        let text = "x".repeat(80);
+        let batch = batch_from_hook(&MessageDisplayHook {
+            delta: Some(text.clone()),
+            ..Default::default()
+        });
+        assert_eq!(batch.key, message_key(&text));
+        assert!(!batch.is_final);
+    }
+
+    #[test]
+    fn batch_from_hook_cumulative_wins_over_delta() {
+        let batch = batch_from_hook(&MessageDisplayHook {
+            displayed_text: Some("> Cumul.\n\nBody.".into()),
+            delta: Some("ignored".into()),
+            message_id: Some("c1".into()),
+            is_final: Some(false),
+            ..Default::default()
+        });
+        match batch.payload {
+            BatchPayload::Cumulative { text } => assert_eq!(text, "> Cumul.\n\nBody."),
+            other => panic!("expected cumulative, got {other:?}"),
+        }
+    }
+
+    /// Pure step driver for adapter→ds-narrate smoke (Qwen serde path).
     fn drive(batches: &[MessageDisplayHook], mic_active: bool) -> (DisplayState, Vec<String>) {
         use std::collections::HashMap;
         let mut state = DisplayState::default();
@@ -904,209 +940,6 @@ mod tests {
             spoken.extend(step.speak);
         }
         (state, spoken)
-    }
-
-    #[test]
-    fn out_of_order_batches_still_assemble_and_speak() {
-        // Batches may arrive any order; index + sticky final assemble once.
-        let b = |idx: u64, chunk: &str, fin: bool| MessageDisplayHook {
-            delta: Some(chunk.into()),
-            message_id: Some("m".into()),
-            index: Some(idx),
-            is_final: Some(fin),
-            ..Default::default()
-        };
-        // Index order 0,1,2; deliver 2,0,1.
-        let batches = [
-            b(2, "\n\nBody after the quote.", true),
-            b(0, "Prose preamble first.", false),
-            b(1, "\n\n> The spoken line.", false),
-        ];
-        let (state, spoken) = drive(&batches, false);
-        assert_eq!(spoken, vec!["The spoken line.".to_string()]);
-        assert_eq!(state.offset, 1, "spoke exactly once after assembly");
-    }
-
-    #[test]
-    fn blockquote_split_across_batches_is_spoken_once() {
-        // Quote in batch 1, body in batch 2 — speak once when body arrives (pre-fix: silence).
-        let batches = [
-            delta("m1", "> Spoken line here.", false),
-            delta("m1", "\n\nNow the body of the reply.", false),
-            delta("m1", " More body.", true),
-        ];
-        let (state, spoken) = drive(&batches, false);
-        assert_eq!(spoken, vec!["Spoken line here.".to_string()]);
-        assert_eq!(state.offset, 1, "should latch after speaking once");
-    }
-
-    #[test]
-    fn blockquote_streamed_char_by_char_still_completes() {
-        let batches = [
-            delta("m1", "> Spoken ", false),
-            delta("m1", "line ", false),
-            delta("m1", "here.", false),
-            delta("m1", "\n\nBody.", true),
-        ];
-        let (_, spoken) = drive(&batches, false);
-        assert_eq!(spoken, vec!["Spoken line here.".to_string()]);
-    }
-
-    #[test]
-    fn prose_preamble_before_blockquote_is_spoken_once() {
-        let batches = [
-            delta("m1", "Okay, here's what I found.", false),
-            delta("m1", "\n\n> The spoken line.", false),
-            delta("m1", "\n\nNow the body of the reply.", true),
-        ];
-        let (state, spoken) = drive(&batches, false);
-        assert_eq!(spoken, vec!["The spoken line.".to_string()]);
-        assert_eq!(state.offset, 1, "should latch after speaking once");
-    }
-
-    #[test]
-    fn preamble_then_blockquote_streamed_char_by_char() {
-        let batches = [
-            delta("m1", "Let me ", false),
-            delta("m1", "check.\n", false),
-            delta("m1", "> Spoken ", false),
-            delta("m1", "line.", false),
-            delta("m1", "\nBody.", true),
-        ];
-        let (_, spoken) = drive(&batches, false);
-        assert_eq!(spoken, vec!["Spoken line.".to_string()]);
-    }
-
-    #[test]
-    fn preamble_only_until_final_stays_silent() {
-        let batches = [
-            delta("m1", "Thinking about it", false),
-            delta("m1", " some more", false),
-            delta("m1", " — done, no spoken line.", true),
-        ];
-        let (_, spoken) = drive(&batches, false);
-        assert!(
-            spoken.is_empty(),
-            "no blockquote ever ⇒ silence, got {spoken:?}"
-        );
-    }
-
-    #[test]
-    fn reply_without_blockquote_is_silent() {
-        let batches = [
-            delta("m1", "Just a plain reply, ", false),
-            delta("m1", "no spoken line at all.", true),
-        ];
-        let (_, spoken) = drive(&batches, false);
-        assert!(
-            spoken.is_empty(),
-            "no leading blockquote ⇒ silence, got {spoken:?}"
-        );
-    }
-
-    #[test]
-    fn cumulative_displayed_text_mode_speaks() {
-        // Forward-compat for cumulative displayedText (vs deltas).
-        let cum = |id: &str, text: &str, f: bool| MessageDisplayHook {
-            displayed_text: Some(text.into()),
-            message_id: Some(id.into()),
-            is_final: Some(f),
-            ..Default::default()
-        };
-        let batches = [
-            cum("m1", "> Spoken.", false),
-            cum("m1", "> Spoken.\n\nBody text.", false),
-        ];
-        let (_, spoken) = drive(&batches, false);
-        assert_eq!(spoken, vec!["Spoken.".to_string()]);
-    }
-
-    #[test]
-    fn final_flag_flushes_blockquote_with_no_body() {
-        let batches = [
-            delta("m1", "> Just the spoken line.", false),
-            delta("m1", "", true),
-        ];
-        let (_, spoken) = drive(&batches, false);
-        assert_eq!(spoken, vec!["Just the spoken line.".to_string()]);
-    }
-
-    #[test]
-    fn spoken_line_voiced_at_most_once_per_message() {
-        let batches = [
-            delta("m1", "> Hello.\n\nBody.", false),
-            delta("m1", " more body.", false),
-            delta("m1", " end.", true),
-        ];
-        let (_, spoken) = drive(&batches, false);
-        assert_eq!(spoken, vec!["Hello.".to_string()]);
-    }
-
-    #[test]
-    fn new_message_id_resets_and_speaks_again() {
-        // New message_id must not merge with prior message after dropping #index keying.
-        let batches = [
-            delta("m1", "> First.\n\nBody.", true),
-            delta("m2", "> Second.\n\nBody.", true),
-        ];
-        let (_, spoken) = drive(&batches, false);
-        assert_eq!(spoken, vec!["First.".to_string(), "Second.".to_string()]);
-    }
-
-    #[test]
-    fn multiple_blockquotes_speak_each_in_order() {
-        let batches = [
-            delta(
-                "m1",
-                "> First point.\n\nDetail about the first point.",
-                false,
-            ),
-            delta("m1", "\n\n> Second point.\n\nMore detail.", false),
-            delta(
-                "m1",
-                "\n\n> And the closing question?\n\nClosing detail.",
-                true,
-            ),
-        ];
-        let (state, spoken) = drive(&batches, false);
-        assert_eq!(
-            spoken,
-            vec![
-                "First point.".to_string(),
-                "Second point.".to_string(),
-                "And the closing question?".to_string(),
-            ]
-        );
-        assert_eq!(state.offset, 3, "all three runs voiced");
-    }
-
-    #[test]
-    fn final_blockquote_with_no_body_after_it_still_speaks() {
-        // Closing quote with no trailing body — completes on final batch ("went silent" guard).
-        let batches = [
-            delta("m1", "> Opening point.\n\nBody.", false),
-            delta("m1", "\n\n> Closing point.", false),
-            delta("m1", "", true),
-        ];
-        let (_, spoken) = drive(&batches, false);
-        assert_eq!(
-            spoken,
-            vec!["Opening point.".to_string(), "Closing point.".to_string()]
-        );
-    }
-
-    #[test]
-    fn mic_active_at_message_start_gates_whole_message() {
-        // Mic live at first batch gates the whole message (cached per message_id).
-        let batches = [
-            delta("m1", "> Spoken.", false),
-            delta("m1", "\n\nBody.", true),
-        ];
-        let (_, spoken) = drive(&batches, true);
-        assert!(
-            spoken.is_empty(),
-            "mic live at start ⇒ message gated, got {spoken:?}"
-        );
     }
 
     // Qwen: snake_case cumulative snapshots via the same serde aliases.

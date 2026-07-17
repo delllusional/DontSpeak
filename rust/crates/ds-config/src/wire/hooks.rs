@@ -692,28 +692,7 @@ mod tests {
     // `shell: "powershell"` pin on a spaced path. The command STRING itself (per-flavor,
     // both driven on any OS so Linux CI covers the Windows form) is pinned by
     // `wire::cmdline`'s own tests, which is also where Codex gets it from.
-
-    #[test]
-    fn command_is_ours_accepts_every_dialect_we_write_and_rejects_the_rest() {
-        // Bare paths (args-array style, and the pre-inline Qwen shape we self-heal).
-        assert!(command_is_ours("/bin/dontspeak"));
-        assert!(command_is_ours(
-            r"C:\Users\u\AppData\Local\Programs\DontSpeak\dontspeak.exe"
-        ));
-        // Inlined forms, all three flavors.
-        assert!(command_is_ours("\"/opt/x y/dontspeak\" notify"));
-        assert!(command_is_ours(
-            "C:/Users/u/AppData/Local/Programs/DontSpeak/dontspeak.exe notify --greet-only"
-        ));
-        assert!(command_is_ours(
-            r#"& "C:\Program Files\DontSpeak\dontspeak.exe" provide"#
-        ));
-        // Not ours: foreign commands, prefix-sharing names, and near-misses.
-        assert!(!command_is_ours("/usr/bin/true"));
-        assert!(!command_is_ours("dontspeak-uninstall"));
-        assert!(!command_is_ours("ds-sync"));
-        assert!(!command_is_ours(""));
-    }
+    // `command_is_ours` dialects live only in `wire::cmdline` (single source).
 
     #[test]
     fn inline_shell_entries_have_no_args_key_and_millisecond_timeouts() {
