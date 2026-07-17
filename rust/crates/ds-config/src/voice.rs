@@ -191,13 +191,14 @@ pub struct VoiceConfig {
     /// Codex app-server subscriber (mid-turn narrate). Default on; inert without daemon.
     #[serde(default = "default_enabled")]
     pub codex_stream: bool,
-    /// Lazy-start app-server. Default off (no surprise spawns).
+    /// Lazy-start app-server (managed standalone or engine-owned ordinary server).
+    /// Default off (no surprise spawns).
     #[serde(default)]
     pub codex_stream_daemon_start: bool,
     /// App-server endpoint; empty = default unix socket; `ws://…` for TCP.
     #[serde(default)]
     pub codex_app_server_url: String,
-    /// Binary for lazy daemon start (PATH or absolute).
+    /// Binary for lazy app-server start (PATH or absolute).
     #[serde(default = "default_codex_bin")]
     pub codex_bin: String,
 
@@ -747,7 +748,7 @@ pub(crate) mod tests {
     #[test]
     fn codex_stream_defaults_and_overrides() {
         // Defaults: the subscriber is ON (inert without ~/.codex + a running app-server),
-        // the lazy daemon start is OFF (no surprise spawns), endpoint = the default unix
+        // lazy app-server start is OFF (no surprise spawns), endpoint = the default unix
         // control socket, binary = bare "codex".
         let v: VoiceConfig = serde_json::from_str("{}").unwrap();
         assert!(v.codex_stream);

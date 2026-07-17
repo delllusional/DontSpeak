@@ -239,8 +239,8 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         // event list has NO `SessionEnd` and no `Notification` (confirmed against the
         // hooks doc, 2026-07-07) — per-session cleanup for Codex is owned by the
         // engine's codex_stream supervisor, not a hook. MID-TURN narration doesn't ride
-        // hooks at all: the engine subscribes to the shared app-server (`codex
-        // app-server daemon start` + `codex --remote`) — see the "app-server" DocRef and
+        // hooks at all: the engine subscribes to the shared app-server (managed or
+        // engine-owned start + `codex --remote`) — see the "app-server" DocRef and
         // docs/STREAMING-NARRATION.md. Verified live with Codex 0.144.1 on 2026-07-12:
         // `--remote` sessions still fire SessionStart, UserPromptSubmit, and Stop, and
         // the hook session id equals the app-server thread id used by the subscriber.

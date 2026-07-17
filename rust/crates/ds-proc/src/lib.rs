@@ -1,4 +1,5 @@
-//! Single-speaker arbitration + barge-in for dontspeak.
+//! Process helpers for DontSpeak: single-speaker arbitration/barge-in and shared Unix
+//! child process-group lifecycle.
 //!
 //! Contract (shared with the engine's caps-ON barge-in):
 //!   * `~/.claude/speak-hook.pid` holds the **process-GROUP id** of the current
@@ -17,6 +18,23 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tempfile::NamedTempFile;
+
+/// Make a Unix child the leader of a new session/process group before `exec`.
+/// Callers can then terminate the complete child tree with [`kill_group`].
+#[cfg(unix)]
+pub fn set_new_process_group(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: pre_exec runs in the forked child before exec; setsid is
+    // async-signal-safe, and the closure captures and allocates nothing.
+    unsafe {
+        command.pre_exec(|| {
+            nix::unistd::setsid()
+                .map(|_| ())
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+        });
+    }
+}
 
 /// Canonical pidfile reader. PURE: `None` on ANY failure so a stale/garbage file
 /// never yields a bogus pid to signal. Shared codec for speaker + engine pidfiles.
@@ -92,6 +110,11 @@ mod imp {
         let _ = killpg(Pid::from_raw(pgid), Signal::SIGTERM);
     }
 
+    /// Force-stop a process group that did not exit after [`kill_group`].
+    pub fn force_kill_group(pgid: i32) {
+        let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
+    }
+
     /// Leaf-PID liveness (`kill(pid, 0)`). Ok or EPERM ⇒ alive; ESRCH ⇒ dead.
     /// Use this for the engine pidfile (plain pid), not [`group_alive`].
     pub fn pid_alive(pid: i32) -> bool {
@@ -139,6 +162,11 @@ mod imp {
         }
     }
 
+    /// Windows has no graceful group signal; the first termination is already forced.
+    pub fn force_kill_group(pid: i32) {
+        kill_group(pid);
+    }
+
     /// Leaf-PID liveness via QUERY_LIMITED_INFORMATION + STILL_ACTIVE (259).
     /// ACCESS_DENIED ⇒ alive (Windows analogue of unix EPERM). Deliberately not
     /// [`group_alive`], which opens with TERMINATE and reads denied as dead.
@@ -165,7 +193,7 @@ mod imp {
     }
 }
 
-pub use imp::{group_alive, kill_group, pid_alive, terminate_pid};
+pub use imp::{force_kill_group, group_alive, kill_group, pid_alive, terminate_pid};
 
 // `mic_active` lives in ds-platform (OS boundary): use ds_platform::mic_active.
 

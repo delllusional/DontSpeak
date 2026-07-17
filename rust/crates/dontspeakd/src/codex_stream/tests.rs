@@ -267,14 +267,38 @@ fn tcp_auto_start_is_loopback_only() {
     assert!(!can_auto_start_tcp("example.com:4500"));
 }
 
-#[cfg(unix)]
 #[test]
-fn should_start_daemon_decision_table() {
-    // Only: opted in AND socket absent AND binary resolved.
-    assert!(should_start_daemon(true, false, true));
-    assert!(!should_start_daemon(false, false, true), "not opted in");
-    assert!(!should_start_daemon(true, true, true), "socket already up");
-    assert!(!should_start_daemon(true, false, false), "no codex binary");
+fn should_start_unix_server_decision_table() {
+    assert!(should_start_unix_server(true, true, true, false));
+    assert!(
+        !should_start_unix_server(false, true, true, false),
+        "not opted in"
+    );
+    assert!(
+        !should_start_unix_server(true, false, true, false),
+        "the endpoint connected or failed in a way startup cannot repair"
+    );
+    assert!(
+        !should_start_unix_server(true, true, false, false),
+        "no codex binary"
+    );
+    assert!(
+        !should_start_unix_server(true, true, true, true),
+        "an owned child is already binding the endpoint"
+    );
+}
+
+#[test]
+fn direct_app_server_command_uses_the_requested_listener() {
+    let command = direct_app_server_command(Path::new("codex-bin"), "unix:///tmp/codex.sock");
+    assert_eq!(command.get_program(), "codex-bin");
+    assert_eq!(
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        ["app-server", "--listen", "unix:///tmp/codex.sock"]
+    );
 }
 
 #[test]
@@ -349,6 +373,66 @@ fn resolve_codex_bin_managed_install_honors_codex_home() {
             None
         ),
         None
+    );
+}
+
+#[test]
+fn unix_start_kind_uses_owned_server_for_homebrew_and_managed_daemon_for_standalone() {
+    let codex_home = tempfile::tempdir().unwrap();
+    let standalone = codex_home.path().join("packages/standalone/current/codex");
+    std::fs::create_dir_all(standalone.parent().unwrap()).unwrap();
+    std::fs::write(&standalone, b"fixture").unwrap();
+
+    assert_eq!(
+        unix_start_kind(&standalone, codex_home.path()),
+        UnixStartKind::ManagedDaemon
+    );
+
+    #[cfg(unix)]
+    {
+        let configured_symlink = codex_home.path().join("configured-codex");
+        std::os::unix::fs::symlink(&standalone, &configured_symlink).unwrap();
+        assert_eq!(
+            unix_start_kind(&configured_symlink, codex_home.path()),
+            UnixStartKind::ManagedDaemon,
+            "a configured symlink to the standalone payload remains managed"
+        );
+    }
+
+    let homebrew = codex_home.path().join("homebrew/bin/codex");
+    std::fs::create_dir_all(homebrew.parent().unwrap()).unwrap();
+    std::fs::write(&homebrew, b"fixture").unwrap();
+    assert_eq!(
+        unix_start_kind(&homebrew, codex_home.path()),
+        UnixStartKind::OwnedServer
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_unix_app_server_stops_its_process_group_on_drop() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("fake-codex");
+    std::fs::write(
+        &fixture,
+        b"#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let server = start_unix_app_server(&fixture, &dir.path().join("control.sock")).unwrap();
+    let pgid = server.child.id() as i32;
+    assert!(ds_proc::group_alive(pgid));
+    drop(server);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while ds_proc::group_alive(pgid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !ds_proc::group_alive(pgid),
+        "dropping the owned server must not orphan its process group"
     );
 }
 

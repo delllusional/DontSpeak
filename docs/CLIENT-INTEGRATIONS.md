@@ -44,18 +44,17 @@ No `MessageDisplay`. Interactive TUI / resume / fork handshake:
 3. Attach or start local app-server  
 4. `codex --remote <endpoint>`
 
-Windows: engine owns kill-on-close Job listener. Unix: managed control socket. Non-TUI
-commands (`exec`, `review`, `mcp`, …) pass through. Caller `--remote` rejected —
-use bare `codex` or set `codex_app_server_url` loopback `ws://`.
+Windows: engine owns a kill-on-close Job listener. Unix: the default control socket
+uses Codex's managed daemon for standalone installs and an engine-owned ordinary
+app-server for Homebrew/npm installs. An already-running external app-server is reused
+and never adopted or stopped. Non-TUI commands (`exec`, `review`, `mcp`, …) pass
+through. Caller `--remote` is rejected — use bare `codex` or set
+`codex_app_server_url` to a loopback `ws://` endpoint.
 
-`dontspeak codex` normally prepares the shared app-server and adds `--remote`. On
-Unix it starts a missing server with `codex app-server daemon start`, which Codex
-0.144.5 supports only for its standalone installation. Homebrew installations need
-an externally managed `codex app-server --listen unix://` plus a direct
-`codex --remote unix://` launch. See
-[Streaming narration — Launches](STREAMING-NARRATION.md#launches) for the macOS
-LaunchAgent setup. Without a remote app-server, hooks still provide end-of-turn
-narration but cannot expose mid-turn deltas.
+`dontspeak codex` prepares the shared app-server, waits until the narration subscriber
+has attached, then adds `--remote`. If preparation fails, hooks still provide
+end-of-turn narration but cannot expose mid-turn deltas. See
+[Streaming narration — Launches](STREAMING-NARRATION.md#launches) for lifecycle details.
 
 ### Qwen Code
 
@@ -110,7 +109,7 @@ dontspeak wire <client> --print-only
 | Client | Verified | Contracts |
 |---|---:|---|
 | Claude Code | 2.1.210 | [hooks](https://code.claude.com/docs/en/hooks), [MCP](https://code.claude.com/docs/en/mcp) |
-| OpenAI Codex | 0.144.4 | [hooks](https://developers.openai.com/codex/hooks), [app server](https://developers.openai.com/codex/app-server), [MCP](https://developers.openai.com/codex/mcp) |
+| OpenAI Codex | 0.144.5 | [hooks](https://developers.openai.com/codex/hooks), [app server](https://developers.openai.com/codex/app-server), [MCP](https://developers.openai.com/codex/mcp) |
 | Qwen Code | 0.19.10 | [hooks](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/hooks.md), [MCP](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/mcp.md) |
 | Grok | 0.2.101 | [CLI](https://docs.x.ai/build/cli/reference), [hooks](https://docs.x.ai/build/features/hooks), [MCP](https://docs.x.ai/build/features/mcp-servers) |
 

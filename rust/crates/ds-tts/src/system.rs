@@ -31,16 +31,7 @@ impl SystemTts {
 /// Shared with `kokoro::spawn`.
 #[cfg(unix)]
 pub(crate) fn set_new_pgroup(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    // SAFETY: pre_exec in forked child before exec; setsid is async-signal-safe;
-    // closure captures nothing, allocates nothing, takes no locks.
-    unsafe {
-        cmd.pre_exec(|| {
-            nix::unistd::setsid()
-                .map(|_| ())
-                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
-        });
-    }
+    ds_proc::set_new_process_group(cmd);
 }
 
 /// OS system-voice settings — ONE cross-platform seam for every UI's "Manage voices"

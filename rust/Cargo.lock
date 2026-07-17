@@ -1089,7 +1089,6 @@ dependencies = [
  "ds-voices",
  "libloading",
  "log",
- "nix 0.31.3",
  "ort",
  "pulldown-cmark",
  "rodio",

@@ -5,7 +5,9 @@
 //! Guarantees: session-keyed (never narrate-everything); witness parity so Stop stays
 //! silent for streamed sessions; never double-speak ([`ds_narrate::deliver_batch`] HWM);
 //! cleanup here (no SessionEnd hook). Config re-read per loop: `codex_stream`,
-//! `codex_stream_daemon_start`, `codex_app_server_url`, `codex_bin`.
+//! `codex_stream_daemon_start`, `codex_app_server_url`, `codex_bin`. Unix standalone
+//! installs use Codex's managed daemon; other installs use the same engine-owned direct
+//! app-server lifecycle as Windows.
 
 mod client;
 mod proto;
@@ -397,7 +399,7 @@ fn can_auto_start_tcp(host: &str) -> bool {
 }
 
 /// Resolve the endpoint from config: a non-empty `codex_app_server_url` wins (TCP);
-/// otherwise use the managed Unix control socket or the loopback Windows launch default.
+/// otherwise use the Unix control socket or the loopback Windows launch default.
 pub(crate) fn resolve_endpoint(
     url_override: &str,
     codex_home_env: Option<&std::ffi::OsStr>,
@@ -417,16 +419,43 @@ pub(crate) fn resolve_endpoint(
     }
 }
 
-/// PURE decision for the opt-in lazy daemon start — extracted so the shell-out itself is
-/// never exercised in tests: start only when the user opted in, the socket is absent, and
-/// a codex binary was actually resolved.
-#[cfg(unix)]
-pub(crate) fn should_start_daemon(
-    daemon_start_enabled: bool,
-    socket_present: bool,
+/// PURE decision for Unix lazy start — extracted so the shell-out itself is never
+/// exercised in tests. A connect failure is required rather than mere path absence so a
+/// stale control-socket inode does not permanently suppress recovery.
+#[cfg(any(unix, test))]
+pub(crate) fn should_start_unix_server(
+    start_enabled: bool,
+    endpoint_unavailable: bool,
     bin_resolved: bool,
+    already_owned: bool,
 ) -> bool {
-    daemon_start_enabled && !socket_present && bin_resolved
+    start_enabled && endpoint_unavailable && bin_resolved && !already_owned
+}
+
+#[cfg(any(unix, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnixStartKind {
+    ManagedDaemon,
+    OwnedServer,
+}
+
+/// Codex accepts managed-daemon startup only from the standalone binary installed at
+/// `$CODEX_HOME/packages/standalone/current/codex`. Homebrew/npm binaries use an ordinary
+/// engine-owned app-server instead. Canonicalization covers `current` and configured-bin
+/// symlinks without treating every binary named `codex` as managed.
+#[cfg(any(unix, test))]
+fn unix_start_kind(bin: &Path, codex_home: &Path) -> UnixStartKind {
+    let standalone = codex_home.join("packages/standalone/current/codex");
+    let is_standalone = bin == standalone
+        || std::fs::canonicalize(bin)
+            .ok()
+            .zip(std::fs::canonicalize(&standalone).ok())
+            .is_some_and(|(bin, standalone)| bin == standalone);
+    if is_standalone {
+        UnixStartKind::ManagedDaemon
+    } else {
+        UnixStartKind::OwnedServer
+    }
 }
 
 /// Resolve the codex binary: an absolute config path is used as-is; a bare name is
@@ -513,9 +542,19 @@ fn resolve_codex_bin(
     None
 }
 
+fn direct_app_server_command(bin: &Path, listen: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(bin);
+    command
+        .args(["app-server", "--listen", listen])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
 /// Launch `codex app-server daemon start` (idempotent upstream; returns once the control
-/// socket answers `initialize`). We never own or kill the DAEMON itself — an external
-/// external-tool shell-out; Codex is never linked. The short-lived
+/// socket answers `initialize`). We never own or kill the DAEMON itself — an external-tool
+/// shell-out; Codex is never linked. The short-lived
 /// STARTER child, however, is reaped on a background thread: this runs inside a driven
 /// retry loop in the long-lived engine, and a dropped-unwaited Child per attempt would
 /// accumulate zombies until the per-user process limit (spawn-and-drop's repo precedent,
@@ -534,7 +573,7 @@ fn start_daemon(bin: &Path) {
         Ok(mut child) => {
             log::info!(
                 target: "engine",
-                "codex-stream: launched `{} app-server daemon start` (socket was absent)",
+                "codex-stream: launched `{} app-server daemon start` (endpoint was unavailable)",
                 bin.display()
             );
             std::thread::Builder::new()
@@ -689,18 +728,18 @@ enum Pending {
     },
 }
 
-/// A Windows `codex app-server --listen ws://...` process started by this engine.
-/// The managed daemon command is Unix-only upstream, so on Windows the opt-in start
-/// owns the direct listener and tears it down with the engine.
+/// A `codex app-server --listen ...` process started and owned by this engine. Windows
+/// uses a kill-on-close Job Object; Unix uses the shared process-group lifecycle and is
+/// selected only when the resolved binary is not the managed standalone install.
 #[cfg(windows)]
-struct OwnedTcpAppServer {
+struct OwnedAppServer {
     child: std::process::Child,
-    host: String,
+    endpoint_key: String,
     job: windows::Win32::Foundation::HANDLE,
 }
 
 #[cfg(windows)]
-impl Drop for OwnedTcpAppServer {
+impl Drop for OwnedAppServer {
     fn drop(&mut self) {
         // SAFETY: `job` is the live handle returned by CreateJobObjectW and is owned solely
         // by this value, so this is its exactly-once close. Closing the kill-on-close job
@@ -711,6 +750,43 @@ impl Drop for OwnedTcpAppServer {
             let _ = windows::Win32::Foundation::CloseHandle(self.job);
         }
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+struct OwnedAppServer {
+    child: std::process::Child,
+    endpoint_key: String,
+}
+
+#[cfg(unix)]
+impl Drop for OwnedAppServer {
+    fn drop(&mut self) {
+        const GRACE: Duration = Duration::from_secs(2);
+        const POLL: Duration = Duration::from_millis(25);
+
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let pgid = self.child.id() as i32;
+        ds_proc::kill_group(pgid);
+        let deadline = Instant::now() + GRACE;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        ds_proc::force_kill_group(pgid);
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl OwnedAppServer {
+    fn endpoint_key(&self) -> &str {
+        &self.endpoint_key
     }
 }
 
@@ -762,22 +838,19 @@ fn assign_kill_on_close_job(
 }
 
 #[cfg(windows)]
-fn start_tcp_app_server(bin: &Path, host: &str) -> Result<OwnedTcpAppServer, String> {
+fn start_tcp_app_server(bin: &Path, host: &str) -> Result<OwnedAppServer, String> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut child = std::process::Command::new(bin)
-        .args(["app-server", "--listen", &format!("ws://{host}")])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
+    let mut command = direct_app_server_command(bin, &format!("ws://{host}"));
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command
         .spawn()
         .map_err(|e| format!("start `{}` on ws://{host}: {e}", bin.display()))?;
     match assign_kill_on_close_job(&mut child) {
-        Ok(job) => Ok(OwnedTcpAppServer {
+        Ok(job) => Ok(OwnedAppServer {
             child,
-            host: host.to_string(),
+            endpoint_key: format!("tcp:{host}"),
             job,
         }),
         Err(e) => {
@@ -786,6 +859,20 @@ fn start_tcp_app_server(bin: &Path, host: &str) -> Result<OwnedTcpAppServer, Str
             Err(e)
         }
     }
+}
+
+#[cfg(unix)]
+fn start_unix_app_server(bin: &Path, socket: &Path) -> Result<OwnedAppServer, String> {
+    let listen = format!("unix://{}", socket.display());
+    let mut command = direct_app_server_command(bin, &listen);
+    ds_proc::set_new_process_group(&mut command);
+    let child = command
+        .spawn()
+        .map_err(|e| format!("start `{}` on {listen}: {e}", bin.display()))?;
+    Ok(OwnedAppServer {
+        child,
+        endpoint_key: format!("unix:{}", socket.display()),
+    })
 }
 
 impl Pending {
@@ -1206,7 +1293,7 @@ fn should_park_supervisor(
 }
 
 /// Never launch an app-server more often than this.
-const DAEMON_START_MIN_GAP: Duration = Duration::from_secs(60);
+const SERVER_START_MIN_GAP: Duration = Duration::from_secs(60);
 
 /// Spawn the supervisor beside the engine's other background threads. Self-gating: it
 /// parks (cheap condvar wait) while `codex_stream` is off, `~/.codex` is absent, or no
@@ -1246,7 +1333,7 @@ pub(crate) fn spawn_supervisor(
 }
 
 /// The outer connect loop: park while gated, resolve the endpoint, attach (optionally
-/// nudging the idempotent daemon start when opted in), then hand the connection to
+/// starting the managed or engine-owned lifecycle), then hand the connection to
 /// [`run_attached`]; reconnect with capped backoff on disconnect.
 fn supervise(
     paths: &Paths,
@@ -1258,35 +1345,45 @@ fn supervise(
 ) {
     let mut backoff = BACKOFF_FLOOR;
     let mut epoch = 0u64;
-    let mut last_daemon_start: Option<Instant> = None;
-    // Once `dontspeak codex` has requested the managed path, keep it warm for this engine
+    let mut last_server_start: Option<Instant> = None;
+    // Once `dontspeak codex` has requested the remote path, keep it warm for this engine
     // lifetime. Later launches then reuse the same observer/server instead of racing a
     // teardown in the gap between the endpoint reply and Codex's SessionStart hook.
-    let mut launch_managed = false;
+    let mut launch_kept_warm = false;
     // One WARN per unresolvable-binary streak: this branch re-runs every backoff pass,
     // and an explicit opt-in that silently no-ops (nvm/npm-prefix installs off the GUI
     // PATH) is the failure the audit flagged — but a per-pass WARN would spam the log.
     let mut warned_bin_unresolvable = false;
-    #[cfg(windows)]
-    let mut owned_tcp_server: Option<OwnedTcpAppServer> = None;
+    #[cfg(any(unix, windows))]
+    let mut owned_server: Option<OwnedAppServer> = None;
     while running.load(Ordering::Relaxed) {
-        #[cfg(windows)]
-        if let Some(server) = owned_tcp_server.as_mut() {
+        #[cfg(any(unix, windows))]
+        if let Some(server) = owned_server.as_mut() {
             match server.child.try_wait() {
                 Ok(Some(status)) => {
                     log::info!(
                         target: "engine",
-                        "codex-stream: engine-owned Windows app-server exited with {status} client=codex"
+                        "codex-stream: engine-owned app-server exited with {status} client=codex"
                     );
-                    owned_tcp_server = None;
+                    if registry.launch_requested() {
+                        registry.launch_failed(format!(
+                            "engine-owned Codex app-server exited with {status} before becoming ready"
+                        ));
+                    }
+                    owned_server = None;
                 }
                 Ok(None) => {}
                 Err(e) => {
                     log::info!(
                         target: "engine",
-                        "codex-stream: could not probe engine-owned Windows app-server: {e} client=codex"
+                        "codex-stream: could not probe engine-owned app-server: {e} client=codex"
                     );
-                    owned_tcp_server = None;
+                    if registry.launch_requested() {
+                        registry.launch_failed(format!(
+                            "could not monitor engine-owned Codex app-server: {e}"
+                        ));
+                    }
+                    owned_server = None;
                 }
             }
         }
@@ -1305,19 +1402,19 @@ fn supervise(
             epoch = registry.wait_change(cur_epoch.max(epoch), Duration::from_millis(100));
             continue;
         }
-        #[cfg(windows)]
+        #[cfg(any(unix, windows))]
         if !cfg.codex_stream_daemon_start
-            && !launch_managed
+            && !launch_kept_warm
             && !launch_requested
-            && owned_tcp_server.is_some()
+            && owned_server.is_some()
         {
-            owned_tcp_server = None;
+            owned_server = None;
             log::info!(
                 target: "engine",
-                "codex-stream: stopped the engine-owned Windows app-server after auto-start was disabled client=codex"
+                "codex-stream: stopped the engine-owned app-server after auto-start was disabled client=codex"
             );
         }
-        let force_start = cfg.codex_stream_daemon_start || launch_managed || launch_requested;
+        let force_start = cfg.codex_stream_daemon_start || launch_kept_warm || launch_requested;
         // Auto-start must not wait for a registered session: a remote TUI cannot connect
         // (and therefore cannot fire SessionStart) until the app-server already exists.
         // Without auto-start, preserve the cheap no-session park.
@@ -1327,12 +1424,12 @@ fn supervise(
             !sessions.is_empty(),
             force_start,
         ) {
-            #[cfg(windows)]
-            if owned_tcp_server.is_some() {
-                owned_tcp_server = None;
+            #[cfg(any(unix, windows))]
+            if owned_server.is_some() {
+                owned_server = None;
                 log::info!(
                     target: "engine",
-                    "codex-stream: stopped the engine-owned Windows app-server client=codex"
+                    "codex-stream: stopped the engine-owned app-server client=codex"
                 );
             }
             // Parked. A nudge (or the timeout) re-checks the gate.
@@ -1344,18 +1441,17 @@ fn supervise(
             std::env::var_os("CODEX_HOME").as_deref(),
             paths,
         );
-        #[cfg(windows)]
-        if let (Some(server), Some(Endpoint::Tcp(configured_host))) =
-            (owned_tcp_server.as_ref(), endpoint.as_ref())
-            && server.host != *configured_host
+        let endpoint_key = endpoint.as_ref().map(Endpoint::key);
+        #[cfg(any(unix, windows))]
+        if let Some(server) = owned_server.as_ref()
+            && endpoint_key.as_deref() != Some(server.endpoint_key())
         {
-            owned_tcp_server = None;
+            owned_server = None;
             log::info!(
                 target: "engine",
-                "codex-stream: stopped the engine-owned Windows app-server after endpoint change client=codex"
+                "codex-stream: stopped the engine-owned app-server after endpoint change client=codex"
             );
         }
-        let endpoint_key = endpoint.as_ref().map(Endpoint::key);
         let remote_endpoint = endpoint.as_ref().map(Endpoint::remote_arg);
         let attempt_started = Instant::now();
         let attached: Result<Result<Detach, String>, String> = match endpoint {
@@ -1370,14 +1466,22 @@ fn supervise(
                 continue;
             }
             #[cfg(unix)]
-            Some(Endpoint::Unix(sock)) => {
-                if !sock.exists() {
+            Some(Endpoint::Unix(sock)) => match std::os::unix::net::UnixStream::connect(&sock) {
+                Err(connect_error) => {
+                    let endpoint_unavailable = matches!(
+                        connect_error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    );
                     let codex_home = std::env::var_os("CODEX_HOME")
                         .filter(|s| !s.is_empty())
                         .map(PathBuf::from)
                         .unwrap_or_else(|| paths.codex_dir.clone());
-                    let bin = resolve_codex_bin(&cfg.codex_bin, &paths.home, &codex_home, None);
-                    if force_start && bin.is_none() {
+                    let bin = if force_start {
+                        resolve_codex_bin(&cfg.codex_bin, &paths.home, &codex_home, None)
+                    } else {
+                        None
+                    };
+                    if force_start && endpoint_unavailable && bin.is_none() {
                         if launch_requested {
                             registry.launch_failed(format!(
                                 "Codex executable {:?} was not found; set codex_bin to its full path",
@@ -1388,55 +1492,77 @@ fn supervise(
                             warned_bin_unresolvable = true;
                             log::info!(
                                 target: "engine",
-                                "codex-stream: daemon start is enabled but `{}` was not found on PATH or the known install dirs — set codex_bin to the binary's full path client=codex",
+                                "codex-stream: app-server start is enabled but `{}` was not found on PATH or the known install dirs — set codex_bin to the binary's full path client=codex",
                                 cfg.codex_bin
                             );
                         }
-                    } else {
+                    } else if bin.is_some() {
                         warned_bin_unresolvable = false;
                     }
                     let throttled =
-                        last_daemon_start.is_some_and(|at| at.elapsed() < DAEMON_START_MIN_GAP);
+                        last_server_start.is_some_and(|at| at.elapsed() < SERVER_START_MIN_GAP);
                     if !throttled
-                        && should_start_daemon(force_start, sock.exists(), bin.is_some())
+                        && should_start_unix_server(
+                            force_start,
+                            endpoint_unavailable,
+                            bin.is_some(),
+                            owned_server.is_some(),
+                        )
                         && let Some(bin) = bin
                     {
-                        last_daemon_start = Some(Instant::now());
-                        start_daemon(&bin);
-                    }
-                    Err(format!("control socket absent: {}", sock.display()))
-                } else {
-                    std::os::unix::net::UnixStream::connect(&sock)
-                        .map_err(|e| format!("connect {}: {e}", sock.display()))
-                        .and_then(|stream| WsClient::handshake(stream, "ws://localhost/"))
-                        .and_then(|mut ws| {
-                            ws.initialize(Duration::from_secs(10))?;
-                            Ok(ws)
-                        })
-                        .map(|mut ws| {
-                            registry.launch_ready(
-                                remote_endpoint
-                                    .clone()
-                                    .expect("an endpoint produced this match arm"),
-                            );
-                            if launch_requested {
-                                launch_managed = true;
+                        last_server_start = Some(Instant::now());
+                        match unix_start_kind(&bin, &codex_home) {
+                            UnixStartKind::ManagedDaemon => start_daemon(&bin),
+                            UnixStartKind::OwnedServer => {
+                                match start_unix_app_server(&bin, &sock) {
+                                    Ok(server) => {
+                                        owned_server = Some(server);
+                                        log::info!(
+                                            target: "engine",
+                                            "codex-stream: started engine-owned app-server on unix://{} client=codex",
+                                            sock.display()
+                                        );
+                                    }
+                                    Err(e) => {
+                                        if launch_requested {
+                                            registry.launch_failed(e.clone());
+                                        }
+                                        log::info!(target: "engine", "codex-stream: {e} client=codex");
+                                    }
+                                }
                             }
-                            let result = run_attached(
-                                &mut ws,
-                                paths,
-                                running,
-                                registry,
-                                mic_active,
-                                speak,
-                                tun,
-                                endpoint_key.as_deref(),
-                            );
-                            registry.launch_detached();
-                            result
-                        })
+                        }
+                    }
+                    Err(format!("connect {}: {connect_error}", sock.display()))
                 }
-            }
+                Ok(stream) => WsClient::handshake(stream, "ws://localhost/")
+                    .and_then(|mut ws| {
+                        ws.initialize(Duration::from_secs(10))?;
+                        Ok(ws)
+                    })
+                    .map(|mut ws| {
+                        registry.launch_ready(
+                            remote_endpoint
+                                .clone()
+                                .expect("an endpoint produced this match arm"),
+                        );
+                        if launch_requested {
+                            launch_kept_warm = true;
+                        }
+                        let result = run_attached(
+                            &mut ws,
+                            paths,
+                            running,
+                            registry,
+                            mic_active,
+                            speak,
+                            tun,
+                            endpoint_key.as_deref(),
+                        );
+                        registry.launch_detached();
+                        result
+                    }),
+            },
             Some(Endpoint::Tcp(host)) => match std::net::TcpStream::connect(&host) {
                 Ok(stream) => WsClient::handshake(stream, &format!("ws://{host}/"))
                     .and_then(|mut ws| {
@@ -1450,7 +1576,7 @@ fn supervise(
                                 .expect("an endpoint produced this match arm"),
                         );
                         if launch_requested {
-                            launch_managed = true;
+                            launch_kept_warm = true;
                         }
                         let result = run_attached(
                             &mut ws,
@@ -1467,7 +1593,7 @@ fn supervise(
                     }),
                 Err(connect_error) => {
                     #[cfg(windows)]
-                    if force_start && owned_tcp_server.is_none() && can_auto_start_tcp(&host) {
+                    if force_start && owned_server.is_none() && can_auto_start_tcp(&host) {
                         let codex_home = std::env::var_os("CODEX_HOME")
                             .filter(|s| !s.is_empty())
                             .map(PathBuf::from)
@@ -1481,16 +1607,16 @@ fn supervise(
                         );
                         if let Some(bin) = bin {
                             warned_bin_unresolvable = false;
-                            let throttled = last_daemon_start
-                                .is_some_and(|at| at.elapsed() < DAEMON_START_MIN_GAP);
+                            let throttled = last_server_start
+                                .is_some_and(|at| at.elapsed() < SERVER_START_MIN_GAP);
                             if !throttled {
-                                last_daemon_start = Some(Instant::now());
+                                last_server_start = Some(Instant::now());
                                 match start_tcp_app_server(&bin, &host) {
                                     Ok(child) => {
-                                        owned_tcp_server = Some(child);
+                                        owned_server = Some(child);
                                         log::info!(
                                             target: "engine",
-                                            "codex-stream: started engine-owned Windows app-server on ws://{host} client=codex"
+                                            "codex-stream: started engine-owned app-server on ws://{host} client=codex"
                                         );
                                     }
                                     Err(e) => {
