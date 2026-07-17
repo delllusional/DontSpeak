@@ -36,6 +36,10 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_stats_range(double lo, double avg, double hi, uint precision, [MarshalAs(UnmanagedType.LPUTF8Str)] string unitKey);
     [DllImport(Dll)] private static extern IntPtr ds_stats_count(ulong count, double audioSecs);
     [DllImport(Dll)] private static extern IntPtr ds_human_size(ulong bytes);
+    [DllImport(Dll)] private static extern IntPtr ds_tray_icon_kind(byte sttActive, byte ttsActive, [MarshalAs(UnmanagedType.LPUTF8Str)] string trayIndicatorJson);
+    [DllImport(Dll)] private static extern IntPtr ds_active_tts_slot([MarshalAs(UnmanagedType.LPUTF8Str)] string ttsEngine);
+    [DllImport(Dll)] private static extern IntPtr ds_active_stt_slot([MarshalAs(UnmanagedType.LPUTF8Str)] string sttEngine);
+    [DllImport(Dll)] private static extern byte ds_diarization_ui_enabled();
     [DllImport(Dll)] private static extern void ds_string_free(IntPtr s);
     [DllImport(Dll)] private static extern byte ds_set_muted(byte on);
     [DllImport(Dll)] private static extern byte ds_open_voice_settings();
@@ -58,6 +62,22 @@ internal static class Native
     public static string StatsCount(ulong count, double audioSecs) => TakeString(ds_stats_count(count, audioSecs));
     /// <summary>Decimal size string shared with macOS/Linux Libraries tabs (byte-for-byte parity).</summary>
     public static string HumanSize(ulong bytes) => TakeString(ds_human_size(bytes));
+
+    /// <summary>Tray kind token from shared Rust (`idle`|`recording`|`speaking`).</summary>
+    public static string TrayIconKind(bool sttActive, bool ttsActive, string[] trayIndicator)
+    {
+        var json = JsonSerializer.Serialize(trayIndicator ?? Array.Empty<string>());
+        return TakeString(ds_tray_icon_kind((byte)(sttActive ? 1 : 0), (byte)(ttsActive ? 1 : 0), json));
+    }
+
+    /// <summary>Active TTS model_status object key (`kokoro`|`tts_system`|empty).</summary>
+    public static string ActiveTtsSlot(string ttsEngine) => TakeString(ds_active_tts_slot(ttsEngine ?? ""));
+
+    /// <summary>Active STT model_status object key (`parakeet`|`claude_code`|`system`|empty).</summary>
+    public static string ActiveSttSlot(string sttEngine) => TakeString(ds_active_stt_slot(sttEngine ?? ""));
+
+    /// <summary>Shared diarization UI gate (`ds_tools::DIARIZATION_ENABLED`) — do not re-mirror.</summary>
+    public static bool DiarizationUiEnabled() => ds_diarization_ui_enabled() != 0;
 
     /// <summary>Workspace product version; cached (immutable for process life; ApplyStatus reads often).</summary>
     public static string Version() => _version ??= TakeString(ds_version());
@@ -228,18 +248,24 @@ internal sealed class HealthSnapshot
     public EngineSelection EngineSelection = new();
     public Dictation Dictation = new();
 
-    /// <summary>Engine object actually doing TTS for active tts_engine.</summary>
-    public EngineInfo ActiveTts => EngineSelection.TtsEngine == "system" ? EngineDots.TtsSystem : EngineDots.Kokoro;
-    /// <summary>Engine object actually doing STT for active stt_engine.</summary>
+    /// <summary>Engine object for active TTS. Tokens lockstep with <c>ds_status::ActiveTtsSlot</c>
+    /// (pure so unit tests need no ds_core.dll; FFI <see cref="Native.ActiveTtsSlot"/> exists too).</summary>
+    public EngineInfo ActiveTts => EngineSelection.TtsEngine switch
+    {
+        "system" => EngineDots.TtsSystem,
+        "built_in" => EngineDots.Kokoro,
+        _ => new EngineInfo(EngineState.Missing, 0, ""), // off / unknown
+    };
+    /// <summary>Engine object for active STT — lockstep with <c>ds_status::ActiveSttSlot</c>.</summary>
     public EngineInfo ActiveStt => EngineSelection.SttEngine switch
     {
         "claude_code" => EngineDots.ClaudeCode,
         "system" => EngineDots.System,
-        _ => EngineDots.Parakeet,
+        "built_in" => EngineDots.Parakeet,
+        _ => new EngineInfo(EngineState.Missing, 0, ""),
     };
 
-    /// <summary>ONE tray/state-stripe mapping, gated by tray_indicator. Token or token_animated
-    /// both color; _animated breathing is macOS-only — Windows just tints.</summary>
+    /// <summary>Tray/state-stripe; lockstep with <c>ds_status::tray_icon_kind</c> (HealthSnapshotTests pin).</summary>
     public TrayIcon.IconState IndicatorState()
     {
         bool Colors(string state) =>
@@ -247,7 +273,6 @@ internal sealed class HealthSnapshot
             Array.IndexOf(Activity.TrayIndicator, state + "_animated") >= 0;
         if (Activity.Recording && Colors("stt")) return TrayIcon.IconState.Recording;
         if (Activity.Speaking && Colors("tts")) return TrayIcon.IconState.Speaking;
-        // Download/warm only on per-engine dots (macOS parity), never tray/stripe.
         return TrayIcon.IconState.Idle;
     }
     public TtsStats Tts = new();

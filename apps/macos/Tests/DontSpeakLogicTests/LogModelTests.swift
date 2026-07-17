@@ -31,6 +31,7 @@ final class LogModelTests: XCTestCase {
             line("engine", "WARN", "c"),
             line("caps", "INFO", "d"),
             line("tts", "INFO", "e"),
+            line("", "INFO", "skip empty source"),
         ]
         XCTAssertEqual(LogCatalog.distinctSources(lines), ["engine", "tts", "caps"])
     }

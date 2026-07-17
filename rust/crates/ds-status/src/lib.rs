@@ -8,9 +8,13 @@
 //! read every key unconditionally.
 
 mod dictation_state;
+mod selection;
 mod state;
+mod tray;
 pub use dictation_state::DictationState;
+pub use selection::{ActiveSttSlot, ActiveTtsSlot};
 pub use state::EngineState;
+pub use tray::{TrayIconKind, tray_icon_kind};
 
 /// f64 → JSON number; NaN/Infinity become 0.0. Default serde_json would emit `null`, which
 /// violates this numeric wire contract and breaks apps' non-optional float DTOs.

@@ -165,6 +165,39 @@ final class Core {
         checkForUpdateOnce()
     }
 
+    /// Active TTS model_status object key (`kokoro`|`tts_system`|empty) — `ds_active_tts_slot`.
+    nonisolated static func activeTtsSlot(_ ttsEngine: String) -> String {
+        ttsEngine.withCString { p in
+            guard let ptr = ds_active_tts_slot(p) else { return "" }
+            defer { ds_string_free(ptr) }
+            return String(cString: ptr)
+        }
+    }
+
+    /// Active STT model_status object key — `ds_active_stt_slot`.
+    nonisolated static func activeSttSlot(_ sttEngine: String) -> String {
+        sttEngine.withCString { p in
+            guard let ptr = ds_active_stt_slot(p) else { return "" }
+            defer { ds_string_free(ptr) }
+            return String(cString: ptr)
+        }
+    }
+
+    /// Tray kind token from shared Rust (`idle`|`recording`|`speaking`).
+    nonisolated static func trayIconKind(
+        sttActive: Bool, ttsActive: Bool, trayIndicator: [String]
+    ) -> String {
+        let jsonData = (try? JSONSerialization.data(withJSONObject: trayIndicator)) ?? Data("[]".utf8)
+        let json = String(data: jsonData, encoding: .utf8) ?? "[]"
+        return json.withCString { jp in
+            guard let ptr = ds_tray_icon_kind(sttActive ? 1 : 0, ttsActive ? 1 : 0, jp) else {
+                return "idle"
+            }
+            defer { ds_string_free(ptr) }
+            return String(cString: ptr)
+        }
+    }
+
     /// One-shot update check. Failures → no pill (FFI returns `{}`).
     private func checkForUpdateOnce() {
         Task { [weak self] in

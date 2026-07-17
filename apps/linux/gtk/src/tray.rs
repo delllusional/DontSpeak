@@ -19,8 +19,8 @@ pub enum Cmd {
 }
 
 pub struct SpeakTray {
-    pub speaking: bool,
-    pub recording: bool,
+    /// Shared kind from [`ds_status::tray_icon_kind`] (gates on `tray_indicator`).
+    pub kind: ds_status::TrayIconKind,
     pub muted: bool,
     seed_purple: Rgb,
     mic_orange: Rgb,
@@ -31,8 +31,7 @@ impl SpeakTray {
     pub fn new(tx: async_channel::Sender<Cmd>) -> Self {
         let (seed_purple, mic_orange) = icon::brand_colors(&crate::ffi::brand_colors_json());
         SpeakTray {
-            speaking: false,
-            recording: false,
+            kind: ds_status::TrayIconKind::Idle,
             muted: false,
             seed_purple,
             mic_orange,
@@ -41,14 +40,12 @@ impl SpeakTray {
     }
 
     /// Per-state tint: recording → mic_orange, speaking → seed_purple, else idle.
-    /// Muted is a slash, not a color. Downloading/warming live only on engine dots, not tray.
+    /// Muted is a slash, not a color. Download/warm live only on engine dots, not tray.
     fn ink(&self) -> Rgb {
-        if self.recording {
-            self.mic_orange
-        } else if self.speaking {
-            self.seed_purple
-        } else {
-            icon::idle_fg()
+        match self.kind {
+            ds_status::TrayIconKind::Recording => self.mic_orange,
+            ds_status::TrayIconKind::Speaking => self.seed_purple,
+            ds_status::TrayIconKind::Idle => icon::idle_fg(),
         }
     }
 }

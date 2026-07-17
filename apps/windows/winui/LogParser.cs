@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -24,6 +25,32 @@ internal static class LogParser
             return raw?.Select(d => new LogLine(d.Source ?? "", d.Level ?? "", d.Text ?? "")).ToList() ?? new();
         }
         catch { return new(); }
+    }
+
+    /// <summary>Distinct non-empty sources in first-appearance order (palette index). Lockstep
+    /// with <c>ds_log::distinct_sources</c>.</summary>
+    internal static List<string> DistinctSources(IReadOnlyList<LogLine> lines)
+    {
+        var ordered = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var l in lines)
+        {
+            if (l.Source.Length == 0 || !seen.Add(l.Source)) continue;
+            ordered.Add(l.Source);
+        }
+        return ordered;
+    }
+
+    /// <summary>Case-insensitive substring over text, source, OR level. Blank query keeps all.
+    /// Lockstep with <c>ds_log::filter_logs</c> (macOS LogCatalog / Linux filter).</summary>
+    internal static List<LogLine> Filter(IReadOnlyList<LogLine> lines, string query)
+    {
+        var q = (query ?? "").Trim();
+        if (q.Length == 0) return lines.ToList();
+        return lines.Where(l =>
+            l.Text.Contains(q, StringComparison.OrdinalIgnoreCase)
+            || l.Source.Contains(q, StringComparison.OrdinalIgnoreCase)
+            || l.Level.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
     }
 
     private sealed record LogLineRaw(

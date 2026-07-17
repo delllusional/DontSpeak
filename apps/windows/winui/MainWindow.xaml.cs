@@ -28,8 +28,8 @@ public sealed partial class MainWindow : Window
     private static readonly SolidColorBrush Gray = new(Color.FromArgb(120, 150, 150, 155));
     // Cascadia Mono (Win11) / Consolas — tools/params; macOS uses SF Mono.
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
-    // Mirrors ds_tools::DIARIZATION_ENABLED — flip both when diarization ships.
-    private const bool DiarizationUiEnabled = false;
+    // Shared gate via FFI (`ds_diarization_ui_enabled` ← ds_tools::DIARIZATION_ENABLED).
+    private static readonly bool DiarizationUiEnabled = Native.DiarizationUiEnabled();
 
     public MainWindow()
     {
@@ -167,9 +167,7 @@ public sealed partial class MainWindow : Window
         catch { return; }
         if (loadGeneration != _logLoadGeneration || LogTab.Visibility != Visibility.Visible) return;
         _logLines = lines;
-        _logSources = new List<string>();
-        foreach (var l in _logLines)
-            if (l.Source.Length > 0 && !_logSources.Contains(l.Source)) _logSources.Add(l.Source);
+        _logSources = LogParser.DistinctSources(_logLines);
         await RenderLogLinesAsync(++_logRenderGeneration);
     }
 
@@ -210,11 +208,7 @@ public sealed partial class MainWindow : Window
     private async System.Threading.Tasks.Task RenderLogLinesAsync(int renderGeneration)
     {
         LogText.Blocks.Clear();
-        var q = _logFilter.Trim();
-        var shown = _logLines.Where(l => q.Length == 0
-            || l.Text.Contains(q, StringComparison.OrdinalIgnoreCase)
-            || l.Source.Contains(q, StringComparison.OrdinalIgnoreCase)
-            || l.Level.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
+        var shown = LogParser.Filter(_logLines, _logFilter);
         if (shown.Count == 0)
         {
             var empty = new Paragraph { Margin = new Thickness(0) };
@@ -374,8 +368,6 @@ public sealed partial class MainWindow : Window
                 SttFailures.Text = s.Stt.Failures.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        // CS0162: const false makes body unreachable; suppress so the flip remains a const bool.
-#pragma warning disable CS0162 // Unreachable code detected
         if (DiarizationUiEnabled)
         {
             var diarInfo = s.EngineDots.Diarization;
@@ -396,7 +388,6 @@ public sealed partial class MainWindow : Window
                 DiarSensitivity.Text = s.Diarization.ClusteringThreshold.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
             }
         }
-#pragma warning restore CS0162
 
         ApplyStateAccent(s.IndicatorState());
         CapsDot.Fill = s.Activity.Caps ? Green : Gray;

@@ -390,6 +390,55 @@ pub extern "C" fn ds_human_size(bytes: u64) -> *mut c_char {
     guard_str("", || to_cstring(crate::status_fmt::human_size(bytes)))
 }
 
+/// Tray / state-stripe kind (`idle` | `recording` | `speaking`). `tray_indicator_json` is a
+/// JSON string array from `model_status.tray_indicator` (NULL/malformed → `[]`). Owned
+/// `char*`. HANDLE-FREE. ONE mapping for every host (see [`ds_status::tray_icon_kind`]).
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_tray_icon_kind(
+    stt_active: u8,
+    tts_active: u8,
+    tray_indicator_json: *const c_char,
+) -> *mut c_char {
+    guard_str("idle", || {
+        let raw = cstr_or_empty(tray_indicator_json);
+        let indicators: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        let kind = ds_status::tray_icon_kind(stt_active != 0, tts_active != 0, &indicators);
+        to_cstring(kind.as_str())
+    })
+}
+
+/// Active TTS model_status object key for config token `tts_engine`
+/// (`kokoro` | `tts_system` | empty when off/unknown). Owned `char*`. HANDLE-FREE.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_active_tts_slot(tts_engine: *const c_char) -> *mut c_char {
+    guard_str("", || {
+        let slot = ds_status::ActiveTtsSlot::from_engine(&cstr_or_empty(tts_engine))
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        to_cstring(slot)
+    })
+}
+
+/// Active STT model_status object key for config token `stt_engine`
+/// (`parakeet` | `claude_code` | `system` | empty when off/unknown). Owned `char*`.
+/// HANDLE-FREE.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_active_stt_slot(stt_engine: *const c_char) -> *mut c_char {
+    guard_str("", || {
+        let slot = ds_status::ActiveSttSlot::from_engine(&cstr_or_empty(stt_engine))
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        to_cstring(slot)
+    })
+}
+
+/// Whether diarization UI/tools are shipped (`ds_tools::DIARIZATION_ENABLED`). ONE flip for
+/// every host — do not re-mirror as a host-local const. 1 = shown, 0 = hidden. HANDLE-FREE.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_diarization_ui_enabled() -> u8 {
+    guard_val(0, || ds_tools::DIARIZATION_ENABLED as u8)
+}
+
 /// Session TTS provider: "cpu"|"cuda"|"coreml"|"ane"|"auto" (NULL/unknown → "auto").
 /// Restarts warm Kokoro + resets TTS stats only if provider actually changes. 1 if
 /// delivered; new provider/stats via `ds_model_status_json`.
@@ -489,6 +538,55 @@ mod tests {
         );
         assert_eq!(take_string(ds_t(std::ptr::null())), "");
         ds_set_locale(std::ptr::null());
+    }
+
+    #[test]
+    fn shared_selection_and_tray_exports_match_ds_status() {
+        let built_in = CString::new("built_in").unwrap();
+        let system = CString::new("system").unwrap();
+        let off = CString::new("off").unwrap();
+        let claude = CString::new("claude_code").unwrap();
+        assert_eq!(take_string(ds_active_tts_slot(built_in.as_ptr())), "kokoro");
+        assert_eq!(
+            take_string(ds_active_tts_slot(system.as_ptr())),
+            "tts_system"
+        );
+        assert_eq!(take_string(ds_active_tts_slot(off.as_ptr())), "");
+        assert_eq!(
+            take_string(ds_active_stt_slot(built_in.as_ptr())),
+            "parakeet"
+        );
+        assert_eq!(
+            take_string(ds_active_stt_slot(claude.as_ptr())),
+            "claude_code"
+        );
+        assert_eq!(take_string(ds_active_stt_slot(system.as_ptr())), "system");
+        assert_eq!(take_string(ds_active_stt_slot(off.as_ptr())), "");
+
+        let ind = CString::new(r#"["stt","tts"]"#).unwrap();
+        assert_eq!(
+            take_string(ds_tray_icon_kind(1, 0, ind.as_ptr())),
+            "recording"
+        );
+        assert_eq!(
+            take_string(ds_tray_icon_kind(0, 1, ind.as_ptr())),
+            "speaking"
+        );
+        assert_eq!(take_string(ds_tray_icon_kind(1, 1, ind.as_ptr())), "recording");
+        let empty = CString::new("[]").unwrap();
+        assert_eq!(
+            take_string(ds_tray_icon_kind(1, 1, empty.as_ptr())),
+            "idle"
+        );
+        assert_eq!(
+            take_string(ds_tray_icon_kind(1, 1, std::ptr::null())),
+            "idle"
+        );
+
+        assert_eq!(
+            ds_diarization_ui_enabled() != 0,
+            ds_tools::DIARIZATION_ENABLED
+        );
     }
 
     /// FFI path through real marshaling + VERSION against a mock (not a retest of

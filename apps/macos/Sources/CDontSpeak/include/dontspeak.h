@@ -221,6 +221,24 @@ char *ds_stats_count(uint64_t count, double audio_secs);
 // `ds_string_free`. HANDLE-FREE.
 char *ds_human_size(uint64_t bytes);
 
+// Tray / state-stripe kind: "idle" | "recording" | "speaking". `stt_active` / `tts_active`
+// are non-zero when Caps dictation / TTS playback is live. `tray_indicator_json` is the
+// model_status `tray_indicator` JSON string array (NULL/malformed → []). Owned `char*`, free
+// with `ds_string_free`. HANDLE-FREE. ONE mapping shared by every host.
+char *ds_tray_icon_kind(uint8_t stt_active, uint8_t tts_active, const char *tray_indicator_json);
+
+// Active TTS model_status object key for config token `tts_engine`: "kokoro" | "tts_system" |
+// "" when off/unknown. Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
+char *ds_active_tts_slot(const char *tts_engine);
+
+// Active STT model_status object key for config token `stt_engine`: "parakeet" | "claude_code" |
+// "system" | "" when off/unknown. Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
+char *ds_active_stt_slot(const char *stt_engine);
+
+// Whether diarization UI/tools are shipped (`ds_tools::DIARIZATION_ENABLED`). ONE flip for
+// every host. Returns 1 when shown, 0 when hidden. HANDLE-FREE.
+uint8_t ds_diarization_ui_enabled(void);
+
 // Set the TTS execution provider for this session: `provider` is "cpu" | "cuda" |
 // "coreml" | "ane" | "auto" (NULL/unknown → "auto"). The engine restarts the warm Kokoro child on
 // the new provider and resets its TTS stats (only if the active provider actually

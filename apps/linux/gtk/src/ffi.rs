@@ -59,38 +59,29 @@ pub fn tools_json() -> String {
 pub fn libraries_json() -> String {
     take(sys::ds_libraries_json())
 }
-/// Activity-log tail (up to `max_bytes`). Core returns JSON `{source, level, text}` entries
-/// (Windows colors by source); we flatten to `"[source] text"` for the GTK TextView.
-pub fn log_tail(max_bytes: u32) -> String {
-    flatten_log_json(&take(sys::ds_logs_json(max_bytes)))
+/// Raw activity-log JSON tail (`[{source,level,text},…]`). Push path keeps JSON so the UI
+/// can filter with shared [`ds_log`] rules before flattening.
+pub fn log_tail_json(max_bytes: u32) -> String {
+    take(sys::ds_logs_json(max_bytes))
 }
 
-/// Like [`log_tail`] but BLOCKS until any `*.log` under the logs dir changes or `timeout_ms`
-/// elapses, then returns the current flattened tail. Client-side fs watch (not engine IPC).
-/// Background thread only; loop via `log_push::spawn_push`.
-pub fn log_wait(max_bytes: u32, timeout_ms: u32) -> String {
-    flatten_log_json(&take(sys::ds_logs_wait(max_bytes, timeout_ms)))
+/// Like [`log_tail_json`] but BLOCKS until any `*.log` under the logs dir changes or
+/// `timeout_ms` elapses. Client-side fs watch (not engine IPC). Background thread only.
+pub fn log_wait_json(max_bytes: u32, timeout_ms: u32) -> String {
+    take(sys::ds_logs_wait(max_bytes, timeout_ms))
 }
 
-/// Flatten combined-log JSON to `"[source] text"` lines — shared by [`log_tail`] / [`log_wait`]
-/// so one-shot and push paths can't drift. Raw payload if not the expected array.
-fn flatten_log_json(json: &str) -> String {
-    match serde_json::from_str::<Vec<serde_json::Value>>(json) {
-        Ok(entries) => entries
-            .iter()
-            .map(|e| {
-                let src = e.get("source").and_then(|v| v.as_str()).unwrap_or("");
-                let text = e.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                if src.is_empty() {
-                    text.to_string()
-                } else {
-                    format!("[{src}] {text}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Err(_) => json.to_string(),
-    }
+/// Parse + filter combined-log JSON with shared [`ds_log`] rules, then flatten for the text view.
+/// Empty result distinguishes no lines vs no match via the optional out-params.
+pub fn filter_and_flatten_logs(json: &str, query: &str) -> (usize, usize, String) {
+    let lines = ds_log::parse_logs_json(json);
+    let total = lines.len();
+    let filtered: Vec<ds_log::LogLine> = ds_log::filter_logs(&lines, query)
+        .into_iter()
+        .map(|(_, l)| l.clone())
+        .collect();
+    let shown = filtered.len();
+    (total, shown, ds_log::flatten_log_lines(&filtered))
 }
 /// Erase the on-disk activity log (unified + rotated + aux). Irreversible — confirm first
 /// (AdwAlertDialog in `ui.rs`).

@@ -108,16 +108,22 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
             while let Ok(snap) = rx.recv().await {
                 ui::update(&w, &snap);
                 overlay.apply(&snap);
-                let (speaking, recording, is_muted) = match &snap.status {
-                    Some(s) => (s.running.tts_active, s.running.stt_active, s.running.muted),
-                    None => (false, false, false),
+                let (kind, is_muted) = match &snap.status {
+                    Some(s) => (
+                        ds_status::tray_icon_kind(
+                            s.running.stt_active,
+                            s.running.tts_active,
+                            &s.tray_indicator,
+                        ),
+                        s.running.muted,
+                    ),
+                    None => (ds_status::TrayIconKind::Idle, false),
                 };
                 muted.set(is_muted);
                 if let Some(h) = &th {
                     h.update(move |t| {
                         t.muted = is_muted;
-                        t.speaking = speaking;
-                        t.recording = recording;
+                        t.kind = kind;
                     });
                 }
             }

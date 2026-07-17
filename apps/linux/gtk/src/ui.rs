@@ -169,16 +169,20 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         &t("common.nav_tools"),
     );
     let (log_scroll, log_view) = build_log_page();
+    // Free-text filter (shared ds_log rules); no dedicated i18n placeholder on other hosts either.
+    let log_filter = gtk::SearchEntry::builder().hexpand(true).build();
     let log_clear_button = gtk::Button::builder()
         .icon_name("user-trash-symbolic")
         .tooltip_text(t("logs.clear"))
         .build();
     let log_toolbar = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .halign(gtk::Align::End)
+        .spacing(8)
         .margin_top(6)
+        .margin_start(6)
         .margin_end(6)
         .build();
+    log_toolbar.append(&log_filter);
     log_toolbar.append(&log_clear_button);
     let log_page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -191,6 +195,11 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         Some("credits"),
         &t("common.nav_credits"),
     );
+    // Latest raw JSON from push; filter re-applies without another disk read.
+    let log_json: std::rc::Rc<std::cell::RefCell<String>> =
+        std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+    let log_query: std::rc::Rc<std::cell::RefCell<String>> =
+        std::rc::Rc::new(std::cell::RefCell::new(String::new()));
     // Live log only while the tab is visible (`log_push`); stop when leaving.
     // `Rc<RefCell>` for GTK closures; the push itself is a real OS thread.
     let log_push_stop: std::rc::Rc<
@@ -199,21 +208,37 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     {
         let lv = log_view.clone();
         let log_push_stop = log_push_stop.clone();
+        let log_json = log_json.clone();
+        let log_query = log_query.clone();
         stack.connect_visible_child_name_notify(move |s| {
             if s.visible_child_name().as_deref() == Some("log") {
                 if log_push_stop.borrow().is_none() {
                     let (tx, rx) = async_channel::unbounded::<String>();
                     *log_push_stop.borrow_mut() = Some(crate::log_push::spawn_push(tx));
                     let lv = lv.clone();
+                    let log_json = log_json.clone();
+                    let log_query = log_query.clone();
                     gtk::glib::spawn_future_local(async move {
-                        while let Ok(text) = rx.recv().await {
-                            set_log_text(&lv, text);
+                        while let Ok(json) = rx.recv().await {
+                            *log_json.borrow_mut() = json;
+                            let q = log_query.borrow().clone();
+                            set_log_from_json(&lv, &log_json.borrow(), &q);
                         }
                     });
                 }
             } else if let Some(stop) = log_push_stop.borrow_mut().take() {
                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+        });
+    }
+    {
+        let lv = log_view.clone();
+        let log_json = log_json.clone();
+        let log_query = log_query.clone();
+        log_filter.connect_search_changed(move |entry| {
+            let q = entry.text().to_string();
+            *log_query.borrow_mut() = q.clone();
+            set_log_from_json(&lv, &log_json.borrow(), &q);
         });
     }
     {
@@ -395,42 +420,44 @@ fn set_failures(row: &adw::ActionRow, label: &gtk::Label, failures: u64) {
     }
 }
 
-/// Selected TTS → (display name, lifecycle token, `EngineObj`). One lookup for subtitle + detail.
+/// Selected TTS → (display name, lifecycle token, `EngineObj`). Slot from shared
+/// [`ds_status::ActiveTtsSlot`] so hosts can't drift on which object is "active".
 fn tts_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
-    match s.tts_engine.as_str() {
-        "built_in" => Some((
+    use ds_status::ActiveTtsSlot;
+    match ActiveTtsSlot::from_engine(&s.tts_engine)? {
+        ActiveTtsSlot::Kokoro => Some((
             t("status.engine.kokoro"),
             s.kokoro.state.as_str(),
             &s.kokoro,
         )),
-        "system" => Some((
+        ActiveTtsSlot::TtsSystem => Some((
             t("status.engine.system"),
             s.tts_system.state.as_str(),
             &s.tts_system,
         )),
-        _ => None,
     }
 }
 
-/// Selected STT → (display name, lifecycle token, `EngineObj`). One lookup for subtitle + detail.
+/// Selected STT → (display name, lifecycle token, `EngineObj`). Slot from shared
+/// [`ds_status::ActiveSttSlot`].
 fn stt_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
-    match s.stt_engine.as_str() {
-        "built_in" => Some((
+    use ds_status::ActiveSttSlot;
+    match ActiveSttSlot::from_engine(&s.stt_engine)? {
+        ActiveSttSlot::Parakeet => Some((
             t("status.engine.parakeet"),
             s.parakeet.state.as_str(),
             &s.parakeet,
         )),
-        "claude_code" => Some((
+        ActiveSttSlot::ClaudeCode => Some((
             t("status.engine.claude_code"),
             s.claude_code.state.as_str(),
             &s.claude_code,
         )),
-        "system" => Some((
+        ActiveSttSlot::System => Some((
             t("status.engine.system"),
             s.system.state.as_str(),
             &s.system,
         )),
-        _ => None,
     }
 }
 
@@ -763,12 +790,15 @@ fn build_log_page() -> (gtk::ScrolledWindow, gtk::TextView) {
     (scroll, view)
 }
 
-/// Fill Logs view and scroll to newest. All tails arrive from `log_push` (no disk on tab select).
-fn set_log_text(view: &gtk::TextView, tail: String) {
-    let text = if tail.trim().is_empty() {
+/// Filter raw combined-log JSON with shared [`ds_log`] rules, flatten, show empty/no-match.
+fn set_log_from_json(view: &gtk::TextView, json: &str, query: &str) {
+    let (total, shown, flat) = crate::ffi::filter_and_flatten_logs(json, query);
+    let text = if total == 0 {
         t("logs.empty")
+    } else if shown == 0 {
+        t("logs.no_match")
     } else {
-        tail
+        flat
     };
     let buf = view.buffer();
     buf.set_text(&text);

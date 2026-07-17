@@ -110,7 +110,8 @@ struct ExpandDot<Dot: View>: View {
 struct StatusView: View {
     @Environment(Core.self) private var core
 
-    private let diarizationUIEnabled = false // mirrors ds_tools::DIARIZATION_ENABLED (rust/crates/ds-tools/src/lib.rs) — flip both together when diarization ships
+    /// Shared gate (`ds_diarization_ui_enabled` ← `ds_tools::DIARIZATION_ENABLED`) — not a host-local const.
+    private let diarizationUIEnabled: Bool = ds_diarization_ui_enabled() != 0
 
     var body: some View {
         // Scrollable content only; chrome is on MainWindow.
@@ -148,31 +149,29 @@ struct StatusView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// TTS row names the concrete engine (system `say` vs Kokoro), not the setting token.
+    /// TTS row: slot from shared `ds_active_tts_slot` (config token → model_status object key).
     @ViewBuilder
     private var ttsEngineRow: some View {
-        switch core.selection.ttsEngine {
-        case "off":
-            OffEngineRow(role: L.t("status.engine.role_tts"))
-        case "system":
+        switch Core.activeTtsSlot(core.selection.ttsEngine) {
+        case "tts_system":
             EngineStatRow(
                 role: L.t("status.engine.role_tts"), detail: L.t("status.engine.system"),
                 status: core.engineDots.ttsSystem
             ) { TtsStatsContent() }
-        default:
+        case "kokoro":
             EngineStatRow(
                 role: L.t("status.engine.role_tts"), detail: L.t("status.engine.kokoro"),
                 status: core.engineDots.kokoro
             ) { TtsStatsContent() }
+        default:
+            OffEngineRow(role: L.t("status.engine.role_tts"))
         }
     }
 
-    /// STT row names what's transcribing (Claude Code / System / Parakeet).
+    /// STT row: slot from shared `ds_active_stt_slot`.
     @ViewBuilder
     private var sttEngineRow: some View {
-        switch core.selection.sttEngine {
-        case "off":
-            OffEngineRow(role: L.t("status.engine.role_stt"))
+        switch Core.activeSttSlot(core.selection.sttEngine) {
         case "claude_code":
             EngineStatRow(
                 role: L.t("status.engine.role_stt"), detail: L.t("status.engine.claude_code"),
@@ -183,11 +182,13 @@ struct StatusView: View {
                 role: L.t("status.engine.role_stt"), detail: L.t("status.engine.system"),
                 status: core.engineDots.system
             ) { SttStatsContent() }
-        default:
+        case "parakeet":
             EngineStatRow(
                 role: L.t("status.engine.role_stt"), detail: L.t("status.engine.parakeet"),
                 status: core.engineDots.parakeet
             ) { SttStatsContent() }
+        default:
+            OffEngineRow(role: L.t("status.engine.role_stt"))
         }
     }
 }

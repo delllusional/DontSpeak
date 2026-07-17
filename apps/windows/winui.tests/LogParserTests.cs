@@ -59,4 +59,54 @@ public class LogParserTests
         var line = Assert.Single(lines);
         Assert.Equal(new LogLine("x", "WARN", "hi"), line);
     }
+
+    // Filter / distinct sources — lockstep with ds_log::catalog (Rust) and macOS LogCatalog.
+
+    private static readonly LogLine[] Sample =
+    {
+        new("tts", "INFO", "spoke a sentence"),
+        new("stt", "ERROR", "mic blocked"),
+        new("caps", "WARN", "held too long"),
+    };
+
+    private static readonly string[] ExpectedSources = ["engine", "tts", "caps"];
+
+    [Fact]
+    public void DistinctSourcesPreserveFirstAppearance()
+    {
+        var lines = new[]
+        {
+            new LogLine("engine", "INFO", "a"),
+            new LogLine("tts", "INFO", "b"),
+            new LogLine("engine", "WARN", "c"),
+            new LogLine("caps", "INFO", "d"),
+            new LogLine("", "INFO", "skip"),
+        };
+        Assert.Equal(ExpectedSources, LogParser.DistinctSources(lines));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   \t ")]
+    public void FilterBlankKeepsAll(string query)
+    {
+        Assert.Equal(Sample.Length, LogParser.Filter(Sample, query).Count);
+    }
+
+    [Theory]
+    [InlineData("BLOCKED", "stt")]
+    [InlineData("caps", "caps")]
+    [InlineData("error", "stt")]
+    [InlineData("  stt  ", "stt")]
+    public void FilterMatchesMessageSourceOrLevel(string query, string expectedSource)
+    {
+        var r = Assert.Single(LogParser.Filter(Sample, query));
+        Assert.Equal(expectedSource, r.Source);
+    }
+
+    [Fact]
+    public void FilterNoMatchIsEmpty()
+    {
+        Assert.Empty(LogParser.Filter(Sample, "zzz"));
+    }
 }

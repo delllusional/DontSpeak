@@ -22,13 +22,16 @@ public struct LogLine: Decodable, Equatable, Sendable {
 }
 
 /// Logs-tab pure rules: stable first-appearance source order (palette index) and free-text
-/// filter. No Foundation — `lowercased()` matches the engine/UI's ASCII tokens.
+/// filter. Lockstep with `ds_log::catalog` (Rust) and Windows `LogParser.Filter` /
+/// `DistinctSources` — same cases pinned by unit tests on each side. No Foundation —
+/// `lowercased()` matches the engine/UI's ASCII tokens.
 public enum LogCatalog {
     /// Distinct sources in first-appearance order; view colors by index mod palette length.
+    /// Empty sources are skipped (lockstep with `ds_log::distinct_sources` / Windows LogParser).
     public static func distinctSources(_ lines: [LogLine]) -> [String] {
         var seen: Set<String> = []
         var ordered: [String] = []
-        for l in lines where !seen.contains(l.source) {
+        for l in lines where !l.source.isEmpty && !seen.contains(l.source) {
             seen.insert(l.source)
             ordered.append(l.source)
         }

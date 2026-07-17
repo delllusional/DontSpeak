@@ -55,7 +55,8 @@ private struct MenuBarLabel: View {
 enum TrayState: Equatable {
     case idle, recording, speaking
 
-    /// True only for `_animated` tray_indicator forms. Drives TrayAnimator breathing.
+    /// True only for `_animated` tray_indicator forms. Drives TrayAnimator breathing
+    /// (macOS-only; Windows tints without breathing). Independent of shared kind resolution.
     @MainActor static func animated(_ core: Core) -> Bool {
         let cfg = core.activity.trayIndicator
         switch current(core) {
@@ -65,16 +66,17 @@ enum TrayState: Equatable {
         }
     }
 
-    /// `tray_indicator` gates color ([] = never). `sttActive` is Caps dictation, not always-on capture.
+    /// `tray_indicator` gates color ([] = never). Shared `ds_tray_icon_kind` — one rule with Win/Linux.
     @MainActor static func current(_ core: Core) -> TrayState {
-        let cfg = core.activity.trayIndicator
-        if core.activity.sttActive && (cfg.contains("stt") || cfg.contains("stt_animated")) {
-            return .recording
+        switch Core.trayIconKind(
+            sttActive: core.activity.sttActive,
+            ttsActive: core.activity.ttsActive,
+            trayIndicator: core.activity.trayIndicator
+        ) {
+        case "recording": return .recording
+        case "speaking": return .speaking
+        default: return .idle
         }
-        if core.activity.ttsActive && (cfg.contains("tts") || cfg.contains("tts_animated")) {
-            return .speaking
-        }
-        return .idle
     }
 
     /// Pill tint; nil when idle. Single color source for menu-bar + title-bar.

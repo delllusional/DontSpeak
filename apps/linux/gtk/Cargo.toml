@@ -44,3 +44,5 @@ sys-locale = "0.3"
 ds-core = { path = "../../../rust/crates/ds-core" }
 # Typed model_status — no hand-mirrored DTO (unlike Swift/C# hosts).
 ds-status = { path = "../../../rust/crates/ds-status" }
+# Logs-tab parse/filter pure rules (same as ds_logs_json wire).
+ds-log = { path = "../../../rust/crates/ds-log" }
