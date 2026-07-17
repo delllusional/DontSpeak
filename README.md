@@ -31,7 +31,10 @@ dontspeak grok
 ```
 
 Preserves client args and exit status. Codex interactive launches also prep app-server
-streaming. Details: [docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md).
+streaming (`codex --remote`). Grok stays a direct `grok` launch; mid-turn digests ride the
+host engine tail of session `updates.jsonl` (config `grok_stream`, default on). Details:
+[docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md) and
+[docs/STREAMING-NARRATION.md](docs/STREAMING-NARRATION.md).
 
 **Update:** re-run install (stop/replace/re-wire/relaunch). In-app version pill only
 signals availability.

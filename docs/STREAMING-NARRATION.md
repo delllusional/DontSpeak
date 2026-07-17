@@ -142,6 +142,15 @@ No `MessageDisplay`. Engine tails `~/.grok/sessions/<encoded-cwd>/<sessionId>/up
 6. Stop: `retry_pending` + empty `is_final` flush; witness suppresses chat_history re-voice
 7. Cleanup: `SessionEnd` forget; ~12 h idle eviction
 
+### Launches
+
+`dontspeak grok` is **Direct** (starts host if needed, then `grok` with your args) — no
+app-server / `--remote` handshake. Mid-turn needs the **host engine** running with
+`grok_stream` on (default). Bare `grok` also works once hooks are wired and the host is
+up (SessionStart / UserPromptSubmit nudge the registry). Without the host or with
+`grok_stream = false`, `Stop` still does end-of-turn narration from `chat_history`.
+User rules: [CLIENT-INTEGRATIONS.md](CLIENT-INTEGRATIONS.md).
+
 ### Config (`config.toml`, live re-read)
 
 | Key | Default | Meaning |
