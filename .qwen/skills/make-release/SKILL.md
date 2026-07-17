@@ -67,7 +67,7 @@ ver="$(python3 scripts/release/sync-workspace-version.py --print)"
 # notes_file = path written above (local only; not in git)
 # Disable comment stripping so markdown `##` section headers survive (git default
 # treats lines starting with `#` as comments and drops them from the annotation).
-git -c core.commentChar='; tag -a "v$ver" -F "$notes_file"
+git -c core.commentChar=';' tag -a "v$ver" -F "$notes_file"
 # Windows PowerShell fallback if null is rejected: git -c core.commentChar=";" tag -a ...
 git push origin main "v$ver"
 ```
@@ -149,7 +149,7 @@ Skip latest check for drafts (they don't move `releases/latest`).
 gh release delete "v$ver" --repo delllusional/DontSpeak --yes   # if published
 git push origin ":refs/tags/v$ver" && git tag -d "v$ver"
 # Re-apply the same notes file (or a fixed one), still annotated:
-git -c core.commentChar='; tag -a "v$ver" -F "$notes_file"
+git -c core.commentChar=';' tag -a "v$ver" -F "$notes_file"
 git push origin main "v$ver"
 ```
 
