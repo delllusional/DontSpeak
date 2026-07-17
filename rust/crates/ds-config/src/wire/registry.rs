@@ -377,8 +377,11 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         //
         // Live 0.2.93 captures on 2026-07-13 showed camelCase data keys and lowercase-snake
         // `hookEventName` values, which the runtime normalizes mechanically. Stop is
-        // metadata-only (no final assistant text field); narration falls back to the last
-        // assistant entry in `transcriptPath`. Grok ignores passive-hook stdout, so digest
+        // metadata-only (no final assistant text field); end-of-turn narration falls back to
+        // the last assistant entry in `transcriptPath` / chat_history when no stream witness.
+        // MID-TURN narration is engine file-tail of session `updates.jsonl`
+        // (`dontspeakd::grok_stream`), not MessageDisplay — so `hook_streaming` stays false
+        // and SessionStart remains greet-only. Grok ignores passive-hook stdout, so digest
         // instructions are also written to `~/.grok/AGENTS.md` (issue #95). The MCP handshake
         // identified itself as `grok-shell-DontSpeak`, normalized to the alias above.
         surfaces: &[
@@ -386,7 +389,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
                 mechanism: WireMechanism::GrokJsonHooks,
                 config_file: |p| &p.grok_hooks_json, // ~/.grok/hooks/dontspeak.json
                 load_hint: None,
-                hook_streaming: false,
+                hook_streaming: false, // mid-turn = engine updates.jsonl tail, not MessageDisplay
                 hook_command_style: HookCommandStyle::ArgsArray, // ignored by GrokJsonHooks
             },
             Surface {

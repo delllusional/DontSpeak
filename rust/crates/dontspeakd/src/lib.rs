@@ -24,6 +24,7 @@
 //! - `config_gate` — pure config predicates + reload decisions
 //! - `barge` — mic-barge watcher
 //! - `codex_stream` — Codex app-server mid-turn narration
+//! - `grok_stream` — Grok updates.jsonl mid-turn narration
 //! - `listen` / `listener` — always-listening pure core / poll-loop glue
 
 // `listen` is pure/tested; `listener` is runtime glue. allow covers inspector
@@ -46,6 +47,7 @@ mod config_gate;
 mod config_watch;
 mod downloads;
 mod engine;
+mod grok_stream;
 mod ipc;
 mod status;
 mod timer;

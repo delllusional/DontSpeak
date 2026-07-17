@@ -8,6 +8,7 @@ Speaks top-level `>` digests (plus shorts fallback) while the reply streams. Cor
 | Claude Code | `MessageDisplay` (per-batch process) | incremental `delta` by block `index` | `dontspeak::hook_narrate` |
 | Qwen Code 0.19.10+ | `MessageDisplay` | cumulative `displayed_text` + `is_final` | `dontspeak::hook_narrate` |
 | OpenAI Codex | engine app-server subscriber | `item/agentMessage/delta` + `item/completed` | `dontspeakd::codex_stream` |
+| Grok | engine file-tail of `updates.jsonl` | ACP `session/update` → `agent_message_chunk` | `dontspeakd::grok_stream` |
 
 All build `StreamBatch` → `ds_narrate::deliver_batch`.
 
@@ -27,6 +28,7 @@ Seeding:
 | Claude / Qwen | `SessionStart` |
 | Plain-TUI Codex | never (`--greet-only`); `Stop` path |
 | Codex app-server | engine on successful `thread/resume` |
+| Grok | engine on first `updates.jsonl` attach (SessionStart is greet-only) |
 
 ## Codex adapter
 
@@ -126,10 +128,32 @@ all platforms.
 - **Windows** — loopback WebSocket; `dontspeak codex` owns Job-object listener
 - Stop fallback on all OSes without a witness
 
+## Grok adapter
+
+No `MessageDisplay`. Engine tails `~/.grok/sessions/<encoded-cwd>/<sessionId>/updates.jsonl`
+(ACP NDJSON). Supervisor:
+
+1. Learn sessions from IPC when `source=Grok` (`GreetSession`, `MarkActive`)
+2. Resolve `updates.jsonl` via path helpers (cwd scan / newest mtime)
+3. Attach at EOF, seed witness once
+4. Parse `method=session/update` + `sessionUpdate=agent_message_chunk` + `content.text` only
+   (ignore thought/tool/user); batch key = `_meta.promptId` or session id
+5. Coalesce deltas (newline / ~150 ms) → `deliver_batch` → TTS queue with **real** session id
+6. Stop: `retry_pending` + empty `is_final` flush; witness suppresses chat_history re-voice
+7. Cleanup: `SessionEnd` forget; ~12 h idle eviction
+
+### Config (`config.toml`, live re-read)
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `grok_stream` | `true` | File-tail on; set `false` to opt out |
+
+No daemon-start or URL keys (Grok writes the session files itself).
+
 ## Deploy
 
-- `dontspeakd::codex_stream` → engine/host rebuild
-- `ds-narrate` + hooks → CLI; Codex launch handshake also IPC → lockstep CLI+host
-- Hook-set change → `dontspeak wire codex`
+- `dontspeakd::codex_stream` / `dontspeakd::grok_stream` → engine/host rebuild
+- `ds-narrate` + hooks (Grok Stop finalize) → CLI; lockstep CLI+host for mid-turn
+- Hook-set change → `dontspeak wire codex` / `dontspeak wire grok` as needed
 
 See [BUILD-DEPLOY.md](BUILD-DEPLOY.md).

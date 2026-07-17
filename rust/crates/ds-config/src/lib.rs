@@ -26,6 +26,7 @@ mod enums;
 mod brand;
 mod claude_code;
 mod grok_rules;
+mod grok_sessions;
 mod narration;
 mod paths;
 mod pidfile;
@@ -48,6 +49,12 @@ pub use enums::{
 pub use grok_rules::{
     GROK_NARRATE_BEGIN, GROK_NARRATE_END, apply_grok_narrate_section, clear_grok_narrate_agents_md,
     sync_grok_narrate_agents_md, sync_grok_narrate_from_config,
+};
+pub use grok_sessions::{
+    encode_grok_session_cwd, grok_chat_history_path, grok_session_dir, grok_sessions_root,
+    grok_updates_jsonl_path, is_updates_jsonl, prefer_chat_history_transcript,
+    resolve_grok_chat_history, resolve_grok_session_dir, resolve_grok_updates_jsonl,
+    scan_grok_chat_history_by_mtime,
 };
 pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
 pub use paths::{

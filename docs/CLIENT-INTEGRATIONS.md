@@ -27,7 +27,7 @@ terminal after first install for PATH.
 | Claude Code | Yes (`MessageDisplay`) | N/A (`Stop` = earcon) | Yes | Direct `claude` |
 | OpenAI Codex | Yes for an app-server remote TUI | Yes for plain local TUI | Yes | Engine app-server + `codex --remote` |
 | Qwen Code 0.19.10 | Yes (`MessageDisplay`) | Witness suppresses duplicate `Stop` speech | Yes | Direct `qwen` |
-| Grok 0.2.101 | No stream | Yes from `Stop.transcriptPath` | Yes | Direct `grok` |
+| Grok 0.2.101 | Yes (engine tails `updates.jsonl`) | Yes from `Stop.transcriptPath` when no witness | Yes | Direct `grok` |
 
 ## Client notes
 
@@ -66,8 +66,18 @@ timeouts (registry emits Qwen shape). Cumulative `MessageDisplay`
 ### Grok
 
 Native hook file + Claude-compatible import; Grok dedupes matching bare commands.
-`Stop` has `transcriptPath` (no assistant field) — read last non-empty assistant JSONL
-entry for final-reply narration only. Silent on bad transcript; earcon still allowed.
+`LaunchMode::Direct`; `hook_streaming` stays false (mid-turn is engine file-tail, not
+`MessageDisplay`).
+
+**Mid-turn:** engine `dontspeakd::grok_stream` tails
+`~/.grok/sessions/<encoded-cwd>/<sessionId>/updates.jsonl` for ACP
+`agent_message_chunk` text (config `grok_stream`, default on). Session discovery via
+Grok `GreetSession` / `MarkActive` IPC. Witness on attach; `Stop` finalizes trailing
+digests and does not re-voice `chat_history` when streamed.
+
+**End-of-turn fallback:** `Stop` has `transcriptPath` (no assistant field) — when no
+witness, read last non-empty assistant JSONL (`chat_history`, remapping bare
+`updates.jsonl`). Silent on bad transcript; earcon still allowed.
 
 **Digest instruction (issue #95):** Grok ignores `UserPromptSubmit` stdout, so
 `additionalContext` never reaches the model. DontSpeak still emits it, plus:

@@ -35,18 +35,24 @@ fn earcon_session(ttsq: &TtsQueue, requested: Option<String>) -> Option<String> 
 /// UserPromptSubmit MarkActive (typed/dictated, or `synthetic` harness continuation — #11).
 ///
 /// `codex_sessions` nudge always runs (liveness + codex_stream re-discovery after restart).
+/// Grok-only: also nudge `grok_sessions` so the updates.jsonl tail attaches.
 /// Active-terminal claim + `input_clears` skipped when `synthetic` (no human "I've moved on").
 /// Classifier: `dontspeak::hook_speak::is_synthetic_continuation`.
 fn handle_mark_active(
     ttsq: &TtsQueue,
     codex_sessions: &crate::codex_stream::SessionRegistry,
+    grok_sessions: &crate::grok_stream::SessionRegistry,
     paths: &Paths,
     session: Option<String>,
     synthetic: bool,
+    source: ClientSource,
 ) {
     // Unconditional liveness nudge (+ re-discovery / negative-cache re-arm).
     if let Some(s) = &session {
         codex_sessions.nudge(s);
+        if source == ClientSource::Grok {
+            grok_sessions.nudge(s);
+        }
     }
     if synthetic {
         return; // no active-terminal steal, no TTS queue touch
@@ -79,6 +85,7 @@ pub(crate) fn spawn_ipc_server(
     reload_requested: Arc<AtomicBool>,
     downloads: DownloadProg,
     codex_sessions: Arc<crate::codex_stream::SessionRegistry>,
+    grok_sessions: Arc<crate::grok_stream::SessionRegistry>,
 ) {
     let sock = paths.engine_sock.clone();
     std::thread::spawn(move || {
@@ -148,6 +155,9 @@ pub(crate) fn spawn_ipc_server(
                     );
                     if let Some(s) = &session {
                         codex_sessions.nudge(s);
+                        if source == ClientSource::Grok {
+                            grok_sessions.nudge(s);
+                        }
                     }
                     ttsq.greet_session(session);
                     emit(&ds_ipc::Response::Done);
@@ -165,7 +175,15 @@ pub(crate) fn spawn_ipc_server(
                             session.as_deref().unwrap_or("-")
                         ),
                     );
-                    handle_mark_active(&ttsq, &codex_sessions, &paths, session, synthetic);
+                    handle_mark_active(
+                        &ttsq,
+                        &codex_sessions,
+                        &grok_sessions,
+                        &paths,
+                        session,
+                        synthetic,
+                        source,
+                    );
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::Speak {
@@ -245,6 +263,7 @@ pub(crate) fn spawn_ipc_server(
                     // Window closed for good: per-window barge AND forget this session's
                     // transient pool-voice assignment so it doesn't grow one entry per session forever.
                     // None (no session id) → global hard barge, nothing session-scoped to forget.
+                    // Grok: also drop the updates.jsonl tail registration.
                     log_client(
                         &paths,
                         source,
@@ -252,6 +271,9 @@ pub(crate) fn spawn_ipc_server(
                     );
                     if let Some(session) = session.as_deref() {
                         ttsq.forget_narration_session(session);
+                        if source == ClientSource::Grok {
+                            grok_sessions.forget(session);
+                        }
                     }
                     match session {
                         None => ttsq.clear(),
@@ -537,12 +559,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path()); // no config.toml → default input_clears=[current]
         let codex_sessions = crate::codex_stream::SessionRegistry::new();
+        let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
         ttsq.set_active_session(Some("other".into()));
         ttsq.enqueue("hi".into(), None, None, Some("a".into()))
             .unwrap();
 
-        handle_mark_active(&ttsq, &codex_sessions, &paths, Some("a".into()), true);
+        handle_mark_active(
+            &ttsq,
+            &codex_sessions,
+            &grok_sessions,
+            &paths,
+            Some("a".into()),
+            true,
+            ClientSource::ClaudeCode,
+        );
 
         assert_eq!(
             ttsq.active_session(),
@@ -563,17 +594,64 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         let codex_sessions = crate::codex_stream::SessionRegistry::new();
+        let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
         ttsq.enqueue("hi".into(), None, None, Some("a".into()))
             .unwrap();
 
-        handle_mark_active(&ttsq, &codex_sessions, &paths, Some("a".into()), false);
+        handle_mark_active(
+            &ttsq,
+            &codex_sessions,
+            &grok_sessions,
+            &paths,
+            Some("a".into()),
+            false,
+            ClientSource::ClaudeCode,
+        );
 
         assert_eq!(ttsq.active_session(), Some("a".into()));
         assert_eq!(
             ttsq.snapshot().1,
             0,
             "default input_clears=[current] still prunes a genuine submit's own queued item"
+        );
+    }
+
+    #[test]
+    fn mark_active_grok_nudges_grok_registry_only() {
+        let ttsq = TtsQueue::test_stub();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let codex_sessions = crate::codex_stream::SessionRegistry::new();
+        let grok_sessions = crate::grok_stream::SessionRegistry::new();
+
+        handle_mark_active(
+            &ttsq,
+            &codex_sessions,
+            &grok_sessions,
+            &paths,
+            Some("g1".into()),
+            true,
+            ClientSource::Grok,
+        );
+        assert!(
+            grok_sessions.contains("g1"),
+            "Grok MarkActive must register for updates.jsonl tail"
+        );
+
+        let grok_sessions2 = crate::grok_stream::SessionRegistry::new();
+        handle_mark_active(
+            &ttsq,
+            &codex_sessions,
+            &grok_sessions2,
+            &paths,
+            Some("c1".into()),
+            true,
+            ClientSource::ClaudeCode,
+        );
+        assert!(
+            !grok_sessions2.contains("c1"),
+            "non-Grok clients must not enter the Grok registry"
         );
     }
 

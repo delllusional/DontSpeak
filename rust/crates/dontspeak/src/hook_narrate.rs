@@ -148,41 +148,6 @@ fn grok_stop_session_tag(session: &str) -> String {
     format!("grok-stop:{session}")
 }
 
-/// Grok session-folder cwd encoding (`C:\Users\usr` → `C%3A%5CUsers%5Cusr`).
-fn encode_grok_session_cwd(cwd: &str) -> String {
-    let mut out = String::with_capacity(cwd.len() * 3);
-    for &b in cwd.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-/// Prefer sibling `chat_history.jsonl` when path is live Grok `updates.jsonl` (no assistant lines).
-fn prefer_chat_history_transcript(path: std::path::PathBuf) -> std::path::PathBuf {
-    let is_updates = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.eq_ignore_ascii_case("updates.jsonl"));
-    if is_updates {
-        let chat = path.with_file_name("chat_history.jsonl");
-        if chat.is_file() {
-            return chat;
-        }
-    }
-    path
-}
-
-fn is_updates_jsonl(path: &std::path::Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.eq_ignore_ascii_case("updates.jsonl"))
-}
-
 /// Grok chat transcript path. Order: (1) transcriptPath, remapping updates.jsonl → sibling
 /// chat_history (bare updates is non-terminal — fall through); (2) encoded-cwd+session under
 /// `~/.grok/sessions`; (3) scan sessions/*/<sessionId>/chat_history (newest mtime on skew).
@@ -195,9 +160,9 @@ fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::p
     {
         let p = std::path::PathBuf::from(raw);
         if p.is_file() {
-            let preferred = prefer_chat_history_transcript(p);
+            let preferred = ds_config::prefer_chat_history_transcript(p);
             // Bare updates.jsonl must not shadow a valid sessions/.../chat_history for the budget.
-            if !is_updates_jsonl(&preferred) {
+            if !ds_config::is_updates_jsonl(&preferred) {
                 return Some(preferred);
             }
         } else {
@@ -212,35 +177,8 @@ fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::p
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())?;
-    let sessions_root = paths.grok_dir.join("sessions");
-    if let Some(cwd) = hook.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        let candidate = sessions_root
-            .join(encode_grok_session_cwd(cwd))
-            .join(session)
-            .join("chat_history.jsonl");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    let Ok(entries) = std::fs::read_dir(&sessions_root) else {
-        return None;
-    };
-    let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
-    for entry in entries.flatten() {
-        let candidate = entry.path().join(session).join("chat_history.jsonl");
-        if !candidate.is_file() {
-            continue;
-        }
-        let modified = candidate
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        let take = best.as_ref().map(|(_, t)| modified > *t).unwrap_or(true);
-        if take {
-            best = Some((candidate, modified));
-        }
-    }
-    best.map(|(p, _)| p)
+    let cwd = hook.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    ds_config::resolve_grok_chat_history(paths, session, cwd)
 }
 
 /// Prefer digest-bearing assistant over a newer tool-status line in "last non-empty" scans.
@@ -609,24 +547,58 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     let streamed = streamed_via_message_display(paths, session.as_deref().unwrap_or_default());
 
     // Final retry for queue-full rejections; witness still suppresses whole-reply fallback.
+    // Grok mid-turn (engine file-tail): also flush trailing digests/shorts with is_final.
+    // Do NOT re-voice chat_history when the witness is present.
     if streamed {
         let session_id = session.as_deref().unwrap_or_default();
+        let session_tag = session.clone();
         if let Err(message) = ds_narrate::retry_pending(paths, session_id, |utterance| {
-            admit_narration(paths, session.clone(), client, utterance)
+            admit_narration(paths, session_tag.clone(), client, utterance)
         }) {
             eprintln!("dontspeak: narration rejected: {message}");
+        }
+        if client == ClientSource::Grok {
+            let key = hook
+                .prompt_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(session_id)
+                .to_string();
+            let final_batch = StreamBatch {
+                key,
+                payload: BatchPayload::Delta {
+                    index: None,
+                    text: String::new(),
+                },
+                is_final: true,
+            };
+            if let Err(message) = ds_narrate::deliver_batch(
+                paths,
+                session_id,
+                &final_batch,
+                ds_platform::is_mic_active(),
+                messages_on,
+                short_on,
+                |utterance| admit_narration(paths, session_tag.clone(), client, utterance),
+            ) {
+                eprintln!("dontspeak: narration rejected: {message}");
+            }
         }
     }
 
     let mic_active = ds_platform::is_mic_active();
 
     // Grok: direct lastAssistantMessage if present; else turn-scoped transcript + deferred fp.
+    // When already streamed mid-turn, skip chat_history selection (witness owns silence).
     let (assistant_text, grok_selection, direct_fp): (
         Option<String>,
         Option<GrokStopSelection>,
         Option<u64>,
     ) = if client == ClientSource::Grok {
-        if let Some(direct) = hook
+        if streamed {
+            (None, None, None)
+        } else if let Some(direct) = hook
             .last_assistant_message
             .as_deref()
             .map(str::trim)
@@ -1377,7 +1349,7 @@ mod tests {
         let tx_dir = paths
             .grok_dir
             .join("sessions")
-            .join(encode_grok_session_cwd(cwd))
+            .join(ds_config::encode_grok_session_cwd(cwd))
             .join(session);
         std::fs::create_dir_all(&tx_dir).unwrap();
         let tx_path = tx_dir.join("chat_history.jsonl");
@@ -1806,7 +1778,7 @@ mod tests {
     #[test]
     fn encode_grok_session_cwd_matches_live_folder_names() {
         assert_eq!(
-            encode_grok_session_cwd(r"C:\Users\usr"),
+            ds_config::encode_grok_session_cwd(r"C:\Users\usr"),
             "C%3A%5CUsers%5Cusr"
         );
     }
@@ -1858,7 +1830,7 @@ mod tests {
         let chat_dir = paths
             .grok_dir
             .join("sessions")
-            .join(encode_grok_session_cwd(cwd))
+            .join(ds_config::encode_grok_session_cwd(cwd))
             .join(session);
         std::fs::create_dir_all(&chat_dir).unwrap();
         let chat = chat_dir.join("chat_history.jsonl");
@@ -1876,6 +1848,66 @@ mod tests {
         };
         let resolved = resolve_grok_transcript_path(&hook, &paths).expect("cwd fallthrough");
         assert_eq!(resolved, chat);
+    }
+
+    #[test]
+    fn grok_streamed_stop_finalizes_without_voicing_chat_history() {
+        // Mid-turn engine tail seeds the witness; Stop must flush is_final and stay silent
+        // on whole chat_history (no double-speak of digests already admitted).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let session = "streamed-sess";
+        ds_narrate::seed_witness(&paths, session);
+        // One incomplete digest in state: empty final batch should flush it.
+        let batch = StreamBatch {
+            key: "prompt-1".into(),
+            payload: BatchPayload::Delta {
+                index: Some(0),
+                text: "> Trailing digest without blank line".into(),
+            },
+            is_final: false,
+        };
+        let mut spoken = Vec::new();
+        ds_narrate::deliver_batch(
+            &paths,
+            session,
+            &batch,
+            false,
+            true,
+            true,
+            |u| {
+                spoken.push(u.text.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(
+            spoken.is_empty(),
+            "incomplete digest waits for is_final/blank line, got {spoken:?}"
+        );
+
+        let payload = serde_json::json!({
+            "session_id": session,
+            "promptId": "prompt-1",
+            "transcriptPath": dir.path().join("missing-chat.jsonl").to_string_lossy(),
+        })
+        .to_string();
+        // Engine sock absent → admit fails soft; finalize still runs deliver_batch path.
+        let _ = speak_reply(&paths, &payload, ClientSource::Grok);
+        assert!(
+            ds_narrate::witness_exists(&paths, session),
+            "witness must remain so stop_utterances stay silent"
+        );
+        assert!(
+            stop_utterances(
+                Some("> Should not re-voice from chat_history"),
+                true,
+                true,
+                false,
+                true
+            )
+            .is_empty()
+        );
     }
 
     #[test]

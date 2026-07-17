@@ -201,6 +201,11 @@ pub struct VoiceConfig {
     #[serde(default = "default_codex_bin")]
     pub codex_bin: String,
 
+    // Grok mid-turn: tail interactive session `updates.jsonl` (ACP agent_message_chunk).
+    /// Grok file-tail mid-turn narrate. Default on; inert without `~/.grok` + active session.
+    #[serde(default = "default_enabled")]
+    pub grok_stream: bool,
+
     /// Extra terminal ids beyond `KNOWN_TERMINALS` (OS-native form). Gates frontmost /
     /// pause / claude_code leak guard. Issue #14.
     #[serde(default)]
@@ -371,6 +376,7 @@ impl Default for VoiceConfig {
             codex_stream_daemon_start: false,
             codex_app_server_url: String::new(),
             codex_bin: default_codex_bin(),
+            grok_stream: true,
             extra_terminals: Vec::new(),
             extra_custom_text_editors: Vec::new(),
             exclude_clients: None,
@@ -732,6 +738,7 @@ pub(crate) mod tests {
         assert!(!v.codex_stream_daemon_start);
         assert!(v.codex_app_server_url.is_empty());
         assert_eq!(v.codex_bin, "codex");
+        assert!(v.grok_stream);
         assert!(v.extra_terminals.is_empty());
         assert!(v.extra_custom_text_editors.is_empty());
         assert!(v.exclude_clients.is_none());
@@ -767,6 +774,28 @@ pub(crate) mod tests {
         ] {
             assert!(keys.contains(k), "{k} must be a known config key");
         }
+    }
+
+    #[test]
+    fn grok_stream_defaults_and_overrides() {
+        // Default ON (inert without ~/.grok + a registered session); plain bool override.
+        let v: VoiceConfig = serde_json::from_str("{}").unwrap();
+        assert!(v.grok_stream);
+        let v: VoiceConfig = serde_json::from_str(r#"{"grok_stream":false}"#).unwrap();
+        assert!(!v.grok_stream);
+        assert!(
+            VoiceConfig::known_keys().contains("grok_stream"),
+            "grok_stream must be a known config key"
+        );
+        // Round-trip: non-default serializes and deserializes.
+        let round = VoiceConfig {
+            grok_stream: false,
+            ..Default::default()
+        };
+        let toml = toml::to_string(&round).unwrap();
+        assert!(toml.contains("grok_stream"));
+        let back: VoiceConfig = toml::from_str(&toml).unwrap();
+        assert!(!back.grok_stream);
     }
 
     #[test]
@@ -1445,6 +1474,7 @@ pub(crate) mod tests {
             codex_stream_daemon_start: true, // non-default (default is false)
             codex_app_server_url: "ws://127.0.0.1:4550".into(), // non-default (default is empty)
             codex_bin: "/opt/codex/bin/codex".into(), // non-default (default is "codex")
+            grok_stream: false,              // non-default (default is true)
             extra_terminals: vec!["myterm".into()], // non-default (default is [])
             extra_custom_text_editors: vec!["myeditor.exe".into()], // non-default (default is [])
             exclude_clients: Some(vec![ClientSource::ClaudeCode]), // non-default (default is None)

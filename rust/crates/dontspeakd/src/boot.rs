@@ -250,6 +250,8 @@ pub fn engine_run(
     // MarkActive) land in this registry; the codex_stream supervisor resumes ONLY matching
     // app-server threads. Built before the IPC server so its arms can nudge it.
     let codex_sessions = crate::codex_stream::SessionRegistry::new();
+    // Grok mid-turn: same discovery path, file-tail of updates.jsonl (not app-server).
+    let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
     // engine-owns-everything: host the RPC socket FIRST so ping/get/set/shutdown
     // are answerable immediately — BEFORE warming Kokoro below, whose model load
@@ -263,6 +265,7 @@ pub fn engine_run(
         reload_requested.clone(),
         downloads.clone(),
         codex_sessions.clone(),
+        grok_sessions.clone(),
     );
 
     // Barge-in TTS the instant the mic goes active (Claude Code's own voice
@@ -278,6 +281,16 @@ pub fn engine_run(
         paths.clone(),
         running.clone(),
         codex_sessions,
+        mic_watcher.handle(),
+        ttsq.clone(),
+    );
+
+    // Grok interactive-session updates.jsonl tail (ACP agent_message_chunk). Parks while
+    // `grok_stream` is off, `~/.grok` is absent, or no Grok session is registered.
+    crate::grok_stream::spawn_supervisor(
+        paths.clone(),
+        running.clone(),
+        grok_sessions,
         mic_watcher.handle(),
         ttsq.clone(),
     );
