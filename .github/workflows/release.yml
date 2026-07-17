@@ -406,8 +406,10 @@ jobs:
           # Notes from the annotated tag body (written at tag time by make-release).
           # --generate-notes only lists merged PRs and is empty for direct-to-main.
           # Lightweight tags: gh falls back to the pointed-at commit message.
+          # Do NOT pass --repo here: gh rejects `--notes-from-tag` together with
+          # `--repo` ("using --notes-from-tag with --repo is not supported"). The
+          # job already runs in this repository; GH_TOKEN + default context is enough.
           gh release create "$TAG" \
-            --repo "${GITHUB_REPOSITORY}" \
             --title "$TITLE" \
             --notes-from-tag \
             "${DRAFT_ARGS[@]}" \

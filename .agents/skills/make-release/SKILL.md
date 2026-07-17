@@ -65,7 +65,10 @@ Monitor to completion and verify assets. Notes are **not** committed to the tree
 ```bash
 ver="$(python3 scripts/release/sync-workspace-version.py --print)"
 # notes_file = path written above (local only; not in git)
-git tag -a "v$ver" -F "$notes_file"
+# Disable comment stripping so markdown `##` section headers survive (git default
+# treats lines starting with `#` as comments and drops them from the annotation).
+git -c core.commentChar='; tag -a "v$ver" -F "$notes_file"
+# Windows PowerShell fallback if null is rejected: git -c core.commentChar=";" tag -a ...
 git push origin main "v$ver"
 ```
 
@@ -101,8 +104,11 @@ gh run watch "$run_id" --repo delllusional/DontSpeak --exit-status
 ```
 
 On fail: `gh run view "$run_id" --log-failed`. Common: tag≠version, OS-only test
-(e.g. Windows CRLF), toolchain drift, notarization secret. Fail before publish → tag
-without release.
+(e.g. Windows CRLF), toolchain drift, notarization secret, or (fixed) publish using
+`--notes-from-tag` together with `--repo` — gh rejects that pair; publish must rely
+on the job's default repo context. Fail before publish → tag without release; if
+builds succeeded, download artifacts and `gh release create` with `--notes-file`
+from the tag body, then still fix the workflow on main.
 
 Watcher can drop mid-run (`wsarecv` / intermittent `HTTP 503`); restart watch or poll
 `gh run view "$run_id" --json status,conclusion` every 30–60s — CI itself is fine.
@@ -143,7 +149,7 @@ Skip latest check for drafts (they don't move `releases/latest`).
 gh release delete "v$ver" --repo delllusional/DontSpeak --yes   # if published
 git push origin ":refs/tags/v$ver" && git tag -d "v$ver"
 # Re-apply the same notes file (or a fixed one), still annotated:
-git tag -a "v$ver" -F "$notes_file"
+git -c core.commentChar='; tag -a "v$ver" -F "$notes_file"
 git push origin main "v$ver"
 ```
 
