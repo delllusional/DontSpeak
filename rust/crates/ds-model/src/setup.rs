@@ -59,7 +59,7 @@ pub fn run_setup_parakeet() -> std::io::Result<PathBuf> {
     })
 }
 
-/// [`run_setup_parakeet`] with aggregate progress via [`run_download_set`].
+/// [`run_setup_parakeet`] with aggregate progress via `run_download_set`.
 pub fn run_setup_parakeet_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
     let total: u64 = parakeet_files().iter().map(|f| f.size_bytes).sum();
     run_download_set(
@@ -88,7 +88,7 @@ pub fn run_setup_kokoro() -> std::io::Result<PathBuf> {
     Ok(model)
 }
 
-/// [`run_setup_kokoro`] with aggregate progress via [`run_download_set`].
+/// [`run_setup_kokoro`] with aggregate progress via `run_download_set`.
 pub fn run_setup_kokoro_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
     let total: u64 = kokoro_files().iter().map(|f| f.size_bytes).sum();
     run_download_set(

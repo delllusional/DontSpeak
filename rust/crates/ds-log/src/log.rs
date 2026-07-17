@@ -120,7 +120,7 @@ pub fn log(log_file: &Path, level: LogLevel, source: &str, msg: &str) {
     log_from(log_file, level, source, ClientSource::DontSpeak, msg);
 }
 
-/// Client-attributed [`log`]: non-`DontSpeak` appends ` client=<token>` to the message
+/// Client-attributed `log`: non-`DontSpeak` appends ` client=<token>` to the message
 /// (positional fields untouched — UI shape stays byte-compatible). Takes the log PATH so
 /// tests must pass a tempdir; deliberately no cached client-attributed variant (would tempt
 /// real-`$HOME` writes).

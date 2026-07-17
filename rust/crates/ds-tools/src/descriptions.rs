@@ -46,18 +46,15 @@ pub const SET_CONFIG_NARRATE: &str = "What to narrate. Default both: \"digests\"
 pub const SET_CONFIG_GREET: &str = "Greet each new terminal in its pool voice. Default on.";
 pub const SET_CONFIG_INPUT_CLEARS: &str = "Queues to clear on submit: \"current\" this terminal, \
     \"other\" the rest (incl. global). Default [\"current\"]; [] none.";
-pub const SET_CONFIG_PAUSE_BG: &str =
-    "Pause speech when no terminal is frontmost. Default false.";
+pub const SET_CONFIG_PAUSE_BG: &str = "Pause speech when no terminal is frontmost. Default false.";
 pub const SET_CONFIG_EARCON_REPLY: &str =
     "Reply-done sound name/path. Default: OS chime; empty = off.";
-pub const SET_CONFIG_EARCON_INPUT: &str =
-    "Needs-input sound name/path. Default off.";
+pub const SET_CONFIG_EARCON_INPUT: &str = "Needs-input sound name/path. Default off.";
 pub const SET_CONFIG_CAPS: &str = "Caps Lock PTT and speech cancel. Default on. Still silences \
     speech when dictation is off.";
 pub const SET_CONFIG_STT_ENGINE: &str = "Dictation: \"built_in\", \"system\", \"claude_code\", \
     or \"off\". Omit to keep the automatic preference. Unsupported/unauthorized rejected.";
-pub const SET_CONFIG_CAPTURE_GAIN: &str =
-    "Mic gain: \"auto\" (default) or 0.5–20.0 fixed.";
+pub const SET_CONFIG_CAPTURE_GAIN: &str = "Mic gain: \"auto\" (default) or 0.5–20.0 fixed.";
 pub const SET_CONFIG_DOUBLE_TAP_SUBMITS: &str = "Double-tap submits; single-tap inserts only. \
     Default false (swaps those).";
 pub const SET_CONFIG_PASTE_SUBMIT_DELAY_MS: &str = "Paste→submit delay (ms). Default 100; 0 = \

@@ -56,7 +56,7 @@ impl Client {
         serde_json::from_str(line.trim()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    /// Drain until a terminal response (drops intermediates). Use [`recv`] in a loop for partials.
+    /// Drain until a terminal response (drops intermediates). Use [`Self::recv`] in a loop for partials.
     pub fn recv_terminal(&mut self) -> io::Result<Response> {
         loop {
             let resp = self.recv()?;

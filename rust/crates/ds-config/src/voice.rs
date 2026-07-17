@@ -72,7 +72,7 @@ pub struct VoiceConfig {
     pub long_press_ms: u64,
 
     // ── Speech-to-text ──────────────────────────────────────────────────────
-    /// STT preference tri-state: None → ladder; Some([]) = off; Some([e]) = force (no auto-sub).
+    /// STT preference tri-state: None → ladder; Some([]) = off; `Some([e])` = force (no auto-sub).
     /// See [`Self::resolved_stt`].
     #[serde(
         default,

@@ -217,7 +217,7 @@ impl StreamingModel {
     }
 
     /// New utterance: zeroed caches, decoder seeded on blank/SOS (reference).
-    /// [`accept_16k`] expects 16 kHz mono (resample is in [`StreamSession`]).
+    /// [`Self::accept_16k`] expects 16 kHz mono (resample is in the stream session).
     pub fn new_state(&mut self) -> Result<StreamingState, String> {
         // Copy meta so &self.meta doesn't span &mut run_decoder.
         let (blank_id, state_len, c1, c2) = {

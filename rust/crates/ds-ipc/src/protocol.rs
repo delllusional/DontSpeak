@@ -13,8 +13,8 @@ use serde_json::Value;
 /// ## `source` field
 ///
 /// Seven **client-originated** variants require `source: ClientSource` (hook `--client` or
-/// MCP `initialize` `clientInfo`): [`GreetSession`], [`MarkActive`], [`SessionEnd`],
-/// [`StopSpeech`], [`Speak`], [`SpeakNarration`], [`Earcon`]. No `#[serde(default)]` /
+/// MCP `initialize` `clientInfo`): [`Self::GreetSession`], [`Self::MarkActive`], [`Self::SessionEnd`],
+/// [`Self::StopSpeech`], [`Self::Speak`], [`Self::SpeakNarration`], [`Self::Earcon`]. No `#[serde(default)]` /
 /// `Option` — absent field is a hard decode error (CLI/engine/wiring ship together; stale
 /// hooks are rejected, not mis-attributed). Unrecognised *token* → `ClientSource::Unknown`
 /// (forward-open, like [`Response::Unknown`]). Guard:
@@ -59,7 +59,7 @@ pub enum Request {
         source: ClientSource,
     },
     /// MCP `speak` tool: Reply on the TTS queue (survives record-barge when resume policy set).
-    /// Narration uses [`SpeakNarration`]. `voice`/`rate` override config.
+    /// Narration uses [`Self::SpeakNarration`]. `voice`/`rate` override config.
     Speak {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +88,7 @@ pub enum Request {
         session: Option<String>,
         source: ClientSource,
     },
-    /// SessionEnd: per-window [`StopSpeech`] plus reclaim pool-voice map entry.
+    /// SessionEnd: per-window [`Self::StopSpeech`] plus reclaim pool-voice map entry.
     SessionEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
@@ -147,20 +147,36 @@ pub enum Response {
     },
     Done,
     /// Codex TUI `--remote` endpoint after narration subscriber is attached.
-    CodexStreamReady { endpoint: String },
+    CodexStreamReady {
+        endpoint: String,
+    },
     /// Non-terminal: mic open.
     Listening,
     /// Non-terminal: live partial.
-    Partial { text: String },
+    Partial {
+        text: String,
+    },
     /// Terminal: final transcript.
-    Transcript { text: String },
+    Transcript {
+        text: String,
+    },
     /// Terminal: `[{"speaker","start","end","name"?}, ...]` (seconds).
-    Diarization { segments: Value },
-    Enrolled { name: String },
-    Speakers { names: Vec<String> },
+    Diarization {
+        segments: Value,
+    },
+    Enrolled {
+        name: String,
+    },
+    Speakers {
+        names: Vec<String>,
+    },
     /// Terminal model presence / removability / running map JSON.
-    ModelStatus { status: Value },
-    Error { message: String },
+    ModelStatus {
+        status: Value,
+    },
+    Error {
+        message: String,
+    },
     /// Version-skew fallback: unknown `ok` tag. TERMINAL so `Client::recv` can clean up instead
     /// of hard-erroring mid-stream (e.g. never sending `TestRecognitionStop`). Decode-only
     /// (`#[serde(other)]`); never encoded by this crate.

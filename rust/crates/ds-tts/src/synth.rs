@@ -3,7 +3,7 @@
 //! I/O parity with kokoro-onnx `_create_audio`:
 //!   * "tokens": int64 [1, n+2], padded `[0, …ids, 0]` (pad = BOS/EOS)
 //!   * "style": f32 [1, 256] — voice 510*256 row by UNPADDED token count (`style_row`)
-//!   * "speed": f32 [1], clamped 0.5..=2.0 (`rate` maps directly; not rate_to_wpm)
+//!   * "speed": f32 `[1]`, clamped 0.5..=2.0 (`rate` maps directly; not rate_to_wpm)
 //!
 //! Output: first tensor, f32 24 kHz mono `[-1, 1]`, then `trim_silence`.
 //!

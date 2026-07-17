@@ -5,8 +5,7 @@ use std::io::Write;
 
 fn agent_line(session: &str, prompt: &str, text: &str) -> String {
     format!(
-        r#"{{"timestamp":1,"method":"session/update","params":{{"sessionId":"{session}","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":{text}}}}},"_meta":{{"promptId":"{prompt}"}}}}}}"#
-        ,
+        r#"{{"timestamp":1,"method":"session/update","params":{{"sessionId":"{session}","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":{text}}}}},"_meta":{{"promptId":"{prompt}"}}}}}}"#,
         text = serde_json::to_string(text).unwrap()
     )
 }
@@ -136,14 +135,16 @@ fn integration_append_digest_chunks_batch_and_witness_silences_stop() {
     );
 
     // Witness silences stop_utterances.
-    assert!(ds_narrate::stop_utterances(
-        Some("> Should not re-voice from Stop chat_history"),
-        true,
-        true,
-        false,
-        true
-    )
-    .is_empty());
+    assert!(
+        ds_narrate::stop_utterances(
+            Some("> Should not re-voice from Stop chat_history"),
+            true,
+            true,
+            false,
+            true
+        )
+        .is_empty()
+    );
 }
 
 #[test]

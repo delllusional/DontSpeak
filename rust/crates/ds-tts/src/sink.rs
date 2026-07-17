@@ -7,10 +7,10 @@
 //!   * **Wall-clock drain** — rodio `empty()` lies on WASAPI; use wall time vs
 //!     appended audio (`AppendClock`).
 //!   * **Played-batch accounting** — cumulative queued duration per batch for
-//!     barge resume ([`played_batches`]; lead silence not a batch).
+//!     barge resume (`played_batches`; lead silence not a batch).
 //!
-//! NO-AUDIO: tests use [`connect_to`](IncrementalSink::connect_to) on a detached
-//! mixer + injected instants; [`open_default`] only in ds-helper.
+//! NO-AUDIO: tests use `connect_to` on a detached
+//! mixer + injected instants; `open_default` only in ds-helper.
 
 use std::num::NonZero;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ impl AppendClock {
     }
 }
 
-/// Per-request sink: append committed PCM batches, then [`wait`] / [`stop`] on barge.
+/// Per-request sink: append committed PCM batches, then [`Self::wait`] / [`Self::stop`] on barge.
 pub struct IncrementalSink {
     // `player` must drop before `_device` — declare it first.
     player: Arc<Player>,

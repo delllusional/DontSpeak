@@ -261,8 +261,7 @@ fn supervise(
         }
 
         // Forget tails for sessions that left the registry (SessionEnd / idle prune).
-        let wanted: std::collections::HashSet<&str> =
-            sessions.iter().map(String::as_str).collect();
+        let wanted: std::collections::HashSet<&str> = sessions.iter().map(String::as_str).collect();
         attached.retain(|session, _| {
             if wanted.contains(session.as_str()) {
                 true

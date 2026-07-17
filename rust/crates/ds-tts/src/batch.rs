@@ -1,7 +1,7 @@
 //! Model-bounded phoneme batching for Kokoro.
 //!
-//! [`split_phonemes`] packs at sentence marks under `MAX_PHONEME_LENGTH` (port of
-//! `splitPhonemes`). [`stream_batches`] is the ramped, floor-protected variant for the
+//! [`split_phonemes`](crate::batch::split_phonemes) packs at sentence marks under `MAX_PHONEME_LENGTH` (port of
+//! `splitPhonemes`). [`stream_batches`](crate::batch::stream_batches) is the ramped, floor-protected variant for the
 //! shared frontend. Batch commit is the consumer's job (helper `prepare`). Both use
 //! `pack_batches`.
 
@@ -98,7 +98,7 @@ fn hard_split_words(s: &str, cap: usize, floor: usize) -> Vec<String> {
     out
 }
 
-/// Shared batching core for [`split_phonemes`] and [`stream_batches`]. Packs
+/// Shared batching core for [`split_phonemes`](crate::batch::split_phonemes) and [`stream_batches`](crate::batch::stream_batches). Packs
 /// `.,!?;`-delimited parts into batches whose length stays under a `budget` that
 /// starts at `budget0` and is advanced by `grow` after each flush. Always
 /// applies the floor (never flush below [`MIN_PHONEME_LENGTH`]), backtracks a

@@ -107,7 +107,10 @@ pub(crate) fn tools_call_cancellable(
         },
         "speak" | "stop_speech" | "mute" | "listen" | "diarize" | "manage_speakers" => {
             let Some(sock) = sock else {
-                return ok(id, tool_result("Cannot resolve engine socket.".into(), true));
+                return ok(
+                    id,
+                    tool_result("Cannot resolve engine socket.".into(), true),
+                );
             };
             ensure_engine(sock);
             match name {
@@ -306,8 +309,7 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
         return Err("At least one setting required.".into());
     }
 
-    ds_config::write_settings(paths, &cfg)
-        .map_err(|e| format!("set_config write failed: {e}"))?;
+    ds_config::write_settings(paths, &cfg).map_err(|e| format!("set_config write failed: {e}"))?;
     let _ = ds_ipc::request(&paths.engine_sock, &ds_ipc::Request::Reload);
 
     Ok(format!("Updated {}.", changes.join(", ")))

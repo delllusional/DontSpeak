@@ -311,7 +311,7 @@ pub fn provider_pref_wants_gpu(pref: &str) -> bool {
 
 /// Realized backend a warm child actually loaded (`PROVIDER` / `STT_PROVIDER` wire).
 /// Distinct from config [`Provider`] (preference ladder); UPPERCASE tokens. Stringify once at
-/// IPC; status [`parse`]s and maps via [`to_provider`] so token typos are compile errors.
+/// IPC; status `parse`s and maps via `to_provider` so token typos are compile errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RealizedProvider {
     Cuda,

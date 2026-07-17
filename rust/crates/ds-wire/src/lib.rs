@@ -7,7 +7,7 @@
 //! idempotent, backed-up; absent client ⇒ clean skip. `wire --list` prints the registry.
 //!
 //! `--print-only` (issue #30): surfaces sharing one file must not each re-read disk (preview
-//! never writes). [`wire_surfaces_print_only`] groups by config path and threads `PreviewDoc`.
+//! never writes). `wire_surfaces_print_only` groups by config path and threads `PreviewDoc`.
 
 pub(crate) mod hooks;
 mod io;
@@ -180,7 +180,7 @@ fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bo
     code
 }
 
-/// Dispatch one surface. `seed`/`capture` are print-only grouping only ([`wire_surfaces_print_only`]);
+/// Dispatch one surface. `seed`/`capture` are print-only grouping only (`wire_surfaces_print_only`);
 /// always `None` on real write. `GrokJsonHooks` ignores both (files never shared).
 #[allow(clippy::too_many_arguments)] // 5 mechanisms + seed/capture; struct wouldn't shrink callers
 fn dispatch_surface(

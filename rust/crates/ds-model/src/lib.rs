@@ -28,7 +28,7 @@
 //! request. Download progress is exposed by the engine. The pure fns below are network-free
 //! and unit-tested; `ensure` is exercised by localhost fixtures (no real CDN).
 //!
-//! Modules of note: [`read_retry`] (AV/EDR transient-`NotFound` race on present files);
+//! Modules of note: `read_retry` (AV/EDR transient-`NotFound` race on present files);
 //! [`update_check`] (GitHub release check — lives here for shared HTTP GET plumbing).
 
 use std::path::{Path, PathBuf};

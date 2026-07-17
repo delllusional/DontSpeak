@@ -150,7 +150,7 @@ fn grok_stop_session_tag(session: &str) -> String {
 
 /// Grok chat transcript path. Order: (1) transcriptPath, remapping updates.jsonl → sibling
 /// chat_history (bare updates is non-terminal — fall through); (2) encoded-cwd+session under
-/// `~/.grok/sessions`; (3) scan sessions/*/<sessionId>/chat_history (newest mtime on skew).
+/// `~/.grok/sessions`; (3) scan `sessions/*/sessionId/chat_history` (newest mtime on skew).
 fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::path::PathBuf> {
     if let Some(raw) = hook
         .transcript_path
@@ -241,7 +241,10 @@ fn store_last_spoken_fingerprint(paths: &Paths, session: &str, fp: u64) {
 
 #[derive(Debug)]
 enum ChatRole {
-    User { text: String, byte_offset: u64 },
+    User {
+        text: String,
+        byte_offset: u64,
+    },
     Assistant {
         text: String,
         /// Fallback turn identity when a large tool result pushes the user line out of the tail.
@@ -1868,18 +1871,10 @@ mod tests {
             is_final: false,
         };
         let mut spoken = Vec::new();
-        ds_narrate::deliver_batch(
-            &paths,
-            session,
-            &batch,
-            false,
-            true,
-            true,
-            |u| {
-                spoken.push(u.text.clone());
-                Ok(())
-            },
-        )
+        ds_narrate::deliver_batch(&paths, session, &batch, false, true, true, |u| {
+            spoken.push(u.text.clone());
+            Ok(())
+        })
         .unwrap();
         assert!(
             spoken.is_empty(),

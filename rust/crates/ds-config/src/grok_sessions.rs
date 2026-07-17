@@ -242,7 +242,11 @@ mod tests {
             r#"{"type":"assistant","content":"hi"}"#,
         )
         .unwrap();
-        std::fs::write(grok_updates_jsonl_path(&newer), r#"{"method":"session/update"}"#).unwrap();
+        std::fs::write(
+            grok_updates_jsonl_path(&newer),
+            r#"{"method":"session/update"}"#,
+        )
+        .unwrap();
 
         assert_eq!(
             resolve_grok_session_dir(&paths, session, Some(cwd)).as_ref(),

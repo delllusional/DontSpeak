@@ -94,7 +94,7 @@ pub trait CapsKeyMonitor {
     fn set_caps_lock(&self, on: bool);
 
     /// macOS-only: IOHID/LED resource stuck denied despite grant (needs process relaunch).
-    /// Default false. Engine polls + relaunches; prefer [`caps_monitor_stuck_detail`].
+    /// Default false. Engine polls + relaunches; prefer [`Self::caps_monitor_stuck_detail`].
     fn caps_monitor_stuck(&self) -> bool {
         false
     }
@@ -104,8 +104,8 @@ pub trait CapsKeyMonitor {
         None
     }
 
-    /// True when Caps edges come from a lossless event stream ([`drain_caps_events`])
-    /// rather than sampling [`is_caps_physically_down`]. Windows hook = true; polled
+    /// True when Caps edges come from a lossless event stream ([`Self::drain_caps_events`])
+    /// rather than sampling [`Self::is_caps_physically_down`]. Windows hook = true; polled
     /// ports default false. Event-driven ports suppress OS Caps toggle but still drive
     /// the LED via `set_caps_lock`.
     fn is_caps_event_driven(&self) -> bool {
