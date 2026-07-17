@@ -43,11 +43,11 @@ enum Subcommand<'a> {
     Wire(&'a [String]),
     /// Registry client + trailing args.
     Launch(ClientSource, &'a [String]),
-    /// `-V` / `--version` / `version` — host probes (MCP clients, shells) hit these.
+    /// `-V` / `--version` / `version`.
     Version,
     /// `-h` / `--help` / `help`.
     Help,
-    /// `status` — soft probe; points at MCP `get_status` (no engine round-trip here).
+    /// `status` (points at MCP `get_status`; no engine call).
     Status,
     /// No argv\[1\]: stdio MCP server (or Grok bare hook).
     Server,
@@ -76,8 +76,7 @@ fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
         Some("notify") => Subcommand::Notify,
         Some("provide") => Subcommand::Provide,
         Some("wire") => Subcommand::Wire(&argv[2..]),
-        // Common binary probes (Grok MCP host, shells). Must not ERROR-log as unknown
-        // subcommands — live log saw `--version`/`--help`/`status`/`version` spam.
+        // Host/shell probes — exit 0, never ERROR as unknown.
         Some("-V" | "--version" | "version") => Subcommand::Version,
         Some("-h" | "--help" | "help") => Subcommand::Help,
         Some("status") => Subcommand::Status,
@@ -108,8 +107,7 @@ Usage:
   dontspeak --help          this help
   dontspeak status          how to query runtime status (MCP get_status)
 
-Hooks and MCP talk to the resident engine over a local socket. Speech config is
-config.toml under the OS data dir — never client settings files.
+Engine via local socket; speech config is OS data-dir config.toml (not client settings).
 ";
 
 /// Detach every role except `Launch` (only Launch needs the console for the interactive child).
@@ -189,7 +187,6 @@ fn main() {
             std::process::exit(client_launch::run(spec, args));
         }
         Subcommand::Version => {
-            // stdout only — probes scrape this; no ERROR log.
             println!("dontspeak {}", env!("CARGO_PKG_VERSION"));
             std::process::exit(0);
         }
@@ -198,7 +195,6 @@ fn main() {
             std::process::exit(0);
         }
         Subcommand::Status => {
-            // Soft probe (seen from Grok host). Runtime state is MCP `get_status` / host UI.
             println!(
                 "dontspeak {}: runtime status is via MCP tool get_status (or the host app UI)",
                 env!("CARGO_PKG_VERSION")

@@ -83,8 +83,7 @@ fn recognized_subcommand_still_dispatches() {
 
 #[test]
 fn version_help_and_status_probes_exit_zero_not_error() {
-    // Grok MCP host (and shells) probe the wired binary with these; must not ERROR-log
-    // as unknown subcommands (exit 2).
+    // Host/shell probes must exit 0, not unknown-subcommand 2.
     for args in [
         &["--version"][..],
         &["-V"],
