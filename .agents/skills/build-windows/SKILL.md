@@ -32,6 +32,19 @@ Same installer as end users (PATH, wire, shortcut, startup, Settings Apps).
    ```powershell
    pwsh -NoProfile -File apps\windows\installer\build-portable.ps1 -Arch x64 -SkipModels
    ```
+   If a user-global `sccache` wrapper panics with `Unable to get config directory` before
+   `rustc` starts, preserve the Cargo config and retry with the wrapper disabled for this
+   build process only:
+   ```powershell
+   $previousWrapper = $env:CARGO_BUILD_RUSTC_WRAPPER
+   try {
+     $env:CARGO_BUILD_RUSTC_WRAPPER = ''
+     pwsh -NoProfile -File apps\windows\installer\build-portable.ps1 -Arch x64 -SkipModels
+   } finally {
+     if ($null -eq $previousWrapper) { Remove-Item Env:\CARGO_BUILD_RUSTC_WRAPPER -ErrorAction SilentlyContinue }
+     else { $env:CARGO_BUILD_RUSTC_WRAPPER = $previousWrapper }
+   }
+   ```
 2. Install local artifact:
    ```powershell
    $archive = Get-Item apps\windows\installer\Output\dontspeak-*-windows-x86_64.zip |
