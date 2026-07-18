@@ -98,7 +98,7 @@ Out of scope:
 | Claude Code | OAuth `GET …/api/oauth/usage` + macOS Keychain or `~/.claude/.credentials.json` | API `five_hour` → `session` | API `seven_day` → `week` | — |
 | Codex | short-lived `codex app-server` → `account/rateLimits/read` | 300 min or session label | 10080 min or weekly label | explicit monthly label only |
 | Qwen Code | Alibaba Coding Plan HTTP + env/settings API keys | `per5Hour*` | `perWeek*` | `perBillMonth*` / `perMonth*` |
-| Grok | try `x.ai/billing` via `grok agent stdio`; else gRPC-web `GetGrokCreditsConfig` + Bearer from `~/.grok/auth.json` | — | cycle ~4–12 days remaining | CLI monthly, or web when cycle is longer |
+| Grok | try `x.ai/billing` via `grok agent stdio`; else gRPC-web `GetGrokCreditsConfig` + Bearer from `~/.grok/auth.json` | — | web: full cycle length ~4–12 days (start→reset); not remaining distance | CLI monthly-named; web else / no cycle start → month (stable) |
 
 Windows resolves CLI binaries via `.exe`/`.cmd` (never extensionless npm shebangs).
 

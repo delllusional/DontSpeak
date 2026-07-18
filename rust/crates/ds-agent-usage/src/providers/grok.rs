@@ -14,12 +14,71 @@ const GRPC_WEB_EMPTY_FRAME: &[u8] = &[0x00, 0x00, 0x00, 0x00, 0x00];
 const OIDC_SCOPE_PREFIX: &str = "https://auth.x.ai::";
 const LEGACY_SESSION_SCOPE: &str = "https://accounts.x.ai/sign-in";
 const MAX_WEB_BODY: usize = 256 * 1024;
+/// Unix-second range accepted as a billing window bound (same as reset candidates).
+const UNIX_TS_MIN: i64 = 1_700_000_000;
+const UNIX_TS_MAX: i64 = 2_100_000_000;
 
 pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
-    match fetch_cli(paths) {
-        Ok(windows) if !windows.is_empty() => Ok(windows),
-        Ok(_) | Err(_) => fetch_web(paths),
+    let cli = fetch_cli(paths);
+    match cli {
+        Ok(ref windows) if !windows.is_empty() => cli,
+        // CLI missing/timeout/RPC/unusable → try web; on dual failure keep CLI category (#115).
+        cli_outcome => match fetch_web(paths) {
+            Ok(windows) if !windows.is_empty() => Ok(windows),
+            Ok(_) => Err(finalize_after_web(
+                cli_outcome.err(),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Grok web billing response unusable",
+                ),
+            )),
+            Err(web_err) => Err(finalize_after_web(cli_outcome.err(), web_err)),
+        },
     }
+}
+
+/// Prefer sanitized CLI category when web also fails; empty CLI is treated as unusable payload.
+fn finalize_after_web(
+    cli_err: Option<std::io::Error>,
+    web_err: std::io::Error,
+) -> std::io::Error {
+    match cli_err {
+        Some(cli) => merge_cli_web_errors(cli, web_err),
+        None => std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Grok CLI billing unusable; web: {}",
+                sanitize_error_message(&web_err)
+            ),
+        ),
+    }
+}
+
+/// Sanitized dual-failure message; `ErrorKind` from the CLI stage (NotFound / TimedOut / …).
+fn merge_cli_web_errors(cli: std::io::Error, web: std::io::Error) -> std::io::Error {
+    let kind = cli.kind();
+    let cli_msg = sanitize_error_message(&cli);
+    let web_msg = sanitize_error_message(&web);
+    std::io::Error::new(kind, format!("Grok CLI: {cli_msg}; web: {web_msg}"))
+}
+
+/// Categories only — never provider bodies, paths with tokens, or Authorization material.
+fn sanitize_error_message(error: &std::io::Error) -> String {
+    let raw = error.to_string();
+    // Drop anything that could look like a bearer / cookie fragment if a lower layer slipped.
+    if raw.len() > 160
+        || raw.contains("Bearer ")
+        || raw.contains("eyJ")
+        || raw.to_ascii_lowercase().contains("authorization")
+    {
+        return match error.kind() {
+            std::io::ErrorKind::NotFound => "unavailable".into(),
+            std::io::ErrorKind::TimedOut => "timed out".into(),
+            std::io::ErrorKind::InvalidData => "unusable payload".into(),
+            _ => "failed".into(),
+        };
+    }
+    raw
 }
 
 fn fetch_cli(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
@@ -45,16 +104,30 @@ fn fetch_cli(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
         initialize_timeout: Duration::from_secs(8),
         request_timeout: Duration::from_secs(12),
     })?;
-    Ok(parse_cli(&result).into_iter().collect())
+    match parse_cli(&result) {
+        Some(row) => Ok(vec![row]),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Grok CLI billing unusable",
+        )),
+    }
 }
 
 fn fetch_web(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
-    let credentials = read_json_file(&paths.grok_dir.join("auth.json"))?;
-    let token = access_token(&credentials).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "Grok OAuth token unavailable")
-    })?;
+    // Credentials dropped before the request; token zeroed after the Authorization header is built.
+    let mut token = {
+        let credentials = read_json_file(&paths.grok_dir.join("auth.json"))?;
+        let raw = access_token(&credentials).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "Grok OAuth token unavailable")
+        })?;
+        SecretString(raw)
+    };
+    let authorization = format!("Bearer {}", token.as_str());
+    token.clear();
+
+    // `authorization` is moved into the request and dropped with the response path.
     let response = request(ds_http::Method::POST, WEB_BILLING_URL)?
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", authorization)
         .header("Origin", "https://grok.com")
         .header("Referer", "https://grok.com/?_s=usage")
         .header("Accept", "*/*")
@@ -78,6 +151,36 @@ fn fetch_web(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
                 "Grok web billing response unusable",
             )
         })
+}
+
+/// Bearer material: overwritten on clear/drop so it does not linger in the heap as a live `String`.
+struct SecretString(String);
+
+impl SecretString {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn clear(&mut self) {
+        zero_string(&mut self.0);
+    }
+}
+
+impl Drop for SecretString {
+    fn drop(&mut self) {
+        zero_string(&mut self.0);
+    }
+}
+
+fn zero_string(value: &mut String) {
+    // Best-effort overwrite before release; no log/Debug surface on SecretString.
+    // SAFETY: `as_mut_vec` bytes are overwritten with 0 (still valid UTF-8) then clear().
+    let bytes = unsafe { value.as_mut_vec() };
+    for byte in bytes.iter_mut() {
+        // SAFETY: `byte` points at owned String buffer; write_volatile(0) is in-bounds.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    value.clear();
 }
 
 /// Prefer SuperGrok OIDC scope entries, then legacy session scopes (CodexBar).
@@ -183,7 +286,7 @@ fn parse_web_billing(body: &[u8], now_unix: i64) -> Option<UsageRow> {
         .iter()
         .filter_map(|field| {
             let raw = i64::try_from(field.value).ok()?;
-            if (1_700_000_000..=2_100_000_000).contains(&raw) {
+            if (UNIX_TS_MIN..=UNIX_TS_MAX).contains(&raw) {
                 Some((field.path.clone(), raw))
             } else {
                 None
@@ -212,12 +315,45 @@ fn parse_web_billing(body: &[u8], now_unix: i64) -> Option<UsageRow> {
         None => return None,
     };
 
-    let period = period_from_reset_distance(resets_at.saturating_sub(now_unix));
+    // Period from full cycle length (start→reset), not remaining distance — remaining flips near
+    // end-of-cycle (#115). Start: prefer [1,4,1], else [1,8,2,1]. No start → Month (stable).
+    let period = period_from_scan(&scan, resets_at);
     UsageRow::checked(period, used_percent, resets_at)
 }
 
-/// CodexBar labels Grok credit windows by remaining cycle length.
-fn period_from_reset_distance(seconds: i64) -> Period {
+fn period_from_scan(scan: &ProtobufScan, resets_at: i64) -> Period {
+    let start = cycle_start(scan, resets_at);
+    match start {
+        Some(start) if start < resets_at => {
+            period_from_cycle_length(resets_at.saturating_sub(start))
+        }
+        // Stable fallback: never reclassify solely because wall-clock advanced.
+        _ => Period::Month,
+    }
+}
+
+/// Billing window start from the live GetGrokCreditsConfig shape.
+fn cycle_start(scan: &ProtobufScan, resets_at: i64) -> Option<i64> {
+    let mut preferred = None;
+    let mut any = None;
+    for field in &scan.varints {
+        let Ok(raw) = i64::try_from(field.value) else {
+            continue;
+        };
+        if !(UNIX_TS_MIN..=UNIX_TS_MAX).contains(&raw) || raw >= resets_at {
+            continue;
+        }
+        any = Some(any.map_or(raw, |prev: i64| prev.max(raw)));
+        if field.path.as_slice() == [1, 4, 1] || field.path.as_slice() == [1, 8, 2, 1] {
+            preferred = Some(preferred.map_or(raw, |prev: i64| prev.max(raw)));
+        }
+    }
+    preferred.or(any)
+}
+
+/// Classify by full cycle length (CodexBar prefers duration over remaining when known).
+/// 4–12 day windows → Week; everything else → Month (CLI is monthly-named).
+fn period_from_cycle_length(seconds: i64) -> Period {
     let days = ((seconds as f64) / 86_400.0).round() as i64;
     if (4..=12).contains(&days) {
         Period::Week
@@ -464,6 +600,105 @@ mod tests {
     }
 
     #[test]
+    fn live_weekly_period_stable_near_cycle_end() {
+        // Same capture: start [1,4,1]=1784266654, reset [1,5,1]=1784871454 (exactly 7 days).
+        // Remaining ~1 day would flip the old remaining-distance heuristic to Month.
+        let body = hex_literal(
+            "00000000560a540d0000004112001a00220c089effe6d20610f894f79f022a0c\
+             089ef48bd30610f894f79f023a0708021500000041421e0802120c089effe6d2\
+             0610f894f79f021a0c089ef48bd30610f894f79f02580162006801800000000f\
+             677270632d7374617475733a300d0a",
+        );
+        let near_end = 1_784_871_454 - 86_400;
+        let window = parse_web_billing(&body, near_end).unwrap();
+        assert_eq!(window.period, Period::Week);
+        assert_eq!(window.resets_at_unix, 1_784_871_454);
+    }
+
+    #[test]
+    fn period_from_cycle_length_matches_week_and_month_bands() {
+        assert_eq!(period_from_cycle_length(7 * 86_400), Period::Week);
+        assert_eq!(period_from_cycle_length(30 * 86_400), Period::Month);
+        assert_eq!(period_from_cycle_length(2 * 86_400), Period::Month);
+    }
+
+    #[test]
+    fn period_defaults_month_without_cycle_start() {
+        // fixed32 percent at path [1] + future reset only (no start) → stable Month.
+        let mut payload = Vec::new();
+        // field 1 wire 5 (fixed32): key=(1<<3)|5=0x0d, bits of 12.0f32
+        payload.push(0x0d);
+        payload.extend_from_slice(&12.0f32.to_le_bytes());
+        // field 5 nested: key=(5<<3)|2=0x2a, then field 1 varint reset
+        let reset: u64 = 1_900_000_000;
+        let mut nested = Vec::new();
+        nested.push(0x08); // field 1 wire 0
+        write_varint(&mut nested, reset);
+        payload.push(0x2a);
+        write_varint(&mut payload, nested.len() as u64);
+        payload.extend_from_slice(&nested);
+
+        let mut body = vec![0x00]; // flags
+        let len = (payload.len() as u32).to_be_bytes();
+        body.extend_from_slice(&len);
+        body.extend_from_slice(&payload);
+        // trailer grpc-status:0
+        let trailer = b"grpc-status:0\r\n";
+        body.push(0x80);
+        body.extend_from_slice(&(trailer.len() as u32).to_be_bytes());
+        body.extend_from_slice(trailer);
+
+        let early = parse_web_billing(&body, 1_800_000_000).unwrap();
+        let late = parse_web_billing(&body, 1_899_000_000).unwrap();
+        assert_eq!(early.period, Period::Month);
+        assert_eq!(late.period, Period::Month);
+        assert_eq!(early.period, late.period);
+    }
+
+    #[test]
+    fn monthly_cycle_length_labels_month() {
+        // start + reset 30 days apart with percent.
+        let start: u64 = 1_800_000_000;
+        let reset: u64 = start + 30 * 86_400;
+        let mut inner = Vec::new();
+        // field 1 fixed32 = 40%
+        inner.push(0x0d);
+        inner.extend_from_slice(&40.0f32.to_le_bytes());
+        // field 4 nested start
+        let mut f4 = Vec::new();
+        f4.push(0x08);
+        write_varint(&mut f4, start);
+        inner.push(0x22); // (4<<3)|2
+        write_varint(&mut inner, f4.len() as u64);
+        inner.extend_from_slice(&f4);
+        // field 5 nested reset
+        let mut f5 = Vec::new();
+        f5.push(0x08);
+        write_varint(&mut f5, reset);
+        inner.push(0x2a); // (5<<3)|2
+        write_varint(&mut inner, f5.len() as u64);
+        inner.extend_from_slice(&f5);
+
+        let mut msg = Vec::new();
+        msg.push(0x0a); // field 1 length-delimited
+        write_varint(&mut msg, inner.len() as u64);
+        msg.extend_from_slice(&inner);
+
+        let mut body = vec![0x00];
+        body.extend_from_slice(&(msg.len() as u32).to_be_bytes());
+        body.extend_from_slice(&msg);
+        let trailer = b"grpc-status:0\r\n";
+        body.push(0x80);
+        body.extend_from_slice(&(trailer.len() as u32).to_be_bytes());
+        body.extend_from_slice(trailer);
+
+        // Near end of cycle: remaining ~1 day; cycle length still 30 → Month.
+        let window = parse_web_billing(&body, (reset as i64) - 86_400).unwrap();
+        assert_eq!(window.period, Period::Month);
+        assert!((window.used_percent - 40.0).abs() < 0.01);
+    }
+
+    #[test]
     fn rejects_nonzero_grpc_status_trailer() {
         let body = b"\x80\x00\x00\x00\x0egrpc-status:7\r\n";
         assert!(parse_web_billing(body, 1_800_000_000).is_none());
@@ -507,9 +742,90 @@ mod tests {
     }
 
     #[test]
-    fn period_from_reset_distance_matches_codexbar() {
-        assert_eq!(period_from_reset_distance(7 * 86_400), Period::Week);
-        assert_eq!(period_from_reset_distance(30 * 86_400), Period::Month);
+    fn merge_preserves_cli_not_found_category() {
+        let cli = std::io::Error::new(std::io::ErrorKind::NotFound, "Grok CLI unavailable");
+        let web = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Grok web billing response unusable",
+        );
+        let merged = merge_cli_web_errors(cli, web);
+        assert_eq!(merged.kind(), std::io::ErrorKind::NotFound);
+        assert!(merged.to_string().contains("CLI"));
+        assert!(merged.to_string().contains("web"));
+        assert!(!merged.to_string().contains("Bearer"));
+    }
+
+    #[test]
+    fn merge_preserves_cli_timeout_category() {
+        let cli = std::io::Error::new(std::io::ErrorKind::TimedOut, "provider RPC timed out");
+        let web = std::io::Error::other("Grok web billing failed: connection refused");
+        let merged = merge_cli_web_errors(cli, web);
+        assert_eq!(merged.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn merge_preserves_cli_rpc_other_category() {
+        let cli = std::io::Error::other("provider RPC returned an error");
+        let web = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Grok web billing response unusable",
+        );
+        let merged = merge_cli_web_errors(cli, web);
+        assert_eq!(merged.kind(), std::io::ErrorKind::Other);
+        assert!(merged.to_string().contains("provider RPC returned an error"));
+    }
+
+    #[test]
+    fn empty_cli_maps_to_unusable_when_web_fails() {
+        let err = finalize_after_web(
+            None,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Grok web billing response unusable",
+            ),
+        );
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("CLI billing unusable"));
+    }
+
+    #[test]
+    fn sanitize_strips_bearer_shaped_messages() {
+        let dirty = std::io::Error::other("Authorization: Bearer eyJhbGciOi.x.y leaked");
+        assert_eq!(sanitize_error_message(&dirty), "failed");
+        let clean =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "Grok CLI unavailable");
+        assert_eq!(sanitize_error_message(&clean), "Grok CLI unavailable");
+    }
+
+    #[test]
+    fn zero_string_overwrites_then_clears() {
+        let mut secret = String::from("super-secret-token-value");
+        zero_string(&mut secret);
+        assert!(secret.is_empty());
+        // clear() after volatile zeros; capacity may remain but contents empty.
+        assert_eq!(secret.len(), 0);
+    }
+
+    #[test]
+    fn secret_string_clear_empties() {
+        let mut secret = SecretString(String::from("token-abc"));
+        assert_eq!(secret.as_str(), "token-abc");
+        secret.clear();
+        assert_eq!(secret.as_str(), "");
+    }
+
+    fn write_varint(out: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let mut byte = (value & 0x7F) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
     }
 
     fn hex_literal(hex: &str) -> Vec<u8> {
