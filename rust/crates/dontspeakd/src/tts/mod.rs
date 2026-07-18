@@ -1235,9 +1235,9 @@ impl TtsManager {
     /// Write one JSON request line to the child's stdin. Err if not running.
     fn write_request(&self, json: &str) -> std::io::Result<()> {
         let mut guard = self.stdin.lock().unwrap();
-        let stdin = guard
-            .as_mut()
-            .ok_or_else(|| std::io::Error::other("TTS child not running"))?;
+        let stdin = guard.as_mut().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotConnected, "TTS child not running")
+        })?;
         stdin.write_all(json.as_bytes())?;
         stdin.write_all(b"\n")?;
         stdin.flush()
@@ -1358,18 +1358,22 @@ impl TtsManager {
         rate: f32,
         skip: usize,
     ) -> std::io::Result<()> {
+        // Fresh request: reset the speak slot so an error before dispatch cannot expose the
+        // previous request's progress to queue retry/resume accounting.
+        {
+            let (m, _cv) = &*self.speak_slot;
+            *m.lock().unwrap() = SpeakSlot::default();
+        }
         // Snapshot the child's generation for THIS request (one acquisition also serves
         // as the is-running gate) — if the reader only wakes us (fatal) after a
         // concurrent restart has ALREADY installed a new child, this lets us tell "our
         // child died" apart from "a stale EOF from an old, superseded child".
         let Some(my_gen) = self.child.running_gen() else {
-            return Err(std::io::Error::other("TTS child not running"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "TTS child not running",
+            ));
         };
-        // Fresh request: reset the speak slot so it reflects THIS speak only.
-        {
-            let (m, _cv) = &*self.speak_slot;
-            *m.lock().unwrap() = SpeakSlot::default();
-        }
 
         let req =
             serde_json::json!({"op": op, "voice": voice, "rate": rate, "text": text, "skip": skip});
@@ -1417,7 +1421,11 @@ impl TtsManager {
                 self.mark_dead_if_current(my_gen);
             }
             self.stats.record_failure();
-            return Err(std::io::Error::other(e));
+            return Err(if fatal {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)
+            } else {
+                std::io::Error::other(e)
+            });
         }
         Ok(())
     }
@@ -1973,6 +1981,18 @@ pub(crate) mod wedge_recovery_tests {
             dir.path().join("ds-test-nonexistent-helper"),
             TtsManagerTestOptions::default(),
         )
+    }
+
+    #[test]
+    fn speak_without_a_child_is_not_connected_and_clears_stale_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = mk_mgr(&dir);
+        mgr.speak_slot.0.lock().unwrap().progress = 9;
+
+        let error = mgr.speak("hello", "af_sarah", 1.0, 0).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+        assert_eq!(mgr.last_speak_progress(), 0);
     }
 
     /// Pins the ACTUAL production 10s/35s values directly (no process, no real wait) —

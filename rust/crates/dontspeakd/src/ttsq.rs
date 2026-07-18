@@ -1371,7 +1371,7 @@ impl TtsQueue {
     }
 
     fn run(self: Arc<Self>) {
-        loop {
+        'outer: loop {
             // Wait for a PLAYABLE item (see [`select_pos`]) while not paused: items for
             // other terminals are held in place until their terminal becomes active.
             // Lock order: `items` then `active`.
@@ -1390,47 +1390,20 @@ impl TtsQueue {
             let _in_flight = InFlightGuard(&self.in_flight);
             let _playing = PlayingGuard(&self.playing);
 
-            // The helper's played-batch mark for THIS dequeue — `Some` ONLY when the
-            // Kokoro warm-child speak actually ran. A System item (or a requeued/
-            // dropped one) never touches the speak slot, and reading it anyway would
-            // poison `resume_skip` with the PREVIOUS Kokoro request's progress.
-            let mut kokoro_mark: Option<usize> = None;
             match &item.action {
                 QueueAction::Speech { text, voice, rate } => {
-                    let (engine, voice, rate) = match self.gate_item(
-                        &item,
-                        gen0,
-                        voice.as_ref(),
-                        *rate,
-                    ) {
-                        GateOutcome::Play {
-                            engine,
-                            voice,
-                            rate,
-                        } => (engine, voice, rate),
-                        GateOutcome::Requeue => {
-                            self.requeue_if_resuming(item, gen0);
-                            continue;
-                        }
-                        GateOutcome::Drop(reason) => {
-                            log::warn!(target: "ttsq", "queued speak could not start: {reason}");
-                            continue;
-                        }
-                    };
-
-                    self.set_tts_active(true);
-                    let result = self.speak_one(engine, text, &voice, rate, item.resume_skip);
-                    if matches!(engine, Some(ds_config::TtsEngine::Kokoro)) {
-                        kokoro_mark = Some(self.tts.last_speak_progress());
-                    }
-                    if let Err(e) = result {
-                        log::warn!(target: "ttsq", "queued speak failed: {e}");
+                    let (outcome, resume_skip) =
+                        self.play_speech(&item, gen0, text, voice.as_ref(), *rate);
+                    item.resume_skip = resume_skip;
+                    if outcome == SpeechOutcome::Requeue {
+                        self.requeue_if_resuming(item, gen0);
+                        continue 'outer;
                     }
                 }
                 QueueAction::Earcon(event) => {
                     if !self.gate_earcon(*event, gen0) {
                         self.requeue_if_resuming(item, gen0);
-                        continue;
+                        continue 'outer;
                     }
                     self.set_tts_active(true);
                     if let Err(e) = self.cue_one(*event) {
@@ -1438,15 +1411,62 @@ impl TtsQueue {
                     }
                 }
             }
-            // max(): a 0 mark (older helper, cancel before any audio, or version skew)
-            // must never erase an earlier resume point.
-            if let Some(mark) = kokoro_mark {
-                item.resume_skip = item.resume_skip.max(mark);
-            }
             if self.generation.load(Ordering::SeqCst) != gen0 {
                 self.requeue_if_resuming(item, gen0);
             }
             self.set_tts_active(false);
+        }
+    }
+
+    /// Play one speech item, retrying one warm-child transport failure. A config reload can
+    /// replace the child after the readiness gate but before or during the request write.
+    fn play_speech(
+        &self,
+        item: &Item,
+        gen0: u64,
+        text: &str,
+        voice_override: Option<&String>,
+        rate_override: Option<f32>,
+    ) -> (SpeechOutcome, usize) {
+        let mut retries_left = 1u8;
+        let mut resume_skip = item.resume_skip;
+        loop {
+            let (engine, voice, rate) =
+                match self.gate_item(item, gen0, voice_override, rate_override) {
+                    GateOutcome::Play {
+                        engine,
+                        voice,
+                        rate,
+                    } => (engine, voice, rate),
+                    GateOutcome::Requeue => return (SpeechOutcome::Requeue, resume_skip),
+                    GateOutcome::Drop(reason) => {
+                        log::warn!(target: "ttsq", "queued speak could not start: {reason}");
+                        return (SpeechOutcome::Finished, resume_skip);
+                    }
+                };
+
+            self.set_tts_active(true);
+            let result = self.speak_one(engine, text, &voice, rate, resume_skip);
+            if matches!(engine, Some(ds_config::TtsEngine::Kokoro)) {
+                resume_skip = resume_skip.max(self.tts.last_speak_progress());
+            }
+            match result {
+                Ok(()) => return (SpeechOutcome::Finished, resume_skip),
+                Err(e) if retries_left > 0 && should_retry_speak(engine, &e) => {
+                    retries_left -= 1;
+                    // The retry re-enters readiness/hold gates. Publish playback as stopped
+                    // first so a cancellation or terminal gate there cannot strand it active.
+                    self.set_tts_active(false);
+                    log::warn!(
+                        target: "ttsq",
+                        "queued speak lost its child during dispatch; retrying once: {e}"
+                    );
+                }
+                Err(e) => {
+                    log::warn!(target: "ttsq", "queued speak failed: {e}");
+                    return (SpeechOutcome::Finished, resume_skip);
+                }
+            }
         }
     }
 
@@ -1591,16 +1611,15 @@ impl TtsQueue {
         voice: &str,
         rate: f32,
         skip: usize,
-    ) -> Result<(), String> {
-        let result = match engine {
-            None => return Err("TTS is disabled".to_string()),
+    ) -> std::io::Result<()> {
+        match engine {
+            None => Err(std::io::Error::other("TTS is disabled")),
             Some(ds_config::TtsEngine::System) => self.tts.speak_system(text, voice, rate),
             Some(ds_config::TtsEngine::Kokoro) => {
                 self.tts.ensure_started();
                 self.tts.speak(text, voice, rate, skip)
             }
-        };
-        result.map_err(|e| e.to_string())
+        }
     }
 
     fn wait_until_ready(&self, engine: Option<ds_config::TtsEngine>, gen0: u64) -> ReadyOutcome {
@@ -1751,6 +1770,24 @@ enum GateOutcome {
     },
     Requeue,
     Drop(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpeechOutcome {
+    Finished,
+    Requeue,
+}
+
+fn should_retry_speak(engine: Option<ds_config::TtsEngine>, error: &std::io::Error) -> bool {
+    matches!(engine, Some(ds_config::TtsEngine::Kokoro))
+        && matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::UnexpectedEof
+        )
 }
 
 /// Whether an interrupted item (narration OR reply) should be RE-ENQUEUED to resume later.
@@ -3684,6 +3721,122 @@ mod tests {
             q.wait_until_ready(Some(ds_config::TtsEngine::System), 0),
             ReadyOutcome::Ready
         );
+    }
+
+    fn queue_with_closing_first_speak(delay_ms: &str) -> (tempfile::TempDir, Arc<TtsQueue>) {
+        let bin = crate::tts::wedge_recovery_tests::fake_helper_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let q = TtsQueue::test_stub_with_helper(
+            dir.path(),
+            bin,
+            crate::tts::TtsManagerTestOptions::default()
+                .with_first_spawn_env(&[("DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS", delay_ms)]),
+        );
+        *q.config.lock().unwrap() = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
+            ..VoiceConfig::default()
+        };
+        (dir, q)
+    }
+
+    fn spawn_test_speech(
+        q: &Arc<TtsQueue>,
+        text: &'static str,
+    ) -> std::thread::JoinHandle<(SpeechOutcome, usize)> {
+        let worker = Arc::clone(q);
+        std::thread::spawn(move || {
+            let spoken = item(text);
+            let QueueAction::Speech { text, voice, rate } = &spoken.action else {
+                unreachable!()
+            };
+            worker.play_speech(
+                &spoken,
+                worker.generation.load(Ordering::SeqCst),
+                text,
+                voice.as_ref(),
+                *rate,
+            )
+        })
+    }
+
+    fn wait_for_first_speak(q: &TtsQueue) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while q.tts.last_speak_progress() != 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            q.tts.last_speak_progress(),
+            1,
+            "the first speak never reached the fake child"
+        );
+    }
+
+    fn restart_test_child(q: &TtsQueue) {
+        q.tts.set_full_duplex_pref(true);
+        q.tts.restart_if_full_duplex_stale();
+    }
+
+    #[test]
+    fn a_queued_speak_retries_once_after_the_warm_child_closes() {
+        let (_dir, q) = queue_with_closing_first_speak("5000");
+        let handle = spawn_test_speech(&q, "survive the reload");
+        wait_for_first_speak(&q);
+        restart_test_child(&q);
+
+        let (outcome, resume_skip) = handle.join().expect("speech test thread panicked");
+
+        assert_eq!(outcome, SpeechOutcome::Finished);
+        assert_eq!(
+            resume_skip, 2,
+            "progress 2 proves the retry completed on the replacement child"
+        );
+        q.set_tts_active(false); // the real worker clears this after play_speech returns
+        q.tts.set_enabled(false);
+    }
+
+    #[test]
+    fn cancellation_during_child_close_does_not_leave_tts_active() {
+        let (_dir, q) = queue_with_closing_first_speak("5000");
+        let handle = spawn_test_speech(&q, "cancel during the reload");
+        wait_for_first_speak(&q);
+        q.generation.fetch_add(1, Ordering::SeqCst);
+        restart_test_child(&q);
+
+        let (outcome, resume_skip) = handle.join().expect("speech test thread panicked");
+        assert_eq!(outcome, SpeechOutcome::Requeue);
+        assert_eq!(resume_skip, 1);
+        assert!(
+            !q.tts_active.load(Ordering::SeqCst),
+            "the retry gate must not strand playback active when cancellation wins"
+        );
+        q.tts.set_enabled(false);
+    }
+
+    #[test]
+    fn only_kokoro_transport_errors_are_retried() {
+        use std::io::ErrorKind;
+
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+            ErrorKind::NotConnected,
+            ErrorKind::UnexpectedEof,
+        ] {
+            let error = std::io::Error::new(kind, "child replaced");
+            assert!(should_retry_speak(
+                Some(ds_config::TtsEngine::Kokoro),
+                &error
+            ));
+            assert!(!should_retry_speak(
+                Some(ds_config::TtsEngine::System),
+                &error
+            ));
+        }
+        assert!(!should_retry_speak(
+            Some(ds_config::TtsEngine::Kokoro),
+            &std::io::Error::other("helper rejected the utterance")
+        ));
     }
 
     /// Pins the cancel-before-error ordering inside the readiness poll: a generation bump must

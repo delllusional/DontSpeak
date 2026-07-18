@@ -19,8 +19,10 @@
 //!     request was actually received (not a made-up out-of-band marker) — THEN wedges:
 //!     never reads or responds to stdin again, mirroring a real (single-worker-thread)
 //!     `ds-helper` blocked inside one hung native call.
-//!   * a `speak` request replies DONE immediately.
-//!   * anything else (`lstop`/`stop`/`mute`/`load`/`unload`/…) is silently ignored, same
+//!   * a `speak` request reports progress/stats and replies DONE immediately. When the
+//!     first-spawn-only `DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS` is set, it instead reports one
+//!     progress batch, waits that many milliseconds, and exits.
+//!   * `load tts` reports TTSLOADED; other fire-and-forget ops are silently ignored, same
 //!     as the real protocol's fire-and-forget ops.
 //!
 //! EOF on stdin exits cleanly. Parses just the `op` field via `serde_json` (the crate
@@ -39,15 +41,20 @@ fn main() {
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+    let close_on_speak_ms = std::env::var("DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
     let _ = writeln!(out, "{}", ds_helper_proto::READY);
     let _ = out.flush();
 
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
-        let op = serde_json::from_str::<serde_json::Value>(&line)
-            .ok()
-            .and_then(|v| v.get("op").and_then(|op| op.as_str()).map(str::to_string));
-        match op.as_deref() {
+        let request = serde_json::from_str::<serde_json::Value>(&line).ok();
+        let op = request
+            .as_ref()
+            .and_then(|v| v.get("op"))
+            .and_then(|op| op.as_str());
+        match op {
             Some("listen") => {
                 let _ = writeln!(out, "{}wedge-ack", ds_helper_proto::PARTIAL_PREFIX);
                 let _ = out.flush();
@@ -56,10 +63,32 @@ fn main() {
                 }
             }
             Some("speak") => {
+                if let Some(delay_ms) = close_on_speak_ms {
+                    let _ = writeln!(out, "{}1", ds_helper_proto::PROGRESS_PREFIX);
+                    let _ = out.flush();
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    return;
+                }
+                let _ = writeln!(out, "{}2", ds_helper_proto::PROGRESS_PREFIX);
+                let _ = writeln!(
+                    out,
+                    "{}synth_ms=1 audio_ms=1 first_ms=1",
+                    ds_helper_proto::STATS_PREFIX
+                );
                 let _ = writeln!(out, "{}", ds_helper_proto::DONE);
                 let _ = out.flush();
             }
-            _ => {} // fire-and-forget ops (`lstop`/`stop`/`mute`/`load`/`unload`/…) and malformed lines: ignored
+            Some("load")
+                if request
+                    .as_ref()
+                    .and_then(|v| v.get("engine"))
+                    .and_then(|v| v.as_str())
+                    == Some("tts") =>
+            {
+                let _ = writeln!(out, "{}", ds_helper_proto::TTSLOADED);
+                let _ = out.flush();
+            }
+            _ => {} // other fire-and-forget ops and malformed lines are ignored
         }
     }
 }
