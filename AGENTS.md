@@ -32,6 +32,10 @@ publishes installer assets the site references.
 
 Shared rules live here; vendor files import them rather than duplicating.
 
+**Always in force:** start every task from freshly pulled `main` unless the task
+names another target — [TASK-BASELINE.md](docs/TASK-BASELINE.md) has the steps and
+exceptions. Read-only work (reviews, audits, Q&A over the repo) is not exempt.
+
 ## Out-of-scope findings
 
 Small obvious fixes: do inline and note in the report. Otherwise file an issue —
