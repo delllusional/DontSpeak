@@ -27,7 +27,9 @@ Bigger than a one-file mechanical edit — catch invariant breaks *before* code:
    engine/`ds-platform` across three hosts: one implementer per OS in parallel.
 4. **Audit if Risk: yes** — `ds-risk-auditor` for FFI, `ds-ipc`, model pinning, OS
    permissions, licensing, release/signing. Otherwise use `code-review`.
-5. **Land** — `ds-lander` merges the worktree branch to `main` and pushes after
-   re-running per-commit gates; stops on conflict.
+5. **Land** — `ds-lander` lands the worktree branch on `main` (FF or cherry-pick),
+   pushes, deletes the branch/worktree, and closes related issues/PRs after
+   re-running per-commit gates — see [docs/TASK-BASELINE.md](docs/TASK-BASELINE.md);
+   stops on conflict.
 
 Workflow: `.claude/workflows/plan-review-implement.js` (or invoke stages by hand).

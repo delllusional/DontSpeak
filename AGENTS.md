@@ -26,14 +26,15 @@ publishes installer assets the site references.
 | Topic | Doc |
 | --- | --- |
 | Instruction wrappers + skill mirrors | [docs/AGENT-SKILLS.md](docs/AGENT-SKILLS.md) |
-| Fresh `main` + task worktrees | [docs/TASK-BASELINE.md](docs/TASK-BASELINE.md) |
+| Fresh `main`, worktrees, land + close | [docs/TASK-BASELINE.md](docs/TASK-BASELINE.md) |
 | Reasoning effort | [docs/TASK-EFFORT.md](docs/TASK-EFFORT.md) |
 | `Agent:` commit trailer | [docs/COMMIT-ATTRIBUTION.md](docs/COMMIT-ATTRIBUTION.md) |
 
 Shared rules live here; vendor files import them rather than duplicating.
 
 **Always in force:** start every task from freshly pulled `main` unless the task
-names another target — [TASK-BASELINE.md](docs/TASK-BASELINE.md) has the steps and
+names another target; when finished, land on `main`, delete the task branch, and
+close related issues — [TASK-BASELINE.md](docs/TASK-BASELINE.md) has the steps and
 exceptions. Read-only work (reviews, audits, Q&A over the repo) is not exempt.
 
 ## Out-of-scope findings
