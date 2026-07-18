@@ -4,10 +4,10 @@ import {
   commandFromHookInput,
   detectClient,
   ensureCommitMessageHook,
-  gitCommitWorkingDirectory,
+  gitCommitInvocations,
   hookWorkingDirectory,
-  repositoryRoot,
   resolveAttribution,
+  resolveRepositoryRoot,
   sessionIdFromInput,
   writeAttributionCache,
 } from "./agent-attribution.mjs";
@@ -22,14 +22,33 @@ async function main() {
   const raw = await readStdin();
   const input = raw.trim() ? JSON.parse(raw) : {};
   const command = commandFromHookInput(input);
-  const commitWorkingDirectory = gitCommitWorkingDirectory(command, hookWorkingDirectory(input));
-  if (!commitWorkingDirectory) return;
+  const invocations = gitCommitInvocations(command, hookWorkingDirectory(input));
+  if (invocations.length === 0) return;
+
+  const rootByDirectory = new Map();
+  const rootOf = (directory) => {
+    if (!rootByDirectory.has(directory)) {
+      rootByDirectory.set(directory, resolveRepositoryRoot(directory));
+    }
+    return rootByDirectory.get(directory);
+  };
+  // Cache root = first invocation whose repository resolves; invocations
+  // targeting another repository are dropped (fail closed there). If no
+  // invocation resolves, the commit fails on its own — nothing to capture.
+  let root;
+  let uses = 0;
+  for (const invocation of invocations) {
+    const resolved = rootOf(invocation.workingDirectory);
+    if (!resolved) continue;
+    root ??= resolved;
+    if (resolved === root) uses += 1;
+  }
+  if (!root) return;
 
   const client = detectClient(process.argv[2] ?? "auto", input);
   if (!client) throw new Error("could not identify the CLI client that is creating this commit");
 
-  const root = repositoryRoot(commitWorkingDirectory);
-  ensureCommitMessageHook(root);
+  const hooksDirectory = ensureCommitMessageHook(root);
   const resolved = resolveAttribution(client, input, { root });
   writeAttributionCache(root, {
     version: 1,
@@ -39,8 +58,9 @@ async function main() {
     model: resolved.model,
     effort: resolved.effort,
     errors: resolved.errors,
+    uses,
     capturedAt: new Date().toISOString(),
-  });
+  }, hooksDirectory);
 }
 
 main().catch((error) => {

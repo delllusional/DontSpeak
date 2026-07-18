@@ -30,6 +30,19 @@ Capture sources:
 Claude auto-`Co-Authored-By` is disabled via `.claude/settings.json` `attribution`.
 If Codex/Qwen still emit auto-attribution, the commit hook strips it.
 
+Hook mechanics:
+
+- Merge commits (`git merge`) are captured and stamped like regular commits.
+- `--amend` preserves the existing pair (appending the amending pair if it
+  differs) only when the amended message is identical to `HEAD`'s (`--no-edit`,
+  unedited editor, reused message); a changed message gets rewrite-lone
+  semantics. Accepted residuals: an edited amend drops the prior lone pair;
+  committing a byte-identical message inherits `HEAD`'s proven pair.
+- Terminal commits with no agent runtime use `Agent: human none`.
+- A capture stays valid for 15 minutes under an agent environment; commits made
+  without one (human terminal) only inherit captures younger than 5 minutes —
+  accepted residual window.
+
 ## Squashing
 
 On squash/rebase: keep every distinct `Agent: <model-id> <effort-level>` pair from

@@ -3,12 +3,16 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import {
   activeAgentEnvironment,
+  messageMatchesHead,
+  normalizeCacheRecord,
+  privateHooksDirectory,
   readAttributionCache,
   removeAttributionCache,
   repositoryRoot,
   rewriteCommitMessage,
   validateCacheRecord,
   validateCommitMessage,
+  writeAttributionCache,
 } from "./agent-attribution.mjs";
 
 function fail(errors) {
@@ -22,8 +26,9 @@ const messageFile = process.argv[2];
 if (!messageFile) fail(["the commit-msg hook did not receive a message file"]);
 
 const root = repositoryRoot(process.cwd());
+const hooksDirectory = privateHooksDirectory(root);
 const message = readFileSync(messageFile, "utf8");
-const record = readAttributionCache(root);
+const record = normalizeCacheRecord(readAttributionCache(root, hooksDirectory));
 
 if (!record) {
   const messageErrors = validateCommitMessage(message);
@@ -36,9 +41,17 @@ if (!record) {
 const errors = validateCacheRecord(record, root);
 if (errors.length > 0) fail(errors);
 
+// Uses are interchangeable, so chain reordering (|| branches, skipped commits)
+// cannot select wrong semantics: the preserve decision keys on message
+// identity with HEAD, and the worst spoof inherits HEAD's own proven pair.
+// Which agent actually ran the commit stays honor-system.
+const preserveLone = messageMatchesHead(message, root);
+
 try {
-  writeFileSync(messageFile, rewriteCommitMessage(message, record.model, record.effort), "utf8");
-  removeAttributionCache(root);
+  writeFileSync(messageFile, rewriteCommitMessage(message, record.model, record.effort, { preserveLone }), "utf8");
+  record.uses -= 1;
+  if (record.uses > 0) writeAttributionCache(root, record, hooksDirectory);
+  else removeAttributionCache(root, hooksDirectory);
 } catch (error) {
   fail([error.message]);
 }

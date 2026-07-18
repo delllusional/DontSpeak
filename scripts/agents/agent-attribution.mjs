@@ -10,13 +10,15 @@ import {
   readFileSync,
   readSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve, win32 } from "node:path";
 
-export const ATTRIBUTION_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
+export const ATTRIBUTION_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
+const ENVLESS_ATTRIBUTION_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 export const ATTRIBUTION_CACHE_FILE = "agent-attribution.json";
 const UPSTREAM_HOOKS_FILE = "upstream-hooks-path";
 
@@ -90,16 +92,56 @@ export function readFileTail(file, maxBytes = 2 * 1024 * 1024) {
   }
 }
 
-export function readJsonLinesReverse(file, selector) {
-  if (!file || !existsSync(file)) return undefined;
-  const lines = readFileTail(file).split(/\r?\n/);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const row = parseJson(lines[index]);
-    if (!row) continue;
-    const selected = selector(row);
-    if (selected !== undefined && selected !== null) return selected;
+function readFileSlice(file, start, end) {
+  const handle = openSync(file, "r");
+  try {
+    const size = fstatSync(handle).size;
+    const from = Math.max(0, Math.min(start, size));
+    const to = Math.max(from, Math.min(end, size));
+    const buffer = Buffer.alloc(to - from);
+    readSync(handle, buffer, 0, buffer.length, from);
+    return buffer.toString("utf8");
+  } finally {
+    closeSync(handle);
   }
-  return undefined;
+}
+
+export function readJsonLinesReverse(file, selector, options = {}) {
+  if (!file || !existsSync(file)) return undefined;
+  const maxBytes = options.maxBytes ?? 2 * 1024 * 1024;
+  const retryMaxBytes = options.retryMaxBytes ?? 32 * 1024 * 1024;
+  const scanLines = (text) => {
+    const lines = text.split(/\r?\n/);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const row = parseJson(lines[index]);
+      if (!row) continue;
+      const selected = selector(row);
+      if (selected !== undefined && selected !== null) return selected;
+    }
+    return undefined;
+  };
+  const found = scanLines(readFileTail(file, maxBytes));
+  if (found !== undefined) return found;
+  // Long sessions outgrow the default tail; retry once with a larger cap.
+  let size;
+  try {
+    size = statSync(file).size;
+  } catch {
+    return undefined;
+  }
+  if (size <= maxBytes || retryMaxBytes <= maxBytes) return undefined;
+  // The retry reads only the not-yet-scanned head region. The line straddling
+  // the first-pass boundary is dropped whole — it must never parse as two
+  // bogus rows (its tail half was already dropped by readFileTail).
+  const start = Math.max(0, size - retryMaxBytes);
+  let text = readFileSlice(file, start, size - maxBytes);
+  if (start > 0) {
+    const firstNewline = text.indexOf("\n");
+    text = firstNewline === -1 ? "" : text.slice(firstNewline + 1);
+  }
+  const lastNewline = text.lastIndexOf("\n");
+  text = lastNewline === -1 ? "" : text.slice(0, lastNewline);
+  return scanLines(text);
 }
 
 function transcriptPath(input) {
@@ -205,8 +247,10 @@ function modelDoesNotReason(home, model) {
 
 function resolveCodex(input) {
   const hookModel = firstString(input?.model, input?.model_id, input?.modelId);
-  const context = codexContextFromTranscript(transcriptPath(input), hookModel);
   const hookEffort = directEffort(input);
+  // Transcript scan only when the hook input is incomplete.
+  if (hookModel && hookEffort) return { model: hookModel, effort: hookEffort };
+  const context = codexContextFromTranscript(transcriptPath(input), hookModel);
   return {
     model: firstString(hookModel, context?.model),
     effort: normalizedEffort(firstString(hookEffort, context?.effort)),
@@ -284,6 +328,8 @@ export function validateAttribution(model, effort) {
     !/^\S+$/.test(model)
     || /^(?:unknown|default|auto)$/i.test(model)
     || /^gpt-\d+(?:\.\d+)?$/i.test(model)
+    // Best-effort bare family-word list; "human" stays valid ("Agent: human none").
+    || /^(?:claude|sonnet|opus|haiku|fable|gpt|codex|grok|gemini|qwen)$/i.test(model)
   ) {
     errors.push(`model is not an exact slug: ${JSON.stringify(model)}`);
   }
@@ -306,56 +352,258 @@ export function detectClient(requested, input, env = process.env) {
   return undefined;
 }
 
+const SEPARATORS = new Set([";", "&&", "||", "|", "&", "(", ")"]);
+const GIT_VALUE_OPTIONS = ["-c", "--namespace", "--config-env"];
+const GIT_COMMAND_NAME = /(^|[\\/])git(\.exe)?$/i;
+const SHELL_COMMAND_NAME = /(^|[\\/])(?:ba|z|da)?sh(\.exe)?$/i;
+const SHELL_COMMAND_FLAG = /^-[a-zA-Z]*c[a-zA-Z]*$/;
+
 function shellTokens(command) {
   const tokens = [];
-  const matcher = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s;&|()]+/g;
-  for (const match of command.matchAll(matcher)) {
+  // Collapse backslash-newline continuations first — an approximation that may
+  // touch quoted content, acceptable for path/flag detection.
+  const source = command.replace(/\\\r?\n/g, " ");
+  const matcher = /"(?:\\.|[^"\\])*"|'[^']*'|\|\||&&|[;&|()]|\r?\n|[^\s;&|()]+/g;
+  for (const match of source.matchAll(matcher)) {
     const raw = match[0];
+    if (raw === "\n" || raw === "\r\n") {
+      tokens.push({ value: "\n", separator: true });
+      continue;
+    }
+    if (SEPARATORS.has(raw)) {
+      tokens.push({ value: raw, separator: true });
+      continue;
+    }
     const quoted = raw.startsWith("\"") || raw.startsWith("'");
-    tokens.push({ value: quoted ? raw.slice(1, -1) : raw, quoted });
+    tokens.push({
+      value: quoted ? raw.slice(1, -1) : raw,
+      quoted,
+      doubleQuoted: raw.startsWith("\""),
+    });
   }
   return tokens;
 }
 
-export function gitCommitWorkingDirectory(command, baseCwd = process.cwd()) {
-  if (typeof command !== "string") return undefined;
-  const tokens = shellTokens(command);
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (token.quoted || !/(?:^|[\\/])git(?:\.exe)?$/i.test(token.value)) continue;
-    let workingDirectory = resolve(baseCwd);
-    let cursor = index + 1;
-    while (cursor < tokens.length) {
-      const value = tokens[cursor].value;
-      if (value === "-C") {
-        const target = tokens[cursor + 1]?.value;
-        if (!target) break;
-        workingDirectory = resolve(workingDirectory, target);
-        cursor += 2;
-        continue;
+// Fail-closed literal check: only a plain literal path may steer cwd tracking.
+// Unquoted tokens must fully match the allowlist (no backslash: unquoted
+// backslash is a bash escape). Tildes are left to resolveShellPath, the single
+// tilde authority (~/… expands, ~user fails closed).
+function unsafePathToken(token) {
+  if (token.argv) return false; // argv elements are post-shell, exact
+  const value = token.value;
+  if (token.quoted) {
+    if (value.startsWith("~")) return true; // quoted ~ is literal; the resolver would expand it
+    return Boolean(token.doubleQuoted) && /[$`]/.test(value);
+  }
+  return !/^[A-Za-z0-9._:@+,\/~=-]+$/.test(value);
+}
+
+// Pure so tests exercise the win32 branches on any host.
+export function resolveShellPath(baseCwd, arg, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const paths = platform === "win32" ? win32 : posix;
+  if (typeof baseCwd !== "string" || typeof arg !== "string" || arg === "") return undefined;
+  let candidate = arg;
+  if (candidate === "~") candidate = options.home ?? homedir();
+  else if (candidate.startsWith("~/")) candidate = paths.join(options.home ?? homedir(), candidate.slice(2));
+  else if (candidate.startsWith("~")) return undefined;
+  if (platform === "win32" && candidate.startsWith("/")) {
+    const drive = /^\/([A-Za-z])(\/.*)?$/.exec(candidate);
+    if (!drive) return undefined; // msys mount (/tmp, /usr): not translatable
+    candidate = `${drive[1].toUpperCase()}:${drive[2] ?? "/"}`;
+  }
+  return paths.resolve(baseCwd, candidate);
+}
+
+function isCommandToken(token, nameRe) {
+  if (token.separator) return false;
+  const match = nameRe.exec(token.value);
+  // Quoted bare names are data ('git commit' in prose); quoted paths still count.
+  return match !== null && (!token.quoted || match[1] !== "");
+}
+
+function parseGitInvocation(segment, start, cwd, settings) {
+  let workingDirectory = cwd;
+  let cursor = start + 1;
+  while (cursor < segment.length) {
+    const value = segment[cursor].value;
+    if (value === "-C") {
+      const target = segment[cursor + 1];
+      if (!target) return undefined;
+      if (workingDirectory !== undefined) {
+        workingDirectory = unsafePathToken(target)
+          ? undefined
+          : resolveShellPath(workingDirectory, target.value, settings);
       }
-      if (["-c", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(value)) {
-        cursor += 2;
-        continue;
+      cursor += 2;
+      continue;
+    }
+    // Repository redirected away from cwd: fail closed on that invocation.
+    if (value === "--git-dir" || value === "--work-tree") {
+      workingDirectory = undefined;
+      cursor += 2;
+      continue;
+    }
+    if (value.startsWith("--git-dir=") || value.startsWith("--work-tree=")) {
+      workingDirectory = undefined;
+      cursor += 1;
+      continue;
+    }
+    if (GIT_VALUE_OPTIONS.includes(value)) {
+      cursor += 2;
+      continue;
+    }
+    if (value.startsWith("-")) {
+      cursor += 1;
+      continue;
+    }
+    if (value === "commit" || value === "merge") {
+      // This subcommand list must stay in sync with the wrapper pre-filters in
+      // .claude/settings.json (command) and .codex/hooks.json (command and
+      // commandWindows).
+      if (workingDirectory === undefined) return { end: cursor }; // fail closed, consume only
+      return { end: cursor, invocation: { workingDirectory, subcommand: value } };
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+function recurseShellPayload(segment, start, cwd, settings, out, depth) {
+  for (let index = start + 1; index + 1 < segment.length; index += 1) {
+    const flag = segment[index];
+    // Only the wrapper's leading flag run counts: `sh script.sh -c "…"` passes
+    // -c to the script, not to the shell.
+    if (flag.quoted || !flag.value.startsWith("-")) return undefined;
+    if (SHELL_COMMAND_FLAG.test(flag.value)) {
+      if (cwd !== undefined && depth < 3) {
+        out.push(...invocationsFromTokens(shellTokens(segment[index + 1].value), cwd, settings, depth + 1));
       }
-      if (value.startsWith("-")) {
-        cursor += 1;
-        continue;
-      }
-      if (value === "commit") return workingDirectory;
-      break;
+      return index + 2;
     }
   }
   return undefined;
 }
 
+function processSegment(segment, state, settings, out, depth) {
+  const command = segment[0].value;
+  if (command === "cd" || command === "pushd") {
+    const target = segment.slice(1).find(
+      (token) => token.quoted || (token.value !== "--" && !/^-[LPe@]+$/.test(token.value)),
+    );
+    if (command === "pushd") {
+      if (!target) {
+        // Bare pushd rotates the stack: cwd and stack both become unknown.
+        state.cwd = undefined;
+        state.dirStack = [];
+        return;
+      }
+      state.dirStack.push(state.cwd);
+    } else if (!target) {
+      state.cwd = undefined;
+      return;
+    }
+    state.cwd = target.value === "-" || unsafePathToken(target)
+      ? undefined
+      : resolveShellPath(state.cwd, target.value, settings);
+    return;
+  }
+  if (command === "popd") {
+    state.cwd = state.dirStack.pop(); // empty stack → unknown
+    return;
+  }
+  let index = 0;
+  while (index < segment.length) {
+    const token = segment[index];
+    if (isCommandToken(token, GIT_COMMAND_NAME)) {
+      const parsed = parseGitInvocation(segment, index, state.cwd, settings);
+      if (parsed) {
+        if (parsed.invocation) out.push(parsed.invocation);
+        index = parsed.end + 1;
+        continue;
+      }
+    } else if (isCommandToken(token, SHELL_COMMAND_NAME)) {
+      const consumed = recurseShellPayload(segment, index, state.cwd, settings, out, depth);
+      if (consumed !== undefined) {
+        index = consumed;
+        continue;
+      }
+    }
+    index += 1;
+  }
+}
+
+function invocationsFromTokens(tokens, baseCwd, settings, depth) {
+  const out = [];
+  const paths = settings.platform === "win32" ? win32 : posix;
+  const state = {
+    cwd: typeof baseCwd === "string" ? paths.resolve(baseCwd) : undefined,
+    dirStack: [],
+  };
+  const subshells = [];
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token.separator) {
+      // Subshell scoping: cd/pushd inside (...) must not leak past the ).
+      if (token.value === "(") {
+        subshells.push({ cwd: state.cwd, dirStack: [...state.dirStack] });
+      } else if (token.value === ")") {
+        const saved = subshells.pop();
+        state.cwd = saved?.cwd;
+        state.dirStack = saved?.dirStack ?? [];
+      }
+      index += 1;
+      continue;
+    }
+    const segment = [];
+    while (index < tokens.length && !tokens[index].separator) {
+      segment.push(tokens[index]);
+      index += 1;
+    }
+    processSegment(segment, state, settings, out, depth);
+  }
+  return out;
+}
+
+// Ordered {workingDirectory, subcommand} per commit/merge invocation.
+export function gitCommitInvocations(command, baseCwd = process.cwd(), options = {}) {
+  const settings = { platform: options.platform ?? process.platform, home: options.home };
+  let tokens;
+  if (Array.isArray(command)) {
+    if (command.length === 0 || !command.every((element) => typeof element === "string")) return [];
+    tokens = command.map((value) => ({ value, quoted: false, argv: true }));
+  } else if (typeof command === "string") {
+    tokens = shellTokens(command);
+  } else {
+    return [];
+  }
+  return invocationsFromTokens(tokens, baseCwd, settings, 0);
+}
+
+export function gitCommitWorkingDirectory(command, baseCwd = process.cwd()) {
+  return gitCommitInvocations(command, baseCwd)[0]?.workingDirectory;
+}
+
 export function commandFromHookInput(input) {
-  return firstString(
+  const candidates = [
     input?.tool_input?.command,
     input?.toolInput?.command,
     input?.tool_input?.cmd,
     input?.toolInput?.cmd,
-  );
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      // argv arrays pass through untouched; the parser takes them pre-split.
+      if (candidate.length > 0 && candidate.every((element) => typeof element === "string")) {
+        return candidate;
+      }
+      continue;
+    }
+    const cleaned = cleanString(candidate);
+    if (cleaned) return cleaned;
+  }
+  return undefined;
 }
 
 function git(cwd, ...args) {
@@ -379,12 +627,25 @@ export function repositoryRoot(cwd) {
   return git(cwd, "rev-parse", "--show-toplevel");
 }
 
+// Discriminates capture-skip conditions from real failures: missing directory
+// or "not a git repository" → undefined (silent skip); anything else throws
+// into the caller's exit-2 path.
+export function resolveRepositoryRoot(directory) {
+  if (!existsSync(directory)) return undefined;
+  const result = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: directory, encoding: "utf8" });
+  if (result.error) throw new Error(`git rev-parse failed to start: ${result.error.message}`);
+  if (result.status === 0) return (result.stdout ?? "").trim() || undefined;
+  const stderr = (result.stderr ?? "").trim();
+  if (/not a git repository/i.test(stderr)) return undefined;
+  throw new Error(stderr || "git rev-parse --show-toplevel failed");
+}
+
 export function privateHooksDirectory(root) {
   return resolve(root, git(root, "rev-parse", "--git-path", "dontspeak-hooks"));
 }
 
-export function attributionCachePath(root) {
-  return join(privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE);
+export function attributionCachePath(root, hooksDirectory) {
+  return join(hooksDirectory ?? privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE);
 }
 
 function unwrapManagedHooksDirectory(root, directory, fallback) {
@@ -401,14 +662,57 @@ function unwrapManagedHooksDirectory(root, directory, fallback) {
   return fallback;
 }
 
+function writeIfChanged(file, contents, mode) {
+  try {
+    if (readFileSync(file, "utf8") === contents) return false;
+  } catch {
+    // Missing or unreadable: write it.
+  }
+  writeFileSync(file, contents, mode === undefined ? "utf8" : { encoding: "utf8", mode });
+  return true;
+}
+
 export function ensureCommitMessageHook(root) {
-  const hooksDirectory = privateHooksDirectory(root);
+  // One spawn: rev-parse prints one result per line in argument order.
+  const [hooksPath, commonDir] = git(
+    root,
+    "rev-parse",
+    "--git-path",
+    "dontspeak-hooks",
+    "--git-common-dir",
+  ).split(/\r?\n/);
+  const hooksDirectory = resolve(root, hooksPath);
   mkdirSync(hooksDirectory, { recursive: true });
   const upstreamFile = join(hooksDirectory, UPSTREAM_HOOKS_FILE);
-  const configured = optionalGit(root, "config", "--path", "--get", "core.hooksPath");
-  const fallback = resolve(root, git(root, "rev-parse", "--git-common-dir"), "hooks");
-  const upstream = unwrapManagedHooksDirectory(root, configured ?? fallback, fallback);
-  writeFileSync(upstreamFile, `${upstream}\n`, "utf8");
+  const fallback = resolve(root, commonDir, "hooks");
+  // One spawn lists every scope; walk highest precedence first (last line
+  // first). The first foreign value from any scope — including worktree, so a
+  // user-set worktree hooksPath is chained, not clobbered — is the upstream,
+  // unwrapped if it is another managed dir. Our own dir is skipped, but its
+  // marker is kept as a last resort: it preserves an upstream whose scope our
+  // worktree entry now shadows.
+  let upstream;
+  let managedMarker;
+  const scoped = optionalGit(root, "config", "--show-scope", "--path", "--get-all", "core.hooksPath");
+  if (scoped) {
+    const values = scoped
+      .split(/\r?\n/)
+      .map((line) => line.split("\t").slice(1).join("\t"))
+      .filter(Boolean);
+    for (const value of values.reverse()) {
+      if (resolve(root, value) === hooksDirectory) {
+        managedMarker ??= unwrapManagedHooksDirectory(root, value, fallback);
+        continue;
+      }
+      const candidate = unwrapManagedHooksDirectory(root, value, fallback);
+      if (candidate !== hooksDirectory) {
+        upstream = candidate;
+        break;
+      }
+    }
+  }
+  upstream ??= managedMarker ?? fallback;
+  writeIfChanged(upstreamFile, `${upstream}\n`);
   const hook = join(hooksDirectory, "commit-msg");
   const upstreamHook = upstream
     ? join(upstream, "commit-msg").replaceAll("\\", "/").replaceAll("'", "'\\''")
@@ -425,33 +729,44 @@ export function ensureCommitMessageHook(root) {
     "exec node \"$(git rev-parse --show-toplevel)/scripts/agents/commit-agent-attribution.mjs\" \"$1\"",
     "",
   );
-  writeFileSync(hook, contents.join("\n"), { encoding: "utf8", mode: 0o755 });
+  writeIfChanged(hook, contents.join("\n"), 0o755);
+  // Always: repairs a lost exec bit even when the contents are identical.
   try {
     chmodSync(hook, 0o755);
   } catch {
     // Git for Windows does not use POSIX execute bits.
   }
-  git(root, "config", "--local", "extensions.worktreeConfig", "true");
-  git(root, "config", "--worktree", "core.hooksPath", hooksDirectory);
+  if (optionalGit(root, "config", "--worktree", "--get", "core.hooksPath") !== hooksDirectory) {
+    git(root, "config", "--local", "extensions.worktreeConfig", "true");
+    git(root, "config", "--worktree", "core.hooksPath", hooksDirectory);
+  }
   return hooksDirectory;
 }
 
-export function writeAttributionCache(root, record) {
-  const file = attributionCachePath(root);
+export function writeAttributionCache(root, record, hooksDirectory) {
+  const file = attributionCachePath(root, hooksDirectory);
   mkdirSync(dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, "utf8");
-  renameSync(temporary, file);
-  return file;
+  // AV/indexers transiently lock the target on Windows; retry briefly.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(temporary, file);
+      return file;
+    } catch (error) {
+      if (attempt >= 3 || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
 }
 
-export function readAttributionCache(root) {
-  return loadJson(attributionCachePath(root));
+export function readAttributionCache(root, hooksDirectory) {
+  return loadJson(attributionCachePath(root, hooksDirectory));
 }
 
-export function removeAttributionCache(root) {
+export function removeAttributionCache(root, hooksDirectory) {
   try {
-    unlinkSync(attributionCachePath(root));
+    unlinkSync(attributionCachePath(root, hooksDirectory));
   } catch {
     // A missing cache is already the desired state.
   }
@@ -482,12 +797,34 @@ function parseAgentTrailer(line) {
   return { model: match[1], effort: match[2], line };
 }
 
+// Single definition of the trailing trailer block, shared by validation and
+// rewrite: pop trailing blank, Agent:, and prohibited-attribution lines until
+// the first other line. Mutates `lines`; never consumes the subject.
+function popTrailerBlock(lines) {
+  const trailers = [];
+  const prohibited = [];
+  while (lines.length > 1) {
+    const line = lines.at(-1);
+    if (line.trim() === "") {
+      lines.pop();
+      continue;
+    }
+    if (PROHIBITED_ATTRIBUTION.test(line)) {
+      prohibited.unshift(lines.pop());
+      continue;
+    }
+    if (line.startsWith("Agent:")) {
+      trailers.unshift(lines.pop());
+      continue;
+    }
+    break;
+  }
+  return { trailers, prohibited };
+}
+
 export function validateCommitMessage(message) {
   const lines = message.trimEnd().split(/\r?\n/);
-  const trailers = [];
-  while (lines.length > 0 && lines.at(-1).startsWith("Agent:")) {
-    trailers.unshift(lines.pop());
-  }
+  const { trailers, prohibited } = popTrailerBlock(lines);
   const errors = [];
   if (trailers.length === 0) errors.push("missing final Agent trailer");
   const seen = new Set();
@@ -503,6 +840,7 @@ export function validateCommitMessage(message) {
     if (seen.has(trailer)) errors.push(`duplicate trailer: ${trailer}`);
     seen.add(trailer);
   }
+  for (const line of prohibited) errors.push(`prohibited attribution: ${line}`);
   for (const line of lines) {
     if (line.startsWith("Agent:")) errors.push(`Agent trailer is not final: ${line}`);
     if (PROHIBITED_ATTRIBUTION.test(line)) errors.push(`prohibited attribution: ${line}`);
@@ -510,17 +848,27 @@ export function validateCommitMessage(message) {
   return errors;
 }
 
-export function rewriteCommitMessage(message, model, effort) {
+export function rewriteCommitMessage(message, model, effort, { preserveLone = false } = {}) {
   const pairErrors = validateAttribution(model, effort);
   if (pairErrors.length > 0) throw new Error(pairErrors.join("; "));
 
   const lines = message.trimEnd().split(/\r?\n/);
-  const existing = lines.filter((line) => line.startsWith("Agent:"));
+  // An attribution-shaped subject cannot be stripped without destroying the
+  // message; fail closed instead.
+  if (lines.length > 0 && (lines[0].startsWith("Agent:") || PROHIBITED_ATTRIBUTION.test(lines[0]))) {
+    throw new Error(`commit subject looks like an attribution line: ${lines[0]}`);
+  }
+  const { trailers: existing } = popTrailerBlock(lines);
+  // Preserve candidates come from the trailing block only, but stray Agent:
+  // and prohibited lines anywhere in the body are stripped — mid-body guessed
+  // trailers must not survive the rewrite.
   const body = lines.filter((line) => !line.startsWith("Agent:") && !PROHIBITED_ATTRIBUTION.test(line));
   while (body.length > 0 && body.at(-1).trim() === "") body.pop();
 
-  let trailers = [];
-  if (existing.length > 1) {
+  const trailers = [];
+  // >=2 = squash, preserved as before. preserveLone = the message provably
+  // re-presents one this hook already stamped, so its lone trailer is proven.
+  if (existing.length > 1 || (preserveLone && existing.length === 1)) {
     for (const line of existing) {
       const parsed = parseAgentTrailer(line);
       if (!parsed) throw new Error(`cannot preserve malformed squash attribution: ${line}`);
@@ -531,18 +879,61 @@ export function rewriteCommitMessage(message, model, effort) {
   }
   const current = `Agent: ${model} ${effort}`;
   if (!trailers.includes(current)) trailers.push(current);
-  return `${body.join("\n")}\n\n${trailers.join("\n")}\n`;
+  const rewritten = `${body.join("\n")}\n\n${trailers.join("\n")}\n`;
+  // The hook must never emit a message the CI checker would reject.
+  const messageErrors = validateCommitMessage(rewritten);
+  if (messageErrors.length > 0) throw new Error(messageErrors.join("; "));
+  return rewritten;
+}
+
+// Comparison-only normalization: commit-msg runs before --cleanup, so git
+// comment lines and trailing whitespace may differ. Never applied to output.
+export function normalizedMessageForComparison(message) {
+  const lines = message
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .filter((line) => !line.startsWith("#"))
+    .map((line) => line.replace(/[ \t]+$/, ""));
+  while (lines.length > 0 && lines.at(-1) === "") lines.pop();
+  return lines.join("\n");
+}
+
+// Preserve-lone gate: the incoming message re-presents HEAD's message (amend
+// --no-edit / -C HEAD). Any failure (unborn HEAD, spawn error) → no preserve.
+export function messageMatchesHead(message, root) {
+  const head = optionalGit(root, "show", "-s", "--format=%B", "HEAD");
+  if (head === undefined) return false;
+  return normalizedMessageForComparison(message) === normalizedMessageForComparison(head);
+}
+
+// Transitional: old-capture (pre-`uses`) version-1 records get a single use;
+// dead code once every checkout runs the new capture script.
+export function normalizeCacheRecord(record) {
+  if (record && record.version === 1 && !("uses" in record)) {
+    return { ...record, uses: 1 };
+  }
+  return record;
 }
 
 export function validateCacheRecord(record, root, env = process.env, now = Date.now()) {
   const errors = [];
   if (!record || record.version !== 1) return ["no usable runtime attribution capture was found"];
+  record = normalizeCacheRecord(record);
+  if (!Number.isInteger(record.uses) || record.uses <= 0) {
+    errors.push("no usable runtime attribution capture was found");
+  }
   if (!record.root || resolve(record.root) !== resolve(root)) errors.push("runtime capture belongs to a different worktree");
+  const active = activeAgentEnvironment(env);
+  // 15 minutes covers long agent command chains, which carry agent env
+  // (CLAUDE_CODE_SESSION_ID confirmed present in Claude Bash subprocesses,
+  // 2026-07-18; other clients unverified and just degrade to 5 minutes).
+  // Env-less (human terminal) consumption keeps the pre-change 5-minute
+  // exposure.
+  const maxAge = active ? ATTRIBUTION_CACHE_MAX_AGE_MS : ENVLESS_ATTRIBUTION_CACHE_MAX_AGE_MS;
   const captured = Date.parse(record.capturedAt);
-  if (!Number.isFinite(captured) || now - captured > ATTRIBUTION_CACHE_MAX_AGE_MS || captured > now + 30_000) {
+  if (!Number.isFinite(captured) || now - captured > maxAge || captured > now + 30_000) {
     errors.push("runtime attribution capture is stale");
   }
-  const active = activeAgentEnvironment(env);
   if (active?.client && record.client !== active.client) {
     errors.push(`runtime capture is for ${record.client}, but this commit runs under ${active.client}`);
   }

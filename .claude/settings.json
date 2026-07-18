@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/agents/capture-agent-attribution.mjs\" auto",
+            "command": "IFS= read -rd '' input || true\ncase \"$input\" in *commit*|*merge*) node \"$CLAUDE_PROJECT_DIR/scripts/agents/capture-agent-attribution.mjs\" auto <<DONTSPEAK_JSON\n$input\nDONTSPEAK_JSON\n;; esac",
             "shell": "bash",
             "timeout": 30
           }
