@@ -274,20 +274,22 @@ fn kimi_last_turn_text(path: &std::path::Path) -> Option<String> {
     const TAIL_BYTES: u64 = 256 * 1024;
     let start = len.saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut tail = String::new();
-    file.take(TAIL_BYTES).read_to_string(&mut tail).ok()?;
+    let mut tail = Vec::with_capacity((len - start) as usize);
+    file.take(TAIL_BYTES).read_to_end(&mut tail).ok()?;
     let complete = if start == 0 {
-        tail.as_str()
+        tail.as_slice()
     } else {
-        // Mid-line seek: drop the partial first line.
-        let first_newline = tail.find('\n')?;
+        // Mid-line seek: drop the partial first line at BYTE level — the seek can split a
+        // multi-byte UTF-8 char (CJK-heavy Kimi output), so `read_to_string` would fail.
+        // Same rule as `chat_roles_chronological`.
+        let first_newline = tail.iter().position(|byte| *byte == b'\n')?;
         &tail[first_newline + 1..]
     };
 
     let mut last_turn: Option<i64> = None;
     let mut texts: Vec<String> = Vec::new();
-    for line in complete.lines() {
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+    for line in complete.split(|byte| *byte == b'\n') {
+        let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
             continue;
         };
         if record.get("type").and_then(serde_json::Value::as_str)
@@ -2043,6 +2045,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(kimi_last_turn_text(&wire).as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn kimi_wire_tail_seek_landing_mid_utf8_char_still_extracts() {
+        // >256KiB file whose tail-seek boundary splits a 3-byte CJK char: the byte-level
+        // partial-line drop must survive it (a string read here loses ALL narration for
+        // exactly the long CJK-heavy sessions Kimi produces).
+        let pad_tail = (4 - KIMI_WIRE.len() % 3) % 3; // steer the boundary onto byte 2 of a char
+        let mut content = "你".repeat(90_000);
+        content.push_str(&"a".repeat(pad_tail));
+        content.push('\n');
+        content.push_str(KIMI_WIRE);
+        let boundary = content.len() - 256 * 1024;
+        assert_eq!(
+            content.as_bytes()[boundary] & 0xC0,
+            0x80,
+            "test setup: boundary must be a UTF-8 continuation byte"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let wire = dir.path().join("wire.jsonl");
+        std::fs::write(&wire, &content).unwrap();
+        assert_eq!(
+            kimi_last_turn_text(&wire).as_deref(),
+            Some("First. Second.")
+        );
     }
 
     #[test]
