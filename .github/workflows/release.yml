@@ -371,8 +371,13 @@ jobs:
               # positional args — `--jq --arg tag ... '...'` fails with "accepts 1 arg(s),
               # received 4"); use jq's own `env.TAG` builtin against the exported var instead,
               # keeping --paginate to see all pages rather than just the first 30 releases.
+              # Capture everything, then trim to the first line in bash: piping into
+              # `head -n1` closes the pipe after one line, and once /releases exceeds a
+              # page gh's next write dies with SIGPIPE (exit 141) — which pipefail turns
+              # into a spurious hard failure of this step (#119).
               existing_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
-                --jq '.[] | select(.tag_name==env.TAG) | .id' | head -n1)"
+                --jq '.[] | select(.tag_name==env.TAG) | .id')"
+              existing_id="${existing_id%%$'\n'*}"
               if [ -n "$existing_id" ]; then
                 echo "Replacing existing draft release id=$existing_id for tag $TAG"
                 gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/$existing_id"
@@ -436,11 +441,12 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           export TAG
-          # Newest non-draft, non-dev release that isn't the one just created.
-          # --jq filters per page; head -n1 takes the newest (list is created-desc).
+          # Newest non-draft, non-dev release that isn't the one just created: the list
+          # is created-desc, so the first line wins. Capture-then-trim, not `| head -n1`
+          # — see the create step's SIGPIPE note (#119).
           prev="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
-            --jq '.[] | select(.draft == false and .tag_name != env.TAG and ((.tag_name | test("-dev")) | not)) | .tag_name' \
-            | head -n1)"
+            --jq '.[] | select(.draft == false and .tag_name != env.TAG and ((.tag_name | test("-dev")) | not)) | .tag_name')"
+          prev="${prev%%$'\n'*}"
           if [ -z "$prev" ]; then
             echo "no previous release — leaving size placeholders"; exit 0
           fi
