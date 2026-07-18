@@ -34,14 +34,12 @@ pub(super) fn call(request: Request<'_>) -> std::io::Result<Value> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let mut child = command.spawn()?;
-    let Some(mut stdin) = child.stdin.take() else {
-        stop_child(&mut child);
+    let mut child = ChildGuard::new(command.spawn()?);
+    let Some(mut stdin) = child.get_mut().and_then(|child| child.stdin.take()) else {
         return Err(std::io::Error::other("provider stdin unavailable"));
     };
-    let Some(stdout) = child.stdout.take() else {
+    let Some(stdout) = child.get_mut().and_then(|child| child.stdout.take()) else {
         drop(stdin);
-        stop_child(&mut child);
         return Err(std::io::Error::other("provider stdout unavailable"));
     };
     let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
@@ -52,7 +50,6 @@ pub(super) fn call(request: Request<'_>) -> std::io::Result<Value> {
         Ok(reader) => reader,
         Err(error) => {
             drop(stdin);
-            stop_child(&mut child);
             return Err(error);
         }
     };
@@ -70,9 +67,33 @@ pub(super) fn call(request: Request<'_>) -> std::io::Result<Value> {
     })();
 
     drop(stdin);
-    stop_child(&mut child);
+    child.stop();
     let _ = reader.join();
     result
+}
+
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn get_mut(&mut self) -> Option<&mut Child> {
+        self.0.as_mut()
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            stop_child(&mut child);
+        }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 fn initialize(

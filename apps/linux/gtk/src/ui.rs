@@ -20,7 +20,6 @@ fn t(key: &str) -> String {
 #[derive(Clone)]
 pub struct Widgets {
     pub window: adw::ApplicationWindow,
-    stack: adw::ViewStack,
     /// Engine headline dot (green running / gray idle).
     engine: gtk::Image,
     tts_row: adw::ExpanderRow,
@@ -298,7 +297,6 @@ pub fn build_window(app: &adw::Application) -> Widgets {
 
     Widgets {
         window,
-        stack,
         engine,
         tts_row,
         tts_dot,
@@ -927,13 +925,17 @@ impl UsagePage {
             })
             .is_err()
         {
-            self.update_empty_state(true);
+            if self.generation.get() == generation {
+                self.update_empty_state(true);
+            }
             return;
         }
         let page = self.clone();
         gtk::glib::spawn_future_local(async move {
             let Ok(Some(deck)) = rx.recv().await else {
-                page.update_empty_state(true);
+                if page.generation.get() == generation {
+                    page.update_empty_state(true);
+                }
                 return;
             };
             if page.generation.get() != generation {

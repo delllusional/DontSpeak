@@ -46,6 +46,12 @@ public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
             remainingLabel: label
         )
     }
+
+    public func hasSameWireValue(as other: UsageRow) -> Bool {
+        period == other.period
+            && usedPercent == other.usedPercent
+            && resetsAtUnix == other.resetsAtUnix
+    }
 }
 
 /// One card. Mirrors Rust `UsageCard`.
@@ -74,6 +80,15 @@ public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
 
     public func withRows(_ rows: [UsageRow]) -> UsageCard {
         UsageCard(agent: agent, rows: rows, account: account)
+    }
+
+    public func hasSameWireValue(as other: UsageCard) -> Bool {
+        agent == other.agent
+            && account == other.account
+            && rows.count == other.rows.count
+            && zip(rows, other.rows).allSatisfy { pair in
+                pair.0.hasSameWireValue(as: pair.1)
+            }
     }
 }
 

@@ -57,7 +57,7 @@ Monitor to completion and verify assets. Notes are **not** committed to the tree
      tempfile at **0.52** to share ring's line — that is not a bug and not a
      "downgrade" to fight. Real caps stay (e.g. `jni` → 0.45, `notify` → ^0.60).
      Inspect with `cargo tree -i windows-sys@0.52.0` / `@0.61.2`.
-  3. **Diagnose before editing `rust/deny.toml`.**  
+  3. **Diagnose before editing `rust/deny.toml`.**
      `cargo tree -i <dup>@<ver> --locked` on **both** manifests. If one lock is simply
      behind, `cargo update -p …` on that workspace — real fix, not a skip.
   4. **`[bans].skip` only for irreducible multi-version splits** after preferring new

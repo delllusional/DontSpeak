@@ -95,13 +95,13 @@ char *ds_model_status_json(void);
 char *ds_model_status_wait(uint64_t since, uint32_t timeout_ms);
 
 // Weekly/monthly coding-agent quota snapshot. BLOCKING: call off the UI thread.
-// `force_refresh != 0` bypasses the 60-second in-process cache. Versioned JSON;
+// `force_refresh != 0` bypasses the 60-second in-process cache. JSON strings are
 // owned `char*`, free with `ds_string_free`. HANDLE-FREE — no engine needed.
 /* Instant deck: installed agent cards + cached rows. No network.
- * JSON: { schema_version: 2, cards: [ { agent, rows: [...] } ] } */
+ * JSON: { cards: [ { agent, account?, rows: [...] } ] } */
 char *ds_agent_usage_skeleton_json(void);
 /* Blocking single-card load. agent = client token; force_refresh bypasses 60s cache.
- * JSON: { agent, rows: [ { period, used_percent, resets_at_unix } ] } */
+ * JSON: { agent, account?, rows: [ { period, used_percent, resets_at_unix } ] } */
 char *ds_agent_usage_card_json(const char *agent, uint8_t force_refresh);
 /* Aggregate deck refresh (tests/tooling). */
 char *ds_agent_usage_json(uint8_t force_refresh);

@@ -101,8 +101,9 @@ impl UsageCard {
     }
 
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self)
-            .unwrap_or_else(|_| format!(r#"{{"agent":"{}","rows":[]}}"#, self.agent.as_str()))
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            serde_json::json!({ "agent": self.agent.as_str(), "rows": [] }).to_string()
+        })
     }
 }
 
@@ -383,10 +384,11 @@ where
             .map_or_else(|| UsageCard::empty(agent), |entry| entry.card);
     }
 
+    let now = now_unix();
     if !force
         && let Some(entry) = cached_card(cache, paths, agent)
-        && entry.fetched_at_unix <= now_unix()
-        && now_unix().saturating_sub(entry.fetched_at_unix) < CACHE_TTL.as_secs() as i64
+        && entry.fetched_at_unix <= now
+        && now.saturating_sub(entry.fetched_at_unix) < CACHE_TTL.as_secs() as i64
     {
         return entry.card;
     }
@@ -622,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_forced_refreshes_share_one_fetch() {
+    fn overlapping_forced_refreshes_reuse_one_fetch() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Barrier};
 

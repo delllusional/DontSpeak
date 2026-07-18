@@ -42,4 +42,13 @@ public class AgentUsageModelTests
     {
         Assert.Null(AgentUsageModel.DecodeDeck("""{"providers":[]}"""));
     }
+
+    [Fact]
+    public void DecodesCanonicalEmptyDeck()
+    {
+        var deck = AgentUsageModel.DecodeDeck("""{"cards":[]}""");
+
+        Assert.NotNull(deck);
+        Assert.Empty(deck.Cards);
+    }
 }

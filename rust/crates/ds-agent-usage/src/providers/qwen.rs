@@ -39,7 +39,7 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
     }))
     .map_err(std::io::Error::other)?;
     let json = send_json(
-        request(ds_http::Method::POST, &url)
+        request(ds_http::Method::POST, &url)?
             .header("Authorization", format!("Bearer {token}"))
             .header("x-api-key", &token)
             .header("X-DashScope-API-Key", &token)
@@ -102,18 +102,39 @@ fn dotenv_value(contents: &str, wanted: &str) -> Option<String> {
         }
         let raw = raw.trim();
         let value = if let Some(quoted) = raw.strip_prefix('"') {
-            quoted.strip_suffix('"')?
+            unescape_double_quoted(quoted.strip_suffix('"')?)?
         } else if let Some(quoted) = raw.strip_prefix('\'') {
-            quoted.strip_suffix('\'')?
+            quoted.strip_suffix('\'')?.to_owned()
         } else {
             let comment = raw.char_indices().find_map(|(index, character)| {
                 (character == '#' && (index == 0 || raw[..index].ends_with(char::is_whitespace)))
                     .then_some(index)
             });
-            raw[..comment.unwrap_or(raw.len())].trim_end()
+            raw[..comment.unwrap_or(raw.len())].trim_end().to_owned()
         };
-        (!value.trim().is_empty()).then(|| value.to_owned())
+        (!value.trim().is_empty()).then_some(value)
     })
+}
+
+fn unescape_double_quoted(value: &str) -> Option<String> {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            out.push(character);
+            continue;
+        }
+        match chars.next()? {
+            'n' => out.push('\n'),
+            '"' => out.push('"'),
+            '\\' => out.push('\\'),
+            escaped => {
+                out.push('\\');
+                out.push(escaped);
+            }
+        }
+    }
+    Some(out)
 }
 
 /// Coding Plan: five-hour / weekly / billing-month (emit complete used/total/reset triples).
@@ -246,6 +267,12 @@ ALIBABA_QWEN_API_KEY='quoted token'\n";
         assert_eq!(
             dotenv_value(dotenv, "ALIBABA_QWEN_API_KEY").as_deref(),
             Some("quoted token")
+        );
+
+        let escaped = "DASHSCOPE_API_KEY=\"line\\nquote\\\"slash\\\\end\"\n";
+        assert_eq!(
+            dotenv_value(escaped, "DASHSCOPE_API_KEY").as_deref(),
+            Some("line\nquote\"slash\\end")
         );
     }
 

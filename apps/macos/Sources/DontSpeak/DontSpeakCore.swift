@@ -98,7 +98,7 @@ struct HealthSnapshot: Sendable, Equatable {
 /// Read-only health bridge. Main-actor mutations; blocking FFI off-thread → Sendable snapshot.
 @Observable @MainActor
 final class Core {
-    /// Sidebar selection — also set by tray menu before openWindow.
+    /// Sidebar selection; starts on Usage and survives tray hide/reopen.
     var screen: AppScreen = .usage
 
     var activity = Activity()

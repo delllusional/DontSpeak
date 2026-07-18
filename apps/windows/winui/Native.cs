@@ -21,6 +21,7 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_model_status_wait(ulong since, uint timeoutMs);
     [DllImport(Dll)] private static extern IntPtr ds_agent_usage_skeleton_json();
     [DllImport(Dll)] private static extern IntPtr ds_agent_usage_card_json([MarshalAs(UnmanagedType.LPUTF8Str)] string agent, byte forceRefresh);
+    [DllImport(Dll)] private static extern IntPtr ds_agent_usage_json(byte forceRefresh);
     [DllImport(Dll)] private static extern IntPtr ds_tools_json();
     [DllImport(Dll)] private static extern IntPtr ds_libraries_json();
     [DllImport(Dll)] private static extern IntPtr ds_logs_json(uint maxBytes);
@@ -136,6 +137,10 @@ internal static class Native
     /// <summary>BLOCKING single-card load. Off UI thread; force bypasses 60s soft cache.</summary>
     public static string AgentUsageCardJson(string agent, bool forceRefresh)
         => TakeString(ds_agent_usage_card_json(agent, (byte)(forceRefresh ? 1 : 0)));
+
+    /// <summary>BLOCKING aggregate deck refresh for diagnostics.</summary>
+    public static string AgentUsageJson(bool forceRefresh)
+        => TakeString(ds_agent_usage_json((byte)(forceRefresh ? 1 : 0)));
 
     /// <summary>BLOCKS until status seq ≠ <paramref name="since"/> or timeout; returns model-status
     /// JSON ("seq" is next since). Dedicated background thread only; since=0 first. "{}" if down.</summary>

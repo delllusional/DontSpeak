@@ -29,7 +29,7 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
         }),
         send_initialized: true,
         method: "account/rateLimits/read",
-        params: Value::Null,
+        params: serde_json::json!({}),
         initialize_timeout: Duration::from_secs(4),
         request_timeout: Duration::from_secs(8),
     })?;
@@ -87,7 +87,7 @@ fn parse_window(window: &Value) -> Option<UsageRow> {
 
 fn period_from_label(label: &str) -> Option<Period> {
     match label.trim().to_ascii_lowercase().as_str() {
-        "five_hour" | "5h" | "5_hour" | "session" | "rate" => Some(Period::Session),
+        "five_hour" | "5h" | "5_hour" | "session" => Some(Period::Session),
         "week" | "weekly" | "seven_day" | "7_day" => Some(Period::Week),
         "month" | "monthly" | "billing_month" => Some(Period::Month),
         _ => None,

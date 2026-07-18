@@ -8,9 +8,6 @@ use crate::{Period, UsageRow};
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
-// Bump with Claude Code client identity expected by OAuth usage endpoint.
-const CLAUDE_CODE_USER_AGENT: &str = "claude-code/2.1.0";
-
 pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
     let credentials = read_credentials(paths)?;
     let token = string_at(&credentials, &["claudeAiOauth", "accessToken"])
@@ -21,13 +18,20 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
                 "Claude OAuth token unavailable",
             )
         })?;
+    let client = ds_config::client_spec(ds_config::ClientSource::ClaudeCode).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Claude client registry entry unavailable",
+        )
+    })?;
+    let user_agent = format!("claude-code/{}", client.verified_client_version);
     let json = send_json(
-        request(ds_http::Method::GET, USAGE_URL)
+        request(ds_http::Method::GET, USAGE_URL)?
             .header("Authorization", format!("Bearer {token}"))
             .header("anthropic-beta", "oauth-2025-04-20")
             .header("Accept", "application/json")
             // Same client identity as Claude Code (read-only token consumer).
-            .header("User-Agent", CLAUDE_CODE_USER_AGENT),
+            .header("User-Agent", user_agent),
     )?;
     Ok(parse(&json))
 }

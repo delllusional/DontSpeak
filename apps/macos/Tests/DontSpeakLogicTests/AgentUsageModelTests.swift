@@ -38,6 +38,22 @@ final class AgentUsageModelTests: XCTestCase {
         XCTAssertEqual(filled.resetsAtUnix, 1)
     }
 
+    func testWireEqualityIgnoresPresentationLabel() {
+        let first = UsageCard(
+            agent: "codex",
+            rows: [UsageRow(period: "week", usedPercent: 10, resetsAtUnix: 1, remainingLabel: "2d")]
+        )
+        let second = UsageCard(
+            agent: "codex",
+            rows: [UsageRow(period: "week", usedPercent: 10, resetsAtUnix: 1, remainingLabel: "1d 23h")]
+        )
+        XCTAssertTrue(first.hasSameWireValue(as: second))
+        XCTAssertFalse(first.hasSameWireValue(as: UsageCard(
+            agent: "codex",
+            rows: [UsageRow(period: "week", usedPercent: 11, resetsAtUnix: 1)]
+        )))
+    }
+
     func testRejectsMalformedDeck() {
         let json = #"{"providers":[]}"#
         XCTAssertNil(UsageDeck.decodeDeck(Data(json.utf8)))

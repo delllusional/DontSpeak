@@ -53,7 +53,7 @@ fn fetch_web(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
     let token = access_token(&credentials).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "Grok OAuth token unavailable")
     })?;
-    let response = request(ds_http::Method::POST, WEB_BILLING_URL)
+    let response = request(ds_http::Method::POST, WEB_BILLING_URL)?
         .header("Authorization", format!("Bearer {token}"))
         .header("Origin", "https://grok.com")
         .header("Referer", "https://grok.com/?_s=usage")
@@ -147,12 +147,7 @@ fn parse_cli(json: &Value) -> Option<UsageRow> {
 
 /// Parse CodexBar-compatible gRPC-web billing: fixed32 percent + future reset.
 fn parse_web_billing(body: &[u8], now_unix: i64) -> Option<UsageRow> {
-    let frames = grpc_web_data_frames(body);
-    let payloads = if frames.is_empty() && looks_like_protobuf(body) {
-        vec![body]
-    } else {
-        frames
-    };
+    let payloads = grpc_web_data_frames(body);
     if payloads.is_empty() {
         return None;
     }
@@ -291,15 +286,6 @@ fn grpc_web_failed(data: &[u8]) -> bool {
     false
 }
 
-fn looks_like_protobuf(data: &[u8]) -> bool {
-    let Some(first) = data.first() else {
-        return false;
-    };
-    let field_number = first >> 3;
-    let wire_type = first & 0x07;
-    field_number > 0 && matches!(wire_type, 0 | 1 | 2 | 5)
-}
-
 #[derive(Default)]
 struct ProtobufScan {
     fixed32: Vec<Fixed32Field>,
@@ -332,14 +318,9 @@ fn scan_protobuf(data: &[u8], depth: u8, path: &[u64]) -> Option<ProtobufScan> {
     let mut index = 0;
     let mut order = 0usize;
     while index < data.len() {
-        let field_start = index;
-        let Some(key) = read_varint(data, &mut index) else {
-            index = field_start.saturating_add(1);
-            continue;
-        };
+        let key = read_varint(data, &mut index)?;
         if key == 0 {
-            index = field_start.saturating_add(1);
-            continue;
+            return None;
         }
         let field_number = key >> 3;
         let wire_type = key & 0x07;
@@ -347,30 +328,23 @@ fn scan_protobuf(data: &[u8], depth: u8, path: &[u64]) -> Option<ProtobufScan> {
         field_path.push(field_number);
         match wire_type {
             0 => {
-                if let Some(value) = read_varint(data, &mut index) {
-                    scan.varints.push(VarintField {
-                        path: field_path,
-                        value,
-                    });
-                } else {
-                    index = field_start.saturating_add(1);
-                }
+                let value = read_varint(data, &mut index)?;
+                scan.varints.push(VarintField {
+                    path: field_path,
+                    value,
+                });
             }
             1 => {
                 if index + 8 > data.len() {
-                    break;
+                    return None;
                 }
                 index += 8;
             }
             2 => {
-                let Some(length) = read_varint(data, &mut index) else {
-                    index = field_start.saturating_add(1);
-                    continue;
-                };
+                let length = read_varint(data, &mut index)?;
                 let length = length as usize;
                 if index.saturating_add(length) > data.len() {
-                    index = field_start.saturating_add(1);
-                    continue;
+                    return None;
                 }
                 let nested = &data[index..index + length];
                 index += length;
@@ -380,7 +354,7 @@ fn scan_protobuf(data: &[u8], depth: u8, path: &[u64]) -> Option<ProtobufScan> {
             }
             5 => {
                 if index + 4 > data.len() {
-                    break;
+                    return None;
                 }
                 let bits = u32::from_le_bytes([
                     data[index],
@@ -410,6 +384,9 @@ fn read_varint(data: &[u8], index: &mut usize) -> Option<u64> {
     while *index < data.len() && shift < 64 {
         let byte = data[*index];
         *index += 1;
+        if shift == 63 && byte > 1 {
+            return None;
+        }
         value |= u64::from(byte & 0x7F) << shift;
         if byte & 0x80 == 0 {
             return Some(value);
@@ -506,6 +483,27 @@ mod tests {
         assert!(scan_protobuf(&nested_group, 0, &[]).is_none());
         // Raw body with only a group tag: parse_web_billing treats as unusable.
         assert!(parse_web_billing(&start_group, 1_800_000_000).is_none());
+    }
+
+    #[test]
+    fn rejects_unframed_and_truncated_protobuf() {
+        assert!(parse_web_billing(&[0x08, 0x01], 1_800_000_000).is_none());
+        for body in [
+            &[0x08, 0x80][..],
+            &[0x09, 0x00][..],
+            &[0x0a, 0x02, 0x08][..],
+            &[0x0d, 0x00][..],
+        ] {
+            assert!(scan_protobuf(body, 0, &[]).is_none());
+        }
+    }
+
+    #[test]
+    fn rejects_overflowing_tenth_varint_byte() {
+        let mut index = 0;
+        let mut bytes = vec![0xff; 9];
+        bytes.push(0x02);
+        assert!(read_varint(&bytes, &mut index).is_none());
     }
 
     #[test]

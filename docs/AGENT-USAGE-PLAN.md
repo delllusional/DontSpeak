@@ -13,7 +13,10 @@ stopped; does not extend `model_status`.
 
 ### Navigation
 
-Status → **Usage** → Tools → Log → Credits on macOS, Windows, and Linux.
+**Usage** → Status → Tools → Log → Credits on macOS, Windows, and Linux.
+Usage is the cold-start default on all three hosts. On macOS, opening the hidden
+window from the tray preserves the current sidebar selection; it does not force
+the Status screen.
 
 ### When the tab is selected
 
@@ -111,7 +114,7 @@ and labels: `session` → Session, `week` → Week, `month` → Month.
 | Crate | Role |
 | --- | --- |
 | `ds-agent-usage` | Domain: deck/card/row, install gate, per-agent cache, providers |
-| `ds-http` | Blocking HTTPS leaf (trust roots, timeouts, bounded body) |
+| `ds-http` | Blocking HTTP leaf (trust roots, timeouts, bounded body); usage providers enforce HTTPS |
 | `ds-core` FFI | JSON C ABI + `ds_usage_resets_in` |
 | `ds-i18n` | All Usage UI strings |
 
@@ -145,14 +148,16 @@ Rules:
 - One typed cache keyed by `ClientSource` is shared by every agent provider and
   every host through `ds-core`.
 - Last-good cards are held in memory and atomically mirrored to
-  `agent-usage-cache.json` under the OS cache directory. The file contains only
-  normalized quota rows and fetch timestamps; never credentials or provider bodies.
+  `agent-usage-cache.json` under the OS cache directory. The file contains normalized
+  quota rows, optional display-only account labels, and fetch timestamps; never
+  authentication secrets or provider bodies.
 - Skeleton lazily restores that file, so the first tab visit after restart can
   paint the prior value before any network request completes.
 - Soft TTL **60s** for non-force `refresh_card` (tooling / optional soft path).
 - Tab UI always force-loads after skeleton so re-select refreshes.
 - Store only cards with rows; empty probe never overwrites a good cache entry.
-- Concurrent refreshes for the same agent share one in-flight probe.
+- Concurrent refreshes for the same agent serialize through one slot and reuse the
+  probe that completed while later callers waited.
 
 ### FFI (handle-free, never panics)
 
@@ -173,9 +178,9 @@ Use a generation counter so stale completions after leave-tab are ignored.
 
 | Host | Navigation | Bind |
 | --- | --- | --- |
-| macOS | `NavigationSplitView` after Status | typed `UsageDeck` / `UsageCard` / `UsageRow` |
-| Windows | `NavigationView` after Status | typed DTOs from `AgentUsageDataSource` |
-| Linux | `AdwViewStack` after Status | typed structs from the FFI adapter |
+| macOS | `NavigationSplitView`, first/default; tray reopen preserves selection | typed `UsageDeck` / `UsageCard` / `UsageRow` |
+| Windows | `NavigationView`, first/default | typed DTOs from `AgentUsageDataSource` |
+| Linux | `AdwViewStack`, first/default | typed structs from the FFI adapter |
 
 Hosts retain stable card shells and transition only changed typed values. Agent
 identity/order, fetch/cache, install gating, and period selection live in Rust.
@@ -197,7 +202,8 @@ Period keys match wire tokens. Unused keys `usage.loading` / `usage.refresh` /
 
 ## Acceptance criteria
 
-- [x] Status, Usage, Tools, Log, Credits in that order on all three hosts.
+- [x] Usage, Status, Tools, Log, Credits in that order on all three hosts; Usage is the cold-start default.
+- [x] macOS tray Settings reopens the window without discarding the current sidebar selection.
 - [x] Card-centric schema (`agent` + `rows`; periods `session` | `week` | `month`); skeleton + per-card ABI.
 - [x] First open with no cache: no empty shells; cards appear only when loaded.
 - [x] Re-select: cached cards first, then force per-agent refresh; no Refresh button.

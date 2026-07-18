@@ -90,6 +90,11 @@ pub fn agent_usage_card(agent: &str, force_refresh: bool) -> Option<UsageCard> {
     )))
     .ok()
 }
+/// Blocking aggregate deck refresh for diagnostics.
+#[allow(dead_code)]
+pub fn agent_usage(force_refresh: bool) -> Option<UsageDeck> {
+    serde_json::from_str(&take(sys::ds_agent_usage_json(force_refresh as u8))).ok()
+}
 pub fn tools_json() -> String {
     take(sys::ds_tools_json())
 }

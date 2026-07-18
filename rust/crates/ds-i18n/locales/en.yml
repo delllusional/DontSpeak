@@ -19,6 +19,7 @@ common:
 # per-OS switch. Provider titles: `usage.provider.<client_source>`.
 usage:
   unavailable: Usage unavailable
+  account_hidden: Account
   session: Session
   week: Week
   month: Month

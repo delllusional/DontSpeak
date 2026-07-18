@@ -20,14 +20,23 @@ const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_CREDENTIAL_BYTES: u64 = 1024 * 1024;
 
-fn request(method: ds_http::Method, url: &str) -> ds_http::RequestBuilder {
-    ds_http::request(
+fn request(method: ds_http::Method, url: &str) -> std::io::Result<ds_http::RequestBuilder> {
+    if !url
+        .get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage provider URL must use HTTPS",
+        ));
+    }
+    Ok(ds_http::request(
         method,
         url,
         CONNECT_TIMEOUT,
         READ_TIMEOUT,
         Some(TOTAL_TIMEOUT),
-    )
+    ))
 }
 
 fn send_json<B: ds_http::body::Body>(
@@ -279,6 +288,15 @@ fn capture_login_shell_path() -> Option<std::ffi::OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_requests_require_https() {
+        let error = request(ds_http::Method::GET, "http://provider.test/usage")
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(request(ds_http::Method::GET, "HTTPS://provider.test/usage").is_ok());
+    }
 
     #[test]
     fn binary_resolution_checks_gui_install_roots() {

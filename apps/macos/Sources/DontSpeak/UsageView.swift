@@ -45,9 +45,7 @@ struct UsageView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear {
-            Task { await onTabSelected() }
-        }
+        .task { await onTabSelected() }
     }
 
     @MainActor private func onTabSelected() async {
@@ -57,7 +55,7 @@ struct UsageView: View {
 
         // 1) Skeleton: installed agents + last-good cache, already decoded by the adapter.
         let deck = await AgentUsageDataSource.readCachedDeck()
-        guard gen == generation else { return }
+        guard !Task.isCancelled, gen == generation else { return }
         guard let deck else {
             settled = cards.isEmpty
             return
@@ -77,25 +75,31 @@ struct UsageView: View {
         }
 
         // 2) Force-load each agent independently; UI updates as each finishes.
-        // Task inherits @MainActor isolation from onTabSelected — no MainActor.run hop.
-        let pending = PendingCount(allAgents.count)
-        for agent in allAgents {
-            Task {
-                let updated = await AgentUsageDataSource.refreshCard(agent)
-                guard gen == generation else { return }
+        await withTaskGroup(of: UsageCard?.self) { group in
+            for agent in allAgents {
+                group.addTask { await AgentUsageDataSource.refreshCard(agent) }
+            }
+            for await updated in group {
+                guard !Task.isCancelled, gen == generation else {
+                    group.cancelAll()
+                    return
+                }
                 if let updated, !updated.rows.isEmpty {
                     applyCard(updated)
                 }
-                if pending.decrement() {
-                    settled = true
-                }
             }
         }
+        guard !Task.isCancelled, gen == generation else { return }
+        settled = true
     }
 
     @MainActor private func applyCard(_ updated: UsageCard, animated: Bool = true) {
         if let idx = cards.firstIndex(where: { $0.agent == updated.agent }) {
             guard cards[idx] != updated else { return }
+            if cards[idx].hasSameWireValue(as: updated) {
+                cards[idx] = updated
+                return
+            }
             if animated {
                 withAnimation(.easeInOut(duration: 0.2)) { cards[idx] = updated }
             } else {
@@ -119,21 +123,6 @@ struct UsageView: View {
 
     private func agentRank(_ agent: String) -> Int {
         canonicalAgents.firstIndex(of: agent) ?? canonicalAgents.count
-    }
-
-}
-
-/// Thread-safe countdown for settling the empty/unavailable state.
-private final class PendingCount: @unchecked Sendable {
-    private var value: Int
-    private let lock = NSLock()
-    init(_ value: Int) { self.value = value }
-    /// Returns true when count reaches zero.
-    func decrement() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        value -= 1
-        return value <= 0
     }
 }
 
@@ -168,7 +157,7 @@ private struct UsageCardView: View {
                         .opacity(accountRevealed ? 1 : 0)
                         .contentShape(Rectangle())
                         .onTapGesture { accountRevealed.toggle() }
-                        .accessibilityLabel(accountRevealed ? accountLabel : "Account")
+                        .accessibilityLabel(accountRevealed ? accountLabel : L.t("usage.account_hidden"))
                         .accessibilityAddTraits(.isButton)
                 }
             }
@@ -197,7 +186,18 @@ private func providerTitle(_ agent: String) -> String {
     let key = "usage.provider.\(agent)"
     let localized = L.t(key)
     if localized != key { return localized }
-    return agent
+    return prettifyUsageToken(agent)
+}
+
+private func periodTitle(_ period: String) -> String {
+    let key = "usage.\(period)"
+    let localized = L.t(key)
+    if localized != key { return localized }
+    return prettifyUsageToken(period)
+}
+
+private func prettifyUsageToken(_ token: String) -> String {
+    token
         .split(separator: "_")
         .map { part in
             guard let first = part.first else { return "" }
@@ -213,7 +213,7 @@ private struct UsageRowView: View {
         VStack(alignment: .leading, spacing: 7) {
             // Bottom-align period + remaining so different font sizes share one baseline.
             HStack(alignment: .lastTextBaseline) {
-                Text(L.t("usage.\(row.period)")).glassRowTitle()
+                Text(periodTitle(row.period)).glassRowTitle()
                 Spacer(minLength: 8)
                 // Remaining till reset (minute-granularity) sits top-right; percent is the bar only.
                 if !row.remainingLabel.isEmpty {
