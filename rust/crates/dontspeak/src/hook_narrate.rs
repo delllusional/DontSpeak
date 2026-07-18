@@ -69,8 +69,9 @@ pub fn mark_streaming_session(paths: &Paths, payload: &str) {
 // ── Stop (final reply — non-streaming) ──────────────────────────────────────────
 
 /// Stop payload subset. CC/Codex/Qwen supply `last_assistant_message`. Grok is metadata-only
-/// (live-verified) — fall back to `transcriptPath` chat_history.jsonl. CamelCase aliases
-/// for forward-compat.
+/// (live-verified) — fall back to `transcriptPath` chat_history.jsonl. Kimi Code guarantees
+/// only `hook_event_name`/`session_id`/`cwd` — fall back to the session wire.jsonl. CamelCase
+/// aliases for forward-compat.
 #[derive(Debug, Deserialize, Default)]
 struct StopHook {
     #[serde(default, alias = "lastAssistantMessage")]
@@ -138,8 +139,201 @@ impl StopHook {
             return select_grok_stop_text(self, paths, session, true)
                 .map(|(text, _fp)| Cow::Owned(text));
         }
+        if client == ClientSource::KimiCode {
+            return resolve_kimi_wire_path(self, paths)
+                .and_then(|path| kimi_last_turn_text(&path))
+                .map(Cow::Owned);
+        }
         None
     }
+}
+
+// ── Kimi Code Stop fallback (session wire.jsonl) ─────────────────────────────
+
+/// Kimi wire journal path. Order: (1) `transcript_path` when present; (2) the derived
+/// workDirKey bucket under `<kimi_dir>/sessions`; (3) a scan across workDirKeys, accepted
+/// only when exactly one bucket holds this session. Silent (`None`) on any miss.
+fn resolve_kimi_wire_path(hook: &StopHook, paths: &Paths) -> Option<std::path::PathBuf> {
+    if let Some(raw) = hook
+        .transcript_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let path = std::path::PathBuf::from(raw);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let session = hook
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let sessions = paths.kimi_dir.join("sessions");
+    if let Some(cwd) = hook.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let candidate = sessions
+            .join(kimi_workdir_key(cwd))
+            .join(session)
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let mut matches = std::fs::read_dir(sessions)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let wire = entry
+                .path()
+                .join(session)
+                .join("agents")
+                .join("main")
+                .join("wire.jsonl");
+            wire.is_file().then_some(wire)
+        });
+    let only = matches.next()?;
+    matches.next().is_none().then_some(only)
+}
+
+/// kimi-code `encodeWorkDirKey`: `wd_<slug>_<sha256(normalized cwd)[:12]>`. Windows-shaped
+/// paths (drive-letter or UNC) are segment-resolved then slash-folded, case preserved —
+/// verified upstream: `C:\Users\usr` hashes as `C:/Users/usr` → `wd_usr_3030c6a48c39`.
+fn kimi_workdir_key(cwd: &str) -> String {
+    use sha2::Digest;
+    let normalized = kimi_normalize_workdir(cwd);
+    let slug = kimi_slug(normalized.rsplit('/').next().unwrap_or_default());
+    let digest = sha2::Sha256::digest(normalized.as_bytes());
+    let hash: String = digest[..6].iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("wd_{slug}_{hash}")
+}
+
+/// kimi-code `normalizeWorkDir`: win32/pathe `resolve` (dot segments out), `\` → `/`.
+fn kimi_normalize_workdir(cwd: &str) -> String {
+    let bytes = cwd.as_bytes();
+    let is_drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    let is_unc = matches!(bytes, [b'\\' | b'/', b'\\' | b'/', ..]);
+    let windows_shaped = is_drive || is_unc;
+    let root_kept = usize::from(windows_shaped);
+    let mut out: Vec<&str> = Vec::new();
+    for segment in cwd.split(['\\', '/']) {
+        match segment {
+            "" | "." => {}
+            ".." if out.len() > root_kept => {
+                out.pop();
+            }
+            ".." => {}
+            segment => out.push(segment),
+        }
+    }
+    let joined = out.join("/");
+    if is_unc {
+        format!("//{joined}")
+    } else if windows_shaped {
+        joined
+    } else {
+        format!("/{joined}")
+    }
+}
+
+/// kimi-code `slugifyWorkDirName`: lowercase, non `[a-z0-9._-]` runs collapse to one `-`,
+/// `-` trimmed, 40 chars max, empty/`.`/`..` → `workspace`.
+fn kimi_slug(name: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_dash = false;
+    for c in name.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.push(c);
+        } else {
+            pending_dash = true;
+        }
+    }
+    let truncated: String = slug.trim_matches('-').chars().take(40).collect();
+    match truncated.trim_end_matches('-') {
+        "" | "." | ".." => "workspace".to_string(),
+        slug => slug.to_string(),
+    }
+}
+
+/// Assistant reply of the last wire turn: ordered `content.part` text parts of the highest
+/// turnId, concatenated. Think parts, other record types, and malformed lines are skipped.
+fn kimi_last_turn_text(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    const TAIL_BYTES: u64 = 256 * 1024;
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = String::new();
+    file.take(TAIL_BYTES).read_to_string(&mut tail).ok()?;
+    let complete = if start == 0 {
+        tail.as_str()
+    } else {
+        // Mid-line seek: drop the partial first line.
+        let first_newline = tail.find('\n')?;
+        &tail[first_newline + 1..]
+    };
+
+    let mut last_turn: Option<i64> = None;
+    let mut texts: Vec<String> = Vec::new();
+    for line in complete.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if record.get("type").and_then(serde_json::Value::as_str)
+            != Some("context.append_loop_event")
+        {
+            continue;
+        }
+        let Some(event) = record.get("event") else {
+            continue;
+        };
+        if event.get("type").and_then(serde_json::Value::as_str) != Some("content.part") {
+            continue;
+        }
+        let Some(turn) = wire_turn_id(event) else {
+            continue;
+        };
+        // Raw text: parts are stream chunks, so their boundary whitespace is meaningful.
+        let text = event
+            .get("part")
+            .filter(|part| {
+                part.get("type").and_then(serde_json::Value::as_str) == Some("text")
+            })
+            .and_then(|part| part.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.trim().is_empty());
+        let Some(text) = text else {
+            continue;
+        };
+        if last_turn.is_some_and(|last| turn < last) {
+            continue; // late flush of an older turn
+        }
+        if last_turn != Some(turn) {
+            texts.clear();
+            last_turn = Some(turn);
+        }
+        texts.push(text.to_string());
+    }
+    let reply = texts.concat();
+    (!reply.trim().is_empty()).then_some(reply)
+}
+
+fn wire_turn_id(event: &serde_json::Value) -> Option<i64> {
+    let raw = event.get("turnId")?;
+    raw.as_i64()
+        .or_else(|| raw.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| raw.as_str()?.trim().parse().ok())
 }
 
 /// Sticky admit key for Grok Stop digests + reply_done so MarkActive cannot prune them;
@@ -1770,5 +1964,178 @@ mod tests {
     fn grok_stop_session_tag_is_distinct_from_real_session() {
         assert_eq!(grok_stop_session_tag("abc-123"), "grok-stop:abc-123");
         assert_ne!(grok_stop_session_tag("abc-123"), "abc-123");
+    }
+
+    // ── Kimi Code Stop fallback (wire.jsonl) ─────────────────────────────────
+
+    #[test]
+    fn kimi_workdir_key_matches_the_verified_upstream_hash_rule() {
+        // Upstream `encodeWorkDirKey`: hash input is the slash-folded cwd, case preserved.
+        assert_eq!(kimi_workdir_key("C:\\Users\\usr"), "wd_usr_3030c6a48c39");
+        assert_eq!(kimi_workdir_key("C:/Users/usr"), "wd_usr_3030c6a48c39");
+    }
+
+    #[test]
+    fn kimi_normalize_workdir_resolves_dot_segments() {
+        assert_eq!(kimi_normalize_workdir("/home/u/a/../proj"), "/home/u/proj");
+        assert_eq!(kimi_normalize_workdir("C:\\Users\\.\\usr"), "C:/Users/usr");
+    }
+
+    #[test]
+    fn kimi_slug_collapses_runs_and_maps_empty_to_workspace() {
+        assert_eq!(kimi_slug("My Proj!"), "my-proj");
+        assert_eq!(kimi_slug("--"), "workspace");
+        assert_eq!(kimi_slug(""), "workspace");
+        assert_eq!(kimi_slug(".."), "workspace");
+        assert_eq!(kimi_slug("a_b-c.d"), "a_b-c.d");
+    }
+
+    fn write_kimi_wire(root: &std::path::Path, workdir_key: &str, session: &str, lines: &str) {
+        let dir = root
+            .join("sessions")
+            .join(workdir_key)
+            .join(session)
+            .join("agents")
+            .join("main");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("wire.jsonl"), lines).unwrap();
+    }
+
+    const KIMI_WIRE: &str = r#"{"type":"metadata","protocol_version":"1","created_at":1}
+{"type":"context.append_loop_event","event":{"type":"content.part","turnId":"1","part":{"type":"text","text":"old turn"}}}
+{"type":"context.append_loop_event","event":{"type":"content.part","turnId":"2","part":{"type":"text","text":"First. "}}}
+{"type":"context.append_loop_event","event":{"type":"content.part","turnId":"2","part":{"type":"text","text":"Second."}}}
+"#;
+
+    #[test]
+    fn kimi_wire_extracts_last_turn_text_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let wire = dir.path().join("wire.jsonl");
+        std::fs::write(&wire, KIMI_WIRE).unwrap();
+        assert_eq!(
+            kimi_last_turn_text(&wire).as_deref(),
+            Some("First. Second.")
+        );
+    }
+
+    #[test]
+    fn kimi_wire_skips_think_parts_and_other_record_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let wire = dir.path().join("wire.jsonl");
+        std::fs::write(
+            &wire,
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","turnId":3,"part":{"type":"think","text":"thinking…"}}}
+{"type":"context.append_loop_event","event":{"type":"content.part","turnId":3,"part":{"type":"text","text":"Answer."}}}
+{"type":"session.update","text":"not a loop event"}
+"#,
+        )
+        .unwrap();
+        assert_eq!(kimi_last_turn_text(&wire).as_deref(), Some("Answer."));
+    }
+
+    #[test]
+    fn kimi_wire_tolerates_malformed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let wire = dir.path().join("wire.jsonl");
+        std::fs::write(
+            &wire,
+            "not json at all\n{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"content.part\",\"turnId\":\"4\",\"part\":{\"type\":\"text\",\"text\":\"ok\"}}}\n{\"type\":\"context.append_loop_event\"",
+        )
+        .unwrap();
+        assert_eq!(kimi_last_turn_text(&wire).as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn kimi_wire_without_text_parts_yields_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let wire = dir.path().join("wire.jsonl");
+        std::fs::write(
+            &wire,
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","turnId":"1","part":{"type":"think","text":"…"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(kimi_last_turn_text(&wire), None);
+        assert_eq!(kimi_last_turn_text(&dir.path().join("absent.jsonl")), None);
+    }
+
+    #[test]
+    fn kimi_fallback_resolves_the_derived_workdir_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        write_kimi_wire(
+            &paths.kimi_dir,
+            "wd_usr_3030c6a48c39",
+            "sess-1",
+            KIMI_WIRE,
+        );
+        let hook = StopHook {
+            session_id: Some("sess-1".into()),
+            cwd: Some("C:\\Users\\usr".into()),
+            ..StopHook::default()
+        };
+        assert_eq!(
+            hook.last_assistant_text(ClientSource::KimiCode, &paths)
+                .as_deref(),
+            Some("First. Second.")
+        );
+    }
+
+    #[test]
+    fn kimi_fallback_scans_for_a_unique_session_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        write_kimi_wire(&paths.kimi_dir, "wd_other_000000000000", "sess-2", KIMI_WIRE);
+        // cwd does not match the bucket; exactly one session dir exists → still found.
+        let hook = StopHook {
+            session_id: Some("sess-2".into()),
+            cwd: Some("/elsewhere".into()),
+            ..StopHook::default()
+        };
+        assert_eq!(
+            hook.last_assistant_text(ClientSource::KimiCode, &paths)
+                .as_deref(),
+            Some("First. Second.")
+        );
+
+        // A second bucket with the same session id makes the scan ambiguous → silent.
+        write_kimi_wire(&paths.kimi_dir, "wd_other_111111111111", "sess-2", KIMI_WIRE);
+        assert_eq!(
+            resolve_kimi_wire_path(&hook, &paths),
+            None,
+            "ambiguous session dir must not guess"
+        );
+    }
+
+    #[test]
+    fn kimi_fallback_missing_session_dir_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let hook = StopHook {
+            session_id: Some("absent".into()),
+            cwd: Some("C:\\Users\\usr".into()),
+            ..StopHook::default()
+        };
+        assert_eq!(
+            hook.last_assistant_text(ClientSource::KimiCode, &paths),
+            None
+        );
+    }
+
+    #[test]
+    fn kimi_fallback_prefers_an_explicit_transcript_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let wire = dir.path().join("custom-wire.jsonl");
+        std::fs::write(&wire, KIMI_WIRE).unwrap();
+        let hook = StopHook {
+            session_id: Some("sess-3".into()),
+            transcript_path: Some(wire.to_string_lossy().into_owned()),
+            ..StopHook::default()
+        };
+        assert_eq!(
+            hook.last_assistant_text(ClientSource::KimiCode, &paths)
+                .as_deref(),
+            Some("First. Second.")
+        );
     }
 }

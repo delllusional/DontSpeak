@@ -1,6 +1,6 @@
 # Client integrations and launchers
 
-Supported: Claude Code, OpenAI Codex, Qwen Code, Grok. Install reconciles hooks + MCP;
+Supported: Claude Code, OpenAI Codex, Qwen Code, Grok, Kimi Code. Install reconciles hooks + MCP;
 `dontspeak <client>` starts the installed client without replacing its config/args.
 
 Hook internals: [HOOKS.md](HOOKS.md). Streaming state machine:
@@ -28,6 +28,7 @@ terminal after first install for PATH.
 | OpenAI Codex | Yes for an app-server remote TUI | Yes for plain local TUI | Yes | Engine app-server + `codex --remote` |
 | Qwen Code 0.19.10 | Yes (`MessageDisplay`) | Witness suppresses duplicate `Stop` speech | Yes | Direct `qwen` |
 | Grok 0.2.101 | Yes (engine tails `updates.jsonl`) | Yes from `Stop.transcriptPath` when no witness | Yes | Direct `grok` |
+| Kimi Code 0.27.0 | No | Yes from `Stop` wire.jsonl fallback | Yes | Direct `kimi` |
 
 ## Client notes
 
@@ -91,7 +92,7 @@ New Grok session required after first wire or digests toggle.
 `dontspeak wire --reconcile` at install; engine re-reconciles at boot via
 `exclude_clients`. Additive, idempotent, backup-before-write, DontSpeak entries only.
 Client-specific homes are honored through `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
-`QWEN_HOME`, and `GROK_HOME`; relative values resolve from the launch directory and
+`QWEN_HOME`, `GROK_HOME`, and `KIMI_CODE_HOME`; relative values resolve from the launch directory and
 `~/...` values resolve from the user home.
 
 | Client | Hooks | MCP |
@@ -100,6 +101,7 @@ Client-specific homes are honored through `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 | OpenAI Codex | `~/.codex/config.toml` | same |
 | Qwen Code | `~/.qwen/settings.json` | same |
 | Grok | `~/.grok/hooks/dontspeak.json` (+ `~/.grok/AGENTS.md` narrate) | `~/.grok/config.toml` |
+| Kimi Code | `~/.kimi-code/config.toml` (flat `[[hooks]]`) | `~/.kimi-code/mcp.json` |
 
 ```sh
 dontspeak wire --list
@@ -115,6 +117,7 @@ dontspeak wire <client> --print-only
 | OpenAI Codex | 0.144.5 | [hooks](https://developers.openai.com/codex/hooks), [app server](https://developers.openai.com/codex/app-server), [MCP](https://developers.openai.com/codex/mcp) |
 | Qwen Code | 0.19.10 | [hooks](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/hooks.md), [MCP](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/mcp.md) |
 | Grok | 0.2.101 | [CLI](https://docs.x.ai/build/cli/reference), [hooks](https://docs.x.ai/build/features/hooks), [MCP](https://docs.x.ai/build/features/mcp-servers) |
+| Kimi Code | 0.27.0 | [hooks](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html), [MCP](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html) |
 
 Pins record last check, not minimum version.
 
@@ -150,7 +153,7 @@ progress bar (percent as bar only). Strings from `ds-i18n` (`usage.*`).
 
 **Speaking highlight:** while TTS plays, `model_status.running.tts_source` is the
 wireable client token of the in-flight utterance (`claude_code` / `codex` /
-`qwen_code` / `grok`; `null` when idle or non-client). Hosts wash that agent’s
+`qwen_code` / `grok` / `kimi_code`; `null` when idle or non-client). Hosts wash that agent’s
 Usage card with the same brand-purple tint as the top-bar speaking stripe. Source
 is retained on each TTS queue item at enqueue (hooks `source`, stream adapters,
 `GreetSession`) — not inferred from session id.

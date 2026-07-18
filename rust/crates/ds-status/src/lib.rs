@@ -49,8 +49,8 @@ pub struct Running {
     pub stt_active: bool,
     pub tts_active: bool,
     /// Wireable client token for the in-flight TTS utterance (`claude_code` / `codex` /
-    /// `qwen_code` / `grok`). `null` when idle or the producer is not a Usage agent
-    /// (greet / unknown / DontSpeak). Absent key (older engines) → `None`.
+    /// `qwen_code` / `grok` / `kimi_code`). `null` when idle or the producer is not a Usage
+    /// agent (greet / unknown / DontSpeak). Absent key (older engines) → `None`.
     #[serde(default)]
     pub tts_source: Option<String>,
     pub muted: bool,

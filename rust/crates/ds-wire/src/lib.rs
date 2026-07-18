@@ -2,9 +2,10 @@
 //! reconcile ([`reconcile`]). One step wires/unwires a client's full integration (hooks + MCP).
 //!
 //! WHAT to wire is declared in `ds_config::CLIENT_REGISTRY`; this crate walks surfaces and
-//! dispatches on mechanism (`ClaudeJsonHooks`/`ClaudeTomlHooks`/`GrokJsonHooks`/`JsonMcp`/
-//! `TomlMcp`). Same code path for interactive wire and engine reconcile (no drift). Additive,
-//! idempotent, backed-up; absent client ⇒ clean skip. `wire --list` prints the registry.
+//! dispatches on mechanism (`ClaudeJsonHooks`/`ClaudeTomlHooks`/`KimiTomlHooks`/
+//! `GrokJsonHooks`/`JsonMcp`/`TomlMcp`). Same code path for interactive wire and engine
+//! reconcile (no drift). Additive, idempotent, backed-up; absent client ⇒ clean skip.
+//! `wire --list` prints the registry.
 //!
 //! `--print-only` (issue #30): surfaces sharing one file must not each re-read disk (preview
 //! never writes). `wire_surfaces_print_only` groups by config path and threads `PreviewDoc`.
@@ -214,6 +215,15 @@ fn dispatch_surface(
             seed,
             capture,
         ),
+        WireMechanism::KimiTomlHooks => hooks::kimi_toml_hooks(
+            (s.config_file)(paths),
+            spec.target,
+            remove,
+            print_only,
+            paths,
+            seed,
+            capture,
+        ),
         WireMechanism::GrokJsonHooks => {
             hooks::grok_json_hooks((s.config_file)(paths), remove, print_only, paths)
         }
@@ -300,7 +310,10 @@ fn print_captured_doc(mechanism: WireMechanism, cfg: &Path, doc: &PreviewDoc) ->
                 }
             }
         }
-        (WireMechanism::ClaudeTomlHooks | WireMechanism::TomlMcp, PreviewDoc::Toml(s)) => {
+        (
+            WireMechanism::ClaudeTomlHooks | WireMechanism::TomlMcp | WireMechanism::KimiTomlHooks,
+            PreviewDoc::Toml(s),
+        ) => {
             println!("// {}\n{s}", cfg.display());
             0
         }
@@ -338,6 +351,9 @@ fn print_registry(paths: Option<&Paths>) {
                 let how = match s.mechanism {
                     WireMechanism::ClaudeJsonHooks => "voice hooks (Claude contract, JSON)",
                     WireMechanism::ClaudeTomlHooks => "voice hooks (Claude contract, TOML)",
+                    WireMechanism::KimiTomlHooks => {
+                        "voice hooks (Kimi flat [[hooks]], TOML)"
+                    }
                     WireMechanism::GrokJsonHooks => {
                         "voice hooks (Claude contract, JSON — dedicated Grok file)"
                     }
@@ -609,6 +625,95 @@ mod tests {
         );
     }
 
+    /// Kimi Code: hooks (flat `[[hooks]]` TOML) and MCP (Claude-shape JSON) are separate
+    /// files; wire creates both, remove strips both, re-wire is a byte-identical no-op.
+    #[test]
+    fn wire_client_kimi_code_wires_both_surfaces_then_removes_both_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.kimi_dir).unwrap();
+
+        assert_eq!(wire_client(ClientSource::KimiCode, &paths, false, false), 0);
+
+        // Hooks: five events — six entries, UserPromptSubmit carries notify AND provide.
+        let text = std::fs::read_to_string(&paths.kimi_config_toml).unwrap();
+        assert_eq!(
+            text.matches("[[hooks]]").count(),
+            6,
+            "six flat entries: {text}"
+        );
+        for event in [
+            "SessionStart",
+            "SessionEnd",
+            "Stop",
+            "Notification",
+        ] {
+            assert!(
+                text.contains(&format!("event = \"{event}\"")),
+                "{event} wired: {text}"
+            );
+        }
+        assert_eq!(
+            text.matches("event = \"UserPromptSubmit\"").count(),
+            2,
+            "UserPromptSubmit is two entries (notify + provide): {text}"
+        );
+        // InlineShell with the uniform client tail; seconds timeouts; greet-only SessionStart.
+        assert!(
+            text.contains(" notify --greet-only --client kimi_code"),
+            "SessionStart greet-only: {text}"
+        );
+        assert!(
+            text.contains(" provide --client kimi_code"),
+            "provide wired: {text}"
+        );
+        assert!(text.contains("timeout = 600"), "Stop timeout: {text}");
+        // Kimi rejects timeouts above 600 (kimi doctor: "expected number to be <=600").
+        assert!(!text.contains("timeout = 1800"), "over-cap timeout: {text}");
+        // THE HARD CONSTRAINT: nothing but event/command/timeout may appear in an entry —
+        // any extra key makes Kimi reject the whole config.
+        for forbidden in ["matcher", "async", "args", "shell"] {
+            assert!(
+                !text.contains(forbidden),
+                "Kimi forbids `{forbidden}` in a [[hooks]] entry: {text}"
+            );
+        }
+
+        // MCP: the Claude-shape mcpServers entry in the SEPARATE mcp.json.
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.kimi_mcp_json).unwrap())
+                .unwrap();
+        assert!(
+            mcp["mcpServers"]["DontSpeak"]["command"]
+                .as_str()
+                .unwrap()
+                .contains("dontspeak"),
+            "mcp entry wired: {mcp}"
+        );
+
+        // Re-wire: byte-identical, no new .bak (steady-state reconcile invariant).
+        let hooks_before = std::fs::read(&paths.kimi_config_toml).unwrap();
+        let mcp_before = std::fs::read(&paths.kimi_mcp_json).unwrap();
+        let baks_before = count_bak_files(dir.path());
+        assert_eq!(wire_client(ClientSource::KimiCode, &paths, false, false), 0);
+        assert_eq!(std::fs::read(&paths.kimi_config_toml).unwrap(), hooks_before);
+        assert_eq!(std::fs::read(&paths.kimi_mcp_json).unwrap(), mcp_before);
+        assert_eq!(
+            count_bak_files(dir.path()),
+            baks_before,
+            "an unchanged re-wire must create NO new .bak files"
+        );
+
+        // Remove: both surfaces stripped cleanly.
+        assert_eq!(wire_client(ClientSource::KimiCode, &paths, true, false), 0);
+        let text2 = std::fs::read_to_string(&paths.kimi_config_toml).unwrap();
+        assert!(!text2.contains("dontspeak"), "hooks stripped: {text2}");
+        let mcp2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.kimi_mcp_json).unwrap())
+                .unwrap();
+        assert!(mcp2.get("mcpServers").is_none(), "mcp entry stripped: {mcp2}");
+    }
+
     /// Count `.bak.` siblings (prove steady-state reconcile creates none).
     fn count_bak_files(dir: &std::path::Path) -> usize {
         let mut n = 0;
@@ -635,6 +740,7 @@ mod tests {
             &paths.codex_dir,
             &paths.qwen_dir,
             &paths.grok_dir,
+            &paths.kimi_dir,
         ] {
             std::fs::create_dir_all(d).unwrap();
         }
@@ -655,6 +761,14 @@ mod tests {
             "qwen not installed → skipped"
         );
         assert!(!paths.grok_config.exists(), "grok not installed → skipped");
+        assert!(
+            !paths.kimi_config_toml.exists(),
+            "kimi not installed → skipped"
+        );
+        assert!(
+            !paths.kimi_mcp_json.exists(),
+            "kimi not installed → skipped"
+        );
     }
 
     /// No `exclude_clients` ⇒ wire all present clients.
@@ -670,6 +784,8 @@ mod tests {
         assert!(paths.codex_config.exists(), "codex wired");
         assert!(paths.qwen_settings.exists(), "qwen wired");
         assert!(paths.grok_config.exists(), "grok wired");
+        assert!(paths.kimi_config_toml.exists(), "kimi hooks wired");
+        assert!(paths.kimi_mcp_json.exists(), "kimi mcp wired");
     }
 
     /// `exclude_clients` strips a previously-wired client.

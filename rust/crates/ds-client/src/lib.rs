@@ -28,6 +28,8 @@ pub enum ClientSource {
     QwenCode,
     /// Grok (Grok Build) — hooks in `~/.grok/hooks/dontspeak.json`, MCP in `~/.grok/config.toml`.
     Grok,
+    /// Kimi Code — hooks in `~/.kimi-code/config.toml`, MCP in `~/.kimi-code/mcp.json`.
+    KimiCode,
     /// DontSpeak itself. Never wired (`client_spec(DontSpeak)` is `None`).
     DontSpeak,
     /// Unknown caller (foreign MCP name, or no `--client`). Domain value, not a legacy shim —
@@ -45,6 +47,7 @@ impl ClientSource {
         ClientSource::Codex,
         ClientSource::QwenCode,
         ClientSource::Grok,
+        ClientSource::KimiCode,
     ];
 
     /// Parse a canonical token (case/whitespace tolerant). `None` for anything else —
@@ -55,6 +58,7 @@ impl ClientSource {
             "codex" => Some(ClientSource::Codex),
             "qwen_code" => Some(ClientSource::QwenCode),
             "grok" => Some(ClientSource::Grok),
+            "kimi_code" => Some(ClientSource::KimiCode),
             "dontspeak" => Some(ClientSource::DontSpeak),
             "unknown" => Some(ClientSource::Unknown),
             _ => None,
@@ -69,6 +73,7 @@ impl ClientSource {
             ClientSource::Codex => "codex",
             ClientSource::QwenCode => "qwen_code",
             ClientSource::Grok => "grok",
+            ClientSource::KimiCode => "kimi_code",
             ClientSource::DontSpeak => "dontspeak",
             ClientSource::Unknown => "unknown",
         }
@@ -113,6 +118,7 @@ mod tests {
             ClientSource::Codex,
             ClientSource::QwenCode,
             ClientSource::Grok,
+            ClientSource::KimiCode,
             ClientSource::DontSpeak,
             ClientSource::Unknown,
         ] {
@@ -138,7 +144,8 @@ mod tests {
                 ClientSource::ClaudeCode,
                 ClientSource::Codex,
                 ClientSource::QwenCode,
-                ClientSource::Grok
+                ClientSource::Grok,
+                ClientSource::KimiCode
             ]
         );
         for &c in ClientSource::CLIENTS {
@@ -188,6 +195,7 @@ mod tests {
             ClientSource::Codex,
             ClientSource::QwenCode,
             ClientSource::Grok,
+            ClientSource::KimiCode,
             ClientSource::DontSpeak,
             ClientSource::Unknown,
         ] {

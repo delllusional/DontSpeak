@@ -6,7 +6,7 @@ Spec for the desktop **Usage** tab. Matches the shipped implementation on
 ## Goal
 
 Show subscription quota for coding agents DontSpeak supports: Claude Code, Codex,
-Qwen Code, and Grok. Independent of speech-engine stats; works with the engine
+Qwen Code, Grok, and Kimi Code. Independent of speech-engine stats; works with the engine
 stopped; does not extend `model_status`.
 
 ## User-visible behavior
@@ -99,6 +99,7 @@ Out of scope:
 | Codex | short-lived `codex app-server` → `account/rateLimits/read` | 300 min or session label | 10080 min or weekly label | explicit monthly label only |
 | Qwen Code | Alibaba Coding Plan HTTP + env/settings API keys | `per5Hour*` | `perWeek*` | `perBillMonth*` / `perMonth*` |
 | Grok | try `x.ai/billing` via `grok agent stdio`; else gRPC-web `GetGrokCreditsConfig` + Bearer from `~/.grok/auth.json` | — | web: full cycle length ~4–12 days (start→reset); not remaining distance | CLI monthly-named; web else / no cycle start → month (stable) |
+| Kimi Code | `GET https://api.kimi.com/coding/v1/usages` + Bearer from `~/.kimi-code/credentials/kimi-code.json` | `limits[]` 5h window (300 min / 5 h or `5h` label) | top-level `usage` weekly | — |
 
 Windows resolves CLI binaries via `.exe`/`.cmd` (never extensionless npm shebangs).
 

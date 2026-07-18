@@ -53,6 +53,14 @@ pub struct Paths {
     pub grok_hooks_json: PathBuf,
     /// Grok global rules; managed narrate section (hook stdout ignored — issue #95).
     pub grok_agents_md: PathBuf,
+    /// `~/.kimi-code` — presence-gate for `wire kimi_code`.
+    pub kimi_dir: PathBuf,
+    /// Kimi Code hooks file (flat `[[hooks]]` array-of-tables).
+    pub kimi_config_toml: PathBuf,
+    /// Kimi Code MCP entry (`mcpServers.DontSpeak`, Claude shape).
+    pub kimi_mcp_json: PathBuf,
+    /// Kimi Code OAuth credentials (usage stats; read-only).
+    pub kimi_credentials_json: PathBuf,
 }
 
 impl Paths {
@@ -80,6 +88,12 @@ impl Paths {
             &cwd,
             std::env::var_os("GROK_HOME").as_deref(),
             ".grok",
+        );
+        let kimi_dir = client_config_dir(
+            &home,
+            &cwd,
+            std::env::var_os("KIMI_CODE_HOME").as_deref(),
+            ".kimi-code",
         );
         let claude_code_config = claude_override
             .as_deref()
@@ -120,6 +134,10 @@ impl Paths {
             grok_hooks_json: grok_dir.join("hooks").join("dontspeak.json"),
             grok_agents_md: grok_dir.join("AGENTS.md"),
             grok_dir,
+            kimi_config_toml: kimi_dir.join("config.toml"),
+            kimi_mcp_json: kimi_dir.join("mcp.json"),
+            kimi_credentials_json: kimi_dir.join("credentials").join("kimi-code.json"),
+            kimi_dir,
             home,
             claude_dir,
         })
@@ -133,6 +151,7 @@ impl Paths {
         let codex_dir = home.join(".codex");
         let qwen_dir = home.join(".qwen");
         let grok_dir = home.join(".grok");
+        let kimi_dir = home.join(".kimi-code");
         let ds_dir = home.join(".dontspeak");
         Self {
             pidfile: ds_dir.join("speak-hook.pid"),
@@ -158,6 +177,10 @@ impl Paths {
             grok_hooks_json: grok_dir.join("hooks").join("dontspeak.json"),
             grok_agents_md: grok_dir.join("AGENTS.md"),
             grok_dir,
+            kimi_config_toml: kimi_dir.join("config.toml"),
+            kimi_mcp_json: kimi_dir.join("mcp.json"),
+            kimi_credentials_json: kimi_dir.join("credentials").join("kimi-code.json"),
+            kimi_dir,
             home,
             claude_dir,
         }
@@ -389,6 +412,18 @@ mod tests {
     fn default_model_dir_has_the_platform_app_and_models_suffix() {
         let dir = model_dir_under(Path::new("cache-root"));
         assert_eq!(dir, Path::new("cache-root").join(APP_DIR).join("models"));
+    }
+
+    #[test]
+    fn kimi_paths_follow_the_kimi_code_home_layout() {
+        let paths = Paths::rooted_at(Path::new("home"));
+        assert_eq!(paths.kimi_dir, Path::new("home").join(".kimi-code"));
+        assert_eq!(paths.kimi_config_toml, paths.kimi_dir.join("config.toml"));
+        assert_eq!(paths.kimi_mcp_json, paths.kimi_dir.join("mcp.json"));
+        assert_eq!(
+            paths.kimi_credentials_json,
+            paths.kimi_dir.join("credentials").join("kimi-code.json")
+        );
     }
 
     #[test]

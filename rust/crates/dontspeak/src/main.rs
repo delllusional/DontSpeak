@@ -100,6 +100,7 @@ Usage:
   dontspeak codex  [args…]  launch Codex
   dontspeak qwen   [args…]  launch Qwen Code
   dontspeak grok   [args…]  launch Grok
+  dontspeak kimi   [args…]  launch Kimi Code
   dontspeak wire   [args…]  wire/unwire client hooks + MCP
   dontspeak notify          command-hook executor (stdin JSON)
   dontspeak provide         query-hook executor (stdin JSON)
@@ -206,8 +207,8 @@ fn main() {
         Subcommand::Unknown(sub) => {
             let msg = format!(
                 "dontspeak: unknown subcommand {sub:?}; expected `claude`, `codex`, `qwen`, \
-                 `grok`, `notify`, `provide`, `wire`, `--version`, or `--help` (run with no \
-                 arguments for the stdio MCP server)"
+                 `grok`, `kimi`, `notify`, `provide`, `wire`, `--version`, or `--help` (run \
+                 with no arguments for the stdio MCP server)"
             );
             eprintln!("{msg}");
             log::error!(target: "hook", "{msg}");
@@ -372,6 +373,7 @@ mod tests {
             ("codex", ClientSource::Codex),
             ("qwen_code", ClientSource::QwenCode),
             ("grok", ClientSource::Grok),
+            ("kimi_code", ClientSource::KimiCode),
         ] {
             let argv = argv(&["dontspeak", "notify", "--client", tok]);
             assert_eq!(client_from_argv(&argv), want, "{tok}");

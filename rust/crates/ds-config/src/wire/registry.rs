@@ -62,6 +62,13 @@ pub enum WireMechanism {
     /// Because the file is exclusively ours, there is nothing to merge: wire OVERWRITES it
     /// (a backup is taken first) and unwire DELETES it. Shaper: `grok_hooks_value`.
     GrokJsonHooks,
+    /// Kimi Code's voice hooks: a FLAT top-level `[[hooks]]` array-of-tables in
+    /// `~/.kimi-code/config.toml`, edited format-preservingly (`toml_edit`). Each entry may
+    /// carry ONLY `event`/`matcher`/`command`/`timeout` (any extra key breaks Kimi's config
+    /// load), so the shape differs from [`WireMechanism::ClaudeTomlHooks`]'s grouped
+    /// `[[hooks.<Event>]]` tables and needs its own shaper:
+    /// `merge_kimi_hooks`/`strip_kimi_hooks`.
+    KimiTomlHooks,
     /// The stdio `mcpServers.DontSpeak` entry merged into a JSON config. Shaper:
     /// `merge_mcp_server`/`strip_mcp_server`.
     JsonMcp,
@@ -413,6 +420,61 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         verified_client_version: "0.2.101",
         verified_on: "2026-07-15",
     },
+    ClientSpec {
+        target: ClientSource::KimiCode,
+        display_name: "Kimi Code",
+        kind: ClientKind::TerminalCli,
+        launch: LaunchSpec {
+            command: "kimi",
+            aliases: &["kimi-code"],
+            mode: LaunchMode::Direct,
+        },
+        mcp_client_prefix: "kimi",
+        present: |p| p.kimi_dir.exists(),
+        detect_dir: |p| &p.kimi_dir,
+        gate_on_presence: true,
+        // Kimi Code's hooks are a FLAT top-level `[[hooks]]` array-of-tables in
+        // `~/.kimi-code/config.toml`, where an entry may carry ONLY
+        // `event`/`matcher`/`command`/`timeout` — any extra key (`async`, `args`, `shell`)
+        // makes Kimi fail to load the config, so the grouped Codex TOML shape cannot be
+        // reused and `KimiTomlHooks` has its own shaper. Commands are inline shell strings
+        // (seconds timeouts; no `matcher` emitted). Non-streaming client (no MessageDisplay):
+        // SessionStart is greet-only, Stop voices the reply; Kimi DOES have SessionEnd and
+        // Notification events (unlike Codex), so all five lifecycle events are wired.
+        // Stdin payloads carry snake_case `hook_event_name`, which the runtime already parses.
+        //
+        // MCP is a separate file, `~/.kimi-code/mcp.json`, in Claude's `mcpServers` shape —
+        // the unmodified `JsonMcp` mechanism. `~/.kimi-code` itself is overridable via
+        // KIMI_CODE_HOME (see `Paths::resolve`).
+        surfaces: &[
+            Surface {
+                mechanism: WireMechanism::KimiTomlHooks,
+                config_file: |p| &p.kimi_config_toml, // ~/.kimi-code/config.toml
+                load_hint: None,
+                hook_streaming: false,
+                hook_command_style: HookCommandStyle::InlineShell,
+            },
+            Surface {
+                mechanism: WireMechanism::JsonMcp,
+                config_file: |p| &p.kimi_mcp_json, // ~/.kimi-code/mcp.json
+                load_hint: Some("start a new Kimi Code session to load the server"),
+                hook_streaming: false,
+                hook_command_style: HookCommandStyle::ArgsArray, // ignored by JsonMcp
+            },
+        ],
+        docs: &[
+            DocRef {
+                topic: "hooks",
+                url: "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html",
+            },
+            DocRef {
+                topic: "mcp",
+                url: "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html",
+            },
+        ],
+        verified_client_version: "0.27.0",
+        verified_on: "2026-07-18",
+    },
 ];
 
 /// Spec for a wireable client; `None` for DontSpeak/Unknown (by design — not wireable).
@@ -592,6 +654,7 @@ mod tests {
             ("qwen-code", ClientSource::QwenCode),
             ("qwen-cli-mcp-client-DontSpeak", ClientSource::QwenCode),
             ("grok-shell-DontSpeak", ClientSource::Grok),
+            ("kimi-code", ClientSource::KimiCode),
         ] {
             assert_eq!(client_from_mcp_name(name), want, "{name}");
             assert_eq!(

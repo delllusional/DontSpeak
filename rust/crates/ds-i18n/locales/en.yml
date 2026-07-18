@@ -28,6 +28,7 @@ usage:
     codex: Codex
     qwen_code: Qwen Code
     grok: Grok
+    kimi_code: Kimi Code
 
 # ──────────────────────────────── TRAY MENU ─────────────────────────────────
 tray:

@@ -51,7 +51,7 @@ impl UsageRow {
 /// One Usage tab card.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageCard {
-    /// `claude_code` | `codex` | `qwen_code` | `grok`.
+    /// `claude_code` | `codex` | `qwen_code` | `grok` | `kimi_code`.
     pub agent: ClientSource,
     /// Local login label when present (absent for API-key-only / missing identity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -288,6 +288,7 @@ fn fetch_rows(paths: &ds_config::Paths, agent: ClientSource) -> std::io::Result<
         ClientSource::Codex => providers::codex::fetch(paths),
         ClientSource::QwenCode => providers::qwen::fetch(paths),
         ClientSource::Grok => providers::grok::fetch(paths),
+        ClientSource::KimiCode => providers::kimi::fetch(paths),
         ClientSource::DontSpeak | ClientSource::Unknown => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "not a usage agent",
@@ -301,8 +302,11 @@ fn fetch_account(paths: &ds_config::Paths, agent: ClientSource) -> Option<String
         ClientSource::ClaudeCode => providers::claude::account(paths),
         ClientSource::Codex => providers::codex::account(paths),
         ClientSource::Grok => providers::grok::account(paths),
-        // Qwen Coding Plan is API-key only.
-        ClientSource::QwenCode | ClientSource::DontSpeak | ClientSource::Unknown => None,
+        // Qwen Coding Plan is API-key only; Kimi Code has no documented email source.
+        ClientSource::QwenCode
+        | ClientSource::KimiCode
+        | ClientSource::DontSpeak
+        | ClientSource::Unknown => None,
     }
 }
 

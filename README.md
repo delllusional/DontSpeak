@@ -1,6 +1,6 @@
 # DontSpeak
 
-Local voice layer for Claude Code, Codex, Qwen Code, and Grok: the agent speaks
+Local voice layer for Claude Code, Codex, Qwen Code, Grok, and Kimi Code: the agent speaks
 replies aloud; you dictate back with Caps Lock.
 
 ## Install

@@ -1,6 +1,7 @@
 //! Hook writers for the registry mechanisms: [`claude_json_hooks`], [`claude_toml_hooks`],
-//! [`grok_json_hooks`], plus [`seed_and_prune`]. Target file comes from the registry; hook
-//! sets/merges live in `ds-config`; path resolve / read / backup+write live in `super::io`.
+//! [`kimi_toml_hooks`], [`grok_json_hooks`], plus [`seed_and_prune`]. Target file comes from
+//! the registry; hook sets/merges live in `ds-config`; path resolve / read / backup+write
+//! live in `super::io`.
 //!
 //! Additive, idempotent, backed-up. Malformed/unmergeable file left untouched (non-fatal).
 //! Print-only `seed`/`capture`: issue #30 / `crate::wire_surfaces_print_only`.
@@ -211,6 +212,67 @@ pub(crate) fn claude_toml_hooks(
             return 1;
         };
         ds_config::merge_codex_hooks(&existing, &bin, client)
+    };
+    match result {
+        Ok(merged) if print_only => match capture {
+            Some(slot) => {
+                *slot = Some(PreviewDoc::Toml(merged));
+                0
+            }
+            None => {
+                println!("// {}\n{merged}", cfg.display());
+                0
+            }
+        },
+        Ok(merged) if merged != existing => io::backup_then_write(
+            "wire",
+            cfg,
+            "toml",
+            &WriteBody::Str(&merged),
+            hook_action(remove),
+        ),
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("wire: {} left unchanged ({e})", cfg.display());
+            0
+        }
+    }
+}
+
+/// Kimi Code flat-`[[hooks]]` TOML hooks (`KimiTomlHooks`). Same writer contract as
+/// [`claude_toml_hooks`]: format-preserving, malformed config left unchanged (exit 0),
+/// zero-write when unchanged, backup before write. `seed`/`capture`: print-only grouping.
+pub(crate) fn kimi_toml_hooks(
+    cfg: &std::path::Path,
+    client: ClientSource,
+    remove: bool,
+    print_only: bool,
+    paths: &Paths,
+    seed: Option<PreviewDoc>,
+    capture: Option<&mut Option<PreviewDoc>>,
+) -> i32 {
+    let existing = match seed {
+        Some(PreviewDoc::Toml(s)) => s,
+        Some(PreviewDoc::Json(_)) => {
+            panic!("kimi_toml_hooks: seed must be PreviewDoc::Toml for a TOML mechanism")
+        }
+        None => match std::fs::read_to_string(cfg) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                eprintln!("wire: could not read {} ({e})", cfg.display());
+                return 1;
+            }
+        },
+    };
+    let result = if remove {
+        ds_config::strip_kimi_hooks(&existing)
+    } else {
+        let Some(bin) = io::resolve_dontspeak_bin_at(Some(paths)) else {
+            eprintln!("wire: could not resolve the dontspeak binary path");
+            return 1;
+        };
+        ds_config::merge_kimi_hooks(&existing, &bin, client)
     };
     match result {
         Ok(merged) if print_only => match capture {
@@ -752,6 +814,117 @@ mod tests {
 
         assert_eq!(
             claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
+            1
+        );
+    }
+
+    // ── KimiTomlHooks: Kimi Code's flat `[[hooks]]` TOML writer ──────────────────────
+    // Mirrors the `claude_toml_hooks` tests against Kimi's own shaper (flat entries, the
+    // event/command/timeout-only key constraint).
+
+    #[test]
+    fn kimi_toml_hooks_wires_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(
+            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, false, &paths, None, None),
+            0
+        );
+        let first = std::fs::read_to_string(&cfg).unwrap();
+
+        // Flat entries (no [[hooks.<Event>]] groups), SessionStart greet-only with the
+        // uniform `--client kimi_code` tail. toml_edit renders the command as a basic (`"`)
+        // or literal (`'`) string depending on the resolved path (backslashes on Windows).
+        assert!(first.contains("[[hooks]]"), "got {first}");
+        assert!(!first.contains("[[hooks."), "flat shape: {first}");
+        assert!(
+            first.contains(" notify --greet-only --client kimi_code\"")
+                || first.contains(" notify --greet-only --client kimi_code'"),
+            "got {first}"
+        );
+
+        // Re-run: an unchanged command set is a true byte-for-byte no-op.
+        assert_eq!(
+            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, false, &paths, None, None),
+            0
+        );
+        let second = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn kimi_toml_hooks_remove_strips_previously_wired_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(
+            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, false, &paths, None, None),
+            0
+        );
+        assert_eq!(
+            kimi_toml_hooks(&cfg, ClientSource::KimiCode, true, false, &paths, None, None),
+            0
+        );
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(!text.contains("dontspeak"));
+    }
+
+    #[test]
+    fn kimi_toml_hooks_remove_on_missing_file_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(
+            kimi_toml_hooks(&cfg, ClientSource::KimiCode, true, false, &paths, None, None),
+            0
+        );
+        assert!(!cfg.exists());
+    }
+
+    #[test]
+    fn kimi_toml_hooks_malformed_toml_is_left_unchanged_non_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
+        let raw = "hooks = [not valid toml";
+        std::fs::write(&cfg, raw).unwrap();
+
+        assert_eq!(
+            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, false, &paths, None, None),
+            0
+        );
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
+    }
+
+    #[test]
+    fn kimi_toml_hooks_print_only_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(
+            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, true, &paths, None, None),
+            0
+        );
+        assert!(!cfg.exists());
+    }
+
+    /// Same blocked-parent technique as `claude_json_hooks_write_failure_returns_1`, for the
+    /// Kimi TOML writer's `backup_then_write` call.
+    #[test]
+    fn kimi_toml_hooks_write_failure_returns_1() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("blocked"), b"not a directory").unwrap();
+        let cfg = dir.path().join("blocked").join("config.toml");
+        let paths = Paths::rooted_at(dir.path());
+
+        assert_eq!(
+            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, false, &paths, None, None),
             1
         );
     }

@@ -55,7 +55,8 @@ immediately). Spec: [docs/TTS-PIPELINE.md](docs/TTS-PIPELINE.md).
 Streaming mid-turn: shared `ds-narrate` (accumulate → blockquote digests → on-disk
 witness for `Stop` silence). Claude: `MessageDisplay`; Qwen: registry-gated adapter;
 Codex: in-engine app-server subscriber (`dontspeakd::codex_stream`); Grok: in-engine
-file-tail of interactive `updates.jsonl` (`dontspeakd::grok_stream`). See
+file-tail of interactive `updates.jsonl` (`dontspeakd::grok_stream`). Kimi Code:
+non-streaming — `Stop` voices the reply from the session `wire.jsonl`. See
 [docs/STREAMING-NARRATION.md](docs/STREAMING-NARRATION.md) and
 [docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md).
 

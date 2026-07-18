@@ -1,4 +1,4 @@
-//! ONE renderer/recogniser for hook COMMAND STRINGS (Codex, Qwen InlineShell).
+//! ONE renderer/recogniser for hook COMMAND STRINGS (Codex, Qwen InlineShell, Kimi Code).
 //! Claude Code uses argv (`ArgsArray`) and never comes here — only client whose Windows
 //! hooks worked before this module.
 //!
