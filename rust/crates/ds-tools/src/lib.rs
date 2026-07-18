@@ -502,7 +502,11 @@ fn output_schema_for(output: Output) -> Value {
                         "properties": {
                             "agent": {
                                 "type": "string",
-                                "enum": ["claude_code", "codex", "qwen_code", "grok"]
+                                // Registry-driven so a new wireable client can't drift out.
+                                "enum": ds_config::ClientSource::CLIENTS
+                                    .iter()
+                                    .map(|c| c.as_str())
+                                    .collect::<Vec<_>>()
                             },
                             "account": { "type": "string" },
                             "rows": {

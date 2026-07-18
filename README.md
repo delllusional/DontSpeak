@@ -28,6 +28,7 @@ dontspeak claude
 dontspeak codex
 dontspeak qwen
 dontspeak grok
+dontspeak kimi
 ```
 
 Preserves client args and exit status. Codex interactive launches also prep app-server
