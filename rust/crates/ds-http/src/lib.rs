@@ -11,11 +11,95 @@ use std::time::Duration;
 
 pub use attohttpc::{Method, RequestBuilder, Response, body};
 
-/// OS trust store once (workspace rustls leaves attohttpc roots empty). Load errors
-/// ignored; HTTPS fails closed if roots are missing.
-fn os_root_certs() -> &'static [rustls_pki_types::CertificateDer<'static>] {
-    static ROOTS: OnceLock<Vec<rustls_pki_types::CertificateDer<'static>>> = OnceLock::new();
-    ROOTS.get_or_init(|| rustls_native_certs::load_native_certs().certs)
+/// Cap on preserved init diagnostics (paths stripped at source; this bounds text only).
+const MAX_ROOTS_DIAGNOSTIC_LEN: usize = 256;
+/// How many load-error contexts to include in a partial/empty diagnostic.
+const MAX_ROOTS_ERROR_CONTEXTS: usize = 3;
+
+struct OsRoots {
+    certs: Vec<rustls_pki_types::CertificateDer<'static>>,
+    /// Set when the store is empty or load reported errors. Not a log sink —
+    /// process-local so higher layers need not have logging wired yet (#114).
+    diagnostic: Option<String>,
+}
+
+/// OS trust store once (workspace rustls leaves attohttpc roots empty). TLS still
+/// fails closed if roots are missing; empty/partial init is preserved for callers.
+fn os_roots() -> &'static OsRoots {
+    static ROOTS: OnceLock<OsRoots> = OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let loaded = rustls_native_certs::load_native_certs();
+        // `Error::context` is a static phrase without filesystem paths.
+        let contexts: Vec<&str> = loaded.errors.iter().map(|e| e.context).collect();
+        let diagnostic = describe_native_roots_init(loaded.certs.len(), &contexts);
+        OsRoots {
+            certs: loaded.certs,
+            diagnostic,
+        }
+    })
+}
+
+/// Sanitized one-shot note when native roots failed or came back empty.
+/// Independent of application log init; `None` when load looked healthy.
+pub fn native_roots_diagnostic() -> Option<&'static str> {
+    os_roots().diagnostic.as_deref()
+}
+
+/// Pure helper: diagnose empty or partial native-cert load without I/O (#114).
+///
+/// `error_contexts` should already omit paths (e.g. `rustls_native_certs::Error::context`).
+/// Returns `None` when at least one cert loaded and no errors were reported.
+pub fn describe_native_roots_init(cert_count: usize, error_contexts: &[&str]) -> Option<String> {
+    if cert_count > 0 && error_contexts.is_empty() {
+        return None;
+    }
+
+    let mut msg = if cert_count == 0 {
+        String::from("native TLS root store empty (0 certificates loaded)")
+    } else {
+        format!("native TLS root store partially loaded ({cert_count} certificates)")
+    };
+
+    if !error_contexts.is_empty() {
+        msg.push_str("; load errors: ");
+        let take = error_contexts.len().min(MAX_ROOTS_ERROR_CONTEXTS);
+        for (i, ctx) in error_contexts.iter().take(take).enumerate() {
+            if i > 0 {
+                msg.push_str(", ");
+            }
+            push_sanitized(&mut msg, ctx);
+        }
+        let remaining = error_contexts.len().saturating_sub(take);
+        if remaining > 0 {
+            msg.push_str(&format!(", +{remaining} more"));
+        }
+    }
+
+    clamp_diagnostic(&mut msg);
+    Some(msg)
+}
+
+fn push_sanitized(out: &mut String, s: &str) {
+    // Drop controls so diagnostics stay single-line / log-safe if later printed.
+    for ch in s.chars() {
+        if ch.is_control() {
+            out.push('?');
+        } else {
+            out.push(ch);
+        }
+    }
+}
+
+fn clamp_diagnostic(msg: &mut String) {
+    if msg.len() <= MAX_ROOTS_DIAGNOSTIC_LEN {
+        return;
+    }
+    let mut end = MAX_ROOTS_DIAGNOSTIC_LEN;
+    while end > 0 && !msg.is_char_boundary(end) {
+        end -= 1;
+    }
+    msg.truncate(end);
+    msg.push('…');
 }
 
 /// Blocking request: connect/read budgets, optional total timeout, native roots, no redirects.
@@ -34,7 +118,7 @@ pub fn request(
     if let Some(total) = total_timeout {
         builder = builder.timeout(total);
     }
-    for cert in os_root_certs() {
+    for cert in &os_roots().certs {
         builder = builder.add_root_certificate(cert.clone());
     }
     builder
@@ -175,5 +259,65 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "total timeout must fire before the mock delay completes: {elapsed:?}"
         );
+    }
+
+    // #114: pure helper — empty store without load errors.
+    #[test]
+    fn describe_empty_roots_without_errors() {
+        let d = describe_native_roots_init(0, &[]).expect("empty store must diagnose");
+        assert!(d.contains("empty"), "{d}");
+        assert!(d.contains("0 certificates"), "{d}");
+        assert!(!d.contains("load errors"), "{d}");
+    }
+
+    // #114: empty store + load errors include sanitized contexts.
+    #[test]
+    fn describe_empty_roots_with_errors() {
+        let d = describe_native_roots_init(
+            0,
+            &["failed to open system store", "path\nwith\0controls"],
+        )
+        .expect("empty+errors must diagnose");
+        assert!(d.contains("empty"), "{d}");
+        assert!(d.contains("failed to open system store"), "{d}");
+        assert!(!d.contains('\n'), "{d}");
+        assert!(!d.contains('\0'), "{d}");
+        assert!(d.contains('?'), "{d}");
+    }
+
+    // #114: healthy load is silent.
+    #[test]
+    fn describe_healthy_roots_has_no_diagnostic() {
+        assert!(describe_native_roots_init(42, &[]).is_none());
+    }
+
+    // #114: partial load (certs present but errors) is reported.
+    #[test]
+    fn describe_partial_roots_with_errors() {
+        let d = describe_native_roots_init(3, &["failed to read PEM from file"])
+            .expect("partial load must diagnose");
+        assert!(d.contains("partially loaded"), "{d}");
+        assert!(d.contains("3 certificates"), "{d}");
+        assert!(d.contains("failed to read PEM from file"), "{d}");
+    }
+
+    // #114: many errors are capped; remainder counted.
+    #[test]
+    fn describe_roots_caps_error_contexts() {
+        let contexts = ["a", "b", "c", "d", "e"];
+        let d = describe_native_roots_init(0, &contexts).expect("empty must diagnose");
+        assert!(d.contains("+2 more"), "{d}");
+        assert!(d.contains('a') && d.contains('c'), "{d}");
+        assert!(!d.contains(", d"), "{d}");
+    }
+
+    // #114: diagnostic text is length-bounded.
+    #[test]
+    fn describe_roots_bounds_diagnostic_length() {
+        let long = "x".repeat(MAX_ROOTS_DIAGNOSTIC_LEN + 64);
+        let d = describe_native_roots_init(0, &[&long]).expect("empty must diagnose");
+        // Cap + ellipsis (ellipsis may be multi-byte).
+        assert!(d.chars().count() <= MAX_ROOTS_DIAGNOSTIC_LEN + 1, "{}", d.len());
+        assert!(d.ends_with('…'), "{d}");
     }
 }
