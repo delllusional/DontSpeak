@@ -156,6 +156,6 @@ progress bar (percent as bar only). Strings from `ds-i18n` (`usage.*`).
 **Speaking highlight:** while TTS plays, `model_status.running.tts_source` is the
 wireable client token of the in-flight utterance (`claude_code` / `codex` /
 `qwen_code` / `grok` / `kimi_code`; `null` when idle or non-client). Hosts wash that agent’s
-Usage card with the same brand-purple tint as the top-bar speaking stripe. Source
-is retained on each TTS queue item at enqueue (hooks `source`, stream adapters,
-`GreetSession`) — not inferred from session id.
+Usage card with a random pastel from `ds_random_pastel_wash_json` (top-bar speaking
+stripe stays brand purple). Source is retained on each TTS queue item at enqueue
+(hooks `source`, stream adapters, `GreetSession`) — not inferred from session id.

@@ -18,7 +18,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ATTRIBUTION_CACHE_FILE,
+  activeAgentEnvironment,
   commandFromHookInput,
+  detectClient,
   ensureCommitMessageHook,
   gitCommitInvocations,
   gitCommitWorkingDirectory,
@@ -56,7 +58,22 @@ function isolatedGitEnvironment(t) {
       else process.env[key] = value;
     }
   });
-  return { configFile, env: { ...process.env } };
+  // Strip host agent markers so spawnSync git/hooks see a clean "no CLI" env
+  // (this harness may run under Grok/Claude with GROK_AGENT etc. set).
+  const env = { ...process.env };
+  for (const key of [
+    "GROK_AGENT",
+    "GROK_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_PROJECT_DIR",
+    "CODEX_THREAD_ID",
+    "QWEN_CODE",
+    "QWEN_PROJECT_DIR",
+    "QWEN_SESSION_ID",
+  ]) {
+    delete env[key];
+  }
+  return { configFile, env };
 }
 
 function jsonLines(file, rows) {
@@ -343,6 +360,44 @@ test("Grok reads the current session model and reasoning effort", (t) => {
   assert.equal(result.model, "grok-4.5");
   assert.equal(result.effort, "high");
   assert.deepEqual(result.errors, []);
+});
+
+test("Grok prefers summary model/effort and falls back when only GROK_AGENT is set", (t) => {
+  const home = temporaryDirectory(t);
+  const cwd = join(home, "work");
+  mkdirSync(cwd, { recursive: true });
+  const session = join(home, ".grok", "sessions", "proj", "session-cwd");
+  mkdirSync(session, { recursive: true });
+  writeFileSync(join(session, "summary.json"), JSON.stringify({
+    current_model_id: "grok-4.5",
+    reasoning_effort: "high",
+    git_root_dir: cwd,
+    last_active_at: "2026-07-18T20:00:00Z",
+  }));
+  // Per-turn build slug must not override the product model the user selected.
+  jsonLines(join(session, "chat_history.jsonl"), [
+    { type: "assistant", model_id: "grok-4.5-build", reasoning_effort: "high" },
+  ]);
+  const byCwd = resolveAttribution(
+    "grok",
+    { cwd },
+    { home, env: { GROK_AGENT: "1" } },
+  );
+  assert.equal(byCwd.model, "grok-4.5");
+  assert.equal(byCwd.effort, "high");
+  assert.deepEqual(byCwd.errors, []);
+});
+
+test("GROK_AGENT alone marks an active Grok agent environment", () => {
+  assert.deepEqual(activeAgentEnvironment({ GROK_AGENT: "1" }), {
+    client: "grok",
+    sessionId: undefined,
+  });
+  assert.deepEqual(
+    activeAgentEnvironment({ GROK_AGENT: "1", GROK_SESSION_ID: "sess" }),
+    { client: "grok", sessionId: "sess" },
+  );
+  assert.equal(detectClient("auto", {}, { GROK_AGENT: "1" }), "grok");
 });
 
 test("Grok reports none only when the catalog proves reasoning is unsupported", (t) => {

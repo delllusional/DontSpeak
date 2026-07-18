@@ -787,6 +787,8 @@ public sealed partial class MainWindow : Window
 
     private TrayIcon.IconState _accentState = (TrayIcon.IconState)(-1);
     private string? _speakingUsageAgent;
+    /// Pre-multiplied α wash from <see cref="Brand.RandomPastelWash"/>; re-rolled when speaking agent changes.
+    private Windows.UI.Color? _speakingWash;
 
     private void SizeStateStripe()
     {
@@ -828,11 +830,12 @@ public sealed partial class MainWindow : Window
         StateStripe.Background = BrandWashBrush(basis);
     }
 
-    /// <summary>Purple wash on the speaking agent card (top-bar stripe parity).</summary>
+    /// <summary>Random pastel wash on the speaking agent Usage card (top bar stays brand purple).</summary>
     private void ApplyUsageSpeakingAccent(string? agent)
     {
         if (string.Equals(_speakingUsageAgent, agent, StringComparison.Ordinal)) return;
         _speakingUsageAgent = agent;
+        _speakingWash = agent is null ? null : Brand.RandomPastelWash();
         foreach (var (name, shell) in _usageCardShells)
             shell.Background = UsageCardBackground(name);
     }
@@ -840,7 +843,14 @@ public sealed partial class MainWindow : Window
     private Brush UsageCardBackground(string agent)
     {
         if (string.Equals(agent, _speakingUsageAgent, StringComparison.Ordinal))
-            return BrandWashBrush(Brand.SeedPurple);
+        {
+            var wash = _speakingWash ?? Brand.RandomPastelWash();
+            if (wash is Windows.UI.Color c)
+            {
+                _speakingWash = c;
+                return new SolidColorBrush(c);
+            }
+        }
         if (Application.Current.Resources.TryGetValue(
                 "CardBackgroundFillColorDefaultBrush", out var background)
             && background is Brush backgroundBrush)
@@ -848,7 +858,7 @@ public sealed partial class MainWindow : Window
         return new SolidColorBrush(Windows.UI.Color.FromArgb(0, 0, 0, 0));
     }
 
-    /// <summary>~30% translucent wash — shared by top stripe and speaking Usage card.</summary>
+    /// <summary>~30% translucent brand wash for the top stripe only.</summary>
     private static SolidColorBrush BrandWashBrush(Windows.UI.Color basis)
     {
         const double Tint = 0.30;

@@ -25,7 +25,10 @@ Capture sources:
 - **Codex** — hook model slug; turn context for effort.
 - **Claude** — transcript for model; tool hooks for applied effort.
 - **Qwen** — transcript for model; settings for `/effort` (no separate post-provider field).
-- **Grok** — session model + effort. `none` only when the catalog says effort is unsupported.
+- **Grok** — session model + effort (`summary.reasoning_effort` / chat turns).
+  `none` only when the catalog says effort is unsupported. Tool shells may only
+  set `GROK_AGENT` (no `GROK_SESSION_ID`); capture then resolves the newest
+  session matching the worktree cwd.
 
 Claude auto-`Co-Authored-By` is disabled via `.claude/settings.json` `attribution`.
 If Codex/Qwen still emit auto-attribution, the commit hook strips it.

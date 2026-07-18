@@ -31,6 +31,7 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_homepage_url();
     [DllImport(Dll)] private static extern IntPtr ds_brand_colors_json();
     [DllImport(Dll)] private static extern IntPtr ds_log_colors_json();
+    [DllImport(Dll)] private static extern IntPtr ds_random_pastel_wash_json();
     [DllImport(Dll)] private static extern IntPtr ds_update_check_json();
     // Shared status-panel formatters (one impl, every platform UI).
     [DllImport(Dll)] private static extern IntPtr ds_engine_state_word([MarshalAs(UnmanagedType.LPUTF8Str)] string state, double progress, [MarshalAs(UnmanagedType.LPUTF8Str)] string why);
@@ -93,6 +94,8 @@ internal static class Native
     public static string BrandColorsJson() => TakeString(ds_brand_colors_json());
     /// <summary>Logs-tab colors JSON; "{}" → <see cref="Brand"/> built-in palette.</summary>
     public static string LogColorsJson() => TakeString(ds_log_colors_json());
+    /// <summary>One random Usage speaking wash <c>{"r","g","b","a"}</c>; "{}" on failure.</summary>
+    public static string RandomPastelWashJson() => TakeString(ds_random_pastel_wash_json());
 
     /// <summary>BLOCKS on GitHub API GET — call off UI thread. Parse with
     /// <see cref="ParseUpdateAvailable"/> / <see cref="ParseLatestVersion"/>.</summary>

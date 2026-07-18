@@ -148,6 +148,10 @@ pub fn homepage_url() -> String {
 pub fn brand_colors_json() -> String {
     take(sys::ds_brand_colors_json())
 }
+/// One random Usage speaking wash `{"r","g","b","a"}` from ds-core (shared recipe).
+pub fn random_pastel_wash_json() -> String {
+    take(sys::ds_random_pastel_wash_json())
+}
 /// Startup update check (`ds_update_check_json`): blocking HTTP to GitHub. Background thread
 /// only (see `main.rs`). `"{}"` on any failure; missing `update_available` ⇒ false.
 pub fn update_check_json() -> String {

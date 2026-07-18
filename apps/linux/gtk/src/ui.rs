@@ -573,6 +573,7 @@ fn make_version_link(row: &adw::ExpanderRow, url: &str) -> gtk::Label {
 }
 
 /// Brand purple for update badge + usage progress (from [`crate::icon::brand_colors`]).
+/// Speaking-card wash color is dynamic (see [`UsagePage::set_speaking_agent`]).
 pub fn load_update_badge_css() {
     let (crate::icon::Rgb(r, g, b), _mic_orange) =
         crate::icon::brand_colors(&crate::ffi::brand_colors_json());
@@ -586,7 +587,6 @@ pub fn load_update_badge_css() {
             background-color: rgb({r}, {g}, {b});
         }}
         .ds-usage-speaking {{
-            background-color: rgba({r}, {g}, {b}, 0.30);
             border-radius: 12px;
         }}"
     );
@@ -599,6 +599,16 @@ pub fn load_update_badge_css() {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }
+}
+
+/// One roll from `ds_random_pastel_wash_json` — `(r,g,b,a)`; `None` if FFI/`{}`.
+fn random_pastel_wash() -> Option<(u8, u8, u8, f64)> {
+    let v: serde_json::Value = serde_json::from_str(&crate::ffi::random_pastel_wash_json()).ok()?;
+    let r = v.get("r")?.as_u64()? as u8;
+    let g = v.get("g")?.as_u64()? as u8;
+    let b = v.get("b")?.as_u64()? as u8;
+    let a = v.get("a").and_then(|x| x.as_f64()).unwrap_or(0.30);
+    Some((r, g, b, a.clamp(0.0, 1.0)))
 }
 
 /// One-shot startup update result. `{}` / missing-or-false `update_available` / missing
@@ -737,6 +747,10 @@ struct UsagePage {
     generation: std::rc::Rc<std::cell::Cell<u64>>,
     /// In-flight TTS agent token (`running.tts_source`); drives `.ds-usage-speaking` wash.
     speaking_agent: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+    /// Pastel wash frozen while the same agent stays speaking; re-rolled on agent change.
+    speaking_wash: std::rc::Rc<std::cell::RefCell<Option<(u8, u8, u8, f64)>>>,
+    /// Dynamic CSS for `.ds-usage-speaking` background (one provider, reloaded on re-roll).
+    speaking_css: gtk::CssProvider,
 }
 
 impl UsagePage {
@@ -754,6 +768,14 @@ impl UsagePage {
             .build();
         let empty_label = gtk::Label::new(Some(&t("usage.unavailable")));
         root.append(&scrolled(&list));
+        let speaking_css = gtk::CssProvider::new();
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &speaking_css,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
         Self {
             root,
             list,
@@ -763,17 +785,43 @@ impl UsagePage {
             empty_label,
             generation: std::rc::Rc::new(std::cell::Cell::new(0)),
             speaking_agent: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            speaking_wash: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            speaking_css,
         }
     }
 
-    /// Brand-purple wash on the card whose agent matches the speaking TTS source.
+    /// Random pastel wash on the card whose agent matches the speaking TTS source.
     fn set_speaking_agent(&self, agent: Option<&str>) {
         let next = agent.map(str::to_string);
         if *self.speaking_agent.borrow() == next {
             return;
         }
         *self.speaking_agent.borrow_mut() = next;
+        *self.speaking_wash.borrow_mut() = if self.speaking_agent.borrow().is_some() {
+            random_pastel_wash()
+        } else {
+            None
+        };
+        self.reload_speaking_css();
         self.refresh_speaking_wash();
+    }
+
+    fn reload_speaking_css(&self) {
+        let css = if let Some((r, g, b, a)) = *self.speaking_wash.borrow() {
+            format!(
+                ".ds-usage-speaking {{
+                    background-color: rgba({r}, {g}, {b}, {a});
+                    border-radius: 12px;
+                }}"
+            )
+        } else {
+            // Radius only; no fill while idle (class may still briefly be present).
+            ".ds-usage-speaking {
+                border-radius: 12px;
+            }"
+            .to_string()
+        };
+        self.speaking_css.load_from_string(&css);
     }
 
     fn refresh_speaking_wash(&self) {

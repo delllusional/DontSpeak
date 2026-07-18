@@ -198,6 +198,44 @@ function findGrokSession(home, sessionId) {
   return undefined;
 }
 
+/// Newest Grok session whose summary cwd/git_root matches `cwd` (path-normalized).
+function findLatestGrokSession(home, cwd) {
+  if (!cwd) return undefined;
+  const base = join(home, ".grok", "sessions");
+  if (!existsSync(base)) return undefined;
+  const want = normalizePathKey(cwd);
+  let best;
+  let bestAt = "";
+  for (const project of readDirNames(base)) {
+    for (const id of readDirNames(join(base, project))) {
+      const dir = join(base, project, id);
+      const summary = loadJson(join(dir, "summary.json"));
+      if (!summary) continue;
+      const roots = [
+        summary.git_root_dir,
+        summary.info?.cwd,
+        summary.cwd,
+      ].filter(Boolean).map(normalizePathKey);
+      if (!roots.some((r) => r === want || want.startsWith(`${r}/`) || r.startsWith(`${want}/`))) {
+        continue;
+      }
+      const at = firstString(summary.last_active_at, summary.updated_at, summary.created_at) ?? "";
+      if (!best || at > bestAt) {
+        best = dir;
+        bestAt = at;
+      }
+    }
+  }
+  return best;
+}
+
+function normalizePathKey(pathValue) {
+  return String(pathValue)
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
 function readDirNames(directory) {
   try {
     return readdirSync(directory, { withFileTypes: true })
@@ -222,9 +260,18 @@ function grokSessionValues(sessionDirectory) {
     const effort = normalizedEffort(firstString(row.reasoning_effort, row.reasoningEffort));
     return model || effort ? { model, effort } : undefined;
   });
+  // Prefer the session's configured product slug (`current_model_id`, e.g. grok-4.5)
+  // over per-turn build variants (`grok-4.5-build`) so the Agent trailer matches
+  // what the user selected. Effort: turn rows first, then summary.reasoning_effort
+  // (always written on modern Grok sessions even when chat lines are sparse).
   return {
-    model: firstString(assistant?.model, event?.model, summary?.current_model_id),
-    effort: normalizedEffort(firstString(assistant?.effort, event?.effort)),
+    model: firstString(summary?.current_model_id, assistant?.model, event?.model),
+    effort: normalizedEffort(firstString(
+      assistant?.effort,
+      event?.effort,
+      summary?.reasoning_effort,
+      summary?.reasoningEffort,
+    )),
   };
 }
 
@@ -282,7 +329,13 @@ function resolveQwen(input, root, home) {
 
 function resolveGrok(input, env, home) {
   const sessionId = firstString(input?.sessionId, input?.session_id, env.GROK_SESSION_ID);
-  const session = grokSessionValues(findGrokSession(home, sessionId));
+  // Shell tools often set GROK_AGENT=1 without GROK_SESSION_ID. Fall back to the
+  // newest session whose cwd/git_root matches this worktree so effort is not lost.
+  const sessionDirectory = findGrokSession(home, sessionId)
+    ?? ((env.GROK_AGENT || env.GROK_SESSION_ID)
+      ? findLatestGrokSession(home, firstString(input?.cwd, input?.workspaceRoot, env.GROK_CWD))
+      : undefined);
+  const session = grokSessionValues(sessionDirectory);
   const model = firstString(input?.modelId, input?.model_id, input?.model, session.model);
   const hookEffort = directEffort(input);
   let effort = hookEffort ?? session.effort;
@@ -343,7 +396,8 @@ export function validateAttribution(model, effort) {
 
 export function detectClient(requested, input, env = process.env) {
   if (requested && requested !== "auto") return requested;
-  if (env.GROK_SESSION_ID) return "grok";
+  // GROK_AGENT is set on tool shells even when GROK_SESSION_ID is omitted.
+  if (env.GROK_SESSION_ID || env.GROK_AGENT) return "grok";
   if (env.CODEX_THREAD_ID) return "codex";
   if (env.QWEN_CODE || env.QWEN_PROJECT_DIR) return "qwen";
   if (env.CLAUDE_CODE_SESSION_ID || env.CLAUDE_PROJECT_DIR) return "claude";
@@ -784,7 +838,11 @@ export function sessionIdFromInput(input, env = process.env) {
 }
 
 export function activeAgentEnvironment(env = process.env) {
-  if (env.GROK_SESSION_ID) return { client: "grok", sessionId: env.GROK_SESSION_ID };
+  // GROK_AGENT alone marks an agent shell (session id may be absent on some
+  // Grok tool runners). Prefer GROK_SESSION_ID when both are present.
+  if (env.GROK_SESSION_ID || env.GROK_AGENT) {
+    return { client: "grok", sessionId: env.GROK_SESSION_ID || undefined };
+  }
   if (env.CODEX_THREAD_ID) return { client: "codex", sessionId: env.CODEX_THREAD_ID };
   if (env.CLAUDE_CODE_SESSION_ID) return { client: "claude", sessionId: env.CLAUDE_CODE_SESSION_ID };
   if (env.QWEN_CODE || env.QWEN_PROJECT_DIR) return { client: "qwen", sessionId: env.QWEN_SESSION_ID };

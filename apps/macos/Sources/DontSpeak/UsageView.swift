@@ -128,10 +128,12 @@ struct UsageView: View {
 
 private struct UsageCardView: View {
     let card: UsageCard
-    /// In-flight TTS matches this agent — brand-purple wash (parity with top-bar speaking tint).
+    /// In-flight TTS matches this agent — pastel from `ds_random_pastel_wash_json` (top-bar stays brand purple).
     var speaking: Bool = false
     /// Session-only reveal; resets when the view is recreated (tab reload / process restart).
     @State private var accountRevealed = false
+    /// Frozen while `speaking` stays true; re-rolled only on false → true.
+    @State private var wash: Color?
 
     private var accountLabel: String? {
         guard let account = card.account?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -171,11 +173,18 @@ private struct UsageCardView: View {
             .platterBackground(cornerRadius: Glass.platterCorner)
         }
         .overlay {
-            if speaking {
+            if speaking, let wash {
                 RoundedRectangle(cornerRadius: Glass.platterCorner, style: .continuous)
-                    .fill(Color.smSeedPurple.opacity(0.30))
+                    .fill(wash)
                     .allowsHitTesting(false)
             }
+        }
+        .onAppear {
+            // First paint may already be speaking; onChange only fires on later edges.
+            if speaking { wash = Brand.randomPastelWash() }
+        }
+        .onChange(of: speaking) { _, on in
+            if on { wash = Brand.randomPastelWash() }
         }
         .animation(.easeInOut(duration: 0.2), value: speaking)
     }

@@ -38,3 +38,5 @@ apps/windows/installer/portable/
 # Windows .NET build artifacts (winui + winui.tests)
 apps/windows/**/bin/
 apps/windows/**/obj/
+
+.worktrees/

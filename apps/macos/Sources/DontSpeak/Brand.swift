@@ -70,3 +70,22 @@ extension Color {
     /// Brand accent for neutral "notice me" cues (e.g. update-available pill) — not a warning.
     static let smSeedPurple = Color(nsColor: Brand.seedPurple)
 }
+
+extension Brand {
+    /// One roll from `ds_random_pastel_wash_json` (Rust recipe). Nil if FFI fails.
+    static func randomPastelWash() -> Color? {
+        guard let json = ffiString(ds_random_pastel_wash_json),
+            let data = json.data(using: .utf8),
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let r = obj["r"] as? Int, let g = obj["g"] as? Int, let b = obj["b"] as? Int
+        else { return nil }
+        let a = (obj["a"] as? Double) ?? (obj["a"] as? NSNumber)?.doubleValue ?? 0.30
+        return Color(
+            .sRGB,
+            red: Double(r) / 255.0,
+            green: Double(g) / 255.0,
+            blue: Double(b) / 255.0,
+            opacity: a
+        )
+    }
+}

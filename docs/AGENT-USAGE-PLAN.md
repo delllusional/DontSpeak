@@ -62,8 +62,14 @@ balance, charts, or raw provider errors.
 
 While TTS is playing an utterance from a wireable client, `model_status.running`
 includes `tts_source` (`claude_code` / `codex` / `qwen_code` / `grok` / `kimi_code`; `null` when
-idle or non-client). Hosts wash that agent’s Usage card with the same brand-purple
-tint as the top-bar speaking stripe.
+idle or non-client). Hosts wash that agent’s Usage card with a **random pastel tint**
+from `ds_random_pastel_wash_json` (single recipe in `ds-core`: HSV random H, S=0.42,
+V=0.92, α=0.30 → `{"r","g","b","a"}`). A new pastel is chosen when `tts_source`
+becomes non-null or changes agent; the color is **frozen** for the continuous
+highlight on that agent. Clear on idle (`tts_source` null).
+
+The **top-bar speaking stripe** remains brand purple. Usage progress bars remain
+brand purple. Pastel wash is Usage-card-only; hosts only paint and freeze (no local HSV).
 
 **Pipe (one producer field → one status field → host match):**
 
@@ -72,7 +78,7 @@ tint as the top-bar speaking stripe.
    session.
 2. Worker claim publishes `PlayingClaim { source, session }`.
 3. `tts_running()` → `(tts_active, Option<source>)` filtering `ClientSource::is_client()`.
-4. Hosts: if `tts_source == card.agent`, apply speaking wash.
+4. Hosts: if `tts_source == card.agent`, apply speaking pastel wash.
 
 Queued earcons that set `tts_active` use the same claim. Out-of-band needs-input
 cues under focus hold do **not** claim playback (pre-existing half-duplex rule) and

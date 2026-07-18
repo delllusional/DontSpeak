@@ -91,4 +91,30 @@ internal static class Brand
             return WinColor.FromArgb(0xFF, r, g, b);
         return WinColor.FromArgb(0xFF, 0xFF, 0x00, 0xFF);
     }
+
+    /// <summary>
+    /// One roll from <c>ds_random_pastel_wash_json</c> (Rust recipe). Null if engine down / malformed.
+    /// </summary>
+    public static WinColor? RandomPastelWash()
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(Native.RandomPastelWashJson());
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("r", out var jr)
+                || !root.TryGetProperty("g", out var jg)
+                || !root.TryGetProperty("b", out var jb)
+                || !root.TryGetProperty("a", out var ja))
+                return null;
+            if (!jr.TryGetByte(out var r) || !jg.TryGetByte(out var g) || !jb.TryGetByte(out var b))
+                return null;
+            var a = ja.ValueKind == JsonValueKind.Number ? ja.GetDouble() : 0.30;
+            a = Math.Clamp(a, 0.0, 1.0);
+            return WinColor.FromArgb((byte)Math.Round(255.0 * a), r, g, b);
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }

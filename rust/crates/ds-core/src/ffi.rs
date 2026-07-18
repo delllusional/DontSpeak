@@ -284,6 +284,14 @@ pub extern "C" fn ds_log_colors_json() -> *mut c_char {
     guard_str("{}", || to_cstring(crate::LOG_COLORS_JSON))
 }
 
+/// One random Usage speaking-card wash: `{"r","g","b","a"}` (opaque RGB + wash alpha).
+/// New color each call; hosts freeze while `tts_source` is unchanged. Owned `char*`.
+/// HANDLE-FREE.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_random_pastel_wash_json() -> *mut c_char {
+    guard_str("{}", || to_cstring(crate::pastel::random_pastel_wash_json()))
+}
+
 /// Workspace version for About. Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_version() -> *mut c_char {
@@ -549,6 +557,10 @@ mod tests {
         let logs: serde_json::Value =
             serde_json::from_str(&take_string(ds_log_colors_json())).unwrap();
         assert!(logs["source_palette"].as_array().is_some());
+        let wash: serde_json::Value =
+            serde_json::from_str(&take_string(ds_random_pastel_wash_json())).unwrap();
+        assert!(wash["r"].as_u64().is_some());
+        assert!(wash["a"].as_f64().is_some());
         let libraries: serde_json::Value =
             serde_json::from_str(&take_string(ds_libraries_json())).unwrap();
         assert!(!libraries.as_array().unwrap().is_empty());

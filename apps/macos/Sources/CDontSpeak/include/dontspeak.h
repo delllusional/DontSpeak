@@ -165,6 +165,12 @@ char *ds_brand_colors_json(void);
 // `ds_string_free`. HANDLE-FREE — no engine.
 char *ds_log_colors_json(void);
 
+// One random Usage speaking-card pastel wash as JSON `{"r","g","b","a"}` (opaque sRGB +
+// wash alpha). Single recipe in ds-core (HSV random H, fixed S/V); hosts only paint and freeze
+// while tts_source is unchanged. New color each call. Owned `char*`, free with `ds_string_free`.
+// HANDLE-FREE — no engine. On failure returns "{}" (host skips wash).
+char *ds_random_pastel_wash_json(void);
+
 // The product version (the Rust workspace version) for the About screen — one
 // shared source for every platform's UI. Owned `char*`, free with
 // `ds_string_free`. HANDLE-FREE — no engine needed.

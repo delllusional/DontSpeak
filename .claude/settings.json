@@ -6,11 +6,11 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Shell|run_terminal_command",
         "hooks": [
           {
             "type": "command",
-            "command": "IFS= read -rd '' input || true\ncase \"$input\" in *commit*|*merge*) node \"$CLAUDE_PROJECT_DIR/scripts/agents/capture-agent-attribution.mjs\" auto <<DONTSPEAK_JSON\n$input\nDONTSPEAK_JSON\n;; esac",
+            "command": "IFS= read -rd '' input || true\ncase \"$input\" in *commit*|*merge*) ROOT=\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null)}\"; node \"$ROOT/scripts/agents/capture-agent-attribution.mjs\" auto <<DONTSPEAK_JSON\n$input\nDONTSPEAK_JSON\n;; esac",
             "shell": "bash",
             "timeout": 30
           }
