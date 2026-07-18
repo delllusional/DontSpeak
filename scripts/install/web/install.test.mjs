@@ -37,13 +37,12 @@ printf '#!/bin/sh\nexit 0\n' > "$DONTSPEAK_INSTALL_DIR/dontspeak-uninstall"
 chmod +x "$DONTSPEAK_INSTALL_DIR/dontspeak-uninstall"
 `,
   );
-  execFileSync("tar", [
-    "-czf",
-    archive,
-    "-C",
-    join(root, "package"),
-    assetName.replace(".tar.gz", ""),
-  ]);
+  // Relative paths + cwd: absolute Windows paths make GNU tar treat `C:` as a host.
+  execFileSync(
+    "tar",
+    ["-czf", assetName, "-C", "package", assetName.replace(".tar.gz", "")],
+    { cwd: root },
+  );
 
   const archiveBytes = await readFile(archive);
   const sha256 = createHash("sha256").update(archiveBytes).digest("hex");
