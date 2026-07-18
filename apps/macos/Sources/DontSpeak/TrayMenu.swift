@@ -18,8 +18,9 @@ struct TrayMenu: View {
         }
 
         // Mute + Settings share a group; only Quit gets a separator (HIG: related items together).
+        // Re-open preserves the last sidebar selection (default `.usage` = first tab on cold start).
         Button {
-            open(.status)
+            openWindow.activating("main")
         } label: {
             Label(L.t("tray.settings"), systemImage: "wrench.and.screwdriver")
         }
@@ -31,11 +32,5 @@ struct TrayMenu: View {
         } label: {
             Label(L.t("tray.quit"), systemImage: "power")
         }
-    }
-
-    /// Select `screen` first so an already-open window also jumps to it.
-    private func open(_ screen: AppScreen) {
-        core.screen = screen
-        openWindow.activating("main")
     }
 }

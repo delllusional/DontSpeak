@@ -18,11 +18,12 @@
 //!   (B) FALLBACK — the `ort` crate's own `download-binaries` cargo feature
 //!       fetches a vetted ORT at BUILD time. Not the default (it bakes the lib).
 //!
-//! Minimal deps by design: `attohttpc` (tiny blocking HTTP over rustls, no tokio;
-//! its socket-level `read_timeout` gives a per-read INACTIVITY timeout — right for
-//! large model downloads), `sha2`, `tempfile` (atomic rename), plus `flate2`+`tar`
-//! ONLY for the one-member ORT `.tgz` extraction (model paths come from ds-config).
-//! No async runtime in the engine.
+//! Minimal deps by design: `attohttpc` via `ds-http` (tiny blocking HTTP over rustls,
+//! no tokio; socket-level `read_timeout` is a per-read INACTIVITY timeout — right for
+//! large model downloads, which intentionally omit a wall-clock total timeout),
+//! `sha2`, `tempfile` (atomic rename), plus `flate2`+`tar` ONLY for the one-member
+//! ORT `.tgz` extraction (model paths come from ds-config). No async runtime in the
+//! engine.
 //!
 //! A stalled download retains its partial temp file and resumes with a validated HTTP Range
 //! request. Download progress is exposed by the engine. The pure fns below are network-free

@@ -225,6 +225,7 @@ pub(crate) fn spawn_supervisor(
             let mut speak = move |session: &str, utterance: &NarrationUtterance| {
                 ttsq.enqueue_narration(
                     utterance.text.clone(),
+                    ds_config::ClientSource::Grok,
                     Some(session.to_string()),
                     Some(utterance.id.clone()),
                 )

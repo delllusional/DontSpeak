@@ -34,6 +34,8 @@ struct Activity: Sendable, Equatable {
     var capsWanted = false
     var sttActive = false
     var ttsActive = false
+    /// Wireable client of the in-flight TTS utterance (`claude_code`/…); nil when idle.
+    var ttsSource: String? = nil
     /// Playback continues but silenced; menu-bar slash.
     var muted = false
     /// Color/animate tokens; [] = never color. Default: static mic + breathing voice.
@@ -97,7 +99,7 @@ struct HealthSnapshot: Sendable, Equatable {
 @Observable @MainActor
 final class Core {
     /// Sidebar selection — also set by tray menu before openWindow.
-    var screen: AppScreen = .status
+    var screen: AppScreen = .usage
 
     var activity = Activity()
     var engineDots = EngineDots()
@@ -372,6 +374,7 @@ final class Core {
             s.activity.capsWanted = r.capsWanted ?? false
             s.activity.sttActive = r.sttActive ?? false
             s.activity.ttsActive = r.ttsActive ?? false
+            s.activity.ttsSource = (r.ttsActive == true) ? r.ttsSource : nil
             s.activity.muted = r.muted ?? false
         }
         s.activity.trayIndicator = dto.trayIndicator ?? Activity().trayIndicator
@@ -457,6 +460,7 @@ struct RunningDTO: Decodable {
     var capsWanted: Bool?
     var sttActive: Bool?
     var ttsActive: Bool?
+    var ttsSource: String?
     var muted: Bool?
 
     enum CodingKeys: String, CodingKey {
@@ -464,6 +468,7 @@ struct RunningDTO: Decodable {
         case capsWanted = "caps_wanted"
         case sttActive = "stt_active"
         case ttsActive = "tts_active"
+        case ttsSource = "tts_source"
         case muted
     }
 }

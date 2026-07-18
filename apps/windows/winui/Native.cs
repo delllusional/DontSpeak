@@ -19,6 +19,8 @@ internal static class Native
     [DllImport(Dll)] private static extern byte ds_engine_stop();
     [DllImport(Dll)] private static extern IntPtr ds_model_status_json();
     [DllImport(Dll)] private static extern IntPtr ds_model_status_wait(ulong since, uint timeoutMs);
+    [DllImport(Dll)] private static extern IntPtr ds_agent_usage_skeleton_json();
+    [DllImport(Dll)] private static extern IntPtr ds_agent_usage_card_json([MarshalAs(UnmanagedType.LPUTF8Str)] string agent, byte forceRefresh);
     [DllImport(Dll)] private static extern IntPtr ds_tools_json();
     [DllImport(Dll)] private static extern IntPtr ds_libraries_json();
     [DllImport(Dll)] private static extern IntPtr ds_logs_json(uint maxBytes);
@@ -32,6 +34,7 @@ internal static class Native
     // Shared status-panel formatters (one impl, every platform UI).
     [DllImport(Dll)] private static extern IntPtr ds_engine_state_word([MarshalAs(UnmanagedType.LPUTF8Str)] string state, double progress, [MarshalAs(UnmanagedType.LPUTF8Str)] string why);
     [DllImport(Dll)] private static extern IntPtr ds_duration_live(double secs);
+    [DllImport(Dll)] private static extern IntPtr ds_usage_resets_in(long resetsAtUnix);
     [DllImport(Dll)] private static extern IntPtr ds_runtime_label([MarshalAs(UnmanagedType.LPUTF8Str)] string provider);
     [DllImport(Dll)] private static extern IntPtr ds_stats_range(double lo, double avg, double hi, uint precision, [MarshalAs(UnmanagedType.LPUTF8Str)] string unitKey);
     [DllImport(Dll)] private static extern IntPtr ds_stats_count(ulong count, double audioSecs);
@@ -57,6 +60,7 @@ internal static class Native
 
     public static string EngineStateWord(string state, double progress, string why) => TakeString(ds_engine_state_word(state, progress, why));
     public static string DurationLive(double secs) => TakeString(ds_duration_live(secs));
+    public static string UsageResetsIn(long resetsAtUnix) => TakeString(ds_usage_resets_in(resetsAtUnix));
     public static string RuntimeLabel(string provider) => TakeString(ds_runtime_label(provider));
     public static string StatsRange(double lo, double avg, double hi, uint precision, string unitKey) => TakeString(ds_stats_range(lo, avg, hi, precision, unitKey));
     public static string StatsCount(ulong count, double audioSecs) => TakeString(ds_stats_count(count, audioSecs));
@@ -126,6 +130,13 @@ internal static class Native
 
     public static string ModelStatusJson() => TakeString(ds_model_status_json());
 
+    /// <summary>Instant deck: installed agent cards + cache. No network.</summary>
+    public static string AgentUsageSkeletonJson() => TakeString(ds_agent_usage_skeleton_json());
+
+    /// <summary>BLOCKING single-card load. Off UI thread; force bypasses 60s soft cache.</summary>
+    public static string AgentUsageCardJson(string agent, bool forceRefresh)
+        => TakeString(ds_agent_usage_card_json(agent, (byte)(forceRefresh ? 1 : 0)));
+
     /// <summary>BLOCKS until status seq ≠ <paramref name="since"/> or timeout; returns model-status
     /// JSON ("seq" is next since). Dedicated background thread only; since=0 first. "{}" if down.</summary>
     public static string ModelStatusWait(ulong since, uint timeoutMs) => TakeString(ds_model_status_wait(since, timeoutMs));
@@ -167,6 +178,8 @@ public sealed record Activity
     public bool Caps, Recording, Speaking;
     // Mute silences voice without stopping playback (tray slash + menu checkmark).
     public bool Muted;
+    /// Wireable client of the in-flight TTS utterance (`claude_code`/…); null when idle.
+    public string? TtsSource;
     // Tray tint tokens: stt/tts or stt_animated/tts_animated. Default ["stt","tts_animated"];
     // [] = never tint. Fallback only — engine is source of truth.
     public string[] TrayIndicator = { "stt", "tts_animated" };
@@ -312,6 +325,7 @@ internal sealed class HealthSnapshot
                 s.Activity.Caps = r.Caps;
                 s.Activity.Recording = r.SttActive;
                 s.Activity.Speaking = r.TtsActive;
+                s.Activity.TtsSource = r.TtsActive ? r.TtsSource : null;
                 s.Activity.Muted = r.Muted;
             }
             // Override default tray_indicator only when key present (null ⇒ keep default).
@@ -440,6 +454,7 @@ internal sealed record RunningDto
     [JsonPropertyName("caps_wanted")] public bool CapsWanted { get; init; }
     [JsonPropertyName("stt_active")] public bool SttActive { get; init; }
     [JsonPropertyName("tts_active")] public bool TtsActive { get; init; }
+    [JsonPropertyName("tts_source")] public string? TtsSource { get; init; }
     [JsonPropertyName("muted")] public bool Muted { get; init; }
     [JsonPropertyName("kokoro")] public bool Kokoro { get; init; }
     [JsonPropertyName("tts_system")] public bool TtsSystem { get; init; }

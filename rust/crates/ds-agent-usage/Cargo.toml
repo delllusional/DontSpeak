@@ -1,0 +1,29 @@
+[package]
+name = "ds-agent-usage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Read-only subscription quota probes for DontSpeak clients."
+
+[dependencies]
+base64 = { workspace = true }
+ds-client = { workspace = true }
+ds-config = { workspace = true }
+ds-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { workspace = true }
+
+[dev-dependencies]
+httpmock = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

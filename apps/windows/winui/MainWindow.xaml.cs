@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
@@ -11,12 +12,13 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Windows.UI;
 
 namespace DontSpeak;
 
 /// <summary>
-/// Fluent Status/Tools/Logs/Credits window (macOS StatusView + ToolsView parity). Status is
+/// Fluent Usage/Status/Tools/Logs/Credits window. Status is
 /// push-driven by <see cref="App"/>; engine + tray live there. Close hides to tray.
 /// </summary>
 public sealed partial class MainWindow : Window
@@ -34,6 +36,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        UsageList.ChildrenTransitions = new TransitionCollection { new RepositionThemeTransition() };
         // Compact width (= min); height provisional until CapHeightToStatusContent.
         AppWindow.Resize(new Windows.Graphics.SizeInt32(380, 620));
         var icoPath = System.IO.Path.Combine(AppContext.BaseDirectory, "AppIcon.ico");
@@ -55,6 +58,8 @@ public sealed partial class MainWindow : Window
         LoadTools();
         LoadLibraries();
         RefreshStatus();
+        // First tab is whatever XAML marks IsSelected (Usage). Pane visibility matches that in
+        // XAML; SelectionChanged → ApplyTabAsync runs when the user (or SelectTab) changes it.
 
         // No poll timer — App's push calls ApplyPushed. One-shot on show; pushes no-op while hidden.
         AppWindow.Changed += (s, e) =>
@@ -127,22 +132,412 @@ public sealed partial class MainWindow : Window
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
-    public void SelectTab(bool tools)
+    public void SelectTab(string tag)
     {
-        int i = tools ? 1 : 0;
-        if (Nav.MenuItems.Count > i) Nav.SelectedItem = Nav.MenuItems[i];
+        var item = Nav.MenuItems
+            .OfType<NavigationViewItem>()
+            .FirstOrDefault(item => string.Equals(item.Tag as string, tag, StringComparison.Ordinal));
+        if (item != null) Nav.SelectedItem = item;
     }
 
     private async void Nav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
-        var tag = (args.SelectedItem as NavigationViewItem)?.Tag as string;
+        // Null/empty → first menu item (XAML default), no hard-coded "usage".
+        var tag = (args.SelectedItem as NavigationViewItem)?.Tag as string
+            ?? (Nav.MenuItems.OfType<NavigationViewItem>().FirstOrDefault()?.Tag as string);
+        await ApplyTabAsync(tag);
+    }
+
+    /// <summary>Show the pane for <paramref name="tag"/> and run tab-enter side effects.</summary>
+    private async System.Threading.Tasks.Task ApplyTabAsync(string? tag)
+    {
         int loadGeneration = ++_logLoadGeneration;
         ++_logRenderGeneration;
         if (StatusScroll != null) StatusScroll.Visibility = tag == "status" ? Visibility.Visible : Visibility.Collapsed;
+        if (UsageTab != null) UsageTab.Visibility = tag == "usage" ? Visibility.Visible : Visibility.Collapsed;
         if (ToolsScroll != null) ToolsScroll.Visibility = tag == "tools" ? Visibility.Visible : Visibility.Collapsed;
         if (CreditsScroll != null) CreditsScroll.Visibility = tag == "credits" ? Visibility.Visible : Visibility.Collapsed;
         if (LogTab != null) LogTab.Visibility = tag == "log" ? Visibility.Visible : Visibility.Collapsed;
+        if (tag == "usage") await LoadUsageOnTabSelectedAsync();
+        else ++_usageGeneration;
         if (tag == "log") await LoadLogsAsync(loadGeneration); // reload on each select (no poll)
+    }
+
+    private int _usageGeneration;
+    // Canonical ClientSource::CLIENTS order supplied by the Rust skeleton deck.
+    private readonly List<string> _usageAgentOrder = new();
+    private readonly Dictionary<string, ContentControl> _usageCardBodies = new();
+    private readonly Dictionary<string, Border> _usageCardShells = new();
+    private readonly Dictionary<string, TextBlock> _usageCardAccounts = new();
+    /// <summary>Session-only: which agent emails are currently revealed (not persisted).</summary>
+    private readonly HashSet<string> _usageAccountRevealed = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, UsageCardDto> _usageCards = new();
+
+    /// <summary>
+    /// Tab select: paint only cards that already have cached rows, then force-load
+    /// each installed agent async and insert/update when that card has data.
+    /// First visit with no cache stays empty until at least one agent loads.
+    /// </summary>
+    private async System.Threading.Tasks.Task LoadUsageOnTabSelectedAsync()
+    {
+        int generation = ++_usageGeneration;
+
+        UsageDeckDto? deck = null;
+        try
+        {
+            deck = await System.Threading.Tasks.Task.Run(AgentUsageDataSource.ReadCachedDeck);
+        }
+        catch { /* empty */ }
+
+        if (generation != _usageGeneration || UsageTab.Visibility != Visibility.Visible) return;
+        if (deck == null)
+        {
+            ShowUsageUnavailableIfEmpty();
+            return;
+        }
+
+        var all = deck.Cards;
+        var agentsToLoad = all.Select(c => c.Agent).ToList();
+        var cachedWithData = all.Where(c => c.Rows.Count > 0).ToList();
+        _usageAgentOrder.Clear();
+        _usageAgentOrder.AddRange(agentsToLoad);
+
+        // Preserve mounted cards for installed agents; merge last-good cache without flicker.
+        ReconcileUsageAgents(agentsToLoad);
+        foreach (var card in cachedWithData)
+            ApplyUsageCard(card);
+
+        if (agentsToLoad.Count == 0)
+        {
+            ShowUsageUnavailableIfEmpty();
+            return;
+        }
+
+        var pending = agentsToLoad.Count;
+        foreach (string agent in agentsToLoad)
+        {
+            _ = System.Threading.Tasks.Task.Run(() =>
+            {
+                UsageCardDto? updated = null;
+                try
+                {
+                    updated = AgentUsageDataSource.RefreshCard(agent);
+                }
+                catch { /* ignore */ }
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (generation != _usageGeneration) return;
+                    if (updated is { Rows.Count: > 0 })
+                        ApplyUsageCard(updated);
+                    if (--pending == 0)
+                        ShowUsageUnavailableIfEmpty();
+                });
+            });
+        }
+    }
+
+    private void ReconcileUsageAgents(List<string> installedAgents)
+    {
+        var installed = installedAgents.ToHashSet(StringComparer.Ordinal);
+        foreach (string agent in _usageCardShells.Keys.Where(agent => !installed.Contains(agent)).ToList())
+        {
+            UsageList.Children.Remove(_usageCardShells[agent]);
+            _usageCardShells.Remove(agent);
+            _usageCardBodies.Remove(agent);
+            _usageCardAccounts.Remove(agent);
+            _usageAccountRevealed.Remove(agent);
+            _usageCards.Remove(agent);
+        }
+    }
+
+    private void ShowUsageUnavailableIfEmpty()
+    {
+        if (_usageCardBodies.Count > 0) return;
+        if (UsageList.Children.Count == 1 && UsageList.Children[0] is TextBlock) return;
+        UsageList.Children.Clear();
+        UsageList.Children.Add(new TextBlock
+        {
+            Text = Loc.T("usage.unavailable"),
+            Opacity = 0.65,
+        });
+    }
+
+    /// <summary>Insert or transition a changed last-good card without remounting its shell.</summary>
+    private void ApplyUsageCard(UsageCardDto card)
+    {
+        string agent = card.Agent;
+        if (_usageCards.TryGetValue(agent, out var current) && UsageCardsEqual(current, card))
+            return;
+        _usageCards[agent] = card;
+
+        if (_usageCardBodies.TryGetValue(agent, out var body))
+        {
+            BindUsageCardHeader(agent, card);
+            BindUsageCard(body, card);
+            return;
+        }
+
+        // Remove "unavailable" placeholder if present.
+        if (UsageList.Children.Count == 1 && UsageList.Children[0] is TextBlock)
+            UsageList.Children.Clear();
+
+        var (shell, newBody) = BuildUsageCardShell(agent);
+        BindUsageCardHeader(agent, card);
+        BindUsageCard(newBody, card);
+        _usageCardBodies[agent] = newBody;
+        _usageCardShells[agent] = shell;
+
+        // Keep canonical agent order in the panel.
+        int insertAt = 0;
+        foreach (var child in UsageList.Children)
+        {
+            if (child is not Border b) continue;
+            string? existing = null;
+            foreach (var kv in _usageCardShells)
+            {
+                if (ReferenceEquals(kv.Value, b))
+                {
+                    existing = kv.Key;
+                    break;
+                }
+            }
+            if (existing != null && UsageAgentRank(existing) < UsageAgentRank(agent))
+                insertAt++;
+        }
+        UsageList.Children.Insert(insertAt, shell);
+    }
+
+    private static bool UsageCardsEqual(UsageCardDto left, UsageCardDto right)
+        => left.Agent == right.Agent
+            && string.Equals(left.Account, right.Account, StringComparison.Ordinal)
+            && left.Rows.SequenceEqual(right.Rows);
+
+    private int UsageAgentRank(string agent)
+    {
+        int rank = _usageAgentOrder.IndexOf(agent);
+        return rank >= 0 ? rank : int.MaxValue;
+    }
+
+    /// <summary>Catalog title for <paramref name="agent"/>; unknown tokens get a prettified fallback
+    /// (snake_case → Title Case) so the header never shows a raw key.</summary>
+    private static string UsageProviderTitle(string agent)
+    {
+        var key = $"usage.provider.{agent}";
+        var label = Loc.T(key);
+        if (!string.Equals(label, key, StringComparison.Ordinal))
+            return label;
+        return CultureInfo.InvariantCulture.TextInfo.ToTitleCase(
+            agent.Replace('_', ' ').ToLowerInvariant());
+    }
+
+    /// <summary>Shared card shell: agent title + optional account (top-right) + body host for rows.</summary>
+    private (Border shell, ContentControl body) BuildUsageCardShell(string agent)
+    {
+        var body = new ContentControl
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+        };
+        var content = new StackPanel
+        {
+            Spacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        // Title left / account right — same caption style as period remaining.
+        // Email is fully transparent until clicked; reveal is session-only (not persisted).
+        var heading = new Grid
+        {
+            ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition() },
+        };
+        heading.Children.Add(new TextBlock
+        {
+            Text = UsageProviderTitle(agent),
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Bottom,
+        });
+        var account = new TextBlock
+        {
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Opacity = 0,
+            FontSize = 12,
+            FontFamily = Mono,
+            TextAlignment = TextAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Visibility = Visibility.Collapsed,
+            IsHitTestVisible = true,
+        };
+        account.PointerPressed += (_, e) =>
+        {
+            if (account.Visibility != Visibility.Visible) return;
+            // Toggle session-only reveal (not persisted).
+            if (_usageAccountRevealed.Remove(agent))
+                account.Opacity = 0;
+            else
+            {
+                _usageAccountRevealed.Add(agent);
+                account.Opacity = 1;
+            }
+            e.Handled = true;
+        };
+        Grid.SetColumn(account, 1);
+        heading.Children.Add(account);
+        _usageCardAccounts[agent] = account;
+        content.Children.Add(heading);
+        content.Children.Add(body);
+
+        var shell = new Border
+        {
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(16),
+            BorderThickness = new Thickness(1),
+            Child = content,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Background = UsageCardBackground(agent),
+        };
+        if (Application.Current.Resources.TryGetValue(
+                "CardStrokeColorDefaultBrush", out var stroke)
+            && stroke is Brush strokeBrush)
+            shell.BorderBrush = strokeBrush;
+        return (shell, body);
+    }
+
+    private void BindUsageCardHeader(string agent, UsageCardDto card)
+    {
+        if (!_usageCardAccounts.TryGetValue(agent, out var accountLabel)) return;
+        string? account = string.IsNullOrWhiteSpace(card.Account) ? null : card.Account.Trim();
+        accountLabel.Text = account ?? "";
+        if (account == null)
+        {
+            accountLabel.Visibility = Visibility.Collapsed;
+            accountLabel.Opacity = 0;
+            _usageAccountRevealed.Remove(agent);
+            return;
+        }
+        accountLabel.Visibility = Visibility.Visible;
+        // Keep session reveal; default remains fully transparent until click.
+        accountLabel.Opacity = _usageAccountRevealed.Contains(agent) ? 1 : 0;
+    }
+
+    /// <summary>Bind card rows into body — same layout as Swift/GTK UsageRow.</summary>
+    private static void BindUsageCard(ContentControl body, UsageCardDto card)
+    {
+        if (body.Content is StackPanel mountedRows && TryUpdateUsageRows(mountedRows, card))
+            return;
+
+        var rows = new StackPanel
+        {
+            Spacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        foreach (var row in card.Rows)
+            rows.Children.Add(BuildUsageRow(row));
+        body.Content = rows;
+    }
+
+    // Keep matching rows mounted so a refresh animates from the displayed value instead
+    // of remounting ProgressBar at zero. Rebuild only when the provider's row shape changes.
+    private static bool TryUpdateUsageRows(StackPanel mountedRows, UsageCardDto card)
+    {
+        if (mountedRows.Children.Count != card.Rows.Count) return false;
+
+        for (int i = 0; i < card.Rows.Count; i++)
+        {
+            if (mountedRows.Children[i] is not StackPanel { Tag: UsageRowView view }
+                || view.Period != card.Rows[i].Period)
+                return false;
+        }
+
+        for (int i = 0; i < card.Rows.Count; i++)
+        {
+            var row = (UsageRowView)((StackPanel)mountedRows.Children[i]).Tag;
+            UpdateUsageRow(row, card.Rows[i], animate: true);
+        }
+        return true;
+    }
+
+    private sealed record UsageRowView(
+        string Period,
+        ProgressBar Progress,
+        TextBlock Remaining);
+
+    private static StackPanel BuildUsageRow(UsageRowDto row)
+    {
+        var heading = new Grid { ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition() } };
+        // Bottom-align period + remaining so different font sizes share one baseline.
+        heading.Children.Add(new TextBlock
+        {
+            Text = Loc.T($"usage.{row.Period}"),
+            VerticalAlignment = VerticalAlignment.Bottom,
+        });
+        // Remaining till reset (minute-granularity) sits top-right; percent is the bar only.
+        var remaining = new TextBlock
+        {
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Opacity = 0.65,
+            FontSize = 12,
+            FontFamily = Mono,
+            TextAlignment = TextAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+        };
+        Grid.SetColumn(remaining, 1);
+        heading.Children.Add(remaining);
+
+        // Default WinUI track is 1px / MinHeight 3 — bump both for a readable usage bar.
+        const double barThickness = 6;
+        var progress = new ProgressBar
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Height = barThickness,
+            MinHeight = barThickness,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            // Brand seed purple (#5B4397) — same accent as tray speaking / tab underline.
+            Foreground = new SolidColorBrush(Brand.SeedPurple),
+        };
+        progress.Resources["ProgressBarMinHeight"] = barThickness;
+        progress.Resources["ProgressBarTrackHeight"] = barThickness;
+        progress.Resources["ProgressBarCornerRadius"] = new CornerRadius(barThickness / 2);
+        progress.Resources["ProgressBarTrackCornerRadius"] = new CornerRadius(barThickness / 2);
+        var view = new UsageRowView(row.Period, progress, remaining);
+        var block = new StackPanel
+        {
+            Spacing = 5,
+            Margin = new Thickness(0, 3, 0, 3),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Tag = view,
+        };
+        block.Children.Add(heading);
+        block.Children.Add(progress);
+        UpdateUsageRow(view, row, animate: false);
+        return block;
+    }
+
+    private static void UpdateUsageRow(UsageRowView view, UsageRowDto row, bool animate)
+    {
+        double previous = view.Progress.Value;
+        view.Progress.Value = row.UsedPercent;
+        if (animate && Math.Abs(previous - row.UsedPercent) >= 0.01)
+        {
+            var animation = new DoubleAnimation
+            {
+                From = previous,
+                To = row.UsedPercent,
+                Duration = new Duration(TimeSpan.FromMilliseconds(180)),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                EnableDependentAnimation = true,
+            };
+            Storyboard.SetTarget(animation, view.Progress);
+            Storyboard.SetTargetProperty(animation, nameof(ProgressBar.Value));
+            var storyboard = new Storyboard();
+            storyboard.Children.Add(animation);
+            storyboard.Begin();
+        }
+
+        string remaining = Native.UsageResetsIn(row.ResetsAtUnix);
+        view.Remaining.Text = remaining;
+        view.Remaining.Visibility = string.IsNullOrEmpty(remaining)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
     }
 
     private List<LogLine> _logLines = new();
@@ -390,10 +785,12 @@ public sealed partial class MainWindow : Window
         }
 
         ApplyStateAccent(s.IndicatorState());
+        ApplyUsageSpeakingAccent(s.Activity.TtsSource);
         CapsDot.Fill = s.Activity.Caps ? Green : Gray;
     }
 
     private TrayIcon.IconState _accentState = (TrayIcon.IconState)(-1);
+    private string? _speakingUsageAgent;
 
     private void SizeStateStripe()
     {
@@ -432,8 +829,35 @@ public sealed partial class MainWindow : Window
             StateStripe.Background = null;
             return;
         }
+        StateStripe.Background = BrandWashBrush(basis);
+    }
+
+    /// <summary>Purple wash on the Usage card whose agent matches the in-flight TTS source
+    /// (same seed purple / ~30% alpha as the top-bar speaking stripe).</summary>
+    private void ApplyUsageSpeakingAccent(string? agent)
+    {
+        if (string.Equals(_speakingUsageAgent, agent, StringComparison.Ordinal)) return;
+        _speakingUsageAgent = agent;
+        foreach (var (name, shell) in _usageCardShells)
+            shell.Background = UsageCardBackground(name);
+    }
+
+    private Brush UsageCardBackground(string agent)
+    {
+        if (string.Equals(agent, _speakingUsageAgent, StringComparison.Ordinal))
+            return BrandWashBrush(Brand.SeedPurple);
+        if (Application.Current.Resources.TryGetValue(
+                "CardBackgroundFillColorDefaultBrush", out var background)
+            && background is Brush backgroundBrush)
+            return backgroundBrush;
+        return new SolidColorBrush(Windows.UI.Color.FromArgb(0, 0, 0, 0));
+    }
+
+    /// <summary>~30% translucent wash — shared by top stripe and speaking Usage card.</summary>
+    private static SolidColorBrush BrandWashBrush(Windows.UI.Color basis)
+    {
         const double Tint = 0.30;
-        StateStripe.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(
+        return new SolidColorBrush(
             Windows.UI.Color.FromArgb((byte)(255 * Tint), basis.R, basis.G, basis.B));
     }
 

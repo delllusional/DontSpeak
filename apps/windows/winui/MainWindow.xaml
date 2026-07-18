@@ -32,7 +32,8 @@
             <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="#5B4397" />
         </NavigationView.Resources>
         <NavigationView.MenuItems>
-            <NavigationViewItem Content="{loc:Loc Key=common.nav_status}" Tag="status" IsSelected="True" />
+            <NavigationViewItem Content="{loc:Loc Key=common.nav_usage}" Tag="usage" IsSelected="True" />
+            <NavigationViewItem Content="{loc:Loc Key=common.nav_status}" Tag="status" />
             <NavigationViewItem Content="{loc:Loc Key=common.nav_tools}" Tag="tools" />
             <NavigationViewItem Content="{loc:Loc Key=common.nav_log}" Tag="log" />
             <NavigationViewItem Content="{loc:Loc Key=common.nav_credits}" Tag="credits" />
@@ -44,7 +45,8 @@
                  (2) the engine rows (TTS / STT, each expands to its stats),
                  (3) Caps-Lock dictation. The macOS Permissions section is
                  omitted — it drives the native macOS privacy panes, which Windows lacks. -->
-            <ScrollViewer x:Name="StatusScroll" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
+            <!-- Default hidden: first tab is Usage (IsSelected above). SelectionChanged keeps this in sync. -->
+            <ScrollViewer x:Name="StatusScroll" Visibility="Collapsed" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
                 <!-- Top-aligned so the panel sizes to its CONTENT (not the scroll viewport) — the
                      window-height cap (CapHeightToStatusContent) reads this panel's ActualHeight. -->
                 <StackPanel Spacing="14" HorizontalAlignment="Stretch" VerticalAlignment="Top">
@@ -250,6 +252,13 @@
                     </Border>
 
                 </StackPanel>
+            </ScrollViewer>
+
+            <!-- ── USAGE — first tab; cache-first cards; tab select refreshes each card async. ── -->
+            <ScrollViewer x:Name="UsageTab"
+                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                          HorizontalContentAlignment="Stretch">
+                <StackPanel x:Name="UsageList" Spacing="12" HorizontalAlignment="Stretch" />
             </ScrollViewer>
 
             <!-- ── TOOLS ──────────────────────────────────────────────────── -->

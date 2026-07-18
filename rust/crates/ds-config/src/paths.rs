@@ -1,5 +1,6 @@
 //! Well-known paths from `$HOME`, plus per-OS data/model dirs.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use directories::BaseDirs;
@@ -30,6 +31,8 @@ pub struct Paths {
     pub config_dir: PathBuf,
     /// Local state root (pidfiles, socket, stats). Models under [`model_dir`].
     pub state_dir: PathBuf,
+    /// Local re-creatable cache root (usage snapshots; models use [`model_dir`]).
+    pub cache_dir: PathBuf,
     /// Our settings single source (`config.toml`); engine watches it.
     pub config_toml: PathBuf,
     /// Enrolled voiceprints — see [`crate::speakers`].
@@ -57,10 +60,32 @@ impl Paths {
     pub fn resolve() -> Option<Self> {
         let base = BaseDirs::new()?;
         let home = base.home_dir().to_path_buf();
-        let claude_dir = home.join(".claude");
-        let codex_dir = home.join(".codex");
-        let qwen_dir = home.join(".qwen");
-        let grok_dir = home.join(".grok");
+        let cwd = std::env::current_dir().unwrap_or_else(|_| home.clone());
+        let claude_override = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let claude_dir = client_config_dir(&home, &cwd, claude_override.as_deref(), ".claude");
+        let codex_dir = client_config_dir(
+            &home,
+            &cwd,
+            std::env::var_os("CODEX_HOME").as_deref(),
+            ".codex",
+        );
+        let qwen_dir = client_config_dir(
+            &home,
+            &cwd,
+            std::env::var_os("QWEN_HOME").as_deref(),
+            ".qwen",
+        );
+        let grok_dir = client_config_dir(
+            &home,
+            &cwd,
+            std::env::var_os("GROK_HOME").as_deref(),
+            ".grok",
+        );
+        let claude_code_config = claude_override
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|_| claude_dir.join(".claude.json"))
+            .unwrap_or_else(|| home.join(".claude.json"));
         // Two roots, each idiomatic per OS (see [`data_dir`] / [`model_dir`] / `state_root`):
         //   config (roaming, user settings): config.toml, speakers.json
         //   state  (local, machine RUNTIME): stats.toml, pidfiles, the IPC socket, logs
@@ -69,6 +94,7 @@ impl Paths {
         // startup, and every writer create_dir_all's its own parent too.
         let config_dir = data_dir()?;
         let state_dir = state_root(&base);
+        let cache_dir = cache_root(&base);
         Some(Self {
             // Runtime/state files live under the LOCAL state root (machine-specific, never
             // roamed); settings live under the roaming config root.
@@ -76,7 +102,7 @@ impl Paths {
             log_file: log_path(&base, &state_dir),
             settings_json: claude_dir.join("settings.json"),
             keybindings_json: claude_dir.join("keybindings.json"),
-            claude_code_config: home.join(".claude.json"),
+            claude_code_config,
             narrate_pid: state_dir.join("narrate.pid"),
             engine_pid: state_dir.join("dontspeakd.pid"),
             engine_sock: state_dir.join("dontspeak.sock"),
@@ -85,6 +111,7 @@ impl Paths {
             speakers_json: config_dir.join("speakers.json"),
             config_dir,
             state_dir,
+            cache_dir,
             codex_config: codex_dir.join("config.toml"),
             codex_dir,
             qwen_settings: qwen_dir.join("settings.json"),
@@ -121,7 +148,8 @@ impl Paths {
             speakers_json: ds_dir.join("speakers.json"),
             // The inert fallback uses ONE dir for both roots (layout is immaterial here).
             config_dir: ds_dir.clone(),
-            state_dir: ds_dir,
+            state_dir: ds_dir.clone(),
+            cache_dir: ds_dir,
             codex_config: codex_dir.join("config.toml"),
             codex_dir,
             qwen_settings: qwen_dir.join("settings.json"),
@@ -133,6 +161,28 @@ impl Paths {
             home,
             claude_dir,
         }
+    }
+}
+
+/// Resolve a client-specific home without mutating process environment in tests.
+/// Relative overrides follow the client's launch cwd; `~` remains the user home.
+fn client_config_dir(
+    home: &Path,
+    cwd: &Path,
+    override_value: Option<&OsStr>,
+    default_name: &str,
+) -> PathBuf {
+    let Some(value) = override_value.filter(|value| !value.is_empty()) else {
+        return home.join(default_name);
+    };
+    let path = Path::new(value);
+    if let Ok(rest) = path.strip_prefix("~") {
+        return home.join(rest);
+    }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
     }
 }
 
@@ -181,6 +231,10 @@ pub fn model_dir() -> Option<PathBuf> {
 
 fn model_dir_under(cache_dir: &Path) -> PathBuf {
     cache_dir.join(APP_DIR).join("models")
+}
+
+fn cache_root(base: &BaseDirs) -> PathBuf {
+    base.cache_dir().join(APP_DIR)
 }
 
 /// Homebrew onnxruntime dylib on Intel mac (None elsewhere). Single source for loader +
@@ -335,6 +389,38 @@ mod tests {
     fn default_model_dir_has_the_platform_app_and_models_suffix() {
         let dir = model_dir_under(Path::new("cache-root"));
         assert_eq!(dir, Path::new("cache-root").join(APP_DIR).join("models"));
+    }
+
+    #[test]
+    fn client_home_override_expands_relative_and_tilde_paths() {
+        let home = Path::new("home");
+        let cwd = Path::new("worktree");
+        assert_eq!(
+            client_config_dir(home, cwd, None, ".codex"),
+            home.join(".codex")
+        );
+        assert_eq!(
+            client_config_dir(home, cwd, Some(OsStr::new("profiles/codex")), ".codex"),
+            cwd.join("profiles/codex")
+        );
+        assert_eq!(
+            client_config_dir(home, cwd, Some(OsStr::new("~/profiles/qwen")), ".qwen"),
+            home.join("profiles/qwen")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_home_override_preserves_absolute_paths() {
+        assert_eq!(
+            client_config_dir(
+                Path::new("/home/person"),
+                Path::new("/work"),
+                Some(OsStr::new("/var/lib/codex")),
+                ".codex",
+            ),
+            Path::new("/var/lib/codex")
+        );
     }
 
     /// The brew-probe version gate: full versions parse and compare against the 1.27 floor; the

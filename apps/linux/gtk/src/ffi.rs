@@ -6,6 +6,30 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
 use ds_core::ffi as sys;
+use serde::Deserialize;
+
+/// Typed Usage deck decoded immediately at the C ABI boundary.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct UsageDeck {
+    pub(crate) cards: Vec<UsageCard>,
+}
+
+/// Typed per-agent last-good value consumed by the GTK view.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct UsageCard {
+    pub(crate) agent: String,
+    /// Signed-in account (usually email) when the client exposes one.
+    #[serde(default)]
+    pub(crate) account: Option<String>,
+    pub(crate) rows: Vec<UsageRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct UsageRow {
+    pub(crate) period: String,
+    pub(crate) used_percent: f64,
+    pub(crate) resets_at_unix: i64,
+}
 
 /// Copy an owned C string from a `ds_*` return into a Rust `String`, then free it. NULL → "".
 fn take(p: *mut c_char) -> String {
@@ -51,6 +75,20 @@ pub fn model_status_json() -> String {
 /// BLOCKING until status seq differs from `since` or `timeout_ms`. Background thread only.
 pub fn model_status_wait(since: u64, timeout_ms: u32) -> String {
     take(sys::ds_model_status_wait(since, timeout_ms))
+}
+/// Instant typed deck: installed agent cards + last-good cache. No network.
+pub fn agent_usage_skeleton() -> Option<UsageDeck> {
+    serde_json::from_str(&take(sys::ds_agent_usage_skeleton_json())).ok()
+}
+
+/// Blocking typed single-card load. Background thread; force bypasses 60s soft cache.
+pub fn agent_usage_card(agent: &str, force_refresh: bool) -> Option<UsageCard> {
+    let c = CString::new(agent).unwrap_or_default();
+    serde_json::from_str(&take(sys::ds_agent_usage_card_json(
+        c.as_ptr(),
+        force_refresh as u8,
+    )))
+    .ok()
 }
 pub fn tools_json() -> String {
     take(sys::ds_tools_json())
@@ -137,9 +175,14 @@ pub fn t_args(key: &str, args: &[(&str, &str)]) -> String {
 }
 
 // ── Formatters (`status_fmt` — shared with macOS/Windows) ────────────────────
-/// Lifetime duration down to seconds, leading zero-units dropped (e.g. "12m 04s").
+/// Duration with leading+trailing zero units dropped (e.g. "12m 04s", "1d 05h").
 pub fn duration_live(secs: f64) -> String {
     take(sys::ds_duration_live(secs))
+}
+
+/// Usage remaining duration from UTC epoch (e.g. "2d 05h"; no seconds).
+pub fn usage_resets_in(resets_at_unix: i64) -> String {
+    take(sys::ds_usage_resets_in(resets_at_unix))
 }
 
 /// Runtime label for a resolved provider token (cpu/cuda/coreml/ane).

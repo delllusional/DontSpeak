@@ -47,7 +47,7 @@ let package = Package(
                 // Missing Carbon fails only at `swift test` / `bundle.sh`, not `cargo test`.
                 // Re-derive the whole list after any native-linkage change.
                 // Snapshot: AudioToolbox CoreAudio IOKit ApplicationServices AppKit
-                //   Foundation CoreGraphics CoreFoundation Carbon + libiconv/libobjc.
+                //   Foundation CoreGraphics CoreFoundation Carbon Security + libiconv/libobjc.
                 .linkedFramework("AppKit"),
                 .linkedFramework("Foundation"),
                 .linkedFramework("AVFoundation"),
@@ -58,6 +58,7 @@ let package = Package(
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("CoreFoundation"),
                 .linkedFramework("Carbon"),
+                .linkedFramework("Security"),
                 .linkedLibrary("iconv"),
                 .linkedLibrary("objc"),
             ]

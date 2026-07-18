@@ -53,34 +53,122 @@ pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
     }
 }
 
-/// Localized lifetime duration down to seconds (totals tick up). Leading zero units
-/// dropped: "5h 11m 23s", "12m 04s", "45s", "1d 02h 03m 04s".
+/// Localized lifetime / remaining duration. Leading **and trailing** zero units
+/// dropped — Status "all-time" (and similar): `"2d"`, `"1d 05h"`, `"5h 11m"`,
+/// `"12m 04s"`, `"45s"`. Never `"0d …"`. Usage remaining uses
+/// [`duration_live_no_seconds`] instead.
 pub fn duration_live(secs: f64) -> String {
     let total = secs.round().max(0.0) as i64;
     let d = total / 86400;
     let h = (total % 86400) / 3600;
     let m = (total % 3600) / 60;
     let s = total % 60;
-    let (hh, mm, ss) = (format!("{h:02}"), format!("{m:02}"), format!("{s:02}"));
+    let d_s = d.to_string();
+    let h_s = h.to_string();
+    let h2 = format!("{h:02}");
+    let m_s = m.to_string();
+    let m2 = format!("{m:02}");
+    let s2 = format!("{s:02}");
     if d > 0 {
-        fill(
-            "status.stats.duration_live.days",
-            &[("d", &d.to_string()), ("h", &hh), ("m", &mm), ("s", &ss)],
-        )
+        if h == 0 && m == 0 && s == 0 {
+            fill("status.stats.duration_live.days_only", &[("d", &d_s)])
+        } else if m == 0 && s == 0 {
+            fill(
+                "status.stats.duration_live.days_hours",
+                &[("d", &d_s), ("h", &h2)],
+            )
+        } else if s == 0 {
+            fill(
+                "status.stats.duration_live.days_hours_minutes",
+                &[("d", &d_s), ("h", &h2), ("m", &m2)],
+            )
+        } else {
+            fill(
+                "status.stats.duration_live.days",
+                &[("d", &d_s), ("h", &h2), ("m", &m2), ("s", &s2)],
+            )
+        }
     } else if h > 0 {
-        fill(
-            "status.stats.duration_live.hours",
-            &[("h", &h.to_string()), ("m", &mm), ("s", &ss)],
-        )
+        if m == 0 && s == 0 {
+            fill("status.stats.duration_live.hours_only", &[("h", &h_s)])
+        } else if s == 0 {
+            fill(
+                "status.stats.duration_live.hours_minutes",
+                &[("h", &h_s), ("m", &m2)],
+            )
+        } else {
+            fill(
+                "status.stats.duration_live.hours",
+                &[("h", &h_s), ("m", &m2), ("s", &s2)],
+            )
+        }
     } else if m > 0 {
-        fill(
-            "status.stats.duration_live.minutes",
-            &[("m", &m.to_string()), ("s", &ss)],
-        )
+        if s == 0 {
+            fill("status.stats.duration_live.minutes_only", &[("m", &m_s)])
+        } else {
+            fill(
+                "status.stats.duration_live.minutes",
+                &[("m", &m_s), ("s", &s2)],
+            )
+        }
     } else {
         fill(
             "status.stats.duration_live.seconds",
             &[("s", &s.to_string())],
+        )
+    }
+}
+
+/// Usage-tab remaining time only (e.g. `2d 05h`, `5h 11m`, `12m`) — no "Resets
+/// in" prefix and **no seconds** (minute is the finest unit).
+pub fn usage_resets_in(resets_at_unix: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let remaining = (resets_at_unix - now).max(0) as f64;
+    duration_live_no_seconds(remaining)
+}
+
+/// Like [`duration_live`] but drops seconds — Usage header remaining text only.
+/// Sub-minute remainders floor to `0m`.
+fn duration_live_no_seconds(secs: f64) -> String {
+    let total = secs.round().max(0.0) as i64;
+    let d = total / 86400;
+    let h = (total % 86400) / 3600;
+    let m = (total % 3600) / 60;
+    let d_s = d.to_string();
+    let h_s = h.to_string();
+    let h2 = format!("{h:02}");
+    let m_s = m.to_string();
+    let m2 = format!("{m:02}");
+    if d > 0 {
+        if h == 0 && m == 0 {
+            fill("status.stats.duration_live.days_only", &[("d", &d_s)])
+        } else if m == 0 {
+            fill(
+                "status.stats.duration_live.days_hours",
+                &[("d", &d_s), ("h", &h2)],
+            )
+        } else {
+            fill(
+                "status.stats.duration_live.days_hours_minutes",
+                &[("d", &d_s), ("h", &h2), ("m", &m2)],
+            )
+        }
+    } else if h > 0 {
+        if m == 0 {
+            fill("status.stats.duration_live.hours_only", &[("h", &h_s)])
+        } else {
+            fill(
+                "status.stats.duration_live.hours_minutes",
+                &[("h", &h_s), ("m", &m2)],
+            )
+        }
+    } else {
+        fill(
+            "status.stats.duration_live.minutes_only",
+            &[("m", &m_s)],
         )
     }
 }
@@ -179,10 +267,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn duration_live_drops_leading_zero_units() {
+    fn duration_live_drops_leading_and_trailing_zero_units() {
         assert_eq!(duration_live(45.0), "45s");
         assert_eq!(duration_live(0.0), "0s");
         assert_eq!(duration_live(12.0 * 60.0 + 4.0), "12m 04s");
+        assert_eq!(duration_live(12.0 * 60.0), "12m");
+        assert_eq!(duration_live(5.0 * 3600.0), "5h");
+        assert_eq!(duration_live(5.0 * 3600.0 + 11.0 * 60.0), "5h 11m");
+        assert_eq!(duration_live(86400.0), "1d");
+        assert_eq!(duration_live(86400.0 + 5.0 * 3600.0), "1d 05h");
+        assert_eq!(
+            duration_live(86400.0 + 2.0 * 3600.0 + 3.0 * 60.0 + 4.0),
+            "1d 02h 03m 04s"
+        );
+        // Never a leading 0d when under a day.
+        assert!(!duration_live(5.0 * 3600.0).contains('d'));
+    }
+
+    #[test]
+    fn duration_live_no_seconds_omits_second_unit() {
+        assert_eq!(duration_live_no_seconds(45.0), "0m");
+        assert_eq!(duration_live_no_seconds(0.0), "0m");
+        assert_eq!(duration_live_no_seconds(12.0 * 60.0 + 4.0), "12m");
+        assert_eq!(duration_live_no_seconds(12.0 * 60.0), "12m");
+        assert_eq!(duration_live_no_seconds(5.0 * 3600.0), "5h");
+        assert_eq!(duration_live_no_seconds(5.0 * 3600.0 + 11.0 * 60.0), "5h 11m");
+        assert_eq!(
+            duration_live_no_seconds(5.0 * 3600.0 + 11.0 * 60.0 + 30.0),
+            "5h 11m"
+        );
+        assert_eq!(duration_live_no_seconds(86400.0), "1d");
+        assert_eq!(duration_live_no_seconds(86400.0 + 5.0 * 3600.0), "1d 05h");
+        assert_eq!(
+            duration_live_no_seconds(86400.0 + 2.0 * 3600.0 + 3.0 * 60.0 + 4.0),
+            "1d 02h 03m"
+        );
+        assert!(!duration_live_no_seconds(90.0).contains('s'));
     }
 
     #[test]

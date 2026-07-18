@@ -159,7 +159,7 @@ pub(crate) fn spawn_ipc_server(
                             grok_sessions.nudge(s);
                         }
                     }
-                    ttsq.greet_session(session);
+                    ttsq.greet_session(source, session);
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::MarkActive {
@@ -206,7 +206,7 @@ pub(crate) fn spawn_ipc_server(
                             text.chars().count()
                         ),
                     );
-                    match ttsq.enqueue(text, voice, rate, session) {
+                    match ttsq.enqueue(text, voice, rate, source, session) {
                         Ok(()) => emit(&ds_ipc::Response::Done),
                         Err(e) => emit(&ds_ipc::Response::error(format!("speak: {e}"))),
                     }
@@ -223,7 +223,7 @@ pub(crate) fn spawn_ipc_server(
                     // Success is deliberately NOT logged: it fires once per blockquote and
                     // would spam the activity log. Identified retries return the same success
                     // without adding a second queue item.
-                    match ttsq.enqueue_narration(text, session, narration_id) {
+                    match ttsq.enqueue_narration(text, source, session, narration_id) {
                         Ok(()) => emit(&ds_ipc::Response::Done),
                         Err(e) => {
                             log_client(&paths, source, &format!("narration rejected: {e}"));
@@ -291,7 +291,7 @@ pub(crate) fn spawn_ipc_server(
                 }
                 ds_ipc::Request::ModelStatus => {
                     emit(&ds_ipc::Response::ModelStatus {
-                        status: model_status_json(&shared, &paths, || ttsq.is_tts_active()),
+                        status: model_status_json(&shared, &paths, || ttsq.tts_running()),
                     });
                 }
                 ds_ipc::Request::WaitModelStatus { since, timeout_ms } => {
@@ -302,7 +302,7 @@ pub(crate) fn spawn_ipc_server(
                     let timeout = std::time::Duration::from_millis(timeout_ms.clamp(1, 60_000));
                     shared.gate.wait_changed(since, timeout);
                     emit(&ds_ipc::Response::ModelStatus {
-                        status: model_status_json(&shared, &paths, || ttsq.is_tts_active()),
+                        status: model_status_json(&shared, &paths, || ttsq.tts_running()),
                     });
                 }
                 ds_ipc::Request::SetProvider { provider } => {
@@ -339,7 +339,7 @@ pub(crate) fn spawn_ipc_server(
                         ),
                     );
                     if let Some(ev) = ds_earcon::EarconEvent::parse(&event) {
-                        match ttsq.dispatch_earcon(ev, session) {
+                        match ttsq.dispatch_earcon(ev, source, session) {
                             Ok(()) => emit(&ds_ipc::Response::Done),
                             Err(e) => emit(&ds_ipc::Response::error(format!("earcon: {e}"))),
                         }
@@ -562,8 +562,14 @@ mod tests {
         let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
         ttsq.set_active_session(Some("other".into()));
-        ttsq.enqueue("hi".into(), None, None, Some("a".into()))
-            .unwrap();
+        ttsq.enqueue(
+            "hi".into(),
+            None,
+            None,
+            ClientSource::Unknown,
+            Some("a".into()),
+        )
+        .unwrap();
 
         handle_mark_active(
             &ttsq,
@@ -596,8 +602,14 @@ mod tests {
         let codex_sessions = crate::codex_stream::SessionRegistry::new();
         let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
-        ttsq.enqueue("hi".into(), None, None, Some("a".into()))
-            .unwrap();
+        ttsq.enqueue(
+            "hi".into(),
+            None,
+            None,
+            ClientSource::Unknown,
+            Some("a".into()),
+        )
+        .unwrap();
 
         handle_mark_active(
             &ttsq,

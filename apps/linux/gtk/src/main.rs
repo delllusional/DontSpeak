@@ -20,12 +20,21 @@ mod ui;
 pub(crate) const APP_ID: &str = "org.dontspeak.DontSpeak";
 
 fn main() -> glib::ExitCode {
+    // Must run before GTK init. VirtualBox/VMware Wayland often blocks the UI thread
+    // in present()/map (`unix_wait_for_peer`), which freezes Settings/Activate forever.
+    // Prefer X11 there unless the user already set GDK_BACKEND.
+    prefer_x11_under_hypervisor();
+
     let app = adw::Application::builder().application_id(APP_ID).build();
 
     // Join the status thread before `engine_stop()` so it isn't mid-`model_status_wait`.
     let status_thread: Rc<RefCell<Option<status::StatusThread>>> = Rc::new(RefCell::new(None));
 
     app.connect_startup(|_| {
+        // Install the process `log` backend once → existing unified activity log only
+        // (`~/.local/state/dontspeak/logs/dontspeak.log` on Linux). No host-private log files.
+        // Idempotent if the in-process engine also inits on its thread.
+        ds_log::init();
         ffi::set_locale(&sys_locale::get_locale().unwrap_or_else(|| "en".to_string()));
         overlay::load_css();
         ui::load_update_badge_css();
@@ -47,10 +56,13 @@ fn main() -> glib::ExitCode {
 }
 
 fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::StatusThread>>>) {
-    // GTK re-fires `activate` on relaunch of a running instance. The window is only ever
-    // hidden (never destroyed) on close — re-present instead of stacking a second tray/UI.
-    if let Some(existing) = app.windows().first() {
-        existing.present();
+    // GTK re-fires `activate` on relaunch / tray Settings (org.gtk.Application.Activate).
+    // Window is only ever hidden (never destroyed) on close — re-show the **main** panel.
+    //
+    // Do not use `windows().first()`: the dictation overlay is also an application window
+    // (`overlay::Overlay`), often ordered before the hidden main window. Presenting that
+    // empty overlay looks like Settings did nothing.
+    if present_main_window(app) {
         return;
     }
 
@@ -60,11 +72,8 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
     // the first snapshot within its 1s poll window.
 
     // Stay alive in the tray: hide (don't destroy) on close.
-    let hold = app.hold();
-    widgets.window.connect_close_request(|w| {
-        w.set_visible(false);
-        glib::Propagation::Stop
-    });
+    let _hold = app.hold();
+    widgets.window.set_hide_on_close(true);
 
     // One-shot update check on a throwaway thread — `ds_update_check_json` is the only
     // network-touching ds-core FFI entry (blocking HTTP). Failures/`{}` → pill stays hidden
@@ -85,12 +94,22 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
         });
     }
 
-    // Tray on its own DBus thread; commands come back over a channel. Fail-soft: no session
-    // bus / no SNI host → no tray, rest of the app still runs.
-    let (cmd_tx, cmd_rx) = async_channel::unbounded::<tray::Cmd>();
+    // ksni `spawn()` runs a blocking async setup on the *calling* thread before detaching
+    // its service loop — never call it on the GTK UI thread (freezes Activate/Settings).
     let tray_handle = {
         use ksni::blocking::TrayMethods;
-        tray::SpeakTray::new(cmd_tx).spawn().ok()
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("ds-tray-spawn".into())
+            .spawn(move || {
+                let handle = tray::SpeakTray::new().spawn().ok();
+                let _ = tx.send(handle);
+            })
+            .ok();
+        // Brief wait only; missing tray is fail-soft.
+        rx.recv_timeout(std::time::Duration::from_secs(3))
+            .ok()
+            .flatten()
     };
 
     let muted = Rc::new(Cell::new(false));
@@ -130,27 +149,45 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
         });
     }
 
-    {
-        let app = app.clone();
-        let w = widgets.clone();
-        let muted = muted.clone();
-        glib::spawn_future_local(async move {
-            let _hold = hold; // keep the app alive while tray commands are listened for
-            while let Ok(cmd) = cmd_rx.recv().await {
-                match cmd {
-                    tray::Cmd::ShowWindow => w.window.present(),
-                    tray::Cmd::ToggleMute => {
-                        // Blocking engine-IPC (up to 120s) — never inline on the GTK main context.
-                        let want = !muted.get();
-                        std::thread::spawn(move || {
-                            ffi::set_muted(want);
-                        });
-                    }
-                    tray::Cmd::Quit => app.quit(),
-                }
-            }
-        });
-    }
+    // Keep hold alive for the process lifetime (tray-resident).
+    std::mem::forget(_hold);
 
+    widgets.window.set_visible(true);
     widgets.window.present();
+}
+
+/// Re-show the health/settings `ApplicationWindow` if it already exists.
+/// Skips the dictation overlay (`gtk::Window`, not `adw::ApplicationWindow`).
+fn present_main_window(app: &adw::Application) -> bool {
+    for win in app.windows() {
+        // Main UI is the only `adw::ApplicationWindow`; overlay is plain `gtk::Window`.
+        if !win.is::<adw::ApplicationWindow>() {
+            continue;
+        }
+        win.set_visible(true);
+        win.unminimize();
+        win.present();
+        return true;
+    }
+    false
+}
+
+/// If unset, force `GDK_BACKEND=x11` on common hypervisors so window show/Activate stays responsive.
+fn prefer_x11_under_hypervisor() {
+    if std::env::var_os("GDK_BACKEND").is_some() {
+        return;
+    }
+    let product = std::fs::read_to_string("/sys/class/dmi/id/product_name")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let vendor = std::fs::read_to_string("/sys/class/dmi/id/sys_vendor")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let hyper = ["virtualbox", "vmware", "kvm", "qemu", "xen", "microsoft corporation", "parallels"]
+        .iter()
+        .any(|h| product.contains(h) || vendor.contains(h));
+    if hyper {
+        // SAFETY: process-wide env before any GTK/GDK init.
+        unsafe { std::env::set_var("GDK_BACKEND", "x11") };
+    }
 }

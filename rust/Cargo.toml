@@ -18,7 +18,12 @@ members = [
     "crates/ds-ipc",
     "crates/ds-proc",
     "crates/ds-platform",
+    # Shared blocking HTTP setup (OS trust roots + bounded small-response reads).
+    # Provider semantics stay in their owning crates.
+    "crates/ds-http",
     "crates/ds-model",
+    # Read-only weekly/monthly quota probes for supported coding agents.
+    "crates/ds-agent-usage",
     # Voice/language enumeration split out of ds-tts (issue #5) so the CLI (dontspeak)
     # can list voices without linking ds-tts's heavy synth stack (ort/rodio/voice-g2p/
     # ds-model); ds-tts re-exports this crate's items unchanged.
@@ -111,6 +116,9 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # of its own. Already transitively in the graph (via attohttpc, ignore/globset); promoted
 # to a direct workspace dep so ds-log can implement `log::Log` as a sink over log_cached.
 log = "0.4"
+# Already transitively in the graph (via attohttpc / ds-http); direct for JWT payload
+# decode in ds-agent-usage (Codex id_token email claim).
+base64 = "0.22"
 
 # ── Engine dependencies ──────────────────────────────────────────────────────
 # Model download (ds-model): tiny blocking HTTP, checksum, atomic rename. We use
@@ -127,6 +135,9 @@ sha2 = "0.11"
 # (ds-model::update_check), so "is a newer release out" is a real semver compare, not a
 # string compare (which would misorder e.g. "0.9.0" vs "0.10.0").
 semver = "1"
+# RFC 3339 provider reset timestamps. Parsing only; native hosts format in the
+# user's locale/time zone.
+time = { version = "0.3", features = ["parsing"] }
 # STT capture/resample (ds-stt, Parakeet): mic capture (cpal) → mono → 16 kHz
 # (rubato) → transcribe-rs over the shared `ort` runtime.
 cpal = "0.18"
@@ -180,6 +191,9 @@ windows = "0.62"
 # Runtime dlopen of dylibs we deliberately don't link at build time (the FluidAudio
 # Core ML / ANE shim, NVML) — resolved by env var/path, like ort's load-dynamic.
 libloading = "0.9"
+# Read Claude Code's OAuth JSON from its macOS Keychain item without allowing
+# authentication UI. Other platforms keep using the protected credentials file.
+security-framework = "3.7"
 # Raw libc calls std doesn't wrap (RTLD_GLOBAL dlopen preloads, thread QoS).
 libc = "0.2"
 # Zip reader for model archives (Windows ONNX Runtime .zip, Linux CUDA wheels).
@@ -203,7 +217,9 @@ ds-earcon = { path = "crates/ds-earcon" }
 ds-ipc = { path = "crates/ds-ipc" }
 ds-proc = { path = "crates/ds-proc" }
 ds-platform = { path = "crates/ds-platform" }
+ds-http = { path = "crates/ds-http" }
 ds-model = { path = "crates/ds-model" }
+ds-agent-usage = { path = "crates/ds-agent-usage" }
 ds-voices = { path = "crates/ds-voices" }
 ds-tts = { path = "crates/ds-tts" }
 ds-stt = { path = "crates/ds-stt" }

@@ -4,9 +4,12 @@
 //! Strings only from shared `ds-i18n` via [`crate::ffi::t`]. State as colored dots (libadwaita
 //! semantic classes), never words — same as the other hosts.
 
+use std::collections::HashMap;
+
 use adw::prelude::*;
 use ds_status::{EngineObj, EngineState, ModelStatus};
 
+use crate::ffi::{UsageCard, UsageDeck, UsageRow};
 use crate::status::Snapshot;
 
 fn t(key: &str) -> String {
@@ -17,6 +20,7 @@ fn t(key: &str) -> String {
 #[derive(Clone)]
 pub struct Widgets {
     pub window: adw::ApplicationWindow,
+    stack: adw::ViewStack,
     /// Engine headline dot (green running / gray idle).
     engine: gtk::Image,
     tts_row: adw::ExpanderRow,
@@ -42,6 +46,8 @@ pub struct Widgets {
     /// click. [`apply_update_check`] rewrites text to "current → new" and tints background
     /// in place (one shared pill, not a separate badge).
     version_subtitle: gtk::Label,
+    /// Usage tab — speaking-agent wash from `running.tts_source`.
+    usage_page: UsagePage,
 }
 
 pub fn build_window(app: &adw::Application) -> Widgets {
@@ -159,9 +165,22 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     caps_group.add(&caps_row);
     content.append(&caps_group);
 
-    // Status / Tools / Log / Credits — AdwViewStack + InlineViewSwitcher (HIG 3–5 views).
-    // Order matches macOS/Windows (Log before Credits).
+    // Usage / Status / Tools / Log / Credits — five-view HIG limit.
+    // First page is the launch default, matching macOS/Windows.
     let stack = adw::ViewStack::new();
+    let usage_page = UsagePage::new();
+    {
+        let page = usage_page.clone();
+        stack.connect_visible_child_name_notify(move |s| {
+            if s.visible_child_name().as_deref() == Some("usage") {
+                // Cache-first paint, then force-refresh each card async.
+                page.on_tab_selected();
+            } else {
+                page.cancel_visible_request();
+            }
+        });
+    }
+    stack.add_titled(&usage_page.root, Some("usage"), &t("common.nav_usage"));
     stack.add_titled(&scrolled(&content), Some("status"), &t("common.nav_status"));
     stack.add_titled(
         &scrolled(&build_tools_page()),
@@ -279,6 +298,7 @@ pub fn build_window(app: &adw::Application) -> Widgets {
 
     Widgets {
         window,
+        stack,
         engine,
         tts_row,
         tts_dot,
@@ -299,6 +319,7 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         spoken,
         heard,
         version_subtitle,
+        usage_page,
     }
 }
 
@@ -327,8 +348,16 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         }
         w.tts_failures_row.set_visible(false);
         w.stt_failures_row.set_visible(false);
+        w.usage_page.set_speaking_agent(None);
         return;
     };
+
+    let speaking = if s.running.tts_active {
+        s.running.tts_source.as_deref()
+    } else {
+        None
+    };
+    w.usage_page.set_speaking_agent(speaking);
 
     set_dot(&w.engine, "running");
 
@@ -545,9 +574,11 @@ fn make_version_link(row: &adw::ExpanderRow, url: &str) -> gtk::Label {
     subtitle
 }
 
-/// `.ds-update-badge` background only — brand purple from [`crate::icon::brand_colors`]
-/// (never a second hardcoded hex). Does NOT set `color`/`font-*` so the version subtitle
-/// keeps its text styling. Local color source; safe at startup independent of the network check.
+/// Brand-purple UI accents from [`crate::icon::brand_colors`] (never a second hardcoded hex):
+/// - `.ds-update-badge` background only (keeps subtitle text styling)
+/// - `.ds-usage-progress` fill (Usage tab progress bars)
+///
+/// Local color source; safe at startup independent of the network check.
 pub fn load_update_badge_css() {
     let (crate::icon::Rgb(r, g, b), _mic_orange) =
         crate::icon::brand_colors(&crate::ffi::brand_colors_json());
@@ -556,6 +587,13 @@ pub fn load_update_badge_css() {
             background-color: rgba({r}, {g}, {b}, 0.18);
             border-radius: 999px;
             padding: 2px 10px;
+        }}
+        progressbar.ds-usage-progress > trough > progress {{
+            background-color: rgb({r}, {g}, {b});
+        }}
+        .ds-usage-speaking {{
+            background-color: rgba({r}, {g}, {b}, 0.30);
+            border-radius: 12px;
         }}"
     );
     let provider = gtk::CssProvider::new();
@@ -673,6 +711,458 @@ fn page_box(group: &adw::PreferencesGroup) -> gtk::Box {
     let clamp = adw::Clamp::builder().maximum_size(600).child(group).build();
     b.append(&clamp);
     b
+}
+
+/// Mounted period row widgets — kept so matching refreshes update in place (WinUI
+/// `UsageRowView` analogue). Remount only when period shape changes.
+#[derive(Clone)]
+struct UsageRowWidgets {
+    period: String,
+    progress: gtk::ProgressBar,
+    remaining: gtk::Label,
+}
+
+/// Stable per-agent shell: `stack` for crossfade remounts; `rows` for in-place updates.
+struct MountedUsageCard {
+    stack: gtk::Stack,
+    account: gtk::Label,
+    rows: Vec<UsageRowWidgets>,
+}
+
+#[derive(Clone)]
+struct UsagePage {
+    root: gtk::Box,
+    list: gtk::Box,
+    /// Canonical `ClientSource::CLIENTS` order supplied by the Rust skeleton deck.
+    canonical_agents: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    /// Latest cards (skeleton + independent loads).
+    latest: std::rc::Rc<std::cell::RefCell<Vec<UsageCard>>>,
+    /// Stable card shells; matching row shape updates ProgressBar/labels in place.
+    rendered: std::rc::Rc<std::cell::RefCell<HashMap<String, MountedUsageCard>>>,
+    empty_label: gtk::Label,
+    generation: std::rc::Rc<std::cell::Cell<u64>>,
+    /// In-flight TTS agent token (`running.tts_source`); drives `.ds-usage-speaking` wash.
+    speaking_agent: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+}
+
+impl UsagePage {
+    fn new() -> Self {
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .build();
+        let list = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_top(10)
+            .margin_bottom(18)
+            .margin_start(18)
+            .margin_end(18)
+            .build();
+        let empty_label = gtk::Label::new(Some(&t("usage.unavailable")));
+        root.append(&scrolled(&list));
+        Self {
+            root,
+            list,
+            canonical_agents: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            latest: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            rendered: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
+            empty_label,
+            generation: std::rc::Rc::new(std::cell::Cell::new(0)),
+            speaking_agent: std::rc::Rc::new(std::cell::RefCell::new(None)),
+        }
+    }
+
+    /// Brand-purple wash on the card whose agent matches the speaking TTS source.
+    fn set_speaking_agent(&self, agent: Option<&str>) {
+        let next = agent.map(str::to_string);
+        if *self.speaking_agent.borrow() == next {
+            return;
+        }
+        *self.speaking_agent.borrow_mut() = next;
+        self.refresh_speaking_wash();
+    }
+
+    fn refresh_speaking_wash(&self) {
+        let speaking = self.speaking_agent.borrow().clone();
+        for (agent, mounted) in self.rendered.borrow().iter() {
+            let on = speaking.as_ref().is_some_and(|s| s == agent);
+            if on {
+                mounted.stack.add_css_class("ds-usage-speaking");
+            } else {
+                mounted.stack.remove_css_class("ds-usage-speaking");
+            }
+        }
+    }
+
+    fn cancel_visible_request(&self) {
+        self.generation.set(self.generation.get().saturating_add(1));
+    }
+
+    fn update_empty_state(&self, settled: bool) {
+        let empty = self.latest.borrow().is_empty();
+        if empty && settled {
+            if self.empty_label.parent().is_none() {
+                self.list.append(&self.empty_label);
+            }
+        } else if self.empty_label.parent().is_some() {
+            self.list.remove(&self.empty_label);
+        }
+    }
+
+    fn reconcile_agents(&self, installed: &[String]) {
+        self.latest
+            .borrow_mut()
+            .retain(|card| installed.contains(&card.agent));
+        let stale: Vec<String> = self
+            .rendered
+            .borrow()
+            .keys()
+            .filter(|agent| !installed.contains(agent))
+            .cloned()
+            .collect();
+        for agent in stale {
+            if let Some(mounted) = self.rendered.borrow_mut().remove(&agent) {
+                self.list.remove(&mounted.stack);
+            }
+        }
+    }
+
+    fn apply_card(&self, card: UsageCard) {
+        let changed = {
+            let mut latest = self.latest.borrow_mut();
+            if let Some(slot) = latest
+                .iter_mut()
+                .find(|current| current.agent == card.agent)
+            {
+                if *slot == card {
+                    false
+                } else {
+                    *slot = card.clone();
+                    true
+                }
+            } else {
+                latest.push(card.clone());
+                let order = self.canonical_agents.borrow();
+                latest.sort_by_key(|current| {
+                    order
+                        .iter()
+                        .position(|agent| agent == &current.agent)
+                        .unwrap_or(usize::MAX)
+                });
+                true
+            }
+        };
+        if !changed {
+            return;
+        }
+
+        // Same period count + order → update labels/ProgressBar in place (WinUI
+        // TryUpdateUsageRows). Crossfade remount only when row shape changes.
+        if let Some(mounted) = self.rendered.borrow().get(&card.agent)
+            && try_update_usage_rows(&mounted.rows, &card)
+        {
+            set_usage_account_label(&mounted.account, card.account.as_deref());
+            self.update_empty_state(false);
+            return;
+        }
+
+        let (group, account, rows) = paint_usage_card(&card);
+        if let Some(mounted) = self.rendered.borrow_mut().get_mut(&card.agent) {
+            let stack = mounted.stack.clone();
+            let previous = stack.visible_child();
+            stack.add_child(&group);
+            stack.set_visible_child(&group);
+            mounted.account = account;
+            mounted.rows = rows;
+            if let Some(previous) = previous {
+                let stack = stack.clone();
+                gtk::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(220),
+                    move || {
+                        if previous.parent().is_some() {
+                            stack.remove(&previous);
+                        }
+                    },
+                );
+            }
+        } else {
+            let stack = gtk::Stack::builder()
+                .transition_type(gtk::StackTransitionType::Crossfade)
+                .transition_duration(180)
+                .hexpand(true)
+                .build();
+            stack.add_child(&group);
+            let previous = {
+                let order = self.canonical_agents.borrow();
+                let rendered = self.rendered.borrow();
+                order
+                    .iter()
+                    .position(|agent| agent == &card.agent)
+                    .and_then(|rank| {
+                        order[..rank].iter().rev().find_map(|agent| {
+                            rendered.get(agent).map(|mounted| mounted.stack.clone())
+                        })
+                    })
+            };
+            self.list.insert_child_after(&stack, previous.as_ref());
+            self.rendered
+                .borrow_mut()
+                .insert(card.agent, MountedUsageCard { stack, account, rows });
+        }
+        self.refresh_speaking_wash();
+        self.update_empty_state(false);
+    }
+
+    /// Tab selected: paint only cards with cached rows; force-load each installed
+    /// agent and insert/update when that load has data (first visit: empty until then).
+    fn on_tab_selected(&self) {
+        let generation = self.generation.get().saturating_add(1);
+        self.generation.set(generation);
+
+        let (tx, rx) = async_channel::bounded::<Option<UsageDeck>>(1);
+        if std::thread::Builder::new()
+            .name("ds-agent-usage-skel".into())
+            .spawn(move || {
+                let _ = tx.send_blocking(crate::ffi::agent_usage_skeleton());
+            })
+            .is_err()
+        {
+            self.update_empty_state(true);
+            return;
+        }
+        let page = self.clone();
+        gtk::glib::spawn_future_local(async move {
+            let Ok(Some(deck)) = rx.recv().await else {
+                page.update_empty_state(true);
+                return;
+            };
+            if page.generation.get() != generation {
+                return;
+            }
+
+            let agents: Vec<String> = deck.cards.iter().map(|c| c.agent.clone()).collect();
+            *page.canonical_agents.borrow_mut() = agents.clone();
+            page.reconcile_agents(&agents);
+            for cached in deck.cards.into_iter().filter(|card| !card.rows.is_empty()) {
+                page.apply_card(cached);
+            }
+            page.update_empty_state(agents.is_empty());
+
+            if agents.is_empty() {
+                return;
+            }
+
+            let remaining = std::rc::Rc::new(std::cell::Cell::new(agents.len()));
+            for agent in agents {
+                let (tx, rx) = async_channel::bounded::<Option<UsageCard>>(1);
+                let agent_thread = agent.clone();
+                let _ = std::thread::Builder::new()
+                    .name("ds-agent-usage-one".into())
+                    .spawn(move || {
+                        let _ = tx.send_blocking(crate::ffi::agent_usage_card(&agent_thread, true));
+                    });
+                let page = page.clone();
+                let remaining = remaining.clone();
+                gtk::glib::spawn_future_local(async move {
+                    let Ok(updated) = rx.recv().await else {
+                        finish_one(&page, &remaining, generation);
+                        return;
+                    };
+                    if page.generation.get() != generation {
+                        return;
+                    }
+                    if let Some(updated) = updated
+                        && !updated.rows.is_empty()
+                    {
+                        page.apply_card(updated);
+                    }
+                    finish_one(&page, &remaining, generation);
+                });
+            }
+        });
+    }
+}
+
+fn finish_one(page: &UsagePage, remaining: &std::rc::Rc<std::cell::Cell<usize>>, generation: u64) {
+    if page.generation.get() != generation {
+        return;
+    }
+    let left = remaining.get().saturating_sub(1);
+    remaining.set(left);
+    if left == 0 {
+        page.update_empty_state(true);
+    }
+}
+
+/// Keep matching rows mounted so a refresh animates from the displayed value instead
+/// of remounting ProgressBar at the new fraction. Rebuild only when shape changes.
+fn try_update_usage_rows(mounted: &[UsageRowWidgets], card: &UsageCard) -> bool {
+    if mounted.len() != card.rows.len() {
+        return false;
+    }
+    for (view, row) in mounted.iter().zip(&card.rows) {
+        if view.period != row.period {
+            return false;
+        }
+    }
+    for (view, row) in mounted.iter().zip(&card.rows) {
+        update_usage_row(view, row);
+    }
+    true
+}
+
+fn update_usage_row(view: &UsageRowWidgets, row: &UsageRow) {
+    // Percent is the progress bar only; remaining till reset sits top-right (no seconds).
+    view.progress
+        .set_fraction((row.used_percent / 100.0).clamp(0.0, 1.0));
+    let remaining = crate::ffi::usage_resets_in(row.resets_at_unix);
+    view.remaining.set_label(&remaining);
+    view.remaining.set_visible(!remaining.is_empty());
+}
+
+/// Localized agent title; unknown tokens get a prettified fallback instead of the raw i18n key.
+fn agent_display_name(agent: &str) -> String {
+    let key = format!("usage.provider.{agent}");
+    let label = t(&key);
+    if label == key {
+        prettify_agent_token(agent)
+    } else {
+        label
+    }
+}
+
+/// `snake_case` → `Title Case` (e.g. `claude_code` → `Claude Code`).
+fn prettify_agent_token(agent: &str) -> String {
+    agent
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut out = first.to_uppercase().collect::<String>();
+                    out.extend(chars.flat_map(|c| c.to_lowercase()));
+                    out
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Same layout as Swift/WinUI: agent title + account (top-right) + period rows.
+fn paint_usage_card(card: &UsageCard) -> (adw::PreferencesGroup, gtk::Label, Vec<UsageRowWidgets>) {
+    let group = adw::PreferencesGroup::builder()
+        .title(agent_display_name(&card.agent))
+        .build();
+    // Account sits top-right of the group header (caption / dim, like remaining).
+    // Fully transparent until clicked; reveal lives only on this widget (UI reload resets).
+    let account = gtk::Label::builder()
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::End)
+        .xalign(1.0)
+        .ellipsize(gtk::pango::EllipsizeMode::Middle)
+        .max_width_chars(28)
+        .build();
+    account.add_css_class("dim-label");
+    account.add_css_class("caption");
+    account.set_opacity(0.0);
+    account.set_can_target(true);
+    {
+        let label = account.clone();
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |_, _, _, _| {
+            if !label.is_visible() || label.text().is_empty() {
+                return;
+            }
+            // Toggle session-only reveal (not persisted).
+            let next = if label.opacity() < 0.5 { 1.0 } else { 0.0 };
+            label.set_opacity(next);
+        });
+        account.add_controller(click);
+    }
+    set_usage_account_label(&account, card.account.as_deref());
+    group.set_header_suffix(Some(&account));
+    let mut rows = Vec::with_capacity(card.rows.len());
+    for row in &card.rows {
+        let (widget, view) = usage_row_widget(row);
+        group.add(&widget);
+        rows.push(view);
+    }
+    (group, account, rows)
+}
+
+fn set_usage_account_label(label: &gtk::Label, account: Option<&str>) {
+    let text = account.map(str::trim).filter(|s| !s.is_empty());
+    match text {
+        Some(value) => {
+            label.set_text(value);
+            label.set_visible(true);
+            // Keep current reveal if the label was already shown; new widgets start at 0.
+        }
+        None => {
+            label.set_text("");
+            label.set_visible(false);
+            label.set_opacity(0.0);
+        }
+    }
+}
+
+/// One row: period + remaining (top-right) | progress. Same structure as Swift/WinUI.
+/// Remaining label is always created (hidden when empty) so in-place updates can toggle it.
+fn usage_row_widget(row: &UsageRow) -> (gtk::Widget, UsageRowWidgets) {
+    let outer = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+
+    // Bottom-align period + remaining so different font sizes share one baseline.
+    let header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .valign(gtk::Align::End)
+        .build();
+    let period = gtk::Label::builder()
+        .label(t(&format!("usage.{}", row.period)))
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::End)
+        .hexpand(true)
+        .xalign(0.0)
+        .yalign(1.0)
+        .build();
+    period.add_css_class("heading");
+    // Remaining till reset sits top-right; percent is the bar only.
+    let remaining_label = gtk::Label::builder()
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::End)
+        .xalign(1.0)
+        .yalign(1.0)
+        .build();
+    remaining_label.add_css_class("dim-label");
+    remaining_label.add_css_class("numeric");
+    remaining_label.add_css_class("caption");
+    header.append(&period);
+    header.append(&remaining_label);
+
+    let progress = gtk::ProgressBar::builder().hexpand(true).build();
+    // Brand seed purple fill — see `load_update_badge_css` / `.ds-usage-progress`.
+    progress.add_css_class("ds-usage-progress");
+
+    outer.append(&header);
+    outer.append(&progress);
+
+    let view = UsageRowWidgets {
+        period: row.period.clone(),
+        progress,
+        remaining: remaining_label,
+    };
+    update_usage_row(&view, row);
+    (outer.upcast(), view)
 }
 
 /// Tools catalog from `ds_tools_json` — expander per tool, params with shared `detail` string.

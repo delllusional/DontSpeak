@@ -139,9 +139,9 @@ pub(crate) struct EngineShared {
 pub(crate) fn model_status_json(
     shared: &EngineShared,
     paths: &Paths,
-    read_tts_active: impl FnOnce() -> bool,
+    read_tts: impl FnOnce() -> (bool, Option<ds_config::ClientSource>),
 ) -> serde_json::Value {
-    let (tts_active, seq) = shared.gate.snapshot(read_tts_active);
+    let ((tts_active, tts_source), seq) = shared.gate.snapshot(read_tts);
     let EngineShared {
         tts,
         caps_active,
@@ -575,6 +575,9 @@ pub(crate) fn model_status_json(
             // True while TTS audio is actually playing — drives the menu-bar
             // TTS state, mirroring `stt_active` for the capture state.
             tts_active,
+            // Wireable client of the in-flight utterance (Usage-card highlight); null when
+            // idle or non-client producer (greet / unknown).
+            tts_source: tts_source.map(|s| s.as_str().to_string()),
             // Global MUTE (Caps-tap when dictation is off, or the tray checkbox): playback
             // still runs, only the audio is silenced. Drives the tray "Mute" toggle + the
             // faded menu-bar icon.
@@ -1014,7 +1017,7 @@ mod tests {
             gate,
         };
 
-        let value = model_status_json(&shared, &paths, || true);
+        let value = model_status_json(&shared, &paths, || (true, None));
         // SAFETY: restore the three values while ENV_LOCK is still held.
         unsafe {
             match previous_model_dir {

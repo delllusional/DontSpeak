@@ -48,6 +48,11 @@ pub struct Running {
     pub caps_wanted: bool,
     pub stt_active: bool,
     pub tts_active: bool,
+    /// Wireable client token for the in-flight TTS utterance (`claude_code` / `codex` /
+    /// `qwen_code` / `grok`). `null` when idle or the producer is not a Usage agent
+    /// (greet / unknown / DontSpeak). Absent key (older engines) → `None`.
+    #[serde(default)]
+    pub tts_source: Option<String>,
     pub muted: bool,
     pub kokoro: bool,
     pub tts_system: bool,
@@ -214,6 +219,7 @@ mod tests {
                 caps_wanted: false,
                 stt_active: false,
                 tts_active: false,
+                tts_source: None,
                 muted: false,
                 kokoro: false,
                 tts_system: true,
@@ -286,6 +292,11 @@ mod tests {
             "dictation.target null when None"
         );
         assert!(v["dictation"]["state"].is_string(), "dictation.state");
+        // Idle sample: tts_source is present and null (never omitted).
+        assert!(
+            v["running"]["tts_source"].is_null(),
+            "running.tts_source null when idle"
+        );
         assert!(v["seq"].is_u64());
         assert!(v["stats"]["tts"]["rtf_avg"].is_f64());
         assert!(v["stats"]["stt"]["transcriptions"].is_u64());
@@ -375,6 +386,7 @@ mod tests {
             caps_wanted in any::<bool>(),
             stt_active in any::<bool>(),
             tts_active in any::<bool>(),
+            tts_source in opt_short_string(),
             muted in any::<bool>(),
             kokoro in any::<bool>(),
             tts_system in any::<bool>(),
@@ -387,6 +399,7 @@ mod tests {
                 caps_wanted,
                 stt_active,
                 tts_active,
+                tts_source,
                 muted,
                 kokoro,
                 tts_system,

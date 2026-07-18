@@ -84,37 +84,22 @@ mod tests {
     #[test]
     fn stt_and_tts_tokens_enable_color() {
         let ind = ["stt", "tts"];
-        assert_eq!(
-            tray_icon_kind(true, false, &ind),
-            TrayIconKind::Recording
-        );
-        assert_eq!(
-            tray_icon_kind(false, true, &ind),
-            TrayIconKind::Speaking
-        );
+        assert_eq!(tray_icon_kind(true, false, &ind), TrayIconKind::Recording);
+        assert_eq!(tray_icon_kind(false, true, &ind), TrayIconKind::Speaking);
         assert_eq!(tray_icon_kind(false, false, &ind), TrayIconKind::Idle);
     }
 
     #[test]
     fn animated_forms_count_as_enabled() {
         let ind = ["stt_animated", "tts_animated"];
-        assert_eq!(
-            tray_icon_kind(true, false, &ind),
-            TrayIconKind::Recording
-        );
-        assert_eq!(
-            tray_icon_kind(false, true, &ind),
-            TrayIconKind::Speaking
-        );
+        assert_eq!(tray_icon_kind(true, false, &ind), TrayIconKind::Recording);
+        assert_eq!(tray_icon_kind(false, true, &ind), TrayIconKind::Speaking);
     }
 
     #[test]
     fn recording_wins_over_speaking() {
         let ind = ["stt", "tts"];
-        assert_eq!(
-            tray_icon_kind(true, true, &ind),
-            TrayIconKind::Recording
-        );
+        assert_eq!(tray_icon_kind(true, true, &ind), TrayIconKind::Recording);
     }
 
     #[test]
@@ -124,10 +109,7 @@ mod tests {
             tray_icon_kind(true, true, &stt_only),
             TrayIconKind::Recording
         );
-        assert_eq!(
-            tray_icon_kind(false, true, &stt_only),
-            TrayIconKind::Idle
-        );
+        assert_eq!(tray_icon_kind(false, true, &stt_only), TrayIconKind::Idle);
         let tts_only = ["tts"];
         assert_eq!(
             tray_icon_kind(true, true, &tts_only),

@@ -44,7 +44,24 @@ public class HealthSnapshotTests
         Assert.True(s.Activity.Caps);
         Assert.True(s.Activity.Recording);
         Assert.False(s.Activity.Speaking);
+        Assert.Null(s.Activity.TtsSource);
         Assert.True(s.Activity.Muted);
+    }
+
+    [Fact]
+    public void TtsSourceOnlyWhenSpeaking()
+    {
+        var speaking = Parse("""
+            {"seq": 1, "running": {"tts_active": true, "tts_source": "claude_code"}}
+            """);
+        Assert.True(speaking.Activity.Speaking);
+        Assert.Equal("claude_code", speaking.Activity.TtsSource);
+
+        var idle = Parse("""
+            {"seq": 2, "running": {"tts_active": false, "tts_source": "claude_code"}}
+            """);
+        Assert.False(idle.Activity.Speaking);
+        Assert.Null(idle.Activity.TtsSource);
     }
 
     /// <summary>An absent tray_indicator keeps the {"stt","tts_animated"} default; a present

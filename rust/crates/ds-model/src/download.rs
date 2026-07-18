@@ -3,6 +3,15 @@
 //! `attohttpc` (no tokio); a socket-level per-read inactivity timeout aborts a
 //! stalled CDN.
 //!
+//! Timeouts intentionally omit a wall-clock total budget: large models can take
+//! minutes. Policy is connect fail-fast + per-read inactivity only (`ds_http::request`
+//! with `total_timeout: None`). Bounded JSON probes (agent-usage) pass `Some(...)`.
+//!
+//! `ds_http` defaults to `max_redirections(0)` so credential-bearing probes never hop
+//! (attohttpc re-sends `Authorization` on cross-origin 3xx). These public CDN GETs
+//! never attach auth; GitHub `releases/download` and Hugging Face `/resolve/` already
+//! 302 to object storage, so [`http_get_builder`] opts back into a small redirect budget.
+//!
 //! Retry classification rides on `io::ErrorKind`, not a custom error enum:
 //! `InvalidData` = checksum mismatch and `NotFound` = HTTP 4xx or definitive DNS
 //! name failure (permanent, fail fast); `TimedOut` = other transport/5xx/truncation
@@ -19,29 +28,29 @@ pub(crate) const DEFAULT_RETRIES: u32 = 3;
 
 // Connect: fail-fast on dead host. Read: per-read inactivity (SO_RCVTIMEO), not whole-request —
 // large models may take minutes; stalled CDN aborts when no bytes arrive for 60s.
+// No total wall-clock timeout: multi-minute transfers must not die at an arbitrary cap
+// (contrast credential-bearing probes in ds-agent-usage, which pass Some(total)).
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Cap endless tiny successful ranges; then ordinary retry/backoff.
 const MAX_RANGE_SEGMENTS_PER_ATTEMPT: u32 = 64;
 
-/// OS trust store once. attohttpc's webpki-roots feature doesn't enable its root-loading
-/// cfg — built-in store is empty; inject native certs ourselves.
-fn os_root_certs() -> &'static [rustls_pki_types::CertificateDer<'static>] {
-    use std::sync::OnceLock;
-    static ROOTS: OnceLock<Vec<rustls_pki_types::CertificateDer<'static>>> = OnceLock::new();
-    ROOTS.get_or_init(|| rustls_native_certs::load_native_certs().certs)
-}
-
 /// Stall timeouts + OS roots — sole setup for every HTTPS download in this crate.
+/// Total timeout is deliberately `None` (see module docs). Never attach
+/// `Authorization` on this builder: redirects are re-enabled for public CDNs only.
 pub(crate) fn http_get_builder(url: &str) -> attohttpc::RequestBuilder {
-    let mut rb = attohttpc::get(url)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(READ_TIMEOUT);
-    for cert in os_root_certs() {
-        rb = rb.add_root_certificate(cert.clone());
-    }
-    rb
+    // Bound hops (GitHub/HF typically need 1). Keep below attohttpc's historical default of 5.
+    const MAX_CDN_REDIRECTIONS: u32 = 5;
+    ds_http::request(
+        ds_http::Method::GET,
+        url,
+        CONNECT_TIMEOUT,
+        READ_TIMEOUT,
+        None,
+    )
+    .follow_redirects(true)
+    .max_redirections(MAX_CDN_REDIRECTIONS)
 }
 
 // Installer prefetch: copy from a local dir (URL basename) instead of network;
@@ -1355,5 +1364,34 @@ mod tests {
             !nested_tmp.exists(),
             "the sweep must recurse into subdirectories"
         );
+    }
+
+    /// #108 audit fix: public CDN downloads must follow a small number of redirects
+    /// (GitHub releases / HF resolve → object storage). Credential probes keep
+    /// `ds_http`'s default max_redirections(0); only this auth-less builder opts in.
+    #[test]
+    fn http_get_builder_follows_cdn_redirect_chain() {
+        let server = httpmock::MockServer::start();
+        let target = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/cdn-object");
+            then.status(200).body("cdn-payload");
+        });
+        let start = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/releases/download/x");
+            then.status(302)
+                .header("Location", server.url("/cdn-object"))
+                .body("");
+        });
+
+        let body = ds_http::read_utf8_limited(
+            http_get_builder(&server.url("/releases/download/x"))
+                .send()
+                .expect("redirect chain must succeed"),
+            64,
+        )
+        .expect("body");
+        assert_eq!(body, "cdn-payload");
+        start.assert();
+        target.assert();
     }
 }

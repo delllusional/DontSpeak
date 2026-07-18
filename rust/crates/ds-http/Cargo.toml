@@ -1,0 +1,21 @@
+[package]
+name = "ds-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Shared blocking HTTP transport policy for DontSpeak."
+
+[dependencies]
+attohttpc = { workspace = true }
+rustls-native-certs = "0.8"
+rustls-pki-types = "1"
+
+[dev-dependencies]
+httpmock = { workspace = true }
+
+[lints]
+workspace = true

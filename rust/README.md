@@ -24,6 +24,8 @@ rust/crates/
   ds-ipc/          # NDJSON RPC (server=engine; fuzz workspace under fuzz/)
   ds-proc/         # pidfile + process-group kill
   ds-platform/     # KeyInjector / FrontmostWindow / CapsKeyMonitor per OS
+  ds-http/         # bounded blocking HTTP + native trust roots
+  ds-agent-usage/  # read-only weekly/monthly coding-agent quotas
   ds-model/        # download + checksum; ORT session; FluidAudio shim loader
   ds-voices/       # voice/language enum (no full synth stack)
   ds-tts/          # Kokoro TTS (Tts trait)

@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///
 /// [`ClientSource::CLIENTS`] are the wire-able clients. `DontSpeak` / `Unknown` are the
 /// non-wireable ends of the same axis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ClientSource {
     /// Claude Code — hooks in `~/.claude/settings.json` + MCP in `~/.claude.json`.
     ClaudeCode,

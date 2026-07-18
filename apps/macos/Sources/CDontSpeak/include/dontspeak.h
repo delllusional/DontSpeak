@@ -94,6 +94,18 @@ char *ds_model_status_json(void);
 // `ds_string_free`; `"{}"` if the engine is down.
 char *ds_model_status_wait(uint64_t since, uint32_t timeout_ms);
 
+// Weekly/monthly coding-agent quota snapshot. BLOCKING: call off the UI thread.
+// `force_refresh != 0` bypasses the 60-second in-process cache. Versioned JSON;
+// owned `char*`, free with `ds_string_free`. HANDLE-FREE — no engine needed.
+/* Instant deck: installed agent cards + cached rows. No network.
+ * JSON: { schema_version: 2, cards: [ { agent, rows: [...] } ] } */
+char *ds_agent_usage_skeleton_json(void);
+/* Blocking single-card load. agent = client token; force_refresh bypasses 60s cache.
+ * JSON: { agent, rows: [ { period, used_percent, resets_at_unix } ] } */
+char *ds_agent_usage_card_json(const char *agent, uint8_t force_refresh);
+/* Aggregate deck refresh (tests/tooling). */
+char *ds_agent_usage_json(uint8_t force_refresh);
+
 // The tool catalog for the app's Tools window — a JSON array of
 // `{name, description, params:[…]}` with the args as an ORDERED array (the UI form of
 // the SAME `ds-tools` catalog the MCP server exposes, so it never drifts from what Claude
@@ -197,10 +209,12 @@ char *ds_t_args(const char *key, const char *args_json);
 // free with `ds_string_free`. HANDLE-FREE. The ONE state→word formatter shared by every UI.
 char *ds_engine_state_word(const char *state, double progress, const char *why);
 
-// Localized lifetime duration down to seconds, leading zero-units dropped
-// (e.g. "12m 04s", "1d 02h 03m 04s"). Owned `char*`, free with
-// `ds_string_free`. HANDLE-FREE.
+// Localized duration; leading+trailing zero units dropped (e.g. "12m 04s", "1d 05h").
+// Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
 char *ds_duration_live(double secs);
+
+// Usage remaining duration from UTC epoch (e.g. "2d 05h"). Owned `char*`.
+char *ds_usage_resets_in(int64_t resets_at_unix);
 
 // Localized RUNTIME label for a resolved provider token ("ane"|"coreml"|"cuda"|
 // "cpu"; unknown passes through). The TTS/STT runtime detail. Owned `char*`, free with

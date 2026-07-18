@@ -33,7 +33,7 @@ test("web installer verifies an asset against a CRLF checksum manifest", async (
     `#!/bin/sh
 set -eu
 mkdir -p "$DONTSPEAK_INSTALL_DIR"
-: > "$DONTSPEAK_INSTALL_DIR/dontspeak-uninstall"
+printf '#!/bin/sh\nexit 0\n' > "$DONTSPEAK_INSTALL_DIR/dontspeak-uninstall"
 chmod +x "$DONTSPEAK_INSTALL_DIR/dontspeak-uninstall"
 `,
   );
@@ -81,14 +81,38 @@ esac
 `,
   );
 
-  const result = spawnSync("sh", [installer], {
+  let shell = "sh";
+  let shellArgs = [installer];
+  if (process.platform === "win32") {
+    const gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
+    shell = resolve(gitExecPath, "../../../bin/sh.exe");
+    shellArgs = [
+      "-c",
+      `
+HOME="$(cygpath -u "$HOME")"
+TEST_FAKE_BIN="$(cygpath -u "$TEST_FAKE_BIN")"
+TEST_ARCHIVE="$(cygpath -u "$TEST_ARCHIVE")"
+TEST_CHECKSUMS="$(cygpath -u "$TEST_CHECKSUMS")"
+DONTSPEAK_INSTALL_DIR="$(cygpath -u "$DONTSPEAK_INSTALL_DIR")"
+export HOME TEST_FAKE_BIN TEST_ARCHIVE TEST_CHECKSUMS DONTSPEAK_INSTALL_DIR
+PATH="$TEST_FAKE_BIN:$PATH"
+export PATH
+exec sh "$(cygpath -u "$1")"
+`,
+      "sh",
+      installer,
+    ];
+  }
+
+  const result = spawnSync(shell, shellArgs, {
     cwd: repoRoot,
     encoding: "utf8",
     env: {
       ...process.env,
       DISPLAY: "",
       HOME: join(root, "home"),
-      PATH: `${fakeBin}:${process.env.PATH}`,
+      PATH: process.platform === "win32" ? process.env.PATH : `${fakeBin}:${process.env.PATH}`,
+      TEST_FAKE_BIN: fakeBin,
       TEST_ARCHIVE: archive,
       TEST_CHECKSUMS: checksums,
       DONTSPEAK_INSTALL_DIR: installDir,

@@ -163,6 +163,41 @@ pub extern "C" fn ds_model_status_wait(since: u64, timeout_ms: u32) -> *mut c_ch
     })
 }
 
+/// Instant Usage deck: installed agent cards + cached rows. **No network.**
+/// Hosts paint one card per entry, then call [`ds_agent_usage_card_json`] per agent.
+/// Owned `char*`. HANDLE-FREE.
+///
+/// JSON: `{ "cards": [ { "agent", "rows": [...] } ] }`
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_agent_usage_skeleton_json() -> *mut c_char {
+    const EMPTY: &str = r#"{"cards":[]}"#;
+    guard_str(EMPTY, || to_cstring(ds_agent_usage::skeleton().to_json()))
+}
+
+/// Blocking single-card load/refresh. Off UI thread; one call per agent card.
+/// `agent` is a `ClientSource` token. `force_refresh != 0` bypasses 60s soft cache.
+/// Owned `char*`. HANDLE-FREE.
+///
+/// JSON: `{ "agent": "claude_code", "rows": [ { "period", "used_percent", "resets_at_unix" } ] }`
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_agent_usage_card_json(agent: *const c_char, force_refresh: u8) -> *mut c_char {
+    const EMPTY: &str = r#"{"agent":"unknown","rows":[]}"#;
+    guard_str(EMPTY, || {
+        let token = cstr_or_empty(agent);
+        let source = ds_agent_usage::parse_agent(&token);
+        to_cstring(ds_agent_usage::refresh_card(source, force_refresh != 0).to_json())
+    })
+}
+
+/// Aggregate refresh (tests / tooling). Owned `char*`. HANDLE-FREE.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_agent_usage_json(force_refresh: u8) -> *mut c_char {
+    const EMPTY: &str = r#"{"cards":[]}"#;
+    guard_str(EMPTY, || {
+        to_cstring(ds_agent_usage::snapshot(force_refresh != 0).to_json())
+    })
+}
+
 /// Tools-window catalog: JSON array `{name, description, params:[…]}` — ordered params,
 /// same `ds-tools` catalog as MCP (no drift). Each param gets localized `detail` via
 /// [`crate::status_fmt::tool_param_detail`]. Owned `char*`. HANDLE-FREE.
@@ -341,10 +376,20 @@ pub extern "C" fn ds_engine_state_word(
     })
 }
 
-/// Lifetime duration down to seconds, leading zero units dropped. Owned `char*`. HANDLE-FREE.
+/// Lifetime / remaining duration; leading and trailing zero units dropped.
+/// Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_duration_live(secs: f64) -> *mut c_char {
     guard_str("", || to_cstring(crate::status_fmt::duration_live(secs)))
+}
+
+/// Usage remaining duration from absolute UTC epoch (e.g. `2d 05h`, no seconds).
+/// Owned `char*`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_usage_resets_in(resets_at_unix: i64) -> *mut c_char {
+    guard_str("", || {
+        to_cstring(crate::status_fmt::usage_resets_in(resets_at_unix))
+    })
 }
 
 /// Runtime label for provider token (ane|coreml|cuda|cpu; unknown verbatim). Owned
@@ -515,6 +560,14 @@ mod tests {
         let libraries: serde_json::Value =
             serde_json::from_str(&take_string(ds_libraries_json())).unwrap();
         assert!(!libraries.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn agent_usage_card_json_unknown_agent_has_no_rows() {
+        let c = CString::new("not_a_client").unwrap();
+        let json = take_string(ds_agent_usage_card_json(c.as_ptr(), 1));
+        let card: ds_agent_usage::UsageCard = serde_json::from_str(&json).unwrap();
+        assert!(card.rows.is_empty());
     }
 
     #[test]

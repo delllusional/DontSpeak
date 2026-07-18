@@ -21,6 +21,8 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [dependencies]
 # Read-only probes need these; the in-process engine host pulls the full stack.
 ds-config = { workspace = true }
+# Read-only coding-agent subscription quota snapshots for the Usage tab.
+ds-agent-usage = { workspace = true }
 # The unified activity log (ds_logs_json/ds_logs_wait/ds_logs_clear), split out of
 # ds-config (issue #6).
 ds-log = { workspace = true }

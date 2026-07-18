@@ -119,7 +119,8 @@ public partial class App : Application
         if (_hostingEngine) Native.EngineStart();
 
         _tray = new TrayIcon();
-        _tray.OpenStatus += () => ShowWindow(false);
+        // Tray re-show must not force a tab — keep whatever was selected (first open uses XAML default).
+        _tray.OpenStatus += () => ShowWindow();
         _tray.Exit += ExitApp;
 
         _panel = new DictationPanel();
@@ -139,7 +140,7 @@ public partial class App : Application
             }
         };
 
-        if (!hidden) ShowWindow(tools);
+        if (!hidden) ShowWindow(tools ? "tools" : null);
         else _tray.Balloon(Loc.T("tray.hint_tray_title"), Loc.T("tray.hint_tray_body"));
 
         var q = DispatcherQueue.GetForCurrentThread();
@@ -209,17 +210,17 @@ public partial class App : Application
                 {
                     _activate!.WaitOne();
                     if (_exiting) break;
-                    uiq.TryEnqueue(() => { if (!_exiting) ShowWindow(false); });
+                    uiq.TryEnqueue(() => { if (!_exiting) ShowWindow(); });
                 }
             }
             catch { /* handle disposed during teardown */ }
         }) { IsBackground = true }.Start();
     }
 
-    private void ShowWindow(bool tools)
+    private void ShowWindow(string? tab = null)
     {
         if (_window == null) return;
-        _window.SelectTab(tools);
+        if (tab != null) _window.SelectTab(tab);
         _window.AppWindow.Show();
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
         Win32.ShowWindow(hwnd, SW_RESTORE);

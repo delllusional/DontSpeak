@@ -90,6 +90,9 @@ New Grok session required after first wire or digests toggle.
 
 `dontspeak wire --reconcile` at install; engine re-reconciles at boot via
 `exclude_clients`. Additive, idempotent, backup-before-write, DontSpeak entries only.
+Client-specific homes are honored through `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`QWEN_HOME`, and `GROK_HOME`; relative values resolve from the launch directory and
+`~/...` values resolve from the user home.
 
 | Client | Hooks | MCP |
 |---|---|---|
@@ -114,3 +117,40 @@ dontspeak wire <client> --print-only
 | Grok | 0.2.101 | [CLI](https://docs.x.ai/build/cli/reference), [hooks](https://docs.x.ai/build/features/hooks), [MCP](https://docs.x.ai/build/features/mcp-servers) |
 
 Pins record last check, not minimum version.
+
+## Usage statistics
+
+Full spec: [AGENT-USAGE-PLAN.md](AGENT-USAGE-PLAN.md). Summary:
+
+**Model:** `UsageDeck` → `cards[]` of `UsageCard` (`agent` + `rows[]`); each
+`UsageRow` has `period` (`session` | `week` | `month`), `used_percent`,
+`resets_at_unix`.
+
+**ABI (off UI thread):**
+
+1. `ds_agent_usage_skeleton_json()` — installed agents + last-good memory/disk cache; no network
+2. `ds_agent_usage_card_json(agent, force)` — blocking load for one agent
+3. `ds_usage_resets_in(unix)` — remaining duration string (`2d 05h`, no seconds, no prefix)
+
+**Tab select:** paint only cards that already have rows (cache); force-load each
+installed agent async; transition a card only when its typed value changes. First
+visit with no cache shows no shells until a load succeeds. No Refresh button /
+loading spinner. Empty probes never wipe the atomically persisted last-good cache,
+and overlapping refreshes for one agent share a probe. Hosts decode ABI JSON in
+their lowest-level data-source adapter; views receive typed cards only. Install gate
+= wire `ClientSpec::present`.
+
+On macOS/Linux, Codex and Grok CLI probes search an explicit `CODEX_CLI_PATH` /
+`GROK_CLI_PATH`, the login-shell PATH, the process PATH, then known install roots.
+Qwen Coding Plan keys are read in client order from the process environment,
+`$QWEN_HOME/.env`, `~/.env`, then the `env` object in Qwen settings.
+
+**Layout (all hosts):** agent title → for each row: period + remaining (top-right),
+progress bar (percent as bar only). Strings from `ds-i18n` (`usage.*`).
+
+**Speaking highlight:** while TTS plays, `model_status.running.tts_source` is the
+wireable client token of the in-flight utterance (`claude_code` / `codex` /
+`qwen_code` / `grok`; `null` when idle or non-client). Hosts wash that agent’s
+Usage card with the same brand-purple tint as the top-bar speaking stripe. Source
+is retained on each TTS queue item at enqueue (hooks `source`, stream adapters,
+`GreetSession`) — not inferred from session id.

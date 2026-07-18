@@ -11,6 +11,7 @@ description = "Model asset download and verification for DontSpeak (Parakeet, Ko
 
 [dependencies]
 ds-config = { workspace = true }
+ds-http = { workspace = true }
 # Tiny BLOCKING HTTP client (attohttpc) — deliberately NOT reqwest/tokio (no async
 # runtime in the engine; "minimal deps"). Chosen for its socket `read_timeout`
 # (per-read inactivity guard) — see the timeout note in lib.rs. TLS = rustls + ring
@@ -22,10 +23,6 @@ attohttpc = { workspace = true }
 # root trust anchors". We keep `ring` (cross-compiles to win-arm64; aws-lc-rs doesn't) and
 # instead inject the OS roots ourselves via attohttpc's `add_root_certificate`, which the
 # rustls impl adds to the store regardless of that broken cfg. pki-types matches rustls 0.23.
-rustls-native-certs = "0.8"
-# Name the cert type attohttpc's `add_root_certificate` wants (its `Certificate` =
-# `CertificateDer`); "1" unifies with attohttpc's rustls 0.23 / rustls-native-certs pki-types.
-rustls-pki-types = "1"
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 # Compare the running version against the latest GitHub release tag (update_check).

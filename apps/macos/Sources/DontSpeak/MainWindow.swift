@@ -1,4 +1,4 @@
-// Single sidebar window (Status / Tools / Logs / Libraries). Chrome lives once:
+// Single sidebar window (Usage / Status / Tools / Logs / Credits). Chrome lives once:
 // Liquid-Glass slab + frosted title-bar strip tinted from `TrayState` (orange dictating /
 // purple narrating).
 
@@ -7,12 +7,13 @@ import SwiftUI
 
 /// Sidebar screens; titles from shared i18n (`common.nav_*`) to match Windows tabs.
 enum AppScreen: String, CaseIterable, Identifiable {
-    case status, tools, log, credits
+    case usage, status, tools, log, credits
     var id: String { rawValue }
 
     var titleKey: String {
         switch self {
         case .status: return "common.nav_status"
+        case .usage: return "common.nav_usage"
         case .tools: return "common.nav_tools"
         case .log: return "common.nav_log"
         case .credits: return "common.nav_credits"
@@ -22,6 +23,7 @@ enum AppScreen: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .status: return "waveform"
+        case .usage: return "chart.bar"
         case .tools: return "wrench.and.screwdriver"
         case .log: return "doc.plaintext"
         case .credits: return "books.vertical"
@@ -68,7 +70,7 @@ struct MainWindow: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationSplitViewStyle(.balanced)
-        // idealHeight == minHeight: first open snug to Status; wider panes scroll inside.
+        // Fixed first-open height; taller panes scroll inside.
         // Restoration off (`closeOnlyWindow`) so every open uses this size.
         .frame(minWidth: 460, idealWidth: 510, minHeight: 320, idealHeight: 320)
         .windowGlass(topTint: stateTint, topHeight: titleBarHeight)
@@ -80,6 +82,7 @@ struct MainWindow: View {
     @ViewBuilder private var detail: some View {
         switch core.screen {
         case .status: StatusView()
+        case .usage: UsageView()
         case .tools: ToolsView()
         case .log: LogView()
         case .credits: CreditsView()

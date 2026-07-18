@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use ds_config::{Paths, VoiceConfig};
+use ds_config::{ClientSource, Paths, VoiceConfig};
 
 use crate::status::StatusGate;
 use crate::tts::TtsManager;
@@ -31,10 +31,16 @@ impl Drop for HealingGuard {
     }
 }
 
-/// `None` = no claimed item; `Some(None)` = an untagged/global item; `Some(Some(id))` = a
-/// session item. The nested option is required because global speech is still real in-flight
-/// work and must remain distinguishable from an idle worker during scoped cancellation.
-struct PlayingGuard<'a>(&'a Mutex<Option<Option<String>>>);
+/// In-flight claim: which client produced the utterance and which session it belongs to.
+/// `session: None` = untagged/global item (still real work — distinct from idle worker).
+#[derive(Clone, Debug)]
+struct PlayingClaim {
+    source: ClientSource,
+    session: Option<String>,
+}
+
+/// Clears the worker's in-flight claim on drop (even if the speak panics).
+struct PlayingGuard<'a>(&'a Mutex<Option<PlayingClaim>>);
 impl Drop for PlayingGuard<'_> {
     fn drop(&mut self) {
         *self.0.lock().unwrap() = None;
@@ -192,6 +198,9 @@ impl QueueAction {
 /// earcons share the same session and cancellation path so they cannot overtake narration.
 struct Item {
     action: QueueAction,
+    /// Who produced this utterance (`ClientSource` from IPC / stream adapters).
+    /// Surfaced as `running.tts_source` while this item is in flight.
+    source: ClientSource,
     /// The client session this action belongs to (`None` = default/global), used for
     /// voice resolution, active-terminal selection, and scoped cancellation.
     session: Option<String>,
@@ -425,7 +434,7 @@ pub struct TtsQueue {
     /// with it at the end). Lets [`clear_session`](Self::clear_session) decide whether
     /// a per-window stop must cancel the in-flight item (its session matches) or only
     /// prune that window's queued items, leaving another window's playback alone.
-    playing_session: Mutex<Option<Option<String>>>,
+    playing: Mutex<Option<PlayingClaim>>,
     tts: Arc<TtsManager>,
     /// The shared status-push gate: a `tts_active` transition bumps it so a blocked
     /// `WaitModelStatus` sees playback start/stop immediately (the flag drives the
@@ -476,7 +485,7 @@ impl TtsQueue {
             pool_assignments: Mutex::new(HashMap::new()),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
-            playing_session: Mutex::new(None),
+            playing: Mutex::new(None),
             tts,
             gate,
             mic,
@@ -552,7 +561,7 @@ impl TtsQueue {
             pool_assignments: Mutex::new(HashMap::new()),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
-            playing_session: Mutex::new(None),
+            playing: Mutex::new(None),
             tts,
             gate: StatusGate::new(),
             mic,
@@ -573,12 +582,14 @@ impl TtsQueue {
     /// Enqueue one bounded unit of speech onto the FIFO. Empty text is ignored. Callers
     /// (explicit `speak`, the greeting, and mid-turn narration) all land here and are played
     /// in order. `voice`/`rate` are optional per-call overrides (narration passes `None` for
-    /// both → the session/config voice at play time).
+    /// both → the session/config voice at play time). `source` is who produced the utterance
+    /// (surfaced as `running.tts_source` while playing when it is a wireable client).
     pub fn enqueue(
         &self,
         text: String,
         voice: Option<String>,
         rate: Option<f32>,
+        source: ClientSource,
         session: Option<String>,
     ) -> Result<(), String> {
         if text.len() > MAX_SPEAK_BYTES {
@@ -587,7 +598,7 @@ impl TtsQueue {
         if text.trim().is_empty() {
             return Ok(());
         }
-        self.enqueue_action(QueueAction::Speech { text, voice, rate }, session)
+        self.enqueue_action(QueueAction::Speech { text, voice, rate }, source, session)
     }
 
     /// Enqueue a cue as an ordered session action. Resolving the configured sound and checking
@@ -595,9 +606,10 @@ impl TtsQueue {
     pub fn enqueue_earcon(
         &self,
         event: ds_earcon::EarconEvent,
+        source: ClientSource,
         session: Option<String>,
     ) -> Result<(), String> {
-        self.enqueue_action(QueueAction::Earcon(event), session)
+        self.enqueue_action(QueueAction::Earcon(event), source, session)
     }
 
     /// Route one earcon: an ordered queue action by default (77f9266 / #78), with ONE
@@ -625,7 +637,7 @@ impl TtsQueue {
     ///   `is_busy()` must stay false, or the always-listening capture would close
     ///   mid-dictation for a one-second ding;
     /// * an out-of-band cue is not a queue item and never registers in
-    ///   `playing_session`, so the per-session stops (`clear_session`/`end_session`/
+    ///   `playing`, so the per-session stops (`clear_session`/`end_session`/
     ///   per-window StopSpeech) cannot reach it; only the GLOBAL helper ops
     ///   (`clear()`'s cancel, `set_muted`, the record-barge stopfade) stop a sounding
     ///   one. That is parity with the pre-77f9266 fire-and-forget cue behavior, now
@@ -636,6 +648,7 @@ impl TtsQueue {
     pub fn dispatch_earcon(
         self: &Arc<Self>,
         event: ds_earcon::EarconEvent,
+        source: ClientSource,
         session: Option<String>,
     ) -> Result<(), String> {
         // Cheap event short-circuit FIRST: reply_done (the common case) must not pay the
@@ -659,6 +672,7 @@ impl TtsQueue {
             }
             let worker = self.clone();
             let thread_session = session.clone();
+            let thread_source = source;
             let spawned = std::thread::Builder::new()
                 .name("ds-cue-oob".into())
                 .spawn(move || {
@@ -674,7 +688,9 @@ impl TtsQueue {
                         worker.worker_hold_state(),
                         !worker.tts_active.load(Ordering::SeqCst),
                     ) {
-                        if let Err(e) = worker.enqueue_earcon(event, thread_session) {
+                        if let Err(e) =
+                            worker.enqueue_earcon(event, thread_source, thread_session)
+                        {
                             log::warn!(target: "ttsq", "out-of-band cue fallback enqueue failed: {e}");
                         }
                         return;
@@ -694,10 +710,15 @@ impl TtsQueue {
                 }
             }
         }
-        self.enqueue_earcon(event, session)
+        self.enqueue_earcon(event, source, session)
     }
 
-    fn enqueue_action(&self, action: QueueAction, session: Option<String>) -> Result<(), String> {
+    fn enqueue_action(
+        &self,
+        action: QueueAction,
+        source: ClientSource,
+        session: Option<String>,
+    ) -> Result<(), String> {
         let mut q = self.items.lock().unwrap();
         let is_cue = matches!(&action, QueueAction::Earcon(_));
         let pending_items = q
@@ -756,6 +777,7 @@ impl TtsQueue {
         self.note_recent(&session);
         q.push_back(Item {
             action,
+            source,
             session,
             resume_skip: 0,
         });
@@ -769,17 +791,18 @@ impl TtsQueue {
     pub fn enqueue_narration(
         &self,
         text: String,
+        source: ClientSource,
         session: Option<String>,
         narration_id: Option<String>,
     ) -> Result<(), String> {
         let Some(id) = narration_id else {
-            return self.enqueue(text, None, None, session);
+            return self.enqueue(text, None, None, source, session);
         };
         let mut accepted = self.accepted_narrations.lock().unwrap();
         if accepted.seen.contains(&id) {
             return Ok(());
         }
-        self.enqueue(text, None, None, session.clone())?;
+        self.enqueue(text, None, None, source, session.clone())?;
         accepted.insert(id, session);
         Ok(())
     }
@@ -798,7 +821,10 @@ impl TtsQueue {
         let gen0 = self.generation.load(Ordering::SeqCst);
         let item = q.remove(pos).expect("select_pos returns a valid index");
         self.in_flight.store(true, Ordering::SeqCst);
-        *self.playing_session.lock().unwrap() = Some(item.session.clone());
+        *self.playing.lock().unwrap() = Some(PlayingClaim {
+            source: item.source,
+            session: item.session.clone(),
+        });
         (item, gen0)
     }
 
@@ -871,11 +897,16 @@ impl TtsQueue {
     /// `StopSpeech { session: None }` still routes to [`clear`](Self::clear).
     pub fn clear_session(&self, session: Option<String>) {
         // Keep pruning and the in-flight identity snapshot under the same `items →
-        // playing_session` lock order as worker selection. The worker therefore cannot remove
+        // playing` lock order as worker selection. The worker therefore cannot remove
         // a target item between these operations and escape the session-scoped cancellation.
         let mut items = self.items.lock().unwrap();
         prune_session(&mut items, &session);
-        let cancel_current = self.playing_session.lock().unwrap().as_ref() == Some(&session);
+        let cancel_current = self
+            .playing
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|p| p.session == session);
         if cancel_current {
             // Per-window barge: fade the in-flight item out (short window) so a clear-on-
             // submit / window close / newest-reply preempt tapers off instead of clicking.
@@ -909,7 +940,7 @@ impl TtsQueue {
     /// `current` prunes `target`'s own queued items and cancels its in-flight item
     /// UNCONDITIONALLY — the worker only ever plays the active session's (or untagged)
     /// audio, so `target` IS what the helper is emitting; gating on `tts_active`/
-    /// `playing_session` would let a submit that landed in a record-barge transition
+    /// `playing` would let a submit that landed in a record-barge transition
     /// (flags briefly stale) leak several blocks before stopping. `other` keeps ONLY
     /// `target`'s queued items — dropping every other session's AND untagged/global
     /// audio — and cancels the in-flight item ONLY when it does NOT belong to `target`
@@ -948,11 +979,11 @@ impl TtsQueue {
             let mut items = self.items.lock().unwrap();
             // Sticky digests for `target` are the same terminal — not "other".
             let playing_is_other = self
-                .playing_session
+                .playing
                 .lock()
                 .unwrap()
                 .as_ref()
-                .is_some_and(|session| !session_belongs_to_real(session, target.as_str()));
+                .is_some_and(|p| !session_belongs_to_real(&p.session, target.as_str()));
             retain_only_session(&mut items, &Some(target));
             if playing_is_other {
                 self.hard_cancel_in_flight_locked(&items);
@@ -1153,6 +1184,23 @@ impl TtsQueue {
         self.tts_active.load(Ordering::SeqCst)
     }
 
+    /// Live TTS for `model_status`: active flag + wireable client source of the in-flight
+    /// item (`None` when idle, or when the producer is not a Usage agent).
+    pub fn tts_running(&self) -> (bool, Option<ClientSource>) {
+        let active = self.is_tts_active();
+        if !active {
+            return (false, None);
+        }
+        let source = self
+            .playing
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|p| p.source)
+            .filter(|s| s.is_client());
+        (true, source)
+    }
+
     /// Set the live playback flag and, on a real transition, bump the status-push gate
     /// so a blocked `WaitModelStatus` sees playback start/stop immediately. The single
     /// writer for `tts_active` — every barge/dequeue routes through here so the push
@@ -1303,8 +1351,9 @@ impl TtsQueue {
     /// Greet a freshly-opened terminal in its assigned pool / system voice (no-op unless
     /// `greet_on_open` is set and TTS is on). Claims the session's voice now via
     /// [`resolve_engine_voice`](Self::resolve_engine_voice), so the per-terminal assignment is
-    /// locked in at open rather than on first reply.
-    pub fn greet_session(&self, session: Option<String>) {
+    /// locked in at open rather than on first reply. `source` is the opening client
+    /// (`GreetSession`) so `running.tts_source` can light that Usage card while greeting.
+    pub fn greet_session(&self, source: ClientSource, session: Option<String>) {
         let cfg = self.config.lock().unwrap().clone();
         if !cfg.greet_on_open {
             return;
@@ -1321,7 +1370,7 @@ impl TtsQueue {
         let name = ds_tts::enumerate::voice_display_name(engine, &voice);
         let idx = GREET_ROTATION.fetch_add(1, Ordering::Relaxed);
         let text = greeting_line(name.as_deref(), idx);
-        if let Err(e) = self.enqueue(text, Some(voice), None, session) {
+        if let Err(e) = self.enqueue(text, Some(voice), None, source, session) {
             log::warn!(target: "ttsq", "greeting rejected: {e}");
         }
     }
@@ -1364,7 +1413,7 @@ impl TtsQueue {
                 }
             };
             let _in_flight = InFlightGuard(&self.in_flight);
-            let _playing = PlayingGuard(&self.playing_session);
+            let _playing = PlayingGuard(&self.playing);
 
             // The helper's played-batch mark for THIS dequeue — `Some` ONLY when the
             // Kokoro warm-child speak actually ran. A System item (or a requeued/
@@ -1999,6 +2048,7 @@ mod tests {
                 voice: None,
                 rate: None,
             },
+            source: ClientSource::Unknown,
             session: session.map(str::to_string),
             resume_skip: 0,
         }
@@ -2193,6 +2243,7 @@ mod tests {
                 voice: None,
                 rate: None,
             },
+            source: ClientSource::Unknown,
             session: None,
             resume_skip: 0,
         }
@@ -2321,14 +2372,23 @@ mod tests {
     #[test]
     fn enqueue_drops_empty_text_and_counts_real_items() {
         let q = mk_queue();
-        q.enqueue("".into(), None, None, None).unwrap();
-        q.enqueue("   \n\t".into(), None, None, None).unwrap();
+        q.enqueue("".into(), None, None, ClientSource::Unknown, None)
+            .unwrap();
+        q.enqueue("   \n\t".into(), None, None, ClientSource::Unknown, None)
+            .unwrap();
         assert_eq!(
             q.snapshot().1,
             0,
             "empty/whitespace-only text is dropped, not queued"
         );
-        q.enqueue("hello there".into(), None, None, None).unwrap();
+        q.enqueue(
+            "hello there".into(),
+            None,
+            None,
+            ClientSource::Unknown,
+            None,
+        )
+        .unwrap();
         assert_eq!(q.snapshot().1, 1, "a real text block is queued");
     }
 
@@ -2336,11 +2396,22 @@ mod tests {
     fn speech_and_cues_preserve_fifo_action_order() {
         let q = mk_queue();
         let session = Some("turn-1".to_string());
-        q.enqueue("first".into(), None, None, session.clone())
+        q.enqueue(
+            "first".into(),
+            None,
+            None,
+            ClientSource::Unknown,
+            session.clone(),
+        )
+        .unwrap();
+        q.enqueue_earcon(
+            ds_earcon::EarconEvent::ReplyDone,
+            ClientSource::Unknown,
+            session.clone(),
+        )
+        .unwrap();
+        q.enqueue("later".into(), None, None, ClientSource::Unknown, session)
             .unwrap();
-        q.enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, session.clone())
-            .unwrap();
-        q.enqueue("later".into(), None, None, session).unwrap();
 
         let items = q.items.lock().unwrap();
         assert!(matches!(
@@ -2414,8 +2485,12 @@ mod tests {
         // default EMPTY needs_input sound and returns before any helper contact. Wait for
         // its single-flight flag to clear so the thread can't interleave with the phases
         // below (where a flipped tts_active would make its re-check fall back to enqueue).
-        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, s.clone())
-            .unwrap();
+        q.dispatch_earcon(
+            ds_earcon::EarconEvent::NeedsInput,
+            ClientSource::Unknown,
+            s.clone(),
+        )
+        .unwrap();
         let done = std::time::Instant::now() + Duration::from_secs(5);
         while q.oob_cue.load(Ordering::SeqCst) {
             assert!(
@@ -2432,8 +2507,12 @@ mod tests {
         // A bypass raced by an in-flight oob cue is coalesced: Ok, nothing enqueued, and
         // the (simulated) in-flight thread keeps sole ownership of the flag.
         q.oob_cue.store(true, Ordering::SeqCst);
-        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, s.clone())
-            .unwrap();
+        q.dispatch_earcon(
+            ds_earcon::EarconEvent::NeedsInput,
+            ClientSource::Unknown,
+            s.clone(),
+        )
+        .unwrap();
         assert!(
             q.items.lock().unwrap().is_empty(),
             "a coalesced cue is dropped, not queued"
@@ -2442,21 +2521,29 @@ mod tests {
         q.oob_cue.store(false, Ordering::SeqCst);
 
         // reply_done never escapes the ordered queue.
-        q.dispatch_earcon(ds_earcon::EarconEvent::ReplyDone, s.clone())
-            .unwrap();
+        q.dispatch_earcon(
+            ds_earcon::EarconEvent::ReplyDone,
+            ClientSource::Unknown,
+            s.clone(),
+        )
+        .unwrap();
         assert_eq!(q.items.lock().unwrap().len(), 1);
 
         // An utterance already sounding: the idle gate routes needs_input to the queue
         // instead of mixing the cue over it.
         q.tts_active.store(true, Ordering::SeqCst);
-        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, s.clone())
-            .unwrap();
+        q.dispatch_earcon(
+            ds_earcon::EarconEvent::NeedsInput,
+            ClientSource::Unknown,
+            s.clone(),
+        )
+        .unwrap();
         assert_eq!(q.items.lock().unwrap().len(), 2);
         q.tts_active.store(false, Ordering::SeqCst);
 
         // Hold cleared (terminal refocused) → ordered queue again.
         q.set_terminal_front(true);
-        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, s)
+        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, ClientSource::Unknown, s)
             .unwrap();
         assert_eq!(q.items.lock().unwrap().len(), 3);
     }
@@ -2494,8 +2581,12 @@ mod tests {
     #[test]
     fn queued_cue_is_suppressed_when_mute_arrives_before_dequeue() {
         let q = mk_queue();
-        q.enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, Some("turn-1".into()))
-            .unwrap();
+        q.enqueue_earcon(
+            ds_earcon::EarconEvent::ReplyDone,
+            ClientSource::Unknown,
+            Some("turn-1".into()),
+        )
+        .unwrap();
         q.set_muted(true);
         let item = q.items.lock().unwrap().pop_front().unwrap();
         let QueueAction::Earcon(event) = item.action else {
@@ -2511,8 +2602,12 @@ mod tests {
     fn explicit_clears_prune_queued_cues_with_their_sessions() {
         let q = mk_queue();
         for session in [Some("a".into()), Some("b".into()), None] {
-            q.enqueue_earcon(ds_earcon::EarconEvent::NeedsInput, session)
-                .unwrap();
+            q.enqueue_earcon(
+                ds_earcon::EarconEvent::NeedsInput,
+                ClientSource::Unknown,
+                session,
+            )
+            .unwrap();
         }
         q.clear_session(Some("a".into()));
         let kept: Vec<_> = q
@@ -2545,6 +2640,7 @@ mod tests {
                 "x".repeat(MAX_SPEAK_BYTES + 1),
                 None,
                 None,
+                ClientSource::Unknown,
                 Some("oversize".into()),
             )
             .unwrap_err();
@@ -2554,20 +2650,78 @@ mod tests {
         assert_eq!(q.active_session(), None);
     }
 
+    /// In-flight claim carries the producer's `ClientSource` so `running.tts_source`
+    /// can highlight the matching Usage card. Non-client producers stay null.
+    #[test]
+    fn tts_running_exposes_wireable_playing_source_only() {
+        let q = mk_queue();
+        assert_eq!(q.tts_running(), (false, None));
+
+        q.enqueue(
+            "hello".into(),
+            None,
+            None,
+            ClientSource::ClaudeCode,
+            Some("sess".into()),
+        )
+        .unwrap();
+        {
+            let mut items = q.items.lock().unwrap();
+            let _ = q.claim_item(&mut items, 0);
+        }
+        q.set_active_for_test(true);
+        assert_eq!(q.tts_running(), (true, Some(ClientSource::ClaudeCode)));
+
+        // Non-wireable producers (legacy DontSpeak self-talk) must not light a Usage card.
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::DontSpeak,
+            session: None,
+        });
+        assert_eq!(q.tts_running(), (true, None));
+
+        // GreetSession-style path: client source on the item lights the matching card.
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Grok,
+            session: Some("open".into()),
+        });
+        assert_eq!(q.tts_running(), (true, Some(ClientSource::Grok)));
+
+        q.set_active_for_test(false);
+        assert_eq!(q.tts_running(), (false, None));
+    }
+
     #[test]
     fn enqueue_bounds_each_session_and_keeps_other_sessions_usable() {
         let q = mk_queue();
         for _ in 0..MAX_SESSION_PENDING_ITEMS {
-            q.enqueue("x".into(), None, None, Some("full".into()))
-                .unwrap();
+            q.enqueue(
+                "x".into(),
+                None,
+                None,
+                ClientSource::Unknown,
+                Some("full".into()),
+            )
+            .unwrap();
         }
 
         let err = q
-            .enqueue("overflow".into(), None, None, Some("full".into()))
+            .enqueue(
+                "overflow".into(),
+                None,
+                None,
+                ClientSource::Unknown,
+                Some("full".into()),
+            )
             .unwrap_err();
         assert!(err.contains("session speech queue is full"));
-        q.enqueue("still accepted".into(), None, None, Some("other".into()))
-            .unwrap();
+        q.enqueue(
+            "still accepted".into(),
+            None,
+            None,
+            ClientSource::Unknown,
+            Some("other".into()),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2579,8 +2733,14 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
         let session = "full";
         for _ in 0..MAX_SESSION_PENDING_ITEMS {
-            q.enqueue("filler".into(), None, None, Some(session.into()))
-                .unwrap();
+            q.enqueue(
+                "filler".into(),
+                None,
+                None,
+                ClientSource::Unknown,
+                Some(session.into()),
+            )
+            .unwrap();
         }
 
         let delta = ds_narrate::StreamBatch {
@@ -2592,7 +2752,12 @@ mod tests {
             is_final: false,
         };
         ds_narrate::deliver_batch(&paths, session, &delta, false, true, false, |utt| {
-            q.enqueue_narration(utt.text.clone(), Some(session.into()), Some(utt.id.clone()))
+            q.enqueue_narration(
+                utt.text.clone(),
+                ClientSource::Unknown,
+                Some(session.into()),
+                Some(utt.id.clone()),
+            )
         })
         .unwrap();
 
@@ -2605,7 +2770,12 @@ mod tests {
         };
         let error =
             ds_narrate::deliver_batch(&paths, session, &completed, false, true, false, |utt| {
-                q.enqueue_narration(utt.text.clone(), Some(session.into()), Some(utt.id.clone()))
+                q.enqueue_narration(
+                    utt.text.clone(),
+                    ClientSource::Unknown,
+                    Some(session.into()),
+                    Some(utt.id.clone()),
+                )
             })
             .unwrap_err();
         assert!(error.contains("session speech queue is full"));
@@ -2614,7 +2784,12 @@ mod tests {
         let mut admitted_id = None;
         ds_narrate::retry_pending(&paths, session, |utt| {
             admitted_id = Some(utt.id.clone());
-            q.enqueue_narration(utt.text.clone(), Some(session.into()), Some(utt.id.clone()))
+            q.enqueue_narration(
+                utt.text.clone(),
+                ClientSource::Unknown,
+                Some(session.into()),
+                Some(utt.id.clone()),
+            )
         })
         .unwrap();
         assert_eq!(
@@ -2629,8 +2804,13 @@ mod tests {
 
         // Re-offer the ID to model a producer crash after the engine accepted it but before
         // the state commit. Engine-side idempotency reports success without duplicating work.
-        q.enqueue_narration("Blocked digest.".into(), Some(session.into()), admitted_id)
-            .unwrap();
+        q.enqueue_narration(
+            "Blocked digest.".into(),
+            ClientSource::Unknown,
+            Some(session.into()),
+            admitted_id,
+        )
+        .unwrap();
         assert_eq!(q.items.lock().unwrap().len(), 1);
     }
 
@@ -2638,12 +2818,24 @@ mod tests {
     fn enqueue_bounds_global_pending_work() {
         let q = mk_queue();
         for i in 0..MAX_PENDING_ITEMS {
-            q.enqueue("x".into(), None, None, Some(format!("session-{i}")))
-                .unwrap();
+            q.enqueue(
+                "x".into(),
+                None,
+                None,
+                ClientSource::Unknown,
+                Some(format!("session-{i}")),
+            )
+            .unwrap();
         }
 
         let err = q
-            .enqueue("overflow".into(), None, None, Some("last".into()))
+            .enqueue(
+                "overflow".into(),
+                None,
+                None,
+                ClientSource::Unknown,
+                Some("last".into()),
+            )
             .unwrap_err();
         assert!(err.contains("speech queue is full"));
         assert_eq!(q.items.lock().unwrap().len(), MAX_PENDING_ITEMS);
@@ -2656,13 +2848,18 @@ mod tests {
             global
                 .enqueue_earcon(
                     ds_earcon::EarconEvent::ReplyDone,
+                    ClientSource::Unknown,
                     Some(format!("cue-session-{i}")),
                 )
                 .unwrap();
         }
         assert!(
             global
-                .enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, Some("overflow".into()))
+                .enqueue_earcon(
+                    ds_earcon::EarconEvent::ReplyDone,
+                    ClientSource::Unknown,
+                    Some("overflow".into())
+                )
                 .unwrap_err()
                 .contains("audio cue queue is full")
         );
@@ -2671,6 +2868,7 @@ mod tests {
                 "narration survives".into(),
                 None,
                 None,
+                ClientSource::Unknown,
                 Some("overflow".into()),
             )
             .unwrap();
@@ -2678,17 +2876,31 @@ mod tests {
         let per_session = mk_queue();
         for _ in 0..MAX_SESSION_PENDING_CUES {
             per_session
-                .enqueue_earcon(ds_earcon::EarconEvent::NeedsInput, Some("held".into()))
+                .enqueue_earcon(
+                    ds_earcon::EarconEvent::NeedsInput,
+                    ClientSource::Unknown,
+                    Some("held".into()),
+                )
                 .unwrap();
         }
         assert!(
             per_session
-                .enqueue_earcon(ds_earcon::EarconEvent::NeedsInput, Some("held".into()))
+                .enqueue_earcon(
+                    ds_earcon::EarconEvent::NeedsInput,
+                    ClientSource::Unknown,
+                    Some("held".into())
+                )
                 .unwrap_err()
                 .contains("session audio cue queue is full")
         );
         per_session
-            .enqueue("still admitted".into(), None, None, Some("held".into()))
+            .enqueue(
+                "still admitted".into(),
+                None,
+                None,
+                ClientSource::Unknown,
+                Some("held".into()),
+            )
             .unwrap();
     }
 
@@ -2696,11 +2908,21 @@ mod tests {
     fn speech_saturation_leaves_bounded_cue_capacity() {
         let q = mk_queue();
         for i in 0..MAX_PENDING_ITEMS {
-            q.enqueue("x".into(), None, None, Some(format!("session-{i}")))
-                .unwrap();
-        }
-        q.enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, Some("session-0".into()))
+            q.enqueue(
+                "x".into(),
+                None,
+                None,
+                ClientSource::Unknown,
+                Some(format!("session-{i}")),
+            )
             .unwrap();
+        }
+        q.enqueue_earcon(
+            ds_earcon::EarconEvent::ReplyDone,
+            ClientSource::Unknown,
+            Some("session-0".into()),
+        )
+        .unwrap();
         assert_eq!(q.items.lock().unwrap().len(), MAX_PENDING_ITEMS + 1);
     }
 
@@ -2709,15 +2931,33 @@ mod tests {
         let per_session = mk_queue();
         for _ in 0..25 {
             per_session
-                .enqueue("x".repeat(MAX_SPEAK_BYTES), None, None, Some("same".into()))
+                .enqueue(
+                    "x".repeat(MAX_SPEAK_BYTES),
+                    None,
+                    None,
+                    ClientSource::Unknown,
+                    Some("same".into()),
+                )
                 .unwrap();
         }
         per_session
-            .enqueue("x".repeat(6144), None, None, Some("same".into()))
+            .enqueue(
+                "x".repeat(6144),
+                None,
+                None,
+                ClientSource::Unknown,
+                Some("same".into()),
+            )
             .unwrap();
         assert!(
             per_session
-                .enqueue("x".into(), None, None, Some("same".into()))
+                .enqueue(
+                    "x".into(),
+                    None,
+                    None,
+                    ClientSource::Unknown,
+                    Some("same".into())
+                )
                 .unwrap_err()
                 .contains("pending text bytes")
         );
@@ -2729,16 +2969,29 @@ mod tests {
                     "x".repeat(MAX_SPEAK_BYTES),
                     None,
                     None,
+                    ClientSource::Unknown,
                     Some(format!("session-{i}")),
                 )
                 .unwrap();
         }
         global
-            .enqueue("x".repeat(4096), None, None, Some("exact".into()))
+            .enqueue(
+                "x".repeat(4096),
+                None,
+                None,
+                ClientSource::Unknown,
+                Some("exact".into()),
+            )
             .unwrap();
         assert!(
             global
-                .enqueue("x".into(), None, None, Some("over".into()))
+                .enqueue(
+                    "x".into(),
+                    None,
+                    None,
+                    ClientSource::Unknown,
+                    Some("over".into())
+                )
                 .unwrap_err()
                 .contains("pending text bytes")
         );
@@ -2801,11 +3054,14 @@ mod tests {
     }
 
     #[test]
-    fn clear_session_cancels_in_flight_only_when_playing_session_matches() {
+    fn clear_session_cancels_in_flight_only_when_playing_matches() {
         // Playing the TARGET session → the in-flight item is cancelled too.
         let q = mk_queue();
         q.tts_active.store(true, Ordering::SeqCst);
-        *q.playing_session.lock().unwrap() = Some(Some("a".into()));
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Unknown,
+            session: Some("a".into()),
+        });
         let gen_before = q.generation.load(Ordering::SeqCst);
         q.clear_session(Some("a".into()));
         assert!(
@@ -2817,7 +3073,10 @@ mod tests {
         // Playing a DIFFERENT session → this per-window stop leaves it alone.
         let q2 = mk_queue();
         q2.tts_active.store(true, Ordering::SeqCst);
-        *q2.playing_session.lock().unwrap() = Some(Some("b".into()));
+        *q2.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Unknown,
+            session: Some("b".into()),
+        });
         let gen_before2 = q2.generation.load(Ordering::SeqCst);
         q2.clear_session(Some("a".into()));
         assert_eq!(
@@ -2857,7 +3116,10 @@ mod tests {
             .extend([narr(Some("a")), narr(Some("b"))]);
         // Someone ELSE is playing ("b") — `current` must still cancel unconditionally.
         q.tts_active.store(true, Ordering::SeqCst);
-        *q.playing_session.lock().unwrap() = Some(Some("b".into()));
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Unknown,
+            session: Some("b".into()),
+        });
         let gen_before = q.generation.load(Ordering::SeqCst);
 
         q.cancel_for_submit(Some("a".into()), true, false);
@@ -2890,7 +3152,10 @@ mod tests {
             .unwrap()
             .extend([narr(Some("a")), narr(Some("b")), narr(None)]);
         q.tts_active.store(true, Ordering::SeqCst);
-        *q.playing_session.lock().unwrap() = Some(Some("other".into()));
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Unknown,
+            session: Some("other".into()),
+        });
         let gen_before = q.generation.load(Ordering::SeqCst);
 
         q.cancel_for_submit(Some("a".into()), false, true);
@@ -2920,7 +3185,10 @@ mod tests {
             .unwrap()
             .extend([narr(Some("a")), narr(Some("b"))]);
         q2.tts_active.store(true, Ordering::SeqCst);
-        *q2.playing_session.lock().unwrap() = Some(Some("a".into()));
+        *q2.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Unknown,
+            session: Some("a".into()),
+        });
         let gen_before2 = q2.generation.load(Ordering::SeqCst);
 
         q2.cancel_for_submit(Some("a".into()), false, true);
@@ -2948,7 +3216,10 @@ mod tests {
             narr(Some("b")),
         ]);
         q3.tts_active.store(true, Ordering::SeqCst);
-        *q3.playing_session.lock().unwrap() = Some(Some("grok-stop:a".into()));
+        *q3.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Unknown,
+            session: Some("grok-stop:a".into()),
+        });
         let gen_before3 = q3.generation.load(Ordering::SeqCst);
         q3.cancel_for_submit(Some("a".into()), false, true);
         let kept3: Vec<_> = q3
@@ -3278,7 +3549,10 @@ mod tests {
     #[test]
     fn session_clear_does_not_cancel_a_foreign_item_claimed_after_pruning() {
         let q = mk_queue();
-        *q.playing_session.lock().unwrap() = Some(Some("cleared".into()));
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Unknown,
+            session: Some("cleared".into()),
+        });
 
         let (selected_generation, final_generation) =
             claim_survivor_across_scoped_cancel(&q, Some("survivor"), |clearer| {
@@ -3294,7 +3568,10 @@ mod tests {
     #[test]
     fn current_scope_does_not_cancel_a_foreign_item_claimed_after_pruning() {
         let q = mk_queue();
-        *q.playing_session.lock().unwrap() = Some(Some("current".into()));
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Unknown,
+            session: Some("current".into()),
+        });
 
         let (selected_generation, final_generation) =
             claim_survivor_across_scoped_cancel(&q, Some("other"), |clearer| {
@@ -3310,7 +3587,10 @@ mod tests {
     #[test]
     fn other_scope_does_not_cancel_the_target_item_claimed_after_pruning() {
         let q = mk_queue();
-        *q.playing_session.lock().unwrap() = Some(Some("other".into()));
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Unknown,
+            session: Some("other".into()),
+        });
 
         let (selected_generation, final_generation) =
             claim_survivor_across_scoped_cancel(&q, Some("current"), |clearer| {
@@ -3325,7 +3605,7 @@ mod tests {
 
     #[test]
     fn global_session_identity_is_distinct_from_an_idle_worker() {
-        // The idle half: with NO claimed item (`playing_session` = None), a global-session
+        // The idle half: with NO claimed item (`playing` = None), a global-session
         // clear must NOT hard-cancel. The nested representation distinguishes "idle" (None)
         // from "playing the untagged global session" (Some(None)); the flat Option<String>
         // it replaced could not — this assertion fails under a revert to it.
@@ -3614,8 +3894,14 @@ mod tests {
         assert_eq!(q.active_session(), None);
 
         // `enqueue` records the recency fallback.
-        q.enqueue("hi".into(), None, None, Some("recent-sess".into()))
-            .unwrap();
+        q.enqueue(
+            "hi".into(),
+            None,
+            None,
+            ClientSource::Unknown,
+            Some("recent-sess".into()),
+        )
+        .unwrap();
         assert_eq!(q.active_session(), Some("recent-sess".into()));
 
         // `set_active_session` writes the authoritative explicit pick, which wins.
@@ -3696,7 +3982,10 @@ mod tests {
             .unwrap()
             .extend([narr(Some("other")), narr(Some("s1"))]);
         q.tts_active.store(true, Ordering::SeqCst);
-        *q.playing_session.lock().unwrap() = Some(Some("s1".to_string()));
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: ClientSource::Unknown,
+            session: Some("s1".into()),
+        });
         let gen_before = q.generation.load(Ordering::SeqCst);
 
         q.end_session(Some("s1".to_string()));
@@ -3710,7 +3999,7 @@ mod tests {
             .map(|it| it.session.clone())
             .collect();
         assert_eq!(remaining, vec![Some("other".to_string())]);
-        // s1's own in-flight item is cancelled (playing_session matched).
+        // s1's own in-flight item is cancelled (playing matched).
         assert!(q.generation.load(Ordering::SeqCst) > gen_before);
         assert!(!q.tts_active.load(Ordering::SeqCst));
         // The pool assignment is forgotten so it doesn't linger past this window's life.

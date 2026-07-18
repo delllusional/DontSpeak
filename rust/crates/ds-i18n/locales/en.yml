@@ -7,10 +7,26 @@ common:
   dash: "—"
   update_arrow: "→"
   nav_status: Status
+  nav_usage: Usage
   nav_tools: Tools
   nav_credits: Credits
   nav_log: Log
   cancel: Cancel
+
+# ─────────────────────────────── USAGE SCREEN ───────────────────────────────
+# Period keys MUST match the `period` wire tokens from ds-agent-usage
+# (`session` | `week` | `month`). Hosts look up `usage.<period>` with no
+# per-OS switch. Provider titles: `usage.provider.<client_source>`.
+usage:
+  unavailable: Usage unavailable
+  session: Session
+  week: Week
+  month: Month
+  provider:
+    claude_code: Claude Code
+    codex: Codex
+    qwen_code: Qwen Code
+    grok: Grok
 
 # ──────────────────────────────── TRAY MENU ─────────────────────────────────
 tray:
@@ -80,9 +96,16 @@ status:
   stats:
     lifetime_all_time: all-time
     duration_live:
+      # Trailing zero units omitted — hosts must not invent "0d" / "0h" themselves.
       days: "%{d}d %{h}h %{m}m %{s}s"
+      days_hours_minutes: "%{d}d %{h}h %{m}m"
+      days_hours: "%{d}d %{h}h"
+      days_only: "%{d}d"
       hours: "%{h}h %{m}m %{s}s"
+      hours_minutes: "%{h}h %{m}m"
+      hours_only: "%{h}h"
       minutes: "%{m}m %{s}s"
+      minutes_only: "%{m}m"
       seconds: "%{s}s"
     realtime: Realtime
     first_audio: First audio
