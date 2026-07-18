@@ -273,11 +273,9 @@ mod tests {
     // #114: empty store + load errors include sanitized contexts.
     #[test]
     fn describe_empty_roots_with_errors() {
-        let d = describe_native_roots_init(
-            0,
-            &["failed to open system store", "path\nwith\0controls"],
-        )
-        .expect("empty+errors must diagnose");
+        let d =
+            describe_native_roots_init(0, &["failed to open system store", "path\nwith\0controls"])
+                .expect("empty+errors must diagnose");
         assert!(d.contains("empty"), "{d}");
         assert!(d.contains("failed to open system store"), "{d}");
         assert!(!d.contains('\n'), "{d}");
@@ -317,7 +315,11 @@ mod tests {
         let long = "x".repeat(MAX_ROOTS_DIAGNOSTIC_LEN + 64);
         let d = describe_native_roots_init(0, &[&long]).expect("empty must diagnose");
         // Cap + ellipsis (ellipsis may be multi-byte).
-        assert!(d.chars().count() <= MAX_ROOTS_DIAGNOSTIC_LEN + 1, "{}", d.len());
+        assert!(
+            d.chars().count() <= MAX_ROOTS_DIAGNOSTIC_LEN + 1,
+            "{}",
+            d.len()
+        );
         assert!(d.ends_with('…'), "{d}");
     }
 }

@@ -38,10 +38,7 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
 }
 
 /// Prefer sanitized CLI category when web also fails; empty CLI is treated as unusable payload.
-fn finalize_after_web(
-    cli_err: Option<std::io::Error>,
-    web_err: std::io::Error,
-) -> std::io::Error {
+fn finalize_after_web(cli_err: Option<std::io::Error>, web_err: std::io::Error) -> std::io::Error {
     match cli_err {
         Some(cli) => merge_cli_web_errors(cli, web_err),
         None => std::io::Error::new(
@@ -772,7 +769,11 @@ mod tests {
         );
         let merged = merge_cli_web_errors(cli, web);
         assert_eq!(merged.kind(), std::io::ErrorKind::Other);
-        assert!(merged.to_string().contains("provider RPC returned an error"));
+        assert!(
+            merged
+                .to_string()
+                .contains("provider RPC returned an error")
+        );
     }
 
     #[test]
@@ -792,8 +793,7 @@ mod tests {
     fn sanitize_strips_bearer_shaped_messages() {
         let dirty = std::io::Error::other("Authorization: Bearer eyJhbGciOi.x.y leaked");
         assert_eq!(sanitize_error_message(&dirty), "failed");
-        let clean =
-            std::io::Error::new(std::io::ErrorKind::NotFound, "Grok CLI unavailable");
+        let clean = std::io::Error::new(std::io::ErrorKind::NotFound, "Grok CLI unavailable");
         assert_eq!(sanitize_error_message(&clean), "Grok CLI unavailable");
     }
 
