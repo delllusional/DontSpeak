@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|run_terminal_command|Shell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel 2>/dev/null)/scripts/agents/capture-agent-attribution.mjs\" grok",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

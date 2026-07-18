@@ -381,11 +381,53 @@ test("Grok prefers summary model/effort and falls back when only GROK_AGENT is s
   const byCwd = resolveAttribution(
     "grok",
     { cwd },
-    { home, env: { GROK_AGENT: "1" } },
+    { home, env: { GROK_AGENT: "1" }, root: cwd },
   );
   assert.equal(byCwd.model, "grok-4.5");
   assert.equal(byCwd.effort, "high");
   assert.deepEqual(byCwd.errors, []);
+});
+
+test("Grok prefers parent sessions over subagents and uses active_sessions.json", (t) => {
+  const home = temporaryDirectory(t);
+  const cwd = join(home, "repo");
+  mkdirSync(cwd, { recursive: true });
+  const parent = join(home, ".grok", "sessions", "p", "parent-1");
+  const child = join(home, ".grok", "sessions", "p", "child-1");
+  mkdirSync(parent, { recursive: true });
+  mkdirSync(child, { recursive: true });
+  writeFileSync(join(parent, "summary.json"), JSON.stringify({
+    current_model_id: "grok-4.5",
+    reasoning_effort: "high",
+    git_root_dir: cwd,
+    last_active_at: "2026-07-18T19:00:00Z",
+    session_kind: "default",
+  }));
+  writeFileSync(join(child, "summary.json"), JSON.stringify({
+    current_model_id: "grok-4.5",
+    reasoning_effort: "low",
+    git_root_dir: cwd,
+    last_active_at: "2026-07-18T21:00:00Z",
+    session_kind: "subagent",
+  }));
+  const preferParent = resolveAttribution("grok", { cwd }, { home, env: { GROK_AGENT: "1" }, root: cwd });
+  assert.equal(preferParent.effort, "high");
+
+  const activeOnly = join(home, ".grok", "sessions", "p", "active-only");
+  mkdirSync(activeOnly, { recursive: true });
+  writeFileSync(join(activeOnly, "summary.json"), JSON.stringify({
+    current_model_id: "grok-4.5",
+    reasoning_effort: "xhigh",
+  }));
+  writeFileSync(join(home, ".grok", "active_sessions.json"), JSON.stringify([
+    { session_id: "active-only", cwd: home },
+  ]));
+  const viaActive = resolveAttribution(
+    "grok",
+    {},
+    { home, env: { GROK_AGENT: "1" }, root: join(home, "unrelated") },
+  );
+  assert.equal(viaActive.effort, "xhigh");
 });
 
 test("GROK_AGENT alone marks an active Grok agent environment", () => {
@@ -398,6 +440,51 @@ test("GROK_AGENT alone marks an active Grok agent environment", () => {
     { client: "grok", sessionId: "sess" },
   );
   assert.equal(detectClient("auto", {}, { GROK_AGENT: "1" }), "grok");
+});
+
+test("commit-msg live-resolves Grok when the PreToolUse cache is missing", (t) => {
+  const { env: isolatedEnv } = isolatedGitEnvironment(t);
+  const home = temporaryDirectory(t);
+  const cwd = join(home, "repo-live");
+  mkdirSync(cwd, { recursive: true });
+  const session = join(home, ".grok", "sessions", "proj", "live-1");
+  mkdirSync(session, { recursive: true });
+  writeFileSync(join(session, "summary.json"), JSON.stringify({
+    current_model_id: "grok-4.5",
+    reasoning_effort: "high",
+    git_root_dir: cwd,
+    last_active_at: "2026-07-18T22:00:00Z",
+  }));
+
+  const env = {
+    ...isolatedEnv,
+    GROK_AGENT: "1",
+    USERPROFILE: home,
+    HOME: home,
+  };
+  // Copy scripts into a real repo and point commit-msg at them.
+  const { root, scripts } = initializedRepository(t, env);
+  // Make the session match this repo root (path key).
+  writeFileSync(join(session, "summary.json"), JSON.stringify({
+    current_model_id: "grok-4.5",
+    reasoning_effort: "high",
+    git_root_dir: root,
+    last_active_at: "2026-07-18T22:00:00Z",
+  }));
+  ensureCommitMessageHook(root);
+  writeFileSync(join(root, "f.txt"), "x\n");
+  assert.equal(spawnSync("git", ["add", "f.txt"], { cwd: root, env, encoding: "utf8" }).status, 0);
+  // No PreToolUse cache file — live path must stamp high.
+  const cache = join(privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE);
+  assert.equal(existsSync(cache), false);
+  const commit = spawnSync("git", ["commit", "-m", "Live resolve\n\nAgent: grok-4.5 none"], {
+    cwd: root,
+    env: { ...env, USERPROFILE: home, HOME: home },
+    encoding: "utf8",
+  });
+  assert.equal(commit.status, 0, commit.stderr + commit.stdout);
+  assert.equal(headMessage(root, env), "Live resolve\n\nAgent: grok-4.5 high");
+  void scripts;
 });
 
 test("Grok reports none only when the catalog proves reasoning is unsupported", (t) => {
@@ -838,21 +925,34 @@ test("the Claude wrapper forwards commit payloads byte-intact", (t) => {
   const outFile = join(bin, "captured.json");
   writeFileSync(join(bin, "node"), `#!/bin/sh\ncat > '${outFile.replaceAll("\\", "/")}'\n`, { mode: 0o755 });
   const payload = JSON.stringify({ tool_input: { command: "git commit -m `date` $(hostname)" } });
+  // Prefer Git Bash over Windows' System32 bash.exe (WSL launcher), which is not a POSIX shell.
+  const bashCandidates = [
+    "C:\\Program Files\\Git\\bin\\bash.exe",
+    "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+    "bash",
+  ];
+  let bash = "bash";
+  for (const candidate of bashCandidates) {
+    const probe = spawnSync(candidate, ["-c", "echo ok"], { encoding: "utf8" });
+    if (!probe.error && probe.status === 0 && (probe.stdout ?? "").includes("ok")) {
+      bash = candidate;
+      break;
+    }
+  }
   const env = {
     ...process.env,
     CLAUDE_PROJECT_DIR: bin,
     PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
   };
-  const run = spawnSync("bash", ["-c", command], { input: payload, env, encoding: "utf8" });
-  if (run.error) {
-    // No usable bash on this host; the string assertions above already pin
+  const run = spawnSync(bash, ["-c", command], { input: payload, env, encoding: "utf8" });
+  if (run.error || run.status !== 0) {
+    // No usable POSIX bash on this host; the string assertions above already pin
     // the safe wrapper form.
     return;
   }
-  assert.equal(run.status, 0, run.stderr);
   assert.equal(readFileSync(outFile, "utf8"), `${payload}\n`);
   rmSync(outFile);
-  const skip = spawnSync("bash", ["-c", command], {
+  const skip = spawnSync(bash, ["-c", command], {
     input: JSON.stringify({ tool_input: { command: "ls -la" } }),
     env,
     encoding: "utf8",

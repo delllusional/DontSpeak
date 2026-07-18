@@ -198,13 +198,31 @@ function findGrokSession(home, sessionId) {
   return undefined;
 }
 
-/// Newest Grok session whose summary cwd/git_root matches `cwd` (path-normalized).
+/// Live sessions from `~/.grok/active_sessions.json` (array of {session_id, cwd, …}).
+function findActiveGrokSession(home) {
+  const rows = loadJson(join(home, ".grok", "active_sessions.json"));
+  if (!Array.isArray(rows)) return undefined;
+  for (const row of rows) {
+    const id = firstString(row?.session_id, row?.sessionId, row?.id);
+    const dir = findGrokSession(home, id);
+    if (dir) return dir;
+  }
+  return undefined;
+}
+
+function isGrokSubagentSession(summary) {
+  const kind = firstString(summary?.session_kind, summary?.sessionKind) ?? "";
+  return kind === "subagent" || kind === "subagent_resume";
+}
+
+/// Newest non-subagent Grok session whose summary cwd/git_root matches `cwd`.
 function findLatestGrokSession(home, cwd) {
   if (!cwd) return undefined;
   const base = join(home, ".grok", "sessions");
   if (!existsSync(base)) return undefined;
   const want = normalizePathKey(cwd);
   let best;
+  let bestSub = -1;
   let bestAt = "";
   for (const project of readDirNames(base)) {
     for (const id of readDirNames(join(base, project))) {
@@ -219,9 +237,12 @@ function findLatestGrokSession(home, cwd) {
       if (!roots.some((r) => r === want || want.startsWith(`${r}/`) || r.startsWith(`${want}/`))) {
         continue;
       }
+      // Prefer parent sessions over plan/implement subagents.
+      const subRank = isGrokSubagentSession(summary) ? 0 : 1;
       const at = firstString(summary.last_active_at, summary.updated_at, summary.created_at) ?? "";
-      if (!best || at > bestAt) {
+      if (!best || subRank > bestSub || (subRank === bestSub && at > bestAt)) {
         best = dir;
+        bestSub = subRank;
         bestAt = at;
       }
     }
@@ -327,14 +348,21 @@ function resolveQwen(input, root, home) {
   };
 }
 
-function resolveGrok(input, env, home) {
+function resolveGrok(input, env, home, root) {
   const sessionId = firstString(input?.sessionId, input?.session_id, env.GROK_SESSION_ID);
-  // Shell tools often set GROK_AGENT=1 without GROK_SESSION_ID. Fall back to the
-  // newest session whose cwd/git_root matches this worktree so effort is not lost.
+  // Shell tools often set GROK_AGENT=1 without GROK_SESSION_ID. Fall back:
+  // 1) newest parent session matching worktree/git root / hook cwd
+  // 2) ~/.grok/active_sessions.json
+  const cwdHint = firstString(
+    input?.cwd,
+    input?.workspaceRoot,
+    env.GROK_CWD,
+    root,
+  );
+  const needFallback = Boolean(env.GROK_AGENT || env.GROK_SESSION_ID || sessionId || root);
   const sessionDirectory = findGrokSession(home, sessionId)
-    ?? ((env.GROK_AGENT || env.GROK_SESSION_ID)
-      ? findLatestGrokSession(home, firstString(input?.cwd, input?.workspaceRoot, env.GROK_CWD))
-      : undefined);
+    ?? (needFallback ? findLatestGrokSession(home, cwdHint) : undefined)
+    ?? (needFallback ? findActiveGrokSession(home) : undefined);
   const session = grokSessionValues(sessionDirectory);
   const model = firstString(input?.modelId, input?.model_id, input?.model, session.model);
   const hookEffort = directEffort(input);
@@ -364,7 +392,7 @@ export function resolveAttribution(client, input, options = {}) {
       resolved = resolveQwen(input, root, home);
       break;
     case "grok":
-      resolved = resolveGrok(input, env, home);
+      resolved = resolveGrok(input, env, home, root);
       break;
     default:
       return { errors: [`unsupported client ${JSON.stringify(client)}`] };

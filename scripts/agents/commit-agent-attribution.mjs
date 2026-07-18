@@ -9,6 +9,7 @@ import {
   readAttributionCache,
   removeAttributionCache,
   repositoryRoot,
+  resolveAttribution,
   rewriteCommitMessage,
   validateCacheRecord,
   validateCommitMessage,
@@ -22,6 +23,15 @@ function fail(errors) {
   process.exit(1);
 }
 
+function stamp(messageFile, message, root, model, effort) {
+  const preserveLone = messageMatchesHead(message, root);
+  writeFileSync(
+    messageFile,
+    rewriteCommitMessage(message, model, effort, { preserveLone }),
+    "utf8",
+  );
+}
+
 const messageFile = process.argv[2];
 if (!messageFile) fail(["the commit-msg hook did not receive a message file"]);
 
@@ -29,10 +39,29 @@ const root = repositoryRoot(process.cwd());
 const hooksDirectory = privateHooksDirectory(root);
 const message = readFileSync(messageFile, "utf8");
 const record = normalizeCacheRecord(readAttributionCache(root, hooksDirectory));
+const active = activeAgentEnvironment();
 
 if (!record) {
+  // Grok tool shells often skip PreToolUse capture (GROK_AGENT without
+  // GROK_SESSION_ID, or project hooks not trusted). Prove attribution live from
+  // ~/.grok/sessions + active_sessions.json so the trailer is still correct.
+  if (active?.client === "grok") {
+    const resolved = resolveAttribution(
+      "grok",
+      { cwd: root, sessionId: active.sessionId },
+      { root },
+    );
+    if (resolved.errors?.length) fail(resolved.errors);
+    try {
+      stamp(messageFile, message, root, resolved.model, resolved.effort);
+    } catch (error) {
+      fail([error.message]);
+    }
+    process.exit(0);
+  }
+
   const messageErrors = validateCommitMessage(message);
-  if (activeAgentEnvironment() || messageErrors.length > 0) {
+  if (active || messageErrors.length > 0) {
     fail(["the CLI did not provide a fresh runtime metadata capture", ...messageErrors]);
   }
   process.exit(0);
@@ -45,10 +74,8 @@ if (errors.length > 0) fail(errors);
 // cannot select wrong semantics: the preserve decision keys on message
 // identity with HEAD, and the worst spoof inherits HEAD's own proven pair.
 // Which agent actually ran the commit stays honor-system.
-const preserveLone = messageMatchesHead(message, root);
-
 try {
-  writeFileSync(messageFile, rewriteCommitMessage(message, record.model, record.effort, { preserveLone }), "utf8");
+  stamp(messageFile, message, root, record.model, record.effort);
   record.uses -= 1;
   if (record.uses > 0) writeAttributionCache(root, record, hooksDirectory);
   else removeAttributionCache(root, hooksDirectory);

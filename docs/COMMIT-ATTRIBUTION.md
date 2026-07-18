@@ -16,7 +16,8 @@ from self-description, UI family label, or defaults. `unknown` / `default` / pro
 are not effort levels.
 
 Trust the project hook per client so it can install the private Git hook:
-Claude/Grok → `.claude/settings.json`; Codex → `.codex/hooks.json`; Qwen →
+Claude → `.claude/settings.json`; Grok → that file **and**
+`.grok/hooks/commit-attribution.json`; Codex → `.codex/hooks.json`; Qwen →
 `.qwen/settings.json`. Missing model or effort **blocks** the commit (CI can check
 shape later but can't recover which runtime produced it).
 
@@ -25,10 +26,12 @@ Capture sources:
 - **Codex** — hook model slug; turn context for effort.
 - **Claude** — transcript for model; tool hooks for applied effort.
 - **Qwen** — transcript for model; settings for `/effort` (no separate post-provider field).
-- **Grok** — session model + effort (`summary.reasoning_effort` / chat turns).
-  `none` only when the catalog says effort is unsupported. Tool shells may only
-  set `GROK_AGENT` (no `GROK_SESSION_ID`); capture then resolves the newest
-  session matching the worktree cwd.
+- **Grok** — session model + effort (`summary.reasoning_effort` / chat turns /
+  `~/.grok/active_sessions.json`). `none` only when the catalog says effort is
+  unsupported. Tool shells often set only `GROK_AGENT` (no `GROK_SESSION_ID`).
+  PreToolUse capture is best-effort; **`commit-msg` also live-resolves** from the
+  Grok session store when the cache is missing so trailers stay correct without
+  a prior capture. Prefer parent sessions over plan/implement subagents.
 
 Claude auto-`Co-Authored-By` is disabled via `.claude/settings.json` `attribution`.
 If Codex/Qwen still emit auto-attribution, the commit hook strips it.
