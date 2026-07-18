@@ -82,6 +82,7 @@ struct Annotations {
 #[derive(Clone, Copy)]
 enum Output {
     Status,
+    Usage,
     Voices,
 }
 
@@ -106,7 +107,8 @@ const fn p(name: &'static str, ty: PType, required: bool, description: &'static 
 /// The whole catalog, in display order — the ONE source both consumer shapes generate
 /// from, and the exact order the Tools window shows. Ordered to lead with the two core
 /// actions (speak · listen) so the highest-frequency tools sit first (primacy), then the
-/// output-control pair (stop_speech · mute), then read-only introspection (get_status · list_voices), then
+/// output-control pair (stop_speech · mute), then read-only introspection
+/// (get_status · get_usage · list_voices), then
 /// speaker diarization (diarize · manage_speakers — the voiceprint library it labels with),
 /// and finally the rare admin tool (set_config) in the low-attention tail.
 static TOOLS: &[Tool] = &[
@@ -154,6 +156,19 @@ static TOOLS: &[Tool] = &[
         min_one: false,
         annotations: annotations(true, false, true),
         output: Some(Output::Status),
+    },
+    Tool {
+        name: "get_usage",
+        description: GET_USAGE,
+        params: &[p("force_refresh", PType::Bool, false, USAGE_FORCE_REFRESH)],
+        min_one: false,
+        annotations: Annotations {
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+            open_world: true,
+        },
+        output: Some(Output::Usage),
     },
     Tool {
         name: "list_voices",
@@ -477,6 +492,48 @@ fn output_schema_for(output: Output) -> Value {
             "required": ["engine", "voice", "voices", "rate", "state"],
             "additionalProperties": false
         }),
+        Output::Usage => json!({
+            "type": "object",
+            "properties": {
+                "cards": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "agent": {
+                                "type": "string",
+                                "enum": ["claude_code", "codex", "qwen_code", "grok"]
+                            },
+                            "account": { "type": "string" },
+                            "rows": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "period": {
+                                            "type": "string",
+                                            "enum": ["session", "week", "month"]
+                                        },
+                                        "used_percent": {
+                                            "type": "number",
+                                            "minimum": 0,
+                                            "maximum": 100
+                                        },
+                                        "resets_at_unix": { "type": "integer", "minimum": 1 }
+                                    },
+                                    "required": ["period", "used_percent", "resets_at_unix"],
+                                    "additionalProperties": false
+                                }
+                            }
+                        },
+                        "required": ["agent", "rows"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["cards"],
+            "additionalProperties": false
+        }),
         Output::Voices => json!({
             "type": "object",
             "properties": {
@@ -674,6 +731,8 @@ mod tests {
             ("set_config", json!({"capture_gain": 20.1}), false),
             ("set_config", json!({}), false),
             ("get_status", json!({"extra": true}), false),
+            ("get_usage", json!({"force_refresh": true}), true),
+            ("get_usage", json!({"force_refresh": "true"}), false),
         ];
 
         for (tool, arguments, valid) in cases {
@@ -891,7 +950,7 @@ mod tests {
     fn catalog_is_a_nonempty_array_of_named_tools() {
         let c = catalog();
         let arr = c.as_array().expect("catalog is a JSON array");
-        let expected = if DIARIZATION_ENABLED { 9 } else { 7 };
+        let expected = if DIARIZATION_ENABLED { 10 } else { 8 };
         assert_eq!(arr.len(), expected, "expected {expected} visible tools");
         for t in arr {
             assert!(
@@ -910,7 +969,7 @@ mod tests {
                 .as_object()
                 .expect("each tool has annotations");
             assert_eq!(annotations.len(), 4, "all annotation hints are explicit");
-            assert_eq!(annotations["openWorldHint"], false);
+            assert_eq!(annotations["openWorldHint"], t["name"] == "get_usage");
             for hint in [
                 "readOnlyHint",
                 "destructiveHint",
@@ -928,7 +987,7 @@ mod tests {
         let tools = catalog.as_array().unwrap();
         for tool in tools {
             let name = tool["name"].as_str().unwrap();
-            if matches!(name, "get_status" | "list_voices") {
+            if matches!(name, "get_status" | "get_usage" | "list_voices") {
                 assert_eq!(tool["outputSchema"]["type"], "object");
                 assert_eq!(output_schema(name), Some(tool["outputSchema"].clone()));
             } else {
@@ -943,7 +1002,7 @@ mod tests {
     fn catalog_ui_params_are_ordered() {
         let ui = catalog_ui();
         let arr = ui.as_array().expect("ui catalog is an array");
-        let expected = if DIARIZATION_ENABLED { 9 } else { 7 };
+        let expected = if DIARIZATION_ENABLED { 10 } else { 8 };
         assert_eq!(arr.len(), expected, "same visible tools as the MCP catalog");
 
         let speak = arr

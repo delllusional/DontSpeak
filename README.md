@@ -85,7 +85,8 @@ Always-listening does not use Caps Lock.
 
 ## MCP tools
 
-`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `list_voices` · `set_config` —
+`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `get_usage` ·
+`list_voices` · `set_config` —
 [docs/MCP-TOOLS.md](docs/MCP-TOOLS.md). Wiring automatic (`exclude_clients`); inspect with
 `dontspeak wire --list` / `wire <client>`.
 

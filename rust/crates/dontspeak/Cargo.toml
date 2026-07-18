@@ -19,10 +19,12 @@ description = "DontSpeak's CLI: client launcher, MCP server, hook verbs, and int
 name = "dontspeak"
 path = "src/main.rs"
 
-# Thin bridge: JSON-RPC over stdin/stdout — the ONLY transport. Forwards to the resident
-# engine over the ds-ipc client; no HTTP, no async runtime (the workspace's no-tokio
-# stance).
+# Thin bridge: JSON-RPC over stdin/stdout — the ONLY transport. Most tools forward to the
+# resident engine over ds-ipc; get_usage shares the Usage tab's read-only HTTP probes. No
+# async runtime (the workspace's no-tokio stance).
 [dependencies]
+# Shared quota cache/provider pipeline; do not duplicate Usage-tab fetch logic here.
+ds-agent-usage = { workspace = true }
 ds-config = { workspace = true }
 # The client-wiring orchestrator + writers (extracted from this crate). `dontspeak wire`
 # calls `ds_wire::run`; the engine (dontspeakd) shares the same `ds_wire::reconcile`.

@@ -24,6 +24,10 @@ pub const LISTEN_SECONDS: &str = "Max recording seconds. Default 30.";
 pub const GET_STATUS: &str = "Speech config and runtime state.";
 pub const STATUS_DETAIL: &str = "Include model, dictation, and runtime stats. Default false.";
 
+pub const GET_USAGE: &str = "Coding-agent subscription usage shown in the Usage tab.";
+pub const USAGE_FORCE_REFRESH: &str =
+    "Bypass the 60-second cache and query providers. Default false.";
+
 pub const DIARIZE: &str = "Record mic and label who spoke when. Needs diarization; macOS only.";
 pub const DIARIZE_SECONDS: &str = "Recording seconds. Default 10.";
 

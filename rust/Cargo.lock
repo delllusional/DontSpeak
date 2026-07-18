@@ -847,6 +847,7 @@ dependencies = [
 name = "dontspeak"
 version = "0.3.3-dev"
 dependencies = [
+ "ds-agent-usage",
  "ds-config",
  "ds-ipc",
  "ds-log",

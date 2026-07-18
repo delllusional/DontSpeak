@@ -1,7 +1,7 @@
 # MCP tools
 
-Seven tools by default: `speak`, `listen`, `stop_speech`, `mute`, `get_status`,
-`list_voices`, `set_config` — Tools window order. Source: `ds-tools`
+Eight tools by default: `speak`, `listen`, `stop_speech`, `mute`, `get_status`,
+`get_usage`, `list_voices`, `set_config` — Tools window order. Source: `ds-tools`
 (`lib.rs` + `descriptions.rs`); parity test pins names/descriptions.
 
 Client wiring is not an MCP tool — engine converges to `exclude_clients` at boot.
@@ -10,10 +10,11 @@ Manual: `dontspeak wire <client>` / `wire --reconcile`.
 `diarize`, `manage_speakers`, and four diarization `set_config` params are implemented
 but hidden (issue #77, `DIARIZATION_ENABLED`).
 
-Annotations: local only (`openWorldHint=false`). Read-only: `get_status`, `list_voices`,
-`listen`, `diarize`. Idempotent: `stop_speech`, `mute`, `set_config`. Destructive when
-discarding queue/state. `get_status` / `list_voices`: `structuredContent` + same JSON in
-text. Stdio: 1 JSON-RPC line ≤1 MiB; max 8 concurrent; cancel stops `listen`.
+Annotations: `get_usage` queries provider APIs (`openWorldHint=true`); the rest are local
+only. Read-only: `get_status`, `get_usage`, `list_voices`, `listen`, `diarize`. Idempotent:
+`stop_speech`, `mute`, `set_config`. Destructive when discarding queue/state. `get_status`,
+`get_usage`, and `list_voices`: `structuredContent` + same JSON in text. Stdio: 1 JSON-RPC
+line ≤1 MiB; max 8 concurrent; cancel stops `listen`.
 
 ## speak
 
@@ -52,6 +53,14 @@ Speech config and runtime state.
 | Param | Type | Required | Description |
 |---|---|---|---|
 | `detail` | boolean | no | Include model, dictation, and runtime stats. Default false. |
+
+## get_usage
+
+Coding-agent subscription usage shown in the Usage tab.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `force_refresh` | boolean | no | Bypass the 60-second cache and query providers. Default false. |
 
 ## list_voices
 

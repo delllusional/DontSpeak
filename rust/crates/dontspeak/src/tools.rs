@@ -1,6 +1,6 @@
 //! `tools/call` router and `call_*` handlers (strict arg structs). Most bridge to the
-//! engine over `ds-ipc`; `list_voices`/`set_config`/`get_status` are config-direct and
-//! never spawn the engine (`set_config` still best-effort-nudges Reload).
+//! engine over `ds-ipc`; `list_voices`/`set_config`/`get_status`/`get_usage` are direct
+//! and never spawn the engine (`set_config` still best-effort-nudges Reload).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,6 +105,8 @@ pub(crate) fn tools_call_cancellable(
             Some(paths) => call_status(&paths, sock, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
+        // Read-only subscription quotas; shared cache/provider logic with the Usage tab.
+        "get_usage" => call_usage(&args).map(ToolSuccess::Structured),
         "speak" | "stop_speech" | "mute" | "listen" | "diarize" | "manage_speakers" => {
             let Some(sock) = sock else {
                 return ok(
@@ -143,6 +145,12 @@ enum ToolSuccess {
 #[serde(default, deny_unknown_fields)]
 struct StatusArgs {
     detail: Option<bool>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UsageArgs {
+    force_refresh: Option<bool>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -265,6 +273,20 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         };
     }
     Ok(out)
+}
+
+fn call_usage(args: &Value) -> Result<Value, String> {
+    call_usage_with(args, ds_agent_usage::snapshot)
+}
+
+fn call_usage_with(
+    args: &Value,
+    snapshot: impl FnOnce(bool) -> ds_agent_usage::UsageDeck,
+) -> Result<Value, String> {
+    let a: UsageArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid get_usage arguments: {e}"))?;
+    serde_json::to_value(snapshot(a.force_refresh.unwrap_or(false)))
+        .map_err(|e| format!("get_usage failed: {e}"))
 }
 
 // config.toml is source of truth; engine Reload nudge (mtime-watch if down).
@@ -676,6 +698,13 @@ mod drift {
             serde_json::to_value(StatusArgs { detail: Some(true) }).unwrap(),
         );
         assert_tool_matches(
+            "get_usage",
+            serde_json::to_value(UsageArgs {
+                force_refresh: Some(true),
+            })
+            .unwrap(),
+        );
+        assert_tool_matches(
             "mute",
             serde_json::to_value(MuteArgs { on: Some(true) }).unwrap(),
         );
@@ -697,6 +726,55 @@ mod drift {
             })
             .unwrap(),
         );
+    }
+}
+
+#[cfg(test)]
+mod usage_output {
+    use super::*;
+    use ds_agent_usage::{Period, UsageCard, UsageDeck, UsageRow};
+
+    #[test]
+    fn usage_returns_the_shared_deck_and_forwards_refresh() {
+        let value = call_usage_with(&json!({ "force_refresh": true }), |force_refresh| {
+            assert!(force_refresh);
+            UsageDeck {
+                cards: vec![UsageCard {
+                    agent: ClientSource::Codex,
+                    account: Some("dev@example.com".into()),
+                    rows: vec![UsageRow {
+                        period: Period::Week,
+                        used_percent: 42.0,
+                        resets_at_unix: 1_900_000_000,
+                    }],
+                }],
+            }
+        })
+        .expect("usage serializes");
+
+        assert_eq!(
+            value,
+            json!({
+                "cards": [{
+                    "agent": "codex",
+                    "account": "dev@example.com",
+                    "rows": [{
+                        "period": "week",
+                        "used_percent": 42.0,
+                        "resets_at_unix": 1_900_000_000
+                    }]
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn usage_defaults_to_the_soft_cache() {
+        call_usage_with(&json!({}), |force_refresh| {
+            assert!(!force_refresh);
+            UsageDeck::empty()
+        })
+        .expect("empty deck serializes");
     }
 }
 
