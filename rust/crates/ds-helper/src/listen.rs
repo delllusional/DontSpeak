@@ -672,6 +672,11 @@ fn try_streaming(
     let started = Instant::now();
     let mut last_text = String::new();
     let mut partials = 0u32;
+    // Gained capture @ device rate — exactly what `session.accept` sees. The only source for
+    // the empty-transcript RMS diagnostic and DONTSPEAK_LISTEN_DUMP wav on THIS path: unlike
+    // the offline fallback below, this is the steady-state path for every backend (see module
+    // docs), so without this buffer those two diagnostics were silently unreachable in practice.
+    let mut accum: Vec<f32> = Vec::new();
     while !stopped() && started.elapsed() < timeout {
         std::thread::sleep(Duration::from_millis(50));
         let block = drain();
@@ -679,6 +684,7 @@ fn try_streaming(
             continue;
         }
         let block = gain.apply(&block);
+        accum.extend_from_slice(&block);
         match session.accept(&block) {
             Ok(text) => {
                 if text != last_text && !text.trim().is_empty() {
@@ -697,6 +703,7 @@ fn try_streaming(
     let tail = drain();
     if !tail.is_empty() {
         let tail = gain.apply(&tail);
+        accum.extend_from_slice(&tail);
         if let Err(e) = session.accept(&tail) {
             log::warn!(target: "helper", "{label}: streaming final drain: {e}");
         }
@@ -709,6 +716,27 @@ fn try_streaming(
     let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
     let audio_ms = session.audio_ms();
     let transcribe_ms = session.transcribe_ms();
+    // Same empty-transcript diagnostics as the offline path (module docs): a near-zero RMS
+    // means silence reached the mic path (AEC over-cancelling, or no mic grant); the dump is
+    // the actual 16 kHz buffer this backend saw.
+    let rms = if accum.is_empty() {
+        0.0
+    } else {
+        (accum.iter().map(|x| x * x).sum::<f32>() / accum.len() as f32).sqrt()
+    };
+    log::debug!(
+        target: "helper",
+        "{label}: rate={rate} accum={} rms={rms:.4} partials={partials} streaming=1",
+        accum.len(),
+    );
+    if std::env::var_os("DONTSPEAK_LISTEN_DUMP").is_some() {
+        let dump = ds_stt::resample_to_16k(&accum, rate);
+        let path = std::env::temp_dir().join("ds-listen.wav");
+        match ds_tts::wav::write_wav16(&path, &dump, 16_000) {
+            Ok(()) => log::info!(target: "helper", "{label}: dumped → {}", path.display()),
+            Err(e) => log::warn!(target: "helper", "{label}: wav dump failed: {e}"),
+        }
+    }
     // STTSTATS schema shared with the offline path; `preview_ms=0` (no re-encode) + `streaming=1`
     // are the success markers in the activity-log `STT listen ...` line under DONTSPEAK_DEBUG.
     println!(
