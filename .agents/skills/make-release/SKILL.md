@@ -90,11 +90,10 @@ Monitor to completion and verify assets. Notes are **not** committed to the tree
 3. Append `## Lines`: bare compare URL then the table from
    `scripts/release/release-stats.py <prev> v$ver` (use the version string that will be
    tagged; after the version commit lands, `v$ver` matches HEAD for stats against prev).
-   Table columns: Area / Code / Tests / Comments / **Size bump (avg bin)** — host app
-   rows show mean package size delta for that OS’s two arches; **Total** is the six-
-   package mean; `rust` is blank (shared code is not a published host package). Sizes
-   from `gh release view` (install scripts / checksums excluded). Needs both tags
-   published (drafts OK).
+   Table columns: Area / Code / Tests / Comments / **Binaries avg** — host app rows
+   show mean package size delta for that OS’s two arches; **Total** is the six-package
+   mean; `rust` is blank. Sizes from `gh release view` (install scripts / checksums
+   excluded). Needs both tags published (drafts OK).
 4. **Annotated tag** (required for real releases — body is the release notes; not a
    tree file). Then push:
 

@@ -12,9 +12,9 @@ tests, macOS XCTest target, and Windows xunit project). Full-line `//`
 comments are tallied separately in their own "comments" column, regardless
 of whether they fall in code or test regions.
 
-Also reports **published-binary size deltas** (GitHub Release host packages only —
-not install scripts or checksums) in a fifth column: each host app row averages
-that OS's two arch packages; **Total** averages all six; `rust` is blank.
+Also reports **Binaries** size deltas (GitHub Release host packages only — not
+install scripts or checksums): each host app row averages that OS's two arch
+packages; **Total** averages all six; `rust` is blank.
 
 Used by the `make-release` skill to generate the change-stats table appended
 to release notes. Run from the repo root:
@@ -190,8 +190,7 @@ def size_bump_by_area(old_ref: str, new_ref: str) -> dict[str, str]:
             return "—"
         old_avg = sum(old_by[p] for p in common) / len(common)
         new_avg = sum(new_by[p] for p in common) / len(common)
-        n = len(common)
-        return f"{fmt_size_bump(new_avg - old_avg)} ({n} pkg avg)"
+        return fmt_size_bump(new_avg - old_avg)
 
     out: dict[str, str] = {}
     for label, plats in AREA_PLATFORMS.items():
@@ -226,7 +225,7 @@ def main():
 
     size_cells = size_bump_by_area(old_ref, new_ref)
 
-    print("| Area | Code | Tests | Comments | Size bump (avg bin) |")
+    print("| Area | Code | Tests | Comments | Binaries avg |")
     print("|---|---:|---:|---:|---:|")
     for label, (code_add, code_del, test_add, test_del, comment_add, comment_del) in rows:
         size = size_cells.get(label, "")
