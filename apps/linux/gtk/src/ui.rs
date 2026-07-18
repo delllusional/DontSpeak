@@ -574,11 +574,7 @@ fn make_version_link(row: &adw::ExpanderRow, url: &str) -> gtk::Label {
     subtitle
 }
 
-/// Brand-purple UI accents from [`crate::icon::brand_colors`] (never a second hardcoded hex):
-/// - `.ds-update-badge` background only (keeps subtitle text styling)
-/// - `.ds-usage-progress` fill (Usage tab progress bars)
-///
-/// Local color source; safe at startup independent of the network check.
+/// Brand purple for update badge + usage progress (from [`crate::icon::brand_colors`]).
 pub fn load_update_badge_css() {
     let (crate::icon::Rgb(r, g, b), _mic_orange) =
         crate::icon::brand_colors(&crate::ffi::brand_colors_json());
@@ -913,8 +909,7 @@ impl UsagePage {
         self.update_empty_state(false);
     }
 
-    /// Tab selected: paint only cards with cached rows; force-load each installed
-    /// agent and insert/update when that load has data (first visit: empty until then).
+    /// Tab select: cache paint, then async force-load per agent.
     fn on_tab_selected(&self) {
         let generation = self.generation.get().saturating_add(1);
         self.generation.set(generation);
@@ -994,8 +989,7 @@ fn finish_one(page: &UsagePage, remaining: &std::rc::Rc<std::cell::Cell<usize>>,
     }
 }
 
-/// Keep matching rows mounted so a refresh animates from the displayed value instead
-/// of remounting ProgressBar at the new fraction. Rebuild only when shape changes.
+/// In-place row update when period shape matches; remount only on shape change.
 fn try_update_usage_rows(mounted: &[UsageRowWidgets], card: &UsageCard) -> bool {
     if mounted.len() != card.rows.len() {
         return false;
@@ -1109,8 +1103,7 @@ fn set_usage_account_label(label: &gtk::Label, account: Option<&str>) {
     }
 }
 
-/// One row: period + remaining (top-right) | progress. Same structure as Swift/WinUI.
-/// Remaining label is always created (hidden when empty) so in-place updates can toggle it.
+/// Period + remaining | progress. Remaining label always mounted (may be hidden).
 fn usage_row_widget(row: &UsageRow) -> (gtk::Widget, UsageRowWidgets) {
     let outer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)

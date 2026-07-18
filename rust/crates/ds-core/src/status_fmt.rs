@@ -53,10 +53,8 @@ pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
     }
 }
 
-/// Localized lifetime / remaining duration. Leading **and trailing** zero units
-/// dropped — Status "all-time" (and similar): `"2d"`, `"1d 05h"`, `"5h 11m"`,
-/// `"12m 04s"`, `"45s"`. Never `"0d …"`. Usage remaining uses
-/// [`duration_live_no_seconds`] instead.
+/// Lifetime / remaining duration; leading+trailing zero units dropped. Usage remaining:
+/// [`duration_live_no_seconds`].
 pub fn duration_live(secs: f64) -> String {
     let total = secs.round().max(0.0) as i64;
     let d = total / 86400;
@@ -119,8 +117,7 @@ pub fn duration_live(secs: f64) -> String {
     }
 }
 
-/// Usage-tab remaining time only (e.g. `2d 05h`, `5h 11m`, `12m`) — no "Resets
-/// in" prefix and **no seconds** (minute is the finest unit).
+/// Usage remaining (`2d 05h` …); no "Resets in" prefix; minute is finest unit.
 pub fn usage_resets_in(resets_at_unix: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -130,8 +127,7 @@ pub fn usage_resets_in(resets_at_unix: i64) -> String {
     duration_live_no_seconds(remaining)
 }
 
-/// Like [`duration_live`] but drops seconds — Usage header remaining text only.
-/// Sub-minute remainders floor to `0m`.
+/// [`duration_live`] without seconds (sub-minute → `0m`).
 fn duration_live_no_seconds(secs: f64) -> String {
     let total = secs.round().max(0.0) as i64;
     let d = total / 86400;

@@ -199,10 +199,7 @@ fn parse_web_billing(body: &[u8], now_unix: i64) -> Option<UsageRow> {
         .into_iter()
         .filter(|(_, ts)| *ts > now_unix)
         .collect();
-    // Preferred path [1, 5, 1]: nested reset timestamp from CodexBar-compatible
-    // GetGrokCreditsConfig captures (see `parses_live_shaped_web_billing_frame`
-    // fixture). Re-derive from a live frame if upstream schema drifts; fallback
-    // is the earliest future unix varint (#110 n5).
+    // Prefer path [1,5,1] reset (CodexBar capture); else earliest future unix varint (#110 n5).
     let preferred = future
         .iter()
         .filter(|(path, _)| path.as_slice() == [1, 5, 1])
@@ -329,12 +326,7 @@ impl ProtobufScan {
     }
 }
 
-/// Walk length-delimited protobuf, collecting fixed32 + varint leaves.
-///
-/// Returns `None` on deprecated wire types 3/4 (start/end group) or unknown
-/// types 6/7: advancing one byte would desync the rest of the stream and
-/// invent garbage fields. Modern protos never emit groups; treat the payload
-/// unusable rather than guess (issue #109 m6).
+/// Length-delimited protobuf → fixed32 + varint leaves. `None` on wire types 3/4/6/7 (no 1-byte advance; #109 m6).
 fn scan_protobuf(data: &[u8], depth: u8, path: &[u64]) -> Option<ProtobufScan> {
     let mut scan = ProtobufScan::default();
     let mut index = 0;
@@ -480,9 +472,7 @@ mod tests {
 
     #[test]
     fn parses_live_shaped_web_billing_frame() {
-        // Captured shape from GetGrokCreditsConfig (percent + weekly reset).
-        // gRPC-web: data frame (len 86) + trailer grpc-status:0.
-        // Exact capture from a live GetGrokCreditsConfig response (usage only).
+        // Live GetGrokCreditsConfig capture (percent + weekly reset).
         let body = hex_literal(
             "00000000560a540d0000004112001a00220c089effe6d20610f894f79f022a0c\
              089ef48bd30610f894f79f023a0708021500000041421e0802120c089effe6d2\

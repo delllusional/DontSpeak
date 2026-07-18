@@ -163,22 +163,15 @@ pub extern "C" fn ds_model_status_wait(since: u64, timeout_ms: u32) -> *mut c_ch
     })
 }
 
-/// Instant Usage deck: installed agent cards + cached rows. **No network.**
-/// Hosts paint one card per entry, then call [`ds_agent_usage_card_json`] per agent.
-/// Owned `char*`. HANDLE-FREE.
-///
-/// JSON: `{ "cards": [ { "agent", "rows": [...] } ] }`
+/// Usage skeleton (`ds_agent_usage::skeleton`). No network. Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_skeleton_json() -> *mut c_char {
     const EMPTY: &str = r#"{"cards":[]}"#;
     guard_str(EMPTY, || to_cstring(ds_agent_usage::skeleton().to_json()))
 }
 
-/// Blocking single-card load/refresh. Off UI thread; one call per agent card.
-/// `agent` is a `ClientSource` token. `force_refresh != 0` bypasses 60s soft cache.
+/// Blocking card refresh (`ClientSource` token). Off UI thread. `force_refresh` skips soft cache.
 /// Owned `char*`. HANDLE-FREE.
-///
-/// JSON: `{ "agent": "claude_code", "rows": [ { "period", "used_percent", "resets_at_unix" } ] }`
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_card_json(agent: *const c_char, force_refresh: u8) -> *mut c_char {
     const EMPTY: &str = r#"{"agent":"unknown","rows":[]}"#;
@@ -189,7 +182,7 @@ pub extern "C" fn ds_agent_usage_card_json(agent: *const c_char, force_refresh: 
     })
 }
 
-/// Aggregate refresh (tests / tooling). Owned `char*`. HANDLE-FREE.
+/// Aggregate refresh (tests/tooling). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_json(force_refresh: u8) -> *mut c_char {
     const EMPTY: &str = r#"{"cards":[]}"#;
@@ -383,8 +376,7 @@ pub extern "C" fn ds_duration_live(secs: f64) -> *mut c_char {
     guard_str("", || to_cstring(crate::status_fmt::duration_live(secs)))
 }
 
-/// Usage remaining duration from absolute UTC epoch (e.g. `2d 05h`, no seconds).
-/// Owned `char*`.
+/// See [`crate::status_fmt::usage_resets_in`]. Owned `char*`.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_usage_resets_in(resets_at_unix: i64) -> *mut c_char {
     guard_str("", || {

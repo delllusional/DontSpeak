@@ -12,23 +12,18 @@ import SwiftUI
 struct UsageView: View {
     @Environment(Core.self) private var core
     @State private var cards: [UsageCard] = []
-    /// Canonical `ClientSource::CLIENTS` order supplied by the Rust skeleton deck.
-    @State private var canonicalAgents: [String] = []
-    /// True after skeleton + all per-agent loads finished for this tab generation.
-    @State private var settled = false
+    /// Rust skeleton order (ClientSource::CLIENTS).\n    @State private var canonicalAgents: [String] = []
+    /// Skeleton + all per-agent loads finished for this generation.\n    @State private var settled = false
     @State private var generation = 0
 
     var body: some View {
         Group {
             if cards.isEmpty {
-                // Blank while first load is in flight; unavailable only when settled with nothing.
                 if settled {
                     Text(L.t("usage.unavailable"))
                         .foregroundStyle(.secondary)
                 } else {
-                    // Keep a real render node mounted so `onAppear` starts the cache/network
-                    // load. An empty conditional collapses to EmptyView and never appears.
-                    Color.clear
+                    // Color.clear keeps onAppear alive (EmptyView never appears).\n                    Color.clear
                 }
             } else {
                 ScrollView {

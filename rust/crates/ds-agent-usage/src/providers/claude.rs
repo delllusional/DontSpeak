@@ -8,8 +8,7 @@ use crate::{Period, UsageRow};
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
-// Bump when Claude Code releases a new client version the OAuth usage endpoint
-// expects (same identity string Claude Code sends).
+// Bump with Claude Code client identity expected by OAuth usage endpoint.
 const CLAUDE_CODE_USER_AGENT: &str = "claude-code/2.1.0";
 
 pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
@@ -27,8 +26,7 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
             .header("Authorization", format!("Bearer {token}"))
             .header("anthropic-beta", "oauth-2025-04-20")
             .header("Accept", "application/json")
-            // Anthropic's OAuth usage endpoint expects the same client identity as
-            // Claude Code; DontSpeak remains a read-only consumer of its token.
+            // Same client identity as Claude Code (read-only token consumer).
             .header("User-Agent", CLAUDE_CODE_USER_AGENT),
     )?;
     Ok(parse(&json))
@@ -53,8 +51,7 @@ fn read_credentials(paths: &ds_config::Paths) -> std::io::Result<Value> {
         Ok(credentials) => return Ok(credentials),
         Err(error) => error,
     };
-    // Claude Code keeps the same JSON in Keychain on macOS. The query below
-    // explicitly skips protected items instead of ever raising authentication UI.
+    // macOS Keychain: skip protected items (never raise auth UI).
     match read_keychain_credentials() {
         Ok(credentials) => Ok(credentials),
         Err(_) => Err(file_error),
@@ -99,8 +96,7 @@ fn read_keychain_credentials() -> std::io::Result<Value> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
-/// Map the generic five-hour and seven-day windows only (CodexBar session + weekly).
-/// Model-scoped weeklies and monetary extra-usage stay out of scope.
+/// Five-hour + seven-day windows only (session/week). No model-scoped or $ extra-usage.
 fn parse(json: &Value) -> Vec<UsageRow> {
     [
         parse_window(json.get("five_hour"), Period::Session),
@@ -113,8 +109,7 @@ fn parse(json: &Value) -> Vec<UsageRow> {
 
 fn parse_window(value: Option<&Value>, period: Period) -> Option<UsageRow> {
     let window = value?.as_object()?;
-    // Anthropic OAuth `utilization` is already percent 0…100 (same scale as
-    // `limits[].percent`). Do not treat 1.0 as a full fraction — that is 1% used.
+    // `utilization` is already 0..100 percent (1.0 = 1%, not full).
     let used = window.get("utilization").and_then(|v| {
         v.as_f64()
             .or_else(|| v.as_i64().map(|n| n as f64))

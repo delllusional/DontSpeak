@@ -43,8 +43,7 @@ pub(crate) fn account(paths: &ds_config::Paths) -> Option<String> {
     jwt_claim(token, "email").or_else(|| jwt_claim(token, "preferred_username"))
 }
 
-/// Decode the JWT payload (middle segment) and read one string claim. Signature is
-/// not verified — the token already lives on disk as the user's own credential.
+/// JWT payload claim (middle segment). No signature check — local credential.
 fn jwt_claim(token: &str, claim: &str) -> Option<String> {
     let payload = token.split('.').nth(1)?;
     // JWT uses unpadded base64url (`-`/`_`). Already in the graph via ds-http/attohttpc.

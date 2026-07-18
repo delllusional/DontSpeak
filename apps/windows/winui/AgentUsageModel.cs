@@ -43,17 +43,17 @@ internal static class AgentUsageModel
     }
 }
 
-/// <summary>Full tab deck. Mirrors Rust <c>UsageDeck</c>.</summary>
+/// <summary>Mirrors Rust <c>UsageDeck</c>.</summary>
 internal sealed record UsageDeckDto(
     [property: JsonPropertyName("cards")] List<UsageCardDto> Cards);
 
-/// <summary>One card: agent + rows. Mirrors Rust <c>UsageCard</c>.</summary>
+/// <summary>Mirrors Rust <c>UsageCard</c>.</summary>
 internal sealed record UsageCardDto(
     [property: JsonPropertyName("agent")] string Agent,
     [property: JsonPropertyName("rows")] List<UsageRowDto> Rows,
     [property: JsonPropertyName("account")] string? Account = null);
 
-/// <summary>One gauge row. Mirrors Rust <c>UsageRow</c>.</summary>
+/// <summary>Mirrors Rust <c>UsageRow</c>.</summary>
 internal sealed record UsageRowDto(
     [property: JsonPropertyName("period")] string Period,
     [property: JsonPropertyName("used_percent")] double UsedPercent,

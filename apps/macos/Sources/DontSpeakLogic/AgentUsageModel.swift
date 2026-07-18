@@ -1,17 +1,15 @@
 import Foundation
 
-/// One gauge inside a card. Mirrors Rust `UsageRow`.
+/// One gauge. Mirrors Rust `UsageRow`.
 ///
-/// `period` is an opaque wire token (`session` / `week` / `month` / …) so a new
-/// Rust period does not fail the whole card decode (parity with Windows/Linux).
-/// `remainingLabel` is not on the wire — hosts fill it at the data-source boundary via
-/// `ds_usage_resets_in` so SwiftUI `body` never calls FFI on every recompute.
+/// `period` is an opaque wire token so unknown periods still decode.
+/// `remainingLabel` filled at data-source via `ds_usage_resets_in` (not in SwiftUI body).
 public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
     public var id: String { period }
     public let period: String
     public let usedPercent: Double
     public let resetsAtUnix: Int64
-    /// Preformatted remaining duration; empty until filled at the data boundary.
+    /// Preformatted remaining; empty until data boundary.
     public let remainingLabel: String
 
     enum CodingKeys: String, CodingKey {
@@ -50,11 +48,10 @@ public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// Backing model for one Usage card: agent type + rows. Mirrors Rust `UsageCard`.
+/// One card. Mirrors Rust `UsageCard`.
 public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
     public var id: String { agent }
     public let agent: String
-    /// Signed-in account (usually email) when the client exposes one; nil/empty otherwise.
     public let account: String?
     public let rows: [UsageRow]
 
@@ -80,7 +77,7 @@ public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// Tab deck: ordered cards. Mirrors Rust `UsageDeck`.
+/// Tab deck. Mirrors Rust `UsageDeck`.
 public struct UsageDeck: Decodable, Equatable, Sendable {
     public let cards: [UsageCard]
 

@@ -116,8 +116,7 @@ fn dotenv_value(contents: &str, wanted: &str) -> Option<String> {
     })
 }
 
-/// Coding Plan supplies five-hour, weekly, and billing-month counters (CodexBar
-/// primary / secondary / tertiary). Emit every complete triple of used/total/reset.
+/// Coding Plan: five-hour / weekly / billing-month (emit complete used/total/reset triples).
 fn parse(json: &Value) -> Vec<UsageRow> {
     let Some(quota) = find_quota_object(json) else {
         return Vec::new();

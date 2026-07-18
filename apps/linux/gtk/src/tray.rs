@@ -1,7 +1,4 @@
-//! StatusNotifierItem tray (GTK4 dropped legacy StatusIcon). Runs on its own thread (ksni
-//! blocking DBus). Menu actions are handled **on this thread** (or a short worker) so they do
-//! not depend on the GTK main loop polling async sources — which was dropping every tray
-//! command under GApplication. Icon is a custom brand pixmap ([`crate::icon`]).
+//! StatusNotifierItem tray on its own thread (ksni). Menu actions run here (not GTK main loop).
 
 use ksni::Tray;
 use ksni::menu::{MenuItem, StandardItem};
@@ -30,8 +27,7 @@ impl SpeakTray {
         }
     }
 
-    /// Per-state tint: recording → mic_orange, speaking → seed_purple, else idle.
-    /// Muted is a slash, not a color. Download/warm live only on engine dots, not tray.
+    /// recording→mic_orange, speaking→seed_purple, else idle. Mute is a slash.
     fn ink(&self) -> Rgb {
         match self.kind {
             ds_status::TrayIconKind::Recording => self.mic_orange,
@@ -41,12 +37,7 @@ impl SpeakTray {
     }
 }
 
-/// Ask the running GApplication to Activate (shows the main window on the GTK thread).
-///
-/// Real export path is `/org/dontspeak/DontSpeak` (not the gtk Application template path).
-/// Signature is `a{sv}` platform-data — empty dict `{}`.
-///
-/// Spawns off this SNI thread so a slow D-Bus reply never freezes the tray menu.
+/// GApplication Activate on `/org/dontspeak/DontSpeak` (`a{sv}` empty). Off SNI thread.
 fn activate_application() {
     std::thread::Builder::new()
         .name("ds-tray-activate".into())
@@ -104,19 +95,13 @@ impl Tray for SpeakTray {
             .collect()
     }
 
-    /// Left-click → show window (keep last tab). ItemIsMenu stays false (ksni default) so the
-    /// host routes left-click here and only shows the context menu on right-click.
+    /// Left-click → show window (ItemIsMenu false).
     fn activate(&mut self, _x: i32, _y: i32) {
         activate_application();
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        // Handlers run on the SNI/DBus thread — keep them non-blocking for GTK widgets.
-        // Mutating `self` is pushed back into the live menu by ksni after the callback returns.
-        //
-        // macOS parity (`TrayMenu.swift`): every row is the same control type with a **leading**
-        // glyph — Mute uses speaker on/off (not a separate CheckmarkItem gutter that misaligns
-        // Settings/Quit). Same left icon column for all three actions.
+        // SNI thread: non-blocking for GTK. Same leading-glyph rows as macOS TrayMenu.
         vec![
             StandardItem {
                 label: crate::ffi::t("tray.mute"),

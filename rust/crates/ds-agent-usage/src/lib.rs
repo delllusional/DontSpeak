@@ -1,14 +1,7 @@
-//! Usage tab domain: one **card per agent**, loadable and displayable independently.
+//! Usage tab domain: one card per installed agent.
 //!
-//! ## Model
-//! - [`UsageCard`] — agent identity + ordered quota [`UsageRow`]s (the unit hosts render)
-//! - [`UsageDeck`] — list of cards for the tab (installed agents, cache-first skeleton)
-//!
-//! ## Load
-//! 1. [`skeleton`] — no network: installed agents + last cached rows
-//! 2. [`refresh_card`] — one agent, blocking; hosts run one task per card
-//!
-//! Install gate reuses wire `ClientSpec::present`. Credentials are read-only.
+//! [`skeleton`] = no network (install gate + cache). [`refresh_card`] = blocking one agent.
+//! Credentials read-only; install via wire `ClientSpec::present`.
 
 mod providers;
 
@@ -25,7 +18,7 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 const CACHE_FILE: &str = "agent-usage-cache.json";
 const MAX_CACHE_BYTES: u64 = 64 * 1024;
 
-/// Semantic period. Wire tokens match `ds-i18n` keys under `usage.<period>`.
+/// Wire tokens match `ds-i18n` `usage.<period>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Period {
@@ -34,7 +27,7 @@ pub enum Period {
     Month,
 }
 
-/// One quota gauge inside a card (period + percent + reset instant).
+/// One quota gauge (period + percent + reset).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageRow {
     pub period: Period,
@@ -55,16 +48,15 @@ impl UsageRow {
     }
 }
 
-/// Backing model for one Usage tab card: agent type + its rows.
+/// One Usage tab card.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageCard {
-    /// Canonical client token (`claude_code`, `codex`, `qwen_code`, `grok`).
+    /// `claude_code` | `codex` | `qwen_code` | `grok`.
     pub agent: ClientSource,
-    /// Signed-in account label (usually email) when the client exposes one locally.
-    /// Absent for API-key-only agents (Qwen) or when credentials omit identity.
+    /// Local login label when present (absent for API-key-only / missing identity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
-    /// Ordered gauges (session → week → month). Empty until loaded / if unavailable.
+    /// Session → week → month. Empty until loaded / unavailable.
     pub rows: Vec<UsageRow>,
 }
 
@@ -114,8 +106,7 @@ impl UsageCard {
     }
 }
 
-/// Trim, reject empty/whitespace, and cap length so a hostile credential file cannot
-/// bloat the cache or UI. Email shape is not required — some clients only expose a login.
+/// Trim + cap (hostile credential files). Not email-shaped — some clients only store a login.
 fn normalize_account(raw: &str) -> Option<String> {
     const MAX_LEN: usize = 128;
     let trimmed = raw.trim();
@@ -129,7 +120,7 @@ fn normalize_account(raw: &str) -> Option<String> {
     Some(out)
 }
 
-/// Full tab deck: ordered cards for every installed agent.
+/// Ordered cards for installed agents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageDeck {
     pub cards: Vec<UsageCard>,
@@ -303,13 +294,13 @@ fn fetch_rows(paths: &ds_config::Paths, agent: ClientSource) -> std::io::Result<
     }
 }
 
-/// Local identity only — never network. Omitted when the agent has no stored login.
+/// Local identity only (never network).
 fn fetch_account(paths: &ds_config::Paths, agent: ClientSource) -> Option<String> {
     match agent {
         ClientSource::ClaudeCode => providers::claude::account(paths),
         ClientSource::Codex => providers::codex::account(paths),
         ClientSource::Grok => providers::grok::account(paths),
-        // Coding Plan is API-key auth; no account email on disk.
+        // Qwen Coding Plan is API-key only.
         ClientSource::QwenCode | ClientSource::DontSpeak | ClientSource::Unknown => None,
     }
 }
@@ -320,7 +311,7 @@ pub fn parse_agent(token: &str) -> ClientSource {
     ClientSource::parse(token).unwrap_or(ClientSource::Unknown)
 }
 
-/// Instant deck: installed agents + cached rows. **No network.**
+/// Installed agents + cached rows. No network.
 pub fn skeleton() -> UsageDeck {
     let Some(paths) = ds_config::Paths::resolve() else {
         return UsageDeck::empty();
@@ -342,8 +333,7 @@ pub fn skeleton() -> UsageDeck {
     UsageDeck { cards }
 }
 
-/// Blocking single-card load/refresh. Soft (`force == false`) uses 60s cache.
-/// Never replaces a good card with an empty probe (rate limits).
+/// Blocking one-card refresh. Soft = 60s cache; never swaps a good card for empty (rate limits).
 pub fn refresh_card(agent: ClientSource, force: bool) -> UsageCard {
     if !agent.is_client() {
         return UsageCard::empty(agent);
@@ -384,8 +374,7 @@ where
     let requested_at = Instant::now();
     let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // A refresh that began before this caller has already completed while it waited.
-    // Reuse that result even for a force request instead of probing the same account twice.
+    // Overlapping wait: reuse the result that finished after we started (even if force).
     if slot
         .last_finished_at
         .is_some_and(|finished_at| finished_at >= requested_at)
@@ -416,7 +405,7 @@ where
     returned
 }
 
-/// Aggregate refresh (tests / tooling). Prefer skeleton + per-card refresh in UI.
+/// Aggregate refresh (tests/tooling). UI prefers skeleton + per-card.
 pub fn snapshot(force_refresh: bool) -> UsageDeck {
     let Some(paths) = ds_config::Paths::resolve() else {
         return UsageDeck::empty();

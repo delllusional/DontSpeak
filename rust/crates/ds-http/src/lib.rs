@@ -1,18 +1,9 @@
-//! Small blocking-HTTP policy shared by model downloads and bounded JSON probes.
-//! Provider URLs, authentication, response schemas, and retry decisions stay in
-//! their owning crates.
+//! Blocking HTTP for model downloads and bounded JSON probes.
+//! Provider URLs, auth, schemas, retries stay in owning crates.
 //!
-//! # Redirects
-//! `request` disables redirect following (`max_redirections(0)`). attohttpc does
-//! not strip `Authorization` on cross-origin redirects; credential-bearing probes
-//! must not hop. Callers that need redirects (e.g. public CDN GETs with no auth)
-//! must opt in explicitly via `.follow_redirects(true).max_redirections(n)`.
-//!
-//! # Timeouts
-//! Connect + per-read inactivity always apply. Optional `total_timeout` is a
-//! wall-clock budget after TCP connect (attohttpc's `.timeout`). Bounded probes
-//! pass `Some(...)`; large model downloads pass `None` so multi-minute transfers
-//! only abort on connect failure or read stall — not on overall duration.
+//! Default `max_redirections(0)`: attohttpc re-sends `Authorization` cross-origin.
+//! Opt in for unauthenticated CDN GETs. Connect + read inactivity always; optional
+//! `total_timeout` wall-clock after connect (`Some` probes, `None` large downloads).
 
 use std::io::Read;
 use std::sync::OnceLock;
@@ -20,21 +11,14 @@ use std::time::Duration;
 
 pub use attohttpc::{Method, RequestBuilder, Response, body};
 
-/// OS trust store once. `attohttpc`'s selected rustls feature does not populate
-/// its root store under the workspace feature combination, so inject native roots.
-///
-/// Partial load failures (`.errors`) are intentionally silent: this crate has no
-/// logger yet; fail-closed still holds (HTTPS fails if needed roots are missing).
+/// OS trust store once (workspace rustls leaves attohttpc roots empty). Load errors
+/// ignored; HTTPS fails closed if roots are missing.
 fn os_root_certs() -> &'static [rustls_pki_types::CertificateDer<'static>] {
     static ROOTS: OnceLock<Vec<rustls_pki_types::CertificateDer<'static>>> = OnceLock::new();
     ROOTS.get_or_init(|| rustls_native_certs::load_native_certs().certs)
 }
 
-/// Create a blocking request with explicit connect/read inactivity budgets,
-/// optional wall-clock total budget, native TLS roots, and no redirect following.
-///
-/// `total_timeout`: `Some` for bounded/credential-bearing probes; `None` for large
-/// downloads that intentionally rely only on connect + read inactivity.
+/// Blocking request: connect/read budgets, optional total timeout, native roots, no redirects.
 pub fn request(
     method: Method,
     url: &str,
@@ -56,7 +40,7 @@ pub fn request(
     builder
 }
 
-/// Read a successful response body with a hard size cap.
+/// Successful body with hard size cap.
 pub fn read_bytes_limited(response: Response, max_bytes: usize) -> std::io::Result<Vec<u8>> {
     let mut response = response
         .error_for_status()
@@ -80,8 +64,7 @@ pub fn read_bytes_limited(response: Response, max_bytes: usize) -> std::io::Resu
     Ok(bytes)
 }
 
-/// Read a successful response into a UTF-8 string without allowing a small JSON
-/// endpoint to allocate an unbounded body.
+/// Successful UTF-8 body with hard size cap.
 pub fn read_utf8_limited(response: Response, max_bytes: usize) -> std::io::Result<String> {
     let bytes = read_bytes_limited(response, max_bytes)?;
     String::from_utf8(bytes)
@@ -135,7 +118,7 @@ mod tests {
         assert!(read_utf8_limited(get(&server.url("/failure"), None).unwrap(), 32).is_err());
     }
 
-    /// #108: default `max_redirections(0)` must not follow a 302 (Authorization leak surface).
+    // #108: max_redirections(0) must not follow 302 (Authorization leak surface).
     #[test]
     fn does_not_follow_redirects_by_default() {
         let server = httpmock::MockServer::start();
@@ -170,7 +153,7 @@ mod tests {
         );
     }
 
-    /// #107: wall-clock total budget aborts a deliberately delayed response.
+    // #107: wall-clock total budget aborts a delayed response.
     #[test]
     fn total_timeout_aborts_slow_response() {
         let server = httpmock::MockServer::start();

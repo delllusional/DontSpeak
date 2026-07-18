@@ -87,8 +87,7 @@ fn integer_at(value: &Value, key: &str) -> Option<i64> {
         .or_else(|| raw.as_str()?.trim().parse().ok())
 }
 
-/// Anthropic emits `…Z`, `…+00:00`, and fractional seconds
-/// (`2025-12-12T20:59:59.707736+00:00`). Plain `Rfc3339` rejects fractions.
+/// Anthropic fractional seconds (plain Rfc3339 rejects).
 fn rfc3339_timestamp(raw: &str) -> Option<i64> {
     use time::format_description::well_known::Rfc3339;
     if let Ok(date) = time::OffsetDateTime::parse(raw, &Rfc3339) {
@@ -104,8 +103,7 @@ fn rfc3339_timestamp(raw: &str) -> Option<i64> {
         .map(|date| date.unix_timestamp())
 }
 
-/// Resolve a CLI from the ambient PATH plus the install roots a GUI-launched app
-/// commonly misses. Returned paths always name an existing file.
+/// PATH + common GUI-missed install roots. Returned paths exist.
 fn resolve_binary(name: &str, paths: &ds_config::Paths) -> Option<PathBuf> {
     let path = std::env::var_os("PATH");
     let override_path = match name {
@@ -196,9 +194,7 @@ fn resolve_binary_in(
     let _ = app_data;
 
     dirs.into_iter().find_map(|dir| {
-        // Windows: never pick extensionless npm shebangs (`#!/bin/sh` "codex"
-        // on PATH). CreateProcess cannot run those; prefer real PE binaries and
-        // then .cmd launchers. CodexBar resolves the native vendor codex.exe.
+        // Windows: skip extensionless npm shebangs (CreateProcess); prefer PE then .cmd.
         #[cfg(windows)]
         let candidates = [
             format!("{name}.exe"),
@@ -215,8 +211,7 @@ fn resolve_binary_in(
     })
 }
 
-/// GUI apps often inherit a minimal PATH. Capture the user's login-shell PATH once,
-/// with a short deadline, then search it before the ambient GUI PATH (as CodexBar does).
+/// Login-shell PATH once (GUI apps get a minimal PATH); searched before ambient.
 #[cfg(not(windows))]
 fn login_shell_path() -> Option<&'static OsStr> {
     static LOGIN_PATH: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();

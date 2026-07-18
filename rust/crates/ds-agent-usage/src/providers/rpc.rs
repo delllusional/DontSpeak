@@ -13,8 +13,7 @@ pub(super) struct Request<'a> {
     pub binary: &'a Path,
     pub arguments: &'a [&'a str],
     pub initialize_params: Value,
-    /// Codex app-server requires an `initialized` notification after the
-    /// initialize response. Other provider protocols may not.
+    /// Codex app-server needs `initialized` after initialize; others may not.
     pub send_initialized: bool,
     pub method: &'a str,
     pub params: Value,
@@ -22,9 +21,7 @@ pub(super) struct Request<'a> {
     pub request_timeout: Duration,
 }
 
-/// Perform one newline-delimited JSON-RPC request against a short-lived CLI.
-/// The child is terminated and reaped on every return path, including malformed
-/// output and timeout. Raw child output never appears in returned errors.
+/// One NDJSON-RPC request on a short-lived CLI. Always reaps child; raw output never in errors.
 pub(super) fn call(request: Request<'_>) -> std::io::Result<Value> {
     let mut command = Command::new(request.binary);
     command

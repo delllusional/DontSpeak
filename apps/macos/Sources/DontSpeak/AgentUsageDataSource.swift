@@ -2,11 +2,7 @@ import CDontSpeak
 import DontSpeakLogic
 import Foundation
 
-/// Lowest-level typed adapter for the Usage C ABI. JSON is decoded immediately after the
-/// blocking call so view code receives only `UsageDeck` and `UsageCard` domain values.
-///
-/// Remaining duration labels are attached here (not in SwiftUI `body`) so render churn
-/// never drives `ds_usage_resets_in` FFI calls.
+/// Usage C ABI adapter. Decode at boundary; attach `remainingLabel` here (not in body).
 enum AgentUsageDataSource {
     static func readCachedDeck() async -> UsageDeck? {
         await Task.detached(priority: .userInitiated) {
@@ -26,7 +22,6 @@ enum AgentUsageDataSource {
         }.value
     }
 
-    /// Fill `remainingLabel` once per row at the FFI boundary.
     private static func attachRemaining(_ deck: UsageDeck) -> UsageDeck {
         UsageDeck(cards: deck.cards.map(attachRemaining))
     }

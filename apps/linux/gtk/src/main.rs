@@ -20,9 +20,7 @@ mod ui;
 pub(crate) const APP_ID: &str = "org.dontspeak.DontSpeak";
 
 fn main() -> glib::ExitCode {
-    // Must run before GTK init. VirtualBox/VMware Wayland often blocks the UI thread
-    // in present()/map (`unix_wait_for_peer`), which freezes Settings/Activate forever.
-    // Prefer X11 there unless the user already set GDK_BACKEND.
+    // Before GTK: hypervisor Wayland can freeze present/map — prefer X11 unless GDK_BACKEND set.
     prefer_x11_under_hypervisor();
 
     let app = adw::Application::builder().application_id(APP_ID).build();

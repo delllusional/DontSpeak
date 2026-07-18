@@ -173,11 +173,7 @@ public sealed partial class MainWindow : Window
     private readonly HashSet<string> _usageAccountRevealed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, UsageCardDto> _usageCards = new();
 
-    /// <summary>
-    /// Tab select: paint only cards that already have cached rows, then force-load
-    /// each installed agent async and insert/update when that card has data.
-    /// First visit with no cache stays empty until at least one agent loads.
-    /// </summary>
+    /// <summary>Tab select: cache paint, then async force-load per agent.</summary>
     private async System.Threading.Tasks.Task LoadUsageOnTabSelectedAsync()
     {
         int generation = ++_usageGeneration;
@@ -832,8 +828,7 @@ public sealed partial class MainWindow : Window
         StateStripe.Background = BrandWashBrush(basis);
     }
 
-    /// <summary>Purple wash on the Usage card whose agent matches the in-flight TTS source
-    /// (same seed purple / ~30% alpha as the top-bar speaking stripe).</summary>
+    /// <summary>Purple wash on the speaking agent card (top-bar stripe parity).</summary>
     private void ApplyUsageSpeakingAccent(string? agent)
     {
         if (string.Equals(_speakingUsageAgent, agent, StringComparison.Ordinal)) return;
