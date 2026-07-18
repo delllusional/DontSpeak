@@ -503,7 +503,7 @@ pub fn is_mic_active() -> bool {
     false
 }
 
-/// Detach inherited/auto console (Windows only; see `windows::detach_console`).
+/// Detach a sole-owner auto console on Windows (no-op if shared/absent; see `windows::detach_console`).
 #[cfg(windows)]
 pub fn detach_console() {
     windows::detach_console();

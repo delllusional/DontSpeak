@@ -64,8 +64,8 @@ windows = { workspace = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_Security",
-    # FreeConsole for detach_console(): drops a console-subsystem process's implicit
-    # console attachment so a GUI-launched hook/MCP child never flashes a window.
+    # FreeConsole + GetConsoleProcessList for detach_console(): free only a sole-owner
+    # console (GUI-host flash kill); keep a shared parent-shell console for interactive I/O.
     "Win32_System_Console",
 ] }
 

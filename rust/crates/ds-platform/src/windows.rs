@@ -985,21 +985,37 @@ pub(crate) fn is_mic_active() -> bool {
     }
 }
 
-/// Detach this process from whatever console it inherited or was implicitly given.
+/// Detach this process from a freshly allocated console (Windows console flash kill).
 ///
 /// `dontspeak.exe` must be a console-subsystem binary so `dontspeak <client>` can block
 /// an interactive shell for the launched TUI (a GUI-subsystem process returns control to
-/// PowerShell/cmd immediately instead of waiting). But most of its roles (`notify`,
-/// `provide`, the bare stdio MCP server) are spawned by a GUI host — Claude Code Desktop,
-/// the WinUI app — that has no console of its own; Windows then allocates a new,
-/// momentarily visible console window for a console-subsystem child unless it detaches.
-/// Piped stdio (always used for these roles) is unaffected: those are independent OS
-/// handles, not tied to console attachment.
+/// PowerShell/cmd immediately instead of waiting). Most other roles (`notify`, `provide`,
+/// the bare stdio MCP server) are spawned by a GUI host — Claude Code Desktop, the WinUI
+/// app — that has no console of its own; Windows then allocates a new, momentarily visible
+/// console window for a console-subsystem child unless it detaches.
+///
+/// FreeConsole is **not** always safe: when the user runs `dontspeak --version` / `--help`
+/// / `status` / `wire` from a real terminal, stdout is a console handle shared with the
+/// parent shell. FreeConsole invalidates it and Rust std silently no-ops writes (exit 0,
+/// empty console). Piped/redirected stdio uses independent handles and is unaffected either
+/// way.
+///
+/// Heuristic via `GetConsoleProcessList`: count `> 1` means the console is shared (keep
+/// it); count `== 1` means Windows allocated it for us alone (free to kill the flash);
+/// count `== 0` means no console (nothing to do).
 pub(crate) fn detach_console() {
-    use windows::Win32::System::Console::FreeConsole;
+    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
 
-    // SAFETY: FreeConsole takes no arguments and has no preconditions; if this process
-    // has no console attached the call just fails harmlessly, which we ignore.
+    // One-slot buffer: if more processes are attached, the API returns the required count
+    // without filling (return > len) — enough to decide share-vs-alone.
+    let mut pids = [0u32; 1];
+    // SAFETY: buffer is valid for `pids.len()` process IDs; no console → 0.
+    let count = unsafe { GetConsoleProcessList(&mut pids) };
+    if count != 1 {
+        return;
+    }
+
+    // SAFETY: FreeConsole takes no arguments; only we are attached (count == 1).
     let _ = unsafe { FreeConsole() };
 }
 
