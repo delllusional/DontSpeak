@@ -194,7 +194,7 @@ def main():
 
     size_cell = size_bump_cell(old_ref, new_ref)
 
-    print("| Area | Code | Tests | Comments | Size Δ (avg bin) |")
+    print("| Area | Code | Tests | Comments | Size bump (avg bin) |")
     print("|---|---:|---:|---:|---:|")
     for label, (code_add, code_del, test_add, test_del, comment_add, comment_del) in rows:
         print(
