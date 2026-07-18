@@ -39,7 +39,7 @@ repeats the flow (cache first, then force network per agent).
 
 For each card with data:
 
-1. **Title** — `usage.provider.<agent>` (`claude_code`, `codex`, `qwen_code`, `grok`)
+1. **Title** — `usage.provider.<agent>` (`claude_code`, `codex`, `qwen_code`, `grok`, `kimi_code`)
    left; optional **account** (usually email) top-right in the same caption
    style as period remaining. Fully **transparent by default**; click/tap
    toggles full opacity for this UI session only (not persisted — reload hides
@@ -61,7 +61,7 @@ balance, charts, or raw provider errors.
 ### Speaking highlight
 
 While TTS is playing an utterance from a wireable client, `model_status.running`
-includes `tts_source` (`claude_code` / `codex` / `qwen_code` / `grok`; `null` when
+includes `tts_source` (`claude_code` / `codex` / `qwen_code` / `grok` / `kimi_code`; `null` when
 idle or non-client). Hosts wash that agent’s Usage card with the same brand-purple
 tint as the top-bar speaking stripe.
 

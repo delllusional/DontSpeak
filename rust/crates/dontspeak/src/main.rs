@@ -111,6 +111,11 @@ Usage:
 Engine via local socket; speech config is OS data-dir config.toml (not client settings).
 ";
 
+/// Expected-subcommands fragment of the unknown-subcommand hint. Separate const so the
+/// registry-drift test can assert every launcher command is listed (same for `USAGE`).
+const EXPECTED_SUBCOMMANDS: &str = "`claude`, `codex`, `qwen`, `grok`, `kimi`, `notify`, \
+     `provide`, `wire`, `--version`, or `--help`";
+
 /// Detach every role except `Launch` (only Launch needs the console for the interactive child).
 fn should_detach_console(subcommand: &Subcommand) -> bool {
     !matches!(subcommand, Subcommand::Launch(..))
@@ -206,9 +211,8 @@ fn main() {
         // typo or old binary handed a newer subcommand). MCP is no-argument only.
         Subcommand::Unknown(sub) => {
             let msg = format!(
-                "dontspeak: unknown subcommand {sub:?}; expected `claude`, `codex`, `qwen`, \
-                 `grok`, `kimi`, `notify`, `provide`, `wire`, `--version`, or `--help` (run \
-                 with no arguments for the stdio MCP server)"
+                "dontspeak: unknown subcommand {sub:?}; expected {EXPECTED_SUBCOMMANDS} \
+                 (run with no arguments for the stdio MCP server)"
             );
             eprintln!("{msg}");
             log::error!(target: "hook", "{msg}");
@@ -289,6 +293,23 @@ mod tests {
                     "{name}"
                 );
             }
+        }
+    }
+
+    /// Drift gate: adding a registry client without updating the help text and the
+    /// unknown-subcommand hint would leave the new launcher undiscoverable.
+    #[test]
+    fn usage_and_unknown_hint_list_every_registry_launcher() {
+        for spec in ds_config::CLIENT_REGISTRY {
+            let cmd = spec.launch.command;
+            assert!(
+                USAGE.contains(&format!("dontspeak {cmd} ")),
+                "USAGE is missing the `{cmd}` launcher line"
+            );
+            assert!(
+                EXPECTED_SUBCOMMANDS.contains(&format!("`{cmd}`")),
+                "unknown-subcommand hint is missing `{cmd}`"
+            );
         }
     }
 

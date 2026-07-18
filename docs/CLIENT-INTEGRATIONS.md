@@ -4,7 +4,8 @@ Supported: Claude Code, OpenAI Codex, Qwen Code, Grok, Kimi Code. Install reconc
 `dontspeak <client>` starts the installed client without replacing its config/args.
 
 Hook internals: [HOOKS.md](HOOKS.md). Streaming state machine:
-[STREAMING-NARRATION.md](STREAMING-NARRATION.md).
+[STREAMING-NARRATION.md](STREAMING-NARRATION.md). Adding a new client:
+[ADDING-A-CLIENT.md](ADDING-A-CLIENT.md).
 
 ## Launch
 
@@ -13,9 +14,10 @@ dontspeak claude [args...]
 dontspeak codex [args...]
 dontspeak qwen [args...]
 dontspeak grok [args...]
+dontspeak kimi [args...]
 ```
 
-Aliases: `claude_code`, `qwen_code`. Registry owns names/executables/modes; adding a
+Aliases: `claude_code`, `qwen_code`, `kimi-code`. Registry owns names/executables/modes; adding a
 client without a launcher fails tests. Launchers preserve cwd, streams, args, exit
 code; start the DontSpeak host first (except `--help` / `--version`). Windows: new
 terminal after first install for PATH.
@@ -114,7 +116,7 @@ dontspeak wire <client> --print-only
 | Client | Verified | Contracts |
 |---|---:|---|
 | Claude Code | 2.1.210 | [hooks](https://code.claude.com/docs/en/hooks), [MCP](https://code.claude.com/docs/en/mcp) |
-| OpenAI Codex | 0.144.5 | [hooks](https://developers.openai.com/codex/hooks), [app server](https://developers.openai.com/codex/app-server), [MCP](https://developers.openai.com/codex/mcp) |
+| OpenAI Codex | 0.144.4 | [hooks](https://developers.openai.com/codex/hooks), [app server](https://developers.openai.com/codex/app-server), [MCP](https://developers.openai.com/codex/mcp) |
 | Qwen Code | 0.19.10 | [hooks](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/hooks.md), [MCP](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/mcp.md) |
 | Grok | 0.2.101 | [CLI](https://docs.x.ai/build/cli/reference), [hooks](https://docs.x.ai/build/features/hooks), [MCP](https://docs.x.ai/build/features/mcp-servers) |
 | Kimi Code | 0.27.0 | [hooks](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html), [MCP](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html) |

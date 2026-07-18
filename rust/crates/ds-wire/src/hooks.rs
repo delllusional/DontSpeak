@@ -179,21 +179,26 @@ fn hook_action(remove: bool) -> &'static str {
     }
 }
 
-/// Claude-contract TOML hooks (`ClaudeTomlHooks`, e.g. Codex). Format-preserving.
-/// Malformed config left unchanged (exit 0). `seed`/`capture`: same as JSON writer.
-pub(crate) fn claude_toml_hooks(
+/// Shared body for the TOML hook mechanisms: format-preserving, malformed/unmergeable
+/// config left unchanged (exit 0), zero-write when unchanged, backup before write,
+/// print-only `seed`/`capture` grouping. Bin resolution happens only on the merge path
+/// (strip never needs it). `merge` is `(existing, bin) -> merged`.
+#[allow(clippy::too_many_arguments)]
+fn toml_hooks_body<E: std::fmt::Display>(
     cfg: &std::path::Path,
-    client: ClientSource,
     remove: bool,
     print_only: bool,
-    paths: &Paths,
     seed: Option<PreviewDoc>,
     capture: Option<&mut Option<PreviewDoc>>,
+    paths: &Paths,
+    panic_ctx: &'static str,
+    merge: impl FnOnce(&str, &str) -> Result<String, E>,
+    strip: impl FnOnce(&str) -> Result<String, E>,
 ) -> i32 {
     let existing = match seed {
         Some(PreviewDoc::Toml(s)) => s,
         Some(PreviewDoc::Json(_)) => {
-            panic!("claude_toml_hooks: seed must be PreviewDoc::Toml for a TOML mechanism")
+            panic!("{panic_ctx}: seed must be PreviewDoc::Toml for a TOML mechanism")
         }
         None => match std::fs::read_to_string(cfg) {
             Ok(text) => text,
@@ -205,13 +210,13 @@ pub(crate) fn claude_toml_hooks(
         },
     };
     let result = if remove {
-        ds_config::strip_codex_hooks(&existing)
+        strip(&existing)
     } else {
         let Some(bin) = io::resolve_dontspeak_bin_at(Some(paths)) else {
             eprintln!("wire: could not resolve the dontspeak binary path");
             return 1;
         };
-        ds_config::merge_codex_hooks(&existing, &bin, client)
+        merge(&existing, &bin)
     };
     match result {
         Ok(merged) if print_only => match capture {
@@ -239,9 +244,32 @@ pub(crate) fn claude_toml_hooks(
     }
 }
 
+/// Claude-contract TOML hooks (`ClaudeTomlHooks`, e.g. Codex). Format-preserving.
+/// Malformed config left unchanged (exit 0). `seed`/`capture`: same as JSON writer.
+pub(crate) fn claude_toml_hooks(
+    cfg: &std::path::Path,
+    client: ClientSource,
+    remove: bool,
+    print_only: bool,
+    paths: &Paths,
+    seed: Option<PreviewDoc>,
+    capture: Option<&mut Option<PreviewDoc>>,
+) -> i32 {
+    toml_hooks_body(
+        cfg,
+        remove,
+        print_only,
+        seed,
+        capture,
+        paths,
+        "claude_toml_hooks",
+        |existing, bin| ds_config::merge_codex_hooks(existing, bin, client),
+        ds_config::strip_codex_hooks,
+    )
+}
+
 /// Kimi Code flat-`[[hooks]]` TOML hooks (`KimiTomlHooks`). Same writer contract as
-/// [`claude_toml_hooks`]: format-preserving, malformed config left unchanged (exit 0),
-/// zero-write when unchanged, backup before write. `seed`/`capture`: print-only grouping.
+/// [`claude_toml_hooks`] (shared [`toml_hooks_body`]), over Kimi's own shaper.
 pub(crate) fn kimi_toml_hooks(
     cfg: &std::path::Path,
     client: ClientSource,
@@ -251,53 +279,17 @@ pub(crate) fn kimi_toml_hooks(
     seed: Option<PreviewDoc>,
     capture: Option<&mut Option<PreviewDoc>>,
 ) -> i32 {
-    let existing = match seed {
-        Some(PreviewDoc::Toml(s)) => s,
-        Some(PreviewDoc::Json(_)) => {
-            panic!("kimi_toml_hooks: seed must be PreviewDoc::Toml for a TOML mechanism")
-        }
-        None => match std::fs::read_to_string(cfg) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                eprintln!("wire: could not read {} ({e})", cfg.display());
-                return 1;
-            }
-        },
-    };
-    let result = if remove {
-        ds_config::strip_kimi_hooks(&existing)
-    } else {
-        let Some(bin) = io::resolve_dontspeak_bin_at(Some(paths)) else {
-            eprintln!("wire: could not resolve the dontspeak binary path");
-            return 1;
-        };
-        ds_config::merge_kimi_hooks(&existing, &bin, client)
-    };
-    match result {
-        Ok(merged) if print_only => match capture {
-            Some(slot) => {
-                *slot = Some(PreviewDoc::Toml(merged));
-                0
-            }
-            None => {
-                println!("// {}\n{merged}", cfg.display());
-                0
-            }
-        },
-        Ok(merged) if merged != existing => io::backup_then_write(
-            "wire",
-            cfg,
-            "toml",
-            &WriteBody::Str(&merged),
-            hook_action(remove),
-        ),
-        Ok(_) => 0,
-        Err(e) => {
-            eprintln!("wire: {} left unchanged ({e})", cfg.display());
-            0
-        }
-    }
+    toml_hooks_body(
+        cfg,
+        remove,
+        print_only,
+        seed,
+        capture,
+        paths,
+        "kimi_toml_hooks",
+        |existing, bin| ds_config::merge_kimi_hooks(existing, bin, client),
+        ds_config::strip_kimi_hooks,
+    )
 }
 
 /// Own-the-file JSON hooks (`GrokJsonHooks`): overwrite on wire, delete on remove (backed up).
@@ -829,7 +821,15 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, false, &paths, None, None),
+            kimi_toml_hooks(
+                &cfg,
+                ClientSource::KimiCode,
+                false,
+                false,
+                &paths,
+                None,
+                None
+            ),
             0
         );
         let first = std::fs::read_to_string(&cfg).unwrap();
@@ -847,7 +847,15 @@ mod tests {
 
         // Re-run: an unchanged command set is a true byte-for-byte no-op.
         assert_eq!(
-            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, false, &paths, None, None),
+            kimi_toml_hooks(
+                &cfg,
+                ClientSource::KimiCode,
+                false,
+                false,
+                &paths,
+                None,
+                None
+            ),
             0
         );
         let second = std::fs::read_to_string(&cfg).unwrap();
@@ -861,11 +869,27 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, false, &paths, None, None),
+            kimi_toml_hooks(
+                &cfg,
+                ClientSource::KimiCode,
+                false,
+                false,
+                &paths,
+                None,
+                None
+            ),
             0
         );
         assert_eq!(
-            kimi_toml_hooks(&cfg, ClientSource::KimiCode, true, false, &paths, None, None),
+            kimi_toml_hooks(
+                &cfg,
+                ClientSource::KimiCode,
+                true,
+                false,
+                &paths,
+                None,
+                None
+            ),
             0
         );
 
@@ -880,7 +904,15 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            kimi_toml_hooks(&cfg, ClientSource::KimiCode, true, false, &paths, None, None),
+            kimi_toml_hooks(
+                &cfg,
+                ClientSource::KimiCode,
+                true,
+                false,
+                &paths,
+                None,
+                None
+            ),
             0
         );
         assert!(!cfg.exists());
@@ -895,7 +927,15 @@ mod tests {
         std::fs::write(&cfg, raw).unwrap();
 
         assert_eq!(
-            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, false, &paths, None, None),
+            kimi_toml_hooks(
+                &cfg,
+                ClientSource::KimiCode,
+                false,
+                false,
+                &paths,
+                None,
+                None
+            ),
             0
         );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
@@ -908,7 +948,15 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, true, &paths, None, None),
+            kimi_toml_hooks(
+                &cfg,
+                ClientSource::KimiCode,
+                false,
+                true,
+                &paths,
+                None,
+                None
+            ),
             0
         );
         assert!(!cfg.exists());
@@ -924,7 +972,15 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            kimi_toml_hooks(&cfg, ClientSource::KimiCode, false, false, &paths, None, None),
+            kimi_toml_hooks(
+                &cfg,
+                ClientSource::KimiCode,
+                false,
+                false,
+                &paths,
+                None,
+                None
+            ),
             1
         );
     }

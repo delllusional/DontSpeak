@@ -351,9 +351,7 @@ fn print_registry(paths: Option<&Paths>) {
                 let how = match s.mechanism {
                     WireMechanism::ClaudeJsonHooks => "voice hooks (Claude contract, JSON)",
                     WireMechanism::ClaudeTomlHooks => "voice hooks (Claude contract, TOML)",
-                    WireMechanism::KimiTomlHooks => {
-                        "voice hooks (Kimi flat [[hooks]], TOML)"
-                    }
+                    WireMechanism::KimiTomlHooks => "voice hooks (Kimi flat [[hooks]], TOML)",
                     WireMechanism::GrokJsonHooks => {
                         "voice hooks (Claude contract, JSON — dedicated Grok file)"
                     }
@@ -642,12 +640,7 @@ mod tests {
             6,
             "six flat entries: {text}"
         );
-        for event in [
-            "SessionStart",
-            "SessionEnd",
-            "Stop",
-            "Notification",
-        ] {
+        for event in ["SessionStart", "SessionEnd", "Stop", "Notification"] {
             assert!(
                 text.contains(&format!("event = \"{event}\"")),
                 "{event} wired: {text}"
@@ -681,8 +674,7 @@ mod tests {
 
         // MCP: the Claude-shape mcpServers entry in the SEPARATE mcp.json.
         let mcp: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&paths.kimi_mcp_json).unwrap())
-                .unwrap();
+            serde_json::from_str(&std::fs::read_to_string(&paths.kimi_mcp_json).unwrap()).unwrap();
         assert!(
             mcp["mcpServers"]["DontSpeak"]["command"]
                 .as_str()
@@ -696,7 +688,10 @@ mod tests {
         let mcp_before = std::fs::read(&paths.kimi_mcp_json).unwrap();
         let baks_before = count_bak_files(dir.path());
         assert_eq!(wire_client(ClientSource::KimiCode, &paths, false, false), 0);
-        assert_eq!(std::fs::read(&paths.kimi_config_toml).unwrap(), hooks_before);
+        assert_eq!(
+            std::fs::read(&paths.kimi_config_toml).unwrap(),
+            hooks_before
+        );
         assert_eq!(std::fs::read(&paths.kimi_mcp_json).unwrap(), mcp_before);
         assert_eq!(
             count_bak_files(dir.path()),
@@ -709,9 +704,11 @@ mod tests {
         let text2 = std::fs::read_to_string(&paths.kimi_config_toml).unwrap();
         assert!(!text2.contains("dontspeak"), "hooks stripped: {text2}");
         let mcp2: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&paths.kimi_mcp_json).unwrap())
-                .unwrap();
-        assert!(mcp2.get("mcpServers").is_none(), "mcp entry stripped: {mcp2}");
+            serde_json::from_str(&std::fs::read_to_string(&paths.kimi_mcp_json).unwrap()).unwrap();
+        assert!(
+            mcp2.get("mcpServers").is_none(),
+            "mcp entry stripped: {mcp2}"
+        );
     }
 
     /// Count `.bak.` siblings (prove steady-state reconcile creates none).

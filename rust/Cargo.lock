@@ -1021,6 +1021,7 @@ dependencies = [
 name = "ds-i18n"
 version = "0.3.3-dev"
 dependencies = [
+ "ds-client",
  "rust-i18n",
  "serde_json",
  "sys-locale",

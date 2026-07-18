@@ -206,7 +206,10 @@ fn kimi_workdir_key(cwd: &str) -> String {
     let normalized = kimi_normalize_workdir(cwd);
     let slug = kimi_slug(normalized.rsplit('/').next().unwrap_or_default());
     let digest = sha2::Sha256::digest(normalized.as_bytes());
-    let hash: String = digest[..6].iter().map(|byte| format!("{byte:02x}")).collect();
+    let hash: String = digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     format!("wd_{slug}_{hash}")
 }
 
@@ -264,27 +267,37 @@ fn kimi_slug(name: &str) -> String {
     }
 }
 
-/// Assistant reply of the last wire turn: ordered `content.part` text parts of the highest
-/// turnId, concatenated. Think parts, other record types, and malformed lines are skipped.
-fn kimi_last_turn_text(path: &std::path::Path) -> Option<String> {
+/// Bounded-tail read budget for transcript JSONL (Kimi wire + Grok chat_history).
+const TAIL_BYTES: u64 = 256 * 1024;
+
+/// Last [`TAIL_BYTES`] of a JSONL file trimmed to complete lines, plus the absolute file
+/// offset of the buffer's first byte (stable line offsets for fingerprints). Mid-line seek:
+/// the partial first line is dropped at BYTE level — the seek can split a multi-byte UTF-8
+/// char (CJK-heavy Kimi output), so a string-level read would fail. `None` on unreadable
+/// file, or a mid-file tail containing no newline at all.
+fn jsonl_tail(path: &std::path::Path) -> Option<(Vec<u8>, u64)> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    const TAIL_BYTES: u64 = 256 * 1024;
     let start = len.saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut tail = Vec::with_capacity((len - start) as usize);
     file.take(TAIL_BYTES).read_to_end(&mut tail).ok()?;
-    let complete = if start == 0 {
-        tail.as_slice()
-    } else {
-        // Mid-line seek: drop the partial first line at BYTE level — the seek can split a
-        // multi-byte UTF-8 char (CJK-heavy Kimi output), so `read_to_string` would fail.
-        // Same rule as `chat_roles_chronological`.
-        let first_newline = tail.iter().position(|byte| *byte == b'\n')?;
-        &tail[first_newline + 1..]
-    };
+    if start == 0 {
+        return Some((tail, 0));
+    }
+    let first_newline = tail.iter().position(|byte| *byte == b'\n')?;
+    Some((
+        tail.split_off(first_newline + 1),
+        start + first_newline as u64 + 1,
+    ))
+}
+
+/// Assistant reply of the last wire turn: ordered `content.part` text parts of the highest
+/// turnId, concatenated. Think parts, other record types, and malformed lines are skipped.
+fn kimi_last_turn_text(path: &std::path::Path) -> Option<String> {
+    let (complete, _) = jsonl_tail(path)?;
 
     let mut last_turn: Option<i64> = None;
     let mut texts: Vec<String> = Vec::new();
@@ -309,9 +322,7 @@ fn kimi_last_turn_text(path: &std::path::Path) -> Option<String> {
         // Raw text: parts are stream chunks, so their boundary whitespace is meaningful.
         let text = event
             .get("part")
-            .filter(|part| {
-                part.get("type").and_then(serde_json::Value::as_str) == Some("text")
-            })
+            .filter(|part| part.get("type").and_then(serde_json::Value::as_str) == Some("text"))
             .and_then(|part| part.get("text"))
             .and_then(serde_json::Value::as_str)
             .filter(|text| !text.trim().is_empty());
@@ -448,38 +459,11 @@ enum ChatRole {
     },
 }
 
-/// Bounded-tail JSONL roles (oldest first). Discards partial first line after seek (UTF-8 split).
-/// Offsets are absolute file positions for stable fingerprints.
+/// Bounded-tail JSONL roles (oldest first), via [`jsonl_tail`]. Offsets are absolute file
+/// positions for stable fingerprints.
 fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Some((complete_lines, complete_start_abs)) = jsonl_tail(path) else {
         return Vec::new();
-    };
-    let Ok(meta) = file.metadata() else {
-        return Vec::new();
-    };
-    let len = meta.len();
-    const TAIL_BYTES: u64 = 256 * 1024;
-    let start = len.saturating_sub(TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
-    }
-
-    let mut tail = Vec::with_capacity((len - start) as usize);
-    if file.take(TAIL_BYTES).read_to_end(&mut tail).is_err() {
-        return Vec::new();
-    }
-    let (complete_lines, complete_start_abs) = if start == 0 {
-        (tail.as_slice(), 0u64)
-    } else {
-        let Some(first_newline) = tail.iter().position(|byte| *byte == b'\n') else {
-            return Vec::new();
-        };
-        (
-            &tail[first_newline + 1..],
-            start + (first_newline as u64) + 1,
-        )
     };
 
     let mut out = Vec::new();
@@ -2089,12 +2073,7 @@ mod tests {
     fn kimi_fallback_resolves_the_derived_workdir_bucket() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        write_kimi_wire(
-            &paths.kimi_dir,
-            "wd_usr_3030c6a48c39",
-            "sess-1",
-            KIMI_WIRE,
-        );
+        write_kimi_wire(&paths.kimi_dir, "wd_usr_3030c6a48c39", "sess-1", KIMI_WIRE);
         let hook = StopHook {
             session_id: Some("sess-1".into()),
             cwd: Some("C:\\Users\\usr".into()),
@@ -2111,7 +2090,12 @@ mod tests {
     fn kimi_fallback_scans_for_a_unique_session_bucket() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        write_kimi_wire(&paths.kimi_dir, "wd_other_000000000000", "sess-2", KIMI_WIRE);
+        write_kimi_wire(
+            &paths.kimi_dir,
+            "wd_other_000000000000",
+            "sess-2",
+            KIMI_WIRE,
+        );
         // cwd does not match the bucket; exactly one session dir exists → still found.
         let hook = StopHook {
             session_id: Some("sess-2".into()),
@@ -2125,7 +2109,12 @@ mod tests {
         );
 
         // A second bucket with the same session id makes the scan ambiguous → silent.
-        write_kimi_wire(&paths.kimi_dir, "wd_other_111111111111", "sess-2", KIMI_WIRE);
+        write_kimi_wire(
+            &paths.kimi_dir,
+            "wd_other_111111111111",
+            "sess-2",
+            KIMI_WIRE,
+        );
         assert_eq!(
             resolve_kimi_wire_path(&hook, &paths),
             None,

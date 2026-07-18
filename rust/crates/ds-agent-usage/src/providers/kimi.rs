@@ -41,8 +41,7 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
 
 /// snake_case OAuth file; `accessToken` tolerated as a drift alias.
 fn access_token(credentials: &Value) -> Option<&str> {
-    string_at(credentials, &["access_token"])
-        .or_else(|| string_at(credentials, &["accessToken"]))
+    string_at(credentials, &["access_token"]).or_else(|| string_at(credentials, &["accessToken"]))
 }
 
 /// Top-level `usage` is the weekly limit; `limits[]` carries timed windows — only the
@@ -270,7 +269,10 @@ mod tests {
             access_token(&serde_json::json!({ "accessToken": "tok2" })),
             Some("tok2")
         );
-        assert_eq!(access_token(&serde_json::json!({ "access_token": "  " })), None);
+        assert_eq!(
+            access_token(&serde_json::json!({ "access_token": "  " })),
+            None
+        );
         assert_eq!(access_token(&serde_json::json!({})), None);
     }
 

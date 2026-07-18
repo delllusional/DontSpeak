@@ -103,4 +103,16 @@ mod tests {
         set_locale("xx");
         assert_eq!(t("tray.quit"), "Quit");
     }
+
+    /// Drift gate: hosts render Usage card titles as `usage.provider.<client_source>`,
+    /// so wiring a new client without a catalog entry would surface the raw key in the UI
+    /// (`t()` returns the key on a miss).
+    #[test]
+    fn every_wireable_client_has_a_usage_provider_label() {
+        set_locale("en");
+        for c in ds_client::ClientSource::CLIENTS {
+            let key = format!("usage.provider.{}", c.as_str());
+            assert_ne!(t(&key), key, "missing en.yml entry for {key}");
+        }
+    }
 }

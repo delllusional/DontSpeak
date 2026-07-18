@@ -159,8 +159,7 @@ pub fn merge_kimi_hooks(
                 .as_array_of_tables_mut()
                 .ok_or_else(|| KimiMergeError::UnmergeableShape("hooks".into()))?;
             let already_current = {
-                let ours: Vec<&TomlTable> =
-                    aot.iter().filter(|t| kimi_entry_is_ours(t)).collect();
+                let ours: Vec<&TomlTable> = aot.iter().filter(|t| kimi_entry_is_ours(t)).collect();
                 ours.len() == desired.len()
                     && ours
                         .iter()
@@ -317,8 +316,7 @@ mod tests {
     fn rewire_heals_a_changed_binary_path_by_replacing_stale_entries() {
         let first = merged("");
         let new_bin = "/opt/dontspeak/bin/dontspeak";
-        let second =
-            merge_kimi_hooks(&first, new_bin, ClientSource::KimiCode).expect("merge ok");
+        let second = merge_kimi_hooks(&first, new_bin, ClientSource::KimiCode).expect("merge ok");
         assert!(!second.contains(BIN), "stale bin path healed away");
         assert!(second.contains(new_bin), "re-wire re-points the command");
         let doc: DocumentMut = second.parse().unwrap();
