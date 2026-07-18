@@ -880,6 +880,7 @@ dependencies = [
  "ds-stt",
  "ds-tts",
  "ds-wire",
+ "fastrand",
  "log",
  "nix 0.31.3",
  "notify",

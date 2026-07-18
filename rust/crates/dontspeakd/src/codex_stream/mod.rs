@@ -1311,8 +1311,8 @@ pub(crate) fn spawn_supervisor(
             sweep_orphaned_state(&paths);
             let mic_active = move || mic.is_active();
             // Utterances ride the SAME per-session queue path as hook narration —
-            // per-session hold/active routing, pool voices, and scoped barge all apply
-            // because the session id matches the one the hooks use.
+            // per-session hold/active routing and scoped barge apply because the session
+            // id matches the one the hooks use (voice follows the Codex source).
             let mut speak = move |session: &str, utterance: &NarrationUtterance| {
                 ttsq.enqueue_narration(
                     utterance.text.clone(),

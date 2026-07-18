@@ -18,11 +18,6 @@ use ds_config::{ClientSource, Paths, VoiceConfig};
 use crate::status::StatusGate;
 use crate::tts::TtsManager;
 
-/// Map a session id (`None` = the default/global session) to its override-map key.
-fn vkey(session: &Option<String>) -> String {
-    session.clone().unwrap_or_default()
-}
-
 /// RAII guard that resets the `healing` flag on drop, even if the closure panics.
 struct HealingGuard(Arc<AtomicBool>);
 impl Drop for HealingGuard {
@@ -56,10 +51,6 @@ impl Drop for InFlightGuard<'_> {
 
 /// Rotates greeting templates so consecutive opens don't repeat the same line.
 static GREET_ROTATION: AtomicUsize = AtomicUsize::new(0);
-
-/// Cap `pool_assignments` (clients that never SessionEnd). Overflow clears map;
-/// `pick_pool_voice` re-derives safely.
-const POOL_ASSIGNMENTS_MAX: usize = 128;
 
 /// Admission IDs outlive playback for safe producer retry; SessionEnd prunes; cap bounds leaks.
 const ACCEPTED_NARRATION_IDS_MAX: usize = 8192;
@@ -132,35 +123,38 @@ fn greeting_line(name: Option<&str>, idx: usize) -> String {
     }
 }
 
-/// Pure pool pick: reuse assignment if still in pool; else first free voice; else RR.
+/// Pure agent pick: reuse the agent's assignment if it's still in `pool`; else roll among
+/// the voices no OTHER agent holds; when every voice is taken (agents outnumber voices),
+/// roll among the least-loaded voices so agents spread out before doubling up anywhere.
 /// Stale assignments (pool edited without clear) must not linger.
-fn pick_pool_voice(
-    assignments: &HashMap<String, String>,
+///
+/// `pool` must be non-empty (caller-checked). `roll(n)` returns an index `< n` —
+/// production passes `fastrand::usize(..n)`; tests inject fixed/seeded rolls.
+fn pick_agent_voice(
+    assignments: &HashMap<ClientSource, String>,
     pool: &[String],
-    session: &str,
+    agent: ClientSource,
+    roll: &mut dyn FnMut(usize) -> usize,
 ) -> String {
-    if let Some(v) = assignments.get(session)
+    if let Some(v) = assignments.get(&agent)
         && pool.iter().any(|p| p == v)
     {
         return v.clone();
     }
-    pool.iter()
-        .find(|v| !assignments.iter().any(|(s, a)| s != session && a == *v))
-        .cloned()
-        .unwrap_or_else(|| pool[assignments.len() % pool.len()].clone())
-}
-
-/// Insert assignment; clear map if over `cap`. Pure (unit-testable without TtsQueue).
-fn record_pool_assignment(
-    assignments: &mut HashMap<String, String>,
-    session: &str,
-    voice: String,
-    cap: usize,
-) {
-    assignments.insert(session.to_string(), voice);
-    if assignments.len() > cap {
-        assignments.clear();
-    }
+    let load = |v: &str| {
+        assignments
+            .iter()
+            .filter(|(a, held)| **a != agent && held.as_str() == v)
+            .count()
+    };
+    let free: Vec<&String> = pool.iter().filter(|v| load(v) == 0).collect();
+    let candidates = if free.is_empty() {
+        let min = pool.iter().map(|v| load(v)).min().unwrap_or(0);
+        pool.iter().filter(|v| load(v) == min).collect()
+    } else {
+        free
+    };
+    candidates[roll(candidates.len())].clone()
 }
 
 #[derive(Debug)]
@@ -202,7 +196,8 @@ struct Item {
     /// Surfaced as `running.tts_source` while this item is in flight.
     source: ClientSource,
     /// The client session this action belongs to (`None` = default/global), used for
-    /// voice resolution, active-terminal selection, and scoped cancellation.
+    /// active-terminal selection and scoped cancellation (voice resolution keys off
+    /// `source`, not the session).
     session: Option<String>,
     /// Batch-granular resume point: frontend batches an earlier run of this item
     /// already PLAYED (the helper's `PROGRESS` high-water mark, merged in [`run`]
@@ -237,16 +232,9 @@ impl ActiveSel {
 
 /// Grok Stop sticky tag prefix. Digests/earcons admit under `grok-stop:<real>` so MarkActive
 /// `input_clears=[current]` (exact prune of the real id) cannot drop them. Sticky is still the
-/// *same terminal* for pool voice, `input_clears=[other]` keep, and active-session priority.
+/// *same terminal* for `input_clears=[other]` keep and active-session priority. (Voice needs
+/// no sticky handling: it resolves off `source`, which is `Grok` either way.)
 const GROK_STOP_STICKY_PREFIX: &str = "grok-stop:";
-
-/// Real session id used for Kokoro pool assignment (strip sticky prefix when present).
-fn pool_session_key(session: &str) -> &str {
-    session
-        .strip_prefix(GROK_STOP_STICKY_PREFIX)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(session)
-}
 
 /// Sticky sibling tag for a real session id (`abc` → `grok-stop:abc`). Already-sticky tags
 /// and the bare `grok-stop` sentinel return `None` (no further sibling).
@@ -417,14 +405,14 @@ pub struct TtsQueue {
     /// Last config published by the engine reload path. Playback reads this in memory
     /// instead of reparsing config.toml for every queued item.
     config: Mutex<VoiceConfig>,
-    /// AUTO voice assignments from the preferred-voices pool, keyed by Claude session id.
-    /// Filled lazily — the first reply from a new session claims the next untaken pool
-    /// voice, so each terminal speaks with a different voice. In-memory; cleared on engine
-    /// restart. The voice itself is a persistent config setting (`tts_built_in_voices`);
-    /// this map only records which pool entry each terminal claimed. Bounded
-    /// (`POOL_ASSIGNMENTS_MAX`): a client that never sends `SessionEnd` must not grow this
-    /// for the daemon's lifetime — see `record_pool_assignment`.
-    pool_assignments: Mutex<HashMap<String, String>>,
+    /// AUTO voice assignments from the preferred-voices pool, keyed by agent
+    /// (`ClientSource`). Filled lazily — an agent's first utterance (or greeting) rolls a
+    /// random untaken pool voice, then keeps it for the engine runtime (`SessionEnd` does
+    /// NOT reclaim it), so every terminal of one agent speaks with that agent's one voice.
+    /// In-memory; re-rolled on engine restart. The voice list itself is persistent config
+    /// (`tts_built_in_voices`); this map only records which entry each agent claimed. No
+    /// size cap needed: cardinality is bounded by the `ClientSource` enum (≤ 6 entries).
+    agent_voices: Mutex<HashMap<ClientSource, String>>,
     /// Which terminal the worker may currently speak for (see [`ActiveSel`]). Read by
     /// the worker at each dequeue; written by the `MarkActive` RPC handler (explicit)
     /// and by every enqueue (recent). One lock, always acquired INSIDE `items`.
@@ -482,7 +470,7 @@ impl TtsQueue {
             terminal_seen: AtomicBool::new(false),
             pause_in_background: AtomicBool::new(false),
             config: Mutex::new(config),
-            pool_assignments: Mutex::new(HashMap::new()),
+            agent_voices: Mutex::new(HashMap::new()),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing: Mutex::new(None),
@@ -558,7 +546,7 @@ impl TtsQueue {
             terminal_seen: AtomicBool::new(false),
             pause_in_background: AtomicBool::new(false),
             config: Mutex::new(VoiceConfig::load(&paths)),
-            pool_assignments: Mutex::new(HashMap::new()),
+            agent_voices: Mutex::new(HashMap::new()),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing: Mutex::new(None),
@@ -1290,56 +1278,42 @@ impl TtsQueue {
         });
     }
 
-    /// SessionEnd (window closed for good): per-window barge like [`clear_session`], then
-    /// FORGET this session's preferred-pool assignment so `pool_assignments` doesn't
-    /// accumulate one entry per distinct session for the daemon's lifetime (it was
-    /// previously only reclaimed on engine restart). Called with `Some` session; the
-    /// `None`/global case routes to [`clear`](Self::clear) at the IPC site (nothing
-    /// session-scoped to forget).
+    /// SessionEnd (window closed for good): per-window barge like [`clear_session`]. The
+    /// agent's voice assignment survives — it's keyed by client, not session, and lives for
+    /// the engine runtime. Called with `Some` session; the `None`/global case routes to
+    /// [`clear`](Self::clear) at the IPC site.
     pub fn end_session(&self, session: Option<String>) {
-        self.clear_session(session.clone());
-        if let Some(s) = &session {
-            let mut map = self.pool_assignments.lock().unwrap();
-            // Pool keys are always the real session id (sticky is stripped on assign).
-            map.remove(pool_session_key(s));
-            map.remove(s);
-            if let Some(sticky) = grok_stop_sticky_sibling(s) {
-                map.remove(&sticky);
-            }
-        }
+        self.clear_session(session);
     }
 
-    /// Get-or-assign this session's voice from the preferred pool (delegates to
-    /// [`pick_pool_voice`]), recording the pick so it's stable per session. `pool`
-    /// must be non-empty (caller checks).
-    fn assign_pool_voice(&self, session: &str, pool: &[String]) -> String {
-        let key = pool_session_key(session);
-        let mut map = self.pool_assignments.lock().unwrap();
-        let voice = pick_pool_voice(&map, pool, key);
-        record_pool_assignment(&mut map, key, voice.clone(), POOL_ASSIGNMENTS_MAX);
+    /// Get-or-assign this agent's voice from the preferred pool (delegates to
+    /// [`pick_agent_voice`]), recording the roll so it's stable for the engine runtime.
+    /// `pool` must be non-empty (caller checks).
+    fn assign_agent_voice(&self, agent: ClientSource, pool: &[String]) -> String {
+        let mut map = self.agent_voices.lock().unwrap();
+        let voice = pick_agent_voice(&map, pool, agent, &mut |n| fastrand::usize(..n));
+        map.insert(agent, voice.clone());
         voice
     }
 
-    /// Resolve the `(engine, voice)` for `session` — the ONE place the greeting and the playback
+    /// Resolve the `(engine, voice)` for `source` — the ONE place the greeting and the playback
     /// worker agree on "what speaks". The engine is the resolved `tts_engine` ladder rung; the
-    /// voice is the System voice, or this terminal's CLAIMED Kokoro pool voice (locking the
-    /// per-terminal assignment; the global/empty session and an empty pool fall back to
-    /// `current_voice()`). Sticky `grok-stop:<id>` reuses the real session's pool voice.
-    /// `None` when TTS is off — no usable rung — so the caller skips/no-ops.
+    /// voice is the System voice, or this agent's CLAIMED Kokoro pool voice (stable for the
+    /// engine runtime; an empty pool and engine self-talk (`DontSpeak`) fall back to
+    /// `current_voice()`). `None` when TTS is off — no usable rung — so the caller
+    /// skips/no-ops.
     fn resolve_engine_voice(
         &self,
         cfg: &VoiceConfig,
-        session: &Option<String>,
+        source: ClientSource,
     ) -> Option<(ds_config::TtsEngine, String)> {
         let engine = cfg.resolved_tts()?;
         let voice = match engine {
             ds_config::TtsEngine::System => cfg.tts_system_voice.clone(),
             ds_config::TtsEngine::Kokoro => {
                 let pool = cfg.active_voices();
-                let sess = vkey(session);
-                let pool_key = pool_session_key(&sess);
-                if !pool.is_empty() && !pool_key.is_empty() {
-                    self.assign_pool_voice(pool_key, pool)
+                if !pool.is_empty() && source != ClientSource::DontSpeak {
+                    self.assign_agent_voice(source, pool)
                 } else {
                     cfg.current_voice()
                 }
@@ -1348,11 +1322,12 @@ impl TtsQueue {
         Some((engine, voice))
     }
 
-    /// Greet a freshly-opened terminal in its assigned pool / system voice (no-op unless
-    /// `greet_on_open` is set and TTS is on). Claims the session's voice now via
-    /// [`resolve_engine_voice`](Self::resolve_engine_voice), so the per-terminal assignment is
-    /// locked in at open rather than on first reply. `source` is the opening client
-    /// (`GreetSession`) so `running.tts_source` can light that Usage card while greeting.
+    /// Greet a freshly-opened terminal in its agent's claimed / system voice (no-op unless
+    /// `greet_on_open` is set and TTS is on). Claims the agent's voice now via
+    /// [`resolve_engine_voice`](Self::resolve_engine_voice), so the assignment is locked in
+    /// at open rather than on first reply — a second terminal of the same agent greets in
+    /// the same voice. `source` is the opening client (`GreetSession`) so
+    /// `running.tts_source` can light that Usage card while greeting.
     pub fn greet_session(&self, source: ClientSource, session: Option<String>) {
         let cfg = self.config.lock().unwrap().clone();
         if !cfg.greet_on_open {
@@ -1361,7 +1336,7 @@ impl TtsQueue {
         // Resolve the active engine + voice via the SAME shared helper the worker uses, so the
         // greeting is NAMED by and SPOKEN in exactly the voice that will play (under System that
         // means the system voice, not a Kokoro id handed to `say`). `None` ⇒ TTS off ⇒ no greeting.
-        let Some((engine, voice)) = self.resolve_engine_voice(&cfg, &session) else {
+        let Some((engine, voice)) = self.resolve_engine_voice(&cfg, source) else {
             return;
         };
         // Name the greeting via the ONE shared resolver (Kokoro id → "Sarah"; System → the
@@ -1524,12 +1499,12 @@ impl TtsQueue {
 
             let cfg = self.config.lock().unwrap().clone();
             // Engine + base voice come from config via the SAME shared helper the greeting
-            // uses — System reads `tts_system_voice`; Kokoro claims this terminal's pool voice
-            // (the global/empty session and an empty pool fall back to `current_voice()`). Off /
-            // no usable rung ⇒ a blank voice (speak_one no-ops, value unused). A per-call
-            // `item.voice` (e.g. the MCP `speak` voice arg) then overrides just the voice
-            // string within the chosen engine.
-            let (engine, base_voice) = match self.resolve_engine_voice(&cfg, &item.session) {
+            // uses — System reads `tts_system_voice`; Kokoro claims this agent's voice (an
+            // empty pool falls back to `current_voice()`). Off / no usable rung ⇒ a blank
+            // voice (speak_one no-ops, value unused). A per-call `item.voice` (e.g. the MCP
+            // `speak` voice arg) then overrides just the voice string within the chosen
+            // engine.
+            let (engine, base_voice) = match self.resolve_engine_voice(&cfg, item.source) {
                 Some((e, v)) => (Some(e), v),
                 None => (None, String::new()),
             };
@@ -1959,84 +1934,122 @@ mod tests {
     }
 
     #[test]
-    fn each_terminal_gets_the_next_untaken_voice() {
-        // Three distinct sessions claim three distinct voices, in pool order.
-        let p = pool();
-        let mut a = HashMap::new();
-        for (sess, want) in [("s1", "af_sarah"), ("s2", "am_adam"), ("s3", "bf_emma")] {
-            let v = pick_pool_voice(&a, &p, sess);
-            assert_eq!(v, want, "session {sess} should get the next untaken voice");
-            a.insert(sess.to_string(), v);
+    fn distinct_agents_claim_distinct_voices_while_free() {
+        // While free voices remain, every agent gets its own — under ANY roll.
+        for mut roll in [
+            Box::new(|_: usize| 0usize) as Box<dyn FnMut(usize) -> usize>,
+            Box::new(|n: usize| n - 1),
+        ] {
+            let p = pool();
+            let mut a = HashMap::new();
+            for agent in [
+                ClientSource::ClaudeCode,
+                ClientSource::Codex,
+                ClientSource::QwenCode,
+            ] {
+                let v = pick_agent_voice(&a, &p, agent, &mut roll);
+                assert!(
+                    !a.values().any(|held| held == &v),
+                    "{agent:?} must get a voice no other agent holds"
+                );
+                a.insert(agent, v);
+            }
         }
     }
 
     #[test]
-    fn assignment_is_stable_per_session() {
+    fn agent_reuses_its_assignment_across_sessions_and_requests() {
+        // The assignment is keyed by agent, not session/terminal: repeated resolutions
+        // (new windows, later replies) return the SAME voice, whatever the roll says.
         let p = pool();
         let mut a = HashMap::new();
-        let first = pick_pool_voice(&a, &p, "s1");
-        a.insert("s1".into(), first.clone());
-        // A second lookup for the same session returns the SAME voice, regardless of others.
-        a.insert("s2".into(), "am_adam".into());
-        assert_eq!(pick_pool_voice(&a, &p, "s1"), first);
+        let first = pick_agent_voice(&a, &p, ClientSource::ClaudeCode, &mut |_| 1);
+        a.insert(ClientSource::ClaudeCode, first.clone());
+        a.insert(ClientSource::Codex, "am_adam".into());
+        assert_eq!(
+            pick_agent_voice(&a, &p, ClientSource::ClaudeCode, &mut |_| 0),
+            first
+        );
+        assert_eq!(
+            pick_agent_voice(&a, &p, ClientSource::ClaudeCode, &mut |n| n - 1),
+            first
+        );
     }
 
     #[test]
-    fn pool_round_robins_once_exhausted() {
-        // More terminals than voices → wrap (reuse) by assignment count.
-        let p = pool(); // len 3
+    fn agents_beyond_pool_reuse_least_loaded_voices() {
+        // More agents than voices → double up on the LEAST-loaded voice, never pile on
+        // one voice while another sits lighter.
+        let p = vec!["af_sarah".to_string(), "am_adam".to_string()];
         let mut a = HashMap::new();
-        for (i, sess) in ["s1", "s2", "s3"].iter().enumerate() {
-            a.insert(sess.to_string(), p[i].clone());
+        for agent in [
+            ClientSource::ClaudeCode,
+            ClientSource::Codex,
+            ClientSource::QwenCode,
+            ClientSource::Grok,
+        ] {
+            let v = pick_agent_voice(&a, &p, agent, &mut |_| 0);
+            a.insert(agent, v);
         }
-        // All three taken → the 4th session wraps to pool[3 % 3] = pool[0].
-        assert_eq!(pick_pool_voice(&a, &p, "s4"), "af_sarah");
+        for v in &p {
+            assert_eq!(
+                a.values().filter(|held| held == &v).count(),
+                2,
+                "4 agents over 2 voices must spread 2-and-2, not clump"
+            );
+        }
+    }
+
+    #[test]
+    fn roll_selects_among_free_candidates_only() {
+        // Carries the old stale-repick regression under agent keying: a repick after a
+        // stale (removed-from-pool) assignment must avoid voices held by OTHER agents —
+        // the roll ranges over the free set only, so index 0 is not pool[0] here.
+        let p = vec!["af_nicole".to_string(), "am_adam".to_string()];
+        let mut a = HashMap::new();
+        a.insert(ClientSource::ClaudeCode, "af_sarah".to_string()); // stale (old pool)
+        a.insert(ClientSource::Codex, "af_nicole".to_string()); // valid, holds af_nicole
+        let mut seen_n = usize::MAX;
+        let v = pick_agent_voice(&a, &p, ClientSource::ClaudeCode, &mut |n| {
+            seen_n = n;
+            0
+        });
+        assert_eq!(v, "am_adam", "must not land on Codex's voice");
+        assert_eq!(seen_n, 1, "the roll ranges over the free set only");
+
+        // Seeded-RNG determinism: the same seed yields the same pick (this is exactly the
+        // production `roll` shape; no live randomness asserted).
+        let empty = HashMap::new();
+        let picks: Vec<String> = (0..2)
+            .map(|_| {
+                let mut rng = fastrand::Rng::with_seed(7);
+                pick_agent_voice(&empty, &pool(), ClientSource::Grok, &mut |n| rng.usize(..n))
+            })
+            .collect();
+        assert_eq!(picks[0], picks[1]);
     }
 
     #[test]
     fn stale_assignment_is_dropped_when_voice_leaves_the_pool() {
-        // Regression: a session assigned under the OLD pool keeps speaking the old
+        // Regression: an agent assigned under the OLD pool keeps speaking the old
         // voice after the user changes `tts_built_in_voices` (the assignment cache
         // survives a config hot-reload). The stale pick must be discarded and a voice
-        // from the CURRENT pool chosen instead — otherwise the terminal keeps using a
+        // from the CURRENT pool chosen instead — otherwise the agent keeps using a
         // voice the user dropped ("Sarah introduces herself as Nicole").
         let mut a = HashMap::new();
-        a.insert("s1".to_string(), "af_sarah".to_string()); // picked under the old default
+        a.insert(ClientSource::ClaudeCode, "af_sarah".to_string()); // old default
         let new_pool = vec!["af_nicole".to_string()]; // user switched to Nicole-only
-        let v = pick_pool_voice(&a, &new_pool, "s1");
+        let v = pick_agent_voice(&a, &new_pool, ClientSource::ClaudeCode, &mut |_| 0);
         assert_eq!(
             v, "af_nicole",
             "a voice no longer in the pool must not be reused"
         );
         // And once re-recorded, the fresh pick is stable.
-        a.insert("s1".to_string(), v);
-        assert_eq!(pick_pool_voice(&a, &new_pool, "s1"), "af_nicole");
-    }
-
-    #[test]
-    fn stale_assignment_repick_avoids_voices_taken_by_other_live_sessions() {
-        // When a stale session re-picks, it must still get a DISTINCT voice from the
-        // sessions whose assignments are still valid under the new pool.
-        let p = vec!["af_nicole".to_string(), "am_adam".to_string()];
-        let mut a = HashMap::new();
-        a.insert("s1".to_string(), "af_sarah".to_string()); // stale (old pool)
-        a.insert("s2".to_string(), "af_nicole".to_string()); // valid, holds af_nicole
-        // s1 re-picks: af_nicole is taken by s2, so s1 gets am_adam (not the stale af_sarah).
-        assert_eq!(pick_pool_voice(&a, &p, "s1"), "am_adam");
-    }
-
-    #[test]
-    fn pool_assignment_map_is_bounded_defensively() {
-        // A client that never sends SessionEnd (crashed hook, or one hammering
-        // GreetSession with fresh session ids) must not grow this map forever.
-        let mut a = HashMap::new();
-        for i in 0..3 {
-            record_pool_assignment(&mut a, &format!("s{i}"), "af_sarah".into(), 3);
-        }
-        assert_eq!(a.len(), 3, "under the cap: every entry kept");
-        // The 4th insert pushes len to 4 > cap(3) → the whole map is cleared, not grown.
-        record_pool_assignment(&mut a, "s3", "af_sarah".into(), 3);
-        assert_eq!(a.len(), 0, "over the cap: cleared, never grown past it");
+        a.insert(ClientSource::ClaudeCode, v);
+        assert_eq!(
+            pick_agent_voice(&a, &new_pool, ClientSource::ClaudeCode, &mut |_| 0),
+            "af_nicole"
+        );
     }
 
     /// Build a narration `Item` tagged with `session` (the only field `select_pos`
@@ -3971,12 +3984,12 @@ mod tests {
     }
 
     #[test]
-    fn end_session_barges_the_window_and_forgets_its_pool_assignment() {
+    fn end_session_barges_the_window_but_keeps_the_agent_assignment() {
         let q = mk_queue();
-        q.pool_assignments
+        q.agent_voices
             .lock()
             .unwrap()
-            .insert("s1".to_string(), "af_sarah".to_string());
+            .insert(ClientSource::ClaudeCode, "af_sarah".to_string());
         q.items
             .lock()
             .unwrap()
@@ -4002,22 +4015,38 @@ mod tests {
         // s1's own in-flight item is cancelled (playing matched).
         assert!(q.generation.load(Ordering::SeqCst) > gen_before);
         assert!(!q.tts_active.load(Ordering::SeqCst));
-        // The pool assignment is forgotten so it doesn't linger past this window's life.
-        assert!(!q.pool_assignments.lock().unwrap().contains_key("s1"));
+        // The agent keeps its voice past the window's life (runtime-stable assignment):
+        // the next Claude Code terminal must speak the same voice.
+        assert_eq!(
+            q.agent_voices
+                .lock()
+                .unwrap()
+                .get(&ClientSource::ClaudeCode),
+            Some(&"af_sarah".to_string())
+        );
     }
 
     #[test]
-    fn assign_pool_voice_records_and_reuses_the_pick_per_session() {
+    fn assign_agent_voice_records_and_reuses_the_pick_per_agent() {
         let q = mk_queue();
         let pool = vec!["af_sarah".to_string(), "am_adam".to_string()];
 
-        let v1 = q.assign_pool_voice("sess-a", &pool);
-        assert_eq!(v1, "af_sarah");
-        assert_eq!(q.pool_assignments.lock().unwrap().get("sess-a"), Some(&v1));
-        // The same session reuses its recorded pick.
-        assert_eq!(q.assign_pool_voice("sess-a", &pool), v1);
-        // A different session gets the next untaken pool voice.
-        assert_eq!(q.assign_pool_voice("sess-b", &pool), "am_adam");
+        let v1 = q.assign_agent_voice(ClientSource::ClaudeCode, &pool);
+        assert!(pool.contains(&v1), "the roll picks from the pool");
+        assert_eq!(
+            q.agent_voices
+                .lock()
+                .unwrap()
+                .get(&ClientSource::ClaudeCode),
+            Some(&v1)
+        );
+        // The same agent reuses its recorded pick.
+        assert_eq!(q.assign_agent_voice(ClientSource::ClaudeCode, &pool), v1);
+        // A different agent rolls among the remaining free voices — with one voice left,
+        // that's deterministic: the other one.
+        let v2 = q.assign_agent_voice(ClientSource::Codex, &pool);
+        assert!(pool.contains(&v2));
+        assert_ne!(v2, v1, "a free voice remains, so agents must not share");
     }
 
     #[test]
@@ -4027,7 +4056,7 @@ mod tests {
             tts_engine_ladder: Vec::new(), // empty ladder = off
             ..VoiceConfig::default()
         };
-        assert_eq!(q.resolve_engine_voice(&cfg, &None), None);
+        assert_eq!(q.resolve_engine_voice(&cfg, ClientSource::Unknown), None);
     }
 
     // System is only buildable on macOS/Windows (see `system_tts_buildable_on`) — gated like
@@ -4043,7 +4072,7 @@ mod tests {
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&cfg, &None),
+            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode),
             Some((ds_config::TtsEngine::System, "Ava (Premium)".to_string()))
         );
     }
@@ -4053,7 +4082,7 @@ mod tests {
     // so gate out only that one platform, matching `voice.rs`'s own tests of this ladder.
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
-    fn resolve_engine_voice_kokoro_with_pool_and_session_delegates_to_pool_assignment() {
+    fn resolve_engine_voice_kokoro_with_pool_delegates_to_agent_assignment() {
         let q = mk_queue();
         let cfg = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
@@ -4061,62 +4090,123 @@ mod tests {
             ..VoiceConfig::default()
         };
         let (engine, voice) = q
-            .resolve_engine_voice(&cfg, &Some("sess-1".to_string()))
+            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode)
             .expect("Kokoro is usable on this build");
         assert_eq!(engine, ds_config::TtsEngine::Kokoro);
-        assert_eq!(voice, "af_sarah", "claims the first untaken pool voice");
-        // The session id is threaded through to the pool-assignment map.
+        assert!(cfg.tts_built_in_voices.contains(&voice));
+        // The source is threaded through to the agent-voice map.
         assert_eq!(
-            q.pool_assignments.lock().unwrap().get("sess-1"),
-            Some(&voice)
-        );
-        // Sticky Grok Stop tag reuses the real session's pool voice (no second claim).
-        let (engine2, voice2) = q
-            .resolve_engine_voice(&cfg, &Some("grok-stop:sess-1".to_string()))
-            .expect("Kokoro sticky");
-        assert_eq!(engine2, ds_config::TtsEngine::Kokoro);
-        assert_eq!(
-            voice2, voice,
-            "sticky must share the real session pool voice"
-        );
-        assert_eq!(
-            q.pool_assignments.lock().unwrap().len(),
-            1,
-            "sticky must not create a second pool map key"
-        );
-        assert!(
-            !q.pool_assignments
+            q.agent_voices
                 .lock()
                 .unwrap()
-                .contains_key("grok-stop:sess-1")
+                .get(&ClientSource::ClaudeCode),
+            Some(&voice)
         );
+        // Every later resolution for the same agent — any window, any request — reuses it.
+        let (_, again) = q
+            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode)
+            .expect("Kokoro again");
+        assert_eq!(again, voice);
+        assert_eq!(q.agent_voices.lock().unwrap().len(), 1);
+        // A second agent claims the remaining free voice — no sharing while one is free.
+        let (_, other) = q
+            .resolve_engine_voice(&cfg, ClientSource::Codex)
+            .expect("Kokoro for Codex");
+        assert_ne!(other, voice);
     }
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
-    fn resolve_engine_voice_kokoro_falls_back_to_current_voice_without_pool_or_session() {
+    fn resolve_engine_voice_kokoro_empty_pool_falls_back_to_current_voice() {
         let q = mk_queue();
-        let with_pool = VoiceConfig {
-            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
-            tts_built_in_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
-            ..VoiceConfig::default()
-        };
-        // Non-empty pool, but NO session id → falls back to `current_voice()`, untracked.
-        assert_eq!(
-            q.resolve_engine_voice(&with_pool, &None),
-            Some((ds_config::TtsEngine::Kokoro, with_pool.current_voice()))
-        );
-        assert!(q.pool_assignments.lock().unwrap().is_empty());
-
-        // A session id, but an EMPTY pool → also falls back to `current_voice()`.
         let empty_pool = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
             tts_built_in_voices: vec![],
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&empty_pool, &Some("sess-2".to_string())),
+            q.resolve_engine_voice(&empty_pool, ClientSource::ClaudeCode),
             Some((ds_config::TtsEngine::Kokoro, empty_pool.current_voice()))
         );
+        assert!(q.agent_voices.lock().unwrap().is_empty());
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    #[test]
+    fn unknown_source_with_a_pool_claims_an_agent_voice() {
+        // Behavior change from the session-keyed pool: session-less/global speech from a
+        // client (e.g. MCP `speak` without a session) now resolves to the agent's stable
+        // voice, not `current_voice()`. All unknown clients share the one Unknown bucket.
+        let q = mk_queue();
+        let cfg = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
+            tts_built_in_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            ..VoiceConfig::default()
+        };
+        let (_, voice) = q
+            .resolve_engine_voice(&cfg, ClientSource::Unknown)
+            .expect("Kokoro is usable on this build");
+        assert!(cfg.tts_built_in_voices.contains(&voice));
+        assert_eq!(
+            q.agent_voices.lock().unwrap().get(&ClientSource::Unknown),
+            Some(&voice)
+        );
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    #[test]
+    fn dontspeak_source_resolves_to_current_voice_not_a_pool_slot() {
+        // Engine self-talk always uses the user's primary pick — never claims a slot.
+        let q = mk_queue();
+        let cfg = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
+            tts_built_in_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            ..VoiceConfig::default()
+        };
+        let (_, voice) = q
+            .resolve_engine_voice(&cfg, ClientSource::DontSpeak)
+            .expect("Kokoro is usable on this build");
+        assert_eq!(voice, cfg.current_voice());
+        assert!(q.agent_voices.lock().unwrap().is_empty());
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    #[test]
+    fn greeting_claims_the_agent_voice_reused_by_later_replies() {
+        // Locking-at-open: the SessionStart greeting claims the agent's voice, and a later
+        // reply from the same agent resolves to that exact voice.
+        let q = mk_queue();
+        let cfg = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
+            tts_built_in_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            greet_on_open: true,
+            ..VoiceConfig::default()
+        };
+        *q.config.lock().unwrap() = cfg.clone();
+
+        q.greet_session(ClientSource::Codex, Some("sess-1".to_string()));
+
+        let claimed = q
+            .agent_voices
+            .lock()
+            .unwrap()
+            .get(&ClientSource::Codex)
+            .cloned()
+            .expect("greeting claims the agent voice at open");
+        // The queued greeting carries the claimed voice as its per-item override.
+        {
+            let items = q.items.lock().unwrap();
+            match &items[0].action {
+                QueueAction::Speech { voice, .. } => {
+                    assert_eq!(voice.as_deref(), Some(claimed.as_str()));
+                }
+                other => panic!("greeting must queue speech, got {other:?}"),
+            }
+        }
+        // A later reply (any session of the same agent) speaks the same voice.
+        let (_, later) = q
+            .resolve_engine_voice(&cfg, ClientSource::Codex)
+            .expect("Kokoro later reply");
+        assert_eq!(later, claimed);
     }
 }

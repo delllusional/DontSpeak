@@ -38,7 +38,7 @@ pub enum Request {
     EnsureCodexStream,
     /// Global mute (tray / Caps). Speech drains silently; cues suppressed. → [`Response::Done`].
     SetMuted { on: bool },
-    /// SessionStart: optional pool-voice greeting when `greet_on_open`. → [`Response::Done`].
+    /// SessionStart: optional agent-voice greeting when `greet_on_open`. → [`Response::Done`].
     GreetSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
@@ -88,7 +88,7 @@ pub enum Request {
         session: Option<String>,
         source: ClientSource,
     },
-    /// SessionEnd: per-window [`Self::StopSpeech`] plus reclaim pool-voice map entry.
+    /// SessionEnd: per-window [`Self::StopSpeech`] (the agent's voice assignment survives).
     SessionEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,

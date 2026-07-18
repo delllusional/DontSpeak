@@ -88,7 +88,7 @@ Atomically update and reload persistent settings.
 | Param | Type | Description |
 |---|---|---|
 | `tts_engine` | enum: `built_in`, `system`, `off` | Speech: "built_in", "system", or "off". Omit to keep the automatic preference. Unsupported engines are rejected. |
-| `tts_built_in_voices` | array of strings | Ordered built-in voice IDs. First = default; rest = per-terminal pool. |
+| `tts_built_in_voices` | array of strings | Ordered built-in voice IDs. First = default; rest = per-agent pool. |
 | `tts_system_voice` | string | System voice name; empty = OS default. System engine only. |
 | `tts_rate` | number 0.5–2.0 | Speech rate. 1.0 = normal. |
 
@@ -97,7 +97,7 @@ Atomically update and reload persistent settings.
 | Param | Type | Description |
 |---|---|---|
 | `narrate` | array of `shorts`, `digests` | What to narrate. Default both: "digests" = long-reply summaries; "shorts" = short replies whole. [] off. |
-| `greet_on_open` | boolean | Greet each new terminal in its pool voice. Default on. |
+| `greet_on_open` | boolean | Greet each new terminal in its agent's pool voice. Default on. |
 | `input_clears` | array of `current`, `other` | Queues to clear on submit: "current" this terminal, "other" the rest (incl. global). Default ["current"]; [] none. |
 | `pause_in_background` | boolean | Pause speech when no terminal is frontmost. Default false. |
 

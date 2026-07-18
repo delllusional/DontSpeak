@@ -71,6 +71,8 @@ toml = { workspace = true }
 # Push-based config.toml watch (FSEvents/inotify/ReadDirectoryChangesW) — replaces
 # the per-tick stat() poll for hot-reload; a coarse stat backstop remains.
 notify = { workspace = true }
+# The per-agent voice roll (`ttsq::pick_agent_voice`'s production `roll`).
+fastrand = { workspace = true }
 
 # unix signal handling (SIGTERM/SIGINT) via type-safe sigaction wrapper.
 [target.'cfg(unix)'.dependencies]

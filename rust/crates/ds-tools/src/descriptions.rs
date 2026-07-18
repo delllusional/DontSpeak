@@ -37,13 +37,13 @@ pub const SET_CONFIG: &str = "Atomically update and reload persistent settings."
 pub const SET_CONFIG_TTS_ENGINE: &str = "Speech: \"built_in\", \"system\", or \"off\". Omit to \
     keep the automatic preference. Unsupported engines are rejected.";
 pub const SET_CONFIG_TTS_VOICES: &str = "Ordered built-in voice IDs. First = default; rest = \
-    per-terminal pool.";
+    per-agent pool.";
 pub const SET_CONFIG_TTS_SYSTEM_VOICE: &str =
     "System voice name; empty = OS default. System engine only.";
 pub const SET_CONFIG_TTS_RATE: &str = "Speech rate. 1.0 = normal.";
 pub const SET_CONFIG_NARRATE: &str = "What to narrate. Default both: \"digests\" = long-reply \
     summaries; \"shorts\" = short replies whole. [] off.";
-pub const SET_CONFIG_GREET: &str = "Greet each new terminal in its pool voice. Default on.";
+pub const SET_CONFIG_GREET: &str = "Greet each new terminal in its agent's pool voice. Default on.";
 pub const SET_CONFIG_INPUT_CLEARS: &str = "Queues to clear on submit: \"current\" this terminal, \
     \"other\" the rest (incl. global). Default [\"current\"]; [] none.";
 pub const SET_CONFIG_PAUSE_BG: &str = "Pause speech when no terminal is frontmost. Default false.";

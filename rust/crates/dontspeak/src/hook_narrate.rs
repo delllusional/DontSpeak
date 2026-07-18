@@ -32,7 +32,7 @@ pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
     );
     // Grok Stop digests use sticky session tag (see `grok_stop_session_tag`) so MarkActive
     // cannot prune them; SessionEnd must barge that tag too (SessionEnd, not only StopSpeech,
-    // so pool / forget_narration_session state is reclaimed).
+    // so forget_narration_session state is reclaimed).
     if client == ClientSource::Grok {
         let sticky = session
             .as_deref()

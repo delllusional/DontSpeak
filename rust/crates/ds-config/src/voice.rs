@@ -50,7 +50,7 @@ impl Default for HandsFreePhrases {
 /// enum `as_str()` tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceConfig {
-    /// Kokoro voice ids; first = current, rest = per-terminal pool (round-robin).
+    /// Kokoro voice ids; first = current, rest = the per-agent pool (random stable pick).
     #[serde(default = "default_voices")]
     pub tts_built_in_voices: Vec<String>,
     /// System TTS voice display name (e.g. "Ava (Premium)"); empty = OS default. Separate
@@ -264,8 +264,8 @@ fn default_earcon_reply() -> String {
 }
 fn default_voices() -> Vec<String> {
     // Default to a single voice ([`DEFAULT_KOKORO_VOICE`]) out of the box. Add more ids
-    // via `set_config` to form a per-terminal pool so concurrent Claude sessions speak
-    // with different voices; with one entry every terminal uses that voice.
+    // via `set_config` to form a per-agent pool so different clients (Claude Code, Codex,
+    // …) speak with different voices; with one entry every agent uses that voice.
     vec![DEFAULT_KOKORO_VOICE.to_string()]
 }
 fn default_long_press_ms() -> u64 {
@@ -597,14 +597,14 @@ impl VoiceConfig {
     /// from one list: the apple-native FluidAudio (Core ML / ANE) backend materializes any
     /// requested voice on demand from the same `voices-v1.0.bin` the ONNX path uses (see
     /// `ds_tts::ane_voices`), so there is no separate apple-native voice set. First = default,
-    /// rest = the per-terminal pool.
+    /// rest = the per-agent pool.
     pub fn active_voices(&self) -> &[String] {
         &self.tts_built_in_voices
     }
 
     /// The default/current voice — `active_voices()[0]`, falling back to
-    /// [`DEFAULT_KOKORO_VOICE`] if the list is somehow empty. The per-session pool
-    /// assignment (in the engine) hands later terminals the subsequent entries.
+    /// [`DEFAULT_KOKORO_VOICE`] if the list is somehow empty. The per-agent pool
+    /// assignment (in the engine) hands each client a stable pool entry.
     pub fn current_voice(&self) -> String {
         self.active_voices()
             .first()

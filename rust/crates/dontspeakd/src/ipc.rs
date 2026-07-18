@@ -134,8 +134,8 @@ pub(crate) fn spawn_ipc_server(
                     }
                 }
                 ds_ipc::Request::GreetSession { session, source } => {
-                    // New terminal opened → greet in its assigned pool voice (no-op unless
-                    // `greet_on_open` is set). Claims the session's voice at open time.
+                    // New terminal opened → greet in its agent's assigned voice (no-op unless
+                    // `greet_on_open` is set). Claims the agent's voice at open time.
                     // Also the codex_stream supervisor's session DISCOVERY: a session id
                     // the hooks vouch for may map to a codex app-server thread (CC/Qwen
                     // ids simply never match one).
@@ -260,9 +260,9 @@ pub(crate) fn spawn_ipc_server(
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::SessionEnd { session, source } => {
-                    // Window closed for good: per-window barge AND forget this session's
-                    // transient pool-voice assignment so it doesn't grow one entry per session forever.
-                    // None (no session id) → global hard barge, nothing session-scoped to forget.
+                    // Window closed for good: per-window barge. The agent's voice assignment
+                    // is keyed by client, not session, and deliberately survives.
+                    // None (no session id) → global hard barge.
                     // Grok: also drop the updates.jsonl tail registration.
                     log_client(
                         &paths,

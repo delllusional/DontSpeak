@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 /// Which best-effort engine ping a notify event maps to.
 pub enum Ping {
-    /// SessionStart → greet in this session's pool voice (engine self-gates).
+    /// SessionStart → greet in this agent's assigned voice (engine self-gates).
     Greet,
     /// UserPromptSubmit → mark THIS terminal active so narration follows it.
     MarkActive,
