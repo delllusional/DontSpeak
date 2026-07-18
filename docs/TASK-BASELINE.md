@@ -9,8 +9,13 @@ releasing, or landing:
 
 1. Inspect `git worktree list` and the task-worktree directory. Reuse only for the
    same task.
-2. Where `main` is checked out, confirm no tracked changes would block an update.
-3. `git pull --ff-only origin main` (no merge commit).
+2. Find the worktree where `main` is checked out (`git worktree list`) and `cd` into
+   it. Confirm no tracked changes would block an update.
+3. **From that main worktree** — not wherever you started — run
+   `git pull --ff-only origin main` (no merge commit). `git pull ... origin main` only
+   advances the local `main` ref when `main` is the checked-out branch in your current
+   directory; run it from any other branch/worktree and it silently updates nothing,
+   leaving local `main` stale for step 4.
 4. Create a named task branch + worktree from refreshed `main`
    (`EnterWorktree` if available, else
    `git worktree add -b <task-branch> <task-worktree> main`).
