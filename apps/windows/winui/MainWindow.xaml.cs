@@ -28,7 +28,7 @@ public sealed partial class MainWindow : Window
     private static readonly SolidColorBrush Gray = new(Color.FromArgb(120, 150, 150, 155));
     // Cascadia Mono (Win11) / Consolas — tools/params; macOS uses SF Mono.
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
-    // Shared gate via FFI (`ds_diarization_ui_enabled` ← ds_tools::DIARIZATION_ENABLED).
+    // See Native.DiarizationUiEnabled.
     private static readonly bool DiarizationUiEnabled = Native.DiarizationUiEnabled();
 
     public MainWindow()

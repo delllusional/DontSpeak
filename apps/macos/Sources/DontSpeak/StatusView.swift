@@ -110,7 +110,7 @@ struct ExpandDot<Dot: View>: View {
 struct StatusView: View {
     @Environment(Core.self) private var core
 
-    /// Shared gate (`ds_diarization_ui_enabled` ← `ds_tools::DIARIZATION_ENABLED`) — not a host-local const.
+    /// `ds_diarization_ui_enabled` (not a host-local const).
     private let diarizationUIEnabled: Bool = ds_diarization_ui_enabled() != 0
 
     var body: some View {

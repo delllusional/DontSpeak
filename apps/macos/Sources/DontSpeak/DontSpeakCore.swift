@@ -165,7 +165,7 @@ final class Core {
         checkForUpdateOnce()
     }
 
-    /// Active TTS model_status object key (`kokoro`|`tts_system`|empty) — `ds_active_tts_slot`.
+    /// `ds_active_tts_slot`.
     nonisolated static func activeTtsSlot(_ ttsEngine: String) -> String {
         ttsEngine.withCString { p in
             guard let ptr = ds_active_tts_slot(p) else { return "" }
@@ -174,7 +174,7 @@ final class Core {
         }
     }
 
-    /// Active STT model_status object key — `ds_active_stt_slot`.
+    /// `ds_active_stt_slot`.
     nonisolated static func activeSttSlot(_ sttEngine: String) -> String {
         sttEngine.withCString { p in
             guard let ptr = ds_active_stt_slot(p) else { return "" }
@@ -183,7 +183,7 @@ final class Core {
         }
     }
 
-    /// Tray kind token from shared Rust (`idle`|`recording`|`speaking`).
+    /// `ds_tray_icon_kind`.
     nonisolated static func trayIconKind(
         sttActive: Bool, ttsActive: Bool, trayIndicator: [String]
     ) -> String {

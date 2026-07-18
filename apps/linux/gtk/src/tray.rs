@@ -19,7 +19,7 @@ pub enum Cmd {
 }
 
 pub struct SpeakTray {
-    /// Shared kind from [`ds_status::tray_icon_kind`] (gates on `tray_indicator`).
+    /// [`ds_status::tray_icon_kind`].
     pub kind: ds_status::TrayIconKind,
     pub muted: bool,
     seed_purple: Rgb,

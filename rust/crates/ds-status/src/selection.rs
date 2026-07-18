@@ -1,22 +1,19 @@
-//! Active STT/TTS engine-object slots — single source for every status UI.
+//! Active STT/TTS `model_status` engine slots — single source for every status UI.
 //!
-//! Config tokens (`stt_engine` / `tts_engine`) select which `model_status` engine object
-//! drives the TTS/STT row. Hosts map the slot to their DTO field; display names stay in
-//! `ds-i18n`. `"off"` / unknown → [`None`] (row shows empty/off, not a wrong engine).
+//! Config tokens (`stt_engine` / `tts_engine`) → object key. Hosts map the slot; labels in
+//! `ds-i18n`. `"off"` / unknown → [`None`].
 
-/// Which `model_status` engine object is the active TTS backend.
+/// Active TTS backend object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ActiveTtsSlot {
-    /// `tts_engine == "built_in"` → `kokoro` object.
     Kokoro,
-    /// `tts_engine == "system"` → `tts_system` object.
     TtsSystem,
 }
 
 impl ActiveTtsSlot {
     pub const ALL: [ActiveTtsSlot; 2] = [ActiveTtsSlot::Kokoro, ActiveTtsSlot::TtsSystem];
 
-    /// Wire / FFI token (`kokoro` | `tts_system`) — the model_status object key.
+    /// model_status object key: `kokoro` | `tts_system`.
     pub fn as_str(self) -> &'static str {
         match self {
             ActiveTtsSlot::Kokoro => "kokoro",
@@ -24,7 +21,7 @@ impl ActiveTtsSlot {
         }
     }
 
-    /// Config token (`built_in` | `system`) → slot. `"off"` / unknown → [`None`].
+    /// Config `built_in` | `system` → slot.
     pub fn from_engine(tts_engine: &str) -> Option<ActiveTtsSlot> {
         match tts_engine {
             "built_in" => Some(ActiveTtsSlot::Kokoro),
@@ -34,14 +31,11 @@ impl ActiveTtsSlot {
     }
 }
 
-/// Which `model_status` engine object is the active STT backend.
+/// Active STT backend object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ActiveSttSlot {
-    /// `stt_engine == "built_in"` → `parakeet` object.
     Parakeet,
-    /// `stt_engine == "claude_code"` → `claude_code` object.
     ClaudeCode,
-    /// `stt_engine == "system"` → `system` object.
     System,
 }
 
@@ -52,7 +46,7 @@ impl ActiveSttSlot {
         ActiveSttSlot::System,
     ];
 
-    /// Wire / FFI token (`parakeet` | `claude_code` | `system`) — the model_status object key.
+    /// model_status object key: `parakeet` | `claude_code` | `system`.
     pub fn as_str(self) -> &'static str {
         match self {
             ActiveSttSlot::Parakeet => "parakeet",
@@ -61,7 +55,7 @@ impl ActiveSttSlot {
         }
     }
 
-    /// Config token (`built_in` | `claude_code` | `system`) → slot. `"off"` / unknown → [`None`].
+    /// Config `built_in` | `claude_code` | `system` → slot.
     pub fn from_engine(stt_engine: &str) -> Option<ActiveSttSlot> {
         match stt_engine {
             "built_in" => Some(ActiveSttSlot::Parakeet),

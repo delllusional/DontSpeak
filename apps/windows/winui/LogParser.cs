@@ -9,9 +9,7 @@ namespace DontSpeak;
 /// <summary>One combined-activity-log line for the Logs tab.</summary>
 internal readonly record struct LogLine(string Source, string Level, string Text);
 
-/// <summary>Pure JSON→<see cref="LogLine"/> for the Logs tab wire shape (<c>Native.LogsJson</c>).
-/// Standalone (not on <see cref="MainWindow"/>) so tests run without Windows App Runtime, like
-/// <see cref="HealthSnapshot.FromJson(string, System.Func{string, double, string, string})"/>.</summary>
+/// <summary>Logs tab JSON parse/filter — pure, no WinAppRuntime (unit-testable).</summary>
 internal static class LogParser
 {
     private static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true };
@@ -27,8 +25,7 @@ internal static class LogParser
         catch { return new(); }
     }
 
-    /// <summary>Distinct non-empty sources in first-appearance order (palette index). Lockstep
-    /// with <c>ds_log::distinct_sources</c>.</summary>
+    /// <summary>See <c>ds_log::distinct_sources</c>.</summary>
     internal static List<string> DistinctSources(IReadOnlyList<LogLine> lines)
     {
         var ordered = new List<string>();
@@ -41,8 +38,7 @@ internal static class LogParser
         return ordered;
     }
 
-    /// <summary>Case-insensitive substring over text, source, OR level. Blank query keeps all.
-    /// Lockstep with <c>ds_log::filter_logs</c> (macOS LogCatalog / Linux filter).</summary>
+    /// <summary>See <c>ds_log::filter_logs</c>.</summary>
     internal static List<LogLine> Filter(IReadOnlyList<LogLine> lines, string query)
     {
         var q = (query ?? "").Trim();

@@ -1,10 +1,9 @@
-//! Logs-tab pure rules: parse the combined-log JSON wire shape and apply free-text filter /
-//! first-appearance source order. Hosts re-bind for UI; algorithm is ONE place (was
-//! reimplemented per platform — macOS `LogCatalog`, Windows inline filter).
+//! Logs-tab pure rules: combined-log JSON parse, free-text filter, first-appearance sources.
+//! Single place for every host (was reimplemented per platform).
 
 use serde_json::Value;
 
-/// One combined-activity-log line (`ds_logs_json` / `ds_logs_wait` wire element).
+/// One wire line from `ds_logs_json` / `ds_logs_wait`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogLine {
     pub source: String,
@@ -12,8 +11,7 @@ pub struct LogLine {
     pub text: String,
 }
 
-/// Parse combined-log JSON array. Malformed / non-array → empty (never throw into the UI).
-/// Missing fields on a line default to `""` so a partial line is kept.
+/// Malformed / non-array → empty. Missing fields → `""` (partial lines kept).
 pub fn parse_logs_json(json: &str) -> Vec<LogLine> {
     if json.trim().is_empty() {
         return Vec::new();
@@ -24,7 +22,6 @@ pub fn parse_logs_json(json: &str) -> Vec<LogLine> {
     arr.into_iter()
         .filter_map(|v| {
             let obj = v.as_object()?;
-            // Non-object elements (e.g. bare numbers) drop — not log lines.
             Some(LogLine {
                 source: str_field(obj, "source"),
                 level: str_field(obj, "level"),
@@ -41,8 +38,8 @@ fn str_field(obj: &serde_json::Map<String, Value>, key: &str) -> String {
         .to_string()
 }
 
-/// Distinct `source` values in first-appearance order (palette index = position mod length).
-/// Empty sources are skipped so they don't consume a palette slot.
+/// Distinct sources, first-appearance order (palette index = position mod length).
+/// Empty sources skipped.
 pub fn distinct_sources(lines: &[LogLine]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut ordered = Vec::new();
@@ -55,8 +52,8 @@ pub fn distinct_sources(lines: &[LogLine]) -> Vec<String> {
     ordered
 }
 
-/// Case-insensitive substring over message, source, OR level. Blank/whitespace query keeps
-/// every line. Returns `(original_index, line)` so filtered UIs keep stable row ids.
+/// Case-insensitive substring on text/source/level. Blank query → all lines.
+/// Returns `(original_index, line)` for stable row ids.
 pub fn filter_logs<'a>(lines: &'a [LogLine], query: &str) -> Vec<(usize, &'a LogLine)> {
     let q = query.trim().to_ascii_lowercase();
     let all = lines.iter().enumerate();
@@ -77,8 +74,7 @@ fn contains_ci(hay: &str, needle_lower: &str) -> bool {
     hay.to_ascii_lowercase().contains(needle_lower)
 }
 
-/// Flatten to `"[source] text"` lines for hosts that render plain text (Linux log view).
-/// Empty source omits the bracket prefix.
+/// `"[source] text"` lines (Linux plain-text log). Empty source omits brackets.
 pub fn flatten_log_lines(lines: &[LogLine]) -> String {
     lines
         .iter()

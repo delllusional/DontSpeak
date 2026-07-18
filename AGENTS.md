@@ -110,10 +110,14 @@ dependency audit stays separate.
 
 ## Code comments
 
+Short. Valuable info only — no filler, no restating clear names/signatures, no
+duplicate notes of the same fact.
+
 **Keep:** design rationale; public contracts (wire tokens, error modes, defaults);
 SAFETY preconditions; single-source / drift / race notes; why a test exists.
 
-**Strip:** restating the signature; duplicated boilerplate; pure "what" on clear names.
+**Strip:** signature restatements; pure "what"; history/changelog asides; the same
+explanation restated on module, item, and call site.
 
-One canonical explanation per concept; cross-ref liberally. Update or delete when
+One canonical note per concept; cross-ref elsewhere. Update or delete when
 behavior changes.

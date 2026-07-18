@@ -1,14 +1,10 @@
-//! Logs→UI push, shaped like `status::spawn_push` but scoped to Log-tab visibility
-//! (started/stopped from `ui.rs`) — polling while the tab is closed is pure waste.
-//!
-//! Payload is the raw `ds_logs_json` array (not pre-flattened) so the UI can apply shared
-//! [`ds_log`] filter rules without a second disk read.
+//! Logs→UI push while the Log tab is open (like `status::spawn_push`).
+//! Raw `ds_logs_json` so the UI can filter via [`ds_log`] without another disk read.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Spawn the push thread: blocks in `ffi::log_wait_json` (2s guard) and sends the raw JSON
-/// tail on every wake. Returns the stop flag (`store(true, Relaxed)`); thread exits within one wait.
+/// Blocks in `log_wait_json` (2s); sends raw JSON. Stop: `store(true, Relaxed)`.
 pub fn spawn_push(tx: async_channel::Sender<String>) -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();

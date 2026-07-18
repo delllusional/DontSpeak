@@ -420,8 +420,7 @@ fn set_failures(row: &adw::ActionRow, label: &gtk::Label, failures: u64) {
     }
 }
 
-/// Selected TTS → (display name, lifecycle token, `EngineObj`). Slot from shared
-/// [`ds_status::ActiveTtsSlot`] so hosts can't drift on which object is "active".
+/// Active TTS row via [`ds_status::ActiveTtsSlot`].
 fn tts_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
     use ds_status::ActiveTtsSlot;
     match ActiveTtsSlot::from_engine(&s.tts_engine)? {
@@ -438,8 +437,7 @@ fn tts_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
     }
 }
 
-/// Selected STT → (display name, lifecycle token, `EngineObj`). Slot from shared
-/// [`ds_status::ActiveSttSlot`].
+/// Active STT row via [`ds_status::ActiveSttSlot`].
 fn stt_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
     use ds_status::ActiveSttSlot;
     match ActiveSttSlot::from_engine(&s.stt_engine)? {
@@ -790,7 +788,7 @@ fn build_log_page() -> (gtk::ScrolledWindow, gtk::TextView) {
     (scroll, view)
 }
 
-/// Filter raw combined-log JSON with shared [`ds_log`] rules, flatten, show empty/no-match.
+/// Filter/flatten via [`ds_log`]; empty or no-match placeholders.
 fn set_log_from_json(view: &gtk::TextView, json: &str, query: &str) {
     let (total, shown, flat) = crate::ffi::filter_and_flatten_logs(json, query);
     let text = if total == 0 {

@@ -63,20 +63,20 @@ internal static class Native
     /// <summary>Decimal size string shared with macOS/Linux Libraries tabs (byte-for-byte parity).</summary>
     public static string HumanSize(ulong bytes) => TakeString(ds_human_size(bytes));
 
-    /// <summary>Tray kind token from shared Rust (`idle`|`recording`|`speaking`).</summary>
+    /// <summary><c>ds_tray_icon_kind</c>.</summary>
     public static string TrayIconKind(bool sttActive, bool ttsActive, string[] trayIndicator)
     {
         var json = JsonSerializer.Serialize(trayIndicator ?? Array.Empty<string>());
         return TakeString(ds_tray_icon_kind((byte)(sttActive ? 1 : 0), (byte)(ttsActive ? 1 : 0), json));
     }
 
-    /// <summary>Active TTS model_status object key (`kokoro`|`tts_system`|empty).</summary>
+    /// <summary><c>ds_active_tts_slot</c>.</summary>
     public static string ActiveTtsSlot(string ttsEngine) => TakeString(ds_active_tts_slot(ttsEngine ?? ""));
 
-    /// <summary>Active STT model_status object key (`parakeet`|`claude_code`|`system`|empty).</summary>
+    /// <summary><c>ds_active_stt_slot</c>.</summary>
     public static string ActiveSttSlot(string sttEngine) => TakeString(ds_active_stt_slot(sttEngine ?? ""));
 
-    /// <summary>Shared diarization UI gate (`ds_tools::DIARIZATION_ENABLED`) — do not re-mirror.</summary>
+    /// <summary><c>ds_diarization_ui_enabled</c> — do not re-mirror.</summary>
     public static bool DiarizationUiEnabled() => ds_diarization_ui_enabled() != 0;
 
     /// <summary>Workspace product version; cached (immutable for process life; ApplyStatus reads often).</summary>
@@ -248,15 +248,14 @@ internal sealed class HealthSnapshot
     public EngineSelection EngineSelection = new();
     public Dictation Dictation = new();
 
-    /// <summary>Engine object for active TTS. Tokens lockstep with <c>ds_status::ActiveTtsSlot</c>
-    /// (pure so unit tests need no ds_core.dll; FFI <see cref="Native.ActiveTtsSlot"/> exists too).</summary>
+    /// <summary>See <c>ds_status::ActiveTtsSlot</c> (pure; no ds_core.dll in tests).</summary>
     public EngineInfo ActiveTts => EngineSelection.TtsEngine switch
     {
         "system" => EngineDots.TtsSystem,
         "built_in" => EngineDots.Kokoro,
         _ => new EngineInfo(EngineState.Missing, 0, ""), // off / unknown
     };
-    /// <summary>Engine object for active STT — lockstep with <c>ds_status::ActiveSttSlot</c>.</summary>
+    /// <summary>See <c>ds_status::ActiveSttSlot</c>.</summary>
     public EngineInfo ActiveStt => EngineSelection.SttEngine switch
     {
         "claude_code" => EngineDots.ClaudeCode,
@@ -265,7 +264,7 @@ internal sealed class HealthSnapshot
         _ => new EngineInfo(EngineState.Missing, 0, ""),
     };
 
-    /// <summary>Tray/state-stripe; lockstep with <c>ds_status::tray_icon_kind</c> (HealthSnapshotTests pin).</summary>
+    /// <summary>See <c>ds_status::tray_icon_kind</c>.</summary>
     public TrayIcon.IconState IndicatorState()
     {
         bool Colors(string state) =>

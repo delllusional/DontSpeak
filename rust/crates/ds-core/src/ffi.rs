@@ -390,9 +390,8 @@ pub extern "C" fn ds_human_size(bytes: u64) -> *mut c_char {
     guard_str("", || to_cstring(crate::status_fmt::human_size(bytes)))
 }
 
-/// Tray / state-stripe kind (`idle` | `recording` | `speaking`). `tray_indicator_json` is a
-/// JSON string array from `model_status.tray_indicator` (NULL/malformed → `[]`). Owned
-/// `char*`. HANDLE-FREE. ONE mapping for every host (see [`ds_status::tray_icon_kind`]).
+/// Tray kind via [`ds_status::tray_icon_kind`]. `tray_indicator_json`: JSON string array
+/// (NULL/malformed → `[]`). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_tray_icon_kind(
     stt_active: u8,
@@ -407,8 +406,8 @@ pub extern "C" fn ds_tray_icon_kind(
     })
 }
 
-/// Active TTS model_status object key for config token `tts_engine`
-/// (`kokoro` | `tts_system` | empty when off/unknown). Owned `char*`. HANDLE-FREE.
+/// Config `tts_engine` → model_status key (see [`ds_status::ActiveTtsSlot`]). Owned `char*`.
+/// HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_active_tts_slot(tts_engine: *const c_char) -> *mut c_char {
     guard_str("", || {
@@ -419,8 +418,7 @@ pub extern "C" fn ds_active_tts_slot(tts_engine: *const c_char) -> *mut c_char {
     })
 }
 
-/// Active STT model_status object key for config token `stt_engine`
-/// (`parakeet` | `claude_code` | `system` | empty when off/unknown). Owned `char*`.
+/// Config `stt_engine` → model_status key (see [`ds_status::ActiveSttSlot`]). Owned `char*`.
 /// HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_active_stt_slot(stt_engine: *const c_char) -> *mut c_char {
@@ -432,8 +430,8 @@ pub extern "C" fn ds_active_stt_slot(stt_engine: *const c_char) -> *mut c_char {
     })
 }
 
-/// Whether diarization UI/tools are shipped (`ds_tools::DIARIZATION_ENABLED`). ONE flip for
-/// every host — do not re-mirror as a host-local const. 1 = shown, 0 = hidden. HANDLE-FREE.
+/// `ds_tools::DIARIZATION_ENABLED` — single flip for every host. 1 shown / 0 hidden.
+/// HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_diarization_ui_enabled() -> u8 {
     guard_val(0, || ds_tools::DIARIZATION_ENABLED as u8)

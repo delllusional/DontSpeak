@@ -1,11 +1,9 @@
 //! Tray / state-stripe icon kind — single source for every host.
 //!
-//! Color is gated by `model_status.tray_indicator`: plain token (`"stt"` / `"tts"`) or
-//! animated form (`"stt_animated"` / `"tts_animated"`) both enable the tint. Empty list
-//! ⇒ never color (idle). Recording wins over speaking when both apply (full-duplex live-mic
-//! cue). Download/warm states stay on engine dots only — never the tray.
+//! Color only when `tray_indicator` lists `stt`/`tts` (or `*_animated`). Empty ⇒ idle.
+//! Recording beats speaking (full-duplex). Download/warm stay on engine dots, not tray.
 
-/// Tray / title-bar indicator kind. Wire tokens via [`TrayIconKind::as_str`].
+/// Wire tokens via [`TrayIconKind::as_str`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TrayIconKind {
     Idle,
@@ -20,7 +18,7 @@ impl TrayIconKind {
         TrayIconKind::Speaking,
     ];
 
-    /// Wire / FFI token (`idle` | `recording` | `speaking`).
+    /// `idle` | `recording` | `speaking`.
     pub fn as_str(self) -> &'static str {
         match self {
             TrayIconKind::Idle => "idle",
@@ -39,8 +37,7 @@ impl TrayIconKind {
     }
 }
 
-/// Whether `tray_indicator` enables coloring for `base` (`"stt"` / `"tts"`), including
-/// the `_animated` form hosts use for breathing pills (macOS).
+/// True if `tray_indicator` enables color for `base` (`stt`/`tts`), including `_animated`.
 fn colors_for(tray_indicator: &[impl AsRef<str>], base: &str) -> bool {
     tray_indicator.iter().any(|t| {
         let t = t.as_ref();
@@ -48,9 +45,7 @@ fn colors_for(tray_indicator: &[impl AsRef<str>], base: &str) -> bool {
     })
 }
 
-/// Resolve tray/state-stripe kind from live activity + `tray_indicator` config.
-///
-/// `stt_active` is Caps dictation (not always-on capture). `tts_active` is playback.
+/// `stt_active` = Caps dictation (not always-on). `tts_active` = playback.
 pub fn tray_icon_kind(
     stt_active: bool,
     tts_active: bool,

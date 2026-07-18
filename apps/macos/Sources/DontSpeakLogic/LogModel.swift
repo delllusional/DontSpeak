@@ -21,13 +21,9 @@ public struct LogLine: Decodable, Equatable, Sendable {
     }
 }
 
-/// Logs-tab pure rules: stable first-appearance source order (palette index) and free-text
-/// filter. Lockstep with `ds_log::catalog` (Rust) and Windows `LogParser.Filter` /
-/// `DistinctSources` — same cases pinned by unit tests on each side. No Foundation —
-/// `lowercased()` matches the engine/UI's ASCII tokens.
+/// Logs-tab pure rules — lockstep with `ds_log::catalog` / Windows `LogParser`.
 public enum LogCatalog {
-    /// Distinct sources in first-appearance order; view colors by index mod palette length.
-    /// Empty sources are skipped (lockstep with `ds_log::distinct_sources` / Windows LogParser).
+    /// See `ds_log::distinct_sources`.
     public static func distinctSources(_ lines: [LogLine]) -> [String] {
         var seen: Set<String> = []
         var ordered: [String] = []
@@ -43,14 +39,12 @@ public enum LogCatalog {
         orderedSources.firstIndex(of: source)
     }
 
-    /// Case-insensitive substring over message, source, OR level (Windows filter semantics).
-    /// Blank/whitespace query keeps every line.
+    /// See `ds_log::filter_logs`.
     public static func filter(_ lines: [LogLine], query: String) -> [LogLine] {
         filterIndexed(lines, query: query).map(\.line)
     }
 
-    /// Like `filter`, but keeps each line's ORIGINAL array index as the stable UI row id
-    /// (filtered offsets renumber on every keystroke and look like new rows to the differ).
+    /// Original indices as stable row ids (filtered offsets renumber every keystroke).
     public static func filterIndexed(
         _ lines: [LogLine], query: String
     ) -> [(index: Int, line: LogLine)] {
