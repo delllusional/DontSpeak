@@ -26,7 +26,9 @@ name: Release
 # Release body comes from the git tag annotation (`gh release create --notes-from-tag`),
 # not --generate-notes (PR-only and empty for this repo's direct-to-main flow). Real
 # releases use annotated tags with the hand-written notes; lightweight tags fall back
-# to the pointed-at commit message (fine for throwaway -dev drafts).
+# to the pointed-at commit message (fine for throwaway -dev drafts). Post-publish, CI
+# fills the Lines table's Binaries-avg placeholders from the published artifact sizes;
+# the tag annotation stays untouched.
 
 on:
   push:
@@ -417,3 +419,35 @@ jobs:
             --notes-from-tag \
             "${DRAFT_ARGS[@]}" \
             "${FILES[@]}" "${INSTALLERS[@]}" checksums.txt
+
+      # Fill the "## Lines" table's Binaries-avg column with real sizes. At tag time the
+      # new release's assets don't exist, so the annotated tag (the immutable notes
+      # transport) carries "…" placeholders; this rewrites ONLY those cells against the
+      # previous release's published sizes. Soft-fail by design: the release is already
+      # live — a stats hiccup must not redden the job. Dev drafts are skipped: their
+      # commit-message bodies have no Lines table, and gh release view/edit by tag is
+      # unreliable for drafts (see the create step's comment).
+      - name: Fill Binaries avg sizes in release notes
+        if: ${{ !contains(github.ref_name, '-dev') }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          export TAG
+          # Newest non-draft, non-dev release that isn't the one just created.
+          # --jq filters per page; head -n1 takes the newest (list is created-desc).
+          prev="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq '.[] | select(.draft == false and .tag_name != env.TAG and ((.tag_name | test("-dev")) | not)) | .tag_name' \
+            | head -n1)"
+          if [ -z "$prev" ]; then
+            echo "no previous release — leaving size placeholders"; exit 0
+          fi
+          gh release view "$TAG" --json body --jq .body > body.md
+          cp body.md body.orig.md
+          python3 scripts/release/release-stats.py --patch-sizes body.md --old "$prev" --assets-dir artifacts
+          if cmp -s body.md body.orig.md; then
+            echo "body unchanged (no Lines table or identical sizes) — skipping edit"; exit 0
+          fi
+          gh release edit "$TAG" --notes-file body.md

@@ -14,16 +14,23 @@ of whether they fall in code or test regions.
 
 Also reports **Binaries** size deltas (GitHub Release host packages only — not
 install scripts or checksums): each host app row averages that OS's two arch
-packages; **Total** averages all six; `rust` is blank.
+packages; **Total** averages all six; `rust` is blank. At tag time the new
+release's assets don't exist yet, so the default mode writes `…` placeholders in
+that column; after publish, release.yml reruns this script in `--patch-sizes`
+mode, which rewrites ONLY those cells from the just-built artifacts on disk vs
+the previous release's published sizes, leaving the tag annotation untouched.
 
 Used by the `make-release` skill to generate the change-stats table appended
 to release notes. Run from the repo root:
 
-    scripts/release/release-stats.py v0.2.0 v0.2.1
+    scripts/release/release-stats.py v0.2.0 HEAD
+    scripts/release/release-stats.py --patch-sizes body.md --old v0.2.0 --assets-dir artifacts
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -167,22 +174,57 @@ AREA_PLATFORMS = {
 }
 
 
-def size_bump_by_area(old_ref: str, new_ref: str) -> dict[str, str]:
+ALL_PLATFORMS = (
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-x86_64",
+    "macos-aarch64",
+    "windows-x86_64",
+    "windows-aarch64",
+)
+
+
+def sizes_by_platform_from_release(tag: str) -> dict[str, int] | None:
+    """Platform key → size bytes for a published release, or None (gh failure / no assets)."""
+    sizes = release_binary_sizes(tag)
+    if sizes is None:
+        return None
+    return {platform_key(n): s for n, s in sizes.items() if platform_key(n)}
+
+
+def sizes_by_platform_from_dir(d: str) -> dict[str, int]:
+    """Platform key → size bytes for packages under `d` (recursive — handles the
+    release job's nested `artifacts/<artifact-name>/` layout). Basenames must match
+    BINARY_ASSET_RE; anything else (installers, checksums) is ignored."""
+    out: dict[str, int] = {}
+    for root, _dirs, files in os.walk(d):
+        for name in files:
+            if BINARY_ASSET_RE.match(name):
+                key = platform_key(name)
+                if key:
+                    out[key] = os.path.getsize(os.path.join(root, name))
+    return out
+
+
+def size_cells(
+    old_by: dict[str, int] | None, new_by: dict[str, int] | None
+) -> dict[str, str]:
     """Map area label (and 'Total') → fifth-column cell text.
 
-    Host app rows: mean size of that OS's published packages (both arches when
-    present in both releases). Total: mean of all six packages. rust: blank.
+    Host app rows: mean size of that OS's packages (both arches when present in
+    both maps). Total: mean of all six packages. rust: blank. No new sizes (the
+    pre-tag run: the release doesn't exist yet) → `…` placeholders for CI's
+    post-publish --patch-sizes pass. No old sizes with real new ones (first-ever
+    release) → `—` via the no-common-platforms path.
     """
-    empty = {label: "" for label, _ in BUCKETS}
-    empty["Total"] = "—"
-
-    old_sizes = release_binary_sizes(old_ref)
-    new_sizes = release_binary_sizes(new_ref)
-    if not old_sizes or not new_sizes:
-        return empty
-
-    old_by = {platform_key(n): s for n, s in old_sizes.items() if platform_key(n)}
-    new_by = {platform_key(n): s for n, s in new_sizes.items() if platform_key(n)}
+    cells = {label: "" for label, _ in BUCKETS}
+    if not new_by:
+        for label, plats in AREA_PLATFORMS.items():
+            if plats:
+                cells[label] = "…"
+        cells["Total"] = "…"
+        return cells
+    old_by = old_by or {}
 
     def avg_delta(plats: tuple[str, ...]) -> str:
         common = [p for p in plats if p in old_by and p in new_by]
@@ -192,29 +234,96 @@ def size_bump_by_area(old_ref: str, new_ref: str) -> dict[str, str]:
         new_avg = sum(new_by[p] for p in common) / len(common)
         return fmt_size_bump(new_avg - old_avg)
 
-    out: dict[str, str] = {}
     for label, plats in AREA_PLATFORMS.items():
-        if not plats:
-            out[label] = ""  # rust: no host package
-        else:
-            out[label] = avg_delta(plats)
-    all_plats = (
-        "linux-x86_64",
-        "linux-aarch64",
-        "macos-x86_64",
-        "macos-aarch64",
-        "windows-x86_64",
-        "windows-aarch64",
-    )
-    out["Total"] = avg_delta(all_plats)
-    return out
+        if plats:  # rust: no host package, stays blank
+            cells[label] = avg_delta(plats)
+    cells["Total"] = avg_delta(ALL_PLATFORMS)
+    return cells
+
+
+LINES_HEADER_ROW = "| Area | Code | Tests | Comments | Binaries avg |"
+
+
+def patch_lines_table(text: str, cells: dict[str, str]) -> str | None:
+    """Rewrite the fifth column of the first Lines table in `text`; None if absent.
+
+    Overwrites area/Total rows' Binaries-avg cells unconditionally (placeholder,
+    blank, or stale) with `cells` values, bolding Total to match the generator.
+    Preserves everything else byte-for-byte, including CRLF vs LF line endings.
+    """
+    lines = text.splitlines(keepends=True)
+    labels = {label for label, _ in BUCKETS} | {"Total"}
+    header_idx = None
+    for i, line in enumerate(lines):
+        if line.rstrip("\r\n") == LINES_HEADER_ROW:
+            header_idx = i
+            break
+    if header_idx is None:
+        return None
+    for i in range(header_idx + 1, len(lines)):
+        body = lines[i].rstrip("\r\n")
+        if not body.startswith("|"):
+            break  # contiguous table rows only
+        ending = lines[i][len(body):]
+        parts = body.split("|")
+        if len(parts) != 7:  # not a well-formed 5-column row
+            continue
+        label = parts[1].strip().strip("`*")
+        if label not in labels:
+            continue
+        value = cells.get(label, "")
+        parts[5] = f" **{value}** " if label == "Total" else f" {value} "
+        lines[i] = "|".join(parts) + ending
+    return "".join(lines)
+
+
+def patch_sizes(body_path: str, old_tag: str, assets_dir: str) -> None:
+    """--patch-sizes mode: fill the body file's Binaries-avg cells in place."""
+    with open(body_path, newline="", encoding="utf-8") as f:
+        text = f.read()
+    old_by = sizes_by_platform_from_release(old_tag)
+    if old_by is None:
+        # Transient gh hiccup must not overwrite placeholders with bogus `—`.
+        print(
+            f"error: no published sizes for {old_tag} (gh failed?) — {body_path} untouched",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    new_by = sizes_by_platform_from_dir(assets_dir)
+    patched = patch_lines_table(text, size_cells(old_by, new_by))
+    if patched is None:
+        print(f"no Lines table in {body_path} — nothing to patch")
+        return
+    with open(body_path, "w", newline="", encoding="utf-8") as f:
+        f.write(patched)
+    # ASCII-only status: Windows consoles may still be cp1252.
+    print(f"patched Binaries avg cells in {body_path} ({old_tag} vs {assets_dir})")
 
 
 def main():
-    if len(sys.argv) != 3:
-        print(f"usage: {sys.argv[0]} <old-ref> <new-ref>", file=sys.stderr)
-        sys.exit(1)
-    old_ref, new_ref = sys.argv[1], sys.argv[2]
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("refs", nargs="*", metavar="ref", help="<old-ref> <new-ref>")
+    ap.add_argument(
+        "--patch-sizes",
+        metavar="BODY_FILE",
+        help="rewrite the Binaries-avg cells of BODY_FILE's Lines table in place",
+    )
+    ap.add_argument("--old", metavar="PREV_TAG", help="previous published release tag")
+    ap.add_argument(
+        "--assets-dir", metavar="DIR", help="directory holding the new release's packages"
+    )
+    args = ap.parse_args()
+
+    if args.patch_sizes:
+        if not args.old or not args.assets_dir:
+            ap.error("--patch-sizes requires --old and --assets-dir")
+        patch_sizes(args.patch_sizes, args.old, args.assets_dir)
+        return
+    if args.old or args.assets_dir:
+        ap.error("--old/--assets-dir only apply with --patch-sizes")
+    if len(args.refs) != 2:
+        ap.error("expected <old-ref> <new-ref>")
+    old_ref, new_ref = args.refs
 
     rows = []
     totals = [0, 0, 0, 0, 0, 0]
@@ -223,17 +332,19 @@ def main():
         rows.append((label, stats))
         totals = [t + s for t, s in zip(totals, stats)]
 
-    size_cells = size_bump_by_area(old_ref, new_ref)
+    cells = size_cells(
+        sizes_by_platform_from_release(old_ref), sizes_by_platform_from_release(new_ref)
+    )
 
-    print("| Area | Code | Tests | Comments | Binaries avg |")
+    print(LINES_HEADER_ROW)
     print("|---|---:|---:|---:|---:|")
     for label, (code_add, code_del, test_add, test_del, comment_add, comment_del) in rows:
-        size = size_cells.get(label, "")
+        size = cells.get(label, "")
         print(
             f"| `{label}` | {fmt(code_add, code_del)} | {fmt(test_add, test_del)} | "
             f"{fmt(comment_add, comment_del)} | {size} |"
         )
-    total_size = size_cells.get("Total", "—")
+    total_size = cells.get("Total", "—")
     print(
         f"| **Total** | **{fmt(totals[0], totals[1])}** | **{fmt(totals[2], totals[3])}** "
         f"| **{fmt(totals[4], totals[5])}** | **{total_size}** |"

@@ -157,6 +157,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: node script tests
         run: node --test scripts/agents/agent-attribution.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
+      - name: python script tests
+        run: python3 scripts/release/release-stats.test.py
 
   # Pick the shared clippy/test OS matrix: Linux-only by default, all three when
   # full-matrix is requested (the release gate). push/PR events have no `inputs`, so
