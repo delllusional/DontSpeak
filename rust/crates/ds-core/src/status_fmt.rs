@@ -53,8 +53,8 @@ pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
     }
 }
 
-/// Lifetime / remaining duration; leading+trailing zero units dropped. Usage remaining:
-/// [`duration_live_no_seconds`].
+/// Lifetime / remaining duration; leading+trailing zero units dropped.
+/// Usage remaining (no seconds): [`usage_resets_in`].
 pub fn duration_live(secs: f64) -> String {
     let total = secs.round().max(0.0) as i64;
     let d = total / 86400;
@@ -127,7 +127,7 @@ pub fn usage_resets_in(resets_at_unix: i64) -> String {
     duration_live_no_seconds(remaining)
 }
 
-/// [`duration_live`] without seconds (sub-minute → `0m`).
+/// Like duration_live but no seconds (sub-minute → `0m`). Private helper for usage_resets_in.
 fn duration_live_no_seconds(secs: f64) -> String {
     let total = secs.round().max(0.0) as i64;
     let d = total / 86400;
@@ -162,10 +162,7 @@ fn duration_live_no_seconds(secs: f64) -> String {
             )
         }
     } else {
-        fill(
-            "status.stats.duration_live.minutes_only",
-            &[("m", &m_s)],
-        )
+        fill("status.stats.duration_live.minutes_only", &[("m", &m_s)])
     }
 }
 
@@ -287,7 +284,10 @@ mod tests {
         assert_eq!(duration_live_no_seconds(12.0 * 60.0 + 4.0), "12m");
         assert_eq!(duration_live_no_seconds(12.0 * 60.0), "12m");
         assert_eq!(duration_live_no_seconds(5.0 * 3600.0), "5h");
-        assert_eq!(duration_live_no_seconds(5.0 * 3600.0 + 11.0 * 60.0), "5h 11m");
+        assert_eq!(
+            duration_live_no_seconds(5.0 * 3600.0 + 11.0 * 60.0),
+            "5h 11m"
+        );
         assert_eq!(
             duration_live_no_seconds(5.0 * 3600.0 + 11.0 * 60.0 + 30.0),
             "5h 11m"

@@ -198,9 +198,6 @@ mod tests {
             r#"{"oauthAccount":{"emailAddress":"me@anthropic.test","displayName":"Me"}}"#,
         )
         .unwrap();
-        assert_eq!(
-            account(&paths).as_deref(),
-            Some("me@anthropic.test")
-        );
+        assert_eq!(account(&paths).as_deref(), Some("me@anthropic.test"));
     }
 }

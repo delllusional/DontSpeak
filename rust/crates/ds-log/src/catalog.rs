@@ -140,10 +140,7 @@ mod tests {
             line("caps", "INFO", "d"),
             line("", "INFO", "skip"),
         ];
-        assert_eq!(
-            distinct_sources(&lines),
-            ["engine", "tts", "caps"]
-        );
+        assert_eq!(distinct_sources(&lines), ["engine", "tts", "caps"]);
     }
 
     #[test]
@@ -206,18 +203,12 @@ mod tests {
         ];
         // "n" matches seNtence (0) + loNg (2)
         let r = filter_logs(&sample, "n");
-        assert_eq!(
-            r.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
-            [0, 2]
-        );
+        assert_eq!(r.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 2]);
     }
 
     #[test]
     fn flatten_prefixes_source() {
-        let lines = [
-            line("engine", "INFO", "up"),
-            line("", "INFO", "orphan"),
-        ];
+        let lines = [line("engine", "INFO", "up"), line("", "INFO", "orphan")];
         assert_eq!(flatten_log_lines(&lines), "[engine] up\norphan");
     }
 }

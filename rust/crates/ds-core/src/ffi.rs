@@ -615,12 +615,12 @@ mod tests {
             take_string(ds_tray_icon_kind(0, 1, ind.as_ptr())),
             "speaking"
         );
-        assert_eq!(take_string(ds_tray_icon_kind(1, 1, ind.as_ptr())), "recording");
-        let empty = CString::new("[]").unwrap();
         assert_eq!(
-            take_string(ds_tray_icon_kind(1, 1, empty.as_ptr())),
-            "idle"
+            take_string(ds_tray_icon_kind(1, 1, ind.as_ptr())),
+            "recording"
         );
+        let empty = CString::new("[]").unwrap();
+        assert_eq!(take_string(ds_tray_icon_kind(1, 1, empty.as_ptr())), "idle");
         assert_eq!(
             take_string(ds_tray_icon_kind(1, 1, std::ptr::null())),
             "idle"

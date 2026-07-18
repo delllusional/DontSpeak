@@ -10,7 +10,7 @@
 //! `ds_http` defaults to `max_redirections(0)` so credential-bearing probes never hop
 //! (attohttpc re-sends `Authorization` on cross-origin 3xx). These public CDN GETs
 //! never attach auth; GitHub `releases/download` and Hugging Face `/resolve/` already
-//! 302 to object storage, so [`http_get_builder`] opts back into a small redirect budget.
+//! 302 to object storage, so the CDN GET builder opts back into a small redirect budget.
 //!
 //! Retry classification rides on `io::ErrorKind`, not a custom error enum:
 //! `InvalidData` = checksum mismatch and `NotFound` = HTTP 4xx or definitive DNS
@@ -1377,7 +1377,8 @@ mod tests {
             then.status(200).body("cdn-payload");
         });
         let start = server.mock(|when, then| {
-            when.method(httpmock::Method::GET).path("/releases/download/x");
+            when.method(httpmock::Method::GET)
+                .path("/releases/download/x");
             then.status(302)
                 .header("Location", server.url("/cdn-object"))
                 .body("");

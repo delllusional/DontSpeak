@@ -901,9 +901,14 @@ impl UsagePage {
                     })
             };
             self.list.insert_child_after(&stack, previous.as_ref());
-            self.rendered
-                .borrow_mut()
-                .insert(card.agent, MountedUsageCard { stack, account, rows });
+            self.rendered.borrow_mut().insert(
+                card.agent,
+                MountedUsageCard {
+                    stack,
+                    account,
+                    rows,
+                },
+            );
         }
         self.refresh_speaking_wash();
         self.update_empty_state(false);

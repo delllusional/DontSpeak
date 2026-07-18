@@ -12,8 +12,10 @@ import SwiftUI
 struct UsageView: View {
     @Environment(Core.self) private var core
     @State private var cards: [UsageCard] = []
-    /// Rust skeleton order (ClientSource::CLIENTS).\n    @State private var canonicalAgents: [String] = []
-    /// Skeleton + all per-agent loads finished for this generation.\n    @State private var settled = false
+    /// Rust skeleton order (`ClientSource::CLIENTS`).
+    @State private var canonicalAgents: [String] = []
+    /// Skeleton + all per-agent loads finished for this generation.
+    @State private var settled = false
     @State private var generation = 0
 
     var body: some View {
@@ -23,7 +25,8 @@ struct UsageView: View {
                     Text(L.t("usage.unavailable"))
                         .foregroundStyle(.secondary)
                 } else {
-                    // Color.clear keeps onAppear alive (EmptyView never appears).\n                    Color.clear
+                    // Color.clear keeps onAppear alive (EmptyView never appears).
+                    Color.clear
                 }
             } else {
                 ScrollView {

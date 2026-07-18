@@ -13,6 +13,7 @@ publish.workspace = true
 # Compile-time-embedded YAML catalog + runtime locale switching. The translations are
 # baked into the binary, so the shared staticlib (macOS) / cdylib (Windows) carries the
 # whole catalog with no external resource files to ship.
+# Prefer current 4.x in both rust/ and apps/linux/gtk/ locks (same rust-i18n* triple).
 rust-i18n = "4"
 # OS language detection (macOS, Windows, Linux, …) so the catalog defaults to the
 # system locale without each UI having to pass it in.

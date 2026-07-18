@@ -30,13 +30,44 @@ Monitor to completion and verify assets. Notes are **not** committed to the tree
   fail-fast; release full-matrix tests/hygiene are the real gate.
 - **Hygiene** (top re-cut cause — not in per-commit CI):
   ```bash
-  (cd rust && cargo fmt) && (cd apps/linux/gtk && cargo fmt)
-  (cd rust && cargo fmt --check) && (cd apps/linux/gtk && cargo fmt --check)
+  (cd rust && cargo fmt --all) && (cd apps/linux/gtk && cargo fmt --all)
+  (cd rust && cargo fmt --all --check) && (cd apps/linux/gtk && cargo fmt --all --check)
   (cd rust && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked)
   cargo deny --manifest-path rust/Cargo.toml --all-features check --config rust/deny.toml
   cargo deny --manifest-path apps/linux/gtk/Cargo.toml --all-features check --config rust/deny.toml
   ```
-  Both workspaces, all-features deny. Commit fmt/advisory fixes.
+  Both workspaces, all-features deny. Commit fmt/advisory fixes. Use `cargo fmt --all`
+  from each package root (not bare `--manifest-path` from repo root — that misses targets).
+
+- **Dependency / deny policy** (when hygiene deny fails, or after any lock update):
+  1. **Prefer current crate versions via Cargo only.** Do not pin/downgrade to silence
+     deny (e.g. hold `rust-i18n` at 4.1). Bump **both** locks together with scoped updates:
+     ```bash
+     (cd rust && cargo update -p rust-i18n -p rust-i18n-macro -p rust-i18n-support)
+     (cd apps/linux/gtk && cargo update -p rust-i18n -p rust-i18n-macro -p rust-i18n-support)
+     (cd rust && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
+     (cd apps/linux/gtk && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
+     cargo tree -i <crate> --manifest-path rust/Cargo.toml --locked
+     cargo tree -i <crate> --manifest-path apps/linux/gtk/Cargo.toml --locked
+     ```
+     No hand-edited lock edges and no custom rewiring scripts.
+  2. **Cargo multi-version edges are intentional.** Resolver maximizes versions *and*
+     minimizes how many copies of a crate stay in the graph. If `ring` needs
+     `windows-sys ^0.52` and `tempfile` accepts `>=0.52, <0.62`, Cargo may point
+     tempfile at **0.52** to share ring's line — that is not a bug and not a
+     "downgrade" to fight. Real caps stay (e.g. `jni` → 0.45, `notify` → ^0.60).
+     Inspect with `cargo tree -i windows-sys@0.52.0` / `@0.61.2`.
+  3. **Diagnose before editing `rust/deny.toml`.**  
+     `cargo tree -i <dup>@<ver> --locked` on **both** manifests. If one lock is simply
+     behind, `cargo update -p …` on that workspace — real fix, not a skip.
+  4. **`[bans].skip` only for irreducible multi-version splits** after preferring new
+     deps (semver-incompatible parents: ahash→getrandom 0.3 vs rand 0.10→0.4). Reason
+     must name the actual parents. Never skip for "GTK failed / rust passed" without
+     checking lock drift first.
+  5. **Cleanup pass on every release.** Re-run deny; drop `skip` rows that show
+     `unmatched-skip` **and** still pass both denies without the row (keep only if the
+     other workspace's `--all-features` graph still needs it — e.g. cbindgen TOML).
+     Prefer deleting stale skips over accumulating them.
 - **macOS Swift tests** (not in prepush):
   ```bash
   (cd rust && cargo build --profile release-ffi --locked -p ds-core)

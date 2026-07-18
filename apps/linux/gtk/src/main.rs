@@ -181,9 +181,17 @@ fn prefer_x11_under_hypervisor() {
     let vendor = std::fs::read_to_string("/sys/class/dmi/id/sys_vendor")
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let hyper = ["virtualbox", "vmware", "kvm", "qemu", "xen", "microsoft corporation", "parallels"]
-        .iter()
-        .any(|h| product.contains(h) || vendor.contains(h));
+    let hyper = [
+        "virtualbox",
+        "vmware",
+        "kvm",
+        "qemu",
+        "xen",
+        "microsoft corporation",
+        "parallels",
+    ]
+    .iter()
+    .any(|h| product.contains(h) || vendor.contains(h));
     if hyper {
         // SAFETY: process-wide env before any GTK/GDK init.
         unsafe { std::env::set_var("GDK_BACKEND", "x11") };

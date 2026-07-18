@@ -782,6 +782,7 @@ dependencies = [
 name = "ds-agent-usage"
 version = "0.3.3-dev"
 dependencies = [
+ "base64",
  "ds-client",
  "ds-config",
  "ds-http",
@@ -891,6 +892,7 @@ dependencies = [
  "gtk4-layer-shell",
  "ksni",
  "libadwaita",
+ "log",
  "resvg",
  "serde",
  "serde_json",

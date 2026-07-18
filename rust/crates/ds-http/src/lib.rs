@@ -113,7 +113,8 @@ mod tests {
             then.status(503).body("unavailable");
         });
 
-        let oversized = read_utf8_limited(get(&server.url("/large"), None).unwrap(), 4).unwrap_err();
+        let oversized =
+            read_utf8_limited(get(&server.url("/large"), None).unwrap(), 4).unwrap_err();
         assert_eq!(oversized.kind(), std::io::ErrorKind::InvalidData);
         assert!(read_utf8_limited(get(&server.url("/failure"), None).unwrap(), 32).is_err());
     }
@@ -159,9 +160,7 @@ mod tests {
         let server = httpmock::MockServer::start();
         server.mock(|when, then| {
             when.method(httpmock::Method::GET).path("/slow");
-            then.status(200)
-                .delay(Duration::from_secs(2))
-                .body("late");
+            then.status(200).delay(Duration::from_secs(2)).body("late");
         });
 
         let started = Instant::now();

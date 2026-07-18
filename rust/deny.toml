@@ -56,6 +56,9 @@ skip = [
     { crate = "bitflags@1.3.2", reason = "existing transitive split; deny any unlisted duplicate version" },
     { crate = "cpal@0.17.3", reason = "rodio has not yet converged with the workspace's cpal generation" },
     { crate = "getrandom@0.2.17", reason = "existing transitive split; deny any unlisted duplicate version" },
+    # rust-i18n 4.2+ (serde-saphyr→ahash) needs 0.3; rand 0.10 / tempfile need 0.4. Irreducible until ahash migrates.
+    { crate = "getrandom@0.3.4", reason = "ahash (rust-i18n 4.2) vs getrandom 0.4 (rand 0.10/tempfile); deny any unlisted duplicate version" },
+    { crate = "r-efi@5.3.0", reason = "getrandom 0.3's r-efi 5 vs getrandom 0.4's r-efi 6; deny any unlisted duplicate version" },
     { crate = "jni@0.21.1", reason = "existing Android transitive split; deny any unlisted duplicate version" },
     { crate = "jni-sys@0.3.1", reason = "existing Android transitive split; deny any unlisted duplicate version" },
     { crate = "mach2@0.5.0", reason = "existing macOS audio transitive split; deny any unlisted duplicate version" },
