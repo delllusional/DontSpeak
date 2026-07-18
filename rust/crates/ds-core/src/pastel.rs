@@ -21,7 +21,7 @@ pub fn random_pastel_wash_json() -> String {
     format!(r#"{{"r":{r},"g":{g},"b":{b},"a":{WASH_ALPHA}}}"#)
 }
 
-/// HSV → sRGB (`h` in [0,1), `s`/`v` in [0,1]).
+/// HSV → sRGB (`h` in \[0, 1), `s`/`v` in \[0, 1\]).
 pub fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
     let h = h.rem_euclid(1.0);
     let s = s.clamp(0.0, 1.0);
@@ -103,6 +103,9 @@ mod tests {
         for _ in 0..8 {
             colors.insert(random_pastel_rgb());
         }
-        assert!(colors.len() > 1, "expected variety across rolls, got {colors:?}");
+        assert!(
+            colors.len() > 1,
+            "expected variety across rolls, got {colors:?}"
+        );
     }
 }

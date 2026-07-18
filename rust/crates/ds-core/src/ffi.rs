@@ -289,7 +289,10 @@ pub extern "C" fn ds_log_colors_json() -> *mut c_char {
 /// HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_random_pastel_wash_json() -> *mut c_char {
-    guard_str("{}", || to_cstring(crate::pastel::random_pastel_wash_json()))
+    guard_str(
+        "{}",
+        || to_cstring(crate::pastel::random_pastel_wash_json()),
+    )
 }
 
 /// Workspace version for About. Owned `char*`. HANDLE-FREE.
