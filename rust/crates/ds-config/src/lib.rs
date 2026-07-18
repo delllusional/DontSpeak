@@ -56,7 +56,9 @@ pub use grok_sessions::{
     resolve_grok_chat_history, resolve_grok_session_dir, resolve_grok_updates_jsonl,
     scan_grok_chat_history_by_mtime,
 };
-pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
+pub use narration::{
+    DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state, clean_for_speech,
+};
 pub use paths::{
     Paths, brew_onnxruntime_dylib, coreml_dir, coreml_model_present, data_dir, model_dir,
 };

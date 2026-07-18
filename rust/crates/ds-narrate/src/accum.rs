@@ -60,8 +60,7 @@ impl Accum {
         let mut spoken = Vec::new();
         if messages_on {
             for (text, _) in runs.into_iter().take(speakable).skip(self.emitted) {
-                let text = text.trim().to_string();
-                if !text.is_empty() {
+                if let Some(text) = ds_config::clean_for_speech(&text) {
                     spoken.push(text);
                 }
             }
@@ -71,7 +70,7 @@ impl Accum {
         // Final + no blockquote at all → voice whole once (latched).
         if short_on && self.seen_final && total == 0 && !self.short_done {
             self.short_done = true;
-            if let Some(utt) = short_reply_utterance(&cumulative) {
+            if let Some(utt) = ds_config::clean_for_speech(&cumulative) {
                 spoken.push(utt);
             }
         }
@@ -84,58 +83,39 @@ impl Accum {
     }
 }
 
-/// Blockquote-less reply → spoken whole. Only strips inline Markdown markers
-/// (`` ` `` `* _ #`) and collapses whitespace; returns `None` for empty/markers-only.
-///
-/// No length/code/URL/slash guards: they swallowed readable replies (e.g. "pause/resume").
-pub fn short_reply_utterance(text: &str) -> Option<String> {
-    let t = text.trim();
-    if t.is_empty() {
-        return None;
-    }
-    let mut s = String::with_capacity(t.len());
-    for ch in t.chars() {
-        match ch {
-            '`' | '*' | '_' | '#' => {}
-            '\n' | '\r' | '\t' => s.push(' '),
-            other => s.push(other),
-        }
-    }
-    let cleaned = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!cleaned.is_empty()).then_some(cleaned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // short_reply_utterance: read WHOLE; only empty/markers-only dropped.
+    // Shorts-path fixtures for `ds_config::clean_for_speech`: read WHOLE, only
+    // empty/markers-only dropped. (Hash-token and backtick-path cases live in
+    // `ds_config::narration`'s own tests, next to the function.)
 
     #[test]
     fn short_utt_plain_text_passes_trimmed() {
         assert_eq!(
-            short_reply_utterance("  Hello there.  ").as_deref(),
+            ds_config::clean_for_speech("  Hello there.  ").as_deref(),
             Some("Hello there.")
         );
     }
 
     #[test]
     fn short_utt_empty_or_whitespace_is_none() {
-        assert_eq!(short_reply_utterance(""), None);
-        assert_eq!(short_reply_utterance("   \n\t "), None);
+        assert_eq!(ds_config::clean_for_speech(""), None);
+        assert_eq!(ds_config::clean_for_speech("   \n\t "), None);
     }
 
     #[test]
     fn short_utt_markers_only_becomes_none() {
-        assert_eq!(short_reply_utterance("***"), None);
-        assert_eq!(short_reply_utterance("###  _ "), None);
+        assert_eq!(ds_config::clean_for_speech("***"), None);
+        assert_eq!(ds_config::clean_for_speech("###  _ "), None);
     }
 
     #[test]
     fn short_utt_long_text_is_read_whole() {
         // No length cap.
         let long = "word ".repeat(120); // ~600 chars
-        let spoken = short_reply_utterance(&long).expect("long text is read");
+        let spoken = ds_config::clean_for_speech(&long).expect("long text is read");
         assert!(spoken.starts_with("word word"));
         assert!(spoken.chars().count() > 320, "not truncated/silenced");
     }
@@ -144,11 +124,11 @@ mod tests {
     fn short_utt_slashed_word_is_read_whole() {
         // Regression: slash must not silence the reply.
         assert_eq!(
-            short_reply_utterance("The pause/resume toggle.").as_deref(),
+            ds_config::clean_for_speech("The pause/resume toggle.").as_deref(),
             Some("The pause/resume toggle.")
         );
         assert_eq!(
-            short_reply_utterance("Edit src/main and rebuild.").as_deref(),
+            ds_config::clean_for_speech("Edit src/main and rebuild.").as_deref(),
             Some("Edit src/main and rebuild.")
         );
     }
@@ -157,11 +137,11 @@ mod tests {
     fn short_utt_code_and_url_are_read_whole() {
         // Backticks stripped as markers; URL kept.
         assert_eq!(
-            short_reply_utterance("Run ```cargo build``` now").as_deref(),
+            ds_config::clean_for_speech("Run ```cargo build``` now").as_deref(),
             Some("Run cargo build now")
         );
         assert_eq!(
-            short_reply_utterance("See https://example.com for more").as_deref(),
+            ds_config::clean_for_speech("See https://example.com for more").as_deref(),
             Some("See https://example.com for more")
         );
     }
@@ -169,15 +149,15 @@ mod tests {
     #[test]
     fn short_utt_strips_markdown_and_collapses_whitespace() {
         assert_eq!(
-            short_reply_utterance("Yes, `that` is the **default**.").as_deref(),
+            ds_config::clean_for_speech("Yes, `that` is the **default**.").as_deref(),
             Some("Yes, that is the default.")
         );
         assert_eq!(
-            short_reply_utterance("line one\n\n  line   two\ttab").as_deref(),
+            ds_config::clean_for_speech("line one\n\n  line   two\ttab").as_deref(),
             Some("line one line two tab")
         );
         assert_eq!(
-            short_reply_utterance("# Heading _emph_").as_deref(),
+            ds_config::clean_for_speech("# Heading _emph_").as_deref(),
             Some("Heading emph")
         );
     }
@@ -334,6 +314,22 @@ mod tests {
                 .feed(0, "> Spoken.\n\nbody.", None, true, false, true)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn digest_and_short_paths_apply_identical_cleanup() {
+        // Regression: the digest path used to be `.trim()`-only while shorts stripped
+        // markers + hash-like tokens — the two cleanups could drift. Both now delegate to
+        // `ds_config::clean_for_speech`; assert that delegation holds for the same content
+        // reached via either path (as a blockquote vs. blockquote-less final reply).
+        let raw = "Fixed `MainWindow.swift` at commit eedfc57.";
+
+        let digest_out = Accum::default().feed(0, &format!("> {raw}"), None, true, true, false);
+        let short_out = Accum::default().feed(0, raw, None, true, true, true);
+
+        assert_eq!(digest_out, short_out);
+        // Trailing "." was attached to the dropped hash token ("eedfc57."), so it goes too.
+        assert_eq!(digest_out, vec!["Fixed MainWindow.swift at commit"]);
     }
 
     #[test]

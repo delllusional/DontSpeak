@@ -66,6 +66,57 @@ pub const DEFAULT_NARRATION_SPEC: &str = r#"# Narrate
 Start every reply with a concise spoken summary of the full response. Write each point on its own `>` line in plain text, without other Markdown, code, URLs, or paths.
 "#;
 
+/// Shared cleanup for text about to be spoken — used for both digest blockquotes and the
+/// shorts fallback, so the two paths can't drift. The narration spec asks the model not to
+/// put code/paths/hashes in spoken lines, but that's a prompt request, not an enforced
+/// contract; this is the code-level backstop.
+///
+/// Strips Markdown marker characters (`` ` * _ # ``, content kept — e.g. `` `path` `` reads
+/// as `path`) and drops standalone hash-like tokens (7-40 hex chars with at least one a-f
+/// letter, so plain decimal numbers like line counts or years are untouched). Deliberately
+/// does NOT touch slashes or file extensions: an earlier length/code/URL/slash guard here
+/// swallowed readable replies (e.g. "pause/resume") and was removed. Collapses whitespace;
+/// returns `None` if nothing speakable remains.
+pub fn clean_for_speech(text: &str) -> Option<String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let mut s = String::with_capacity(t.len());
+    for ch in t.chars() {
+        match ch {
+            '`' | '*' | '_' | '#' => {}
+            '\n' | '\r' | '\t' => s.push(' '),
+            other => s.push(other),
+        }
+    }
+    let cleaned = s
+        .split_whitespace()
+        .filter(|tok| !is_hash_like(tok))
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// A standalone token that reads as a hash/commit-id rather than a word or number: all
+/// hex digits, 7-40 chars long, with at least one `a`-`f` letter (excludes plain decimal
+/// numbers, which are common and fine to speak).
+fn is_hash_like(token: &str) -> bool {
+    let core = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    let len = core.chars().count();
+    if !(7..=40).contains(&len) {
+        return false;
+    }
+    let mut has_hex_letter = false;
+    for ch in core.chars() {
+        if !ch.is_ascii_hexdigit() {
+            return false;
+        }
+        has_hex_letter |= ch.is_ascii_alphabetic();
+    }
+    has_hex_letter
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +168,44 @@ mod tests {
         let runs = all_blockquotes_state("> partial spoken line", true);
         assert_eq!(runs, vec![("partial spoken line".to_string(), true)]);
         assert!(texts("just prose, no spoken line", true).is_empty());
+    }
+
+    #[test]
+    fn clean_for_speech_strips_markers_keeps_content() {
+        assert_eq!(
+            clean_for_speech("Yes, `that` is the **default**.").as_deref(),
+            Some("Yes, that is the default.")
+        );
+        assert_eq!(
+            clean_for_speech("`.github/workflows/release.yml`").as_deref(),
+            Some(".github/workflows/release.yml"),
+            "path kept, only backtick markers dropped"
+        );
+    }
+
+    #[test]
+    fn clean_for_speech_drops_hash_like_tokens_only() {
+        assert_eq!(
+            clean_for_speech("It fast forwarded from commit eedfc57 to main.").as_deref(),
+            Some("It fast forwarded from commit to main.")
+        );
+        // Plain numbers, short hex-ish words, and non-hex identifiers are untouched.
+        assert_eq!(
+            clean_for_speech("Line 1234567 of 2026 tests pass.").as_deref(),
+            Some("Line 1234567 of 2026 tests pass.")
+        );
+        assert_eq!(
+            clean_for_speech("Edit src/main and rebuild.").as_deref(),
+            Some("Edit src/main and rebuild."),
+            "regression: slash must not silence or mangle the reply"
+        );
+    }
+
+    #[test]
+    fn clean_for_speech_empty_or_markers_only_is_none() {
+        assert_eq!(clean_for_speech(""), None);
+        assert_eq!(clean_for_speech("***"), None);
+        assert_eq!(clean_for_speech("###  _ "), None);
     }
 
     #[test]

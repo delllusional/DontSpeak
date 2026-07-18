@@ -14,7 +14,7 @@
 mod accum;
 mod stream;
 
-pub use accum::{Accum, short_reply_utterance};
+pub use accum::Accum;
 pub use stream::{
     BatchPayload, DisplayState, DisplayStep, NarrationUtterance, StreamBatch, clear_session_state,
     deliver_batch, display_state_path, retry_pending, seed_witness, step, stop_utterances,
