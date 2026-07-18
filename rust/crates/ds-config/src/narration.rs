@@ -66,17 +66,10 @@ pub const DEFAULT_NARRATION_SPEC: &str = r#"# Narrate
 Start every reply with a concise spoken summary of the full response. Write each point on its own `>` line in plain text, without other Markdown, code, URLs, or paths.
 "#;
 
-/// Shared cleanup for text about to be spoken — used for both digest blockquotes and the
-/// shorts fallback, so the two paths can't drift. The narration spec asks the model not to
-/// put code/paths/hashes in spoken lines, but that's a prompt request, not an enforced
-/// contract; this is the code-level backstop.
-///
-/// Strips Markdown marker characters (`` ` * _ # ``, content kept — e.g. `` `path` `` reads
-/// as `path`) and drops standalone hash-like tokens (7-40 hex chars with at least one a-f
-/// letter, so plain decimal numbers like line counts or years are untouched). Deliberately
-/// does NOT touch slashes or file extensions: an earlier length/code/URL/slash guard here
-/// swallowed readable replies (e.g. "pause/resume") and was removed. Collapses whitespace;
-/// returns `None` if nothing speakable remains.
+/// Spoken-text cleanup for digests and shorts (one path — no drift).
+/// Drops `` ` * _ # `` (content kept); drops hash-like tokens (7–40 hex, ≥1 a–f letter;
+/// plain decimals kept). Does not strip slashes/extensions (e.g. pause/resume). Collapses
+/// whitespace; `None` if nothing speakable remains.
 pub fn clean_for_speech(text: &str) -> Option<String> {
     let t = text.trim();
     if t.is_empty() {
@@ -98,9 +91,7 @@ pub fn clean_for_speech(text: &str) -> Option<String> {
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
-/// A standalone token that reads as a hash/commit-id rather than a word or number: all
-/// hex digits, 7-40 chars long, with at least one `a`-`f` letter (excludes plain decimal
-/// numbers, which are common and fine to speak).
+/// Hex token 7–40 chars with ≥1 a–f (excludes plain decimals).
 fn is_hash_like(token: &str) -> bool {
     let core = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
     let len = core.chars().count();

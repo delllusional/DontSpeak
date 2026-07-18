@@ -87,9 +87,7 @@ impl Accum {
 mod tests {
     use super::*;
 
-    // Shorts-path fixtures for `ds_config::clean_for_speech`: read WHOLE, only
-    // empty/markers-only dropped. (Hash-token and backtick-path cases live in
-    // `ds_config::narration`'s own tests, next to the function.)
+    // Shorts path via `clean_for_speech` (hash/backtick cases in ds_config::narration).
 
     #[test]
     fn short_utt_plain_text_passes_trimmed() {
@@ -318,17 +316,14 @@ mod tests {
 
     #[test]
     fn digest_and_short_paths_apply_identical_cleanup() {
-        // Regression: the digest path used to be `.trim()`-only while shorts stripped
-        // markers + hash-like tokens — the two cleanups could drift. Both now delegate to
-        // `ds_config::clean_for_speech`; assert that delegation holds for the same content
-        // reached via either path (as a blockquote vs. blockquote-less final reply).
+        // Both paths use `clean_for_speech` (blockquote vs blockquote-less final).
         let raw = "Fixed `MainWindow.swift` at commit eedfc57.";
 
         let digest_out = Accum::default().feed(0, &format!("> {raw}"), None, true, true, false);
         let short_out = Accum::default().feed(0, raw, None, true, true, true);
 
         assert_eq!(digest_out, short_out);
-        // Trailing "." was attached to the dropped hash token ("eedfc57."), so it goes too.
+        // Hash token drops trailing "." attached to it ("eedfc57.").
         assert_eq!(digest_out, vec!["Fixed MainWindow.swift at commit"]);
     }
 
