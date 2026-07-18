@@ -18,6 +18,15 @@ const API_KEY_NAMES: [&str; 4] = [
     "DASHSCOPE_API_KEY",
 ];
 
+/// Pure parts of the Coding Plan quota POST (fixture-testable; no network).
+struct QuotaRequest {
+    url: String,
+    base: &'static str,
+    body: Vec<u8>,
+    /// Credential headers only — non-auth headers are attached at send time.
+    credential_headers: Vec<(&'static str, String)>,
+}
+
 pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
     let settings = read_json_file(&paths.qwen_settings).unwrap_or(Value::Null);
     let token = qwen_token(paths, &settings).ok_or_else(|| {
@@ -28,6 +37,33 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
     })?;
     let is_cn = string_at(&settings, &["codingPlan", "region"])
         .is_some_and(|region| region.eq_ignore_ascii_case("cn"));
+    let parts = build_quota_request(&token, is_cn)?;
+    let mut builder = request(ds_http::Method::POST, &parts.url)?;
+    for (name, value) in &parts.credential_headers {
+        builder = builder.header(*name, value);
+    }
+    let json = send_json(
+        builder
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("Origin", parts.base)
+            .header("User-Agent", "DontSpeak-agent-usage")
+            .bytes(parts.body),
+    )?;
+    Ok(parse(&json))
+}
+
+/// Model Studio HTTP auth is `Authorization: Bearer` for both international and
+/// China (official curl/SDK examples). Token Plan FAQ treats `x-api-key` as an
+/// alternate, not an additional required header; current docs do not list
+/// `X-DashScope-API-Key` for these HTTP contracts. Residual: the console
+/// `/data/api.json` quota gateway itself is not publicly documented for API-key
+/// auth and may still require a browser session (`ConsoleNeedLogin`).
+fn credential_headers(token: &str) -> Vec<(&'static str, String)> {
+    vec![("Authorization", format!("Bearer {token}"))]
+}
+
+fn build_quota_request(token: &str, is_cn: bool) -> std::io::Result<QuotaRequest> {
     let (base, region, commodity) = if is_cn {
         (CN_BASE, "cn-beijing", "sfm_codingplan_public_cn")
     } else {
@@ -38,18 +74,12 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
         "queryCodingPlanInstanceInfoRequest": { "commodityCode": commodity }
     }))
     .map_err(std::io::Error::other)?;
-    let json = send_json(
-        request(ds_http::Method::POST, &url)?
-            .header("Authorization", format!("Bearer {token}"))
-            .header("x-api-key", &token)
-            .header("X-DashScope-API-Key", &token)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .header("Origin", base)
-            .header("User-Agent", "DontSpeak-agent-usage")
-            .bytes(body),
-    )?;
-    Ok(parse(&json))
+    Ok(QuotaRequest {
+        url,
+        base,
+        body,
+        credential_headers: credential_headers(token),
+    })
 }
 
 fn qwen_token(paths: &ds_config::Paths, settings: &Value) -> Option<String> {
@@ -289,5 +319,49 @@ ALIBABA_QWEN_API_KEY='quoted token'\n";
 
         std::fs::write(&dotenv, vec![b'x'; MAX_CREDENTIAL_BYTES as usize + 1]).unwrap();
         assert_eq!(token_from_dotenv(&dotenv), None);
+    }
+
+    #[test]
+    fn intl_and_cn_quota_requests_send_only_authorization_bearer() {
+        const TOKEN: &str = "sk-sp-fixture-not-a-live-key";
+        for (is_cn, base, region, commodity) in [
+            (
+                false,
+                INTL_BASE,
+                "ap-southeast-1",
+                "sfm_codingplan_public_intl",
+            ),
+            (true, CN_BASE, "cn-beijing", "sfm_codingplan_public_cn"),
+        ] {
+            let parts = build_quota_request(TOKEN, is_cn).unwrap();
+            assert_eq!(parts.base, base);
+            assert_eq!(
+                parts.url,
+                format!("{base}{QUOTA_PATH}&currentRegionId={region}")
+            );
+            assert!(parts.url.starts_with("https://"));
+
+            assert_eq!(
+                parts.credential_headers,
+                vec![("Authorization", format!("Bearer {TOKEN}"))]
+            );
+            let names: Vec<&str> = parts
+                .credential_headers
+                .iter()
+                .map(|(name, _)| *name)
+                .collect();
+            assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("x-api-key")));
+            assert!(
+                !names
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case("X-DashScope-API-Key"))
+            );
+
+            let body: Value = serde_json::from_slice(&parts.body).unwrap();
+            assert_eq!(
+                body["queryCodingPlanInstanceInfoRequest"]["commodityCode"],
+                commodity
+            );
+        }
     }
 }
