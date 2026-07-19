@@ -34,6 +34,14 @@ pub(crate) fn set_new_pgroup(cmd: &mut Command) {
     ds_proc::set_new_process_group(cmd);
 }
 
+/// Build a platform speech command from raw agent text. This is the only System-TTS
+/// command seam: every caller gets the canonical prose cleanup and the same empty no-op.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub fn speech_command(voice: Option<&str>, rate: f32, text: &str) -> Option<Command> {
+    let prose = crate::normalize_spoken_text(text);
+    (!prose.is_empty()).then(|| platform_command(voice, rate, &prose))
+}
+
 /// OS system-voice settings — ONE cross-platform seam for every UI's "Manage voices"
 /// (`ds_open_voice_settings`). Returns true if a page was launched.
 /// - macOS → Accessibility ▸ Spoken Content (modern then legacy anchor)
@@ -78,10 +86,8 @@ pub fn open_voice_settings() -> bool {
     false
 }
 
-/// `say` flags only (`-r`/`-v`, null Stdio). Call sites own text/pgroup/spawn/pidfile.
-/// Single source for free `spawn`, `SystemTts::speak`, and dontspeakd::speak_system.
 #[cfg(target_os = "macos")]
-pub fn say_command(voice: Option<&str>, rate: f32) -> Command {
+fn platform_command(voice: Option<&str>, rate: f32, text: &str) -> Command {
     use std::process::Stdio;
     let wpm = crate::rate_to_wpm(rate);
     let mut cmd = Command::new("say");
@@ -89,6 +95,7 @@ pub fn say_command(voice: Option<&str>, rate: f32) -> Command {
     if let Some(v) = voice.filter(|v| !v.trim().is_empty()) {
         cmd.arg("-v").arg(v);
     }
+    cmd.arg(text);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -103,14 +110,15 @@ pub fn spawn(
     txt: &str,
     voice_id: &str,
     rate: f32,
-) -> std::io::Result<(std::process::Child, i32)> {
-    let mut cmd = say_command(Some(voice_id), rate);
-    cmd.arg(txt);
+) -> std::io::Result<Option<(std::process::Child, i32)>> {
+    let Some(mut cmd) = speech_command(Some(voice_id), rate, txt) else {
+        return Ok(None);
+    };
     set_new_pgroup(&mut cmd);
     let child = cmd.spawn()?;
     // SACRED single-speaker post-spawn (ARCHITECTURE §0.2) — ds_proc::record_or_kill.
     let pgid = ds_proc::record_or_kill(&paths.pidfile, &child)?;
-    Ok((child, pgid))
+    Ok(Some((child, pgid)))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,8 +127,9 @@ pub fn spawn(
 #[cfg(target_os = "macos")]
 impl Tts for SystemTts {
     fn speak(&self, text: &str, voice_id: Option<&str>, rate: f32) -> std::io::Result<SpeakHandle> {
-        let mut cmd = say_command(voice_id, rate);
-        cmd.arg(text);
+        let Some(mut cmd) = speech_command(voice_id, rate, text) else {
+            return Ok(SpeakHandle { pgid: 0 });
+        };
         set_new_pgroup(&mut cmd);
 
         let child = cmd.spawn()?;
@@ -173,7 +182,7 @@ fn ps_squote_escape(text: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
-pub fn say_command(voice: Option<&str>, rate: f32, text: &str) -> Command {
+fn platform_command(voice: Option<&str>, rate: f32, text: &str) -> Command {
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
     // SAPI Rate -10..10 from rate 0.5..=2.0 (1.0 → 0). Slow/fast halves span the
@@ -207,7 +216,9 @@ pub fn say_command(voice: Option<&str>, rate: f32, text: &str) -> Command {
 #[cfg(target_os = "windows")]
 impl Tts for SystemTts {
     fn speak(&self, text: &str, voice_id: Option<&str>, rate: f32) -> std::io::Result<SpeakHandle> {
-        let mut cmd = say_command(voice_id, rate, text);
+        let Some(mut cmd) = speech_command(voice_id, rate, text) else {
+            return Ok(SpeakHandle { pgid: 0 });
+        };
         let child = cmd.spawn()?;
         // SACRED single-speaker post-spawn (ARCHITECTURE §0.2).
         let pgid = ds_proc::record_or_kill(&self.paths.pidfile, &child)?;
@@ -237,6 +248,25 @@ impl Tts for SystemTts {
 // Linux (cfg, NOT built on the macOS host)
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
+fn platform_command(_voice: Option<&str>, rate: f32, text: &str) -> Command {
+    use std::process::Stdio;
+    // Same piecewise map as Windows SAPI (full -100..100; one slope cannot hit
+    // both -100 at 0.5 and +100 at 2.0).
+    let r = rate.clamp(0.5, 2.0);
+    let spd_rate = if r < 1.0 {
+        ((r - 1.0) * 200.0).round() as i32
+    } else {
+        ((r - 1.0) * 100.0).round() as i32
+    };
+    let mut cmd = Command::new("spd-say");
+    cmd.arg("-r").arg(spd_rate.to_string()).arg("-w").arg(text);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd
+}
+
+#[cfg(target_os = "linux")]
 impl Tts for SystemTts {
     fn speak(
         &self,
@@ -244,20 +274,9 @@ impl Tts for SystemTts {
         _voice_id: Option<&str>,
         rate: f32,
     ) -> std::io::Result<SpeakHandle> {
-        use std::process::Stdio;
-        // Same piecewise map as Windows SAPI (full -100..100; single slope can't
-        // hit -100 at r=0.5).
-        let r = rate.clamp(0.5, 2.0);
-        let spd_rate = if r < 1.0 {
-            ((r - 1.0) * 200.0).round() as i32 // 0.5->-100 .. 1.0->0
-        } else {
-            ((r - 1.0) * 100.0).round() as i32 // 1.0->0 .. 2.0->100
+        let Some(mut cmd) = speech_command(None, rate, text) else {
+            return Ok(SpeakHandle { pgid: 0 });
         };
-        let mut cmd = Command::new("spd-say");
-        cmd.arg("-r").arg(spd_rate.to_string()).arg("-w").arg(text);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
         set_new_pgroup(&mut cmd);
         let child = cmd.spawn()?;
         // SACRED single-speaker post-spawn (ARCHITECTURE §0.2).
@@ -278,7 +297,7 @@ impl Tts for SystemTts {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::say_command;
+    use super::speech_command;
     use std::ffi::OsStr;
 
     fn args(c: &std::process::Command) -> Vec<String> {
@@ -288,28 +307,37 @@ mod tests {
     }
 
     #[test]
-    fn say_command_includes_voice_and_rate() {
-        let cmd = say_command(Some("Samantha"), 1.0);
+    fn speech_command_includes_voice_rate_and_clean_text() {
+        let cmd = speech_command(Some("Samantha"), 1.0, "Use **shared** `phonemes`.")
+            .expect("speakable text");
         assert_eq!(cmd.get_program(), OsStr::new("say"));
-        assert_eq!(args(&cmd), vec!["-r", "175", "-v", "Samantha"]);
+        assert_eq!(
+            args(&cmd),
+            vec!["-r", "175", "-v", "Samantha", "Use shared phonemes."]
+        );
     }
 
     #[test]
-    fn say_command_omits_voice_when_empty() {
-        assert_eq!(args(&say_command(None, 1.0)), vec!["-r", "175"]);
-        assert_eq!(args(&say_command(Some("   "), 1.0)), vec!["-r", "175"]);
+    fn speech_command_omits_voice_when_empty() {
+        let default = speech_command(None, 1.0, "hello").unwrap();
+        assert_eq!(args(&default), vec!["-r", "175", "hello"]);
+        let blank = speech_command(Some("   "), 1.0, "hello").unwrap();
+        assert_eq!(args(&blank), vec!["-r", "175", "hello"]);
     }
 
     #[test]
-    fn say_command_maps_rate_extremes() {
-        assert_eq!(args(&say_command(None, 0.5)), vec!["-r", "88"]);
-        assert_eq!(args(&say_command(None, 2.0)), vec!["-r", "350"]);
+    fn speech_command_maps_rate_extremes_and_omits_empty_prose() {
+        let slow = speech_command(None, 0.5, "hello").unwrap();
+        assert_eq!(args(&slow), vec!["-r", "88", "hello"]);
+        let fast = speech_command(None, 2.0, "hello").unwrap();
+        assert_eq!(args(&fast), vec!["-r", "350", "hello"]);
+        assert!(speech_command(None, 1.0, "***").is_none());
     }
 }
 
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests {
-    use super::{ps_squote_escape, say_command};
+    use super::{platform_command, ps_squote_escape, speech_command};
     use std::ffi::OsStr;
 
     /// Regression (audit): only the ASCII apostrophe was doubled, so any smart-quote code
@@ -323,7 +351,7 @@ mod windows_tests {
             "a''b\u{2018}\u{2018}c\u{2019}\u{2019}d\u{201A}\u{201A}e\u{201B}\u{201B}f"
         );
 
-        let cmd = say_command(
+        let cmd = platform_command(
             Some("O\u{2019}Brien"),
             1.0,
             "don\u{2019}t \u{2018}quote\u{2019}",
@@ -350,7 +378,7 @@ mod windows_tests {
 
     #[test]
     fn say_command_builds_the_default_voice_script_without_spawning() {
-        let cmd = say_command(None, 1.0, "It's wired.");
+        let cmd = speech_command(None, 1.0, "It's **wired**.").expect("speakable text");
         assert_eq!(cmd.get_program(), OsStr::new("powershell"));
         let args = args(&cmd);
         assert_eq!(&args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
@@ -362,11 +390,11 @@ mod windows_tests {
 
     #[test]
     fn say_command_escapes_the_named_voice_and_maps_rate_extremes() {
-        let slow = args(&say_command(Some("Reader's Voice"), 0.5, "hello"));
+        let slow = args(&platform_command(Some("Reader's Voice"), 0.5, "hello"));
         assert!(slow[3].contains("$s.SelectVoice('Reader''s Voice')"));
         assert!(slow[3].contains("$s.Rate = -10"));
 
-        let fast = args(&say_command(Some("   "), 2.0, "hello"));
+        let fast = args(&platform_command(Some("   "), 2.0, "hello"));
         assert!(!fast[3].contains("SelectVoice"));
         assert!(fast[3].contains("$s.Rate = 10"));
     }

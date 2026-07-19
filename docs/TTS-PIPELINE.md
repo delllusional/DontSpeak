@@ -18,12 +18,16 @@ Canonical path from assistant text to Kokoro audio. Streaming mechanics:
 | Stage | Owner | Contract |
 |---|---|---|
 | Assistant text | Client hooks / Codex subscriber / MCP `speak` | Streamed batches or final utterance |
-| Narration select | `ds-narrate` | Emit completed top-level blockquotes once; optional short non-quote final |
+| Narration select | `ds-narrate` | Emit completed top-level blockquotes once; optional short non-quote final; preserve selected text for the shared frontend |
 | Delivery | Hook/MCP IPC or in-process Codex | `SpeakNarration` / `Speak` / direct enqueue |
 | Schedule | `dontspeakd::TtsQueue` | Session FIFO + policy |
-| Text frontend | `ds-tts` | GFM → English norm → IPA → vocab filter → typed chunks |
-| Synthesis | `ds-helper` | Same `KokoroPhonemeChunk` → ONNX or Core ML |
+| Text frontend | `ds-tts` | One GFM → prose cleanup for every route. Kokoro then runs English norm → IPA → vocab filter → typed chunks; System stops at prose |
+| Synthesis | `ds-helper` (Kokoro) / OS voice (System) | Kokoro: `KokoroPhonemeChunk` → ONNX or Core ML. System: `say` / SAPI / spd-say |
 | Result | Helper + queue | Success, cancel, disabled, load fail, timeout, synth fail |
+
+Narration selection decides what to speak but does not rewrite it. Every delivery route
+converges on `ds_tts::normalize_spoken_text`, which owns markup, URL, hash, and whitespace
+cleanup once. Backend normalization starts from that prose; it does not duplicate cleanup.
 
 Three delivery routes (by design): hooks (commit HWM on queue accept), MCP (one-shot),
 Codex (in-process). Streaming routes retry rejected work; no route yet propagates
@@ -31,10 +35,14 @@ terminal playback ACK to the producer.
 
 ## Shared English frontend
 
+Applies to **Kokoro** fully; System TTS stops after step 2 (OS handles digits).
+
 1. `SpokenText` (pulldown-cmark GFM): speak prose/labels/code; drop markup/HTML/link
-   targets/task/footnote/alert markers. Block boundaries = word boundaries.
+   targets/task/footnote/alert markers and commit-like hashes. Block boundaries = word
+   boundaries. This is the only text-cleanup implementation.
 2. Bare URLs → word `link` (keep surrounding punctuation).
-3. Number/version/identifier expand → one contextual G2P pass.
+3. Number/version/identifier expand → one contextual G2P pass. (**Kokoro only** —
+   `normalize_kokoro_text`; System uses the shared prose directly.)
 4. `voice-g2p` (empty eSpeak path — never invoked).
 5. Dictionary misses → pinned BART ONNX G2P (cache successes; fail → spell ASCII or
    say `unknown`; degraded not permanently cached).

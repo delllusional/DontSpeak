@@ -6,7 +6,7 @@
 /// when `tts_system_voice` is empty. Used to NAME "who is speaking" for the
 /// greeting. Returns the raw OS name (e.g. Windows `"Microsoft Hazel Desktop"`);
 /// the caller tidies for display. `None` if unresolved.
-/// * Windows → `System.Speech` current voice (same engine `ds_tts::system::say_command`
+/// * Windows → `System.Speech` current voice (same engine `ds_tts::system::speech_command`
 ///   speaks through, so the name matches what's heard).
 /// * macOS → Spoken Content System Voice (`SelectedVoiceName`, else derived from
 ///   `SelectedVoiceID` — see [`default_voice_name`]).

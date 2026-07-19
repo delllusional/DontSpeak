@@ -1,7 +1,7 @@
 //! Agent text → prose for the speech frontend.
 //!
 //! Markdown is structure, not pronunciation: keep labels/code; drop formatting,
-//! HTML tags, link destinations. Bare URLs → the word "link".
+//! HTML tags, link destinations, and commit-like hashes. Bare URLs → the word "link".
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
@@ -112,14 +112,14 @@ fn strip_html_tags(html: &str) -> String {
 fn omit_urls_and_collapse_whitespace(rendered: &str) -> String {
     rendered
         .split_whitespace()
-        .map(spoken_token)
+        .filter_map(spoken_token)
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 /// Bare URL → "link", **keeping wrapped punctuation** (else "See https://…." →
 /// "See link" fuses sentences and breaks `batch` `.!?` boundaries).
-fn spoken_token(token: &str) -> String {
+fn spoken_token(token: &str) -> Option<String> {
     const OPENERS: &[char] = &['(', '[', '{', '<', '"', '\'', '‘', '“', '„', '«', '‹'];
     // '“' is English OPENER and German CLOSER — at token end only the closing role applies.
     const CLOSERS: &[char] = &[
@@ -139,11 +139,22 @@ fn spoken_token(token: &str) -> String {
     let url = after_open[..boundary].trim_end_matches(CLOSERS);
     let trailing = &after_open[url.len()..];
 
-    if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("www.") {
-        format!("{leading}link{trailing}")
+    if is_hash_like(token) {
+        None
+    } else if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("www.") {
+        Some(format!("{leading}link{trailing}"))
     } else {
-        token.to_string()
+        Some(token.to_string())
     }
+}
+
+/// Hex token 7–40 chars with at least one a–f (plain decimals are not hashes).
+fn is_hash_like(token: &str) -> bool {
+    let core = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    let len = core.len();
+    (7..=40).contains(&len)
+        && core.chars().all(|ch| ch.is_ascii_hexdigit())
+        && core.chars().any(|ch| ch.is_ascii_alphabetic())
 }
 
 #[cfg(test)]
@@ -158,6 +169,21 @@ mod tests {
         assert_eq!(
             spoken.as_str(),
             "Result Use shared phonemes; see the audit."
+        );
+    }
+
+    #[test]
+    fn drops_hashes_without_mangling_identifiers_paths_or_anchors() {
+        assert_eq!(
+            SpokenText::from_markdown(
+                "Edit foo_bar in src/main at eedfc57; see docs/TTS-PIPELINE.md#shared-english-frontend."
+            )
+            .as_str(),
+            "Edit foo_bar in src/main at see docs/TTS-PIPELINE.md#shared-english-frontend."
+        );
+        assert_eq!(
+            SpokenText::from_markdown("Line 1234567 of 2026 tests pass.").as_str(),
+            "Line 1234567 of 2026 tests pass."
         );
     }
 

@@ -1107,38 +1107,15 @@ impl TtsManager {
         self.speak_slot.0.lock().unwrap().progress
     }
 
-    /// Speak `text` via the macOS System engine (`say`) and block until it
-    /// finishes (or is killed by `stop`). System TTS keeps no warm model — it
-    /// spawns per request. The OS voice (System Settings) is used; `rate` maps to
-    /// `say -r <words/min>`. Barge-in kills the tracked child.
-    #[cfg(target_os = "macos")]
+    /// Speak through the OS System engine and block until completion or barge-in.
+    /// [`ds_tts::system::speech_command`] owns prose cleanup, empty-input handling,
+    /// voice selection, rate mapping, and platform command construction.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn speak_system(&self, text: &str, voice: &str, rate: f32) -> std::io::Result<()> {
-        // Single speaker: stop any Kokoro playback and any prior `say` first.
+        let Some(mut cmd) = ds_tts::system::speech_command(Some(voice), rate, text) else {
+            return Ok(());
+        };
         self.stop();
-        // Shared say-command builder (canonical flags + wpm mapping). A non-empty
-        // voice selects a specific `say` voice (the FULL displayed name, incl. any
-        // quality suffix); empty means the OS default voice. We do NOT use the
-        // pidfile here — this path owns the child via `say_child` directly.
-        let voice = (!voice.trim().is_empty()).then_some(voice);
-        let mut cmd = ds_tts::system::say_command(voice, rate);
-        let child = cmd.arg(text).spawn()?;
-        // Hand the child to the shared slot so stop() can kill it, then poll for
-        // completion holding the lock only briefly (so a concurrent stop can win).
-        *self.say_child.lock().unwrap() = Some(child);
-        self.wait_for_system_child()
-    }
-
-    /// Windows: speak via the OS synthesizer (PowerShell `System.Speech.Synthesis`),
-    /// the same builder the library `SystemTts` uses. Mirrors the macOS path: single
-    /// speaker (stop any in-flight speech first), own the spawned child through the
-    /// `say_child` slot so a barge-in/stop can kill it, then poll for completion.
-    /// A non-empty `voice` selects a specific installed voice (full display name);
-    /// empty = the OS default voice.
-    #[cfg(target_os = "windows")]
-    pub fn speak_system(&self, text: &str, voice: &str, rate: f32) -> std::io::Result<()> {
-        self.stop();
-        let voice = (!voice.trim().is_empty()).then_some(voice);
-        let mut cmd = ds_tts::system::say_command(voice, rate, text);
         let child = cmd.spawn()?;
         // Hand the child to the shared slot so stop() can kill it, then poll for
         // completion holding the lock only briefly (so a concurrent stop can win).

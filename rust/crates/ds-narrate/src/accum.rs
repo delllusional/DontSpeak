@@ -59,9 +59,7 @@ impl Accum {
         let mut spoken = Vec::new();
         if messages_on {
             for (text, _) in runs.into_iter().take(speakable).skip(self.emitted) {
-                if let Some(text) = ds_config::clean_for_speech(&text) {
-                    spoken.push(text);
-                }
+                spoken.push(text);
             }
         }
         self.emitted = speakable.max(self.emitted);
@@ -69,8 +67,8 @@ impl Accum {
         // Final + no blockquote at all → voice whole once (latched).
         if short_on && self.seen_final && total == 0 && !self.short_done {
             self.short_done = true;
-            if let Some(utt) = ds_config::clean_for_speech(&cumulative) {
-                spoken.push(utt);
+            if !cumulative.trim().is_empty() {
+                spoken.push(cumulative);
             }
         }
 
@@ -85,79 +83,6 @@ impl Accum {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Shorts path via `clean_for_speech` (hash/backtick cases in ds_config::narration).
-
-    #[test]
-    fn short_utt_plain_text_passes_trimmed() {
-        assert_eq!(
-            ds_config::clean_for_speech("  Hello there.  ").as_deref(),
-            Some("Hello there.")
-        );
-    }
-
-    #[test]
-    fn short_utt_empty_or_whitespace_is_none() {
-        assert_eq!(ds_config::clean_for_speech(""), None);
-        assert_eq!(ds_config::clean_for_speech("   \n\t "), None);
-    }
-
-    #[test]
-    fn short_utt_markers_only_becomes_none() {
-        assert_eq!(ds_config::clean_for_speech("***"), None);
-        assert_eq!(ds_config::clean_for_speech("###  _ "), None);
-    }
-
-    #[test]
-    fn short_utt_long_text_is_read_whole() {
-        // No length cap.
-        let long = "word ".repeat(120); // ~600 chars
-        let spoken = ds_config::clean_for_speech(&long).expect("long text is read");
-        assert!(spoken.starts_with("word word"));
-        assert!(spoken.chars().count() > 320, "not truncated/silenced");
-    }
-
-    #[test]
-    fn short_utt_slashed_word_is_read_whole() {
-        // Regression: slash must not silence the reply.
-        assert_eq!(
-            ds_config::clean_for_speech("The pause/resume toggle.").as_deref(),
-            Some("The pause/resume toggle.")
-        );
-        assert_eq!(
-            ds_config::clean_for_speech("Edit src/main and rebuild.").as_deref(),
-            Some("Edit src/main and rebuild.")
-        );
-    }
-
-    #[test]
-    fn short_utt_code_and_url_are_read_whole() {
-        // Backticks stripped as markers; URL kept.
-        assert_eq!(
-            ds_config::clean_for_speech("Run ```cargo build``` now").as_deref(),
-            Some("Run cargo build now")
-        );
-        assert_eq!(
-            ds_config::clean_for_speech("See https://example.com for more").as_deref(),
-            Some("See https://example.com for more")
-        );
-    }
-
-    #[test]
-    fn short_utt_strips_markdown_and_collapses_whitespace() {
-        assert_eq!(
-            ds_config::clean_for_speech("Yes, `that` is the **default**.").as_deref(),
-            Some("Yes, that is the default.")
-        );
-        assert_eq!(
-            ds_config::clean_for_speech("line one\n\n  line   two\ttab").as_deref(),
-            Some("line one line two tab")
-        );
-        assert_eq!(
-            ds_config::clean_for_speech("# Heading _emph_").as_deref(),
-            Some("Heading emph")
-        );
-    }
 
     #[test]
     fn speaks_the_leading_line_once_when_complete() {
@@ -278,7 +203,7 @@ mod tests {
         assert!(a.feed(0, "Yes, ", None, false, true, true).is_empty()); // not final yet
         assert_eq!(
             a.feed(1, "that's the `default`.", None, true, true, true),
-            vec!["Yes, that's the default."]
+            vec!["Yes, that's the `default`."]
         );
         // Latched against late duplicates.
         assert!(a.feed(2, " dup", None, true, true, true).is_empty());
@@ -286,11 +211,11 @@ mod tests {
 
     #[test]
     fn short_mode_reads_code_paths_and_long_text_whole() {
-        // No content guards — only markdown markers cleaned.
+        // Selection preserves content; the single TTS frontend owns prose cleanup.
         assert_eq!(
             Accum::default().feed(0, "Run ```cargo build```", None, true, true, true),
-            vec!["Run cargo build"],
-            "code fence → read (backticks stripped)"
+            vec!["Run ```cargo build```"],
+            "code fence is forwarded intact"
         );
         assert_eq!(
             Accum::default().feed(0, "See rust/crates/lib.rs now", None, true, true, true),
@@ -314,16 +239,14 @@ mod tests {
     }
 
     #[test]
-    fn digest_and_short_paths_apply_identical_cleanup() {
-        // Both paths use `clean_for_speech` (blockquote vs blockquote-less final).
+    fn digest_and_short_paths_forward_identical_text() {
         let raw = "Fixed `MainWindow.swift` at commit eedfc57.";
 
         let digest_out = Accum::default().feed(0, &format!("> {raw}"), None, true, true, false);
         let short_out = Accum::default().feed(0, raw, None, true, true, true);
 
         assert_eq!(digest_out, short_out);
-        // Hash token drops trailing "." attached to it ("eedfc57.").
-        assert_eq!(digest_out, vec!["Fixed MainWindow.swift at commit"]);
+        assert_eq!(digest_out, vec![raw]);
     }
 
     #[test]

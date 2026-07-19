@@ -10,7 +10,8 @@
 //! play. Pure stages unit-tested without audio/model/network.
 //!
 //! Single-speaker pidfile is sacred: every engine spawns in its OWN process group and
-//! returns pgid for barge-in (`killpg`). Live `Child` via `kokoro::spawn` / `system::spawn`.
+//! returns pgid for barge-in (`killpg`). Live `Child` via `kokoro::spawn` or the optional
+//! result of `system::spawn` (empty prose is a successful no-op).
 
 use std::io;
 
@@ -46,10 +47,15 @@ pub use ds_voices::{Gender, Quality, SpeakerVoice};
 // Private: synth/ane_voices use `crate::voices` for the npz parser.
 pub(crate) use ds_voices::voices;
 
-/// Normalize rendered English before Kokoro G2P. Shared helper front-end; idempotent
-/// so backends may call it defensively outside the helper.
+/// Canonical agent-text cleanup used by every speech backend.
+pub fn normalize_spoken_text(text: &str) -> String {
+    spoken::SpokenText::from_markdown(text).into_string()
+}
+
+/// Normalize rendered English before Kokoro G2P. Idempotent so backends may call it
+/// defensively outside the helper.
 pub fn normalize_kokoro_text(text: &str) -> String {
-    numbers::expand_numbers(&spoken::SpokenText::from_markdown(text).into_string())
+    numbers::expand_numbers(&normalize_spoken_text(text))
 }
 
 /// Process-GROUP id of a spawned speaker — pidfile records it for caps-ON barge-in.
@@ -109,6 +115,34 @@ mod tests {
         let normalized = normalize_kokoro_text("Build 57 in room 1,000.");
         assert_eq!(normalized, "Build fifty-seven in room one thousand.");
         assert_eq!(normalize_kokoro_text(&normalized), normalized);
+    }
+
+    #[test]
+    fn spoken_text_renders_markdown_without_number_expansion() {
+        assert_eq!(
+            normalize_spoken_text(
+                "Use **shared** `phonemes`; see [the audit](https://example.com/a)."
+            ),
+            "Use shared phonemes; see the audit."
+        );
+        assert_eq!(
+            normalize_spoken_text("Build 57 next."),
+            "Build 57 next.",
+            "OS voices expand digits themselves"
+        );
+        assert_eq!(
+            normalize_spoken_text("Read https://example.com now."),
+            "Read link now."
+        );
+        assert_eq!(normalize_spoken_text("***"), "");
+    }
+
+    #[test]
+    fn every_backend_uses_the_same_text_cleanup() {
+        let source = "## Result\nUse **foo_bar** at eedfc57; see https://example.com.";
+        let prose = "Result Use foo_bar at see link.";
+        assert_eq!(normalize_spoken_text(source), prose);
+        assert_eq!(normalize_kokoro_text(source), prose);
     }
 
     #[test]

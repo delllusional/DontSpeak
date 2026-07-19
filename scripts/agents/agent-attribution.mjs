@@ -9,6 +9,7 @@ import {
   readdirSync,
   readFileSync,
   readSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -251,7 +252,13 @@ function findLatestGrokSession(home, cwd) {
 }
 
 function normalizePathKey(pathValue) {
-  return String(pathValue)
+  let path = String(pathValue);
+  try {
+    path = realpathSync(path);
+  } catch {
+    // A stale/nonexistent session path can still be compared lexically.
+  }
+  return path
     .replace(/\\/g, "/")
     .replace(/\/+$/, "")
     .toLowerCase();
@@ -375,7 +382,7 @@ function resolveGrok(input, env, home, root) {
 
 export function resolveAttribution(client, input, options = {}) {
   const env = options.env ?? process.env;
-  const home = options.home ?? homedir();
+  const home = options.home ?? env.HOME ?? env.USERPROFILE ?? homedir();
   const root = options.root ?? input?.cwd ?? process.cwd();
   let resolved;
   switch (client) {
