@@ -137,6 +137,8 @@ UsageDeck
   cards[]: UsageCard
     agent            // ClientSource wire token
     account?         // optional email / login from local credentials
+    needs_auth?      // wire key present only when true: credentials exist but a
+                     // silent read is disallowed (macOS keychain ACL)
     rows[]: UsageRow
       period         // session | week | month
       used_percent   // finite 0…100
@@ -175,6 +177,7 @@ Rules:
 | --- | --- |
 | `ds_agent_usage_skeleton_json()` | Installed agents + cache; **no network** |
 | `ds_agent_usage_card_json(agent, refresh)` | Blocking single-card load |
+| `ds_agent_usage_card_authorize_json(agent)` | **User-initiated** authorize + forced load; may raise the macOS keychain ACL dialog — explicit click only |
 | `ds_agent_usage_json(refresh)` | Aggregate all cards (tests/tooling) |
 | `ds_usage_resets_in(resets_at_unix)` | Remaining duration string (no seconds) |
 
@@ -204,8 +207,27 @@ Period keys match wire tokens. Unused keys `usage.loading` / `usage.refresh` /
 ## Security and privacy
 
 - Credential reads are read-only, size-bounded, documented paths only.
-- No login, token refresh, browser launch, interactive Keychain prompt, or provider-file writes
-  during Usage refresh.
+- No login, token refresh, browser launch, or provider-file writes during Usage
+  refresh.
+- **Credential UI:** implicit / automatic reads (startup, tab paint, MCP `usage`,
+  `ds_agent_usage_json`, `ds_agent_usage_card_json`) never raise credential UI —
+  on macOS the silent Keychain search skips ACL-protected items and the follow-up
+  existence probe is attributes-only (no secret decrypt, no dialog). The **sole**
+  prompting path is `ds_agent_usage_card_authorize_json`: click-driven per card,
+  macOS-only in practice, and it may block on the legacy-keychain ACL dialog.
+  A guarded item surfaces as `needs_auth: true` on the card (with any stale cached
+  rows retained); hosts render a generic "authorization needed" row + Authorize
+  button. This button is not the out-of-scope Refresh button — it exists only
+  while credentials are guarded and disappears once a silent read works.
+- **ACL persistence, no config key:** after "Always Allow" macOS adds DontSpeak's
+  code-signing identity to the item's ACL, so later silent reads succeed and the
+  button disappears by construction. The ACL is the OS source of truth — a config
+  flag would drift when Claude Code recreates the item on re-login/token rotation.
+  Deny or one-time Allow just re-derives `needs_auth` on the next refresh. Dev
+  ad-hoc builds re-prompt per binary (dist builds are stably Developer ID-signed).
+- **Cache invariant:** `agent-usage-cache.json` never stores `needs_auth: true`
+  (only cards with rows are stored, and those fetched successfully), so the
+  skeleton never paints the authorize row — only a per-card refresh does.
 - Production HTTPS only for live probes; tests use fixtures / loopback only.
 - Secrets and raw provider payloads never appear in FFI JSON or logs.
 - Provider children are bounded and reaped.

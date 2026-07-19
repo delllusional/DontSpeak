@@ -18,6 +18,7 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_model_status_wait(ulong since, uint timeoutMs);
     [DllImport(Dll)] private static extern IntPtr ds_agent_usage_skeleton_json();
     [DllImport(Dll)] private static extern IntPtr ds_agent_usage_card_json([MarshalAs(UnmanagedType.LPUTF8Str)] string agent, byte refresh);
+    [DllImport(Dll)] private static extern IntPtr ds_agent_usage_card_authorize_json([MarshalAs(UnmanagedType.LPUTF8Str)] string agent);
     [DllImport(Dll)] private static extern IntPtr ds_agent_usage_json(byte refresh);
     [DllImport(Dll)] private static extern IntPtr ds_tools_json();
     [DllImport(Dll)] private static extern IntPtr ds_libraries_json();
@@ -124,6 +125,11 @@ internal static class Native
     /// <summary>BLOCKING single-card load. Off UI; force bypasses 60s soft cache.</summary>
     public static string AgentUsageCardJson(string agent, bool refresh)
         => TakeString(ds_agent_usage_card_json(agent, (byte)(refresh ? 1 : 0)));
+
+    /// <summary>BLOCKING user-initiated authorize + forced card load. Off UI, explicit
+    /// click only — may raise a native credential dialog (macOS engine builds).</summary>
+    public static string AgentUsageAuthorizeCardJson(string agent)
+        => TakeString(ds_agent_usage_card_authorize_json(agent));
 
     /// <summary>BLOCKING aggregate deck (diagnostics).</summary>
     public static string AgentUsageJson(bool refresh)

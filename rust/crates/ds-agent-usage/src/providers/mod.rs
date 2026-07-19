@@ -15,6 +15,23 @@ pub(crate) mod kimi;
 pub(crate) mod qwen;
 mod rpc;
 
+/// Crate-internal fetch error; the FFI boundary stays JSON (`UsageCard.needs_auth`).
+#[derive(Debug)]
+pub(crate) enum FetchError {
+    /// OS credential store holds the token but a silent read is disallowed.
+    /// Only the macOS Claude keychain probe constructs this.
+    Guarded,
+    // Payload is diagnostic only (tests assert kinds); prod callers just branch
+    // on Guarded and drop the rows.
+    Io(#[allow(dead_code)] std::io::Error),
+}
+
+impl From<std::io::Error> for FetchError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
 /// Credential probes: connect + body wall-clock.

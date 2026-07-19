@@ -211,7 +211,7 @@ public sealed partial class MainWindow : Window
                 DispatcherQueue.TryEnqueue(() =>
                 {
                     if (generation != _usageGeneration) return;
-                    if (updated is { Rows.Count: > 0 })
+                    if (updated != null && (updated.Rows.Count > 0 || updated.NeedsAuth))
                         ApplyUsageCard(updated);
                     if (--pending == 0)
                         ShowUsageUnavailableIfEmpty();
@@ -288,9 +288,11 @@ public sealed partial class MainWindow : Window
         UsageList.Children.Insert(insertAt, shell);
     }
 
+    // NeedsAuth included so auth-state transitions repaint the card body.
     private static bool UsageCardsEqual(UsageCardDto left, UsageCardDto right)
         => left.Agent == right.Agent
             && string.Equals(left.Account, right.Account, StringComparison.Ordinal)
+            && left.NeedsAuth == right.NeedsAuth
             && left.Rows.SequenceEqual(right.Rows);
 
     private int UsageAgentRank(string agent)
@@ -394,7 +396,7 @@ public sealed partial class MainWindow : Window
         accountLabel.Opacity = _usageAccountRevealed.Contains(agent) ? 1 : 0;
     }
 
-    private static void BindUsageCard(ContentControl body, UsageCardDto card)
+    private void BindUsageCard(ContentControl body, UsageCardDto card)
     {
         if (body.Content is StackPanel mountedRows && TryUpdateUsageRows(mountedRows, card))
             return;
@@ -406,13 +408,18 @@ public sealed partial class MainWindow : Window
         };
         foreach (var row in card.Rows)
             rows.Children.Add(BuildUsageRow(row));
+        if (card.NeedsAuth)
+            rows.Children.Add(BuildUsageAuthRow(card.Agent));
         body.Content = rows;
     }
 
     // Same shape: update in place so ProgressBar animates (remount would restart at zero).
+    // Auth-state toggles change the expected child list, so the shape check fails
+    // and the body rebuilds with/without the authorize row.
     private static bool TryUpdateUsageRows(StackPanel mountedRows, UsageCardDto card)
     {
-        if (mountedRows.Children.Count != card.Rows.Count) return false;
+        int expected = card.Rows.Count + (card.NeedsAuth ? 1 : 0);
+        if (mountedRows.Children.Count != expected) return false;
 
         for (int i = 0; i < card.Rows.Count; i++)
         {
@@ -420,6 +427,9 @@ public sealed partial class MainWindow : Window
                 || view.Period != card.Rows[i].Period)
                 return false;
         }
+        if (card.NeedsAuth
+            && mountedRows.Children[card.Rows.Count] is not Grid { Tag: UsageAuthRowView })
+            return false;
 
         for (int i = 0; i < card.Rows.Count; i++)
         {
@@ -433,6 +443,61 @@ public sealed partial class MainWindow : Window
         string Period,
         ProgressBar Progress,
         TextBlock Remaining);
+
+    private sealed record UsageAuthRowView(Button Authorize);
+
+    /// <summary>Guarded-credentials row: caption + the only UI path that may prompt.</summary>
+    private Grid BuildUsageAuthRow(string agent)
+    {
+        var grid = new Grid
+        {
+            Margin = new Thickness(0, 3, 0, 3),
+            ColumnDefinitions =
+            {
+                new ColumnDefinition(),
+                new ColumnDefinition { Width = GridLength.Auto },
+            },
+        };
+        grid.Children.Add(new TextBlock
+        {
+            Text = Loc.T("usage.needs_auth"),
+            Opacity = 0.65,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        var authorize = new Button { Content = Loc.T("usage.authorize") };
+        authorize.Click += (_, _) => StartUsageAuthorize(agent, authorize);
+        Grid.SetColumn(authorize, 1);
+        grid.Children.Add(authorize);
+        grid.Tag = new UsageAuthRowView(authorize);
+        return grid;
+    }
+
+    /// <summary>Disable the button, run the blocking authorize FFI off the UI thread,
+    /// apply the result through the generation-checked path.</summary>
+    private void StartUsageAuthorize(string agent, Button authorize)
+    {
+        if (!authorize.IsEnabled) return;
+        authorize.IsEnabled = false;
+        int generation = _usageGeneration;
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            UsageCardDto? updated = null;
+            try
+            {
+                updated = AgentUsageDataSource.AuthorizeCard(agent);
+            }
+            catch { /* ignore */ }
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                // Re-enable regardless: on deny the identical card skips repaint.
+                authorize.IsEnabled = true;
+                if (generation != _usageGeneration) return;
+                if (updated != null && (updated.Rows.Count > 0 || updated.NeedsAuth))
+                    ApplyUsageCard(updated);
+            });
+        });
+    }
 
     private static StackPanel BuildUsageRow(UsageRowDto row)
     {

@@ -681,10 +681,12 @@ struct UsageRowWidgets {
 }
 
 /// Per-agent shell: stack for crossfade remounts; rows for in-place updates.
+/// `needs_auth` = mounted auth state; a toggle forces a remount (row set changes).
 struct MountedUsageCard {
     stack: gtk::Stack,
     account: gtk::Label,
     rows: Vec<UsageRowWidgets>,
+    needs_auth: bool,
 }
 
 #[derive(Clone)]
@@ -848,8 +850,10 @@ impl UsagePage {
             return;
         }
 
-        // Matching period shape → in-place update; else crossfade remount.
+        // Matching period shape + unchanged auth state → in-place update; else
+        // crossfade remount (auth row appears/disappears with the remount).
         if let Some(mounted) = self.rendered.borrow().get(&card.agent)
+            && mounted.needs_auth == card.needs_auth
             && try_update_usage_rows(&mounted.rows, &card)
         {
             set_usage_account_label(&mounted.account, card.account.as_deref());
@@ -857,7 +861,7 @@ impl UsagePage {
             return;
         }
 
-        let (group, account, rows) = paint_usage_card(&card);
+        let (group, account, rows) = self.paint_usage_card(&card);
         if let Some(mounted) = self.rendered.borrow_mut().get_mut(&card.agent) {
             let stack = mounted.stack.clone();
             let previous = stack.visible_child();
@@ -865,6 +869,7 @@ impl UsagePage {
             stack.set_visible_child(&group);
             mounted.account = account;
             mounted.rows = rows;
+            mounted.needs_auth = card.needs_auth;
             if let Some(previous) = previous {
                 let stack = stack.clone();
                 gtk::glib::timeout_add_local_once(
@@ -902,6 +907,7 @@ impl UsagePage {
                     stack,
                     account,
                     rows,
+                    needs_auth: card.needs_auth,
                 },
             );
         }
@@ -970,7 +976,7 @@ impl UsagePage {
                         return;
                     }
                     if let Some(updated) = updated
-                        && !updated.rows.is_empty()
+                        && (!updated.rows.is_empty() || updated.needs_auth)
                     {
                         page.apply_card(updated);
                     }
@@ -1046,43 +1052,112 @@ fn prettify_agent_token(agent: &str) -> String {
         .join(" ")
 }
 
-fn paint_usage_card(card: &UsageCard) -> (adw::PreferencesGroup, gtk::Label, Vec<UsageRowWidgets>) {
-    let group = adw::PreferencesGroup::builder()
-        .title(agent_display_name(&card.agent))
-        .build();
-    // Account top-right; session-only opacity toggle (starts transparent).
-    let account = gtk::Label::builder()
-        .halign(gtk::Align::End)
-        .valign(gtk::Align::End)
-        .xalign(1.0)
-        .ellipsize(gtk::pango::EllipsizeMode::Middle)
-        .max_width_chars(28)
-        .build();
-    account.add_css_class("dim-label");
-    account.add_css_class("caption");
-    account.set_opacity(0.0);
-    account.set_can_target(true);
-    {
-        let label = account.clone();
-        let click = gtk::GestureClick::new();
-        click.connect_released(move |_, _, _, _| {
-            if !label.is_visible() || label.text().is_empty() {
+impl UsagePage {
+    fn paint_usage_card(
+        &self,
+        card: &UsageCard,
+    ) -> (adw::PreferencesGroup, gtk::Label, Vec<UsageRowWidgets>) {
+        let group = adw::PreferencesGroup::builder()
+            .title(agent_display_name(&card.agent))
+            .build();
+        // Account top-right; session-only opacity toggle (starts transparent).
+        let account = gtk::Label::builder()
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::End)
+            .xalign(1.0)
+            .ellipsize(gtk::pango::EllipsizeMode::Middle)
+            .max_width_chars(28)
+            .build();
+        account.add_css_class("dim-label");
+        account.add_css_class("caption");
+        account.set_opacity(0.0);
+        account.set_can_target(true);
+        {
+            let label = account.clone();
+            let click = gtk::GestureClick::new();
+            click.connect_released(move |_, _, _, _| {
+                if !label.is_visible() || label.text().is_empty() {
+                    return;
+                }
+                let next = if label.opacity() < 0.5 { 1.0 } else { 0.0 };
+                label.set_opacity(next);
+            });
+            account.add_controller(click);
+        }
+        set_usage_account_label(&account, card.account.as_deref());
+        group.set_header_suffix(Some(&account));
+        let mut rows = Vec::with_capacity(card.rows.len());
+        for row in &card.rows {
+            let (widget, view) = usage_row_widget(row);
+            group.add(&widget);
+            rows.push(view);
+        }
+        if card.needs_auth {
+            group.add(&self.usage_auth_row(&card.agent));
+        }
+        (group, account, rows)
+    }
+
+    /// Guarded-credentials row: caption + the only UI path that may prompt.
+    /// Click: disable, run the blocking authorize FFI on a named thread, apply
+    /// the result through the generation-checked path.
+    fn usage_auth_row(&self, agent: &str) -> gtk::Widget {
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .margin_top(8)
+            .margin_bottom(8)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        let label = gtk::Label::builder()
+            .label(t("usage.needs_auth"))
+            .halign(gtk::Align::Start)
+            .hexpand(true)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        label.add_css_class("dim-label");
+        let authorize = gtk::Button::with_label(&t("usage.authorize"));
+        authorize.set_valign(gtk::Align::Center);
+        row.append(&label);
+        row.append(&authorize);
+
+        let page = self.clone();
+        let agent = agent.to_string();
+        authorize.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let (tx, rx) = async_channel::bounded::<Option<UsageCard>>(1);
+            let agent_thread = agent.clone();
+            if std::thread::Builder::new()
+                .name("ds-agent-usage-auth".into())
+                .spawn(move || {
+                    let _ = tx.send_blocking(crate::ffi::agent_usage_card_authorize(&agent_thread));
+                })
+                .is_err()
+            {
+                button.set_sensitive(true);
                 return;
             }
-            let next = if label.opacity() < 0.5 { 1.0 } else { 0.0 };
-            label.set_opacity(next);
+            let generation = page.generation.get();
+            let page = page.clone();
+            let button = button.clone();
+            gtk::glib::spawn_future_local(async move {
+                let updated = rx.recv().await.ok().flatten();
+                // Re-enable regardless: on deny the identical card skips repaint.
+                button.set_sensitive(true);
+                if page.generation.get() != generation {
+                    return;
+                }
+                if let Some(updated) = updated
+                    && (!updated.rows.is_empty() || updated.needs_auth)
+                {
+                    page.apply_card(updated);
+                }
+            });
         });
-        account.add_controller(click);
+        row.upcast()
     }
-    set_usage_account_label(&account, card.account.as_deref());
-    group.set_header_suffix(Some(&account));
-    let mut rows = Vec::with_capacity(card.rows.len());
-    for row in &card.rows {
-        let (widget, view) = usage_row_widget(row);
-        group.add(&widget);
-        rows.push(view);
-    }
-    (group, account, rows)
 }
 
 fn set_usage_account_label(label: &gtk::Label, account: Option<&str>) {

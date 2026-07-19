@@ -52,21 +52,25 @@ public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// One card (Rust UsageCard).
+/// One card (Rust UsageCard). `needsAuth` = credentials guarded (macOS keychain
+/// ACL); wire key absent when false.
 public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
     public var id: String { agent }
     public let agent: String
     public let account: String?
     public let rows: [UsageRow]
+    public let needsAuth: Bool
 
     enum CodingKeys: String, CodingKey {
         case agent, account, rows
+        case needsAuth = "needs_auth"
     }
 
-    public init(agent: String, rows: [UsageRow], account: String? = nil) {
+    public init(agent: String, rows: [UsageRow], account: String? = nil, needsAuth: Bool = false) {
         self.agent = agent
         self.account = account
         self.rows = rows
+        self.needsAuth = needsAuth
     }
 
     public init(from decoder: Decoder) throws {
@@ -74,15 +78,17 @@ public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
         agent = try c.decode(String.self, forKey: .agent)
         account = try c.decodeIfPresent(String.self, forKey: .account)
         rows = try c.decode([UsageRow].self, forKey: .rows)
+        needsAuth = try c.decodeIfPresent(Bool.self, forKey: .needsAuth) ?? false
     }
 
     public func withRows(_ rows: [UsageRow]) -> UsageCard {
-        UsageCard(agent: agent, rows: rows, account: account)
+        UsageCard(agent: agent, rows: rows, account: account, needsAuth: needsAuth)
     }
 
     public func hasSameWireValue(as other: UsageCard) -> Bool {
         agent == other.agent
             && account == other.account
+            && needsAuth == other.needsAuth
             && rows.count == other.rows.count
             && zip(rows, other.rows).allSatisfy { pair in
                 pair.0.hasSameWireValue(as: pair.1)

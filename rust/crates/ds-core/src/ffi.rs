@@ -167,6 +167,20 @@ pub extern "C" fn ds_agent_usage_card_json(agent: *const c_char, refresh: u8) ->
     })
 }
 
+/// USER-INITIATED authorize + forced card refresh. BLOCKING: network plus, on
+/// macOS, possibly the keychain ACL credential dialog. Host contract: off the UI
+/// thread, explicit click only — never startup / tab paint / MCP. Owned `char*`.
+/// HANDLE-FREE.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_agent_usage_card_authorize_json(agent: *const c_char) -> *mut c_char {
+    const EMPTY: &str = r#"{"agent":"unknown","rows":[]}"#;
+    guard_str(EMPTY, || {
+        let token = cstr_or_empty(agent);
+        let source = ds_agent_usage::parse_agent(&token);
+        to_cstring(ds_agent_usage::authorize_card(source).to_json())
+    })
+}
+
 /// Aggregate refresh (tests/tooling). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_json(refresh: u8) -> *mut c_char {
@@ -537,6 +551,16 @@ mod tests {
         let json = take_string(ds_agent_usage_card_json(c.as_ptr(), 1));
         let card: ds_agent_usage::UsageCard = serde_json::from_str(&json).unwrap();
         assert!(card.rows.is_empty());
+    }
+
+    // Non-client token exits before Paths::resolve — no real dirs, no prompt.
+    #[test]
+    fn agent_usage_card_authorize_json_unknown_agent_is_empty_without_auth() {
+        let c = CString::new("not_a_client").unwrap();
+        let json = take_string(ds_agent_usage_card_authorize_json(c.as_ptr()));
+        let card: ds_agent_usage::UsageCard = serde_json::from_str(&json).unwrap();
+        assert!(card.rows.is_empty());
+        assert!(!card.needs_auth);
     }
 
     #[test]

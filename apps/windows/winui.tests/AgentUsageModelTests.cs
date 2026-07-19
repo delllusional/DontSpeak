@@ -51,4 +51,18 @@ public class AgentUsageModelTests
         Assert.NotNull(deck);
         Assert.Empty(deck.Cards);
     }
+
+    // Wire key is absent when false (legacy cards) and true only when guarded.
+    [Fact]
+    public void DecodesNeedsAuthDefaultingFalse()
+    {
+        var legacy = AgentUsageModel.DecodeCard("""{"agent":"claude_code","rows":[]}""");
+        Assert.NotNull(legacy);
+        Assert.False(legacy.NeedsAuth);
+
+        var guarded = AgentUsageModel.DecodeCard(
+            """{"agent":"claude_code","rows":[],"needs_auth":true}""");
+        Assert.NotNull(guarded);
+        Assert.True(guarded.NeedsAuth);
+    }
 }

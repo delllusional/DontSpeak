@@ -20,6 +20,8 @@ common:
 usage:
   unavailable: Agents unavailable
   account_hidden: Account
+  needs_auth: "Stats need credential access"
+  authorize: Authorize
   session: Session
   week: Week
   month: Month

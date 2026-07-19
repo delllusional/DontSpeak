@@ -734,11 +734,19 @@ mod usage_output {
                         used_percent: 42.0,
                         resets_at_unix: 1_900_000_000,
                     }],
+                    needs_auth: false,
                 }],
             }
         })
         .expect("usage serializes");
 
+        // Wire-compat gate: needs_auth is skip-when-false — old decks unchanged.
+        assert!(
+            !value["cards"][0]
+                .as_object()
+                .unwrap()
+                .contains_key("needs_auth")
+        );
         assert_eq!(
             value,
             json!({
@@ -753,6 +761,21 @@ mod usage_output {
                 }]
             })
         );
+    }
+
+    #[test]
+    fn guarded_card_serializes_needs_auth() {
+        let value = call_usage_with(&json!({}), |_| UsageDeck {
+            cards: vec![UsageCard {
+                agent: ClientSource::ClaudeCode,
+                account: None,
+                rows: Vec::new(),
+                needs_auth: true,
+            }],
+        })
+        .expect("usage serializes");
+
+        assert_eq!(value["cards"][0]["needs_auth"], json!(true));
     }
 
     #[test]

@@ -142,15 +142,17 @@ Pins record last check, not minimum version.
 
 Full spec: [AGENT-USAGE-PLAN.md](AGENT-USAGE-PLAN.md). Summary:
 
-**Model:** `UsageDeck` → `cards[]` of `UsageCard` (`agent` + `rows[]`); each
-`UsageRow` has `period` (`session` | `week` | `month`), `used_percent`,
-`resets_at_unix`.
+**Model:** `UsageDeck` → `cards[]` of `UsageCard` (`agent` + `rows[]` +
+`needs_auth`, wire key present only when true: credentials guarded by the macOS
+keychain ACL); each `UsageRow` has `period` (`session` | `week` | `month`),
+`used_percent`, `resets_at_unix`.
 
 **ABI (off UI thread):**
 
 1. `ds_agent_usage_skeleton_json()` — installed agents + last-good memory/disk cache; no network
-2. `ds_agent_usage_card_json(agent, force)` — blocking load for one agent
-3. `ds_usage_resets_in(unix)` — remaining duration string (`2d 05h`, no seconds, no prefix)
+2. `ds_agent_usage_card_json(agent, force)` — blocking load for one agent; never prompts
+3. `ds_agent_usage_card_authorize_json(agent)` — **user-initiated** authorize + forced load; may raise the macOS keychain ACL dialog, explicit click only
+4. `ds_usage_resets_in(unix)` — remaining duration string (`2d 05h`, no seconds, no prefix)
 
 **Tab select:** paint only cards that already have rows (cache); force-load each
 installed agent async; transition a card only when its typed value changes. First

@@ -29,7 +29,8 @@ struct UsageView: View {
                         ForEach(cards) { card in
                             UsageCardView(
                                 card: card,
-                                speaking: core.activity.speakingSource == card.agent
+                                speaking: core.activity.speakingSource == card.agent,
+                                onAuthorize: authorize
                             )
                         }
                     }
@@ -77,13 +78,24 @@ struct UsageView: View {
                     group.cancelAll()
                     return
                 }
-                if let updated, !updated.rows.isEmpty {
+                if let updated, !updated.rows.isEmpty || updated.needsAuth {
                     applyCard(updated)
                 }
             }
         }
         guard !Task.isCancelled, gen == generation else { return }
         settled = true
+    }
+
+    /// User-click authorize: blocking FFI off the main actor, then the same
+    /// generation-checked apply as a refresh.
+    @MainActor private func authorize(_ agent: String) async {
+        let gen = generation
+        let updated = await AgentUsageDataSource.authorizeCard(agent)
+        guard gen == generation, let updated else { return }
+        if !updated.rows.isEmpty || updated.needsAuth {
+            applyCard(updated)
+        }
     }
 
     @MainActor private func applyCard(_ updated: UsageCard, animated: Bool = true) {
@@ -123,8 +135,12 @@ private struct UsageCardView: View {
     let card: UsageCard
     /// TTS matches this agent — pastel wash (top bar stays brand purple).
     var speaking: Bool = false
+    /// Runs the blocking authorize FFI and applies the result (UsageView owns both).
+    var onAuthorize: (String) async -> Void = { _ in }
     /// Session-only; resets when the view is recreated.
     @State private var accountRevealed = false
+    /// In-flight authorize; disables the button until the FFI returns.
+    @State private var authorizing = false
     /// Frozen while speaking; re-rolled only on false → true.
     @State private var wash: Color?
 
@@ -160,6 +176,18 @@ private struct UsageCardView: View {
                 ForEach(Array(card.rows.enumerated()), id: \.offset) { index, row in
                     if index > 0 { PlatterDivider() }
                     UsageRowView(row: row)
+                }
+                if card.needsAuth {
+                    if !card.rows.isEmpty { PlatterDivider() }
+                    UsageAuthRowView(authorizing: authorizing) {
+                        guard !authorizing else { return }
+                        authorizing = true
+                        let agent = card.agent
+                        Task {
+                            await onAuthorize(agent)
+                            authorizing = false
+                        }
+                    }
                 }
             }
             .platterBackground(cornerRadius: Glass.platterCorner)
@@ -205,6 +233,28 @@ private func prettifyUsageToken(_ token: String) -> String {
             return String(first).uppercased() + part.dropFirst()
         }
         .joined(separator: " ")
+}
+
+/// Guarded-credentials row: explanation + the only UI path that may prompt.
+private struct UsageAuthRowView: View {
+    let authorizing: Bool
+    let onAuthorize: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text(L.t("usage.needs_auth"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            if authorizing {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Button(L.t("usage.authorize"), action: onAuthorize)
+                .disabled(authorizing)
+        }
+        .platterRow()
+    }
 }
 
 private struct UsageRowView: View {

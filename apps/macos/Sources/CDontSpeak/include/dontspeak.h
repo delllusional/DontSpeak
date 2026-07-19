@@ -44,221 +44,169 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+// Saturation of the pastel base (0…1).
+#define PASTEL_S 0.42
+
+// Value/brightness of the pastel base (0…1).
+#define PASTEL_V 0.92
+
+// Overlay alpha applied by hosts on the speaking Usage card.
+#define WASH_ALPHA 0.30
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
 
-// Start the engine on a background thread if not already running. Returns 1 if
-// it is now running (started or already up), 0 on failure.
+// 1 = ok.
 uint8_t ds_engine_start(void);
 
-// Stop the engine (clear the run flag, join the thread). Returns 1 if an engine
-// was running, 0 if none. Safe to call on quit.
+// 1 if was running. Safe on quit.
 uint8_t ds_engine_stop(void);
 
-// Ask the running engine to re-read its config (no restart). Returns 1 if an
-// engine is running, else 0.
+// 1 if ok.
 uint8_t ds_engine_reload(void);
 
-// Set global MUTE (the tray "Mute" checkbox). `on != 0` mutes — playback keeps draining,
-// only the audio is silenced. Sent to the running engine over IPC (the same channel the
-// status read uses); returns 1 if the request was delivered, 0 if the engine is down.
+// Mute (`on != 0`); playback drains. 1 if IPC delivered.
 uint8_t ds_set_muted(uint8_t on);
 
-// Open the OS's system-voice settings page (macOS Spoken Content / Windows Speech).
-// Returns false on Linux, which has no portable settings page (issue #74).
-// Cross-platform seam for the UI "Manage voices" button. Returns 1 if launched, 0 otherwise. HANDLE-FREE.
+// OS voice settings. 0 on Linux (#74). HANDLE-FREE.
 uint8_t ds_open_voice_settings(void);
 
-// Kokoro (TTS) model set present + valid? (disk probe only). HANDLE-FREE.
+// Kokoro present+valid? Disk probe. HANDLE-FREE.
 uint8_t ds_kokoro_present_global(void);
 
-// Is the FULL Parakeet-ONNX (STT) asset set present + valid? HANDLE-FREE.
+// Full Parakeet-ONNX set present+valid? HANDLE-FREE.
 uint8_t ds_parakeet_onnx_present_global(void);
 
-// Engine running? (pidfile probe). HANDLE-FREE, safe off main thread.
+// Pidfile probe. HANDLE-FREE, off-main-thread ok.
 uint8_t ds_engine_running_global(void);
 
-// The engine's model-status JSON (presence + per-subsystem running map). Owned
-// `char*` the caller frees with `ds_string_free`; `"{}"` if the engine is
-// down. HANDLE-FREE — safe off the main thread.
+// Model-status JSON. Owned `char*` (`ds_string_free`); `"{}"` if down. HANDLE-FREE.
 char *ds_model_status_json(void);
 
-// Like [`ds_model_status_json`] but BLOCKS until the engine's status sequence
-// differs from `since`, or `timeout_ms` elapses — then returns the current status
-// JSON (whose `seq` field is the new sequence to pass as `since` next time). This is
-// the PUSH transport for the dictation overlay: the UI calls it on a DEDICATED
-// background thread (never the UI thread — it blocks) in a loop, re-rendering the
-// instant a partial lands instead of polling on a timer. Pass `since = 0` first
-// (returns immediately with the current state). Owned `char*`, free with
-// `ds_string_free`; `"{}"` if the engine is down.
+// Block until `seq` ≠ `since` or timeout. Overlay push: background thread loop
+// (`since = 0` first). Owned `char*`; `"{}"` if down.
 char *ds_model_status_wait(uint64_t since, uint32_t timeout_ms);
 
-// Weekly/monthly coding-agent quota snapshot. BLOCKING: call off the UI thread.
-// `refresh != 0` bypasses the 60-second in-process cache. JSON strings are
-// owned `char*`, free with `ds_string_free`. HANDLE-FREE — no engine needed.
-/* Instant deck: installed agent cards + cached rows. No network.
- * JSON: { cards: [ { agent, account?, rows: [...] } ] } */
+// Usage skeleton (`ds_agent_usage::skeleton`). No network. Owned `char*`. HANDLE-FREE.
 char *ds_agent_usage_skeleton_json(void);
-/* Blocking single-card load. agent = client token; refresh bypasses 60s cache.
- * JSON: { agent, account?, rows: [ { period, used_percent, resets_at_unix } ] } */
+
+// Blocking card refresh (`ClientSource` token). Off UI thread. `refresh` skips soft cache.
+// Owned `char*`. HANDLE-FREE.
 char *ds_agent_usage_card_json(const char *agent, uint8_t refresh);
-/* Aggregate deck refresh (tests/tooling). */
+
+// USER-INITIATED authorize + forced card refresh. BLOCKING: network plus, on
+// macOS, possibly the keychain ACL credential dialog. Host contract: off the UI
+// thread, explicit click only — never startup / tab paint / MCP. Owned `char*`.
+// HANDLE-FREE.
+char *ds_agent_usage_card_authorize_json(const char *agent);
+
+// Aggregate refresh (tests/tooling). Owned `char*`. HANDLE-FREE.
 char *ds_agent_usage_json(uint8_t refresh);
 
-// The tool catalog for the app's Tools window — a JSON array of
-// `{name, description, params:[…]}` with the args as an ORDERED array (the UI form of
-// the SAME `ds-tools` catalog the MCP server exposes, so it never drifts from what Claude
-// can call). Each param is enriched with a localized `detail` qualifier (enum allowed-values
-// or a numeric range) via [`crate::status_fmt::tool_param_detail`], so every host renders
-// the SAME pre-built string instead of re-deriving it. Owned `char*`, free with
-// `ds_string_free`. HANDLE-FREE — no engine.
+// Tools-window catalog: JSON array `{name, description, params:[…]}` — ordered params,
+// same `ds-tools` catalog as MCP (no drift). Each param gets localized `detail` via
+// [`crate::status_fmt::tool_param_detail`]. Owned `char*`. HANDLE-FREE.
 char *ds_tools_json(void);
 
-// The third-party libraries catalog for the app's Libraries window — a JSON array of
-// `{name, usage, homepage, license, license_url, files:[{name, url, size_bytes?}]}`,
-// collected from the SAME download registry every platform fetches from (so the credits
-// can't drift from what's actually shipped). Scope is the downloaded models + runtime.
-// Owned `char*`, free with `ds_string_free`. HANDLE-FREE — no engine.
+// Libraries/credits catalog from the same download registry every platform fetches
+// (models + runtime). Owned `char*`. HANDLE-FREE.
 char *ds_libraries_json(void);
 
-// The COMBINED activity-log tail for the app's Logs tab — a JSON array of
-// `{source, level, text}` merging the unified log (each line tagged engine/tts/stt/caps/hook/
-// mcp/config) with every sibling auxiliary log (e.g. the out-of-process `helper` stderr), in
-// rough chronological order. `max_bytes` caps the tail PER file. Opens SHARED-read (works while
-// the engine appends); the UI derives its source filter from the distinct `source` values.
-// "[]" when there's no log yet. Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
+// Combined activity-log tail for Logs tab: `{source, level, text}` merging unified log
+// with sibling aux logs. `max_bytes` per file; shared-read while engine appends.
+// `"[]"` if none. Owned `char*`. HANDLE-FREE.
 char *ds_logs_json(uint32_t max_bytes);
 
-// Like [`ds_logs_json`] but BLOCKS until the logs directory changes (any `*.log` file
-// created/modified/removed — the unified log or a sibling aux log; rotated `*.log.N` files
-// don't count) or `timeout_ms` elapses, then returns the CURRENT combined log JSON — the SAME
-// shape `ds_logs_json` returns, no diff/since token (unlike `ds_model_status_wait`, there's no
-// cross-call sequence to echo back — the caller just re-renders the full tail each time). This
-// is CLIENT-SIDE (an fs watch in the calling process), NOT an engine-IPC round-trip like the
-// status wait — logs are read straight off disk here, same as `ds_logs_json`. Call ONLY on a
-// DEDICATED background thread (it blocks up to `timeout_ms`), in a loop: call → render → call
-// again. `max_bytes` caps the tail PER file, same as `ds_logs_json`. Owned `char*`, free with
-// `ds_string_free`; `"[]"` if `Paths` can't resolve. HANDLE-FREE.
+// Like [`ds_logs_json`] but BLOCKS until any `*.log` in the logs dir changes (not
+// rotated `*.log.N`) or `timeout_ms` elapses, then returns the full current tail (no
+// since-token). Client-side fs watch, not engine IPC. Dedicated background thread only.
+// Owned `char*`; `"[]"` if Paths fail. HANDLE-FREE.
 char *ds_logs_wait(uint32_t max_bytes, uint32_t timeout_ms);
 
-// Erase the ENTIRE on-disk activity log — the unified log, its rotated backups, and every
-// sibling auxiliary log — for the Logs tab's Clear button. Irreversible; the caller must confirm
-// with the user before calling. A no-op (not an error) if there's nothing on disk yet.
-// HANDLE-FREE — no engine.
+// Erase entire on-disk activity log (unified + rotated + aux). Irreversible — UI must
+// confirm. No-op if empty. HANDLE-FREE.
 void ds_logs_clear(void);
 
-// The product homepage URL (e.g. the About screen's clickable link) — a single
-// source of truth so every platform's UI opens the same address. Owned `char*`,
-// free with `ds_string_free`. HANDLE-FREE — no engine needed.
+// Product homepage URL — single source for every platform. Owned `char*`. HANDLE-FREE.
 char *ds_homepage_url(void);
 
-// Brand colors (hex sRGB) as a JSON object — the single cross-platform source of truth so
-// macOS + Windows render identical tints (the visual analogue of the shared ds-i18n
-// string catalog). Keys: `seed_purple`, `mic_orange`, `warning`. Owned `char*`, free with
-// `ds_string_free`. HANDLE-FREE — no engine needed.
+// Brand colors JSON (`seed_purple`, `mic_orange`, `warning`) — single cross-platform
+// source. Owned `char*`. HANDLE-FREE.
 char *ds_brand_colors_json(void);
 
-// Logs-tab colors as a JSON object (`{levels:{ERROR,WARN}, source_palette:[…]}`) — the single
-// cross-platform source of truth for the activity-log view's coloring, so every platform's Logs
-// tab tints identically (sibling of `ds_brand_colors_json`). Owned `char*`, free with
-// `ds_string_free`. HANDLE-FREE — no engine.
+// Logs-tab colors JSON (`levels`, `source_palette`) — sibling of `ds_brand_colors_json`.
+// Owned `char*`. HANDLE-FREE.
 char *ds_log_colors_json(void);
 
-// One random Usage speaking-card pastel wash as JSON `{"r","g","b","a"}` (opaque sRGB +
-// wash alpha). Single recipe in ds-core (HSV random H, fixed S/V); hosts only paint and freeze
-// while speaker is unchanged. New color each call. Owned `char*`, free with `ds_string_free`.
-// HANDLE-FREE — no engine. On failure returns "{}" (host skips wash).
+// One random Usage speaking-card wash: `{"r","g","b","a"}` (opaque RGB + wash alpha).
+// New color each call; hosts freeze while `speaker` is unchanged. Owned `char*`.
+// HANDLE-FREE.
 char *ds_random_pastel_wash_json(void);
 
-// The product version (the Rust workspace version) for the About screen — one
-// shared source for every platform's UI. Owned `char*`, free with
-// `ds_string_free`. HANDLE-FREE — no engine needed.
+// Workspace version for About. Owned `char*`. HANDLE-FREE.
 char *ds_version(void);
 
-// Startup update check: is a newer DontSpeak release out? Hits the real GitHub API (a
-// blocking HTTP GET — this is the one FFI call that touches the network, NOT handle-free the
-// way the disk/IPC-only probes above are; call it off the UI thread, e.g. once at startup on
-// a background thread) and compares the latest release tag against [`crate::VERSION`] via
-// [`ds_model::update_check::check_for_update_at`]. Returns a JSON object:
-// `{"update_available":bool,"current_version":str,"latest_version":str,"html_url":str}` — the
-// per-host UI reads `update_available` to decide whether to show the pill next to the version
-// number, `latest_version` as the version it displays, and `html_url` as the pill's own
-// click-through target. On ANY failure (offline, rate-limited, malformed response) returns
-// `"{}"` — a host must treat a missing `update_available` key the same as `false`, never as
-// "unknown, so show the pill anyway". Owned `char*`, free with `ds_string_free`.
+// Startup update check vs GitHub API (blocking HTTP — only network FFI; call off UI
+// thread). Compares latest tag to [`crate::VERSION`]. Returns
+// `{"update_available", "current_version", "latest_version", "html_url"}`. Any failure
+// → `"{}"`; host must treat missing `update_available` as false (never show pill).
+// Owned `char*`.
 char *ds_update_check_json(void);
 
-// Set the active UI locale (BCP-47 or a bare language tag, e.g. "de"). NULL is a no-op.
-// Unknown locales fall back to English at lookup. HANDLE-FREE — no engine needed.
+// Set active UI locale (BCP-47 / bare tag). NULL no-op; unknown → English at lookup.
+// HANDLE-FREE.
 void ds_set_locale(const char *locale);
 
-// The active UI locale tag — so a UI can match its native number formatter to the
-// catalog's language. Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
+// Active UI locale tag (for matching native number formatters). Owned `char*`. HANDLE-FREE.
 char *ds_locale(void);
 
-// Look up a localized UI string by `key` (a C string). English fallback; a missing key
-// returns the key itself. Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
+// Localized string by `key`; missing key returns the key. Owned `char*`. HANDLE-FREE.
 char *ds_t(const char *key);
 
-// Look up a localized string and interpolate `%{name}` placeholders from `args_json`, a
-// JSON object `{ "name": value }` (values stringified). Both args are C strings. Owned
-// `char*`, free with `ds_string_free`. HANDLE-FREE.
+// Localized string with `%{name}` from `args_json` (`{ "name": value }`). Owned `char*`.
+// HANDLE-FREE.
 char *ds_t_args(const char *key, const char *args_json);
 
-// Localized hover word for an engine lifecycle state. `state` is the model-status token from
-// the canonical [`ds_status::EngineState`] vocabulary ("running"|"idle"|"warming"|
-// "downloading"|"failed"|"blocked"|"missing"),
-// `progress` the 0..1 OVERALL download fraction — byte-weighted across the whole model set, a
-// single global percent (only used for "downloading"), `why` the
-// failure reason (only used for "failed"; empty → the generic default). Owned `char*`,
-// free with `ds_string_free`. HANDLE-FREE. The ONE state→word formatter shared by every UI.
+// Hover word for engine lifecycle state. Tokens: running|idle|warming|downloading|
+// failed|blocked|missing. `progress` = overall byte-weighted 0..1 (downloading only);
+// `why` = failure reason (failed only). Owned `char*`. HANDLE-FREE.
 char *ds_engine_state_word(const char *state, double progress, const char *why);
 
-// Localized duration; leading+trailing zero units dropped (e.g. "12m 04s", "1d 05h").
-// Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
+// Lifetime / remaining duration; leading and trailing zero units dropped.
+// Owned `char*`. HANDLE-FREE.
 char *ds_duration_live(double secs);
 
-// Usage remaining duration from UTC epoch (e.g. "2d 05h"). Owned `char*`.
+// See [`crate::status_fmt::usage_resets_in`]. Owned `char*`.
 char *ds_usage_resets_in(int64_t resets_at_unix);
 
-// Localized RUNTIME label for a resolved provider token ("ane"|"coreml"|"cuda"|
-// "cpu"; unknown passes through). The TTS/STT runtime detail. Owned `char*`, free with
-// `ds_string_free`. HANDLE-FREE.
+// Runtime label for provider token (ane|coreml|cuda|cpu; unknown verbatim). Owned
+// `char*`. HANDLE-FREE.
 char *ds_runtime_label(const char *provider);
 
-// A stat RANGE string — "avg`<unit>`  ·  lo–hi". `precision` = decimals; `unit_key` = the
-// catalog key for the trailing unit ("status.stats.unit.times" / ".seconds"). Owned `char*`,
-// free with `ds_string_free`. HANDLE-FREE.
+// Stat range `"avg{unit}  ·  lo–hi"`. Owned `char*`. HANDLE-FREE.
 char *ds_stats_range(double lo, double avg, double hi, uint32_t precision, const char *unit_key);
 
-// A COUNT + audio-duration stat string — "`<count>`  <audio_secs> s". Owned `char*`, free with
-// `ds_string_free`. HANDLE-FREE.
+// Count + audio duration stat. Owned `char*`. HANDLE-FREE.
 char *ds_stats_count(uint64_t count, double audio_secs);
 
-// A human-readable file size — decimal units, "1.4 GB" / "325 MB" / "12 KB" / "512 B". The ONE
-// size formatter shared by every UI's Libraries/Credits tab. Owned `char*`, free with
-// `ds_string_free`. HANDLE-FREE.
+// Human file size (decimal SI). Owned `char*`. HANDLE-FREE.
 char *ds_human_size(uint64_t bytes);
 
-// Tray / state-stripe kind: "idle" | "recording" | "speaking". `stt_active` / `tts_active`
-// are non-zero when Caps dictation / TTS playback is live. `tray_indicator_json` is the
-// model_status `tray` JSON string array (NULL/malformed → []). Owned `char*`, free
-// with `ds_string_free`. HANDLE-FREE. ONE mapping shared by every host.
+// Tray kind via [`ds_status::tray_icon_kind`]. `tray_indicator_json`: JSON array of
+// [`ds_status::StatusTrayKind`] tokens (NULL/malformed → `[]`). Owned `char*`. HANDLE-FREE.
 char *ds_tray_icon_kind(uint8_t stt_active, uint8_t tts_active, const char *tray_indicator_json);
 
-// Whether diarization UI/tools are shipped (`ds_tools::DIARIZATION_ENABLED`). ONE flip for
-// every host. Returns 1 when shown, 0 when hidden. HANDLE-FREE.
+// `ds_tools::DIARIZATION_ENABLED` — single flip for every host. 1 shown / 0 hidden.
+// HANDLE-FREE.
 uint8_t ds_diarization_ui_enabled(void);
 
-// Set the TTS execution provider for this session: `provider` is "cpu" | "cuda" |
-// "coreml" | "ane" | "auto" (NULL/unknown → "auto"). The engine restarts the warm Kokoro child on
-// the new provider and resets its TTS stats (only if the active provider actually
-// changed). Returns 1 if the request reached the engine, else 0. The new provider
-// + fresh stats then show up via `ds_model_status_json`.
+// Session TTS provider: "cpu"|"cuda"|"coreml"|"ane"|"auto" (NULL/unknown → "auto").
+// Restarts warm Kokoro + resets TTS stats only if provider actually changes. 1 if
+// delivered; new provider/stats via `ds_model_status_json`.
 uint8_t ds_set_provider(const char *provider);
 
-// Free a `char*` returned by any ds_* function. NULL is a no-op.
+// Free a `char*` from any ds_* function. NULL no-op.
 void ds_string_free(char *s);
 
 #ifdef __cplusplus

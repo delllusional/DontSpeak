@@ -10,6 +10,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ds_client::ClientSource;
+use providers::FetchError;
 use serde::{Deserialize, Serialize};
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
@@ -56,6 +57,15 @@ pub struct UsageCard {
     pub account: Option<String>,
     /// Session → week → month. Empty until loaded / unavailable.
     pub rows: Vec<UsageRow>,
+    /// Credentials exist but a silent read is disallowed (macOS keychain ACL);
+    /// a user-initiated [`authorize_card`] can unlock. Absent on the wire when
+    /// false; the persisted cache never stores `true` (see `UsageCache::store`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub needs_auth: bool,
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 impl UsageCard {
@@ -64,18 +74,21 @@ impl UsageCard {
             agent,
             account: None,
             rows: Vec::new(),
+            needs_auth: false,
         }
     }
 
     fn from_result(
         agent: ClientSource,
         account: Option<String>,
-        result: std::io::Result<Vec<UsageRow>>,
+        result: Result<Vec<UsageRow>, FetchError>,
     ) -> Self {
+        let needs_auth = matches!(result, Err(FetchError::Guarded));
         let mut card = Self {
             agent,
             account,
             rows: result.unwrap_or_default(),
+            needs_auth,
         };
         card.normalize();
         card
@@ -280,17 +293,22 @@ fn installed_agents(paths: &ds_config::Paths) -> Vec<ClientSource> {
         .collect()
 }
 
-fn fetch_rows(paths: &ds_config::Paths, agent: ClientSource) -> std::io::Result<Vec<UsageRow>> {
+/// `interactive` only affects the Claude arm (macOS keychain); every other
+/// provider ignores it.
+fn fetch_rows(
+    paths: &ds_config::Paths,
+    agent: ClientSource,
+    interactive: bool,
+) -> Result<Vec<UsageRow>, FetchError> {
     match agent {
-        ClientSource::ClaudeCode => providers::claude::fetch(paths),
-        ClientSource::Codex => providers::codex::fetch(paths),
-        ClientSource::QwenCode => providers::qwen::fetch(paths),
-        ClientSource::Grok => providers::grok::fetch(paths),
-        ClientSource::KimiCode => providers::kimi::fetch(paths),
-        ClientSource::Hermes => providers::hermes::fetch(paths),
-        ClientSource::DontSpeak | ClientSource::Unknown => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "not a usage agent",
+        ClientSource::ClaudeCode => providers::claude::fetch(paths, interactive),
+        ClientSource::Codex => providers::codex::fetch(paths).map_err(FetchError::Io),
+        ClientSource::QwenCode => providers::qwen::fetch(paths).map_err(FetchError::Io),
+        ClientSource::Grok => providers::grok::fetch(paths).map_err(FetchError::Io),
+        ClientSource::KimiCode => providers::kimi::fetch(paths).map_err(FetchError::Io),
+        ClientSource::Hermes => providers::hermes::fetch(paths).map_err(FetchError::Io),
+        ClientSource::DontSpeak | ClientSource::Unknown => Err(FetchError::Io(
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a usage agent"),
         )),
     }
 }
@@ -339,7 +357,20 @@ pub fn skeleton() -> UsageDeck {
 }
 
 /// Blocking one-card refresh. Soft = 60s cache; keep last good card on empty (rate limits).
+/// Never prompts (interactive = false forever — MCP/CLI/implicit paths).
 pub fn refresh_card(agent: ClientSource, force: bool) -> UsageCard {
+    refresh_card_inner(agent, force, false)
+}
+
+/// USER-INITIATED authorize + forced refresh. BLOCKING: network plus, on macOS,
+/// possibly the keychain ACL dialog. Reachable only from
+/// `ds_agent_usage_card_authorize_json` — hosts call it on explicit click.
+pub fn authorize_card(agent: ClientSource) -> UsageCard {
+    refresh_card_inner(agent, true, true)
+}
+
+fn refresh_card_inner(agent: ClientSource, force: bool, interactive: bool) -> UsageCard {
+    // is_client gate stays ahead of Paths::resolve (FFI tests rely on it).
     if !agent.is_client() {
         return UsageCard::empty(agent);
     }
@@ -358,31 +389,38 @@ pub fn refresh_card(agent: ClientSource, force: bool) -> UsageCard {
         &paths,
         agent,
         force,
+        interactive,
         || fetch_account(&paths, agent),
-        || fetch_rows(&paths, agent),
+        || fetch_rows(&paths, agent, interactive),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn refresh_card_with<A, F>(
     cache: &Mutex<UsageCache>,
     slot: &Mutex<RefreshSlot>,
     paths: &ds_config::Paths,
     agent: ClientSource,
     force: bool,
+    interactive: bool,
     account: A,
     fetch: F,
 ) -> UsageCard
 where
     A: FnOnce() -> Option<String>,
-    F: FnOnce() -> std::io::Result<Vec<UsageRow>>,
+    F: FnOnce() -> Result<Vec<UsageRow>, FetchError>,
 {
     let requested_at = Instant::now();
     let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // Overlapping wait: reuse the result that finished after we started (even if force).
-    if slot
-        .last_finished_at
-        .is_some_and(|finished_at| finished_at >= requested_at)
+    // Overlapping wait: reuse the result that finished after we started (even if
+    // force). Interactive skips reuse — a silent refresh finishing while we
+    // queued must not swallow the user's prompt request; the slot mutex still
+    // serializes the authorize against concurrent silent refreshes.
+    if !interactive
+        && slot
+            .last_finished_at
+            .is_some_and(|finished_at| finished_at >= requested_at)
     {
         return cached_card(cache, paths, agent)
             .map_or_else(|| UsageCard::empty(agent), |entry| entry.card);
@@ -398,7 +436,8 @@ where
     }
 
     let card = UsageCard::from_result(agent, account(), fetch());
-    let returned = if card.has_data() {
+    let needs_auth = card.needs_auth;
+    let mut returned = if card.has_data() {
         cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -407,6 +446,10 @@ where
     } else {
         cached_card(cache, paths, agent).map_or(card, |entry| entry.card)
     };
+    // Guarded refresh keeps stale cached rows AND shows the authorize state.
+    // Store only runs on has_data() (needs_auth == false there), so the on-disk
+    // cache never contains `needs_auth: true` and the skeleton never paints it.
+    returned.needs_auth = needs_auth;
     slot.last_finished_at = Some(Instant::now());
     returned
 }
@@ -510,6 +553,7 @@ mod tests {
             agent,
             account: Some("user@x.ai".into()),
             rows: vec![UsageRow::checked(Period::Week, 8.0, 1_800_000_000).unwrap()],
+            needs_auth: false,
         };
         let cache = Mutex::new(UsageCache::default());
         cache.lock().unwrap().store(&paths, good.clone());
@@ -519,6 +563,7 @@ mod tests {
             &paths,
             agent,
             true,
+            false,
             || Some("ignored@x.ai".into()),
             || Ok(Vec::new()),
         );
@@ -533,6 +578,7 @@ mod tests {
             agent: ClientSource::Codex,
             account: Some("dev@openai.com".into()),
             rows: vec![UsageRow::checked(Period::Session, 42.0, 1_900_000_000).unwrap()],
+            needs_auth: false,
         };
 
         let mut first = UsageCache::default();
@@ -557,6 +603,7 @@ mod tests {
             agent: ClientSource::QwenCode,
             account: None,
             rows: vec![UsageRow::checked(Period::Month, 23.0, 1_900_000_000).unwrap()],
+            needs_auth: false,
         };
         let mut initial = UsageCache::default();
         initial.store(&paths, good.clone());
@@ -567,6 +614,7 @@ mod tests {
             &Mutex::new(RefreshSlot::default()),
             &paths,
             ClientSource::QwenCode,
+            false,
             false,
             || None,
             || {
@@ -602,6 +650,7 @@ mod tests {
                                 resets_at_unix: 0,
                             },
                         ],
+                        needs_auth: false,
                     },
                 },
                 CachedCard {
@@ -610,6 +659,7 @@ mod tests {
                         agent: ClientSource::DontSpeak,
                         account: None,
                         rows: vec![UsageRow::checked(Period::Week, 1.0, 1_900_000_000).unwrap()],
+                        needs_auth: false,
                     },
                 },
             ],
@@ -654,6 +704,7 @@ mod tests {
                         &paths,
                         ClientSource::ClaudeCode,
                         true,
+                        false,
                         || Some("claude@example.com".into()),
                         || {
                             fetches.fetch_add(1, Ordering::SeqCst);
@@ -684,6 +735,7 @@ mod tests {
                 agent: ClientSource::ClaudeCode,
                 account: Some("me@anthropic.test".into()),
                 rows: vec![UsageRow::checked(Period::Session, 10.0, 1).unwrap()],
+                needs_auth: false,
             }],
         };
         let json = deck.to_json();
@@ -694,5 +746,120 @@ mod tests {
         assert!(!json.contains("\"schema_version\""));
         assert!(!json.contains("\"providers\""));
         assert!(!json.contains("\"client\""));
+        // Wire compat: needs_auth is skip-when-false, present only when true.
+        assert!(!json.contains("needs_auth"));
+    }
+
+    #[test]
+    fn needs_auth_serde_defaults_false_and_serializes_only_true() {
+        // Legacy cache/deck JSON without the key still parses.
+        let legacy: UsageCard =
+            serde_json::from_str(r#"{"agent":"claude_code","rows":[]}"#).unwrap();
+        assert!(!legacy.needs_auth);
+
+        let guarded: UsageCard =
+            serde_json::from_str(r#"{"agent":"claude_code","rows":[],"needs_auth":true}"#).unwrap();
+        assert!(guarded.needs_auth);
+        assert!(guarded.to_json().contains("\"needs_auth\":true"));
+    }
+
+    #[test]
+    fn guarded_refresh_with_empty_cache_flags_needs_auth() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(root.path());
+        let returned = refresh_card_with(
+            &Mutex::new(UsageCache::default()),
+            &Mutex::new(RefreshSlot::default()),
+            &paths,
+            ClientSource::ClaudeCode,
+            true,
+            false,
+            || None,
+            || Err(FetchError::Guarded),
+        );
+        assert!(returned.rows.is_empty());
+        assert!(returned.needs_auth);
+    }
+
+    #[test]
+    fn guarded_refresh_keeps_cached_rows_and_never_persists_needs_auth() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(root.path());
+        let agent = ClientSource::ClaudeCode;
+        let good = UsageCard {
+            agent,
+            account: Some("me@anthropic.test".into()),
+            rows: vec![UsageRow::checked(Period::Session, 33.0, 1_900_000_000).unwrap()],
+            needs_auth: false,
+        };
+        let cache = Mutex::new(UsageCache::default());
+        cache.lock().unwrap().store(&paths, good.clone());
+
+        let returned = refresh_card_with(
+            &cache,
+            &Mutex::new(RefreshSlot::default()),
+            &paths,
+            agent,
+            true,
+            true,
+            || None,
+            || Err(FetchError::Guarded),
+        );
+        assert_eq!(returned.rows, good.rows);
+        assert!(returned.needs_auth);
+
+        // Cache invariant: the skeleton must never paint the authorize row.
+        let disk = std::fs::read_to_string(cache_path(&paths)).unwrap();
+        assert!(!disk.contains("needs_auth"));
+        let reloaded = cached_card(&cache, &paths, agent).unwrap().card;
+        assert!(!reloaded.needs_auth);
+    }
+
+    #[test]
+    fn interactive_refresh_skips_overlap_reuse() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(root.path());
+        // A refresh "finishing" after any later request starts: future instant.
+        let finished_late = || {
+            Mutex::new(RefreshSlot {
+                last_finished_at: Some(Instant::now() + Duration::from_secs(3600)),
+            })
+        };
+        let fetches = AtomicUsize::new(0);
+        let fetch = || {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![
+                UsageRow::checked(Period::Week, 5.0, 1_900_000_000).unwrap(),
+            ])
+        };
+
+        let silent = refresh_card_with(
+            &Mutex::new(UsageCache::default()),
+            &finished_late(),
+            &paths,
+            ClientSource::ClaudeCode,
+            true,
+            false,
+            || None,
+            fetch,
+        );
+        assert_eq!(fetches.load(Ordering::SeqCst), 0);
+        assert!(silent.rows.is_empty());
+
+        let interactive = refresh_card_with(
+            &Mutex::new(UsageCache::default()),
+            &finished_late(),
+            &paths,
+            ClientSource::ClaudeCode,
+            true,
+            true,
+            || None,
+            fetch,
+        );
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert!(interactive.has_data());
+        assert!(!interactive.needs_auth);
     }
 }

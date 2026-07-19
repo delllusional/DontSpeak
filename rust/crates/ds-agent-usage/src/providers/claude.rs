@@ -1,15 +1,21 @@
 use serde_json::Value;
 
-#[cfg(target_os = "macos")]
-use super::MAX_CREDENTIAL_BYTES;
-use super::{read_json_file, request, rfc3339_timestamp, send_json, string_at};
+use super::{
+    FetchError, MAX_CREDENTIAL_BYTES, read_json_file, request, rfc3339_timestamp, send_json,
+    string_at,
+};
 use crate::{Period, UsageRow};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
-pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
-    let credentials = read_credentials(paths)?;
+/// `interactive` reaches the keychain probe only from the user-initiated
+/// authorize FFI; every implicit path passes `false` and can never prompt.
+pub(crate) fn fetch(
+    paths: &ds_config::Paths,
+    interactive: bool,
+) -> Result<Vec<UsageRow>, FetchError> {
+    let credentials = read_credentials(paths, interactive)?;
     let token = string_at(&credentials, &["claudeAiOauth", "accessToken"])
         .or_else(|| string_at(&credentials, &["claude_ai_oauth", "access_token"]))
         .ok_or_else(|| {
@@ -44,60 +50,103 @@ pub(crate) fn account(paths: &ds_config::Paths) -> Option<String> {
         .map(str::to_owned)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn read_credentials(paths: &ds_config::Paths) -> std::io::Result<Value> {
-    read_json_file(&paths.claude_dir.join(".credentials.json"))
+/// Keychain probe outcome. `ItemPresent` = item exists but a silent data read
+/// was disallowed (macOS keychain ACL) — classified as [`FetchError::Guarded`].
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) enum KeychainProbe {
+    Data(Vec<u8>),
+    ItemPresent,
+    Absent,
 }
 
-#[cfg(target_os = "macos")]
-fn read_credentials(paths: &ds_config::Paths) -> std::io::Result<Value> {
-    let file_error = match read_json_file(&paths.claude_dir.join(".credentials.json")) {
-        Ok(credentials) => return Ok(credentials),
-        Err(error) => error,
-    };
-    // macOS Keychain: skip protected items (never raise auth UI).
-    match read_keychain_credentials() {
-        Ok(credentials) => Ok(credentials),
-        Err(_) => Err(file_error),
+fn read_credentials(paths: &ds_config::Paths, interactive: bool) -> Result<Value, FetchError> {
+    let file = read_json_file(&paths.claude_dir.join(".credentials.json"));
+    #[cfg(target_os = "macos")]
+    {
+        resolve_credentials(file, || keychain_probe(interactive))
+    }
+    // Non-macOS: file-only; `Guarded` is unreachable by construction.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = interactive;
+        resolve_credentials(file, || KeychainProbe::Absent)
     }
 }
 
+/// Pure classification: a readable plain file wins (probe never invoked).
+fn resolve_credentials(
+    file: std::io::Result<Value>,
+    probe: impl FnOnce() -> KeychainProbe,
+) -> Result<Value, FetchError> {
+    let file_error = match file {
+        Ok(credentials) => return Ok(credentials),
+        Err(error) => error,
+    };
+    match probe() {
+        KeychainProbe::Data(bytes) => {
+            if bytes.len() as u64 > MAX_CREDENTIAL_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "credential payload exceeds size limit",
+                )
+                .into());
+            }
+            serde_json::from_slice(&bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
+        }
+        KeychainProbe::ItemPresent => Err(FetchError::Guarded),
+        KeychainProbe::Absent => Err(FetchError::Io(file_error)),
+    }
+}
+
+/// Sole prompting path in the whole crate: step 2 runs only when `interactive`
+/// (user click through `ds_agent_usage_card_authorize_json`) and MAY raise the
+/// legacy-keychain ACL dialog, blocking until the user answers. Steps 1 and 3
+/// never raise UI: silent search skips protected items; the attributes-only
+/// probe does not decrypt the secret.
 #[cfg(target_os = "macos")]
-fn read_keychain_credentials() -> std::io::Result<Value> {
+fn keychain_probe(interactive: bool) -> KeychainProbe {
     use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
 
-    let results = ItemSearchOptions::new()
+    fn first_data(results: Vec<SearchResult>) -> Option<Vec<u8>> {
+        results.into_iter().find_map(|result| match result {
+            SearchResult::Data(bytes) => Some(bytes),
+            _ => None,
+        })
+    }
+
+    if let Ok(results) = ItemSearchOptions::new()
         .class(ItemClass::generic_password())
         .service(KEYCHAIN_SERVICE)
         .load_data(true)
         .skip_authenticated_items(true)
         .search()
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Claude Keychain credentials unavailable",
-            )
-        })?;
-    let bytes = results
-        .into_iter()
-        .find_map(|result| match result {
-            SearchResult::Data(bytes) => Some(bytes),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Claude Keychain credentials unavailable",
-            )
-        })?;
-    if bytes.len() as u64 > MAX_CREDENTIAL_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "credential payload exceeds size limit",
-        ));
+        && let Some(bytes) = first_data(results)
+    {
+        return KeychainProbe::Data(bytes);
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+
+    if interactive
+        && let Ok(results) = ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(KEYCHAIN_SERVICE)
+            .load_data(true)
+            .search()
+        && let Some(bytes) = first_data(results)
+    {
+        return KeychainProbe::Data(bytes);
+    }
+
+    let attributes = ItemSearchOptions::new()
+        .class(ItemClass::generic_password())
+        .service(KEYCHAIN_SERVICE)
+        .load_attributes(true)
+        .limit(1)
+        .search();
+    match attributes {
+        Ok(results) if !results.is_empty() => KeychainProbe::ItemPresent,
+        _ => KeychainProbe::Absent,
+    }
 }
 
 /// `five_hour` + `seven_day` only (no model-scoped / $ extra).
@@ -203,5 +252,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(account(&paths).as_deref(), Some("me@anthropic.test"));
+    }
+
+    // resolve_credentials classifier table — synthetic probes, no live keychain.
+
+    fn miss() -> std::io::Result<Value> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no credential file",
+        ))
+    }
+
+    #[test]
+    fn readable_file_wins_and_probe_never_runs() {
+        let resolved = resolve_credentials(Ok(serde_json::json!({"claudeAiOauth": {}})), || {
+            panic!("probe must not run when the file read succeeds")
+        });
+        assert!(resolved.is_ok());
+    }
+
+    #[test]
+    fn file_miss_with_present_item_is_guarded() {
+        let resolved = resolve_credentials(miss(), || KeychainProbe::ItemPresent);
+        assert!(matches!(resolved, Err(FetchError::Guarded)));
+    }
+
+    #[test]
+    fn file_miss_with_absent_item_keeps_the_file_error() {
+        let resolved = resolve_credentials(miss(), || KeychainProbe::Absent);
+        match resolved {
+            Err(FetchError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            }
+            _ => panic!("expected the original file error"),
+        }
+    }
+
+    #[test]
+    fn probe_data_parses_or_maps_to_invalid_data() {
+        let ok = resolve_credentials(miss(), || {
+            KeychainProbe::Data(br#"{"claudeAiOauth":{"accessToken":"t"}}"#.to_vec())
+        });
+        assert_eq!(
+            ok.ok()
+                .as_ref()
+                .and_then(|v| string_at(v, &["claudeAiOauth", "accessToken"])),
+            Some("t")
+        );
+
+        for bad in [
+            b"not json".to_vec(),
+            vec![b'x'; (MAX_CREDENTIAL_BYTES + 1) as usize],
+        ] {
+            match resolve_credentials(miss(), || KeychainProbe::Data(bad)) {
+                Err(FetchError::Io(error)) => {
+                    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                }
+                _ => panic!("expected InvalidData"),
+            }
+        }
     }
 }

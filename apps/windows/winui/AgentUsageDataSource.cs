@@ -8,4 +8,8 @@ internal static class AgentUsageDataSource
 
     internal static UsageCardDto? RefreshCard(string agent)
         => AgentUsageModel.DecodeCard(Native.AgentUsageCardJson(agent, refresh: true));
+
+    /// <summary>BLOCKING; user click only (see Native.AgentUsageAuthorizeCardJson).</summary>
+    internal static UsageCardDto? AuthorizeCard(string agent)
+        => AgentUsageModel.DecodeCard(Native.AgentUsageAuthorizeCardJson(agent));
 }

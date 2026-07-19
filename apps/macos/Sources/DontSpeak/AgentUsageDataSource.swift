@@ -22,6 +22,17 @@ enum AgentUsageDataSource {
         }.value
     }
 
+    /// BLOCKING: network + possibly the keychain ACL dialog. Explicit click only.
+    static func authorizeCard(_ agent: String) async -> UsageCard? {
+        await Task.detached(priority: .userInitiated) {
+            guard let json = ffiString({
+                agent.withCString { ds_agent_usage_card_authorize_json($0) }
+            }) else { return nil }
+            guard let card = UsageDeck.decodeCard(Data(json.utf8)) else { return nil }
+            return attachRemaining(card)
+        }.value
+    }
+
     private static func attachRemaining(_ deck: UsageDeck) -> UsageDeck {
         UsageDeck(cards: deck.cards.map(attachRemaining))
     }
