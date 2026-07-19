@@ -60,10 +60,11 @@ non-streaming — `Stop` voices the reply from the session `wire.jsonl`. See
 [docs/STREAMING-NARRATION.md](docs/STREAMING-NARRATION.md) and
 [docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md).
 
-## Local STT (Parakeet)
+## Local STT (built-in)
 
-Same warm helper as TTS: Caps-ON opens mic → streaming FastConformer (Core ML via
-FluidAudio on Apple Silicon). Caps-OFF: final transcript → focus-gated key injector.
+Same warm helper as TTS: Caps-ON opens mic → streaming FastConformer over ORT on
+Windows/Linux, or Parakeet via FluidAudio Core ML on Apple Silicon. Caps-OFF: final
+transcript → focus-gated key injector.
 Details: [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md).
 
 ## Models & ONNX

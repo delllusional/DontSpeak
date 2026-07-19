@@ -1,7 +1,9 @@
 # Speech-to-text pipeline
 
-Built-in dictation: streaming FastConformer (Windows/Linux), Core ML Parakeet
+Built-in dictation: streaming FastConformer 1040 ms (Windows/Linux), Core ML Parakeet
 (Apple Silicon), macOS System Speech. Same provider for Caps-Lock and always-listening.
+The portable FastConformer emits lowercase text without punctuation; its encoder metadata
+sets the live partial cadence.
 
 ## Ownership
 

@@ -1,8 +1,10 @@
-//! Validate the Rust Parakeet STT path: load a 16 kHz mono WAV and transcribe it via
-//! `LocalTranscriber::for_provider("ane", ..)` → the FluidAudio Core ML shim.
+//! Live validation for the Rust built-in STT path: load a 16 kHz mono WAV and transcribe it
+//! through the selected portable ONNX or macOS native provider.
 //!
+//!   cargo run -p ds-stt --example parakeet_check -- some_16k.wav cpu
+//!   cargo run -p ds-stt --example parakeet_check -- some_16k.wav cuda /path/to/models
 //!   SMKOKORO_DYLIB_PATH=/path/to/libsmkokoro.dylib \
-//!     cargo run -p ds-stt --example parakeet_check -- some_16k.wav
+//!     cargo run -p ds-stt --example parakeet_check -- some_16k.wav ane
 use std::path::PathBuf;
 
 fn load_wav_16k(path: &str) -> Vec<f32> {
@@ -35,7 +37,14 @@ fn main() {
         samples.len() as f32 / 16_000.0
     );
 
-    let mut t = ds_stt::LocalTranscriber::for_provider("ane", PathBuf::new());
+    let provider = std::env::args().nth(2).unwrap_or_else(|| "cpu".into());
+    let model_dir = std::env::args()
+        .nth(3)
+        .map(PathBuf::from)
+        .or_else(ds_model::parakeet_dir)
+        .unwrap_or_default();
+    println!("provider: {provider}");
+    let mut t = ds_stt::LocalTranscriber::for_provider(&provider, model_dir);
     match t.transcribe_pcm_16k(&samples) {
         Ok(text) => println!("TRANSCRIPT: {text}"),
         Err(e) => {

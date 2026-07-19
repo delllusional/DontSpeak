@@ -1,21 +1,7 @@
-//! Download engine — atomic temp + rename, validated HTTP Range resume across
-//! retries, sha-verify, and the installer prefetch fast-path. Blocking
-//! `attohttpc` (no tokio); a socket-level per-read inactivity timeout aborts a
-//! stalled CDN.
-//!
-//! Timeouts intentionally omit a wall-clock total budget: large models can take
-//! minutes. Policy is connect fail-fast + per-read inactivity only (`ds_http::request`
-//! with `total_timeout: None`). Bounded JSON probes (agent-usage) pass `Some(...)`.
-//!
-//! `ds_http` defaults to `max_redirections(0)` so credential-bearing probes never hop
-//! (attohttpc re-sends `Authorization` on cross-origin 3xx). These public CDN GETs
-//! never attach auth; GitHub `releases/download` and Hugging Face `/resolve/` already
-//! 302 to object storage, so the CDN GET builder opts back into a small redirect budget.
-//!
-//! Retry classification rides on `io::ErrorKind`, not a custom error enum:
-//! `InvalidData` = checksum mismatch and `NotFound` = HTTP 4xx or definitive DNS
-//! name failure (permanent, fail fast); `TimedOut` = other transport/5xx/truncation
-//! failures (transient, retried) — see `is_permanent_error`.
+//! Atomic download: temp + rename, Range resume, sha-verify, installer prefetch.
+//! Blocking `attohttpc`; per-read inactivity (no total timeout — large models).
+//! CDN GETs re-enable redirects (auth-less); probes keep `max_redirections(0)`.
+//! Permanent: `InvalidData` (checksum), `NotFound` (4xx/DNS). Transient: `TimedOut`.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -26,21 +12,15 @@ use crate::spec::ModelSpec;
 
 pub(crate) const DEFAULT_RETRIES: u32 = 3;
 
-// Connect: fail-fast on dead host. Read: per-read inactivity (SO_RCVTIMEO), not whole-request —
-// large models may take minutes; stalled CDN aborts when no bytes arrive for 60s.
-// No total wall-clock timeout: multi-minute transfers must not die at an arbitrary cap
-// (contrast credential-bearing probes in ds-agent-usage, which pass Some(total)).
+// Connect fail-fast; 60s per-read inactivity; no total timeout (vs agent-usage Some(total)).
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-/// Cap endless tiny successful ranges; then ordinary retry/backoff.
+/// Cap endless tiny ranges before outer retry.
 const MAX_RANGE_SEGMENTS_PER_ATTEMPT: u32 = 64;
 
-/// Stall timeouts + OS roots — sole setup for every HTTPS download in this crate.
-/// Total timeout is deliberately `None` (see module docs). Never attach
-/// `Authorization` on this builder: redirects are re-enabled for public CDNs only.
+/// Auth-less CDN GET: redirects on, total timeout None. Never attach Authorization.
 pub(crate) fn http_get_builder(url: &str) -> attohttpc::RequestBuilder {
-    // Bound hops (GitHub/HF typically need 1). Keep below attohttpc's historical default of 5.
     const MAX_CDN_REDIRECTIONS: u32 = 5;
     ds_http::request(
         ds_http::Method::GET,
@@ -53,16 +33,15 @@ pub(crate) fn http_get_builder(url: &str) -> attohttpc::RequestBuilder {
     .max_redirections(MAX_CDN_REDIRECTIONS)
 }
 
-// Installer prefetch: copy from a local dir (URL basename) instead of network;
-// verify+extract reused. Unset on normal app/engine path.
+// Installer: local dir keyed by url_basename (no network).
 static PREFETCH_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-/// Prefetch dir (`None` = off). Matched by [`url_basename`]. For `--install-prefetched`.
+/// Prefetch dir (`None` = off). Keyed by [`url_basename`].
 pub fn set_prefetch_source(dir: Option<PathBuf>) {
     *PREFETCH_DIR.lock().unwrap() = dir;
 }
 
-/// Last path segment of `url` (query/fragment stripped) — installer save key.
+/// Last path segment (query/fragment stripped) — installer save key.
 pub fn url_basename(url: &str) -> &str {
     let no_query = url.split(['?', '#']).next().unwrap_or(url);
     let trimmed = no_query.trim_end_matches('/');
@@ -76,8 +55,7 @@ fn prefetch_local(url: &str) -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-// One in-flight download per dest path: parallel targets that share a file
-// (ORT dylib, kokoro_frontend subset) attach instead of double-fetching.
+// Per-dest lock so shared files (ORT, kokoro_frontend) attach instead of double-fetch.
 pub(crate) fn file_flight(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -91,7 +69,6 @@ pub(crate) fn file_flight(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
         .clone()
 }
 
-/// Local copy + progress jump to 100% (installer fast-path).
 fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
     if local.metadata()?.len() > MAX_DOWNLOAD_BYTES {
         return Err(std::io::Error::new(
@@ -105,12 +82,12 @@ fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> st
     Ok(())
 }
 
-/// Verify local SHA-256 or download (range-resume + atomic rename). Returns final path.
+/// Cache hit if SHA matches; else Range-resume download + atomic rename.
 pub fn ensure(spec: &ModelSpec) -> std::io::Result<PathBuf> {
     ensure_with_retries(spec, DEFAULT_RETRIES, &|_, _| {})
 }
 
-/// [`ensure`] with live `(downloaded, total)` progress.
+/// [`ensure`] with `(downloaded, total)` progress.
 pub fn ensure_with_progress(
     spec: &ModelSpec,
     progress: &dyn Fn(u64, u64),
@@ -133,15 +110,13 @@ fn ensure_with_retries(
     Ok(final_path)
 }
 
-/// Explicit-dest core of ensure (testable without `model_dir()`). Serialized by
-/// [`file_flight`] so parallel same-path callers attach to one fetch.
+/// Explicit dest; serialized by [`file_flight`].
 fn ensure_at(
     final_path: &Path,
     spec: &ModelSpec,
     retries: u32,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
-    // Once-per-process orphan sweep first (most calls are presence-only).
     if let Some(dir) = final_path.parent() {
         sweep_orphans_once(dir);
     }
@@ -160,8 +135,7 @@ fn ensure_at(
 
     let tmp = tempfile::NamedTempFile::new_in(dir)?;
 
-    // A corrupt installer-prefetched copy falls back to the network. Handle it once here so
-    // retries do not keep copying the same bad local bytes back over the resumable temp file.
+    // Corrupt prefetch → network once (don't re-copy bad bytes on retry).
     if let Some(local) = prefetch_local(&spec.url) {
         copy_prefetched(&local, tmp.path(), progress)?;
         if verify_sha256(tmp.path(), &spec.sha256) {
@@ -191,10 +165,6 @@ fn ensure_at(
                 return Ok(());
             }
             Err(e) => {
-                // Fast-fail permanent errors (checksum mismatch, HTTP 404): a
-                // retry would only re-fetch the same wrong/absent body — for a
-                // 150 MB+ model that is minutes of wasted bandwidth. Only
-                // transient errors (timeout, reset, 5xx) are worth retrying.
                 if is_permanent_error(&e) {
                     return Err(std::io::Error::new(
                         e.kind(),
@@ -205,8 +175,6 @@ fn ensure_at(
                     e.kind(),
                     format!("attempt {} of {}: {e}", attempt + 1, retries.max(1)),
                 ));
-                // Brief backoff before the next attempt so a momentary network
-                // hiccup has time to clear (skip after the final attempt).
                 if attempt + 1 < retries.max(1) {
                     std::thread::sleep(std::time::Duration::from_millis(
                         500 * (attempt as u64 + 1),
@@ -218,10 +186,7 @@ fn ensure_at(
     Err(last_err.unwrap_or_else(|| std::io::Error::other("download failed")))
 }
 
-/// Map an HTTP status code to an `io::Error` whose `kind()` encodes whether the
-/// failure is PERMANENT (don't retry) or TRANSIENT (retry). A 4xx status (e.g.
-/// 404 — the file was re-hosted/removed) is permanent and surfaces as `NotFound`;
-/// any other non-success status (5xx) is transient and surfaces as `TimedOut`.
+/// 4xx → permanent `NotFound`; other non-success → transient `TimedOut`.
 fn classify_http_status(code: u16) -> std::io::Error {
     if (400..500).contains(&code) {
         std::io::Error::new(
@@ -238,9 +203,7 @@ fn is_permanent_dns_error(e: &std::io::Error) -> bool {
         return true;
     }
 
-    // `ToSocketAddrs` preserves resolver error codes that `io::ErrorKind` does not
-    // categorize. Limit this to the supported OSes' definitive "name does not exist"
-    // results; temporary resolver failures (EAI_AGAIN / WSATRY_AGAIN) remain retryable.
+    // Definitive NXDOMAIN only; EAI_AGAIN stays retryable.
     match e.raw_os_error() {
         #[cfg(target_os = "windows")]
         Some(11001 | 11003 | 11004) => true,
@@ -252,8 +215,7 @@ fn is_permanent_dns_error(e: &std::io::Error) -> bool {
     }
 }
 
-/// Transport failures are transient except for a definitive DNS "name not found"
-/// result, which cannot recover across this download's short retry window.
+/// Transient except definitive DNS name-not-found.
 fn transport_err(e: attohttpc::Error) -> std::io::Error {
     let kind = match e.kind() {
         attohttpc::ErrorKind::Io(source) if is_permanent_dns_error(source) => {
@@ -264,7 +226,6 @@ fn transport_err(e: attohttpc::Error) -> std::io::Error {
     std::io::Error::new(kind, e.to_string())
 }
 
-/// The response metadata needed to decide whether the destination is truncated or appendable.
 enum HttpStream {
     Body {
         reader: Box<attohttpc::ResponseReader>,
@@ -275,9 +236,7 @@ enum HttpStream {
     RangeUnsatisfiable,
 }
 
-/// State shared by retry attempts for one temporary file. `If-Range` binds an appended suffix
-/// to the representation that supplied the existing prefix; checksum verification remains the
-/// final integrity gate.
+/// Per-temp retry state. `If-Range` binds suffix to prefix; checksum is final gate.
 #[derive(Default)]
 pub(crate) struct DownloadState {
     validator: Option<String>,
@@ -290,9 +249,7 @@ fn parse_content_length(headers: &attohttpc::header::HeaderMap) -> Option<u64> {
         .and_then(|s| s.parse().ok())
 }
 
-/// Parse `Content-Range: bytes START-END/TOTAL`. Resume is allowed only when every
-/// component is concrete and internally consistent; otherwise appending could silently
-/// produce a corrupt file that merely fails its checksum after wasting the remaining transfer.
+/// `Content-Range: bytes START-END/TOTAL` — all concrete + consistent, else reject.
 fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     let (unit, value) = value.split_once(' ')?;
     if !unit.eq_ignore_ascii_case("bytes") {
@@ -306,7 +263,7 @@ fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     (start <= end && end < total).then_some((start, end, total))
 }
 
-/// Prefer a strong ETag, falling back to the HTTP date that `If-Range` also accepts.
+/// Strong ETag, else Last-Modified (`If-Range`).
 fn response_validator(headers: &attohttpc::header::HeaderMap) -> Option<String> {
     let strong_etag = headers
         .get("etag")
@@ -317,10 +274,8 @@ fn response_validator(headers: &attohttpc::header::HeaderMap) -> Option<String> 
         .map(str::to_owned)
 }
 
-/// Open a full or resumed GET. A `206` is accepted only when `Content-Range` starts at the
-/// requested offset and agrees with `Content-Length`. A `200` after a Range request means the
-/// server ignored Range and is a safe full restart. `416` asks the caller to retry once from
-/// zero because the local partial and remote representation no longer agree.
+/// Full/resume GET. 206 only if Content-Range matches offset; 200 after Range = full restart;
+/// 416 → caller restart from zero.
 fn http_get_stream(
     url: &str,
     resume_from: u64,
@@ -400,11 +355,7 @@ fn http_get_stream(
     })
 }
 
-/// Whether an error from one download attempt is PERMANENT — retrying it would
-/// only waste time + bandwidth re-fetching a (possibly huge) body. A checksum
-/// mismatch (`InvalidData`) means the bytes that arrived are wrong (re-host, MITM,
-/// or a stale pinned digest) and a 4xx (`NotFound`) means the URL is gone; both
-/// fail fast. Everything else (timeout, reset, 5xx) is transient and retried.
+/// `InvalidData` / `NotFound` fail fast; else retry.
 pub(crate) fn is_permanent_error(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
@@ -607,42 +558,19 @@ fn download_to_network(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Orphaned partial-download temp-file sweep.
-//
-// Every downloader in this crate (this module's `download_once`, `ort::ensure_onnxruntime_at`,
-// `coreml_repo::download_one`) writes into a `tempfile`-created file in the SAME directory as
-// its final destination, using `tempfile`'s DEFAULT naming (prefix `.tmp`, no suffix — none of
-// them override it), then atomically renames it onto the final path on success. On a normal
-// return (success OR error) the temp file's `Drop` deletes it — but `Drop` never runs on
-// SIGKILL / a force-quit / a power loss, so a run killed mid-download can leave a `.tmp*` file
-// behind that nothing else ever looks at again; over time these accumulate indefinitely.
-// There's no dedicated "app startup" hook in this crate to wire a sweep into (the eager
-// pre-download orchestrators live in a sibling module), so instead we sweep once per process
-// the first time any file-based download is requested (see `sweep_orphans_once`, called from
-// `ensure_at`) — a "sensible point" that fires on essentially every normal run.
-// ─────────────────────────────────────────────────────────────────────────────
+// Orphan `.tmp*` sweep: tempfile default prefix; Drop skips SIGKILL. Once per process
+// from ensure_at (covers nested Core ML/CUDA dirs under model_dir).
 
-/// Only a temp file at least this old is swept — a `.tmp*` file could be a genuinely in-flight
-/// download (from THIS process a moment before its own rename, or another concurrently running
-/// instance); only a leftover this old is safe to assume abandoned by a prior, uncleanly-ended
-/// run.
+/// Only age ≥ this is swept (in-flight downloads stay).
 const MIN_ORPHAN_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 static ORPHAN_SWEEP_ONCE: std::sync::Once = std::sync::Once::new();
 
-/// Run [`sweep_orphaned_temp_files`] against `dir` exactly once per process. `dir` is
-/// `model_dir()` for every real caller (every [`ensure_at`] request resolves its destination
-/// under it), so one sweep from there also reaches the Core ML / CUDA subdirectories nested
-/// under it — the other two downloaders' temp files included.
 fn sweep_orphans_once(dir: &Path) {
     ORPHAN_SWEEP_ONCE.call_once(|| sweep_orphaned_temp_files(dir));
 }
 
-/// Recursively remove orphaned partial-download temp files under `dir`: entries whose name
-/// matches `tempfile`'s default naming AND are older than [`MIN_ORPHAN_AGE`]. Best-effort — a
-/// removal failure (permissions, a racing delete) is silently skipped; this is opportunistic
-/// cleanup, not a correctness requirement, so a missed orphan simply waits for the next sweep.
+/// Recursive best-effort remove of `.tmp*` older than [`MIN_ORPHAN_AGE`].
 pub(crate) fn sweep_orphaned_temp_files(dir: &Path) {
     let now = std::time::SystemTime::now();
     let Ok(entries) = std::fs::read_dir(dir) else {

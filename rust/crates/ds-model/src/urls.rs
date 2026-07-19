@@ -58,40 +58,34 @@ pub const KOKORO_G2P_DECODER: Download = Download {
     size_bytes: 1_750_816,
 };
 
-// ── Parakeet STT: cache-aware STREAMING FastConformer transducer (80ms, int8) ──
-// NeMo `stt_en_fastconformer_hybrid_large_streaming_80ms`, transducer branch, exported by
-// csukuangfj (sherpa-onnx). This REPLACED the old whole-buffer transcribe-rs Parakeet TDT model;
-// the `built_in` STT engine + config tokens keep the "parakeet" name. The `ds-stt::streaming`
-// runner loads all four flat in one dir (~137 MB total).
-// 80ms is the lowest-latency sherpa variant (~12 encoder steps/sec) — picked so the ONNX path
-// (Windows/Linux, and the macOS `cpu` fallback) updates the live overlay far more often than
-// the old 480ms variant; cadence is read from the encoder metadata, so just swapping the files
-// retunes it. Same encoder family/size — only the chunk geometry differs.
+// ── Parakeet STT: streaming FastConformer 1040ms int8 (NeMo hybrid large) ──
+// sherpa-onnx export of stt_en_fastconformer_hybrid_large_streaming_1040ms.
+// Cache-aware streaming over ORT/CUDA. Cadence from encoder metadata. ~137 MB.
 
 pub const PARAKEET_ENCODER: Download = Download {
     file_name: "encoder.int8.onnx",
-    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8/resolve/main/encoder.int8.onnx",
-    sha256: "8b982c67b45e3b735d3fee49a4fea525b3149b450ba437f4c8a933f4aa6744c0",
-    size_bytes: 131_507_579,
+    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-1040ms-int8/resolve/main/encoder.int8.onnx",
+    sha256: "d6e9d453b71556ef03bf80def322a403e406625be3f648f5ff6743a40a071686",
+    size_bytes: 131_507_616,
 };
 
 pub const PARAKEET_DECODER: Download = Download {
     file_name: "decoder.int8.onnx",
-    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8/resolve/main/decoder.int8.onnx",
-    sha256: "76eec598da07c204747a859a723b99077ef0bbdc19ef4b3f51eb43275662475d",
-    size_bytes: 3_955_863,
+    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-1040ms-int8/resolve/main/decoder.int8.onnx",
+    sha256: "1324c145c9695e92f6377d24daadb8881b4fa5706bf580461d1a571a6dee4862",
+    size_bytes: 3_955_864,
 };
 
 pub const PARAKEET_JOINER: Download = Download {
     file_name: "joiner.int8.onnx",
-    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8/resolve/main/joiner.int8.onnx",
-    sha256: "67f4291dc170fd06b3695a8511f5199fd5965ee3c77cfbd59afc10e145f173f2",
-    size_bytes: 1_408_182,
+    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-1040ms-int8/resolve/main/joiner.int8.onnx",
+    sha256: "a9861a0b32aa8a2de65d882e2a3607b531d6ffa0b77f92a9cc3261930437f2fc",
+    size_bytes: 1_408_181,
 };
 
 pub const PARAKEET_TOKENS: Download = Download {
     file_name: "tokens.txt",
-    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8/resolve/main/tokens.txt",
+    url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-1040ms-int8/resolve/main/tokens.txt",
     sha256: "618dc110fc2213886b52e063ff42329bbdf37a266ca7705184090fa5f39f3131",
     size_bytes: 11_896,
 };
@@ -458,12 +452,11 @@ pub const KOKORO_G2P: Project = Project {
     files: &[KOKORO_G2P_ENCODER, KOKORO_G2P_DECODER],
 };
 
-/// Parakeet STT model — NVIDIA NeMo cache-aware streaming FastConformer transducer
-/// (CC-BY-4.0; ONNX streaming export by csukuangfj / sherpa-onnx).
+/// Streaming FastConformer STT — NVIDIA NeMo (CC-BY-4.0; ONNX by csukuangfj / sherpa-onnx).
 pub const PARAKEET: Project = Project {
     name: "FastConformer",
-    usage: "Speech-to-text model (NVIDIA NeMo; streaming ONNX export by csukuangfj/sherpa-onnx)",
-    homepage: "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_fastconformer_hybrid_large_streaming_80ms",
+    usage: "Speech-to-text model (NVIDIA NeMo streaming FastConformer 1040ms; ONNX by csukuangfj/sherpa-onnx)",
+    homepage: "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_fastconformer_hybrid_large_streaming_1040ms",
     license: "CC-BY-4.0",
     license_url: "https://creativecommons.org/licenses/by/4.0/",
     platforms: Platform::ALL,

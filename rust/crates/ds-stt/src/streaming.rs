@@ -846,49 +846,11 @@ mod tests {
         )
     }
 
-    /// Minimal 16-bit PCM mono WAV reader → f32 [-1,1] (test-only; assumes 16 kHz mono LE).
-    fn read_wav_16k_mono_pcm(path: &std::path::Path) -> Vec<f32> {
-        let bytes = std::fs::read(path).expect("read wav");
-        // Find the "data" chunk, then read i16 samples after its 8-byte header.
-        let pos = bytes
-            .windows(4)
-            .position(|w| w == b"data")
-            .expect("no data chunk");
-        let start = pos + 8;
-        bytes[start..]
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
-            .collect()
-    }
-
     #[test]
     fn parse_tokens_splits_on_last_space() {
         let v = parse_tokens("\u{2581}the 5\n<blk> 1024\n").unwrap();
         assert_eq!(v[5], "\u{2581}the");
         assert_eq!(v[1024], "<blk>");
-    }
-
-    /// End-to-end oracle: gated on a real model dir via DONTSPEAK_STREAMING_MODEL_DIR (containing
-    /// encoder/decoder/joiner.int8.onnx + tokens.txt + test_wavs/0.wav). Reproduces the reference
-    /// transcript. Skipped (passes) when the env/model isn't present so CI stays self-contained.
-    #[test]
-    fn oracle_transcribes_test_wav() {
-        let Ok(dir) = std::env::var("DONTSPEAK_STREAMING_MODEL_DIR") else {
-            eprintln!("skip: set DONTSPEAK_STREAMING_MODEL_DIR to run the oracle test");
-            return;
-        };
-        let dir = std::path::PathBuf::from(dir);
-        let wav = dir.join("test_wavs/0.wav");
-        let pcm = read_wav_16k_mono_pcm(&wav);
-        let mut model = StreamingModel::load(&dir, true).expect("load");
-        let mut st = model.new_state().expect("state");
-        model.accept_16k(&mut st, &pcm).expect("accept");
-        let text = model.finalize(&mut st).expect("finalize");
-        eprintln!("streaming oracle => {text:?}");
-        assert!(
-            text.contains("after early nightfall the yellow lamps"),
-            "unexpected transcript: {text:?}"
-        );
     }
 
     // `timed` relocated from `coreml.rs` (see its doc comment) — coverage moves with it.

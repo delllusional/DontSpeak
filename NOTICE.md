@@ -98,9 +98,9 @@ Each carries its upstream license:
   enabled. The model's precise training provenance therefore remains unverified.
 - **Parakeet TDT 0.6b v2** STT model (NVIDIA), the macOS Core ML / ANE path — **CC-BY-4.0**.
   Attribution is required: "Parakeet TDT 0.6b v2 © NVIDIA, licensed under CC-BY-4.0."
-- **stt_en_fastconformer_hybrid_large_streaming_80ms** STT model (NVIDIA NeMo), the
+- **stt_en_fastconformer_hybrid_large_streaming_1040ms** STT model (NVIDIA NeMo), the
   cross-platform ONNX path — **CC-BY-4.0**. The streaming ONNX export is by csukuangfj /
-  sherpa-onnx. Attribution is required: "stt_en_fastconformer_hybrid_large_streaming_80ms
+  sherpa-onnx. Attribution is required: "stt_en_fastconformer_hybrid_large_streaming_1040ms
   © NVIDIA, licensed under CC-BY-4.0; ONNX export © csukuangfj / sherpa-onnx."
   https://github.com/k2-fsa/sherpa-onnx
 - **SepFormer speech separator** (the macOS dictation speaker-lock) — an int8 ONNX export

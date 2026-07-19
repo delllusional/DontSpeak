@@ -18,7 +18,7 @@ fn shim_available() -> bool {
 
 /// Active local transcriber. Same lazy-load surface as [`ParakeetTranscriber`].
 pub enum LocalTranscriber {
-    /// Streaming FastConformer over `ort` (`cpu` provider). Boxed: avoids clippy
+    /// Streaming FastConformer over `ort` (`cpu`/`cuda` provider). Boxed: avoids clippy
     /// `large_enum_variant` vs the smaller Core ML arm.
     ParakeetOnnx(Box<ParakeetTranscriber>),
     /// macOS FluidAudio Core ML / ANE (`parakeet` engine).

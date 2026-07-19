@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(enc.file_name, "encoder.int8.onnx");
         assert!(
             enc.url.contains(
-                "sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8/resolve/main/encoder.int8.onnx"
+                "sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-1040ms-int8/resolve/main/encoder.int8.onnx"
             ),
             "encoder url: {}",
             enc.url
@@ -500,6 +500,16 @@ mod tests {
         assert_eq!(joiner.file_name, "joiner.int8.onnx");
         let tokens = parakeet_tokens_spec();
         assert_eq!(tokens.file_name, "tokens.txt");
+        let variant = "sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-1040ms-int8";
+        for spec in [&enc, &dec, &joiner, &tokens] {
+            assert!(
+                spec.url.contains(variant),
+                "portable STT assets must all use the 1040ms export: {}",
+                spec.url
+            );
+        }
+        assert!(crate::urls::PARAKEET.usage.contains("1040ms"));
+        assert!(crate::urls::PARAKEET.homepage.contains("1040ms"));
         // All four pin distinct, lowercase, 64-hex digests.
         for spec in [&enc, &dec, &joiner, &tokens] {
             assert_eq!(spec.sha256.len(), 64, "sha256 must be 64 hex chars");

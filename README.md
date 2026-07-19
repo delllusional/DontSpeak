@@ -73,8 +73,8 @@ Always-listening does not use Caps Lock.
 ## Models & runtimes
 
 - **TTS** — Kokoro-82M or OS voice
-- **STT** — streaming FastConformer (80 ms); Parakeet TDT via Core ML on macOS; macOS
-  system recognizer; Claude Code dictation. See [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md)
+- **STT** — streaming FastConformer (1040 ms) on Windows/Linux; Parakeet via Core ML,
+  plus System Speech on macOS; Claude Code dictation. See [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md)
 - Diarization (pyannote / WeSpeaker / SepFormer) — issue #77
 
 `provider` ladder default `["ane", "cuda", "cpu"]`:
