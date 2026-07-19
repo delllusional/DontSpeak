@@ -56,9 +56,10 @@ Streaming mid-turn: shared `ds-narrate` (accumulate → blockquote digests → o
 witness for `Stop` silence). Claude: `MessageDisplay`; Qwen: registry-gated adapter;
 Codex: in-engine app-server subscriber (`dontspeakd::codex_stream`); Grok: in-engine
 file-tail of interactive `updates.jsonl` (`dontspeakd::grok_stream`). Kimi Code:
-non-streaming — `Stop` voices the reply from the session `wire.jsonl`. See
-[docs/STREAMING-NARRATION.md](docs/STREAMING-NARRATION.md) and
-[docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md).
+non-streaming — `Stop` voices the reply from the session `wire.jsonl`. Hermes Agent:
+non-streaming shell hooks — remapped `post_llm_call` → `Stop` voices
+`extra.assistant_response`. See [docs/STREAMING-NARRATION.md](docs/STREAMING-NARRATION.md)
+and [docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md).
 
 ## Local STT (built-in)
 

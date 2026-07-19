@@ -60,6 +60,11 @@ pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};
 pub use wire::grok_hooks::grok_hooks_value;
 pub use wire::hooks::{HookSpec, HooksMergeError, INSTALLED_BINS, merge_hooks, strip_hooks};
 pub use wire::json_mcp::{merge_mcp_server, strip_mcp_server};
+pub use wire::hermes_allowlist::{
+    desired_approvals as hermes_desired_approvals, merge_hermes_allowlist, strip_hermes_allowlist,
+};
+pub use wire::hermes_hooks::{HermesMergeError, merge_hermes_hooks, strip_hermes_hooks};
+pub use wire::hermes_mcp::{merge_hermes_mcp, strip_hermes_mcp};
 pub use wire::kimi_hooks::{KimiMergeError, merge_kimi_hooks, strip_kimi_hooks};
 pub use wire::registry::{
     CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, HookCommandStyle, LaunchMode, LaunchSpec,

@@ -29,6 +29,7 @@ usage:
     qwen_code: Qwen Code
     grok: Grok
     kimi_code: Kimi Code
+    hermes: Hermes Agent
 
 # ──────────────────────────────── TRAY MENU ─────────────────────────────────
 tray:

@@ -1,5 +1,6 @@
 //! UserPromptSubmit `provide`: inject narration context when digests are on.
 
+use ds_config::ClientSource;
 use ds_ipc::{Request, Response};
 use serde_json::{Value, json};
 
@@ -10,22 +11,32 @@ use serde_json::{Value, json};
 const MUTED_NOTICE: &str = "\n\n## Voice state\nMUTED: speech and narration play silently. \
     Put anything important in text until unmuted.";
 
-/// When digests are ON, return the narration spec as `hookSpecificOutput.additionalContext`.
+/// When digests are ON, return the narration spec. Claude-shape clients get
+/// `hookSpecificOutput.additionalContext`; Hermes wants flat `{"context":…}`.
 /// `None` when digests off (no instruction tokens). Also folds a best-effort mute notice
 /// from the engine — read-only; down/unreachable engine omits the notice, never blocks.
-pub(crate) fn narration_context() -> Option<Value> {
+pub(crate) fn narration_context(client: ClientSource) -> Option<Value> {
     let paths = ds_config::Paths::resolve()?;
     if !ds_config::VoiceConfig::load(&paths).narrates(ds_config::NarrateKind::Digests) {
         return None;
     }
     let spec = ds_config::DEFAULT_NARRATION_SPEC.to_string();
     let context = with_voice_state(spec, engine_muted(&paths));
-    Some(json!({
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": context,
-        }
-    }))
+    Some(provide_shape(client, context))
+}
+
+/// Pure dual-shape for unit tests (no engine / Paths).
+fn provide_shape(client: ClientSource, context: String) -> Value {
+    if client == ClientSource::Hermes {
+        json!({ "context": context })
+    } else {
+        json!({
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": context,
+            }
+        })
+    }
 }
 
 /// Read-only mute probe. `false` when engine down/unreachable — omit notice, don't block.
@@ -61,5 +72,19 @@ mod tests {
             1,
             "exactly one notice"
         );
+    }
+
+    #[test]
+    fn hermes_provide_is_flat_context_others_keep_hook_specific_output() {
+        let hermes = provide_shape(ClientSource::Hermes, "SPEC".into());
+        assert_eq!(hermes["context"], "SPEC");
+        assert!(hermes.get("hookSpecificOutput").is_none());
+
+        let claude = provide_shape(ClientSource::ClaudeCode, "SPEC".into());
+        assert_eq!(
+            claude["hookSpecificOutput"]["additionalContext"],
+            "SPEC"
+        );
+        assert!(claude.get("context").is_none());
     }
 }

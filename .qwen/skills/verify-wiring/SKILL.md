@@ -14,9 +14,10 @@ Registry: `rust/crates/ds-config/src/wire/registry.rs` — per client: paths, me
 startup already converges local configs to *current code*). Print registry:
 `dontspeak wire --list`. Pins also mirrored in `docs/CLIENT-INTEGRATIONS.md`.
 
-## Per client (all five unless scoped)
+## Per client (all six unless scoped)
 
-Claude Code, OpenAI Codex, Qwen Code, Grok, **and Kimi Code** — do not skip Grok or Kimi Code.
+Claude Code, OpenAI Codex, Qwen Code, Grok, Kimi Code, **and Hermes Agent** — do not skip
+any of them.
 
 1. **Current version**
    - Claude: `claude --version`
@@ -26,19 +27,23 @@ Claude Code, OpenAI Codex, Qwen Code, Grok, **and Kimi Code** — do not skip Gr
      [CLI docs](https://docs.x.ai/build/cli/reference))
    - Kimi Code: `kimi --version` if installed, else docs-only (registry /
      [hooks docs](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html))
+   - Hermes Agent: `hermes --version` if installed, else docs-only (registry /
+     [shell hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks#shell-hooks))
 
 2. **Re-read that entry's `DocRef` URLs** (don't search elsewhere). Check contracts:
    - **Hooks:** Claude/Qwen JSON, Codex TOML, Grok `~/.grok/hooks/*.json`, Kimi Code flat
-     `[[hooks]]` in `~/.kimi-code/config.toml` — stdin object
+     `[[hooks]]` in `~/.kimi-code/config.toml`, Hermes nested `hooks.<event>` in
+     `~/.hermes/config.yaml` (+ allowlist JSON) — stdin object
      routed by event; schemas + events in [HOOKS.md](../../../docs/HOOKS.md) and
      [CLIENT-INTEGRATIONS.md](../../../docs/CLIENT-INTEGRATIONS.md). Claude/Qwen: six events;
      Codex: three (no MessageDisplay; Stop voices reply; SessionStart greet-only); Grok:
      dedicated hooks file + AGENTS.md digests; Kimi Code: five lifecycle events, no
-     MessageDisplay (Stop voices reply from wire.jsonl). Shapers: `wire/hooks.rs`,
-     `codex.rs`, `kimi_hooks.rs`, Grok.
-   - **MCP:** `mcpServers` / `[mcp_servers.<name>]` shape + file path (Claude
-     `~/.claude.json`, Qwen settings, Codex TOML, Grok `~/.grok/config.toml`, Kimi Code
-     `~/.kimi-code/mcp.json`).
+     MessageDisplay (Stop voices reply from wire.jsonl); Hermes: four shell-hook events
+     remapped to SessionStart/UserPromptSubmit/Stop/SessionEnd. Shapers: `wire/hooks.rs`,
+     `codex.rs`, `kimi_hooks.rs`, `hermes_hooks.rs`, Grok.
+   - **MCP:** `mcpServers` / `[mcp_servers.<name>]` / YAML `mcp_servers` shape + file path
+     (Claude `~/.claude.json`, Qwen settings, Codex TOML, Grok `~/.grok/config.toml`,
+     Kimi Code `~/.kimi-code/mcp.json`, Hermes `~/.hermes/config.yaml`).
    - **`mcp_client_prefix`:** `starts_with` on `clientInfo.name` from activity log
      `mcp initialize clientInfo.name=…` line.
 

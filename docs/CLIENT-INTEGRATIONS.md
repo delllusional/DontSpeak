@@ -1,7 +1,8 @@
 # Client integrations and launchers
 
-Supported: Claude Code, OpenAI Codex, Qwen Code, Grok, Kimi Code. Install reconciles hooks + MCP;
-`dontspeak <client>` starts the installed client without replacing its config/args.
+Supported: Claude Code, OpenAI Codex, Qwen Code, Grok, Kimi Code, Hermes Agent.
+Install reconciles hooks + MCP; `dontspeak <client>` starts the installed client without
+replacing its config/args.
 
 Hook internals: [HOOKS.md](HOOKS.md). Streaming state machine:
 [STREAMING-NARRATION.md](STREAMING-NARRATION.md). Adding a new client:
@@ -15,6 +16,7 @@ dontspeak codex [args...]
 dontspeak qwen [args...]
 dontspeak grok [args...]
 dontspeak kimi [args...]
+dontspeak hermes [args...]
 ```
 
 Aliases: `claude_code`, `qwen_code`, `kimi-code`. Registry owns names/executables/modes; adding a
@@ -31,6 +33,7 @@ terminal after first install for PATH.
 | Qwen Code 0.19.10 | Yes (`MessageDisplay`) | Witness suppresses duplicate `Stop` speech | Yes | Direct `qwen` |
 | Grok 0.2.101 | Yes (engine tails `updates.jsonl`) | Yes from `Stop.transcriptPath` when no witness | Yes | Direct `grok` |
 | Kimi Code 0.27.0 | No | Yes from `Stop` wire.jsonl fallback | Yes | Direct `kimi` |
+| Hermes Agent 0.18.2 | No | Yes from `post_llm_call` → `extra.assistant_response` | Yes | Direct `hermes` |
 
 ## Client notes
 
@@ -89,13 +92,23 @@ witness, read last non-empty assistant JSONL (`chat_history`, remapping bare
 
 New Grok session required after first wire or digests toggle.
 
+### Hermes Agent
+
+Binary `hermes`. Non-streaming shell hooks in `~/.hermes/config.yaml` (`hooks:` block)
+plus `mcp_servers.DontSpeak` in the same file. First-use consent pairs are pre-approved
+in `~/.hermes/shell-hooks-allowlist.json`. Event remap before TitleCase: `on_session_start`
+→ SessionStart, `pre_llm_call` → UserPromptSubmit, `post_llm_call` → Stop,
+`on_session_finalize` → SessionEnd. Provide shape is flat `{"context":…}` (not Claude
+`hookSpecificOutput`). `HERMES_HOME` overrides the client dir. No Hermes STT/TTS
+providers — engine audio only.
+
 ## Wiring
 
 `dontspeak wire --reconcile` at install; engine re-reconciles at boot via
 `exclude_clients`. Additive, idempotent, backup-before-write, DontSpeak entries only.
 Client-specific homes are honored through `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
-`QWEN_HOME`, `GROK_HOME`, and `KIMI_CODE_HOME`; relative values resolve from the launch directory and
-`~/...` values resolve from the user home.
+`QWEN_HOME`, `GROK_HOME`, `KIMI_CODE_HOME`, and `HERMES_HOME`; relative values resolve
+from the launch directory and `~/...` values resolve from the user home.
 
 | Client | Hooks | MCP |
 |---|---|---|
@@ -104,6 +117,7 @@ Client-specific homes are honored through `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 | Qwen Code | `~/.qwen/settings.json` | same |
 | Grok | `~/.grok/hooks/dontspeak.json` (+ `~/.grok/AGENTS.md` narrate) | `~/.grok/config.toml` |
 | Kimi Code | `~/.kimi-code/config.toml` (flat `[[hooks]]`) | `~/.kimi-code/mcp.json` |
+| Hermes Agent | `~/.hermes/config.yaml` (`hooks:`) + allowlist JSON | same config.yaml (`mcp_servers`) |
 
 ```sh
 dontspeak wire --list
@@ -120,6 +134,7 @@ dontspeak wire <client> --print-only
 | Qwen Code | 0.19.10 | [hooks](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/hooks.md), [MCP](https://github.com/QwenLM/qwen-code/blob/v0.19.10/docs/users/features/mcp.md) |
 | Grok | 0.2.101 | [CLI](https://docs.x.ai/build/cli/reference), [hooks](https://docs.x.ai/build/features/hooks), [MCP](https://docs.x.ai/build/features/mcp-servers) |
 | Kimi Code | 0.27.0 | [hooks](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html), [MCP](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html) |
+| Hermes Agent | 0.18.2 | [shell hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks#shell-hooks), [MCP](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp) |
 
 Pins record last check, not minimum version.
 
@@ -155,7 +170,7 @@ progress bar (percent as bar only). Strings from `ds-i18n` (`usage.*`).
 
 **Speaking highlight:** while TTS plays, `model_status.activity.speaker` is the
 wireable client token of the in-flight utterance (`claude_code` / `codex` /
-`qwen_code` / `grok` / `kimi_code`; `null` when idle or non-client). Hosts wash that agent’s
-Usage card with a random pastel from `ds_random_pastel_wash_json` (top-bar speaking
-stripe stays brand purple). Source is retained on each TTS queue item at enqueue
+`qwen_code` / `grok` / `kimi_code` / `hermes`; `null` when idle or non-client). Hosts wash
+that agent’s Usage card with a random pastel from `ds_random_pastel_wash_json` (top-bar
+speaking stripe stays brand purple). Source is retained on each TTS queue item at enqueue
 (hooks `source`, stream adapters, `GreetSession`) — not inferred from session id.

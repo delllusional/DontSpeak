@@ -39,15 +39,16 @@ repeats the flow (cache first, then force network per agent).
 
 For each card with data:
 
-1. **Title** — `usage.provider.<agent>` (`claude_code`, `codex`, `qwen_code`, `grok`, `kimi_code`)
-   left; optional **account** (usually email) top-right in the same caption
-   style as period remaining. Fully **transparent by default**; click/tap
+1. **Title** — `usage.provider.<agent>` (`claude_code`, `codex`, `qwen_code`, `grok`,
+   `kimi_code`, `hermes`) left; optional **account** (usually email) top-right in the
+   same caption style as period remaining. Fully **transparent by default**; click/tap
    toggles full opacity for this UI session only (not persisted — reload hides
    again). Sources are local credentials only:
    - Claude: `~/.claude.json` → `oauthAccount.emailAddress`
    - Codex: `~/.codex/auth.json` JWT `id_token` → `email`
    - Grok: `~/.grok/auth.json` session entry → `email`
    - Qwen: none (API-key auth)
+   - Kimi Code / Hermes: none
 2. **Each row** (session → week → month when present):
    - period label: `usage.<period>` (`session` | `week` | `month`)
    - remaining time until `resets_at_unix` top-right via `ds_usage_resets_in`
@@ -61,8 +62,9 @@ balance, charts, or raw provider errors.
 ### Speaking highlight
 
 While TTS is playing an utterance from a wireable client, `model_status.activity`
-includes `speaker` (`claude_code` / `codex` / `qwen_code` / `grok` / `kimi_code`; `null` when
-idle or non-client). Hosts wash that agent’s Usage card with a **random pastel tint**
+includes `speaker` (`claude_code` / `codex` / `qwen_code` / `grok` / `kimi_code` /
+`hermes`; `null` when idle or non-client). Hosts wash that agent’s Usage card with a
+**random pastel tint**
 from `ds_random_pastel_wash_json` (single recipe in `ds-core`: HSV random H, S=0.42,
 V=0.92, α=0.30 → `{"r","g","b","a"}`). A new pastel is chosen when `speaker`
 becomes non-null or changes agent; the color is **frozen** for the continuous
@@ -106,6 +108,7 @@ Out of scope:
 | Qwen Code | Alibaba Coding Plan HTTP + env/settings API keys | `per5Hour*` | `perWeek*` | `perBillMonth*` / `perMonth*` |
 | Grok | try `x.ai/billing` via `grok agent stdio`; else gRPC-web `GetGrokCreditsConfig` + Bearer from `~/.grok/auth.json` | — | web: full cycle length ~4–12 days (start→reset); not remaining distance | CLI monthly-named; web else / no cycle start → month (stable) |
 | Kimi Code | `GET https://api.kimi.com/coding/v1/usages` + Bearer from `~/.kimi-code/credentials/kimi-code.json` | `limits[]` 5h window (300 min / 5 h or `5h` label) | top-level `usage` weekly | — |
+| Hermes Agent | stub (no public quota API yet) | — | — | — |
 
 Windows resolves CLI binaries via `.exe`/`.cmd` (never extensionless npm shebangs).
 

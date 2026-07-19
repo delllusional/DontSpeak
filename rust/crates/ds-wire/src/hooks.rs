@@ -90,7 +90,7 @@ pub(crate) fn claude_json_hooks(
 ) -> i32 {
     let existing = match seed {
         Some(PreviewDoc::Json(v)) => v,
-        Some(PreviewDoc::Toml(_)) => {
+        Some(PreviewDoc::Toml(_) | PreviewDoc::Yaml(_)) => {
             panic!("claude_json_hooks: seed must be PreviewDoc::Json for a JSON mechanism")
         }
         None => {
@@ -188,7 +188,7 @@ fn toml_hooks_body<E: std::fmt::Display>(
 ) -> i32 {
     let existing = match seed {
         Some(PreviewDoc::Toml(s)) => s,
-        Some(PreviewDoc::Json(_)) => {
+        Some(PreviewDoc::Json(_) | PreviewDoc::Yaml(_)) => {
             panic!("{panic_ctx}: seed must be PreviewDoc::Toml for a TOML mechanism")
         }
         None => match std::fs::read_to_string(cfg) {
@@ -279,6 +279,209 @@ pub(crate) fn kimi_toml_hooks(
         |existing, bin| ds_config::merge_kimi_hooks(existing, bin, client),
         ds_config::strip_kimi_hooks,
     )
+}
+
+/// Shared YAML text body (Hermes config.yaml): same contract as [`toml_hooks_body`].
+#[allow(clippy::too_many_arguments)]
+fn yaml_text_body<E: std::fmt::Display>(
+    cfg: &std::path::Path,
+    remove: bool,
+    print_only: bool,
+    seed: Option<PreviewDoc>,
+    capture: Option<&mut Option<PreviewDoc>>,
+    paths: &Paths,
+    panic_ctx: &'static str,
+    merge: impl FnOnce(&str, &str) -> Result<String, E>,
+    strip: impl FnOnce(&str) -> Result<String, E>,
+) -> i32 {
+    let existing = match seed {
+        Some(PreviewDoc::Yaml(s)) => s,
+        Some(PreviewDoc::Json(_) | PreviewDoc::Toml(_)) => {
+            panic!("{panic_ctx}: seed must be PreviewDoc::Yaml for a YAML mechanism")
+        }
+        None => match std::fs::read_to_string(cfg) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                eprintln!("wire: could not read {} ({e})", cfg.display());
+                return 1;
+            }
+        },
+    };
+    let result = if remove {
+        strip(&existing)
+    } else {
+        let Some(bin) = io::resolve_dontspeak_bin_at(Some(paths)) else {
+            eprintln!("wire: could not resolve the dontspeak binary path");
+            return 1;
+        };
+        merge(&existing, &bin)
+    };
+    match result {
+        Ok(merged) if print_only => match capture {
+            Some(slot) => {
+                *slot = Some(PreviewDoc::Yaml(merged));
+                0
+            }
+            None => {
+                println!("// {}\n{merged}", cfg.display());
+                0
+            }
+        },
+        Ok(merged) if merged != existing => io::backup_then_write(
+            "wire",
+            cfg,
+            "yaml",
+            &WriteBody::Str(&merged),
+            hook_action(remove),
+        ),
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("wire: {} left unchanged ({e})", cfg.display());
+            0
+        }
+    }
+}
+
+/// Hermes nested `hooks.<event>` YAML. Same writer contract as TOML path.
+pub(crate) fn hermes_yaml_hooks(
+    cfg: &std::path::Path,
+    client: ClientSource,
+    remove: bool,
+    print_only: bool,
+    paths: &Paths,
+    seed: Option<PreviewDoc>,
+    capture: Option<&mut Option<PreviewDoc>>,
+) -> i32 {
+    yaml_text_body(
+        cfg,
+        remove,
+        print_only,
+        seed,
+        capture,
+        paths,
+        "hermes_yaml_hooks",
+        |existing, bin| ds_config::merge_hermes_hooks(existing, bin, client),
+        ds_config::strip_hermes_hooks,
+    )
+}
+
+/// Hermes `mcp_servers.DontSpeak` in config.yaml (shares file with hooks).
+pub(crate) fn hermes_yaml_mcp(
+    cfg: &std::path::Path,
+    remove: bool,
+    print_only: bool,
+    paths: &Paths,
+    seed: Option<PreviewDoc>,
+    capture: Option<&mut Option<PreviewDoc>>,
+    load_hint: &str,
+) -> i32 {
+    let existing = match seed {
+        Some(PreviewDoc::Yaml(s)) => s,
+        Some(PreviewDoc::Json(_) | PreviewDoc::Toml(_)) => {
+            panic!("hermes_yaml_mcp: seed must be PreviewDoc::Yaml for a YAML mechanism")
+        }
+        None => match std::fs::read_to_string(cfg) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                eprintln!("wire: could not read {} ({e})", cfg.display());
+                return 1;
+            }
+        },
+    };
+    let result = if remove {
+        ds_config::strip_hermes_mcp(&existing, crate::SERVER_NAME)
+    } else {
+        let Some(bin) = io::resolve_dontspeak_bin_at(Some(paths)) else {
+            eprintln!("wire: could not resolve the dontspeak binary path");
+            return 1;
+        };
+        ds_config::merge_hermes_mcp(&existing, crate::SERVER_NAME, &bin, &[])
+    };
+    match result {
+        Ok(merged) if print_only => match capture {
+            Some(slot) => {
+                *slot = Some(PreviewDoc::Yaml(merged));
+                0
+            }
+            None => {
+                println!("// {}\n{merged}", cfg.display());
+                0
+            }
+        },
+        Ok(merged) if merged != existing => {
+            let action = if remove {
+                "removed dontspeak MCP server from"
+            } else {
+                "registered dontspeak MCP server ->"
+            };
+            let code =
+                io::backup_then_write("wire", cfg, "yaml", &WriteBody::Str(&merged), action);
+            if code == 0 && !remove {
+                eprintln!("wire: {load_hint}");
+            }
+            code
+        }
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("wire: {e}");
+            1
+        }
+    }
+}
+
+/// Hermes shell-hooks allowlist JSON (consent for every wired `(event, command)`).
+pub(crate) fn hermes_shell_allowlist(
+    cfg: &std::path::Path,
+    client: ClientSource,
+    remove: bool,
+    print_only: bool,
+    paths: &Paths,
+) -> i32 {
+    if remove && !print_only && !cfg.exists() {
+        return 0;
+    }
+    let existing = match io::read_json_or_bail("wire", cfg) {
+        Ok(v) => v,
+        Err(()) => return 0,
+    };
+    let before = existing.clone();
+    let merged = if remove {
+        ds_config::strip_hermes_allowlist(&existing)
+    } else {
+        let Some(bin) = io::resolve_dontspeak_bin_at(Some(paths)) else {
+            eprintln!("wire: could not resolve the dontspeak binary path");
+            return 1;
+        };
+        ds_config::merge_hermes_allowlist(&existing, &bin, client)
+    };
+    if print_only {
+        match serde_json::to_string_pretty(&merged) {
+            Ok(s) => {
+                println!("// {}\n{s}", cfg.display());
+                0
+            }
+            Err(e) => {
+                eprintln!("wire: serialize failed: {e}");
+                1
+            }
+        }
+    } else if merged == before {
+        0
+    } else {
+        io::backup_then_write(
+            "wire",
+            cfg,
+            "json",
+            &WriteBody::Json(&merged),
+            if remove {
+                "removed DontSpeak shell-hook approvals from"
+            } else {
+                "wired DontSpeak shell-hook approvals ->"
+            },
+        )
+    }
 }
 
 /// Own-the-file JSON hooks (Grok): overwrite on wire, delete on remove (backed up). No merge.

@@ -328,6 +328,7 @@ mod tests {
             ds_client::ClientSource::QwenCode,
             ds_client::ClientSource::Grok,
             ds_client::ClientSource::KimiCode,
+            ds_client::ClientSource::Hermes,
             ds_client::ClientSource::DontSpeak,
             ds_client::ClientSource::Unknown,
         ])

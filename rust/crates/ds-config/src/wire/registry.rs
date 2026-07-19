@@ -49,6 +49,15 @@ pub enum WireMechanism {
     /// Flat `[[hooks]]` — only `event`/`matcher`/`command`/`timeout` (extra keys break Kimi).
     /// `merge_kimi_hooks`/`strip_kimi_hooks` (vs grouped ClaudeTomlHooks).
     KimiTomlHooks,
+    /// Hermes nested `hooks.<event>: [{command, timeout}]` in config.yaml.
+    /// `merge_hermes_hooks`/`strip_hermes_hooks` (YAML; comment loss on re-emit).
+    HermesYamlHooks,
+    /// Hermes `mcp_servers.DontSpeak` in the same config.yaml.
+    /// `merge_hermes_mcp`/`strip_hermes_mcp`.
+    HermesYamlMcp,
+    /// Hermes `shell-hooks-allowlist.json` approvals for `(event, command)` consent.
+    /// `merge_hermes_allowlist`/`strip_hermes_allowlist`.
+    HermesShellAllowlist,
     /// JSON `mcpServers.DontSpeak`. `merge_mcp_server`/`strip_mcp_server`.
     JsonMcp,
     /// TOML `mcp_servers.DontSpeak`. `merge_mcp_server_toml`/`strip_mcp_server_toml`.
@@ -345,6 +354,60 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         verified_client_version: "0.27.0",
         verified_on: "2026-07-18",
     },
+    ClientSpec {
+        target: ClientSource::Hermes,
+        display_name: "Hermes Agent",
+        kind: ClientKind::TerminalCli,
+        launch: LaunchSpec {
+            command: "hermes",
+            aliases: &[],
+            mode: LaunchMode::Direct,
+        },
+        // Never `"mcp"` — would match every MCP client. Prefix `"hermes"` only.
+        mcp_client_prefix: "hermes",
+        present: |p| p.hermes_dir.exists(),
+        detect_dir: |p| &p.hermes_dir,
+        gate_on_presence: true,
+        // Shell hooks + MCP share config.yaml; allowlist is the consent sidecar.
+        // Non-streaming: on_session_start greet-only; pre_llm_call notify+provide;
+        // post_llm_call Stop; on_session_finalize SessionEnd. HERMES_HOME → Paths::resolve.
+        surfaces: &[
+            Surface {
+                mechanism: WireMechanism::HermesYamlHooks,
+                config_file: |p| &p.hermes_config_yaml, // ~/.hermes/config.yaml
+                load_hint: None,
+                hook_streaming: false,
+                hook_command_style: HookCommandStyle::InlineShell,
+            },
+            Surface {
+                mechanism: WireMechanism::HermesYamlMcp,
+                config_file: |p| &p.hermes_config_yaml, // same file
+                load_hint: Some("start a new Hermes session to load the server"),
+                hook_streaming: false,
+                hook_command_style: HookCommandStyle::ArgsArray,
+            },
+            Surface {
+                mechanism: WireMechanism::HermesShellAllowlist,
+                config_file: |p| &p.hermes_shell_hooks_allowlist,
+                load_hint: None,
+                hook_streaming: false,
+                hook_command_style: HookCommandStyle::ArgsArray,
+            },
+        ],
+        docs: &[
+            DocRef {
+                topic: "hooks",
+                url: "https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks#shell-hooks",
+            },
+            DocRef {
+                topic: "mcp",
+                url: "https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp",
+            },
+        ],
+        // Docs-derived pin (shell hooks + mcp contracts); live session pin pending.
+        verified_client_version: "0.18.2",
+        verified_on: "2026-07-19",
+    },
 ];
 
 /// `None` for DontSpeak/Unknown (not wireable).
@@ -502,6 +565,8 @@ mod tests {
             ("qwen-cli-mcp-client-DontSpeak", ClientSource::QwenCode),
             ("grok-shell-DontSpeak", ClientSource::Grok),
             ("kimi-code", ClientSource::KimiCode),
+            ("hermes", ClientSource::Hermes),
+            ("hermes-agent-DontSpeak", ClientSource::Hermes),
         ] {
             assert_eq!(client_from_mcp_name(name), want, "{name}");
             assert_eq!(

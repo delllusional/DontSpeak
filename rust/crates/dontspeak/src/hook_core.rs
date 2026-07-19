@@ -27,6 +27,18 @@ struct EventEnvelope {
     hook_event_name: String,
 }
 
+/// Hermes dialect → Claude PascalCase (before TitleCase, which would yield
+/// `OnSessionStart` / `PreLlmCall` / … and miss our handlers).
+fn remap_hermes_event(raw: &str) -> Option<&'static str> {
+    match raw {
+        "on_session_start" => Some("SessionStart"),
+        "pre_llm_call" => Some("UserPromptSubmit"),
+        "post_llm_call" => Some("Stop"),
+        "on_session_finalize" => Some("SessionEnd"),
+        _ => None,
+    }
+}
+
 /// Grok lowercase-snake → Claude PascalCase. Identity on already-PascalCase; mechanical so
 /// new upstream names need no hand-maintained match table.
 fn normalize_event_name(raw: &str) -> String {
@@ -45,11 +57,15 @@ fn normalize_event_name(raw: &str) -> String {
     normalized
 }
 
-/// Event name from raw hook payload; empty when absent/malformed. Grok values normalized.
+/// Event name from raw hook payload; empty when absent/malformed.
+/// Hermes remapped first; then Grok TitleCase normalize.
 pub fn event_name(payload: &str) -> String {
     let raw = serde_json::from_str::<EventEnvelope>(payload.trim())
         .map(|e| e.hook_event_name)
         .unwrap_or_default();
+    if let Some(mapped) = remap_hermes_event(&raw) {
+        return mapped.to_string();
+    }
     normalize_event_name(&raw)
 }
 
@@ -131,10 +147,11 @@ pub(crate) fn notify_at(
     }
 }
 
-/// QUERY: `hookSpecificOutput` JSON for `event`, or `None` when no reply / narration off.
-pub fn provide(event: &str, _payload: &str) -> Option<Value> {
+/// QUERY: context JSON for `event`, or `None` when no reply / narration off.
+/// Hermes uses flat `{"context":…}`; other clients keep Claude `hookSpecificOutput`.
+pub fn provide(event: &str, _payload: &str, client: ds_config::ClientSource) -> Option<Value> {
     match event {
-        "UserPromptSubmit" => hook_prompt::narration_context(),
+        "UserPromptSubmit" => hook_prompt::narration_context(client),
         _ => None,
     }
 }
@@ -159,9 +176,27 @@ mod tests {
     }
 
     #[test]
+    fn event_name_remaps_hermes_events_before_titlecase() {
+        for (wire, canonical) in [
+            ("on_session_start", "SessionStart"),
+            ("pre_llm_call", "UserPromptSubmit"),
+            ("post_llm_call", "Stop"),
+            ("on_session_finalize", "SessionEnd"),
+        ] {
+            let payload = format!(r#"{{"hook_event_name":"{wire}"}}"#);
+            assert_eq!(event_name(&payload), canonical, "{wire}");
+        }
+        // Without the remap table, TitleCase would yield OnSessionStart.
+        assert_ne!(
+            event_name(r#"{"hook_event_name":"on_session_start"}"#),
+            "OnSessionStart"
+        );
+    }
+
+    #[test]
     fn session_start_owes_no_provide_reply() {
         // Greeting is voice-only; SessionStart no longer returns a banner (CC 2.1+).
-        assert!(provide("SessionStart", "{}").is_none());
+        assert!(provide("SessionStart", "{}", ds_config::ClientSource::ClaudeCode).is_none());
     }
 
     /// Digest-shaped reply — what Stop would voice (or wrongly suppress).

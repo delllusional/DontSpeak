@@ -66,7 +66,8 @@ pub fn mark_streaming_session(paths: &Paths, payload: &str) {
 // ── Stop (final reply — non-streaming) ──────────────────────────────────────────
 
 /// Stop payload subset. CC/Codex/Qwen: `last_assistant_message`. Grok metadata-only →
-/// chat_history.jsonl. Kimi: only event/session/cwd → session wire.jsonl. CamelCase aliases.
+/// chat_history.jsonl. Kimi: only event/session/cwd → session wire.jsonl.
+/// Hermes: `extra.assistant_response` on `post_llm_call`. CamelCase aliases.
 #[derive(Debug, Deserialize, Default)]
 struct StopHook {
     #[serde(default, alias = "lastAssistantMessage")]
@@ -81,6 +82,15 @@ struct StopHook {
     /// Reconstruct sessions path when transcriptPath missing.
     #[serde(default)]
     cwd: Option<String>,
+    /// Hermes shell-hook extras (`assistant_response` on post_llm_call).
+    #[serde(default)]
+    extra: Option<StopExtra>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct StopExtra {
+    #[serde(default)]
+    assistant_response: Option<String>,
 }
 
 /// JSONL assistant/user line (Grok chat_history or similar).
@@ -114,7 +124,7 @@ impl TranscriptEntry {
 }
 
 impl StopHook {
-    /// Direct field, else Grok/Kimi transcript fallbacks.
+    /// Direct field, else Grok/Kimi/Hermes fallbacks.
     fn last_assistant_text(&self, client: ClientSource, paths: &Paths) -> Option<Cow<'_, str>> {
         if let Some(t) = self
             .last_assistant_message
@@ -122,6 +132,14 @@ impl StopHook {
             .filter(|s| !s.trim().is_empty())
         {
             return Some(Cow::Borrowed(t));
+        }
+        if client == ClientSource::Hermes {
+            return self
+                .extra
+                .as_ref()
+                .and_then(|e| e.assistant_response.as_deref())
+                .filter(|s| !s.trim().is_empty())
+                .map(Cow::Borrowed);
         }
         if client == ClientSource::Grok {
             let session = self
@@ -2114,6 +2132,40 @@ mod tests {
         };
         assert_eq!(
             hook.last_assistant_text(ClientSource::KimiCode, &paths),
+            None
+        );
+    }
+
+    #[test]
+    fn hermes_stop_reads_extra_assistant_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let hook = StopHook {
+            session_id: Some("hermes-sess".into()),
+            extra: Some(StopExtra {
+                assistant_response: Some("Hermes final reply.".into()),
+            }),
+            ..StopHook::default()
+        };
+        assert_eq!(
+            hook.last_assistant_text(ClientSource::Hermes, &paths)
+                .as_deref(),
+            Some("Hermes final reply.")
+        );
+        // Blank / missing extra is silent.
+        let empty = StopHook {
+            session_id: Some("hermes-sess".into()),
+            extra: Some(StopExtra {
+                assistant_response: Some("   ".into()),
+            }),
+            ..StopHook::default()
+        };
+        assert_eq!(
+            empty.last_assistant_text(ClientSource::Hermes, &paths),
+            None
+        );
+        assert_eq!(
+            StopHook::default().last_assistant_text(ClientSource::Hermes, &paths),
             None
         );
     }

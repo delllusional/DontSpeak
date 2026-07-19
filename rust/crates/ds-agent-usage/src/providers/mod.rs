@@ -10,6 +10,7 @@ use serde_json::Value;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod grok;
+pub(crate) mod hermes;
 pub(crate) mod kimi;
 pub(crate) mod qwen;
 mod rpc;

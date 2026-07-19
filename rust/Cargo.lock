@@ -940,6 +940,7 @@ dependencies = [
  "ds-log",
  "ds-proc",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",

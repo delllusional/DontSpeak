@@ -7,6 +7,9 @@ pub(crate) mod cmdline;
 
 pub mod codex;
 pub mod grok_hooks;
+pub mod hermes_allowlist;
+pub mod hermes_hooks;
+pub mod hermes_mcp;
 pub mod hooks;
 pub mod json_mcp;
 pub mod kimi_hooks;

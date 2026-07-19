@@ -61,6 +61,12 @@ pub struct Paths {
     pub kimi_mcp_json: PathBuf,
     /// Kimi Code OAuth credentials (usage stats; read-only).
     pub kimi_credentials_json: PathBuf,
+    /// `~/.hermes` — presence-gate for `wire hermes`.
+    pub hermes_dir: PathBuf,
+    /// Hermes shell hooks + MCP (`hooks:` / `mcp_servers.DontSpeak` in config.yaml).
+    pub hermes_config_yaml: PathBuf,
+    /// Hermes first-use consent for shell hooks (`(event, command)` approvals).
+    pub hermes_shell_hooks_allowlist: PathBuf,
 }
 
 impl Paths {
@@ -94,6 +100,12 @@ impl Paths {
             &cwd,
             std::env::var_os("KIMI_CODE_HOME").as_deref(),
             ".kimi-code",
+        );
+        let hermes_dir = client_config_dir(
+            &home,
+            &cwd,
+            std::env::var_os("HERMES_HOME").as_deref(),
+            ".hermes",
         );
         let claude_code_config = claude_override
             .as_deref()
@@ -138,6 +150,9 @@ impl Paths {
             kimi_mcp_json: kimi_dir.join("mcp.json"),
             kimi_credentials_json: kimi_dir.join("credentials").join("kimi-code.json"),
             kimi_dir,
+            hermes_config_yaml: hermes_dir.join("config.yaml"),
+            hermes_shell_hooks_allowlist: hermes_dir.join("shell-hooks-allowlist.json"),
+            hermes_dir,
             home,
             claude_dir,
         })
@@ -152,6 +167,7 @@ impl Paths {
         let qwen_dir = home.join(".qwen");
         let grok_dir = home.join(".grok");
         let kimi_dir = home.join(".kimi-code");
+        let hermes_dir = home.join(".hermes");
         let ds_dir = home.join(".dontspeak");
         Self {
             pidfile: ds_dir.join("speak-hook.pid"),
@@ -180,6 +196,9 @@ impl Paths {
             kimi_mcp_json: kimi_dir.join("mcp.json"),
             kimi_credentials_json: kimi_dir.join("credentials").join("kimi-code.json"),
             kimi_dir,
+            hermes_config_yaml: hermes_dir.join("config.yaml"),
+            hermes_shell_hooks_allowlist: hermes_dir.join("shell-hooks-allowlist.json"),
+            hermes_dir,
             home,
             claude_dir,
         }
@@ -407,6 +426,17 @@ mod tests {
         assert_eq!(
             paths.kimi_credentials_json,
             paths.kimi_dir.join("credentials").join("kimi-code.json")
+        );
+    }
+
+    #[test]
+    fn hermes_paths_follow_the_hermes_home_layout() {
+        let paths = Paths::rooted_at(Path::new("home"));
+        assert_eq!(paths.hermes_dir, Path::new("home").join(".hermes"));
+        assert_eq!(paths.hermes_config_yaml, paths.hermes_dir.join("config.yaml"));
+        assert_eq!(
+            paths.hermes_shell_hooks_allowlist,
+            paths.hermes_dir.join("shell-hooks-allowlist.json")
         );
     }
 

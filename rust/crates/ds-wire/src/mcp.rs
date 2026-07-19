@@ -61,7 +61,7 @@ pub fn apply(
 
     let existing = match seed {
         Some(PreviewDoc::Json(v)) => v,
-        Some(PreviewDoc::Toml(_)) => {
+        Some(PreviewDoc::Toml(_) | PreviewDoc::Yaml(_)) => {
             panic!("mcp::apply: seed must be PreviewDoc::Json for a JSON mechanism")
         }
         None => {
@@ -143,7 +143,7 @@ pub fn apply_toml(
 
     let existing = match seed {
         Some(PreviewDoc::Toml(s)) => s,
-        Some(PreviewDoc::Json(_)) => {
+        Some(PreviewDoc::Json(_) | PreviewDoc::Yaml(_)) => {
             panic!("mcp::apply_toml: seed must be PreviewDoc::Toml for a TOML mechanism")
         }
         None => std::fs::read_to_string(cfg).unwrap_or_default(),

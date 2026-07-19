@@ -11,11 +11,12 @@ use std::path::{Path, PathBuf};
 
 use ds_config::{ClientKind, ClientSource, ClientSpec, Paths, Surface, WireMechanism};
 
-/// Merged surface doc for print-only threading (JSON or format-preserving TOML).
+/// Merged surface doc for print-only threading (JSON, format-preserving TOML, or YAML text).
 #[derive(Debug)]
 pub(crate) enum PreviewDoc {
     Json(serde_json::Value),
     Toml(String),
+    Yaml(String),
 }
 
 /// MCP registry key / `serverInfo.name`. Must match `dontspeak::mcp::SERVER_NAME`.
@@ -210,6 +211,32 @@ fn dispatch_surface(
             seed,
             capture,
         ),
+        WireMechanism::HermesYamlHooks => hooks::hermes_yaml_hooks(
+            (s.config_file)(paths),
+            spec.target,
+            remove,
+            print_only,
+            paths,
+            seed,
+            capture,
+        ),
+        WireMechanism::HermesYamlMcp => hooks::hermes_yaml_mcp(
+            (s.config_file)(paths),
+            remove,
+            print_only,
+            paths,
+            seed,
+            capture,
+            s.load_hint
+                .unwrap_or("start a new Hermes session to load the server"),
+        ),
+        WireMechanism::HermesShellAllowlist => hooks::hermes_shell_allowlist(
+            (s.config_file)(paths),
+            spec.target,
+            remove,
+            print_only,
+            paths,
+        ),
         WireMechanism::GrokJsonHooks => {
             hooks::grok_json_hooks((s.config_file)(paths), remove, print_only, paths)
         }
@@ -302,8 +329,15 @@ fn print_captured_doc(mechanism: WireMechanism, cfg: &Path, doc: &PreviewDoc) ->
             println!("// {}\n{s}", cfg.display());
             0
         }
-        (WireMechanism::GrokJsonHooks, _) => {
-            unreachable!("GrokJsonHooks never populates a capture slot")
+        (
+            WireMechanism::HermesYamlHooks | WireMechanism::HermesYamlMcp,
+            PreviewDoc::Yaml(s),
+        ) => {
+            println!("// {}\n{s}", cfg.display());
+            0
+        }
+        (WireMechanism::GrokJsonHooks | WireMechanism::HermesShellAllowlist, _) => {
+            unreachable!("this mechanism never populates a capture slot")
         }
         (mechanism, doc) => unreachable!(
             "PreviewDoc variant {doc:?} does not match its surface's mechanism {mechanism:?}"
@@ -337,6 +371,15 @@ fn print_registry(paths: Option<&Paths>) {
                     WireMechanism::ClaudeJsonHooks => "voice hooks (Claude contract, JSON)",
                     WireMechanism::ClaudeTomlHooks => "voice hooks (Claude contract, TOML)",
                     WireMechanism::KimiTomlHooks => "voice hooks (Kimi flat [[hooks]], TOML)",
+                    WireMechanism::HermesYamlHooks => {
+                        "voice hooks (Hermes nested hooks.<event>, YAML)"
+                    }
+                    WireMechanism::HermesYamlMcp => {
+                        "MCP server (stdio, mcp_servers table in YAML)"
+                    }
+                    WireMechanism::HermesShellAllowlist => {
+                        "shell-hook allowlist (Hermes consent JSON)"
+                    }
                     WireMechanism::GrokJsonHooks => {
                         "voice hooks (Claude contract, JSON — dedicated Grok file)"
                     }
@@ -684,6 +727,100 @@ mod tests {
         );
     }
 
+    /// Hermes: hooks + MCP share config.yaml; allowlist is a separate JSON consent file.
+    #[test]
+    fn wire_client_hermes_wires_all_surfaces_then_removes_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.hermes_dir).unwrap();
+
+        assert_eq!(wire_client(ClientSource::Hermes, &paths, false, false), 0);
+
+        let text = std::fs::read_to_string(&paths.hermes_config_yaml).unwrap();
+        for event in [
+            "on_session_start",
+            "pre_llm_call",
+            "post_llm_call",
+            "on_session_finalize",
+        ] {
+            assert!(text.contains(event), "{event} wired: {text}");
+        }
+        assert!(
+            text.contains(" notify --greet-only --client hermes"),
+            "SessionStart greet-only: {text}"
+        );
+        assert!(
+            text.contains(" provide --client hermes"),
+            "provide wired: {text}"
+        );
+        assert!(
+            text.contains("mcp_servers") && text.contains("DontSpeak"),
+            "mcp entry wired alongside hooks: {text}"
+        );
+
+        let allow: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&paths.hermes_shell_hooks_allowlist).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            allow["approvals"].as_array().unwrap().len(),
+            5,
+            "five (event, command) approvals: {allow}"
+        );
+
+        // Re-wire: byte-identical, no new .bak.
+        let cfg_before = std::fs::read(&paths.hermes_config_yaml).unwrap();
+        let allow_before = std::fs::read(&paths.hermes_shell_hooks_allowlist).unwrap();
+        let baks_before = count_bak_files(dir.path());
+        assert_eq!(wire_client(ClientSource::Hermes, &paths, false, false), 0);
+        assert_eq!(std::fs::read(&paths.hermes_config_yaml).unwrap(), cfg_before);
+        assert_eq!(
+            std::fs::read(&paths.hermes_shell_hooks_allowlist).unwrap(),
+            allow_before
+        );
+        assert_eq!(
+            count_bak_files(dir.path()),
+            baks_before,
+            "unchanged re-wire creates no .bak"
+        );
+
+        assert_eq!(wire_client(ClientSource::Hermes, &paths, true, false), 0);
+        let text2 = std::fs::read_to_string(&paths.hermes_config_yaml).unwrap();
+        assert!(!text2.contains("dontspeak"), "hooks/mcp stripped: {text2}");
+        let allow2: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&paths.hermes_shell_hooks_allowlist).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            allow2.get("approvals").is_none(),
+            "allowlist stripped: {allow2}"
+        );
+    }
+
+    /// Issue #30: print-only must show hooks+MCP union for Hermes config.yaml.
+    #[test]
+    fn wire_surfaces_print_only_hermes_shows_hooks_and_mcp_union() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.hermes_dir).unwrap();
+
+        let spec = ds_config::client_spec(ClientSource::Hermes).unwrap();
+        let results = wire_surfaces_print_only(spec, &paths, false);
+        // config.yaml (hooks+mcp) + allowlist file = 2 groups.
+        assert_eq!(results.len(), 2, "Hermes surfaces group by file: {results:?}");
+        let yaml_group = results
+            .iter()
+            .find(|(f, _, _)| f == &paths.hermes_config_yaml)
+            .expect("config.yaml group");
+        assert_eq!(yaml_group.1, 0);
+        let Some(PreviewDoc::Yaml(text)) = &yaml_group.2 else {
+            panic!("expected PreviewDoc::Yaml, got {:?}", yaml_group.2);
+        };
+        assert!(text.contains("post_llm_call"), "hooks present: {text}");
+        assert!(text.contains("mcp_servers"), "mcp present: {text}");
+        assert!(!paths.hermes_config_yaml.exists(), "print-only never writes");
+    }
+
     /// Count `.bak.` siblings (prove steady-state reconcile creates none).
     fn count_bak_files(dir: &std::path::Path) -> usize {
         let mut n = 0;
@@ -711,6 +848,7 @@ mod tests {
             &paths.qwen_dir,
             &paths.grok_dir,
             &paths.kimi_dir,
+            &paths.hermes_dir,
         ] {
             std::fs::create_dir_all(d).unwrap();
         }
@@ -739,6 +877,14 @@ mod tests {
             !paths.kimi_mcp_json.exists(),
             "kimi not installed → skipped"
         );
+        assert!(
+            !paths.hermes_config_yaml.exists(),
+            "hermes not installed → skipped"
+        );
+        assert!(
+            !paths.hermes_shell_hooks_allowlist.exists(),
+            "hermes not installed → skipped"
+        );
     }
 
     /// No `exclude_clients` ⇒ wire all present clients.
@@ -756,6 +902,11 @@ mod tests {
         assert!(paths.grok_config.exists(), "grok wired");
         assert!(paths.kimi_config_toml.exists(), "kimi hooks wired");
         assert!(paths.kimi_mcp_json.exists(), "kimi mcp wired");
+        assert!(paths.hermes_config_yaml.exists(), "hermes config wired");
+        assert!(
+            paths.hermes_shell_hooks_allowlist.exists(),
+            "hermes allowlist wired"
+        );
     }
 
     /// `exclude_clients` strips a previously-wired client.

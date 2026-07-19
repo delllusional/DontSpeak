@@ -32,6 +32,9 @@ ds-log = { workspace = true }
 # wiring stamps. Re-exported flat from lib.rs, so downstream crates keep saying
 # `ds_config::ClientSource`.
 ds-client = { workspace = true }
+# Hermes Agent config.yaml (hooks + mcp_servers). Already in the workspace lock via
+# rust-i18n; comment loss on re-emit is accepted (no format-preserving YAML editor).
+serde-saphyr = "0.0.29"
 
 [lints]
 workspace = true

@@ -1,10 +1,10 @@
 # DontSpeak
 
-Local voice layer for Claude Code, Codex, Qwen Code, Grok, and Kimi Code: the agent speaks
-replies aloud; the user dictates with Caps Lock. One native app per OS (macOS
-SwiftUI, Windows WinUI, Linux GTK4) hosts the same Rust engine **in-process** via
-`ds-core` C ABI — no separate daemon. Hooks and the MCP server are thin clients
-over a Unix-domain socket.
+Local voice layer for Claude Code, Codex, Qwen Code, Grok, Kimi Code, and Hermes
+Agent: the agent speaks replies aloud; the user dictates with Caps Lock. One native
+app per OS (macOS SwiftUI, Windows WinUI, Linux GTK4) hosts the same Rust engine
+**in-process** via `ds-core` C ABI — no separate daemon. Hooks and the MCP server
+are thin clients over a Unix-domain socket.
 
 - Design: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Crates: [rust/README.md](rust/README.md)

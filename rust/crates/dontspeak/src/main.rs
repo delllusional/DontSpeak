@@ -76,6 +76,7 @@ Usage:
   dontspeak qwen   [args…]  launch Qwen Code
   dontspeak grok   [args…]  launch Grok
   dontspeak kimi   [args…]  launch Kimi Code
+  dontspeak hermes [args…]  launch Hermes Agent
   dontspeak wire   [args…]  wire/unwire client hooks + MCP
   dontspeak notify          command-hook executor (stdin JSON)
   dontspeak provide         query-hook executor (stdin JSON)
@@ -87,7 +88,7 @@ Engine via local socket; speech config is OS data-dir config.toml (not client se
 ";
 
 /// Unknown-subcommand hint fragment — separate so registry-drift test asserts every launcher.
-const EXPECTED_SUBCOMMANDS: &str = "`claude`, `codex`, `qwen`, `grok`, `kimi`, `notify`, \
+const EXPECTED_SUBCOMMANDS: &str = "`claude`, `codex`, `qwen`, `grok`, `kimi`, `hermes`, `notify`, \
      `provide`, `wire`, `--version`, or `--help`";
 
 /// Detach every role except `Launch` (only Launch needs the console for the interactive child).
@@ -108,7 +109,7 @@ fn run_grok_hook() {
     let payload = read_stdin();
     let event = hook_core::event_name(&payload);
     hook_core::notify(&event, &payload, true, ClientSource::Grok);
-    if let Some(out) = hook_core::provide(&event, &payload) {
+    if let Some(out) = hook_core::provide(&event, &payload, ClientSource::Grok) {
         println!("{out}");
     }
     if let Some(paths) = ds_config::Paths::resolve()
@@ -145,7 +146,10 @@ fn main() {
         }
         Subcommand::Provide => {
             let payload = read_stdin();
-            if let Some(out) = hook_core::provide(&hook_core::event_name(&payload), &payload) {
+            let client = client_from_argv(&argv);
+            if let Some(out) =
+                hook_core::provide(&hook_core::event_name(&payload), &payload, client)
+            {
                 println!("{out}");
             }
             std::process::exit(0);
@@ -351,6 +355,7 @@ mod tests {
             ("qwen_code", ClientSource::QwenCode),
             ("grok", ClientSource::Grok),
             ("kimi_code", ClientSource::KimiCode),
+            ("hermes", ClientSource::Hermes),
         ] {
             let argv = argv(&["dontspeak", "notify", "--client", tok]);
             assert_eq!(client_from_argv(&argv), want, "{tok}");

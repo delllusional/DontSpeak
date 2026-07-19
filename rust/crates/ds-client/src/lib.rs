@@ -11,6 +11,7 @@ pub enum ClientSource {
     QwenCode,
     Grok,
     KimiCode,
+    Hermes,
     /// Internal; `client_spec` is always `None`.
     DontSpeak,
     /// Foreign MCP / missing `--client`.
@@ -26,6 +27,7 @@ impl ClientSource {
         ClientSource::QwenCode,
         ClientSource::Grok,
         ClientSource::KimiCode,
+        ClientSource::Hermes,
     ];
 
     /// Case/whitespace tolerant; `None` → call sites use Unknown.
@@ -36,6 +38,7 @@ impl ClientSource {
             "qwen_code" => Some(ClientSource::QwenCode),
             "grok" => Some(ClientSource::Grok),
             "kimi_code" => Some(ClientSource::KimiCode),
+            "hermes" => Some(ClientSource::Hermes),
             "dontspeak" => Some(ClientSource::DontSpeak),
             "unknown" => Some(ClientSource::Unknown),
             _ => None,
@@ -50,6 +53,7 @@ impl ClientSource {
             ClientSource::QwenCode => "qwen_code",
             ClientSource::Grok => "grok",
             ClientSource::KimiCode => "kimi_code",
+            ClientSource::Hermes => "hermes",
             ClientSource::DontSpeak => "dontspeak",
             ClientSource::Unknown => "unknown",
         }
@@ -86,6 +90,7 @@ mod tests {
             ClientSource::QwenCode,
             ClientSource::Grok,
             ClientSource::KimiCode,
+            ClientSource::Hermes,
             ClientSource::DontSpeak,
             ClientSource::Unknown,
         ] {
@@ -116,7 +121,8 @@ mod tests {
                 ClientSource::Codex,
                 ClientSource::QwenCode,
                 ClientSource::Grok,
-                ClientSource::KimiCode
+                ClientSource::KimiCode,
+                ClientSource::Hermes,
             ]
         );
         for &c in ClientSource::CLIENTS {
