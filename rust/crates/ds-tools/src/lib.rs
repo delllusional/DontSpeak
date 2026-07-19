@@ -196,12 +196,7 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_TTS_ENGINE,
             ),
-            p(
-                "tts_voices",
-                PType::StrArray,
-                false,
-                SET_CONFIG_TTS_VOICES,
-            ),
+            p("tts_voices", PType::StrArray, false, SET_CONFIG_TTS_VOICES),
             p(
                 "tts_system_voice",
                 PType::Str,
@@ -222,24 +217,9 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_INPUT_CLEARS,
             ),
-            p(
-                "pause_bg",
-                PType::Bool,
-                false,
-                SET_CONFIG_PAUSE_BG,
-            ),
-            p(
-                "earcon_reply",
-                PType::Str,
-                false,
-                SET_CONFIG_EARCON_REPLY,
-            ),
-            p(
-                "earcon_input",
-                PType::Str,
-                false,
-                SET_CONFIG_EARCON_INPUT,
-            ),
+            p("pause_bg", PType::Bool, false, SET_CONFIG_PAUSE_BG),
+            p("earcon_reply", PType::Str, false, SET_CONFIG_EARCON_REPLY),
+            p("earcon_input", PType::Str, false, SET_CONFIG_EARCON_INPUT),
             p("caps", PType::Bool, false, SET_CONFIG_CAPS),
             p(
                 "stt_engine",
@@ -286,12 +266,7 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_SPEAKER_THRESH,
             ),
-            p(
-                "speaker_lock",
-                PType::Bool,
-                false,
-                SET_CONFIG_SPEAKER_LOCK,
-            ),
+            p("speaker_lock", PType::Bool, false, SET_CONFIG_SPEAKER_LOCK),
             p(
                 "tray",
                 PType::EnumArray(&["stt", "tts", "stt_animated", "tts_animated"]),
@@ -697,11 +672,7 @@ mod tests {
             ("voices", json!({"tts_engine": "off"}), false),
             ("set_config", json!({"narrate": ["shorts"]}), true),
             ("set_config", json!({"narrate": ["other"]}), false),
-            (
-                "set_config",
-                json!({"tts_voices": ["af_sarah"]}),
-                true,
-            ),
+            ("set_config", json!({"tts_voices": ["af_sarah"]}), true),
             ("set_config", json!({"tts_voices": [7]}), false),
             ("set_config", json!({"rate": 0.49}), false),
             ("set_config", json!({"capture_gain": "auto"}), true),
@@ -793,11 +764,7 @@ mod tests {
         mentions(SET_CONFIG_NARRATE, "Default both", "narrate");
         mentions(
             SET_CONFIG_GREET,
-            if v.greet {
-                "Default on"
-            } else {
-                "Default off"
-            },
+            if v.greet { "Default on" } else { "Default off" },
             "greet",
         );
         mentions(
@@ -820,25 +787,13 @@ mod tests {
 
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         assert!(!v.earcon_reply.is_empty());
-        mentions(
-            SET_CONFIG_EARCON_REPLY,
-            "Default: OS chime",
-            "earcon_reply",
-        );
+        mentions(SET_CONFIG_EARCON_REPLY, "Default: OS chime", "earcon_reply");
         assert!(v.earcon_input.is_empty());
-        mentions(
-            SET_CONFIG_EARCON_INPUT,
-            "Default off",
-            "earcon_input",
-        );
+        mentions(SET_CONFIG_EARCON_INPUT, "Default off", "earcon_input");
 
         mentions(
             SET_CONFIG_CAPS,
-            if v.caps {
-                "Default on"
-            } else {
-                "Default off"
-            },
+            if v.caps { "Default on" } else { "Default off" },
             "caps",
         );
         assert!(v.stt_engine.is_none());
@@ -878,11 +833,7 @@ mod tests {
             "provider",
         );
         assert!(v.diarizer.is_empty());
-        mentions(
-            SET_CONFIG_DIARIZER,
-            "[] = off (default)",
-            "diarizer",
-        );
+        mentions(SET_CONFIG_DIARIZER, "[] = off (default)", "diarizer");
         mentions(
             SET_CONFIG_CLUSTERING,
             &format!("Default {}", v.cluster_threshold),
@@ -914,10 +865,7 @@ mod tests {
         assert_eq!(v.tray, vec![TrayKind::Stt, TrayKind::TtsAnimated]);
         mentions(
             SET_CONFIG_TRAY,
-            &format!(
-                "Default {}",
-                serde_json::to_string(&v.tray).unwrap()
-            ),
+            &format!("Default {}", serde_json::to_string(&v.tray).unwrap()),
             "tray",
         );
         assert_eq!(v.clear_on_input, vec![CancelSpeechScope::Current]);

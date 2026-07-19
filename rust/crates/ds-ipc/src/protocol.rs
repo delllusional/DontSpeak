@@ -26,7 +26,9 @@ pub enum Request {
     /// Codex app-server ready after narration subscriber attaches (TUI race).
     EnsureCodexStream,
     /// Global mute; speech drains silently, cues suppressed.
-    SetMuted { on: bool },
+    SetMuted {
+        on: bool,
+    },
     /// SessionStart greeting when `greet`.
     GreetSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,16 +84,28 @@ pub enum Request {
     /// Stop via second connection (first is streaming).
     TestRecognitionStop,
     /// One-shot diarization.
-    Diarize { seconds: u64 },
-    Enroll { name: String, seconds: u64 },
-    ForgetSpeaker { name: String },
+    Diarize {
+        seconds: u64,
+    },
+    Enroll {
+        name: String,
+        seconds: u64,
+    },
+    ForgetSpeaker {
+        name: String,
+    },
     ListSpeakers,
     /// Presence/removability; engine is authority. File IO in app.
     ModelStatus,
     /// Block until `seq` ≠ `since` or timeout. `since = 0` immediate.
-    WaitModelStatus { since: u64, timeout_ms: u64 },
+    WaitModelStatus {
+        since: u64,
+        timeout_ms: u64,
+    },
     /// Session-local TTS provider; restarts Kokoro, resets stats. Not persisted.
-    SetProvider { provider: String },
+    SetProvider {
+        provider: String,
+    },
     /// IPC exit; real quit is FFI `ds_engine_stop`.
     Shutdown,
     /// Same as mtime poll (shared debounce).

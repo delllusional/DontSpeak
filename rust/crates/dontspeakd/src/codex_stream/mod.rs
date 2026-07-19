@@ -1391,11 +1391,7 @@ fn supervise(
             continue;
         }
         #[cfg(any(unix, windows))]
-        if !cfg.codex_daemon
-            && !launch_kept_warm
-            && !launch_requested
-            && owned_server.is_some()
-        {
+        if !cfg.codex_daemon && !launch_kept_warm && !launch_requested && owned_server.is_some() {
             owned_server = None;
             log::info!(
                 target: "engine",

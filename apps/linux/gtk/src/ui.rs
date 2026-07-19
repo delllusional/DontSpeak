@@ -4,9 +4,7 @@
 use std::collections::HashMap;
 
 use adw::prelude::*;
-use ds_status::{
-    EngineState, EngineStatus, ModelStatus, StatusSttEngine, StatusTtsEngine,
-};
+use ds_status::{EngineState, EngineStatus, ModelStatus, StatusSttEngine, StatusTtsEngine};
 
 use crate::ffi::{UsageCard, UsageDeck, UsageRow};
 use crate::status::Snapshot;

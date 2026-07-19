@@ -1010,8 +1010,7 @@ mod set_config_tests {
         let (_dir, paths) = rooted_paths();
         assert!(!paths.config_toml.exists());
 
-        let msg =
-            call_set_config(&paths, &json!({ "rate": 1.2 })).expect("a valid change applies");
+        let msg = call_set_config(&paths, &json!({ "rate": 1.2 })).expect("a valid change applies");
         assert_eq!(msg, "Updated rate=1.2.");
         assert!(paths.config_toml.exists(), "config.toml was written");
 

@@ -23,8 +23,7 @@ pub const STATUS: &str = "Speech config and runtime state.";
 pub const STATUS_DETAIL: &str = "Include model, dictation, and runtime stats. Default false.";
 
 pub const USAGE: &str = "Coding-agent subscription usage shown in the Agents tab.";
-pub const USAGE_REFRESH: &str =
-    "Bypass the 60-second cache and query providers. Default false.";
+pub const USAGE_REFRESH: &str = "Bypass the 60-second cache and query providers. Default false.";
 
 pub const DIARIZE: &str = "Record mic and label who spoke when. Needs diarization; macOS only.";
 pub const DIARIZE_SECONDS: &str = "Recording seconds. Default 10.";

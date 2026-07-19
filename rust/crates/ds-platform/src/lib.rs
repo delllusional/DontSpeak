@@ -84,7 +84,7 @@ pub trait CapsKeyMonitor {
         None
     }
 
-    /// Lossless event stream ([`drain_caps_events`]) vs polled physical sample.
+    /// Lossless event stream ([`Self::drain_caps_events`]) vs polled physical sample.
     /// Windows hook = true. Event-driven ports suppress OS toggle; still drive LED.
     fn is_caps_event_driven(&self) -> bool {
         false

@@ -350,19 +350,14 @@ mod tests {
         .unwrap();
         let mut c3 = VoiceConfig::default();
         anim.apply(&mut c3).unwrap();
-        assert_eq!(
-            c3.tray,
-            vec![TrayKind::SttAnimated, TrayKind::TtsAnimated]
-        );
+        assert_eq!(c3.tray, vec![TrayKind::SttAnimated, TrayKind::TtsAnimated]);
 
-        let err =
-            serde_json::from_value::<SetConfigArgs>(serde_json::json!({ "tray": ["both"] }))
-                .unwrap_err();
+        let err = serde_json::from_value::<SetConfigArgs>(serde_json::json!({ "tray": ["both"] }))
+            .unwrap_err();
         assert!(err.to_string().contains("must be one of"), "got: {err}");
 
         // `[]` = never color.
-        let off: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tray": [] })).unwrap();
+        let off: SetConfigArgs = serde_json::from_value(serde_json::json!({ "tray": [] })).unwrap();
         let mut c2 = VoiceConfig::default();
         let ch = off.apply(&mut c2).unwrap();
         assert!(c2.tray.is_empty());
@@ -480,10 +475,9 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "tts_voices": ["ef_dora"] })).unwrap();
         assert!(bad.apply(&mut cfg).is_err());
 
-        let good: SetConfigArgs = serde_json::from_value(
-            serde_json::json!({ "tts_voices": ["af_sarah", "bm_george"] }),
-        )
-        .unwrap();
+        let good: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_voices": ["af_sarah", "bm_george"] }))
+                .unwrap();
         assert!(good.apply(&mut cfg).is_ok());
     }
 }

@@ -5,11 +5,11 @@ use std::{collections::HashSet, io};
 use serde::{Deserialize, Serialize};
 
 use crate::enums::{
-    de_diarizer, de_exclude_clients, de_clear_on_input, de_listen_mode, de_narrate,
-    de_provider, de_stt_engine_ladder, de_stt_engine_pref, de_tray, de_tts_engine_ladder,
-    de_tts_engine_pref, default_diarizer, default_clear_on_input, default_narrate,
-    default_provider, default_stt_engine_ladder, default_tray, default_tts_engine_ladder,
-    se_stt_engine_pref, se_tts_engine_pref,
+    de_clear_on_input, de_diarizer, de_exclude_clients, de_listen_mode, de_narrate, de_provider,
+    de_stt_engine_ladder, de_stt_engine_pref, de_tray, de_tts_engine_ladder, de_tts_engine_pref,
+    default_clear_on_input, default_diarizer, default_narrate, default_provider,
+    default_stt_engine_ladder, default_tray, default_tts_engine_ladder, se_stt_engine_pref,
+    se_tts_engine_pref,
 };
 use ds_log::{LogLevel, log};
 
@@ -58,7 +58,7 @@ pub struct VoiceConfig {
     #[serde(default = "default_long_press_ms")]
     pub long_press_ms: u64,
 
-    /// Pref: None→ladder; Some([])=off; Some([e])=force. See `resolved_stt`.
+    /// Pref: None→ladder; Some(empty)=off; Some(one engine)=force. See `resolved_stt`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -348,8 +348,8 @@ impl Default for VoiceConfig {
 }
 
 impl VoiceConfig {
-/// Spoken replies on ([`Self::resolved_tts`] is Some).
-pub fn is_tts_on(&self) -> bool {
+    /// Spoken replies on ([`Self::resolved_tts`] is Some).
+    pub fn is_tts_on(&self) -> bool {
         self.resolved_tts().is_some()
     }
 
@@ -736,10 +736,9 @@ pub(crate) mod tests {
         assert!(VoiceConfig::default().extra_editors.is_empty());
 
         // A flat pass-through list: no dedup/validation, order preserved.
-        let v: VoiceConfig = serde_json::from_str(
-            r#"{"extra_terminals":["foo"],"extra_editors":["bar.exe"]}"#,
-        )
-        .unwrap();
+        let v: VoiceConfig =
+            serde_json::from_str(r#"{"extra_terminals":["foo"],"extra_editors":["bar.exe"]}"#)
+                .unwrap();
         assert_eq!(v.extra_terminals, vec!["foo".to_string()]);
         assert_eq!(v.extra_editors, vec!["bar.exe".to_string()]);
 
@@ -922,11 +921,7 @@ pub(crate) mod tests {
 
     #[test]
     fn diarizer_provider_is_the_on_off_ladder() {
-        let diar = |j: &str| {
-            serde_json::from_str::<VoiceConfig>(j)
-                .unwrap()
-                .diarizer
-        };
+        let diar = |j: &str| serde_json::from_str::<VoiceConfig>(j).unwrap().diarizer;
         // Default is EMPTY = diarization OFF (opt-in); the on/off flag is folded in.
         assert!(VoiceConfig::default().diarizer.is_empty());
         assert!(!VoiceConfig::default().is_diarization_on());
@@ -954,11 +949,7 @@ pub(crate) mod tests {
 
     #[test]
     fn tray_indicator_is_a_set_of_tokens() {
-        let tray = |j: &str| {
-            serde_json::from_str::<VoiceConfig>(j)
-                .unwrap()
-                .tray
-        };
+        let tray = |j: &str| serde_json::from_str::<VoiceConfig>(j).unwrap().tray;
         // The array form normalizes to one token per state, canonical order (stt, then tts);
         // an empty array = never color.
         assert_eq!(
@@ -966,10 +957,7 @@ pub(crate) mod tests {
             vec![TrayKind::Stt, TrayKind::Tts]
         );
         assert_eq!(tray(r#"{"tray":["tts"]}"#), vec![TrayKind::Tts]);
-        assert!(
-            tray(r#"{"tray":[]}"#).is_empty(),
-            "empty array = none"
-        );
+        assert!(tray(r#"{"tray":[]}"#).is_empty(), "empty array = none");
         // The `_animated` form colors AND breathes, and wins if both forms of a state appear.
         assert_eq!(
             tray(r#"{"tray":["stt_animated","tts"]}"#),
@@ -986,15 +974,9 @@ pub(crate) mod tests {
         );
         // A legacy string / wrong-typed value degrades to the default set (NO migration of the
         // old none/both tokens — clean rename, no compat shim).
-        for raw in [
-            r#"{"tray":"both"}"#,
-            r#"{"tray":"none"}"#,
-            r#"{"tray":3}"#,
-        ] {
+        for raw in [r#"{"tray":"both"}"#, r#"{"tray":"none"}"#, r#"{"tray":3}"#] {
             assert_eq!(
-                serde_json::from_str::<VoiceConfig>(raw)
-                    .unwrap()
-                    .tray,
+                serde_json::from_str::<VoiceConfig>(raw).unwrap().tray,
                 vec![TrayKind::Stt, TrayKind::TtsAnimated],
                 "{raw} → default set"
             );
@@ -1389,17 +1371,17 @@ pub(crate) mod tests {
             endpoint_silence_ms: 650,
             full_duplex: true,
             capture_gain: CaptureGain::Manual(2.5),
-            double_tap_submit: true,   // non-default (default is false)
-            paste_delay_ms: 150, // non-default (default is 100)
+            double_tap_submit: true, // non-default (default is false)
+            paste_delay_ms: 150,     // non-default (default is 100)
             clear_on_input: vec![CancelSpeechScope::Other], // non-default (default is [current])
-            pause_bg: true,  // non-default (default is false)
+            pause_bg: true,          // non-default (default is false)
             earcon_reply: "Glass".into(), // non-default (default is the OS chime)
             earcon_input: "Funk".into(),
-            codex_stream: false,             // non-default (default is true)
-            codex_daemon: true, // non-default (default is false)
+            codex_stream: false, // non-default (default is true)
+            codex_daemon: true,  // non-default (default is false)
             codex_app_server_url: "ws://127.0.0.1:4550".into(), // non-default (default is empty)
             codex_bin: "/opt/codex/bin/codex".into(), // non-default (default is "codex")
-            grok_stream: false,              // non-default (default is true)
+            grok_stream: false,  // non-default (default is true)
             extra_terminals: vec!["myterm".into()], // non-default (default is [])
             extra_editors: vec!["myeditor.exe".into()], // non-default (default is [])
             exclude_clients: Some(vec![ClientSource::ClaudeCode]), // non-default (default is None)
@@ -1558,10 +1540,7 @@ pub(crate) mod tests {
         let mut paths = Paths::rooted_at(dir.path());
         paths.config_toml = dir.path().join("config.toml");
         std::fs::write(&paths.config_toml, "tts_voices = []\n").unwrap();
-        assert_eq!(
-            VoiceConfig::load(&paths).tts_voices,
-            default_voices()
-        );
+        assert_eq!(VoiceConfig::load(&paths).tts_voices, default_voices());
     }
 
     #[test]

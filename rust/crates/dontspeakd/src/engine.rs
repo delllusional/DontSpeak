@@ -420,15 +420,16 @@ impl<P: Platform + 'static> Engine<P> {
                     // `active_session` for both scopes so they can't disagree.
                     q.cancel_for_submit(
                         q.active_session(),
-                        self.cfg.clear_on_input.contains(&CancelSpeechScope::Current),
+                        self.cfg
+                            .clear_on_input
+                            .contains(&CancelSpeechScope::Current),
                         self.cfg.clear_on_input.contains(&CancelSpeechScope::Other),
                     );
                 }
                 // Polled timer — tick thread must not block-sleep.
                 if self.cfg.paste_delay_ms > 0 {
-                    self.pending_enter_at = Some(
-                        Instant::now() + Duration::from_millis(self.cfg.paste_delay_ms),
-                    );
+                    self.pending_enter_at =
+                        Some(Instant::now() + Duration::from_millis(self.cfg.paste_delay_ms));
                 } else {
                     self.press_deferred_enter();
                 }
@@ -547,8 +548,7 @@ impl<P: Platform + 'static> Engine<P> {
 
         self.long_press_ms = normalize_long_press(cfg.long_press_ms);
         self.plat.set_extra_terminals(cfg.extra_terminals.clone());
-        self.plat
-            .set_extra_editors(cfg.extra_editors.clone());
+        self.plat.set_extra_editors(cfg.extra_editors.clone());
 
         // Rebuild STT when selection changes OR local model becomes available (fresh-install:
         // `resolved_stt` stays `built_in` but `build_stt` would switch ClaudeNative → helper).
@@ -831,7 +831,10 @@ impl<P: Platform + 'static> Engine<P> {
         if self.cfg.listen_mode == ds_config::ListenMode::Always {
             let busy = self.ttsq.as_ref().map(|q| q.is_busy()).unwrap_or(false);
             // A hands-free submit applies `clear_on_input` per scope, same as any other submit.
-            let cancel_current = self.cfg.clear_on_input.contains(&CancelSpeechScope::Current);
+            let cancel_current = self
+                .cfg
+                .clear_on_input
+                .contains(&CancelSpeechScope::Current);
             let cancel_other = self.cfg.clear_on_input.contains(&CancelSpeechScope::Other);
             if let Some(l) = self.listener.as_mut() {
                 l.tick(busy, cancel_current, cancel_other);
@@ -1617,9 +1620,7 @@ mod tests {
             self.set_extra_terminals_calls.borrow_mut().push(extra);
         }
         fn set_extra_editors(&self, extra: Vec<String>) {
-            self.set_extra_editors_calls
-                .borrow_mut()
-                .push(extra);
+            self.set_extra_editors_calls.borrow_mut().push(extra);
         }
     }
     impl CapsKeyMonitor for MockPlatform {
@@ -2936,10 +2937,7 @@ mod tests {
             &[Vec::<String>::new()]
         );
         assert_eq!(
-            d.plat
-                .set_extra_editors_calls
-                .borrow()
-                .as_slice(),
+            d.plat.set_extra_editors_calls.borrow().as_slice(),
             &[Vec::<String>::new()]
         );
 

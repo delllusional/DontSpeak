@@ -146,7 +146,7 @@ impl TtsEngine {
         }
     }
 
-    /// Brand/model for listings/status (`kokoro`/`system`); config token is [`as_str`].
+    /// Brand/model for listings/status (`kokoro`/`system`); config token is [`Self::as_str`].
     pub fn brand(self) -> &'static str {
         match self {
             TtsEngine::BuiltIn => "kokoro",
@@ -633,8 +633,7 @@ where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(true));
-    let parsed =
-        fail_open_vec!(&v, TrayKind, TrayKind::parse).unwrap_or_else(default_tray);
+    let parsed = fail_open_vec!(&v, TrayKind, TrayKind::parse).unwrap_or_else(default_tray);
     Ok(normalize_tray(parsed))
 }
 

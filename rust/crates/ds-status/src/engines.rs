@@ -8,7 +8,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-fn unknown_engine<'de, D: Deserializer<'de>>(token: &str, expected: &'static [&'static str]) -> D::Error {
+fn unknown_engine<'de, D: Deserializer<'de>>(
+    token: &str,
+    expected: &'static [&'static str],
+) -> D::Error {
     serde::de::Error::unknown_variant(token, expected)
 }
 
@@ -30,8 +33,7 @@ impl StatusSttEngine {
         StatusSttEngine::Off,
     ];
 
-    pub const TOKENS: &'static [&'static str] =
-        &["built_in", "system", "claude_code", "off"];
+    pub const TOKENS: &'static [&'static str] = &["built_in", "system", "claude_code", "off"];
 
     pub fn as_str(self) -> &'static str {
         match self {

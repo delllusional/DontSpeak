@@ -1207,11 +1207,7 @@ impl TtsQueue {
             return Ok(());
         }
         let cfg = self.config.lock().unwrap().clone();
-        let Some(path) = ds_earcon::resolve_cue(
-            &cfg.earcon_reply,
-            &cfg.earcon_input,
-            event,
-        ) else {
+        let Some(path) = ds_earcon::resolve_cue(&cfg.earcon_reply, &cfg.earcon_input, event) else {
             return Ok(());
         };
         self.tts.cue(&path).map_err(|e| e.to_string())

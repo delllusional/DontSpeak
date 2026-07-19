@@ -403,12 +403,7 @@ pub(crate) fn model_status_json(
             stt: stt_stats.snapshot(),
             lifetime: lifetime.snapshot(),
         },
-        tray: cfg
-            .tray
-            .iter()
-            .copied()
-            .map(status_tray_kind)
-            .collect(),
+        tray: cfg.tray.iter().copied().map(status_tray_kind).collect(),
     };
     serde_json::to_value(status).unwrap_or(serde_json::Value::Null)
 }
@@ -603,9 +598,7 @@ mod tests {
     use crate::tts::TtsManager;
     use ds_config::{Paths, Provider, SttEngine, TtsEngine};
     use ds_model::DownloadTarget;
-    use ds_status::{
-        DictationState, EngineState, ModelStatus, StatusSttEngine, StatusTtsEngine,
-    };
+    use ds_status::{DictationState, EngineState, ModelStatus, StatusSttEngine, StatusTtsEngine};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use std::thread;

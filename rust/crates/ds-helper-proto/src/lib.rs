@@ -121,7 +121,10 @@ mod tests {
     #[test]
     fn stdin_ops_serialize_to_wire_tokens() {
         assert_eq!(serde_json::to_value(HelperOp::Stop).unwrap(), "stop");
-        assert_eq!(serde_json::to_value(HelperOp::Stopfade).unwrap(), "stopfade");
+        assert_eq!(
+            serde_json::to_value(HelperOp::Stopfade).unwrap(),
+            "stopfade"
+        );
         assert_eq!(serde_json::to_value(HelperOp::Lstop).unwrap(), "lstop");
         assert_eq!(serde_json::to_value(HelperModel::Tts).unwrap(), "tts");
         assert_eq!(serde_json::to_value(HelperModel::Stt).unwrap(), "stt");

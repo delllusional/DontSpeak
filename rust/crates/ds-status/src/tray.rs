@@ -22,8 +22,7 @@ impl StatusTrayKind {
         StatusTrayKind::TtsAnimated,
     ];
 
-    pub const TOKENS: &'static [&'static str] =
-        &["stt", "tts", "stt_animated", "tts_animated"];
+    pub const TOKENS: &'static [&'static str] = &["stt", "tts", "stt_animated", "tts_animated"];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -116,11 +115,7 @@ impl<'de> Deserialize<'de> for TrayIconKind {
 }
 
 /// `stt_active` = Caps dictation (not always-on). `tts_active` = playback.
-pub fn tray_icon_kind(
-    stt_active: bool,
-    tts_active: bool,
-    tray: &[StatusTrayKind],
-) -> TrayIconKind {
+pub fn tray_icon_kind(stt_active: bool, tts_active: bool, tray: &[StatusTrayKind]) -> TrayIconKind {
     if stt_active && tray.iter().any(|k| k.is_stt()) {
         return TrayIconKind::Recording;
     }

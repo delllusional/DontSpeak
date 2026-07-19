@@ -89,15 +89,18 @@ impl<'de> Deserialize<'de> for EngineState {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
         EngineState::parse(&s).ok_or_else(|| {
-            serde::de::Error::unknown_variant(&s, &[
-                "missing",
-                "idle",
-                "downloading",
-                "warming",
-                "blocked",
-                "failed",
-                "running",
-            ])
+            serde::de::Error::unknown_variant(
+                &s,
+                &[
+                    "missing",
+                    "idle",
+                    "downloading",
+                    "warming",
+                    "blocked",
+                    "failed",
+                    "running",
+                ],
+            )
         })
     }
 }

@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Wireable clients in [`CLIENTS`]; plus `DontSpeak` / `Unknown`.
+/// Wireable clients in [`ClientSource::CLIENTS`]; plus `DontSpeak` / `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ClientSource {
     ClaudeCode,
