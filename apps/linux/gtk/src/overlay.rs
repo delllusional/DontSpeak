@@ -106,18 +106,10 @@ impl Overlay {
     /// Show/update or hide from a status push (same gate as the other hosts).
     pub fn apply(&self, snap: &Snapshot) {
         // Visibility is engine-side via canonical `dictation.state` (incl. REFUSED brief glow).
-        let show = match &snap.status {
-            Some(s) => match DictationState::parse(&s.dictation.state) {
-                Some(st) => st != DictationState::Hidden,
-                // Older engine (no/unknown token): legacy boolean derivation.
-                None => {
-                    s.dictation.awaiting_confirm
-                        || (s.dictation.recording && s.dictation.local_stt)
-                        || s.dictation.refused
-                }
-            },
-            None => false,
-        };
+        let show = snap
+            .status
+            .as_ref()
+            .is_some_and(|s| s.dictation.state != DictationState::Hidden);
 
         if !show {
             if self.visible.replace(false) {
@@ -134,7 +126,10 @@ impl Overlay {
         // Empty while recording: no shared i18n "speak now" key; glow is the cue.
         self.label.set_text(&s.dictation.text);
         // Orange glow: speak-now, missing paste target, or refused start (reuses no-target glow).
-        let glow = s.dictation.prompt_glow || !s.dictation.has_paste_target || s.dictation.refused;
+        let state = s.dictation.state;
+        let glow = state == DictationState::Recording && s.dictation.text.is_empty()
+            || !s.dictation.has_paste_target
+            || state == DictationState::Refused;
         if glow {
             self.window.add_css_class("glow");
         } else {

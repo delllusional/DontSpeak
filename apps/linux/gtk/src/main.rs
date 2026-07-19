@@ -1,7 +1,7 @@
 //! DontSpeak Linux GUI host — GTK4 + libadwaita.
 //!
-//! Hosts the engine in-process via the `ds-core` C ABI and renders pushed status as tray,
-//! health panel, and focus-safe dictation overlay. Control lives in the MCP.
+//! In-process engine via `ds-core` C ABI; tray + health panel + dictation overlay.
+//! Control lives in the MCP.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -25,18 +25,15 @@ fn main() -> glib::ExitCode {
 
     let app = adw::Application::builder().application_id(APP_ID).build();
 
-    // Join the status thread before `engine_stop()` so it isn't mid-`model_status_wait`.
+    // Join status thread before engine_stop so it isn't mid-model_status_wait.
     let status_thread: Rc<RefCell<Option<status::StatusThread>>> = Rc::new(RefCell::new(None));
 
     app.connect_startup(|_| {
-        // Install the process `log` backend once → existing unified activity log only
-        // (`~/.local/state/dontspeak/logs/dontspeak.log` on Linux). No host-private log files.
-        // Idempotent if the in-process engine also inits on its thread.
+        // Unified activity log only (no host-private files). Idempotent with engine init.
         ds_log::init();
         ffi::set_locale(&sys_locale::get_locale().unwrap_or_else(|| "en".to_string()));
         overlay::load_css();
         ui::load_update_badge_css();
-        // Idempotent; true if the engine is running after the call.
         ffi::engine_start();
     });
     app.connect_activate({
@@ -54,28 +51,23 @@ fn main() -> glib::ExitCode {
 }
 
 fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::StatusThread>>>) {
-    // GTK re-fires `activate` on relaunch / tray Settings (org.gtk.Application.Activate).
-    // Window is only ever hidden (never destroyed) on close — re-show the **main** panel.
-    //
-    // Do not use `windows().first()`: the dictation overlay is also an application window
-    // (`overlay::Overlay`), often ordered before the hidden main window. Presenting that
-    // empty overlay looks like Settings did nothing.
+    // activate re-fires on relaunch / tray Settings. Close only hides — re-show main panel.
+    // Do not use windows().first(): dictation overlay is also an app window and often first;
+    // presenting it looks like Settings did nothing.
     if present_main_window(app) {
         return;
     }
 
     let widgets = ui::build_window(app);
-    // No sync prime: `model_status_json` is a blocking engine-IPC round-trip (up to 120s) and
-    // this is the GTK main thread. Panel stays blank one frame; `status::spawn_push` delivers
-    // the first snapshot within its 1s poll window.
+    // No sync prime: model_status_json blocks (up to 120s) on the GTK main thread.
+    // Blank one frame; status::spawn_push delivers within its 1s poll.
 
-    // Stay alive in the tray: hide (don't destroy) on close.
+    // Tray-resident: hide (don't destroy) on close.
     let _hold = app.hold();
     widgets.window.set_hide_on_close(true);
 
-    // One-shot update check on a throwaway thread — `ds_update_check_json` is the only
-    // network-touching ds-core FFI entry (blocking HTTP). Failures/`{}` → pill stays hidden
-    // (`ui::apply_update_check`).
+    // One-shot update check off-UI — only network-touching ds-core entry (blocking HTTP).
+    // Failures/`{}` → pill stays hidden.
     {
         let w = widgets.clone();
         let (tx, rx) = async_channel::bounded::<String>(1);
@@ -92,8 +84,7 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
         });
     }
 
-    // ksni `spawn()` runs a blocking async setup on the *calling* thread before detaching
-    // its service loop — never call it on the GTK UI thread (freezes Activate/Settings).
+    // ksni spawn() blocks on the calling thread before detaching — never on GTK UI thread.
     let tray_handle = {
         use ksni::blocking::TrayMethods;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -104,7 +95,7 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
                 let _ = tx.send(handle);
             })
             .ok();
-        // Brief wait only; missing tray is fail-soft.
+        // Missing tray is fail-soft.
         rx.recv_timeout(std::time::Duration::from_secs(3))
             .ok()
             .flatten()
@@ -128,11 +119,11 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
                 let (kind, is_muted) = match &snap.status {
                     Some(s) => (
                         ds_status::tray_icon_kind(
-                            s.running.stt_active,
-                            s.running.tts_active,
+                            s.activity.recording,
+                            s.activity.speaking,
                             &s.tray_indicator,
                         ),
-                        s.running.muted,
+                        s.activity.muted,
                     ),
                     None => (ds_status::TrayIconKind::Idle, false),
                 };
@@ -147,18 +138,16 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
         });
     }
 
-    // Keep hold alive for the process lifetime (tray-resident).
+    // Hold for process lifetime (tray-resident).
     std::mem::forget(_hold);
 
     widgets.window.set_visible(true);
     widgets.window.present();
 }
 
-/// Re-show the health/settings `ApplicationWindow` if it already exists.
-/// Skips the dictation overlay (`gtk::Window`, not `adw::ApplicationWindow`).
+/// Re-show health/settings ApplicationWindow; skip dictation overlay (plain gtk::Window).
 fn present_main_window(app: &adw::Application) -> bool {
     for win in app.windows() {
-        // Main UI is the only `adw::ApplicationWindow`; overlay is plain `gtk::Window`.
         if !win.is::<adw::ApplicationWindow>() {
             continue;
         }
@@ -170,7 +159,7 @@ fn present_main_window(app: &adw::Application) -> bool {
     false
 }
 
-/// If unset, force `GDK_BACKEND=x11` on common hypervisors so window show/Activate stays responsive.
+/// Force GDK_BACKEND=x11 on common hypervisors when unset (Wayland freezes present/map).
 fn prefer_x11_under_hypervisor() {
     if std::env::var_os("GDK_BACKEND").is_some() {
         return;

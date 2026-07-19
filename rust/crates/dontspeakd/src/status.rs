@@ -1,6 +1,5 @@
-//! `model_status` aggregator + caps-event status channel.
+//! `model_status` aggregator.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -18,32 +17,11 @@ use crate::stats;
 use crate::tts::TtsManager;
 use ds_model::DownloadTarget;
 use ds_status::{
-    CapsEvent as CapsEventDto, DiarStats, Dictation, DictationState, EngineObj, EngineState,
-    Loaded, ModelStatus, Running, Stats,
+    Activity, DiarizationStatus, Dictation, DictationState, EngineState, EngineStatus, ModelStatus,
+    Stats, StatusSttEngine, StatusTrayKind, StatusTtsEngine, SttStatus, TtsStatus,
 };
 
-/// Epoch milliseconds, for ordering caps events the app displays as a live log.
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Caps event for `model_status` (`kind`: press/release/start/stop/reset).
-#[derive(Clone)]
-pub(crate) struct CapsEvent {
-    pub ts_ms: u64,
-    pub kind: &'static str,
-}
-
-/// Bounded caps log (newest last); engine writes, RPC status reads.
-pub(crate) type CapsLog = Arc<Mutex<VecDeque<CapsEvent>>>;
-pub(crate) const CAPS_LOG_MAX: usize = 50;
-
-/// Status sequence + condvar: clients block until a real `model_status` change
-/// (push via `WaitModelStatus` / `ds_model_status_wait`). Bump after every flip
-/// (dictation, tts_active, stt_active, mute, engineRunning).
+/// Status seq + condvar for `WaitModelStatus`. Bump after every status flip.
 pub(crate) struct StatusGate {
     seq: Mutex<u64>,
     cv: Condvar,
@@ -57,49 +35,37 @@ impl StatusGate {
         })
     }
 
-    /// Advance the sequence and wake every blocked `wait_changed`.
+    /// Bump seq; wake waiters.
     pub(crate) fn bump(&self) {
         let mut s = self.seq.lock().unwrap_or_else(|e| e.into_inner());
         *s = s.wrapping_add(1);
         self.cv.notify_all();
     }
 
-    /// Hold a status transition immediately after its atomic flag write so queue race
-    /// tests can deterministically inspect the surrounding lock ordering.
+    /// Hold seq lock after a flag write (queue race tests).
     #[cfg(test)]
     pub(crate) fn hold_transition_for_test(&self) -> std::sync::MutexGuard<'_, u64> {
         self.seq.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The current sequence (embedded in `model_status_json` so the app echoes it
-    /// back as `since` on the next wait).
+    /// Current seq (app echoes as `since` on next wait).
     pub(crate) fn seq(&self) -> u64 {
         *self.seq.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Capture the sequence BEFORE reading the fields for one status snapshot. If a
-    /// transition lands during the reads, the returned sequence stays old so the
-    /// client's next wait returns immediately instead of acknowledging state it did
-    /// not receive.
+    /// Seq first, then read: mid-read transitions stay unacked (next wait returns).
     pub(crate) fn snapshot<T>(&self, read: impl FnOnce() -> T) -> (T, u64) {
         let seq = self.seq();
         (read(), seq)
     }
 
-    /// Block until the sequence differs from `since` (a status change landed) or
-    /// `timeout` elapses, then return the current sequence. Returns immediately if
-    /// the state already advanced past `since` while the caller was away.
+    /// Block until seq ≠ `since` or timeout. Immediate if already advanced.
     pub(crate) fn wait_changed(&self, since: u64, timeout: Duration) -> u64 {
         let guard = self.seq.lock().unwrap_or_else(|e| e.into_inner());
-        // Fast path: the state already advanced while the caller was away.
         if *guard != since {
             return *guard;
         }
-        // `wait_timeout_while` re-checks the predicate (here "still unchanged") across
-        // spurious wakeups, only returning once the seq differs from `since` or the
-        // single `timeout` deadline elapses — the idiomatic guard against a notify that
-        // races a wakeup. Predicate + the `bump` notify share this one `seq` mutex, so
-        // there is no lost-wakeup window.
+        // Predicate + bump share `seq` mutex — no lost-wakeup window.
         let (guard, _) = self
             .cv
             .wait_timeout_while(guard, timeout, |s| *s == since)
@@ -108,34 +74,23 @@ impl StatusGate {
     }
 }
 
-/// The shared Arc handles threaded through the RPC server and the status
-/// aggregator. Bundled into one struct so [`crate::ipc::spawn_ipc_server`] and
-/// [`model_status_json`] take a single `&EngineShared` instead of a long list of
-/// `Arc`-cloned args. Built ONCE in `engine_run` (same Arcs, same clones).
+/// Shared Arcs for IPC + status (built once in `engine_run`).
 #[derive(Clone)]
 pub(crate) struct EngineShared {
     pub tts: Arc<TtsManager>,
     pub caps_active: Arc<AtomicBool>,
     pub stt_active: Arc<AtomicBool>,
-    pub caps_log: CapsLog,
     pub paste: PasteState,
     pub downloads: DownloadProg,
     pub tts_stats: Arc<stats::TtsStats>,
     pub stt_stats: Arc<stats::SttStats>,
     pub lifetime: Arc<stats::LifetimeSeconds>,
-    /// The push gate the `WaitModelStatus` handler blocks on (shared with every
-    /// component that flips a status flag, each of which bumps it after the flip).
+    /// WaitModelStatus gate (bumped on every status flip).
     pub gate: Arc<StatusGate>,
 }
 
-/// Build the model presence + removability report (the engine is the authority:
-/// it knows what it has loaded). `read_tts_active` is deliberately deferred until
-/// after the status sequence is captured: a transition during this comparatively
-/// expensive report must remain unacknowledged so the client's next wait refreshes
-/// immediately. A model is `removable` only if present AND not currently running in
-/// the engine — for Kokoro/onnx that means the warm TTS child is NOT alive; Parakeet
-/// shares the onnx dylib, so it's removable whenever present unless the warm Kokoro
-/// child is holding that dylib.
+/// Model presence report. `read_tts` runs under gate.snapshot so mid-report
+/// transitions stay unacked.
 pub(crate) fn model_status_json(
     shared: &EngineShared,
     paths: &Paths,
@@ -146,7 +101,6 @@ pub(crate) fn model_status_json(
         tts,
         caps_active,
         stt_active,
-        caps_log,
         paste,
         downloads,
         tts_stats,
@@ -155,20 +109,9 @@ pub(crate) fn model_status_json(
         gate: _,
     } = shared;
     let cfg = VoiceConfig::load(paths);
-    // The engines the preference ladders RESOLVE to on this build — every "is engine X
-    // active" check below reads these, not the raw ladder (so an unusable rung is skipped).
+    // Resolved ladders (skip unusable rungs) — all active checks use these.
     let resolved_tts = cfg.resolved_tts();
     let resolved_stt = cfg.resolved_stt();
-    // Is the Kokoro warm child up (for removability + the Kokoro-engine case).
-    let kokoro_warm = tts.is_running();
-    // TTS "running" for the UI dot = the engine is on AND ready: off → never; System
-    // (`say`) is always ready; Kokoro needs its warm child up.
-    let tts_running = match resolved_tts {
-        Some(ds_config::TtsEngine::System) => true,
-        Some(ds_config::TtsEngine::Kokoro) => kokoro_warm,
-        _ => false, // off / no usable rung
-    };
-
     // CHEAP presence: file existence only — NO sha256. model_status is polled to
     // drive the UI's status dots, so it must be fast; full sha verification over
     // the 325MB Kokoro onnx + the Parakeet ONNX files would delay the dots by
@@ -197,52 +140,29 @@ pub(crate) fn model_status_json(
         kokoro_onnx_files_present()
     };
     let kokoro_present = kokoro_present_for(tts_uses_apple_native, shim, kokoro_files);
-    // The STT engine is `parakeet`; the ACTIVE runtime is the resolved provider.
-    //   * onnx         → gated on the downloaded ONNX model files (+ shared dylib).
-    //   * apple-native → gated on the shim + ITS downloaded Core ML sets (target
-    //                    `parakeet_coreml`), marker-checked like the Kokoro row above.
     let parakeet_onnx_files = parakeet_onnx_files_present();
-    // Same shim-aware downgrade as Kokoro above: the STT provider resolves to `Ane` as a static
-    // preference, but with no Core ML shim the warm child runs Parakeet on the ONNX-CPU path — so
-    // the row must gate on the downloaded ONNX files, not the (absent) apple-native cache.
+    // Same shim-aware ONNX downgrade as Kokoro.
     let stt_uses_onnx = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), shim);
     let parakeet_present = if stt_uses_onnx {
         parakeet_onnx_files
     } else {
-        parakeet_available() // shim + the downloaded Core ML sets (see config_gate)
+        parakeet_available()
     };
     let parakeet_enabled = resolved_stt == Some(ds_config::SttEngine::BuiltIn);
-    // "running" green dot: the selected engine is parakeet and its active runtime is ready.
     let parakeet_running = parakeet_enabled && parakeet_present;
-    // System STT (Apple's on-device recognizer). No DontSpeak-managed download ring —
-    // the OS owns the en-US model — but it has a real not-ready window: the first time it's
-    // selected the model downloads. So it gets the SAME present/warming/running split as
-    // Parakeet: "present" = can run (model installed OR downloading), "warming" (orange) =
-    // model still being prepared, "running" (green) = model installed + ready NOW.
+    // System STT: OS-owned model; same present/warming/running split as Parakeet.
     let system_enabled = resolved_stt == Some(ds_config::SttEngine::System);
-    // Only probe (a shim dlopen + Speech query) when System is actually selected — the
-    // row is hidden otherwise, so non-system users pay nothing on the model-status poll.
+    // Probe only when selected (row hidden otherwise).
     let system_state = if system_enabled {
         ds_stt::system_state()
     } else {
         ds_stt::SystemState::Unavailable
     };
-    // present = can run (model installed OR still downloading); running (green) = installed
-    // + ready NOW. When present && !running && enabled, engine_obj derives "warming"
-    // (orange) — the "preparing" dot, mirroring Parakeet while its model loads.
     let system_present = system_enabled && system_state != ds_stt::SystemState::Unavailable;
     let system_running = system_state == ds_stt::SystemState::Ready;
 
-    // claude_code STT — delegate to Claude Code's own voice dictation. READ Claude Code's
-    // config (settings.json voice + keybindings.json) ONLY when it's the selected engine
-    // (the row is hidden otherwise, so non-claude_code users pay no file IO). "present" =
-    // CC voice is enabled AND its bound key is one we can synthesize; otherwise we surface
-    // a "how to enable" hint instead of silently doing nothing.
+    // claude_code: read CC config only when selected. present = voice on + synthesizable key.
     let claude_code_enabled = resolved_stt == Some(ds_config::SttEngine::ClaudeCode);
-    // `claude_code_key` = the human label of the keypress we SYNTHESIZE into Claude Code
-    // (its bound `voice:pushToTalk`); the app shows it instead of local STT stats, since
-    // claude_code does no local transcription — "we just press this key, Claude Code does
-    // the rest". `None` when the engine isn't usable (the row shows the error hint instead).
     let (claude_code_present, claude_code_running, claude_code_error, claude_code_key) =
         if claude_code_enabled {
             let cc = ds_config::read_claude_code_voice(paths);
@@ -264,55 +184,32 @@ pub(crate) fn model_status_json(
             (false, false, None, None)
         };
 
-    // Recent caps-trigger events for the app's status panel (newest last).
-    let caps_events: Vec<CapsEventDto> = caps_log
-        .lock()
-        .map(|q| {
-            q.iter()
-                .map(|e| CapsEventDto {
-                    ts: e.ts_ms,
-                    kind: e.kind.to_string(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
     // Dictation-preview snapshot for the confirm panel (see `dictation_preview`): the
     // finalized transcript while awaiting confirmation, else the live partial — but never
     // the finalized text while a Caps press is in flight (a long-press cancel mustn't flash
     // the bubble before it dismisses).
-    let (dict_text, dict_awaiting, dict_target, dict_has_target, dict_refused) = paste
+    let (dict_text, dict_awaiting, dict_has_target, dict_refused) = paste
         .lock()
         .map(|p| {
             let (text, awaiting) = dictation_preview(&p.final_state, &p.partial, p.caps_held);
             (
                 text,
                 awaiting,
-                p.target.clone(),
                 p.has_paste_target,
-                // LIVE refusal window (same clock the tick digest hashes, so this snapshot
-                // and the push that woke the app agree): a Caps tap the engine refused
-                // because the selected engine can't transcribe yet.
+                // Same refusal clock as tick digest.
                 crate::engine::refusal_live(p.refused_until, std::time::Instant::now()),
             )
         })
-        .unwrap_or((String::new(), false, None, true, false));
+        .unwrap_or((String::new(), false, true, false));
 
-    // Background-download snapshot → per-engine "state"/"progress"/"error" so the
-    // app renders the lifecycle dot directly (engine owns the decision). Targets
-    // download in PARALLEL, one progress entry each — every row reports its OWN
-    // target's fraction, never a shared value mirrored onto whichever row happened
-    // to be fetching.
+    // Per-target download snapshot (parallel; each row owns its fraction).
     let dl = downloads
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .targets
         .clone();
-    // A row lights "downloading" for exactly its own in-flight targets. `KokoroFrontend`
-    // carries the shared voices, G2P graphs, and runtime, so it correctly gates the row.
     let downloading = |eng: DownloadTarget| matches!(dl.get(&eng), Some(TargetState::Active(_)));
-    // Active-only: a Done entry's finished % must NOT feed these direct per-target
-    // fractions (the row-level Done fallback lives in `row_download_frac`).
+    // Active-only (Done % is row_download_frac).
     let frac_for = |eng: DownloadTarget| match dl.get(&eng) {
         Some(TargetState::Active(p)) => p.frac(),
         _ => 0.0,
@@ -321,65 +218,28 @@ pub(crate) fn model_status_json(
         Some(TargetState::Failed(e)) => Some(e.clone()),
         _ => None,
     };
-    // Kokoro row reflects the Kokoro MODEL: running = warm child up; enabled =
-    // Kokoro is the selected TTS engine AND TTS is on; failed = warm-load error
-    // (present but won't start) or a failed Kokoro download. BOTH flavors of the
-    // Kokoro fetch (ONNX `kokoro_model`, apple-native `kokoro_coreml`) run in the
-    // download manager, so one per-target progress/error channel serves every platform.
     let kokoro_enabled = resolved_tts == Some(ds_config::TtsEngine::Kokoro);
-    // A warm-load error means "present but won't start" — a real failure ONLY when the
-    // model is present. On a clean install the warm child also errors ("kokoro model not
-    // downloaded"), but that's the `missing` state (offer Download), not a failure — so
-    // ignore the load error unless the model is present (else the row reads red "failed"
-    // instead of the download affordance). A genuine download failure always surfaces.
+    // Load error only while present (clean install "not downloaded" is missing, not failed).
     let kokoro_error = combined_error(
         kokoro_present,
         dl_err_for(DownloadTarget::KokoroModel)
             .or_else(|| dl_err_for(DownloadTarget::KokoroCoreml))
             .or_else(|| dl_err_for(DownloadTarget::KokoroFrontend)),
-        // A mid-session `load tts`/preload failure (e.g. a transient AV-scan file-not-found on
-        // an already-downloaded model) ahead of the warm-CHILD start failure — both are
-        // per-Kokoro, so either surfaces.
         tts.tts_load_error().or_else(|| tts.last_error()),
     );
 
-    // System TTS (macOS `say`) — the speech-OUT analogue of the System STT row. No model
-    // to download/remove; present + running when it's the selected engine and TTS is on,
-    // so the adaptive TTS row can show "System" (green) instead of a greyed-out Kokoro.
     let tts_system_enabled = resolved_tts == Some(ds_config::TtsEngine::System);
-    let tts_system_running = tts_system_enabled; // System selected ⇒ on (no separate flag)
+    let tts_system_running = tts_system_enabled;
 
-    // Diarization model presence (FluidAudio's self-managed cache).
     let diar_present = diarization_present();
-    // The SepFormer separator the speaker-LOCK pairs with diarization: without it the lock
-    // fails open (transcribes unfiltered), so the row's green must require it too. Plain
-    // existence — the pinned sha was verified at download time (`ensure`), and hashing
-    // ~29 MB per status poll would be waste.
+    // SepFormer required for lock green (exists check only — sha at download).
     let sepformer_present = ds_model::model_path(ds_model::SEPFORMER_FILE)
         .map(|p| p.is_file())
         .unwrap_or(false);
 
-    // "downloading" comes from the DOWNLOAD MANAGER on every platform — EVERY model fetch
-    // (ONNX models, the apple-native Core ML sets, the GPU runtime) runs there as its own
-    // single-flight target, so the dot reads "downloading" for exactly the fetch window and
-    // never a premature "starting"/green (presence is marker-gated, so a partial download
-    // reads missing, and the state precedence puts downloading first). GREEN =
-    // `tts_loaded`/`stt_loaded`, which the helper sets only AFTER the model is resident + warm.
-    // The shared GPU runtime is a compute DEPENDENCY of the ONNX engines: on a first-boot NVIDIA
-    // box it's fetched (single-flighted) AHEAD of the model download, and until it lands neither
-    // ONNX engine can run — so the rows must read "downloading" (with the runtime's %), not a stale
-    // "missing"/"ort cpu". Gated to the ONNX path: on the apple-native (ANE / macOS) path the
-    // runtime isn't used and `Cuda` is never a download target, so this is a no-op there.
-    // BUT once the row's own engine has already loaded, a Cuda fetch that outlives it (e.g. a
-    // SECOND box's Parakeet/Kokoro warming up onto the same shared runtime, or the runtime
-    // re-verifying after the row's model is already resident+warm) must NOT force the row back
-    // to "downloading" — that was the bug (a fully-loaded, working Kokoro flashing back to a
-    // ~25% ring). See `row_downloading` for the precise gate: Cuda alone can only force
-    // "downloading" while the row's own engine has NOT yet loaded.
-    //
-    // `tts_loaded`/`stt_loaded` (GREEN, set only after the model is resident + warm) are
-    // hoisted here — reused below at `running:` and again in the `stats.loaded` block — so
-    // `row_downloading` can read "has this row's engine already loaded" without a second call.
+    // Download manager owns "downloading". GREEN = loaded (resident+warm).
+    // Cuda is ONNX compute dep: force downloading until row's engine loads; never
+    // after (avoids loaded Kokoro flashing back to ~25% ring). See row_downloading.
     let tts_loaded = tts.is_tts_loaded();
     let stt_loaded = tts.is_stt_loaded();
     let cuda_downloading = downloading(DownloadTarget::Cuda);
@@ -400,8 +260,6 @@ pub(crate) fn model_status_json(
         stt_loaded,
         !stt_uses_onnx,
     );
-    // Each row's ring shows ITS OWN target's fraction (downloads run in parallel) —
-    // see `row_download_frac` for the model-wins-over-CUDA priority.
     let kokoro_frac = row_download_frac(
         &dl,
         &[
@@ -418,17 +276,12 @@ pub(crate) fn model_status_json(
         ],
     );
 
-    // Dictation flags hoisted to ONE read each so `recording`/`prompt_glow`/`state` below
-    // can't tear across separate atomic loads within a single snapshot.
+    // One load each — avoid tear across recording/prompt_glow/state.
     let dict_recording = stt_active.load(Ordering::Relaxed);
     let dict_local = dictation_local_stt(parakeet_running, system_running);
 
-    let status = ModelStatus {
-        // Removable only on the ONNX path (apple-native has no DontSpeak-managed Kokoro
-        // files — FluidAudio self-manages its cache, mirroring the Parakeet row) AND
-        // while the WARM Kokoro child isn't holding the files (the System engine doesn't
-        // warm Kokoro, so the files are free even with TTS on).
-        kokoro: engine_obj(
+    let tts_status = match resolved_tts {
+        Some(ds_config::TtsEngine::Kokoro) => Some(engine_status(
             RowState {
                 present: kokoro_present,
                 downloading: kokoro_downloading,
@@ -436,14 +289,24 @@ pub(crate) fn model_status_json(
                 running: tts_loaded,
                 enabled: kokoro_enabled,
             },
-            !tts_uses_apple_native && kokoro_present && !kokoro_warm,
             kokoro_frac,
-        ),
-        // Parakeet STT — one engine, runtime chosen by `stt_provider`. With the ONNX
-        // runtime it has downloadable model files (removable only when the warm Kokoro
-        // child isn't holding the shared dylib) and shows a download ring; with
-        // apple-native FluidAudio self-manages its cache (never removable, no ring).
-        parakeet: engine_obj(
+        )),
+        Some(ds_config::TtsEngine::System) => Some(engine_status(
+            RowState {
+                present: tts_system_enabled,
+                downloading: false,
+                error: None,
+                running: tts_system_running,
+                enabled: tts_system_running,
+            },
+            0.0,
+        )),
+        None => None,
+    };
+
+    let stt_status = match resolved_stt {
+        // Parakeet STT — one engine, runtime chosen by `stt.provider`.
+        Some(ds_config::SttEngine::BuiltIn) => Some(engine_status(
             RowState {
                 present: parakeet_present,
                 downloading: parakeet_downloading,
@@ -454,52 +317,14 @@ pub(crate) fn model_status_json(
                     } else {
                         dl_err_for(DownloadTarget::ParakeetCoreml)
                     },
-                    // A mid-session `load stt`/preload failure (e.g. a transient AV-scan
-                    // file-not-found on an already-downloaded model) — only surfaced as
-                    // "Failed" (not "Missing") while the model is actually present.
                     tts.stt_load_error(),
                 ),
                 running: stt_loaded && parakeet_enabled,
                 enabled: parakeet_enabled,
             },
-            stt_uses_onnx && parakeet_present && !kokoro_warm,
             parakeet_frac,
-        ),
-        // Speaker diarization / speaker-LOCK (FluidAudio Core ML — never removable). The
-        // dot tracks the speaker-LOCK feature
-        // the user actually turns on: GREEN (`running`) only when `stt_speaker_lock` is on
-        // AND diarization is enabled AND the models are present (the lock can actually
-        // isolate the enrolled voice) — INCLUDING the SepFormer separator, which the lock
-        // needs to un-mix the enrolled voice (absent ⇒ the lock silently fails open, so
-        // green would lie); GREY (`idle`) when the lock is off — even though diarization
-        // may be enabled under the hood for the diarize/enroll tools. Missing → the
-        // Download button; orange while the shim fetches its models OR the separator
-        // downloads (auto-kicked when the lock turns on).
-        diarization: engine_obj(
-            RowState {
-                present: diar_present,
-                downloading: downloading(DownloadTarget::DiarizationCoreml)
-                    || downloading(DownloadTarget::SepformerModel),
-                error: dl_err_for(DownloadTarget::DiarizationCoreml)
-                    .or_else(|| dl_err_for(DownloadTarget::SepformerModel)),
-                running: cfg.stt_speaker_lock
-                    && cfg.is_diarization_on()
-                    && diar_present
-                    && sepformer_present,
-                enabled: cfg.stt_speaker_lock,
-            },
-            false,
-            frac_for(DownloadTarget::DiarizationCoreml)
-                .max(frac_for(DownloadTarget::SepformerModel)),
-        ),
-        // System STT (Apple's on-device recognizer) — the OS owns the model, so
-        // there's nothing for DontSpeak to remove and no download RING (no progress): never
-        // `removable`, never `downloading`. But it warms like Parakeet: the state machine
-        // derives "warming" (orange) from present && !running && enabled — true while the
-        // en-US model is still being prepared (present but not Ready) — then "running"
-        // (green) once it's installed, "missing" when selected but unavailable (macOS < 26 /
-        // unsupported locale) so the dot honestly shows it can't run, no silent fallback.
-        system: engine_obj(
+        )),
+        Some(ds_config::SttEngine::System) => Some(engine_status(
             RowState {
                 present: system_present,
                 downloading: false,
@@ -507,13 +332,9 @@ pub(crate) fn model_status_json(
                 running: system_running,
                 enabled: system_enabled,
             },
-            false,
             0.0,
-        ),
-        // claude_code STT — Claude Code does the (cloud) transcription; nothing to download
-        // or remove. "present" = CC voice on + key synthesizable; the `error` carries the
-        // "run /voice" / "rebind the key" hint so the UI can tell the user how to enable it.
-        claude_code: engine_obj(
+        )),
+        Some(ds_config::SttEngine::ClaudeCode) => Some(engine_status(
             RowState {
                 present: claude_code_present,
                 downloading: false,
@@ -521,190 +342,83 @@ pub(crate) fn model_status_json(
                 running: claude_code_running,
                 enabled: claude_code_enabled,
             },
-            false,
             0.0,
-        ),
-        // System TTS (macOS `say`) — the speech-OUT analogue of the System STT row, so the
-        // adaptive TTS row can show "System" (green when selected + TTS on) instead of a
-        // greyed-out Kokoro. No model to download/remove.
-        tts_system: engine_obj(
-            RowState {
-                present: tts_system_enabled,
-                downloading: false,
-                error: None,
-                running: tts_system_running,
-                enabled: tts_system_running,
-            },
-            false,
-            0.0,
-        ),
-        // The ACTIVE STT engine token, so the app's single STT row can reflect whichever
-        // engine is selected (parakeet vs system) without inferring it from the dots.
-        stt_engine: resolved_stt
-            .map(|e| e.as_str())
-            .unwrap_or("off")
-            .to_string(),
-        // The ACTUAL STT runtime for the built_in (Parakeet) engine, from the warm child's
-        // realized `STT_PROVIDER` line — "ane"/"cuda"/"cpu" — the SAME realized-EP channel and
-        // shared `realized_ort_token` mapping as `tts_provider` below, so the two rows can't drift.
-        // The child already reports the honest backend (CPU/ANE fallback included). Null for
-        // system/claude_code.
-        stt_provider: stt_provider_token(resolved_stt, &tts.stt_realized_provider()),
-        // The ACTIVE TTS engine token ("built_in" = Kokoro, "system" = `say`), so the app's
-        // TTS row adapts the same way the STT row does (built_in → Kokoro, system → System).
-        tts_engine: resolved_tts
-            .map(|e| e.as_str())
-            .unwrap_or("off")
-            .to_string(),
-        // The ACTUAL TTS runtime the warm Kokoro child is on, as a config-style TOKEN
-        // (`ane`/`coreml`/`cuda`/`cpu`) so it matches `stt_provider`'s vocabulary
-        // AND round-trips with the `tts_provider` setting. Mapped from the live PROVIDER the
-        // child reports ("CoreML-ANE"/"CoreML"/"CUDA"/"CPU"). Null for the system (`say`) engine.
-        tts_provider: tts_provider_token(resolved_tts, tts.provider().as_str()),
-        // The keypress we synthesize into Claude Code (its bound voice key), shown in the
-        // claude_code row instead of local stats. Null unless claude_code is selected + usable.
-        claude_code_key,
-        // Back-compat: the flat running map the MCP `status`/`model_status` tools read.
-        running: Running {
-            caps: caps_active.load(Ordering::Relaxed),
-            // The raw `caps_enabled` SETTING (before the Accessibility preflight that
-            // `caps` also folds in), so the UI can tell "off" from "on but blocked by a
-            // missing permission" and warn accordingly. Cheap: a tiny TOML read per poll.
-            caps_wanted: caps_loop_enabled(&cfg),
-            stt_active: stt_active.load(Ordering::Relaxed),
-            // True while TTS audio is actually playing — drives the menu-bar
-            // TTS state, mirroring `stt_active` for the capture state.
-            tts_active,
-            // Wireable client of the in-flight utterance (Usage-card highlight); null when
-            // idle or non-client producer (greet / unknown).
-            tts_source: tts_source.map(|s| s.as_str().to_string()),
-            // Global MUTE (Caps-tap when dictation is off, or the tray checkbox): playback
-            // still runs, only the audio is silenced. Drives the tray "Mute" toggle + the
-            // faded menu-bar icon.
-            muted: tts.is_muted(),
-            // Kokoro-SPECIFIC (not "is any TTS running"): `tts_running` is true for System
-            // `say` too, so gate on the Kokoro engine actually being the selected one.
-            kokoro: tts_running && resolved_tts == Some(ds_config::TtsEngine::Kokoro),
-            tts_system: tts_system_running,
-            parakeet: parakeet_running,
-            system: system_running,
-            claude_code: claude_code_running,
+        )),
+        None => None,
+    };
+
+    // Speaker lock needs both diarization and SepFormer before it can report running.
+    let diarization_status = engine_status(
+        RowState {
+            present: diar_present,
+            downloading: downloading(DownloadTarget::DiarizationCoreml)
+                || downloading(DownloadTarget::SepformerModel),
+            error: dl_err_for(DownloadTarget::DiarizationCoreml)
+                .or_else(|| dl_err_for(DownloadTarget::SepformerModel)),
+            running: cfg.stt_speaker_lock
+                && cfg.is_diarization_on()
+                && diar_present
+                && sepformer_present,
+            enabled: cfg.stt_speaker_lock,
         },
-        // Dictation confirm-panel state: `recording` while capturing (live
-        // partials in `text`), `awaiting_confirm` once the transcript is finalized
-        // and waiting for the Caps confirm tap (`text` is then the final), `target`
-        // = the app focused when recording started (the paste destination).
-        // `local_stt` = this dictation is the local-transcript (Parakeet) path, so
-        // the overlay should appear THE MOMENT recording starts (don't wait for the
-        // first partial); ClaudeNative produces no partials, so its panel stays
-        // suppressed (it submits straight to Claude).
-        dictation: Dictation {
+        frac_for(DownloadTarget::DiarizationCoreml).max(frac_for(DownloadTarget::SepformerModel)),
+    );
+
+    let status = ModelStatus {
+        seq,
+        activity: Activity {
+            caps_enabled: caps_loop_enabled(&cfg),
+            caps_active: caps_active.load(Ordering::Relaxed),
             recording: dict_recording,
-            awaiting_confirm: dict_awaiting,
-            text: dict_text.clone(),
-            target: dict_target,
-            // Both local STT engines deposit a confirm-panel transcript (Parakeet and
-            // System); ClaudeNative submits straight to Claude and shows no panel.
-            // Exactly derivable from the SAME two locals independently serialized above as
-            // `running.parakeet`/`running.system` — extracted to `dictation_local_stt` so
-            // that OR relationship is pinned by a test and a future edit to either row can't
-            // silently desync them (see `tests::local_stt_matches_running_flags`).
-            local_stt: dict_local,
-            // LIVE: is an editable text field focused to receive the paste? Sampled each
-            // tick while the panel is up. The app tints the dictation glow when false
-            // ("no input to submit into"). Replaces the old `no_target_warn` red flash.
-            has_paste_target: dict_has_target,
-            // The "speak now" glow decision, computed HERE so every platform's overlay
-            // pulses identically and can't drift: glow only while actively recording with
-            // nothing transcribed yet and not already awaiting the confirm tap — i.e. the
-            // empty pill prompting the user to talk. Once words arrive (or we're awaiting
-            // confirmation, or capture stopped) it goes static. The no-target warning glow
-            // is a SEPARATE cue driven by `has_paste_target`.
-            prompt_glow: dict_recording && dict_text.is_empty() && !dict_awaiting,
-            // A dictation START was just refused (engine enabled but can't transcribe yet —
-            // model missing/downloading/loading). Each overlay shows the panel washed in
-            // the SAME warning glow as `has_paste_target == false` for the refusal window,
-            // so a Caps tap on a fresh install is never a silent no-op.
-            refused: dict_refused,
-            // The canonical panel state every host switches on for visibility, derived
-            // HERE so no UI re-derives the mode from the booleans above (state-machine
-            // survey item 3). Vocabulary: `DictationState`.
-            state: dictation_state(dict_recording, dict_awaiting, dict_local, dict_refused)
-                .as_str()
-                .to_string(),
+            speaking: tts_active,
+            speaking_source: tts_source,
+            muted: tts.is_muted(),
         },
-        // Menu-bar icon preference (app-only; the engine just passes it through): a SET of
-        // tokens, e.g. ["stt","tts"] (both), ["stt"], or [] (never color). Drives which states
-        // color the tray.
-        tray_indicator: cfg
-            .tray_indicator
-            .iter()
-            .map(|k| k.as_str().to_string())
-            .collect(),
-        // Live engine stats for the app's stats view: TTS + STT realtime factors /
-        // counts, lifetime totals, and which models are resident in the warm helper.
+        tts: TtsStatus {
+            engine: status_tts_engine(resolved_tts),
+            provider: tts_provider_token(resolved_tts, tts.provider().as_str()),
+            status: tts_status,
+        },
+        stt: SttStatus {
+            engine: status_stt_engine(resolved_stt),
+            provider: stt_provider_token(resolved_stt, &tts.stt_realized_provider()),
+            status: stt_status,
+            delegation_key: claude_code_key,
+        },
+        diarization: DiarizationStatus {
+            status: diarization_status,
+            enabled: cfg.is_diarization_on(),
+            // Realized compute token hosts pass to `ds_runtime_label` (ANE for AppleNative).
+            provider: ds_config::Provider::Ane.as_str().to_string(),
+            speakers: ds_config::SpeakerStore::load(&paths.speakers_json).names(),
+            clustering_threshold: cfg.clustering_threshold as f64,
+        },
+        dictation: Dictation {
+            state: dictation_state(dict_recording, dict_awaiting, dict_local, dict_refused),
+            text: dict_text,
+            has_paste_target: dict_has_target,
+        },
         stats: Stats {
             tts: tts_stats.snapshot(),
             stt: stt_stats.snapshot(),
-            // Persisted lifetime seconds (spoken + heard) across all sessions.
             lifetime: lifetime.snapshot(),
-            // Which models are CURRENTLY resident in the warm helper — the honest
-            // signal for "did Parakeet unload" (the memory number is noisy: ort
-            // retains freed arena while TTS keeps synthesizing).
-            loaded: Loaded {
-                tts: tts_loaded,
-                stt: stt_loaded,
-            },
-            // Diarization stats for the Settings row's expansion: enabled, model presence,
-            // the enrolled voiceprint names (so the row can show "who it recognizes"), and
-            // the live thresholds. Lives UNDER `stats` (where the app's EngineStats.parse
-            // reads it) — NOT at the root, where it would collide with the diarization
-            // engine_obj dot below and clobber its `state` (so the dot never goes green).
-            // On-demand, so there's no realtime-factor like STT/TTS.
-            diarization: DiarStats {
-                enabled: cfg.is_diarization_on(),
-                present: diar_present,
-                // The resolved diarizer runtime in the SAME token vocabulary as
-                // tts_provider/stt_provider, so the row's "Runtime" line reuses runtimeLabel
-                // (the single apple_native rung is Core ML / ANE → "ane"). On-demand, so no
-                // realtime factor.
-                runtime: match cfg.resolved_diarizer_provider() {
-                    ds_config::DiarizerProvider::AppleNative => "ane",
-                }
-                .to_string(),
-                speakers: ds_config::SpeakerStore::load(&paths.speakers_json).names(),
-                clustering_threshold: cfg.clustering_threshold as f64,
-                speaker_threshold: cfg.speaker_threshold as f64,
-            },
         },
-        // Engine → app caps status channel: a bounded log of recent press/release/
-        // tap/reset events the Settings window renders live.
-        caps_events,
-        // Build-id handshake: the app compares this against its own embedded id and
-        // restarts the engine if they drift (see build.rs / bundle.sh lockstep).
-        build_id: env!("DONTSPEAK_BUILD_ID").to_string(),
-        // Push sequence: the app echoes this back as `since` on the next
-        // `WaitModelStatus` so it blocks until the NEXT change (see `StatusGate`).
-        seq,
+        tray_indicator: cfg
+            .tray_indicator
+            .iter()
+            .copied()
+            .map(status_tray_kind)
+            .collect(),
     };
     serde_json::to_value(status).unwrap_or(serde_json::Value::Null)
 }
 
-/// Relabel a warm-child REALIZED-provider wire token to the config [`Provider`](ds_config::Provider)
-/// the status row shows, through the SHARED [`RealizedProvider`](ds_config::RealizedProvider) — the
-/// ONE realized-EP vocabulary BOTH engines PRODUCE (as a typed enum) and this row CONSUMES, so a
-/// token typo is a compile error and the two rows can't drift into different labels for the same
-/// runtime (drift guard: [`tests::tts_and_stt_report_the_same_realized_runtime`]).
+/// Child realized-EP → config Provider (shared STT/TTS; drift guard in tests).
 fn realized_ort_token(child_provider: &str) -> ds_config::Provider {
     ds_config::RealizedProvider::parse(child_provider).to_provider()
 }
 
-/// The STT runtime TOKEN the UI shows — the REALIZED EP the warm child reports on its `STT_PROVIDER`
-/// line (what the Parakeet sessions ACTUALLY loaded on, CPU fallback included), mapped through the
-/// SAME [`realized_ort_token`] as TTS. No longer a preference gated on `cuda_present`/`shim_ok`: the
-/// child already reports the honest backend (it falls back to the ONNX CPU path when the ANE shim /
-/// GPU runtime is absent), so this just relabels it. `None` for non-built_in engines
-/// (claude_code/system/off have no local Parakeet ort runtime).
+/// Realized STT EP token (built_in only); child reports honest backend.
 fn stt_provider_token(
     resolved_stt: Option<ds_config::SttEngine>,
     child_provider: &str,
@@ -717,10 +431,7 @@ fn stt_provider_token(
     }
 }
 
-/// The TTS runtime TOKEN the UI shows — the REALIZED EP the warm Kokoro child reports on its
-/// `PROVIDER` line (`"CoreML-ANE"`/`"CoreML"`/`"CUDA"`/`"CPU"`), i.e. what ACTUALLY loaded (CPU
-/// fallback included), mapped through the SAME [`realized_ort_token`] as STT. `None` for the System
-/// (`say`) / Off engines (no Kokoro runtime).
+/// Realized TTS EP token (Kokoro only).
 fn tts_provider_token(
     resolved_tts: Option<ds_config::TtsEngine>,
     child_provider: &str,
@@ -733,27 +444,13 @@ fn tts_provider_token(
     }
 }
 
-/// Whether FluidAudio's speaker-diarization Core ML models are on disk in our `coreml_dir`.
-/// Uses the SAME completion-marker check the downloader writes (`is_coreml_repo_present`), so the
-/// status row and the downloader can never disagree about one location — a partial/aborted
-/// fetch (subdir exists, no `.ds-ready` marker) reads MISSING here exactly as it does to the
-/// downloader, instead of the old substring heuristic that called a half-download "present".
+/// Diarization Core ML present — same completion markers as downloader.
 fn diarization_present() -> bool {
     ds_model::coreml_repo::is_coreml_repo_present(&ds_model::coreml_repo::DIARIZATION_COREML)
 }
 
-/// Whether a model row reads "downloading", given its OWN in-flight signal
-/// (`own_downloading` — the row's ONNX model fetch or apple-native Core ML set) plus the
-/// shared CUDA runtime's state. `cuda_downloading` alone can ONLY force the row into
-/// "downloading" while the row's own engine has NOT yet loaded (`!engine_loaded`) — that's
-/// the shared GPU runtime's first-boot behavior described above (fetched ahead of the model,
-/// neither ONNX engine can run until it lands). Once the row's engine IS loaded (resident +
-/// warm), a Cuda fetch that's still running for some OTHER reason (e.g. re-verifying, or
-/// serving the other engine) must NOT flip an already-working row back to "downloading" —
-/// that was the regression this guards (a fully-loaded, working Kokoro flashing from a full
-/// ring back to ~25%). Never applies on the apple-native path (`uses_apple_native`): the
-/// shared runtime doesn't exist there and `Cuda` is never a download target. Pure, so the
-/// gate is unit-tested directly (see [`tests::row_downloading_gates_cuda_on_engine_loaded`]).
+/// Row "downloading": own fetch, or Cuda while `!engine_loaded` on ONNX path.
+/// Cuda must not flip an already-loaded row. Pure (unit-tested).
 fn row_downloading(
     own_downloading: bool,
     cuda_downloading: bool,
@@ -763,17 +460,7 @@ fn row_downloading(
     own_downloading || (!uses_apple_native && cuda_downloading && !engine_loaded)
 }
 
-/// Combine a model row's DOWNLOAD-manager error with its (mid-session re/load) failure,
-/// gated on PRESENCE for the load half only — a genuinely absent/never-installed model must
-/// read "missing" (offer Download), never a stale "failed", even if a load-error slot happens
-/// to still hold a message from a previous install (`TtsManager`'s per-model `stt_load_error`/
-/// `tts_load_error` are cleared on the model's own residency transitions, but this keeps the
-/// row itself defensive against any ordering this misses). A download error, by contrast,
-/// surfaces UNCONDITIONALLY — mirrors the pre-existing `kokoro_error` ordering, where a failed
-/// fetch is shown even though the model isn't present (that IS the interesting state: "tried to
-/// get it, couldn't"). Pure, mirroring `row_downloading`/`row_download_frac` — extracted so this
-/// precedence is unit-tested directly rather than needing a full `EngineShared`/`TtsManager`
-/// harness (see `local_stt_matches_running_flags`'s doc for why that's disproportionate here).
+/// dl_err always; load_err only while present (absent → missing, not stale failed).
 fn combined_error(
     present: bool,
     dl_err: Option<String>,
@@ -782,14 +469,7 @@ fn combined_error(
     dl_err.or(if present { load_err } else { None })
 }
 
-/// The fraction a MODEL row's download ring shows, picked from the row's OWN targets in
-/// priority order: the ONNX model fetch's live progress, then its just-finished progress
-/// (so a completed fetch's ring reads 100% rather than snapping back to 0 the instant it
-/// retires into `Done`), then the apple-native Core ML set the same way, then the shared
-/// CUDA runtime's LIVE progress (the compute dependency — shown only when it is the sole
-/// fetch blocking the row; a concurrent model fetch wins). 0.0 when none of the above apply —
-/// the caller's `engine_obj` zeroes progress anyway unless the row reads "downloading". Pure,
-/// so the row↔target wiring is unit-tested.
+/// Row ring fraction: own Active|Done, else live Cuda only.
 fn row_download_frac(
     targets: &std::collections::HashMap<DownloadTarget, TargetState>,
     own_targets: &[DownloadTarget],
@@ -797,27 +477,17 @@ fn row_download_frac(
     own_targets
         .iter()
         .find_map(|t| match targets.get(t) {
-            // A row's OWN target feeds its ring whether live or just finished;
-            // Failed feeds nothing (the error channel covers it).
             Some(TargetState::Active(p) | TargetState::Done(p)) => Some(p.frac()),
             _ => None,
         })
         .or_else(|| match targets.get(&DownloadTarget::Cuda) {
-            // The Cuda fallback is LIVE-only: a finished Cuda fetch must not keep
-            // feeding rows' rings after it ends.
             Some(TargetState::Active(p)) => Some(p.frac()),
             _ => None,
         })
         .unwrap_or(0.0)
 }
 
-/// The five same-shaped flags every model row feeds into [`engine_obj`], bundled into one
-/// struct instead of five positional args. Before this, `engine_obj` took `present`, `dling`,
-/// `error`, `running`, `enabled` as separate positional `bool`/`Option<String>` params — with
-/// the `tts_system` call site passing the SAME variable for both `running` and `enabled`, easy
-/// to transpose by accident. `removable`/`progress` stay as separate args to `engine_obj`
-/// since they aren't part of this row-identity cluster (e.g. `removable` also depends on
-/// whether another engine is holding a shared dylib).
+/// Flags for [`engine_obj`] (named fields avoid running/enabled transpose).
 struct RowState {
     present: bool,
     downloading: bool,
@@ -827,10 +497,8 @@ struct RowState {
 }
 
 /// Build one engine row with a lifecycle `state` (the app maps it 1:1 to a status dot):
-/// downloading > failed > missing > running > warming > idle. Internal to
-/// `dontspeakd::status` only — does not touch [`ds_status::EngineObj`]'s shape or the
-/// serialized JSON.
-fn engine_obj(row: RowState, removable: bool, progress: f64) -> EngineObj {
+/// downloading > failed > missing > running > warming > idle.
+fn engine_status(row: RowState, progress: f64) -> EngineStatus {
     let state = engine_state(
         row.present,
         row.downloading,
@@ -838,10 +506,8 @@ fn engine_obj(row: RowState, removable: bool, progress: f64) -> EngineObj {
         row.running,
         row.enabled,
     );
-    EngineObj {
-        present: row.present,
-        removable,
-        state: state.as_str().to_string(),
+    EngineStatus {
+        state,
         progress: if row.downloading && progress.is_finite() {
             progress.clamp(0.0, 1.0)
         } else {
@@ -851,22 +517,38 @@ fn engine_obj(row: RowState, removable: bool, progress: f64) -> EngineObj {
     }
 }
 
-/// `Dictation.local_stt`: true whenever EITHER local-transcript STT engine (Parakeet or
-/// System) is the one actually running — the confirm panel should appear whenever a local
-/// engine is producing a transcript, not just for Parakeet. This is exactly the same OR of
-/// the same two locals independently serialized a few lines away as `Running.parakeet` /
-/// `Running.system`; extracted into its own PURE function (rather than inlined at both call
-/// sites) so the relationship is pinned by a test
-/// ([`tests::local_stt_matches_running_flags`]) and a future edit to either row can't
-/// silently desync them.
+fn status_stt_engine(resolved: Option<ds_config::SttEngine>) -> StatusSttEngine {
+    match resolved {
+        Some(ds_config::SttEngine::BuiltIn) => StatusSttEngine::BuiltIn,
+        Some(ds_config::SttEngine::System) => StatusSttEngine::System,
+        Some(ds_config::SttEngine::ClaudeCode) => StatusSttEngine::ClaudeCode,
+        None => StatusSttEngine::Off,
+    }
+}
+
+fn status_tts_engine(resolved: Option<ds_config::TtsEngine>) -> StatusTtsEngine {
+    match resolved {
+        Some(ds_config::TtsEngine::Kokoro) => StatusTtsEngine::BuiltIn,
+        Some(ds_config::TtsEngine::System) => StatusTtsEngine::System,
+        None => StatusTtsEngine::Off,
+    }
+}
+
+fn status_tray_kind(k: ds_config::TrayKind) -> StatusTrayKind {
+    match k {
+        ds_config::TrayKind::Stt => StatusTrayKind::Stt,
+        ds_config::TrayKind::Tts => StatusTrayKind::Tts,
+        ds_config::TrayKind::SttAnimated => StatusTrayKind::SttAnimated,
+        ds_config::TrayKind::TtsAnimated => StatusTrayKind::TtsAnimated,
+    }
+}
+
+/// `local_stt` ≡ running.parakeet ‖ running.system (pinned by test).
 fn dictation_local_stt(parakeet_running: bool, system_running: bool) -> bool {
     parakeet_running || system_running
 }
 
-/// PURE lifecycle-state (the app maps it 1:1 to a status dot). Precedence:
-/// `downloading > failed > missing > running > warming > idle`. Extracted so the ordering —
-/// in particular "a model still downloading is NEVER green/running" — is unit-tested. Returns
-/// the canonical [`EngineState`]; the caller stores its `.as_str()` into the wire DTO.
+/// Lifecycle: downloading > failed > missing > running > warming > idle.
 pub(crate) fn engine_state(
     present: bool,
     dling: bool,
@@ -889,16 +571,8 @@ pub(crate) fn engine_state(
     }
 }
 
-/// PURE confirm-panel state (the canonical `dictation.state` token every host switches on
-/// for panel visibility). Precedence: `awaiting_confirm > (recording && local_stt) >
-/// refused > hidden` — `awaiting` first because `dictation_preview` can report awaiting
-/// while `stt_active` hasn't flipped yet in the stop-tap window (the finalized transcript
-/// must win); `refused` below `recording` because `refused_until` is cleared when a real
-/// recording starts, so that pair can't legitimately coexist. A recording WITHOUT
-/// `local_stt` (ClaudeNative) is `hidden` — that engine's panel is deliberately
-/// suppressed. Pinned by test to satisfy the show-gate equivalence
-/// `state != Hidden ⇔ awaiting || (recording && local_stt) || refused` — exactly the
-/// legacy per-host expression this token replaces.
+/// Confirm-panel state: awaiting > (recording && local_stt) > refused > hidden.
+/// Awaiting wins stop-tap window; ClaudeNative recording stays hidden.
 pub(crate) fn dictation_state(
     recording: bool,
     awaiting: bool,
@@ -919,7 +593,7 @@ pub(crate) fn dictation_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        CapsEvent, EngineShared, StatusGate, combined_error, dictation_local_stt, dictation_state,
+        EngineShared, StatusGate, combined_error, dictation_local_stt, dictation_state,
         engine_state, model_status_json, realized_ort_token, row_download_frac, row_downloading,
         stt_provider_token, tts_provider_token,
     };
@@ -929,8 +603,9 @@ mod tests {
     use crate::tts::TtsManager;
     use ds_config::{Paths, Provider, SttEngine, TtsEngine};
     use ds_model::DownloadTarget;
-    use ds_status::{DictationState, EngineState, ModelStatus};
-    use std::collections::VecDeque;
+    use ds_status::{
+        DictationState, EngineState, ModelStatus, StatusSttEngine, StatusTtsEngine,
+    };
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -954,7 +629,7 @@ mod tests {
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(
             &paths.config_toml,
-            "stt_engine_ladder = []\ntts_engine_ladder = []\ncaps_enabled = false\ntray_indicator = []\n",
+            "stt_engine_ladder = [\"built_in\"]\ntts_engine_ladder = [\"built_in\"]\ncaps_enabled = false\ntray_indicator = []\n",
         )
         .unwrap();
         // SAFETY: process-wide test environment mutation is serialized by ENV_LOCK and restored
@@ -981,7 +656,6 @@ mod tests {
         {
             let mut p = paste.lock().unwrap();
             p.partial = "live words".to_string();
-            p.target = Some("Editor".to_string());
             p.has_paste_target = false;
         }
         let downloads = Arc::new(Mutex::new(DownloadState::default()));
@@ -1005,10 +679,6 @@ mod tests {
             tts,
             caps_active: Arc::new(AtomicBool::new(true)),
             stt_active: Arc::new(AtomicBool::new(true)),
-            caps_log: Arc::new(Mutex::new(VecDeque::from([CapsEvent {
-                ts_ms: 123,
-                kind: "start",
-            }]))),
             paste,
             downloads,
             tts_stats,
@@ -1018,6 +688,8 @@ mod tests {
         };
 
         let value = model_status_json(&shared, &paths, || (true, None));
+        // caps events are logged (see `Engine::record_caps`) but never serialized here.
+        assert!(value.get("caps_events").is_none());
         // SAFETY: restore the three values while ENV_LOCK is still held.
         unsafe {
             match previous_model_dir {
@@ -1035,24 +707,23 @@ mod tests {
         }
 
         let status: ModelStatus = serde_json::from_value(value).unwrap();
-        assert_eq!(status.kokoro.state, "downloading");
-        assert_eq!(status.kokoro.progress, 0.25);
-        assert_eq!(status.parakeet.state, "failed");
-        assert_eq!(status.parakeet.error.as_deref(), Some("download failed"));
-        assert_eq!(status.stt_engine, "off");
-        assert_eq!(status.tts_engine, "off");
-        assert!(status.running.caps);
-        assert!(!status.running.caps_wanted);
-        assert!(status.running.stt_active);
-        assert!(status.running.tts_active);
+        let tts = status.tts.status.as_ref().unwrap();
+        assert_eq!(tts.state, EngineState::Downloading);
+        assert_eq!(tts.progress, 0.25);
+        let stt = status.stt.status.as_ref().unwrap();
+        assert_eq!(stt.state, EngineState::Failed);
+        assert_eq!(stt.error.as_deref(), Some("download failed"));
+        assert_eq!(status.stt.engine, StatusSttEngine::BuiltIn);
+        assert_eq!(status.tts.engine, StatusTtsEngine::BuiltIn);
+        assert!(status.activity.caps_active);
+        assert!(!status.activity.caps_enabled);
+        assert!(status.activity.recording);
+        assert!(status.activity.speaking);
         assert_eq!(status.dictation.text, "live words");
-        assert_eq!(status.dictation.target.as_deref(), Some("Editor"));
-        assert!(!status.dictation.local_stt);
         assert!(!status.dictation.has_paste_target);
-        assert_eq!(status.dictation.state, "hidden");
+        assert_eq!(status.dictation.state, DictationState::Hidden);
         assert_eq!(status.stats.tts.utterances, 1);
         assert_eq!(status.stats.stt.transcriptions, 1);
-        assert_eq!(status.caps_events[0].kind, "start");
         assert_eq!(status.seq, 1);
         assert!(status.tray_indicator.is_empty());
     }
@@ -1395,34 +1066,27 @@ mod tests {
         assert_eq!(combined_error(false, None, None), None);
     }
 
-    /// Pins `dictation_local_stt`'s own OR definition — NOT an end-to-end check of
-    /// `model_status_json` itself (that would need a full `EngineShared`/`TtsManager` test
-    /// harness, disproportionate for what's currently just two identically-named,
-    /// single-assignment locals). The real invariant — `Dictation.local_stt` and
-    /// `Running.parakeet`/`Running.system` a few lines above it in `model_status_json`
-    /// both read the SAME `parakeet_running`/`system_running` bindings — currently holds
-    /// by construction (grep this file for those names before touching either call site),
-    /// not because this test would catch a divergence between them.
+    /// Either local STT backend makes dictation local; delegated STT does not.
     #[test]
-    fn local_stt_matches_running_flags() {
+    fn local_stt_accepts_either_local_backend() {
         for parakeet_running in [false, true] {
             for system_running in [false, true] {
                 assert_eq!(
                     dictation_local_stt(parakeet_running, system_running),
                     parakeet_running || system_running,
-                    "local_stt must equal running.parakeet || running.system \
+                    "local_stt must equal parakeet_running || system_running \
                      (parakeet_running={parakeet_running}, system_running={system_running})"
                 );
             }
         }
     }
 
-    /// The canonical `dictation.state` token must reproduce every host's legacy show gate
-    /// exactly: `state != Hidden ⇔ awaiting || (recording && local_stt) || refused` —
+    /// The canonical `dictation.state` token must preserve the producer's show gate:
+    /// `state != Hidden ⇔ awaiting || (recording && local_stt) || refused` —
     /// pinned across the FULL 16-row truth table so a precedence edit can't silently
     /// change any host's panel visibility.
     #[test]
-    fn dictation_state_matches_the_legacy_show_gate_for_all_inputs() {
+    fn dictation_state_matches_the_show_gate_for_all_inputs() {
         for recording in [false, true] {
             for awaiting in [false, true] {
                 for local_stt in [false, true] {

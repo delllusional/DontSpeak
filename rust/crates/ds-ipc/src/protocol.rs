@@ -13,15 +13,15 @@ use serde_json::Value;
 /// ## `source` field
 ///
 /// Seven **client-originated** variants require `source: ClientSource` (hook `--client` or
-/// MCP `initialize` `clientInfo`): [`Self::GreetSession`], [`Self::MarkActive`], [`Self::SessionEnd`],
-/// [`Self::StopSpeech`], [`Self::Speak`], [`Self::SpeakNarration`], [`Self::Earcon`]. No `#[serde(default)]` /
-/// `Option` — absent field is a hard decode error (CLI/engine/wiring ship together; stale
-/// hooks are rejected, not mis-attributed). Unrecognised *token* → `ClientSource::Unknown`
-/// (forward-open, like [`Response::Unknown`]). Guard:
-/// `request_without_source_is_a_hard_decode_error`.
+/// MCP `initialize` `clientInfo`): [`Self::GreetSession`], [`Self::MarkActive`],
+/// [`Self::SessionEnd`], [`Self::StopSpeech`], [`Self::Speak`], [`Self::SpeakNarration`],
+/// [`Self::Earcon`]. No `#[serde(default)]` / `Option` — absent field is a hard decode error
+/// (CLI/engine/wiring ship together; stale hooks are rejected, not mis-attributed).
+/// Unrecognised *token* → `ClientSource::Unknown` (forward-open, like [`Response::Unknown`]).
+/// Guard: `request_without_source_is_a_hard_decode_error`.
 ///
-/// All other variants deliberately omit `source` (app tray / engine self-talk / STT tools);
-/// that keeps `ds-core` FFI constructors unchanged.
+/// Other variants deliberately omit `source` (tray / engine self-talk / STT tools) so
+/// `ds-core` FFI constructors stay unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
@@ -29,28 +29,26 @@ pub enum Request {
     Ping,
     /// TTS queue snapshot → [`Response::Status`].
     Status,
-    /// Ensure Kokoro frontend assets (voices, OOV G2P, ORT); returns immediately (download is
-    /// single-flight background). → [`Response::Done`].
+    /// Ensure Kokoro frontend assets; returns immediately (download is single-flight background).
     EnsureKokoroFrontend,
-    /// Ready the Codex app-server observation path for `dontspeak codex`. Returns only after
-    /// the narration subscriber is attached (closes TUI-starts-before-narration race).
+    /// Ready Codex app-server observation for `dontspeak codex`. Returns only after narration
+    /// subscriber is attached (closes TUI-starts-before-narration race).
     /// → [`Response::CodexStreamReady`] / [`Response::Error`].
     EnsureCodexStream,
-    /// Global mute (tray / Caps). Speech drains silently; cues suppressed. → [`Response::Done`].
+    /// Global mute (tray / Caps). Speech drains silently; cues suppressed.
     SetMuted { on: bool },
-    /// SessionStart: optional agent-voice greeting when `greet_on_open`. → [`Response::Done`].
+    /// SessionStart: optional agent-voice greeting when `greet_on_open`.
     GreetSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        /// Required client origin — see enum-level `source` docs.
         source: ClientSource,
     },
     /// UserPromptSubmit: mark active terminal; other sessions' TTS is held (not dropped).
     MarkActive {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        /// Harness-injected continuation (issue #11), not a human submit — liveness only:
-        /// must NOT claim active-terminal or apply `input_clears`. Classifier:
+        /// Harness-injected continuation (issue #11) — liveness only: must NOT claim
+        /// active-terminal or apply `input_clears`. Classifier:
         /// `dontspeak::hook_speak::is_synthetic_continuation`.
         /// `#[serde(default)]` = wire compactness (omit when false), not legacy-hook compat
         /// (stale hooks fail on missing `source` first).
@@ -58,7 +56,7 @@ pub enum Request {
         synthetic: bool,
         source: ClientSource,
     },
-    /// MCP `speak` tool: Reply on the TTS queue (survives record-barge when resume policy set).
+    /// MCP `speak`: Reply on TTS queue (survives record-barge when resume policy set).
     /// Narration uses [`Self::SpeakNarration`]. `voice`/`rate` override config.
     Speak {
         text: String,
@@ -82,13 +80,13 @@ pub enum Request {
         /// Required even though the engine does not log this variant (blockquote spam).
         source: ClientSource,
     },
-    /// Barge-in. `Some(session)` scopes drop/cancel to that window; `None` = global hard barge.
+    /// Barge-in. `Some(session)` scopes drop/cancel; `None` = global hard barge.
     StopSpeech {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
         source: ClientSource,
     },
-    /// SessionEnd: per-window [`Self::StopSpeech`] (the agent's voice assignment survives).
+    /// SessionEnd: per-window [`Self::StopSpeech`] (agent voice assignment survives).
     SessionEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
@@ -107,28 +105,27 @@ pub enum Request {
     /// → [`Response::Speakers`].
     ListSpeakers,
     /// Model presence/removability. Engine is authority (`removable` only if present and not
-    /// loaded). File IO stays in the app. → [`Response::ModelStatus`].
+    /// loaded). File IO stays in the app.
     ModelStatus,
-    /// Block until status `seq` differs from `since` or `timeout_ms` (push for dictation
-    /// overlay). `since = 0` replies immediately.
+    /// Block until status `seq` differs from `since` or `timeout_ms` (dictation overlay).
+    /// `since = 0` replies immediately.
     WaitModelStatus { since: u64, timeout_ms: u64 },
     /// Session-local TTS provider (`cpu`/`cuda`/`coreml`/`ane`/`auto`); restarts warm Kokoro,
-    /// resets TTS stats. Not persisted. → [`Response::Done`].
+    /// resets TTS stats. Not persisted.
     SetProvider { provider: String },
     /// IPC exit path; real quit is FFI `ds_engine_stop`. Kept for out-of-process stop.
     Shutdown,
-    /// Explicit config reload (same as mtime poll, debounced with it). → [`Response::Done`].
+    /// Explicit config reload (same as mtime poll, debounced with it).
     Reload,
-    /// Earcon: `"reply_done"` (Stop) or `"needs_input"` (Notification). Unknown/disabled ⇒ no-op.
+    /// Earcon: [`ds_earcon::EarconEvent`] (Stop / Notification). Disabled cue ⇒ no-op.
     Earcon {
-        event: String,
+        event: ds_earcon::EarconEvent,
         /// Session whose ordered speech this cue terminates. Optional for older hooks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
         source: ClientSource,
     },
     /// macOS System STT TCC + capability check before persisting `stt_engine=system`.
-    /// → [`Response::Done`] / [`Response::Error`].
     AuthorizeSystemStt,
 }
 
@@ -276,7 +273,7 @@ mod tests {
             },
             Request::AuthorizeSystemStt,
             Request::Earcon {
-                event: "reply_done".into(),
+                event: ds_earcon::EarconEvent::ReplyDone,
                 session: Some("sess-1".into()),
                 source: ClientSource::Grok,
             },
@@ -335,7 +332,7 @@ mod tests {
         assert!(!Response::Partial { text: "x".into() }.is_terminal());
     }
 
-    /// Absent `synthetic` → false (issue #11; never assume continuation). See field docs.
+    /// Absent `synthetic` → false (issue #11; never assume continuation).
     #[test]
     fn mark_active_synthetic_defaults_to_false_when_absent_on_the_wire() {
         let line = r#"{"cmd":"mark_active","session":"sess-1","source":"claude_code"}"#;
@@ -351,8 +348,7 @@ mod tests {
     }
 
     /// Guard: absent `source` is a hard decode error (not silent default). Unrecognised
-    /// *token* fails open (`unknown_client_token_decodes_to_unknown`). Rejection is socket
-    /// `bad request` + activity-log WARN via `on_bad_request` — hooks discard the reply.
+    /// *token* fails open (`unknown_client_token_decodes_to_unknown`).
     #[test]
     fn request_without_source_is_a_hard_decode_error() {
         let cases = [
@@ -401,7 +397,7 @@ mod tests {
     #[test]
     fn earcon_session_roundtrips_and_old_lines_default_to_global() {
         let with_session = Request::Earcon {
-            event: "needs_input".into(),
+            event: ds_earcon::EarconEvent::NeedsInput,
             session: Some("sess-1".into()),
             source: ClientSource::ClaudeCode,
         };

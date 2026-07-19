@@ -145,14 +145,14 @@ pub(crate) fn reconcile_helper_models(tts: &Arc<tts::TtsManager>, cfg: &VoiceCon
         return;
     }
     if helper_uses_tts(cfg) {
-        tts.load_engine("tts");
+        tts.load_engine(ds_helper_proto::HelperModel::Tts);
     } else {
-        tts.unload_engine("tts");
+        tts.unload_engine(ds_helper_proto::HelperModel::Tts);
     }
     if helper_uses_stt(cfg) {
-        tts.load_engine("stt");
+        tts.load_engine(ds_helper_proto::HelperModel::Stt);
     } else {
-        tts.unload_engine("stt");
+        tts.unload_engine(ds_helper_proto::HelperModel::Stt);
     }
 }
 

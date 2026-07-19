@@ -1,19 +1,14 @@
-// C ABI boundary. Pointer validity is the native host's responsibility (Swift/C#).
+// C ABI; pointer validity is the host's. HANDLE-FREE probes + lifecycle (`dontspeak.h`).
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-//! Stable C ABI for the native UI (committed `dontspeak.h`, cbindgen). Small and
-//! HANDLE-FREE: read-only probes, in-process engine lifecycle, mute/TTS provider/locale,
-//! shared UI constants/formatters/i18n, string free. Rich control lives in DontSpeak.
+//! Stable C ABI for native UI (cbindgen `dontspeak.h`).
 
 use std::ffi::{CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::{engine, models};
 
-// `catch_unwind` is a no-op under `panic = "abort"`, voiding this safety boundary for
-// in-process hosts. `release-ffi` (rust/Cargo.toml) forces `panic = "unwind"` — every
-// cdylib/staticlib build of ds-core MUST use it (see apps/macos/build.sh,
-// apps/windows/installer/build-common.ps1).
+// release-ffi forces panic=unwind — catch_unwind is a no-op under abort.
 #[cfg(panic = "abort")]
 compile_error!(
     "ds-core must not be built with panic=\"abort\" -- its extern \"C\" boundary relies on \
@@ -23,29 +18,27 @@ compile_error!(
      panic=\"unwind\") instead of the default `release` profile."
 );
 
-// Lifecycle state lives in [`crate::host`] (sole owner); these are thin u8 adapters
-// matching committed `dontspeak.h`.
+// Lifecycle owned by [`crate::host`]; thin u8 adapters for `dontspeak.h`.
 
-/// Start engine on background thread if not running. 1 = running, 0 = failure.
+/// 1 = running, 0 = failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_start() -> u8 {
     guard_val(0, || crate::host::engine_start() as u8)
 }
 
-/// Stop engine (clear run flag, join). 1 if was running. Safe on quit.
+/// 1 if was running. Safe on quit.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_stop() -> u8 {
     guard_val(0, || crate::host::engine_stop() as u8)
 }
 
-/// Re-read config without restart. 1 if engine running.
+/// 1 if engine running.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_reload() -> u8 {
     guard_val(0, || crate::host::engine_reload() as u8)
 }
 
-/// Global MUTE (tray checkbox). `on != 0` silences audio; playback keeps draining.
-/// IPC to engine; 1 if delivered, 0 if engine down.
+/// Mute audio (`on != 0`); playback still drains. 1 if IPC delivered.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_set_muted(on: u8) -> u8 {
     guard_val(0, || {
@@ -62,26 +55,23 @@ pub extern "C" fn ds_set_muted(on: u8) -> u8 {
     })
 }
 
-/// Open OS system-voice settings (macOS Spoken Content / Windows Speech).
-/// False on Linux (no portable page, issue #74). 1 if launched. HANDLE-FREE.
+/// OS voice settings. 0 on Linux (#74). HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_open_voice_settings() -> u8 {
     guard_val(0, || ds_tts::system::open_voice_settings() as u8)
 }
 
-/// Run `f`, returning `default` on panic (must not cross FFI).
+/// Panic must not cross FFI → `default`.
 fn guard_val<T>(default: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(default)
 }
 
-/// Like [`guard_val`] for string returns: heap-allocate `default` only on the panic path.
-/// Eager `guard_val(to_cstring(default), …)` would allocate every call and leak the unused
-/// `*mut c_char` (no destructor). `unwrap_or_else` builds the fallback only when needed.
+/// Panic path only allocates `default` (eager alloc would leak unused CString).
 fn guard_str(default: &'static str, f: impl FnOnce() -> *mut c_char) -> *mut c_char {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| to_cstring(default))
 }
 
-/// Heap C string; caller frees with `ds_string_free`. Interior NUL → "".
+/// Caller frees with `ds_string_free`. Interior NUL → "".
 fn to_cstring(s: impl Into<Vec<u8>>) -> *mut c_char {
     match CString::new(s) {
         Ok(c) => c.into_raw(),
@@ -285,7 +275,7 @@ pub extern "C" fn ds_log_colors_json() -> *mut c_char {
 }
 
 /// One random Usage speaking-card wash: `{"r","g","b","a"}` (opaque RGB + wash alpha).
-/// New color each call; hosts freeze while `tts_source` is unchanged. Owned `char*`.
+/// New color each call; hosts freeze while `speaking_source` is unchanged. Owned `char*`.
 /// HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_random_pastel_wash_json() -> *mut c_char {
@@ -438,8 +428,8 @@ pub extern "C" fn ds_human_size(bytes: u64) -> *mut c_char {
     guard_str("", || to_cstring(crate::status_fmt::human_size(bytes)))
 }
 
-/// Tray kind via [`ds_status::tray_icon_kind`]. `tray_indicator_json`: JSON string array
-/// (NULL/malformed → `[]`). Owned `char*`. HANDLE-FREE.
+/// Tray kind via [`ds_status::tray_icon_kind`]. `tray_indicator_json`: JSON array of
+/// [`ds_status::StatusTrayKind`] tokens (NULL/malformed → `[]`). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_tray_icon_kind(
     stt_active: u8,
@@ -448,33 +438,10 @@ pub extern "C" fn ds_tray_icon_kind(
 ) -> *mut c_char {
     guard_str("idle", || {
         let raw = cstr_or_empty(tray_indicator_json);
-        let indicators: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        let indicators: Vec<ds_status::StatusTrayKind> =
+            serde_json::from_str(&raw).unwrap_or_default();
         let kind = ds_status::tray_icon_kind(stt_active != 0, tts_active != 0, &indicators);
         to_cstring(kind.as_str())
-    })
-}
-
-/// Config `tts_engine` → model_status key (see [`ds_status::ActiveTtsSlot`]). Owned `char*`.
-/// HANDLE-FREE.
-#[unsafe(no_mangle)]
-pub extern "C" fn ds_active_tts_slot(tts_engine: *const c_char) -> *mut c_char {
-    guard_str("", || {
-        let slot = ds_status::ActiveTtsSlot::from_engine(&cstr_or_empty(tts_engine))
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        to_cstring(slot)
-    })
-}
-
-/// Config `stt_engine` → model_status key (see [`ds_status::ActiveSttSlot`]). Owned `char*`.
-/// HANDLE-FREE.
-#[unsafe(no_mangle)]
-pub extern "C" fn ds_active_stt_slot(stt_engine: *const c_char) -> *mut c_char {
-    guard_str("", || {
-        let slot = ds_status::ActiveSttSlot::from_engine(&cstr_or_empty(stt_engine))
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        to_cstring(slot)
     })
 }
 
@@ -599,28 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_selection_and_tray_exports_match_ds_status() {
-        let built_in = CString::new("built_in").unwrap();
-        let system = CString::new("system").unwrap();
-        let off = CString::new("off").unwrap();
-        let claude = CString::new("claude_code").unwrap();
-        assert_eq!(take_string(ds_active_tts_slot(built_in.as_ptr())), "kokoro");
-        assert_eq!(
-            take_string(ds_active_tts_slot(system.as_ptr())),
-            "tts_system"
-        );
-        assert_eq!(take_string(ds_active_tts_slot(off.as_ptr())), "");
-        assert_eq!(
-            take_string(ds_active_stt_slot(built_in.as_ptr())),
-            "parakeet"
-        );
-        assert_eq!(
-            take_string(ds_active_stt_slot(claude.as_ptr())),
-            "claude_code"
-        );
-        assert_eq!(take_string(ds_active_stt_slot(system.as_ptr())), "system");
-        assert_eq!(take_string(ds_active_stt_slot(off.as_ptr())), "");
-
+    fn shared_tray_export_matches_ds_status() {
         let ind = CString::new(r#"["stt","tts"]"#).unwrap();
         assert_eq!(
             take_string(ds_tray_icon_kind(1, 0, ind.as_ptr())),

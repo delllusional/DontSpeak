@@ -112,11 +112,11 @@ impl TtsStats {
             0.0
         };
         ds_status::TtsSnapshot {
-            rtf_avg: avg_rtf,
             rtf_min: s.rtf_min,
+            rtf_avg: avg_rtf,
             rtf_max: s.rtf_max,
-            first_avg_ms: first_avg,
             first_min_ms: s.first_min,
+            first_avg_ms: first_avg,
             first_max_ms: s.first_max,
             utterances: s.utterances,
             audio_secs: s.total_audio_ms / 1000.0,
@@ -214,8 +214,8 @@ impl SttStats {
             0.0
         };
         ds_status::SttSnapshot {
-            rtf_avg,
             rtf_min: s.rtf_min,
+            rtf_avg,
             rtf_max: s.rtf_max,
             transcriptions: s.transcriptions,
             audio_secs: s.total_audio_ms / 1000.0,

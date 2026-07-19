@@ -17,6 +17,8 @@ serde_json = { workspace = true }
 # The client-identity enum: the REQUIRED `source` field on every client-originated Request.
 # A leaf crate (serde only), so this adds nothing to the graph.
 ds-client = { workspace = true }
+# Earcon event tokens on Request::Earcon — shared with hooks/engine.
+ds-earcon = { workspace = true }
 
 # Windows has no std Unix-domain-socket support, but Win10 1803+ ships AF_UNIX.
 # uds_windows wraps it with a std-mirroring UnixListener/UnixStream (incoming(),

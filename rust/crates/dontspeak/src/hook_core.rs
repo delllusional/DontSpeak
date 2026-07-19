@@ -110,9 +110,19 @@ pub(crate) fn notify_at(
             let earcon_session = hook_narrate::speak_reply(paths, payload, client);
             match earcon_session {
                 Some(session) => {
-                    hook_speak::engine_earcon_for_session(paths, "reply_done", session, client);
+                    hook_speak::engine_earcon_for_session(
+                        paths,
+                        ds_earcon::EarconEvent::ReplyDone,
+                        session,
+                        client,
+                    );
                 }
-                None => hook_speak::engine_earcon(paths, "reply_done", payload, client),
+                None => hook_speak::engine_earcon(
+                    paths,
+                    ds_earcon::EarconEvent::ReplyDone,
+                    payload,
+                    client,
+                ),
             }
         }
         // Permission / idle only — handler filters "waiting on you" types.

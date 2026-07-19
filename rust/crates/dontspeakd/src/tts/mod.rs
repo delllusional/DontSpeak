@@ -114,141 +114,68 @@ impl TtsManagerTestOptions {
 }
 
 pub struct TtsManager {
-    /// Path to the `ds-helper` helper binary.
     bin: PathBuf,
-    /// Unified engine log path used to place the helper's last-resort stderr log beside it.
+    /// Engine log path — helper last-resort stderr sits beside it.
     helper_log_file: PathBuf,
-    /// Serializes warm-child LIFECYCLE transitions — `start` / `stop_child` /
-    /// `mark_dead`. Without it, a crash-driven `mark_dead` from a concurrent
-    /// play+listen pair (both wake fatal on the same EOF) could race a restart and
-    /// `join` the WRONG reader. The OUTERMOST lock: always taken before
-    /// `child`/`stdin`/`reader`. Brief, never held across a slot `Condvar` wait.
+    /// Outer lifecycle lock (start/stop/mark_dead). Before child/stdin/reader;
+    /// never across a slot Condvar wait. Prevents join of wrong reader on dual-EOF.
     lifecycle: Mutex<()>,
-    /// When `restart_child` last actually bounced the process — gates its debounce
-    /// (see `restart_child`) and doubles as a debug aid for spotting a rapid-fire
-    /// restart storm. `None` until the first restart.
+    /// Debounce for restart_child; None until first restart.
     last_restart: Mutex<Option<std::time::Instant>>,
-    /// The warm child's process-lifecycle slot — the live Kokoro `--serve` handle
-    /// (empty when not warm), its incarnation number, and the deliberate-teardown
-    /// marker, consolidated behind named transitions so the three can't drift
-    /// apart by convention (see [`ChildSlot`]). `Arc` so the persistent reader
-    /// thread can share it too — its unexpected-EOF handler classifies the EOF
-    /// (deliberate stop vs post-READY crash) and `try_wait`s the child (peek only,
-    /// never taking/killing) to log the real exit status/signal instead of just
-    /// "died, reason unknown"; the actual reap still happens later via
-    /// `mark_dead`/`restart_if_crashed`.
+    /// Live child + generation + deliberate-teardown ([`ChildSlot`]). Shared with reader.
     child: Arc<ChildSlot>,
-    /// Kokoro child stdin — written by speak/preview/listen AND stop (brief sections).
     stdin: Mutex<Option<ChildStdin>>,
-    /// The persistent stdout reader thread (one per warm child). Owns the child's
-    /// `BufReader<ChildStdout>` and demuxes into the slots below. Joined by
-    /// `stop_child`/`mark_dead` (after the child is killed → reader EOFs) so no
-    /// stale reader races the next start's slots.
+    /// Persistent demux reader; joined after kill so slots aren't raced by next start.
     reader: Mutex<Option<JoinHandle<()>>>,
-    /// Filled by the reader: a `speak`/`preview` waits here for its terminal DONE
-    /// (or ERR/EOF). Reset at the start of each `play()`.
     speak_slot: Arc<(Mutex<SpeakSlot>, Condvar)>,
-    /// Filled by the reader when a cue finishes, is suppressed, or is cancelled.
     cue_slot: Arc<(Mutex<CueSlot>, Condvar)>,
-    /// Filled by the reader: a `listen` drains LISTENING/PARTIAL/FINAL/STTERR/LDONE
-    /// events here. Cleared at the start of each `listen()`. Demuxing the one
-    /// stdout into separate slots is what lets a speak and a listen coexist.
+    /// Separate from speak_slot so speak+listen coexist on one stdout.
     listen_slot: Arc<(Mutex<ListenSlot>, Condvar)>,
-    /// Exactly one logical caller may own the helper's untagged listen event stream. A test
-    /// recognition request now fails busy instead of clearing/stealing Caps dictation events.
+    /// One untagged listen owner; tests fail busy instead of stealing Caps events.
     listen_lease: Mutex<()>,
-    /// At most one cue op in flight — see `cue_validated` for the CueSlot race this closes.
+    /// One cue op (closes CueSlot race in cue_validated).
     cue_lease: Mutex<()>,
-    /// Monotonic helper listen generation. Stop is expressed as "cancel through generation N"
-    /// so an early stop can never be erased by delayed start processing.
+    /// Stop = cancel through gen N (early stop can't be erased by delayed start).
     next_listen_generation: AtomicU64,
     active_listen_generation: AtomicU64,
     listen_stopped_through: AtomicU64,
-    /// When a stop was sent for the active generation. Used to bound a wedged native finalizer.
+    /// Bounds wedged native finalizer after stop.
     listen_stop_started: Mutex<Option<(u64, std::time::Instant)>>,
-    /// Constructor-injected test dependencies; absent entirely from release binaries.
     #[cfg(test)]
     test_options: TtsManagerTestOptions,
-    /// Filled by the reader: a one-shot `diarize` waits here for its DIAR/DIARERR +
-    /// terminal DDONE. Cleared at the start of each `diarize()`. Its own slot (not
-    /// `listen_slot`) so a diarize and a speak demux independently.
+    /// Own slot so diarize/speak demux independently.
     diarize_slot: Arc<(Mutex<DiarizeSlot>, Condvar)>,
-    /// Filled by the reader: a one-shot `enroll` waits here for its EMB/ENROLLERR +
-    /// terminal EDONE. Cleared at the start of each `enroll()`.
     enroll_slot: Arc<(Mutex<EnrollSlot>, Condvar)>,
-    /// The in-flight macOS `say` process (System engine), so a barge-in/stop can
-    /// kill it. System TTS has no warm model — it spawns per request.
+    /// In-flight `say` (System TTS, per-request spawn).
     say_child: Mutex<Option<Child>>,
-    /// Last warm-child START failure (e.g. "onnxruntime dylib is not <ver>",
-    /// "kokoro model not downloaded"), surfaced to the app's status dot as the
-    /// red "failed" state. `None` once a start succeeds or TTS is toggled off.
-    /// Invariant: only ever `Some` while no child is installed — set exclusively
-    /// by `start_locked`'s failure returns, cleared by success and `stop_child`.
+    /// Warm-child START failure only while no child installed.
     last_error: Mutex<Option<String>>,
-    /// Live TTS stats (realtime factor / latency / counts) for the app's stats
-    /// view, fed by the child's per-utterance `STATS` line.
     stats: Arc<crate::stats::TtsStats>,
-    /// Live STT stats, fed by the helper's per-listen `STTSTATS` line.
     stt_stats: Arc<crate::stats::SttStats>,
-    /// Persisted lifetime seconds (spoken + heard), bumped from the same reader as
-    /// the live stats. Survives across sessions — see [`crate::stats::LifetimeSeconds`].
     lifetime: Arc<crate::stats::LifetimeSeconds>,
-    /// The warm child's active TTS ONNX execution provider ("CPU"/"CoreML"/"CUDA"), reported
-    /// via its `PROVIDER` line at startup. For the engine stats.
+    /// Realized TTS EP from PROVIDER line.
     provider: Mutex<String>,
-    /// The warm child's active STT execution provider ("CPU"/"CUDA"/"CoreML-ANE"/"System"),
-    /// reported via its `STT_PROVIDER` line — the SAME realized-EP channel as `provider`, so the
-    /// STT status row shows what ACTUALLY loaded (not a preference), mapped through the one shared
-    /// `realized_ort_token`. Starts "CPU".
+    /// Realized STT EP from STT_PROVIDER (same channel as provider). Starts "CPU".
     stt_realized: Arc<Mutex<String>>,
-    /// The next warm child's spawn preferences (provider/STT-provider/full-duplex/
-    /// STT-preload) — see [`SpawnPrefs`]. Read together by `start_locked` to assemble
-    /// the spawn env; written field-by-field by `set_provider`/`set_full_duplex_pref`/
-    /// `set_stt_provider_pref`/`set_stt_wanted`.
+    /// Next spawn prefs ([`SpawnPrefs`]); start_locked reads as one unit.
     spawn_prefs: Mutex<SpawnPrefs>,
-    /// The full-duplex mode the CURRENTLY running child was started with, so a
-    /// changed `spawn_prefs.full_duplex` can trigger exactly one restart (mirrors how
-    /// `provider` tracks the running provider for `set_provider`).
+    /// Running child's full-duplex (restart once on pref change).
     full_duplex_active: Mutex<bool>,
-    /// The STT engine the CURRENTLY running child was started with, so a changed
-    /// `spawn_prefs.stt_provider` triggers exactly one restart (mirrors `full_duplex_active`).
+    /// Running child's STT provider token.
     stt_provider_active: Mutex<String>,
-    /// Whether the running child was started with Kokoro/output enabled.
     tts_wanted_active: Mutex<bool>,
-    /// Which models are CURRENTLY resident in the warm helper. Kokoro is eager (true
-    /// once the child is READY); Parakeet is lazy (true after the first `listen`). An
-    /// `unload` clears the matching flag; the helper stopping clears both. Surfaced in
-    /// `model_status` because the memory number is too noisy (ort retains freed arena).
-    /// `Arc` (like `stt_loaded`) so the stdout reader can drop it on an UNEXPECTED EOF —
-    /// a post-READY child death must unload both models immediately, not when the next
-    /// write happens to fail. `Arc` so the persistent reader thread shares the same slot.
+    /// Kokoro residency. Arc so reader unloads on unexpected EOF.
     tts_model: Arc<ModelSlot>,
-    /// The STT (Parakeet) counterpart of `tts_model`: residency flips true on the helper's
-    /// `STTLOADED` confirmation (emitted after preload + the graph WARMUP) — the dot only
-    /// greens when the model is truly resident AND warm, not optimistically on the load
-    /// request — and its load-error state (from `STTLOADERR`) so `model_status`'s `parakeet`
-    /// row can show a failure without also tripping `kokoro`'s. Distinct from `last_error`
-    /// (warm-CHILD start failures): this is per-MODEL.
+    /// Parakeet residency (STTLOADED after warmup) + per-model load error.
     stt_model: Arc<ModelSlot>,
-    /// Global MUTE: when true the warm child plays silence (queue still drains; only the audio
-    /// is zeroed). Toggled by a Caps-tap (dictation off) and the tray checkbox. Read by the
-    /// status snapshot; pushed to the child via the `mute` op.
     muted: AtomicBool,
-    /// The shared status-push gate, installed once at boot via [`set_status_gate`]. A
-    /// mute toggle bumps it so a blocked `WaitModelStatus` wakes immediately (the muted
-    /// flag is part of `model_status`). `OnceLock`-empty in tests / before wiring, where
-    /// `set_muted` simply skips the bump.
+    /// Status gate (mute bumps WaitModelStatus). Empty in tests / pre-wire.
     gate: OnceLock<Arc<StatusGate>>,
-    /// When [`restart_if_crashed`](Self::restart_if_crashed) last ATTEMPTED a heal — its
-    /// [`HEAL_COOLDOWN`] throttle, so a deterministic crasher can't turn every speak/tap
-    /// into a blocking spawn+load.
+    /// Heal throttle ([`HEAL_COOLDOWN`]).
     last_heal: Mutex<Option<std::time::Instant>>,
 }
 
-/// Minimum spacing between crash-heal attempts — see
-/// [`TtsManager::restart_if_crashed`]. Long enough that a helper crashing on EVERY start
-/// costs one blocking retry per window (speaks in between drop fast, as before the heal
-/// existed); short enough that a transient kill (AV scan, OOM pressure) recovers promptly.
+/// Min spacing between crash-heal attempts (deterministic crasher vs transient kill).
 const HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl TtsManager {
@@ -354,35 +281,28 @@ impl TtsManager {
         }
     }
 
-    /// Install the shared status-push gate (called once at boot). Lets [`set_muted`]
-    /// bump it so a mute change pushes to a blocked `WaitModelStatus` immediately.
+    /// Install status gate once at boot (mute bumps WaitModelStatus).
     pub fn set_status_gate(&self, gate: Arc<StatusGate>) {
         let _ = self.gate.set(gate);
     }
 
-    /// Whether the running warm child is in full-duplex AEC mode. Callers use it to
-    /// bypass the half-duplex `is_mic_active()` gates — under VPIO the input device is
-    /// always live, so `is_mic_active()` is permanently true and useless as a gate.
+    /// Full-duplex AEC active (VPIO mic always live — skip half-duplex mic gates).
     pub fn is_full_duplex_active(&self) -> bool {
         *self.full_duplex_active.lock().unwrap()
     }
 
-    /// Is the Kokoro (TTS) model currently resident in the warm helper?
     pub fn is_tts_loaded(&self) -> bool {
         self.tts_model.is_loaded()
     }
-    /// Is the Parakeet (STT) model currently resident in the warm helper?
     pub fn is_stt_loaded(&self) -> bool {
         self.stt_model.is_loaded()
     }
 
-    /// The last STT (re)load failure (the helper's `STTLOADERR`), if any — surfaced in
-    /// `model_status`'s `parakeet` row alongside `last_error`/the download error.
+    /// Last STTLOADERR (parakeet row).
     pub fn stt_load_error(&self) -> Option<String> {
         self.stt_model.error()
     }
-    /// The last TTS (re)load failure (the helper's `TTSLOADERR`) — the `tts_load_error`
-    /// counterpart of [`stt_load_error`](Self::stt_load_error).
+    /// Last TTSLOADERR.
     pub fn tts_load_error(&self) -> Option<String> {
         self.tts_model.error()
     }
@@ -444,21 +364,9 @@ impl TtsManager {
         true
     }
 
-    /// Restart the warm child AND reset BOTH engines' stats. The single restart point:
-    /// the child hosts Kokoro (TTS) and Parakeet (STT) together, so any restart tears
-    /// down both and begins one fresh measurement window for both — even a change that
-    /// touched only one engine.
+    /// Restart warm child + reset both engines' stats (shared Kokoro+Parakeet process).
     fn restart_child(&self) {
-        // Debounce: back-to-back bounces (config churn landing faster than the child
-        // can spawn/settle) are a suspected contributor to the "warm child exited
-        // unexpectedly" self-heal firing — and, in turn, to a queued speak dropping
-        // because the guard's readiness check raced the child's death. When two
-        // restarts land inside MIN_RESTART_GAP, sleep out the remainder before
-        // actually bouncing the child, so the previous one gets a chance to fully
-        // settle first. The sleep happens with `last_restart` UNLOCKED (never hold a
-        // guard across a blocking wait) — a concurrent restart_child racing in during
-        // the sleep just computes its own elapsed-since-last and debounces too, it
-        // doesn't skip its restart.
+        // Debounce rapid config churn; sleep with last_restart unlocked.
         const MIN_RESTART_GAP: std::time::Duration = std::time::Duration::from_secs(1);
         let now = std::time::Instant::now();
         let prev = self.last_restart.lock().unwrap().replace(now);
@@ -477,9 +385,7 @@ impl TtsManager {
                     wait.as_millis()
                 );
                 std::thread::sleep(wait);
-                // Re-anchor to the moment we actually proceed (not the original call
-                // time) so a THIRD rapid call debounces off the real spacing instead
-                // of compounding against an already-stale timestamp.
+                // Re-anchor so a third rapid call debounces off real spacing.
                 *self.last_restart.lock().unwrap() = Some(std::time::Instant::now());
             }
         }
@@ -489,44 +395,21 @@ impl TtsManager {
         self.stt_stats.reset();
     }
 
-    /// Restart the warm child to pick up models that finished downloading AFTER it started —
-    /// the self-heal a background fetch calls on success (see
-    /// [`crate::downloads::start_download`]). Distinct from [`set_provider`](Self::set_provider)
-    /// and [`restart_if_full_duplex_stale`](Self::restart_if_full_duplex_stale), which restart
-    /// only on a provider/mode CHANGE: here the provider is UNCHANGED but the model files just
-    /// appeared (a provider switch or fresh install started the child before they existed), so
-    /// we restart unconditionally. If the child is running we restart it to pick up the files;
-    /// if it is NOT running we START it — it EXITED when it tried to load before the model
-    /// existed (fresh install / provider switch), and nothing else re-spawns it after a fatal
-    /// "not downloaded", so without starting it here the engine would sit on its stale failure
-    /// until a manual restart. "Not running" now also covers `start_locked`'s cheap presence
-    /// gate having skipped the spawn entirely (not just "toggled off") — either way the fix is
-    /// the same: try again now that the model is actually on disk. The sole caller (the
-    /// download-completion hook) only reaches here for a target whose engine is wanted, so
-    /// starting is correct. Reuses the shared start path.
-    /// Returns whether a warm child is running afterwards.
+    /// Download completion: restart (or start if presence-gated) to load new model files.
+    /// Provider unchanged; sole caller only for wanted engines. Returns is_running after.
     pub(crate) fn reload_models(&self) -> bool {
         if !self.is_running() {
-            self.ensure_started(); // load the now-present model (child had exited before it existed)
+            self.ensure_started();
             return self.is_running();
         }
         self.restart_child();
         true
     }
 
-    /// Self-heal for a warm child that DIED post-READY (crash: AV false-positive on freshly
-    /// written dylibs, OOM, GPU driver) — the queue worker calls this before dropping a
-    /// not-playable Kokoro item. It completes `mark_dead`'s contract ("the next speak
-    /// restarts it"): without it the worker's not-ready guard dropped that very speak, so a
-    /// crashed child wedged BOTH models in "Starting" until an app restart. The decision is
-    /// [`crate::config_gate::warm_child_heal_action`]: a dead child (still in the slot, or
-    /// already reaped by an io error) restarts; a child that's alive (still loading) or
-    /// whose last START failed (the download-completion hook owns that retry) is left alone.
+    /// Post-READY crash heal (queue worker). Decision: [`warm_child_heal_action`].
+    /// Observe+act under one lifecycle lock (avoid killing replacement after reload_models).
     pub(crate) fn restart_if_crashed(&self) {
         use crate::config_gate::HealAction;
-        // Observe AND act under ONE `lifecycle` acquisition: a snapshot taken outside it
-        // could go stale across a concurrent `reload_models` restart (a full stop+start —
-        // seconds), and the reap below would then kill the healthy replacement child.
         let _lifecycle = self.lifecycle.lock().unwrap();
         let (present, exited) = self.child.probe();
         let error = self.last_error().is_some();
@@ -534,10 +417,7 @@ impl TtsManager {
         if action == HealAction::Nothing {
             return;
         }
-        // Throttle: at most one attempt per window. A DETERMINISTIC crasher (corrupt model,
-        // an AV that kills the helper on every start) would otherwise turn every speak/tap
-        // into a blocking multi-second spawn+load; the incident class this heals (a one-shot
-        // AV kill on freshly written dylibs) recovers on the first attempt anyway.
+        // One attempt per HEAL_COOLDOWN (deterministic crasher throttle).
         {
             let mut last = self.last_heal.lock().unwrap();
             if last.is_some_and(|t| t.elapsed() < HEAL_COOLDOWN) {
@@ -559,45 +439,32 @@ impl TtsManager {
         }
     }
 
-    /// Set whether the warm child should run in full-duplex AEC mode (the engine
-    /// passes `full_duplex && Parakeet STT`, see `full_duplex_wanted`). Stores the preference only; the
-    /// next (re)start uses it. Pair with [`restart_if_full_duplex_stale`](Self::restart_if_full_duplex_stale)
-    /// to apply a change to an already-running child.
+    /// Store full-duplex pref; pair with restart_if_full_duplex_stale for running child.
     pub fn set_full_duplex_pref(&self, on: bool) {
         self.spawn_prefs.lock().unwrap().full_duplex = on;
     }
 
-    /// Set which local STT backend the warm child should use — the resolved provider token
-    /// ("cpu"|"cuda"|"ane"|"system").
-    /// Stores the preference only; [`restart_if_full_duplex_stale`](Self::restart_if_full_duplex_stale)
-    /// applies a change to an already-running child.
+    /// Store STT provider token; restart_if_full_duplex_stale applies.
     pub fn set_stt_provider_pref(&self, engine: &str) {
         self.spawn_prefs.lock().unwrap().stt_provider = engine.to_string();
     }
 
-    /// Set whether STT should be preloaded in the warm child (= `helper_uses_stt(cfg)`).
-    /// Applied on the next (re)start via the `DONTSPEAK_STT_PRELOAD` env.
+    /// STT preload pref (`DONTSPEAK_STT_PRELOAD` on next start).
     pub fn set_stt_wanted(&self, wanted: bool) {
         self.spawn_prefs.lock().unwrap().stt_preload = wanted;
     }
 
-    /// Set whether the next helper should load Kokoro and open playback output.
+    /// Kokoro/output preload pref for next start.
     pub fn set_tts_wanted(&self, wanted: bool) {
         self.spawn_prefs.lock().unwrap().tts_preload = wanted;
     }
 
-    /// Restart the warm child iff it is running with a mode that no longer matches the
-    /// preference — either the full-duplex flag (toggled, or STT moved to/from a local
-    /// engine) or the local STT engine itself (cpu ↔ ane, so the child picks
-    /// up the new `DONTSPEAK_STT_PROVIDER`). No-op when stopped or already matching — safe
-    /// to call on every config reload.
+    /// Restart if running prefs mismatch (fd / STT provider / tts_preload). Safe every reload.
     pub fn restart_if_full_duplex_stale(&self) {
         if !self.is_running() {
-            return; // takes effect on next start
+            return;
         }
-        // Copy the prefs out and drop `spawn_prefs` before touching the other two locks
-        // (never hold a guard across another lock acquisition — same discipline as the
-        // `start_locked` copy-out above).
+        // Drop spawn_prefs before other locks.
         let prefs = self.spawn_prefs.lock().unwrap().clone();
         let fd_stale = prefs.full_duplex != *self.full_duplex_active.lock().unwrap();
         let stt_stale = prefs.stt_provider != *self.stt_provider_active.lock().unwrap();
@@ -608,19 +475,13 @@ impl TtsManager {
         self.restart_child();
     }
 
-    /// The provider a preference RESOLVES to right now — what the warm child will
-    /// actually report. "cuda"/"auto" only become CUDA once the GPU runtime is
-    /// present (else the helper falls back to CPU), so resolving against presence
-    /// keeps `set_provider` from restart-looping while the runtime downloads.
+    /// Resolved EP the child will report (cuda only if runtime present — no restart loop).
     fn resolve_provider(which: &str) -> ds_config::RealizedProvider {
         use ds_config::RealizedProvider;
         if which.eq_ignore_ascii_case("coreml") {
             return RealizedProvider::CoreMl;
         }
-        // `ane` AND `auto` resolve to the FluidAudio Core ML / ANE backend on macOS (the
-        // shared ladder's top rung) — but only when its shim dylib is actually present (set
-        // by the app); otherwise the helper falls back to the ONNX CPU path, so resolve to
-        // CPU to match what the child will report and avoid a needless restart.
+        // ane/auto → ANE only with shim; else CPU (match child, avoid needless restart).
         #[cfg(target_os = "macos")]
         if which.eq_ignore_ascii_case("ane") || which.eq_ignore_ascii_case("auto") {
             let have_dylib = std::env::var_os("SMKOKORO_DYLIB_PATH")
@@ -1055,11 +916,13 @@ impl TtsManager {
         // play audibly at full volume right after the switch while the UI still shows
         // "muted" (mirrors the `mute` op `set_muted` sends to an already-running child on
         // a live toggle).
-        let _ = self.write_request(if self.is_muted() {
-            r#"{"op":"mute","text":"on"}"#
-        } else {
-            r#"{"op":"mute","text":"off"}"#
-        });
+        let _ = self.write_request(
+            &serde_json::json!({
+                "op": ds_helper_proto::HelperOp::Mute,
+                "text": if self.is_muted() { "on" } else { "off" },
+            })
+            .to_string(),
+        );
         log::info!(target: "engine", "TTS warm Kokoro child READY");
     }
 
@@ -1183,17 +1046,15 @@ impl TtsManager {
     }
 
     /// Tell the warm helper to free a cached model it no longer needs while the
-    /// OTHER engine keeps it warm — universal: `"tts"` → Kokoro, `"stt"` → Parakeet.
+    /// OTHER engine keeps it warm — universal: TTS → Kokoro, STT → Parakeet.
     /// The helper lazily reloads on next use. Fire-and-forget; no-op when the helper
-    /// isn't running (nothing to free) or the engine is unknown.
-    pub fn unload_engine(&self, engine: &str) {
-        if engine != "tts" && engine != "stt" {
-            return;
-        }
-        if self
-            .write_request(&format!(r#"{{"op":"unload","engine":"{engine}"}}"#))
-            .is_ok()
-        {
+    /// isn't running (nothing to free).
+    pub fn unload_engine(&self, engine: ds_helper_proto::HelperModel) {
+        let req = serde_json::json!({
+            "op": ds_helper_proto::HelperOp::Unload,
+            "engine": engine,
+        });
+        if self.write_request(&req.to_string()).is_ok() {
             // `ModelSlot::transition` is itself change-gated (mirrors `mark_loaded`'s push on
             // the "true" direction) — otherwise an ordinary TTS/STT engine switch would leave
             // a blocked `WaitModelStatus` showing a stale "Running" dot for up to the poll
@@ -1204,31 +1065,32 @@ impl TtsManager {
             // any stale "failed to load" state — a deliberately unloaded model has none anymore.
             let gate = self.gate.get().map(|g| g.as_ref());
             match engine {
-                "tts" => self.tts_model.transition(ModelState::Idle, gate),
-                "stt" => self.stt_model.transition(ModelState::Idle, gate),
-                _ => {}
+                ds_helper_proto::HelperModel::Tts => {
+                    self.tts_model.transition(ModelState::Idle, gate)
+                }
+                ds_helper_proto::HelperModel::Stt => {
+                    self.stt_model.transition(ModelState::Idle, gate)
+                }
             }
-            log::info!(target: "engine", "helper: requested unload of {engine} model");
+            log::info!(target: "engine", "helper: requested unload of {engine:?} model");
         }
     }
 
     /// Tell the warm helper to eagerly (pre)load a model so it's resident the moment
     /// its engine is selected — the symmetric counterpart to [`unload_engine`], so
     /// "loaded" reflects residency before first use (Parakeet is otherwise lazy).
-    /// Fire-and-forget; no-op when the helper isn't running or the engine is unknown.
-    pub fn load_engine(&self, engine: &str) {
-        if engine != "tts" && engine != "stt" {
-            return;
-        }
-        if self
-            .write_request(&format!(r#"{{"op":"load","engine":"{engine}"}}"#))
-            .is_ok()
-        {
+    /// Fire-and-forget; no-op when the helper isn't running.
+    pub fn load_engine(&self, engine: ds_helper_proto::HelperModel) {
+        let req = serde_json::json!({
+            "op": ds_helper_proto::HelperOp::Load,
+            "engine": engine,
+        });
+        if self.write_request(&req.to_string()).is_ok() {
             // Neither engine lights optimistically: TTS waits for the helper's `TTSLOADED`
             // confirmation (after `load_backend`) exactly as STT waits for `STTLOADED` (after
             // preload + graph warmup), so the dot stays "warming" until the model is truly
             // resident — never greening on the mere `load` request.
-            log::info!(target: "engine", "helper: requested preload of {engine} model");
+            log::info!(target: "engine", "helper: requested preload of {engine:?} model");
         }
     }
 
@@ -1254,7 +1116,7 @@ impl TtsManager {
     /// (0 = from the top); the helper clamps it, so a stale value degrades to an
     /// empty no-op request, never a panic. See [`last_speak_progress`](Self::last_speak_progress).
     pub fn speak(&self, text: &str, voice: &str, rate: f32, skip: usize) -> std::io::Result<()> {
-        self.play("speak", text, voice, rate, skip)
+        self.play(text, voice, rate, skip)
     }
 
     /// The helper's ABSOLUTE played-batch high-water mark for the most recent speak
@@ -1350,14 +1212,7 @@ impl TtsManager {
         ))
     }
 
-    fn play(
-        &self,
-        op: &str,
-        text: &str,
-        voice: &str,
-        rate: f32,
-        skip: usize,
-    ) -> std::io::Result<()> {
+    fn play(&self, text: &str, voice: &str, rate: f32, skip: usize) -> std::io::Result<()> {
         // Fresh request: reset the speak slot so an error before dispatch cannot expose the
         // previous request's progress to queue retry/resume accounting.
         {
@@ -1375,8 +1230,13 @@ impl TtsManager {
             ));
         };
 
-        let req =
-            serde_json::json!({"op": op, "voice": voice, "rate": rate, "text": text, "skip": skip});
+        let req = serde_json::json!({
+            "op": ds_helper_proto::HelperOp::Speak,
+            "voice": voice,
+            "rate": rate,
+            "text": text,
+            "skip": skip,
+        });
         if let Err(e) = self.write_request(&req.to_string()) {
             self.mark_dead();
             self.stats.record_failure();
@@ -1506,7 +1366,11 @@ impl TtsManager {
             s.events.clear();
             s.dead = false;
         }
-        let request = serde_json::json!({ "op": "listen", "session": generation }).to_string();
+        let request = serde_json::json!({
+            "op": ds_helper_proto::HelperOp::Listen,
+            "session": generation,
+        })
+        .to_string();
         if let Err(e) = self.write_request(&request) {
             self.mark_dead();
             return Err(e);
@@ -1583,7 +1447,9 @@ impl TtsManager {
     /// targets to stay dead-code-clean.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn stop(&self) {
-        let _ = self.write_request(r#"{"op":"stop"}"#);
+        let _ = self.write_request(
+            &serde_json::json!({ "op": ds_helper_proto::HelperOp::Stop }).to_string(),
+        );
         if let Some(mut c) = self.say_child.lock().unwrap().take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -1604,11 +1470,13 @@ impl TtsManager {
     /// mute-consumes-speech semantics as the rodio volume path.
     pub fn set_muted(&self, on: bool) {
         let changed = self.muted.swap(on, Ordering::Relaxed) != on;
-        let _ = self.write_request(if on {
-            r#"{"op":"mute","text":"on"}"#
-        } else {
-            r#"{"op":"mute","text":"off"}"#
-        });
+        let _ = self.write_request(
+            &serde_json::json!({
+                "op": ds_helper_proto::HelperOp::Mute,
+                "text": if on { "on" } else { "off" },
+            })
+            .to_string(),
+        );
         // Push the mute transition to a blocked `WaitModelStatus` (the flag is part of
         // `model_status`). Only on a real change so an idempotent re-set wakes no one.
         if changed && let Some(gate) = self.gate.get() {
@@ -1622,7 +1490,9 @@ impl TtsManager {
     /// record-barge) tapers off instead of clicking. The system `say` path can't fade,
     /// so it's killed outright exactly as in `stop`.
     pub fn stop_fade(&self) {
-        let _ = self.write_request(r#"{"op":"stopfade"}"#);
+        let _ = self.write_request(
+            &serde_json::json!({ "op": ds_helper_proto::HelperOp::Stopfade }).to_string(),
+        );
         if let Some(mut c) = self.say_child.lock().unwrap().take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -1663,7 +1533,11 @@ impl TtsManager {
             *m.lock().unwrap() = CueSlot::default();
         }
         if let Err(error) = self.write_request(
-            &serde_json::json!({ "op": "cue", "text": path.to_string_lossy() }).to_string(),
+            &serde_json::json!({
+                "op": ds_helper_proto::HelperOp::Cue,
+                "text": path.to_string_lossy(),
+            })
+            .to_string(),
         ) {
             self.mark_dead();
             return Err(error);
@@ -1715,7 +1589,11 @@ impl TtsManager {
             *stop_started = Some((generation, std::time::Instant::now()));
         }
         drop(stop_started);
-        let request = serde_json::json!({ "op": "lstop", "session": generation }).to_string();
+        let request = serde_json::json!({
+            "op": ds_helper_proto::HelperOp::Lstop,
+            "session": generation,
+        })
+        .to_string();
         let _ = self.write_request(&request);
     }
 
@@ -1829,7 +1707,13 @@ impl TtsManager {
             s.done = false;
             s.dead = false;
         }
-        if let Err(e) = self.write_request(&format!(r#"{{"op":"diarize","seconds":{seconds}}}"#)) {
+        if let Err(e) = self.write_request(
+            &serde_json::json!({
+                "op": ds_helper_proto::HelperOp::Diarize,
+                "seconds": seconds,
+            })
+            .to_string(),
+        ) {
             self.mark_dead();
             return Err(e);
         }
@@ -1880,7 +1764,13 @@ impl TtsManager {
             s.done = false;
             s.dead = false;
         }
-        if let Err(e) = self.write_request(&format!(r#"{{"op":"enroll","seconds":{seconds}}}"#)) {
+        if let Err(e) = self.write_request(
+            &serde_json::json!({
+                "op": ds_helper_proto::HelperOp::Enroll,
+                "seconds": seconds,
+            })
+            .to_string(),
+        ) {
             self.mark_dead();
             return Err(e);
         }
@@ -2341,13 +2231,13 @@ mod status_gate_tests {
         // Simulate a genuinely loaded TTS engine, then unload it: a REAL true→false
         // transition, so the first call must bump.
         tts.tts_model.transition(ModelState::Loaded, None);
-        tts.unload_engine("tts");
+        tts.unload_engine(ds_helper_proto::HelperModel::Tts);
         let seq1 = gate.seq();
         assert_ne!(seq1, 0, "a real loaded→unloaded transition bumps the gate");
         assert!(!tts.tts_model.is_loaded());
 
         // Repeat on an already-unloaded engine: no real transition, must NOT bump again.
-        tts.unload_engine("tts");
+        tts.unload_engine(ds_helper_proto::HelperModel::Tts);
         assert_eq!(
             gate.seq(),
             seq1,

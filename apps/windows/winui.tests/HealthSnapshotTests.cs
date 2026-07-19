@@ -3,18 +3,12 @@ using Xunit;
 
 namespace DontSpeak.Tests;
 
-/// <summary>
-/// Model-status parse with stubbed state-word formatter (no ds_core.dll) — wire shapes match
-/// dontspeakd model_status_json / macOS DontSpeakLogic tests.
-/// </summary>
+/// <summary>Canonical model-status parsing with a stubbed formatter (no ds_core.dll).</summary>
 public class HealthSnapshotTests
 {
-    /// <summary>Stub for ds_engine_state_word (tests without ds_core.dll).</summary>
     private static string Word(string state, double progress, string why) => state;
-
     private static HealthSnapshot Parse(string json) => HealthSnapshot.FromJson(json, Word);
 
-    // CA1861: hoist constant arrays out of asserts.
     private static readonly string[] DefaultIndicator = { "stt", "tts_animated" };
     private static readonly string[] TtsOnly = { "tts" };
     private static readonly string[] AlexOnly = { "Alex" };
@@ -34,134 +28,69 @@ public class HealthSnapshotTests
     }
 
     [Fact]
-    public void WellFormedPayloadMapsActivityAndSeq()
+    public void ActivityAndSequenceMapTogether()
     {
         var s = Parse("""
-            {"seq": 42, "running": {"caps": true, "stt_active": true, "tts_active": false, "muted": true}}
+            {"seq":42,"activity":{"caps_enabled":true,"caps_active":true,
+             "recording":true,"speaking":false,"speaking_source":null,"muted":true}}
             """);
         Assert.True(s.Activity.EngineRunning);
         Assert.Equal(42UL, s.StatusSeq);
-        Assert.True(s.Activity.Caps);
+        Assert.True(s.Activity.CapsEnabled);
+        Assert.True(s.Activity.CapsActive);
         Assert.True(s.Activity.Recording);
         Assert.False(s.Activity.Speaking);
-        Assert.Null(s.Activity.TtsSource);
+        Assert.Null(s.Activity.SpeakingSource);
         Assert.True(s.Activity.Muted);
     }
 
     [Fact]
-    public void TtsSourceOnlyWhenSpeaking()
+    public void SpeakingSourceIsClearedWhenIdle()
     {
-        var speaking = Parse("""
-            {"seq": 1, "running": {"tts_active": true, "tts_source": "claude_code"}}
-            """);
-        Assert.True(speaking.Activity.Speaking);
-        Assert.Equal("claude_code", speaking.Activity.TtsSource);
+        var speaking = Parse("""{"activity":{"speaking":true,"speaking_source":"claude_code"}}""");
+        Assert.Equal("claude_code", speaking.Activity.SpeakingSource);
 
-        var idle = Parse("""
-            {"seq": 2, "running": {"tts_active": false, "tts_source": "claude_code"}}
-            """);
-        Assert.False(idle.Activity.Speaking);
-        Assert.Null(idle.Activity.TtsSource);
+        var idle = Parse("""{"activity":{"speaking":false,"speaking_source":"claude_code"}}""");
+        Assert.Null(idle.Activity.SpeakingSource);
     }
 
-    /// <summary>An absent tray_indicator keeps the {"stt","tts_animated"} default; a present
-    /// one replaces it (nulls dropped); an empty array means "never tint".</summary>
     [Fact]
-    public void TrayIndicatorOverridesOnlyWhenPresent()
+    public void TrayIndicatorReplacesTheDefault()
     {
-        Assert.Equal(
-            DefaultIndicator,
-            Parse("""{"seq": 1}""").Activity.TrayIndicator);
-        Assert.Equal(
-            TtsOnly,
-            Parse("""{"tray_indicator": ["tts", null]}""").Activity.TrayIndicator);
-        Assert.Empty(Parse("""{"tray_indicator": []}""").Activity.TrayIndicator);
+        Assert.Equal(DefaultIndicator, Parse("""{"seq":1}""").Activity.TrayIndicator);
+        Assert.Equal(TtsOnly, Parse("""{"tray_indicator":["tts"]}""").Activity.TrayIndicator);
+        Assert.Empty(Parse("""{"tray_indicator":[]}""").Activity.TrayIndicator);
     }
 
-    /// <summary>dictation.has_paste_target FAILS OPEN: absent reads as true (the overlay
-    /// must not warn "no target" just because an old engine omits the key).</summary>
-    [Fact]
-    public void DictationHasTargetFailsOpen()
-    {
-        Assert.True(Parse("""{"dictation": {"text": "hi"}}""").Dictation.DictHasTarget);
-        Assert.False(Parse("""{"dictation": {"has_paste_target": false}}""").Dictation.DictHasTarget);
-        var d = Parse("""{"dictation": {"text": "hello", "awaiting_confirm": true, "local_stt": true}}""").Dictation;
-        Assert.Equal("hello", d.DictText);
-        Assert.True(d.DictAwaitingConfirm);
-        Assert.True(d.DictLocalStt);
-    }
-
-    /// <summary>dictation.refused FAILS QUIET: absent (an older engine) reads as false — no
-    /// spurious refusal glow — while an explicit true surfaces the refused-start cue.</summary>
-    [Fact]
-    public void DictationRefusedFailsQuiet()
-    {
-        Assert.False(Parse("""{"dictation": {"text": "hi"}}""").Dictation.DictRefused);
-        Assert.True(Parse("""{"dictation": {"refused": true}}""").Dictation.DictRefused);
-    }
-
-    /// <summary>The canonical dictation.state token parses through; absent (older engine)
-    /// reads as "" — the ShowPanel fallback signal.</summary>
-    [Fact]
-    public void DictationStateParsesAndDefaultsEmpty()
-    {
-        Assert.Equal("recording", Parse("""{"dictation": {"state": "recording"}}""").Dictation.DictState);
-        Assert.Equal("", Parse("""{"dictation": {"text": "hi"}}""").Dictation.DictState);
-    }
-
-    /// <summary>ShowPanel switches on the canonical token (vocabulary:
-    /// rust/crates/ds-status/src/dictation_state.rs): hidden ⇒ false, the three visible
-    /// states ⇒ true, regardless of what the legacy booleans say.</summary>
     [Theory]
     [InlineData("hidden", false)]
     [InlineData("recording", true)]
     [InlineData("awaiting_confirm", true)]
     [InlineData("refused", true)]
-    public void ShowPanelFollowsTheCanonicalToken(string token, bool expected)
+    public void DictationUsesItsCanonicalState(string state, bool visible)
     {
-        // Legacy booleans contradict token so token wins.
-        var visible = new Dictation { DictState = token };
-        Assert.Equal(expected, visible.ShowPanel(recording: false));
-        var hidden = new Dictation
-        {
-            DictState = token,
-            DictAwaitingConfirm = true,
-            DictLocalStt = true,
-            DictRefused = true,
-        };
-        Assert.Equal(expected, hidden.ShowPanel(recording: true));
+        var d = Parse($$"""{"dictation":{"state":"{{state}}","text":"","has_paste_target":true} }""").Dictation;
+        Assert.Equal(visible, d.ShowPanel);
+        Assert.Equal(state == "recording", d.PromptGlow);
+        Assert.Equal(state != "refused", d.HasUsableTarget);
     }
 
-    /// <summary>An absent/unknown token (older engine DLL) falls back to the legacy boolean
-    /// derivation — a showing case and a hidden case each way, so skew can't kill the panel.</summary>
-    [Theory]
-    [InlineData("")]
-    [InlineData("bogus_token")]
-    public void ShowPanelFallsBackToBooleansOnUnknownToken(string token)
-    {
-        Assert.True(new Dictation { DictState = token, DictAwaitingConfirm = true }.ShowPanel(recording: false));
-        Assert.True(new Dictation { DictState = token, DictLocalStt = true }.ShowPanel(recording: true));
-        Assert.False(new Dictation { DictState = token, DictLocalStt = false }.ShowPanel(recording: true));
-        Assert.True(new Dictation { DictState = token, DictRefused = true }.ShowPanel(recording: false));
-        Assert.False(new Dictation { DictState = token }.ShowPanel(recording: false));
-    }
-
-    /// <summary>Missing/empty engine tokens fall to each engine's own default so a partial
-    /// payload still picks a row to render.</summary>
     [Fact]
-    public void EngineSelectionFallsBackPerEngine()
+    public void SelectedEngineSectionsMapWithoutSlotProjection()
     {
-        var s = Parse("""{"seq": 1}""");
-        Assert.Equal("claude_code", s.EngineSelection.SttEngine);
-        Assert.Equal("built_in", s.EngineSelection.TtsEngine);
-        var t = Parse("""{"stt_engine": "built_in", "tts_engine": "system", "tts_provider": "coreml"}""");
-        Assert.Equal("built_in", t.EngineSelection.SttEngine);
-        Assert.Equal("system", t.EngineSelection.TtsEngine);
-        Assert.Equal("coreml", t.EngineSelection.TtsProvider);
+        var s = Parse("""
+            {"tts":{"engine":"system","provider":null,
+                    "status":{"state":"idle","progress":0,"error":null}},
+             "stt":{"engine":"claude_code","provider":null,"delegation_key":"Space",
+                    "status":{"state":"running","progress":0,"error":null}}}
+            """);
+        Assert.Equal("system", s.TtsEngine.Engine);
+        Assert.Equal(EngineState.Idle, s.TtsEngine.Status.State);
+        Assert.Equal("claude_code", s.SttEngine.Engine);
+        Assert.Equal("Space", s.SttEngine.DelegationKey);
+        Assert.Equal(EngineState.Running, s.SttEngine.Status.State);
     }
 
-    /// <summary>The engine `state` string drives the enum 1:1; a missing object reads as
-    /// Missing; an unknown state falls to Missing (never throws on a newer engine).</summary>
     [Theory]
     [InlineData("running", EngineState.Running)]
     [InlineData("idle", EngineState.Idle)]
@@ -172,31 +101,33 @@ public class HealthSnapshotTests
     [InlineData("something_new", EngineState.Missing)]
     public void EngineStateStringMapsToEnum(string state, EngineState expected)
     {
-        // Space before final brace: avoid $$ interpolation treating `}}` as closer (CS9007).
-        var s = Parse($$"""{"kokoro": {"state": "{{state}}", "progress": 0.5} }""");
-        Assert.Equal(expected, s.EngineDots.Kokoro.State);
-        Assert.Equal(0.5, s.EngineDots.Kokoro.Progress);
-        Assert.Equal(EngineState.Missing, s.EngineDots.Parakeet.State);
+        var s = Parse($$"""{"tts":{"engine":"built_in","status":{"state":"{{state}}","progress":0.5} } }""");
+        Assert.Equal(expected, s.TtsEngine.Status.State);
+        Assert.Equal(0.5, s.TtsEngine.Status.Progress);
     }
 
-    /// <summary>diarization engine object uses same ToEngine mapping as Kokoro/etc.</summary>
     [Fact]
-    public void DiarizationEngineObjectMapsIntoEngineDots()
+    public void DiarizationOwnsLifecycleAndDetails()
     {
-        var s = Parse("""{"diarization": {"state": "running", "progress": 1.0}}""");
-        Assert.Equal(EngineState.Running, s.EngineDots.Diarization.State);
-        Assert.Equal(1.0, s.EngineDots.Diarization.Progress);
+        var s = Parse("""
+            {"diarization":{"status":{"state":"running","progress":1.0,"error":null},
+             "enabled":true,"provider":"ane","speakers":["Alex"],"clustering_threshold":0.72}}
+            """);
+        Assert.Equal(EngineState.Running, s.Diarization.Status.State);
+        Assert.True(s.Diarization.Enabled);
+        Assert.Equal("ane", s.Diarization.Runtime);
+        Assert.Equal(AlexOnly, s.Diarization.Speakers);
+        Assert.Equal(0.72, s.Diarization.ClusteringThreshold);
     }
 
     [Fact]
     public void StatsBlocksMapIntoTheSnapshotGroups()
     {
         var s = Parse("""
-            {"stats": {
-               "tts": {"rtf_avg": 1.2, "rtf_min": 1.0, "rtf_max": 1.5, "utterances": 7, "audio_secs": 33.5, "failures": 2},
-               "stt": {"rtf_avg": 0.4, "transcriptions": 3, "audio_secs": 9.0, "failures": 1},
-               "lifetime": {"tts_secs": 100, "stt_secs": 50},
-               "diarization": {"enabled": true, "speakers": ["Alex"], "clustering_threshold": 0.72, "runtime": "ane"}}}
+            {"stats":{
+              "tts":{"rtf_avg":1.2,"rtf_min":1.0,"rtf_max":1.5,"utterances":7,"audio_secs":33.5,"failures":2},
+              "stt":{"rtf_avg":0.4,"transcriptions":3,"audio_secs":9.0,"failures":1},
+              "lifetime":{"tts_secs":100,"stt_secs":50}}}
             """);
         Assert.Equal(1.2, s.Tts.RtfAvg);
         Assert.Equal(7, s.Tts.Utterances);
@@ -206,13 +137,8 @@ public class HealthSnapshotTests
         Assert.Equal(1, s.Stt.Failures);
         Assert.Equal(100, s.Lifetime.TtsSecs);
         Assert.Equal(50, s.Lifetime.SttSecs);
-        Assert.True(s.Diarization.Enabled);
-        Assert.Equal(AlexOnly, s.Diarization.Speakers);
-        Assert.Equal(0.72, s.Diarization.ClusteringThreshold);
-        Assert.Equal("ane", s.Diarization.Runtime);
     }
 
-    /// <summary>Recording wins over speaking; tint only when token/_animated in set; [] never tints.</summary>
     [Fact]
     public void IndicatorStateHonorsTheTrayIndicatorSet()
     {
@@ -225,11 +151,6 @@ public class HealthSnapshotTests
         Assert.Equal(TrayIcon.IconState.Speaking, s.IndicatorState());
 
         s.Activity.TrayIndicator = Array.Empty<string>();
-        Assert.Equal(TrayIcon.IconState.Idle, s.IndicatorState());
-
-        s.Activity.Recording = false;
-        s.Activity.Speaking = false;
-        s.Activity.TrayIndicator = new[] { "stt", "tts" };
         Assert.Equal(TrayIcon.IconState.Idle, s.IndicatorState());
     }
 }

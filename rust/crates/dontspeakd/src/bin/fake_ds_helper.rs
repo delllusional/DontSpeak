@@ -1,34 +1,10 @@
-//! `dontspeakd-fake-helper` — a fake `ds-helper --serve` process, built as an ordinary
-//! artifact of this crate (like `ds-aec`'s `ds-aec-probe`: Cargo has no way to scope a
-//! `[[bin]]` to `cargo test` only, so this exists in every `cargo build`/`cargo test` of
-//! `dontspeakd`, debug and release alike — it is NOT test-gated). Never spawned by
-//! production code and never packaged/shipped (every packaging/install script names the
-//! real `ds-helper` literally). Exists solely so `tts::wedge_recovery_tests` (issue #34,
-//! item 2) has a REAL child process that speaks just enough of the `ds-helper-proto` wire
-//! to simulate a genuinely hung native STT finalize call, without the real `ds-helper`'s
-//! model/mic/audio dependencies.
+//! Fake `ds-helper --serve` for `tts::wedge_recovery_tests`. Not packaged; built always
+//! (Cargo can't test-only `[[bin]]`). Never production-spawned.
 //!
-//! Protocol: emits READY immediately (unless `DONTSPEAK_FAKE_WEDGE_PRE_READY` is set in
-//! the env — then it wedges FIRST: alive, silent, stdout open, never printing READY/ERR
-//! or closing the pipe, mirroring a real helper stuck pre-READY in ORT provider init or
-//! behind an AV scan of the model file — the issue #59 shape the READY-handshake bound
-//! in `tts::start_locked` exists to kill), then per stdin line:
-//!   * a `listen` request emits one `PARTIAL wedge-ack` line FIRST — a real, recognized
-//!     `ds-helper-proto` token that `listen_cancellable`'s own event loop demuxes and
-//!     hands to the caller's `on_partial` callback, which is how the test proves the
-//!     request was actually received (not a made-up out-of-band marker) — THEN wedges:
-//!     never reads or responds to stdin again, mirroring a real (single-worker-thread)
-//!     `ds-helper` blocked inside one hung native call.
-//!   * a `speak` request reports progress/stats and replies DONE immediately. When the
-//!     first-spawn-only `DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS` is set, it instead reports one
-//!     progress batch, waits that many milliseconds, and exits.
-//!   * `load tts` reports TTSLOADED; other fire-and-forget ops are silently ignored, same
-//!     as the real protocol's fire-and-forget ops.
-//!
-//! EOF on stdin exits cleanly. Parses just the `op` field via `serde_json` (the crate
-//! already depends on it for this exact protocol) rather than substring-matching the raw
-//! line — a substring match would misfire on any request whose `text` field happens to
-//! contain the literal word "listen" or "speak".
+//! READY unless `DONTSPEAK_FAKE_WEDGE_PRE_READY` (pre-READY hang — #59 handshake kill).
+//! `listen` → `PARTIAL wedge-ack` then hang; `speak` → DONE (or exit after
+//! `DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS`); `load tts` → TTSLOADED. Parse `op` via JSON
+//! (not substring). EOF exits.
 
 use std::io::{BufRead, Write};
 

@@ -1,15 +1,15 @@
 //! Canonical dictation confirm-panel state — single source for the `dictation.state` wire token.
 //!
 //! Producer (`dontspeakd::status::dictation_state`) derives one [`DictationState`] per snapshot
-//! with precedence `awaiting_confirm > (recording && local_stt) > refused > hidden`, stores
-//! [`DictationState::as_str`] in [`crate::Dictation::state`] (additive; legacy booleans stay).
-//! Rust consumers classify via [`DictationState::parse`], not raw `&str` matching.
+//! with precedence `awaiting_confirm > (recording && local_stt) > refused > hidden` and stores
+//! it typed in [`crate::Dictation::state`]. Serde emits the wire token.
 //!
 //! Platform UIs (Swift/C#) hand-mirror token values across the C ABI; the pinning test below
-//! blocks silent drift. Absent/unknown token ⇒ fall back to legacy booleans (never straight to
-//! hidden), so version skew cannot kill the panel.
+//! blocks silent drift.
 
 use std::str::FromStr;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Dictation confirm-panel state; 1:1 with `dictation.state`. Panel shown when not `hidden`.
 /// Producer precedence and skew fallback: module docs.
@@ -60,6 +60,26 @@ impl FromStr for DictationState {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         DictationState::parse(s).ok_or(())
+    }
+}
+
+/// Wire token string (not externally-tagged JSON).
+impl Serialize for DictationState {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+/// Unknown token → error (producer only emits [`DictationState::ALL`]).
+impl<'de> Deserialize<'de> for DictationState {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        DictationState::parse(&s).ok_or_else(|| {
+            serde::de::Error::unknown_variant(
+                &s,
+                &["hidden", "recording", "awaiting_confirm", "refused"],
+            )
+        })
     }
 }
 

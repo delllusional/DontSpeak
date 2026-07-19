@@ -7,9 +7,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
-description = "The ds-helper child's stdout reply-token vocabulary — one shared definition for the emitter (ds-helper) and the parser (dontspeakd), so the two sides of the wire contract can't drift."
+description = "ds-helper child wire vocabulary: stdout reply-token constants and typed stdin op/engine enums shared by ds-helper and dontspeakd."
 
-# Deliberately a zero-dependency leaf: constants only, no formatting/parsing logic.
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

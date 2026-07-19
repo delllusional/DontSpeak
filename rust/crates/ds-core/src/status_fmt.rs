@@ -1,10 +1,5 @@
-//! Shared status-panel formatters for every native UI (macOS SwiftUI, Windows WinUI,
-//! Linux GTK) via the C ABI. Formerly duplicated per-platform: engine-state word,
-//! live duration, runtime label, RTF/first-audio range + count stats.
-//!
-//! Stat formatters return the COMPLETE string (number formatting included) so hosts
-//! render byte-identically. Decimal separator is `.` and not yet locale-aware —
-//! deliberate "de-dup first, prettify later" tradeoff.
+//! Status-panel formatters for every host via C ABI. Complete strings (byte-identical
+//! hosts); decimal `.` (not locale-aware yet).
 
 /// Fill a catalog string's `%{name}` placeholders (mirrors rust-i18n; avoids JSON
 /// round-trip for these NUL-free args).

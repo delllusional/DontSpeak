@@ -69,8 +69,8 @@ enum TrayState: Equatable {
     /// `tray_indicator` gates color ([] = never). Shared `ds_tray_icon_kind` — one rule with Win/Linux.
     @MainActor static func current(_ core: Core) -> TrayState {
         switch Core.trayIconKind(
-            sttActive: core.activity.sttActive,
-            ttsActive: core.activity.ttsActive,
+            sttActive: core.activity.recording,
+            ttsActive: core.activity.speaking,
             trayIndicator: core.activity.trayIndicator
         ) {
         case "recording": return .recording

@@ -133,7 +133,7 @@ struct StatusView: View {
                         EngineStatRow(
                             role: L.t("status.engine.role_diar"),
                             detail: L.t("status.engine.pyannote"),
-                            status: core.engineDots.diarizer
+                            status: core.diarization.status
                         ) { DiarStatsContent() }
                     }
                 }
@@ -149,43 +149,41 @@ struct StatusView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// TTS row: slot from shared `ds_active_tts_slot` (config token → model_status object key).
     @ViewBuilder
     private var ttsEngineRow: some View {
-        switch Core.activeTtsSlot(core.selection.ttsEngine) {
-        case "tts_system":
+        switch core.tts.engine {
+        case "system":
             EngineStatRow(
                 role: L.t("status.engine.role_tts"), detail: L.t("status.engine.system"),
-                status: core.engineDots.ttsSystem
+                status: core.tts.status
             ) { TtsStatsContent() }
-        case "kokoro":
+        case "built_in":
             EngineStatRow(
                 role: L.t("status.engine.role_tts"), detail: L.t("status.engine.kokoro"),
-                status: core.engineDots.kokoro
+                status: core.tts.status
             ) { TtsStatsContent() }
         default:
             OffEngineRow(role: L.t("status.engine.role_tts"))
         }
     }
 
-    /// STT row: slot from shared `ds_active_stt_slot`.
     @ViewBuilder
     private var sttEngineRow: some View {
-        switch Core.activeSttSlot(core.selection.sttEngine) {
+        switch core.stt.engine {
         case "claude_code":
             EngineStatRow(
                 role: L.t("status.engine.role_stt"), detail: L.t("status.engine.claude_code"),
-                status: core.engineDots.claudeCode
+                status: core.stt.status
             ) { SttStatsContent() }
         case "system":
             EngineStatRow(
                 role: L.t("status.engine.role_stt"), detail: L.t("status.engine.system"),
-                status: core.engineDots.system
+                status: core.stt.status
             ) { SttStatsContent() }
-        case "parakeet":
+        case "built_in":
             EngineStatRow(
                 role: L.t("status.engine.role_stt"), detail: L.t("status.engine.parakeet"),
-                status: core.engineDots.parakeet
+                status: core.stt.status
             ) { SttStatsContent() }
         default:
             OffEngineRow(role: L.t("status.engine.role_stt"))
@@ -311,7 +309,7 @@ private struct CapsLockRow: View {
 
     /// Mic row only for engines we capture — see `dontSpeakUsesMicrophone`.
     private var showsMicrophone: Bool {
-        dontSpeakUsesMicrophone(sttEngine: core.selection.sttEngine)
+        dontSpeakUsesMicrophone(sttEngine: core.stt.engine)
     }
 
     /// Nested grants for header: orange only on DENIED (not .unknown). Mic only if showsMicrophone.
@@ -325,8 +323,8 @@ private struct CapsLockRow: View {
     /// Caps loop state folded with nested grants (denied → orange on collapsed header).
     private var capsCombined: EngineStatus {
         if permsRollup == .denied { return .blocked }
-        if core.activity.capsRunning { return .running }
-        return core.activity.capsWanted ? .blocked : .idle
+        if core.activity.capsActive { return .running }
+        return core.activity.capsEnabled ? .blocked : .idle
     }
 
     var body: some View {
@@ -414,7 +412,7 @@ private struct LifetimeContent: View {
 private struct TtsStatsContent: View {
     @Environment(Core.self) private var core
     var body: some View {
-        if core.selection.ttsEngine == "system" {
+        if core.tts.engine == "system" {
             // Whole row opens Spoken Content (no local RTF for `say`).
             LabeledContent {
                 Image(systemName: "arrow.up.forward.app").foregroundStyle(.secondary)
@@ -425,7 +423,7 @@ private struct TtsStatsContent: View {
             .onTapGesture { core.openSpokenContentSettings() }
             .linkCursor()
         } else {
-            if let prov = core.selection.ttsProvider {
+            if let prov = core.tts.provider {
                 LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(prov))
             }
             let s = core.stats.tts
@@ -451,13 +449,13 @@ private struct TtsStatsContent: View {
 private struct SttStatsContent: View {
     @Environment(Core.self) private var core
     var body: some View {
-        if core.selection.sttEngine == "built_in", let prov = core.selection.sttProvider {
+        if core.stt.engine == "built_in", let prov = core.stt.provider {
             LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(prov))
         }
         // Claude Code: show synthesized key, not local RTF.
         let s = core.stats.stt
-        if core.selection.sttEngine == "claude_code" {
-            if let k = core.selection.claudeCodeKey, !k.isEmpty {
+        if core.stt.engine == "claude_code" {
+            if let k = core.stt.delegationKey, !k.isEmpty {
                 glassHint("status.stt_claude_code", ["key": k])
             } else {
                 glassHint("status.stt_claude_code_off")
@@ -479,14 +477,14 @@ private struct SttStatsContent: View {
 private struct DiarStatsContent: View {
     @Environment(Core.self) private var core
     var body: some View {
-        let s = core.stats.diarization
+        let s = core.diarization
         if !s.enabled {
             glassHint("status.diarization_disabled")
         } else if s.speakers.isEmpty {
             glassHint("status.diarization_no_speakers")
         } else {
-            if !s.runtime.isEmpty {
-                LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(s.runtime))
+            if !s.provider.isEmpty {
+                LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(s.provider))
             }
             LabeledContent(
                 L.t("status.diarization_enrolled"),

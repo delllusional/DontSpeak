@@ -28,12 +28,9 @@ private enum Overlay {
 @Observable @MainActor
 final class DictationModel {
     var text: String = ""
-    var target: String?
-    var awaiting: Bool = false
-    var recording: Bool = false
     /// Editable paste target focused? False → warning glow.
     var hasTarget: Bool = true
-    /// Engine `prompt_glow` — shared with Windows.
+    /// Derived from the canonical dictation state.
     var promptGlow: Bool = false
     /// User-resizable; drives content re-wrap.
     var width: CGFloat = Overlay.width
@@ -233,28 +230,19 @@ final class DictationPanelController {
     /// Apply Core dictation snapshot; show gate is `dictation.state` token.
     func apply(
         state: String,
-        recording: Bool, awaiting: Bool, text: String, target: String?, local: Bool, hasTarget: Bool,
-        promptGlow: Bool, refused: Bool
+        text: String, hasTarget: Bool
     ) {
         // != guards (same as Core.apply) — @Observable has no equality short-circuit.
-        let target = (target?.isEmpty == false) ? target : nil
         // Refused start reuses no-target orange wash (single overlay cue).
+        let refused = state == "refused"
         let hasTarget = hasTarget && !refused
-        if model.recording != recording { model.recording = recording }
-        if model.awaiting != awaiting { model.awaiting = awaiting }
         if model.text != text { model.text = text }
-        if model.target != target { model.target = target }
         if model.hasTarget != hasTarget { model.hasTarget = hasTarget }
+        let promptGlow = state == "recording" && text.isEmpty
         if model.promptGlow != promptGlow { model.promptGlow = promptGlow }
 
         // Canonical state token (ds-status dictation_state) — same show gate every platform.
-        let show: Bool
-        switch state {
-        case "hidden": show = false
-        case "recording", "awaiting_confirm", "refused": show = true
-        // Older engine: legacy boolean derivation.
-        default: show = awaiting || (recording && local) || refused
-        }
+        let show = state != "hidden"
         guard show else {
             if panel.isVisible { panel.orderOut(nil) }
             return
@@ -301,7 +289,7 @@ struct DictationOverlay: View {
     /// One flip under repeatForever keeps glow pulsing without a timer.
     @State private var breathe = false
 
-    /// Engine `prompt_glow` (shared with Windows).
+    /// Speak-now glow derived from the canonical dictation state.
     private var prompting: Bool { model.promptGlow }
 
     /// Whole-card orange wash when no paste target (separate from white speak-now ring).

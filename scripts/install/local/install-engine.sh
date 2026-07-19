@@ -1,49 +1,28 @@
 #!/usr/bin/env bash
-# install-engine.sh — build + install the dontspeak ENGINE BINARIES with a
-# BUILD_ID. There is no standalone daemon; DontSpeak.app hosts the engine in-process.
-# Called by BOTH:
-#   • scripts/install/local/install.sh (first-time / full CLI install), and
-#   • apps/macos/bundle.sh (so building the app ALWAYS rebuilds+installs matching binaries).
+# install-engine.sh — build+install CLI bins (dontspeak, ds-helper) with BUILD_ID.
+# No standalone daemon (app hosts engine). Called by install.sh + bundle.sh.
 #
-# IMPORTANT (see docs/BUILD-DEPLOY.md): this installs to ~/.local/bin only. The RUNNING APP
-# spawns its OWN BUNDLED `Contents/MacOS/ds-helper` and runs the engine in-process, so a
-# HELPER or ENGINE change is NOT live until a full `bundle.sh` (or a manual copy-into-bundle +
-# re-sign + relaunch). Only HOOK / MCP changes in the `dontspeak` binary go live via this script
-# (the wired hooks invoke ~/.local/bin/dontspeak directly).
+# Installs to ~/.local/bin only — app uses bundled ds-helper; helper/engine changes
+# need full bundle.sh. Hooks/MCP from this script go live via ~/.local/bin/dontspeak.
 #
-# What it does (idempotent, macOS-first):
-#   1. compute a BUILD_ID (git short hash + -dirty) unless DONTSPEAK_BUILD_ID is set,
-#   2. cargo build --release the 2 CLI bins (dontspeak MCP/hooks + ds-helper); the id is
-#      baked into the engine LIBRARY (dontspeakd's build.rs), which the app links via ds-core,
-#   3. install them to $INSTALL_DIR (default ~/.local/bin),
-#   4. codesign ALL installed bins with a STABLE identity AND the app's signing
-#      identifier (app.dontspeak.org) so the Accessibility/Input-Monitoring grants
-#      survive rebuilds and are shared with the app bundle (ad-hoc only as fallback),
-#   (logging is ~/Library/Logs/dontspeak.log with in-process rotation, no conf.)
-#
-# Inputs (env): DONTSPEAK_INSTALL_DIR, DONTSPEAK_BUILD_ID, DONTSPEAK_CODESIGN_ID.
-# Echoes the resolved BUILD_ID as its LAST line (callers capture it for Info.plist).
+# Env: DONTSPEAK_INSTALL_DIR, DONTSPEAK_BUILD_ID, DONTSPEAK_CODESIGN_ID.
+# Last stdout line = BUILD_ID.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-# Shared helpers: PATH setup, compute_build_id, find_codesign_id, ensure_local_sign_identity.
 . "$REPO/scripts/install/lib/common.sh"
 RUST_DIR="$REPO/rust"
 H="$HOME"
 INSTALL_DIR="${DONTSPEAK_INSTALL_DIR:-$H/.local/bin}"
 UNAME="$(uname -s)"
 
-# ── 1. BUILD_ID (git short hash + -dirty), unless the caller pinned one ───────────
-# compute_build_id (scripts/install/lib/common.sh) is the SAME id the macOS app stamps, so the
-# engine and app stay in lockstep (the app's drift check compares them).
+# 1. BUILD_ID (debug log only, not status wire)
 DONTSPEAK_BUILD_ID="$(compute_build_id "$REPO")"; export DONTSPEAK_BUILD_ID
 echo "==> engine BUILD_ID = $DONTSPEAK_BUILD_ID" >&2
 
 mkdir -p "$INSTALL_DIR"
 
-# ── 2. build the 2 CLI bins. The BUILD_ID rides the dontspeakd LIBRARY's build.rs (a dep
-#       of the `dontspeak` bin via ds-tools→…, and of the app via ds-core), so exporting it
-#       above is enough — there is no standalone daemon bin to build. ────────────────────
+# 2. CLI bins (BUILD_ID via dontspeakd build.rs)
 echo "==> build hooks/mcp + ds-helper (release)" >&2
 ( cd "$RUST_DIR" && cargo build --release \
     -p dontspeak -p ds-helper \
@@ -55,16 +34,10 @@ for b in dontspeak ds-helper; do
   install -m 0755 "$REL/$b" "$INSTALL_DIR/$b"
 done
 
-# ── 3. codesign: STABLE identity + the app's identifier for EVERY bin ───────────────
-# Sign both installed bins with the SAME stable cert AND the SAME signing
-# identifier the app bundle uses (app.dontspeak.org — see apps/macos/bundle-lib.sh).
-# One cert + one identifier across the app, its bundled helper, and these CLI bins means
-# TCC (Accessibility / Input Monitoring) keys every component to ONE app identity, so the
-# grants are shared and survive rebuilds. A stable cdhash is what makes them persist;
-# ad-hoc (no identity) rotates it and re-prompts every build, so it's only the fallback.
+# 3. Stable sign with app.dontspeak.org (shared TCC); ad-hoc fallback
 if [ "$UNAME" = "Darwin" ]; then
-  ensure_local_sign_identity   # mint the self-signed local-dev cert ONCE if none exists (scripts/install/lib/common.sh). This runs in bundle.sh step 0, BEFORE step 3 signs the app — provisioning here means the bins get the STABLE signature on the very first clean install, not just on the second build. No-op when an identity already exists / in dist mode / when opted out.
-  STABLE_ID="$(find_codesign_id)"   # shared resolver (scripts/install/lib/common.sh); empty → the ad-hoc fallback below.
+  ensure_local_sign_identity
+  STABLE_ID="$(find_codesign_id)"
   sign_stable() {
     codesign --force --identifier "app.dontspeak.org" --sign "$STABLE_ID" "$INSTALL_DIR/$1" 2>/dev/null \
       && echo "   signed $1 (stable: ${STABLE_ID%% (*}…, app.dontspeak.org)" >&2 \
@@ -77,16 +50,8 @@ if [ "$UNAME" = "Darwin" ]; then
   done
 fi
 
-# The engine hosts in-process inside DontSpeak.app (ds_engine_start) and owns the RPC
-# socket; the MCP server launches the app (app.dontspeak.org) when the engine is needed.
-# Logging writes ~/Library/Logs/dontspeak.log with lean in-process size rotation
-# (rename-based, sudo-free) — there is no newsyslog conf to install.
-
-# ── 4. standalone uninstaller → $INSTALL_DIR (parity with the release installer,
-#      which places the SAME scripts/install/bundle/uninstall.sh bytes as dontspeak-uninstall) — so a
-#      dev box can fully remove DontSpeak without a repo checkout. ────────────────
+# 4. Standalone uninstaller (parity with release installer)
 install -m0755 "$REPO/scripts/install/bundle/uninstall.sh" "$INSTALL_DIR/dontspeak-uninstall"
 echo "==> placed $INSTALL_DIR/dontspeak-uninstall (full removal any time)" >&2
 
-# LAST line: the resolved id, for callers (bundle.sh stamps Info.plist with it).
 echo "$DONTSPEAK_BUILD_ID"

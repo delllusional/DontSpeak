@@ -1,6 +1,5 @@
 //! Engine lifecycle: `engine_run`, startup wiring, signals, `install_bin`.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,25 +21,24 @@ use crate::engine::{Engine, PasteBuf, PasteState};
 use crate::ipc::spawn_ipc_server;
 use crate::listener;
 use crate::stats;
-use crate::status::{CapsLog, EngineShared, StatusGate};
+use crate::status::{EngineShared, StatusGate};
 use crate::stt_test::TestSession;
 use crate::tts::TtsManager;
 use crate::ttsq::TtsQueue;
 
-pub(crate) const POLL_MS: u64 = 30; // caps-state poll interval
-/// Trailing-edge reload debounce after last trigger (headroom over ~581 ms nudge+echo).
+pub(crate) const POLL_MS: u64 = 30; // caps-state poll
+/// Trailing-edge reload debounce after last trigger.
 const RELOAD_QUIET_WINDOW: Duration = Duration::from_millis(750);
-/// Re-probe Accessibility so live grant/revoke flips the caps loop without reload.
+/// Re-probe AX so live grant/revoke flips caps without reload.
 const AX_PROBE_INTERVAL: Duration = Duration::from_secs(2);
-/// Slow auto-download retry when launch fetch failed / no network.
+/// Slow auto-download retry (launch fetch fail / no network).
 const AUTO_DL_RETRY_INTERVAL: Duration = Duration::from_secs(20);
-/// Nudge status gate while downloading (progress itself doesn't bump seq) ~2.5 Hz.
+/// Status-gate nudge while downloading (~2.5 Hz; progress alone doesn't bump seq).
 const DL_PROGRESS_BUMP_INTERVAL: Duration = Duration::from_millis(400);
-/// Coarse `stat()` backstop if config_watch fails/drops events.
+/// Coarse mtime backstop if config_watch drops events.
 const MTIME_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Run engine on this thread. Host drives `running` / `reload_requested` via C ABI
-/// (`engine_stop` / `engine_reload`). Only entry path; process needs OS permissions.
+/// Engine entry on this thread. Host drives `running` / `reload_requested` (C ABI).
 pub fn engine_run(
     running: Arc<AtomicBool>,
     reload_requested: Arc<AtomicBool>,
@@ -53,9 +51,7 @@ pub fn engine_run(
         log::LevelFilter::Info
     });
 
-    // FATAL startup failures RETURN an error instead of process::exit(): this fn
-    // runs on a background thread INSIDE the host app (the in-process FFI host),
-    // where an exit() would kill the whole app. The host surfaces the Err instead.
+    // Return Err, never process::exit (in-process host thread).
     let paths = match Paths::resolve() {
         Some(p) => p,
         None => {
@@ -71,17 +67,8 @@ pub fn engine_run(
             return Err(EngineError::PlatformInit(e.to_string()));
         }
     };
-    // engine-owns-everything: Accessibility (CGEventPost) is needed ONLY for the
-    // Caps-Lock dictation loop — NOT for the RPC host, TTS, STT capture,
-    // or config. So a denied preflight is a WARNING, not a fatal exit: the engine
-    // stays up as the resident service (no more launchd crash-loop), and the caps
-    // loop self-gates on AX trust (re-probed each reload, so granting it later +
-    // a reload nudge enables dictation without a restart).
-    // One-time PROMPT for the OS permission the caps loop needs (macOS
-    // Accessibility). This registers the app in the Accessibility list AND shows the
-    // grant dialog on a fresh install, so the user has a row to toggle — without it
-    // the silent `preflight` probe below just keeps logging "not trusted" forever and
-    // the app never appears in Settings. No-op off macOS / when already trusted.
+    // AX needed only for Caps loop — denied is warn, not fatal (engine stays up).
+    // request_permissions: one-time prompt so the app appears in Settings.
     plat.request_permissions();
     if let Err(e) = plat.preflight() {
         log::warn!(
@@ -91,22 +78,12 @@ pub fn engine_run(
         );
     }
 
-    // Read the physical-hold threshold from config.toml. Fail-open:
-    // `VoiceConfig::load` already defaults long_press_ms=600 on any error, so a
-    // missing or invalid config.toml still yields a working engine.
+    // Fail-open load (defaults on bad TOML).
     let cfg = VoiceConfig::load(&paths);
     let long_press_ms = cfg.long_press_ms;
 
-    // One-time PROMPT for macOS Speech-Recognition authorization when the config
-    // resolves to System STT — mirrors `plat.request_permissions()` above (the same
-    // "ask once at boot" shape for Accessibility). Without this, a machine that never
-    // went through the explicit `set_config(stt_engine=system)` opt-in gate (e.g. the
-    // default `stt_engine_ladder` picking System, unset by the user) never calls
-    // `system_authorize()` at all: the recognizer sits in `Preparing` (orange) forever
-    // and every Caps-Lock tap gets refused, with no path to actually become usable.
-    // Re-run on every reload too (see the `Run` arm below) — the ladder can newly
-    // resolve to System after boot as well (a hand-edited config.toml, or a higher rung
-    // losing availability), and that path never went through `set_config` either.
+    // System STT speech-auth prompt at boot (and reload) — ladder can resolve to System
+    // without set_config's explicit opt-in.
     authorize_system_stt_if_needed(&cfg, &reload_requested, &running);
 
     log::info!(
@@ -115,22 +92,20 @@ pub fn engine_run(
          stt={} debug={debug})",
         cfg.resolved_stt().map(|e| e.as_str()).unwrap_or("off")
     );
+    // DONTSPEAK_BUILD_ID — log-only, not on wire.
+    log::debug!(
+        target: "engine",
+        "build_id={}",
+        env!("DONTSPEAK_BUILD_ID")
+    );
 
-    // Make sure both our roots exist before we write settings / the pidfile / bind the RPC
-    // socket — unlike ~/.claude they aren't created by another tool. On Windows these are
-    // distinct (roaming %APPDATA% config vs local %LOCALAPPDATA% state); on macOS they're
-    // the same dir. (Individual writers also create_dir_all their own parents.)
     let _ = std::fs::create_dir_all(&paths.config_dir);
     let _ = std::fs::create_dir_all(&paths.state_dir);
 
-    // Converge each AI client's wiring to config.toml's declared `exclude_clients` (absent ⇒ all
-    // supported). Runs OFF the boot thread so a slow client-file write never delays engine
-    // startup; a steady-state boot writes nothing (the writers short-circuit on an unchanged
-    // document). Diagnostics from the writers go to the host's (discarded) stderr — the engine
-    // logs only a one-line exit-code summary. LIMITATION: a client installed while the engine is
-    // already running (with `exclude_clients` unchanged) is not wired until the next boot.
+    // Wire reconcile off-thread (exclude_clients). Limitation: clients installed
+    // mid-run with unchanged exclude_clients wait until next boot.
     {
-        let paths = paths.clone(); // Paths: Clone
+        let paths = paths.clone();
         std::thread::spawn(move || {
             let code = ds_wire::reconcile(&paths);
             if code != 0 {
@@ -139,15 +114,7 @@ pub fn engine_run(
         });
     }
 
-    // Single-instance guard: evict an OLDER engine BEFORE we bind the socket below.
-    // launchd's KeepAlive only enforces one launchd-managed daemon — it does NOT
-    // cover the engine running in-process inside the GUI host, and Windows/Linux
-    // have no OS singleton at all. Since `ds_ipc::bind` unlinks + rebinds the
-    // socket, a second engine would otherwise STEAL the path from a still-running
-    // first one, leaving two engines that both narrate (heard as the same reply
-    // spoken twice after a reinstall/upgrade). Ask the old one to exit first; this
-    // is cross-platform (SIGTERM → clean shutdown on unix; TerminateProcess on
-    // Windows, after which its helper self-exits on stdin EOF). No-op if none/dead.
+    // Evict older engine before bind — IPC rebind would steal socket and double-narrate.
     if let Some(old) = ds_config::evict_stale_engine(&paths.engine_pid, std::process::id()) {
         log::info!(
             target: "engine",
@@ -155,9 +122,7 @@ pub fn engine_run(
         );
     }
 
-    // §E.4: write our own pid so the NEXT engine to start can evict US + probe our
-    // liveness (see evict_stale_engine above). Tolerate a write failure: eviction just
-    // no-ops, so the engine keeps running either way.
+    // Own pid for next instance's eviction. Write failure → eviction no-ops.
     if let Err(e) = std::fs::write(&paths.engine_pid, std::process::id().to_string()) {
         log::warn!(
             target: "engine",
@@ -166,18 +131,9 @@ pub fn engine_run(
         );
     }
 
-    // `running` / `reload_requested` are owned by the caller: the in-app FFI host
-    // flips them from engine_stop()/engine_reload().
-
-    // Live stats for the warm helper (Kokoro TTS + Parakeet STT), fed below.
     let tts_stats = Arc::new(stats::TtsStats::new());
     let stt_stats = Arc::new(stats::SttStats::new());
-    // Persisted lifetime seconds (spoken + heard), summed across sessions. Lives next
-    // to the other side files in our data dir; loaded now, rewritten after each utterance.
     let lifetime = Arc::new(stats::LifetimeSeconds::load(paths.stats_toml.clone()));
-    // Status push gate: every component that flips a `model_status` flag bumps it; the
-    // `WaitModelStatus` IPC handler blocks on it. ONE Arc, shared by all of them. Built
-    // up front so the TTS manager + queue (below) can be wired to it at construction.
     let status_gate = StatusGate::new();
     let tts = Arc::new(TtsManager::new(
         install_bin("ds-helper"),
@@ -186,39 +142,21 @@ pub fn engine_run(
         stt_stats.clone(),
         lifetime.clone(),
     ));
-    // Wire the gate into the TTS manager so a mute toggle pushes (the muted flag is in
-    // `model_status`). Done after construction to keep `new`'s signature test-friendly.
     tts.set_status_gate(status_gate.clone());
-    // STT runs through the warm helper (consolidation) — TestSession delegates to it.
     let stt_test = Arc::new(TestSession::new(tts.clone()));
-    // Effective caps state (AX-gated), shared with the RPC status handler.
     let caps_active = Arc::new(AtomicBool::new(false));
-    // Live dictation flag + recent-events log, the engine → app caps status
-    // channel surfaced through `model_status`.
     let stt_active = Arc::new(AtomicBool::new(false));
-    let caps_log: CapsLog = Arc::new(Mutex::new(VecDeque::new()));
-    // Dictation-preview buffer shared between the engine (writes partials/finals,
-    // pastes on confirm) and the IPC status handler (reads it for the `dictation`
-    // object the confirm panel renders).
     let paste: PasteState = Arc::new(Mutex::new(PasteBuf::default()));
-    // The ONE mic-in-use watcher (CoreAudio listener on macOS, poll thread elsewhere). Its
-    // cached state feeds BOTH the TTS worker's focus-hold and the mic-barge watcher, so
-    // neither queries the audio device on a timer. Held for the engine's lifetime.
+    // One mic watcher for TTS focus-hold + barge (cached; no per-timer device query).
     let mic_watcher = ds_platform::MicWatcher::spawn(|_| {});
-    // Seed every helper spawn preference before starting the queue or exposing IPC. A speak can
-    // otherwise reach `restart_if_crashed` during boot and start an STT-only helper from the
-    // constructor defaults; that process has no playback sink and persists until a later reload.
+    // Seed spawn prefs before queue/IPC — else boot heal can start STT-only helper
+    // (constructor defaults; no playback sink until reload).
     tts.set_full_duplex_pref(full_duplex_wanted(&cfg));
     tts.set_stt_provider_pref(helper_stt_provider(&cfg));
-    // Preload STT only for the built-in engine. `helper_stt_provider` resolves to "cpu" even for
-    // Off/ClaudeCode, so the provider token itself cannot gate this.
+    // STT preload only for built_in (provider token is "cpu" even for Off/ClaudeCode).
     tts.set_stt_wanted(helper_uses_stt(&cfg));
     tts.set_tts_wanted(helper_uses_tts(&cfg));
-    // `start_locked` resolves its model-presence gate from this stored preference. While stopped,
-    // `set_provider` only records the value; its restart behavior begins once a child is running.
     tts.set_provider(cfg.resolved_tts_provider().as_str());
-    // The single TTS serializer: all speech (replies + narration) flows through
-    // this queue onto the warm child, so there is no per-block model reload.
     let ttsq = TtsQueue::start(
         tts.clone(),
         paths.clone(),
@@ -226,18 +164,12 @@ pub fn engine_run(
         mic_watcher.handle(),
     );
 
-    // Background model-download state (polled via model_status by the app's dots).
     let downloads = Arc::new(Mutex::new(DownloadState::default()));
 
-    // The ONE allowed structural tweak: bundle the shared Arc handles threaded
-    // through the RPC server and the status aggregator into a single struct, built
-    // ONCE here (same Arcs, same clones), so both take `&EngineShared` instead of
-    // a long list of loose `Arc`-cloned args.
     let shared = EngineShared {
         tts: tts.clone(),
         caps_active: caps_active.clone(),
         stt_active: stt_active.clone(),
-        caps_log: caps_log.clone(),
         paste: paste.clone(),
         downloads: downloads.clone(),
         tts_stats: tts_stats.clone(),
@@ -246,16 +178,11 @@ pub fn engine_run(
         gate: status_gate.clone(),
     };
 
-    // Codex mid-turn narration: the session ids the hooks report over IPC (GreetSession /
-    // MarkActive) land in this registry; the codex_stream supervisor resumes ONLY matching
-    // app-server threads. Built before the IPC server so its arms can nudge it.
+    // Session registries before IPC (hooks nudge; supervisors filter).
     let codex_sessions = crate::codex_stream::SessionRegistry::new();
-    // Grok mid-turn: same discovery path, file-tail of updates.jsonl (not app-server).
     let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
-    // engine-owns-everything: host the RPC socket FIRST so ping/get/set/shutdown
-    // are answerable immediately — BEFORE warming Kokoro below, whose model load
-    // blocks for a few seconds (otherwise a client right after launch times out).
+    // RPC first — answer before Kokoro warm blocks.
     spawn_ipc_server(
         shared.clone(),
         paths.clone(),
@@ -268,15 +195,9 @@ pub fn engine_run(
         grok_sessions.clone(),
     );
 
-    // Barge-in TTS the instant the mic goes active (Claude Code's own voice
-    // recording is invisible to the engine otherwise), so speech never plays into
-    // a live recording.
     spawn_mic_barge_watcher(ttsq.clone(), stt_active.clone(), mic_watcher.handle());
 
-    // The Codex app-server SUBSCRIBER (mid-turn narration for `codex --remote` sessions —
-    // docs/STREAMING-NARRATION.md). Self-gating: parks while `codex_stream` is off,
-    // `~/.codex` is absent, or no session is registered; config is re-read per pass, so
-    // no ConfigChange plumbing is needed.
+    // Mid-turn supervisors (self-gating; re-read config each pass).
     crate::codex_stream::spawn_supervisor(
         paths.clone(),
         running.clone(),
@@ -285,8 +206,6 @@ pub fn engine_run(
         ttsq.clone(),
     );
 
-    // Grok interactive-session updates.jsonl tail (ACP agent_message_chunk). Parks while
-    // `grok_stream` is off, `~/.grok` is absent, or no Grok session is registered.
     crate::grok_stream::spawn_supervisor(
         paths.clone(),
         running.clone(),
@@ -295,23 +214,9 @@ pub fn engine_run(
         ttsq.clone(),
     );
 
-    // Warm Kokoro only when TTS is on AND Kokoro is the engine (System uses `say`,
-    // which needs no warm model). Blocks on the model load, but the RPC server
-    // thread above is already serving.
+    // Warm helper when needed (RPC already serving).
     tts.set_enabled(helper_needed(&cfg));
-    // Make the helper's resident models match the selection at boot (preload the
-    // selected engine, free the other) so the UI's "loaded" is right from the start.
-    // Apply the persisted execution-provider preference before the warm child
-    // starts; on Windows "cuda" downloads the GPU runtime (background) then restarts
-    // BOTH engines onto the GPU (the shared `provider` drives Kokoro TTS + Parakeet STT).
-    // Wire the warm-child reload hook + the shutdown observer BEFORE any download can start,
-    // so a model fetched here (or on a later reload / IPC request) restarts the child to load
-    // it — the shared self-heal that makes a provider switch / fresh install converge without
-    // a manual restart — and so a detached download's completion hook sees the SAME
-    // engine-lifetime `running` flag `ds-core`'s `engine_stop()` clears (a download that
-    // finishes after the engine has already been told to stop becomes a no-op instead of
-    // respawning the warm child / nudging a reload on an engine the caller believes is fully
-    // torn down).
+    // Wire reload/shutdown hooks before any download (completion must no-op after stop).
     wire(
         &downloads,
         tts.clone(),
@@ -321,17 +226,10 @@ pub fn engine_run(
             running: running.clone(),
         },
     );
-    // Full-auto: apply the provider and fetch EVERYTHING missing right away (no manual
-    // Download button) — the CUDA runtime first when the provider calls for it, then the
-    // model sets, all in parallel (`fetch_plan` pins the order). Retried on reload + the
-    // slow poll tick below if it fails.
     apply_provider_and_autofetch(&tts, &downloads, &cfg);
     reconcile_helper_models(&tts, &cfg);
 
-    // Select the STT engine from config. The factory has no silent substitution:
-    // an unavailable chosen engine degrades to the same inert placeholder off/None
-    // uses, never to a different engine. The reload path below rebuilds this box after an
-    // explicit nudge or config.toml change.
+    // No silent STT substitution — unavailable → inert placeholder.
     let mut daemon = Engine::with_config(
         plat,
         &cfg,
@@ -343,15 +241,9 @@ pub fn engine_run(
     daemon.ttsq = Some(ttsq.clone());
     daemon.caps_active = Some(caps_active.clone());
     daemon.stt_active = Some(stt_active.clone());
-    daemon.caps_log = Some(caps_log.clone());
-    // Share the SAME push gate the IPC `WaitModelStatus` handler blocks on, so the
-    // engine's dictation-change bumps wake the app's overlay push thread.
     daemon.status_gate = Some(status_gate.clone());
-    // Share the SAME preview buffer the IPC status handler reads, so partials the
-    // helper writes and the landed final transcript are visible to the confirm panel.
     daemon.paste = paste.clone();
-    // Parakeet dictation runs THROUGH the warm helper now (consolidation): rebuild
-    // the stt as HelperStt now that daemon.tts is set (with_config built the default).
+    // Rebuild STT now that tts is set (HelperStt path).
     daemon.stt = build_stt(
         &cfg,
         daemon.plat.clone(),
@@ -359,13 +251,8 @@ pub fn engine_run(
         &daemon.paste,
         Some(&paths),
     );
-    // Track whether that resolved to the LOCAL helper (same predicate build_stt uses:
-    // helper present AND model available) so `reload` can detect a later availability flip
-    // (fresh-install model download) and rebuild — see `Engine::reload`.
+    // For reload to detect local availability flip after first model download.
     daemon.stt_is_local = daemon.tts.is_some() && local_stt_available(&cfg);
-    // Always-listening: build the hands-free listener up front if configured
-    // (otherwise the Caps-Lock PTT path runs as before). Hot-reload toggles it
-    // via Engine::reload.
     if cfg.listen_mode == ds_config::ListenMode::Always {
         daemon.listener = Some(listener::Listener::new(
             &cfg,
@@ -382,45 +269,24 @@ pub fn engine_run(
     caps_active.store(daemon.caps_enabled, Ordering::Relaxed);
     let poll = Duration::from_millis(POLL_MS);
 
-    // Engine is up and serving: push the engineRunning transition so a client that was
-    // blocked on `WaitModelStatus` across a restart re-reads a fresh, live snapshot.
     status_gate.bump();
 
-    // Hot-reload watch state. SIGHUP (reload_requested) is the explicit
-    // "reload now" nudge; the mtime-watch makes a plain our config.toml write
-    // auto-apply. `pending_reload_since` is the trailing-edge debounce's own memory of
-    // an outstanding, not-yet-applied trigger (see `config_gate::reload_tick`) — `None`
-    // until the first trigger arrives, so nothing needs seeding.
     let mut last_seen = config_mtime(&paths.config_toml);
     let mut pending_reload_since: Option<Instant> = None;
-    // Re-probe Accessibility periodically so GRANTING it live flips the caps loop
-    // on (green dot) with no reload/restart — and revoking flips it off.
     let mut last_ax_probe = Instant::now()
         .checked_sub(AX_PROBE_INTERVAL)
         .unwrap_or_else(Instant::now);
     let mut last_auto_dl = Instant::now();
     let mut last_dl_bump = Instant::now();
-    let mut dl_was_active = false; // for the download active→ended edge (push the terminal state)
+    let mut dl_was_active = false; // active→ended edge for terminal state push
     let mut last_mtime_check = Instant::now()
         .checked_sub(MTIME_CHECK_INTERVAL)
         .unwrap_or_else(Instant::now);
-    // Push-based config watch (FSEvents/inotify/ReadDirectoryChangesW): flips
-    // `reload_requested` when config.toml changes, so the `stat()` below is only a
-    // coarse backstop. Held for the loop's lifetime — dropping the handle stops the watch.
+    // Push watch; mtime below is coarse backstop.
     let _config_watcher = crate::config_watch::spawn(&paths.config_toml, reload_requested.clone());
-    // Set when the platform reports its caps-HID monitor stuck (see
-    // `ds_platform::CapsKeyMonitor::caps_monitor_stuck`) — checked after the loop
-    // exits below to relaunch the whole process once the normal graceful shutdown
-    // (ds-helper killed, stats flushed, pidfile cleared) has already completed.
+    // Caps-HID stuck → relaunch after graceful shutdown.
     let mut relaunch_after_shutdown = false;
-    // Which resource triggered it (see `Engine::relaunch_reason`), captured at
-    // detection time for both the immediate log below and, if the relaunch budget
-    // is exhausted, the give-up message at the end of this function — NOT derived
-    // from a low-level `eprintln!` in ds_platform::macos::{iohid,led}, which goes
-    // to raw process stderr (a GUI-launched app's stderr typically isn't captured
-    // anywhere visible) rather than this engine's own persisted `log()`. This is
-    // the one line that reliably lands in dontspeak.log, so it names the resource
-    // itself instead of pointing at a sibling line that may not exist anywhere.
+    // Capture reason at detection for dontspeak.log (GUI stderr may be discarded).
     let mut relaunch_reason: Option<&'static str> = None;
 
     while running.load(Ordering::Relaxed) {
@@ -429,11 +295,7 @@ pub fn engine_run(
         if last_ax_probe.elapsed() >= AX_PROBE_INTERVAL {
             daemon.refresh_caps_gate();
             last_ax_probe = Instant::now();
-            // `running.swap` (not `.store`): only claim the relaunch if WE are the
-            // one transitioning it true→false. If it already reads false — e.g. an
-            // IPC `Request::Shutdown` (ipc.rs) landed this same instant because the
-            // user quit the app — a stuck caps monitor must not override an
-            // explicit quit with a relaunch; let this shutdown be a real one.
+            // swap: don't relaunch over an explicit quit that already cleared running.
             if daemon.needs_relaunch() && running.swap(false, Ordering::Relaxed) {
                 relaunch_reason = daemon.relaunch_reason();
                 log::info!(
@@ -446,35 +308,15 @@ pub fn engine_run(
             }
         }
 
-        // Full-auto download retry safety net: if an enabled engine's model is still
-        // missing (a launch-time download failed / had no network), re-kick it without any
-        // user action. Cheap + idempotent, but throttled so it's not a per-tick stat storm.
-        //
-        // Piggybacks the SAME throttle: a periodic `load stt`/`load tts` self-heal backstop.
-        // `reconcile_helper_models` fires-and-forgets a `load`/`unload` per wanted engine —
-        // idempotent (a resident model just re-confirms `STTLOADED`/`TTSLOADED`, gated by
-        // `ModelSlot::transition`'s change-gating so this can't spam StatusGate) — so
-        // re-sending it every interval recovers within one window from a dropped/
-        // never-delivered fire-and-forget stdio write: the `load`/`unload` request arriving
-        // while the helper is mid-restart, or a pipe write whose effect the sender can't
-        // confirm — there's no ack/request-id in the `dontspeakd`<->`ds-helper` wire protocol.
-        // NOT compensating for an internal `TtsManager`/`ModelSlot`/`SttResidencySlot` race —
-        // those are structurally closed (see `model_slot.rs`/`stt_residency.rs`), not this
-        // tick's job.
+        // Throttled: auto-download retry + fire-and-forget load/unload self-heal
+        // (no wire ack; recovers dropped stdio writes, not closed races).
         if last_auto_dl.elapsed() >= AUTO_DL_RETRY_INTERVAL {
             auto_download_missing(&downloads, &daemon.cfg);
             reconcile_helper_models(&tts, &daemon.cfg);
             last_auto_dl = Instant::now();
         }
 
-        // Live download progress + terminal transition: `DownloadProg.done` advances (and the
-        // download later ENDS) without bumping the status seq, so the app's seq-gated push would
-        // freeze the "Downloading N%" ring — showing a stuck ring even after the fetch failed or
-        // finished. While a download-manager fetch is active (EVERY model fetch runs there,
-        // Core ML sets included) nudge the gate so the percent tracks live; and bump ONCE MORE
-        // on the active→ended edge so the dot leaves the ring for its real terminal state —
-        // green (running) or a RED dot + failure note — instead of a stuck ring. Shared engine
-        // loop ⇒ identical on all UIs.
+        // Progress doesn't bump seq — nudge while active + once on active→ended.
         if last_dl_bump.elapsed() >= DL_PROGRESS_BUMP_INTERVAL {
             let downloading = downloads
                 .lock()
@@ -488,10 +330,7 @@ pub fn engine_run(
         }
 
         let hup = reload_requested.swap(false, Ordering::Relaxed);
-        // Throttle the config.toml stat to MTIME_CHECK_INTERVAL instead of every 30 ms
-        // tick. `current` defaults to `last_seen` on a non-check tick so a SIGHUP/RPC reload
-        // (which doesn't stat) leaves `last_seen` unchanged — the next stat tick re-detects
-        // any real edit normally.
+        // Throttle mtime; non-check ticks keep last_seen so hup doesn't mask edits.
         let mut current = last_seen;
         let mut mtime_changed = false;
         if last_mtime_check.elapsed() >= MTIME_CHECK_INTERVAL {
@@ -507,26 +346,13 @@ pub fn engine_run(
         );
         pending_reload_since = next_pending;
         match reload_decision {
-            // A trigger is outstanding but the quiet window hasn't elapsed — nothing else
-            // to do: `pending_reload_since` (just updated above) is what carries it to the
-            // next tick, no need to re-arm `reload_requested` (a fresh trigger next tick
-            // folds straight into that state regardless of the flag's value).
             crate::config_gate::ReloadTick::Defer => {}
             crate::config_gate::ReloadTick::Idle => {}
             crate::config_gate::ReloadTick::Run => {
-                // VoiceConfig::load is fail-open (bad TOML → defaults), so a reload
-                // never bricks the engine on a transient bad edit. (Documented: a
-                // hand-edit with a transient bad state would reload to DEFAULTS until
-                // the next valid save — matches startup behavior.)
+                // Fail-open load (bad TOML → defaults).
                 let new_cfg = VoiceConfig::load(&paths);
-                // Switching the STT engine starts a FRESH stats accumulator — the RTF / count
-                // shown in the engine's row must reflect ONLY the selected engine, never carry
-                // the previous engine's samples (e.g. Parakeet's numbers lingering under System).
                 let stt_engine_changed = new_cfg.resolved_stt() != daemon.cfg.resolved_stt();
-                // Re-run the client-wiring reconcile ONLY when the DESIRED set actually changed,
-                // so ordinary `set_config` writes (which never touch `exclude_clients`) don't churn
-                // client files. `daemon.cfg` is still the OLD config here (reload overwrites it
-                // below), so this diffs old→new. Off-thread like the boot trigger.
+                // Wire reconcile only when exclude set changes (avoid set_config churn).
                 if new_cfg.excluded_clients() != daemon.cfg.excluded_clients() {
                     let paths = paths.clone();
                     std::thread::spawn(move || {
@@ -537,19 +363,9 @@ pub fn engine_run(
                 if stt_engine_changed {
                     stt_stats.reset();
                 }
-                // Same one-time authorize nudge as boot — a reload (not just startup) can be
-                // the FIRST time the config resolves to System (a hand-edited config.toml, or
-                // the ladder falling through when a higher rung stops being available), and
-                // that path never goes through `set_config`'s explicit opt-in gate either.
                 authorize_system_stt_if_needed(&new_cfg, &reload_requested, &running);
-                // Newly-activated engine (e.g. user just enabled TTS) → apply the provider and
-                // auto-fetch its model(s), CUDA runtime included when the provider calls for it.
                 apply_provider_and_autofetch(&tts, &downloads, &new_cfg);
-                // Advance the mtime watermark. On a stat-tick reload `current` is already fresh;
-                // on a `hup` reload (push watcher / SIGHUP / RPC, which didn't stat) `current` is
-                // stale, so stat ONCE here — otherwise the ≤3 s backstop would re-stat, see the
-                // new mtime, and fire a second redundant reload for the same edit. (See the
-                // `reload_watermark` unit test.)
+                // Refresh watermark on hup so mtime backstop doesn't double-reload.
                 last_seen =
                     reload_watermark(mtime_changed, current, || config_mtime(&paths.config_toml));
             }
@@ -558,59 +374,22 @@ pub fn engine_run(
         std::thread::sleep(poll);
     }
     daemon.shutdown();
-    // Engine is stopping: push the engineRunning→false transition so any client still
-    // blocked on `WaitModelStatus` wakes now instead of waiting out its full timeout.
     status_gate.bump();
 
-    // CONC-2: the HOSTED (in-process FFI) path returns here without process-exit,
-    // so the OS does NOT reap our children for us — kill + reap the warm
-    // ds-helper child explicitly, or engine_stop()/app-quit orphans it (it
-    // would keep the mic/model alive after the engine "stopped"). set_enabled(false)
-    // runs stop_child(): drop stdin → kill → wait → join the reader. Idempotent and
-    // already the toggle-off teardown, so engine-stop exit is unaffected.
+    // Hosted path: OS won't reap children — stop helper explicitly.
     tts.set_enabled(false);
-    // CORR-2: the lifetime totals are persisted with a debounce off the reader
-    // thread, so a clean stop must flush the unwritten tail (a no-op when nothing
-    // is pending) — otherwise the last few utterances of the session are lost.
     lifetime.flush();
-    // Still-DETACHED on this return (not joined): the IPC server thread
-    // (spawn_ipc_server), the mic-barge watcher (spawn_mic_barge_watcher), the
-    // TtsQueue worker (TtsQueue::start), and — while a permission dialog is still
-    // unanswered — `authorize_system_stt_if_needed`'s thread (it checks `running` before
-    // touching `reload_requested`, so it's harmless past this point, just outstanding).
-    // They hold only Arc clones of the shared state and do no external IO after the
-    // socket is removed below; under the hosted FFI the engine is a singleton so a fresh
-    // start rebinds cleanly. Joining them would need stop signals threaded through each —
-    // deferred as too invasive for this conservative fix.
+    // Detached threads (IPC, barge, ttsq, optional auth) not joined — Arc-only, rebind OK.
 
-    // §E.4: remove the engine pidfile ONLY if it still records OUR pid — same
-    // don't-clobber-a-newer-instance discipline as ds-narrate::clear_self_pid
-    // (a freshly relaunched engine may have already overwritten it).
+    // Remove pid only if still ours (don't clobber a newer instance).
     if ds_config::read_engine_pid(&paths.engine_pid).map(|pid| pid as u32)
         == Some(std::process::id())
     {
         let _ = std::fs::remove_file(&paths.engine_pid);
     }
-    // Tidy the RPC socket on clean exit (a stale file is harmless — serve()
-    // unlinks it on the next start — but leaving it makes `ls` lie about state).
     let _ = std::fs::remove_file(&paths.engine_sock);
 
-    // Self-relaunch, requested above by the caps-HID-stuck check: spawn a fresh
-    // instance of the CURRENT executable, then return through the normal host path.
-    // This keeps stack unwinding and every still-live local Drop implementation intact;
-    // the ordinary shutdown sequence above has already killed ds-helper, flushed stats,
-    // and removed the pidfile and socket.
-    //
-    // Deliberately NOT `dontspeak::engine_launch::launch_host()` (`open -g -b
-    // app.dontspeak.org`): that helper is for "nothing is running yet, start the
-    // host app" (an MCP shim's cold-start path). Here the OLD instance is still
-    // mid-exit when the replacement is spawned — `open -b` resolving the same
-    // bundle id could just reactivate the dying instance instead of starting a
-    // truly fresh process, which is the one thing this relaunch must guarantee.
-    // A direct re-exec of this same binary sidesteps that. (Losing LaunchServices
-    // frontmost-activation doesn't matter either: the app runs with
-    // `NSApp.setActivationPolicy(.accessory)` — no Dock icon, nothing to "front."
-    // Losing argv doesn't matter: nothing here reads `CommandLine.arguments`.)
+    // Caps-HID stuck: re-exec this binary (not open -b — could reactivate dying instance).
     if relaunch_after_shutdown {
         if caps_relaunch_budget_exhausted(&paths) {
             log::info!(
@@ -626,15 +405,7 @@ pub fn engine_run(
         let relaunched = std::env::current_exe()
             .and_then(|exe| std::process::Command::new(&exe).spawn().map(|_| ()));
         if let Err(e) = relaunched {
-            // Every resource the normal quit path would have released is ALREADY
-            // gone at this point (ds-helper killed, socket/pidfile removed) — so
-            // this is not "stay up as a host," it's staying alive with nothing
-            // left running, on the theory that a visibly-dead process (no menu
-            // bar icon at all) is worse than a silent one a user can still find
-            // and manually relaunch. Expected to be unreachable in practice
-            // (current_exe/spawn failing on an already-running binary implies
-            // something like the executable vanishing from disk or the process
-            // table being exhausted).
+            // Resources already released — stay alive so user can find/relaunch manually.
             log::info!(
                 target: "engine",
                 "relaunch failed ({e}) — NOT exiting; this instance has already released \
@@ -646,22 +417,8 @@ pub fn engine_run(
     Ok(())
 }
 
-/// Spawn the one-time macOS Speech-Recognition authorization attempt for System STT, IF
-/// this resolution actually needs it ([`config_gate::system_stt_needs_authorization`]) —
-/// so an already-`Ready` (or off-macOS, where it's never selected) config never pays for
-/// a spurious thread +, on macOS <26, a real on-device smoke-transcribe. `system_authorize`
-/// BLOCKS on the OS permission flow, so it runs off this thread; on completion it nudges
-/// `reload_requested` (the SAME flag the download self-heal in `downloads.rs` uses) so
-/// `Engine::reload`'s `local_avail_flipped` check picks up a freshly granted (or freshly
-/// denied) recognizer without a restart. Skips the nudge if `running` has already gone
-/// false — the engine may have been asked to stop while this thread was blocked on the
-/// permission dialog, exactly the race `downloads.rs`'s own `shutdown` observer guards
-/// against for its detached completion hooks. Called from BOTH boot (`engine_run`, once)
-/// and every config reload (the ladder can newly resolve to System after boot too, via a
-/// hand-edited config.toml or a higher rung losing availability) — `system_authorize`
-/// otherwise runs ONLY through `set_config`'s explicit `AuthorizeSystemStt` opt-in gate
-/// (`dontspeak::tools::call_set_config`), which a config that resolves to System via the
-/// ladder alone never goes through.
+/// Off-thread System STT speech-auth when needed. Nudges reload on completion unless
+/// `running` already false (same shutdown race as download completion hooks).
 fn authorize_system_stt_if_needed(
     cfg: &VoiceConfig,
     reload_requested: &Arc<AtomicBool>,
@@ -686,21 +443,12 @@ fn authorize_system_stt_if_needed(
     });
 }
 
-/// Cap on relaunches over the caps-HID-stuck condition within [`CAPS_RELAUNCH_WINDOW`] —
-/// a persistent (not per-process) denial must not turn into a silent, unbounded
-/// quit/relaunch loop that bounces the menu-bar icon and cold-reloads the STT model
-/// every few seconds forever. Small marker file in the state dir (NOT an env var passed
-/// to the child): the relaunch re-execs this same binary directly, which does inherit
-/// env, but a marker on disk is simplest to reason about and survives regardless of
-/// exactly how the child gets started.
+/// Caps-HID relaunch cap within window (disk marker; avoid unbounded quit loop).
 const MAX_CAPS_RELAUNCHES: u32 = 3;
-/// A relaunch streak older than this doesn't count toward the cap — it's very unlikely
-/// to be the same stuck episode, so a fresh count is the right call.
+/// Streak older than this doesn't count (fresh stuck episode).
 const CAPS_RELAUNCH_WINDOW: Duration = Duration::from_secs(120);
 
-/// Read-modify-write the relaunch-streak marker; returns whether the budget is now
-/// exhausted (in which case the marker is left as-is — NOT bumped — so the guard stays
-/// tripped rather than resetting on every subsequent stuck detection while dead).
+/// RMW relaunch-streak marker. Exhausted → true without bumping (stay tripped).
 fn caps_relaunch_budget_exhausted(paths: &Paths) -> bool {
     let marker = paths.state_dir.join("caps-relaunch-guard");
     let now = std::time::SystemTime::now()
@@ -713,8 +461,6 @@ fn caps_relaunch_budget_exhausted(paths: &Paths) -> bool {
             let (count, at) = s.trim().split_once(' ')?;
             Some((count.parse::<u32>().ok()?, at.parse::<u64>().ok()?))
         })
-        // Outside the window, treat as no prior streak — a much-later, unrelated
-        // stuck episode shouldn't inherit an old count.
         .filter(|(_, at)| now.saturating_sub(*at) <= CAPS_RELAUNCH_WINDOW.as_secs())
         .map(|(count, _)| count)
         .unwrap_or(0);
@@ -725,14 +471,10 @@ fn caps_relaunch_budget_exhausted(paths: &Paths) -> bool {
     false
 }
 
-/// A FATAL engine-startup failure, RETURNED from [`engine_run`] instead of
-/// `process::exit()` so a startup failure on the in-process FFI host thread can't
-/// take down the whole app. The host logs/surfaces it.
+/// Fatal startup failure returned from [`engine_run`] (never process::exit).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
-    /// `$HOME` (and thus the runtime paths) could not be resolved.
     HomeUnresolved,
-    /// Platform init (input/event backend) failed; carries detail.
     PlatformInit(String),
 }
 
@@ -745,10 +487,7 @@ impl std::fmt::Display for EngineError {
     }
 }
 
-/// Resolve a sibling helper binary (e.g. `ds-helper`):
-///   1. a sibling of THIS executable with that name (the install layout — all
-///      bins land in the same `--bin` dir / `~/.local/bin`),
-///   2. bare `<name>` (resolved via `$PATH`).
+/// Sibling of this exe, else bare name on `$PATH`.
 fn install_bin(name: &str) -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
@@ -766,10 +505,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// A tempdir-rooted `Paths` with `state_dir` (where the relaunch-guard marker
-    /// lives) actually created — `caps_relaunch_budget_exhausted` silently no-ops
-    /// its `fs::write` if the parent dir is missing, which would make every case
-    /// here look like "budget never exhausts" for the wrong reason.
+    /// Paths with state_dir created (budget write no-ops if parent missing).
     fn test_paths() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());

@@ -19,11 +19,6 @@
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
-    <!-- BUILD_ID handshake: bundle.sh overwrites this (from git) per build and bakes
-         the SAME id into the engine, so the app can detect + auto-restart the engine
-         that drifted out of lockstep. "dev" for a plain swift build. -->
-    <key>DSBuildID</key>
-    <string>dev</string>
     <!-- App icon: AppIcon.icon (Icon Composer / Liquid Glass) compiled by actool
          into Resources/Assets.car (macOS 26, CFBundleIconName) + a fallback
          Resources/AppIcon.icns (CFBundleIconFile). Both keys named "AppIcon". -->

@@ -1,8 +1,8 @@
-//! Canonical engine lifecycle state — single source for the `EngineObj.state` wire token.
+//! Canonical engine lifecycle state — single source for the `EngineStatus.state` wire token.
 //!
 //! Producer (`dontspeakd::status`) picks one [`EngineState`] per engine row via
-//! `downloading > failed > missing > running > warming > idle`, stores [`EngineState::as_str`]
-//! in [`crate::EngineObj::state`]. Rust consumers classify via [`EngineState::parse`].
+//! `downloading > failed > missing > running > warming > idle` and stores it typed in
+//! [`crate::EngineStatus::state`]. Serde emits the wire token; consumers match the enum.
 //!
 //! Platform UIs (Swift/C#) hand-mirror token values; the pinning test blocks silent drift.
 //!
@@ -11,7 +11,9 @@
 
 use std::str::FromStr;
 
-/// Engine lifecycle state; 1:1 with `EngineObj.state` and the status-dot mapping.
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Engine lifecycle state; 1:1 with `EngineStatus.state` and the status-dot mapping.
 /// Precedence and `Blocked` reservation: module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EngineState {
@@ -72,6 +74,31 @@ impl FromStr for EngineState {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         EngineState::parse(s).ok_or(())
+    }
+}
+
+/// Wire token string (not externally-tagged JSON).
+impl Serialize for EngineState {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+/// Unknown token → error (producer only emits [`EngineState::ALL`]; contract tests pin).
+impl<'de> Deserialize<'de> for EngineState {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        EngineState::parse(&s).ok_or_else(|| {
+            serde::de::Error::unknown_variant(&s, &[
+                "missing",
+                "idle",
+                "downloading",
+                "warming",
+                "blocked",
+                "failed",
+                "running",
+            ])
+        })
     }
 }
 

@@ -14,6 +14,8 @@ description = "Single Rust source of truth for the model_status schema, mirrored
 # hand-written DTOs (winui Native.cs, macOS) mirror THIS shape and parse it. ONE Rust
 # definition, hand-mirrored on the edges and guarded by the round-trip contract test below.
 serde = { workspace = true }
+# `activity.speaking_source` is the same client-identity token as hooks/IPC/usage cards.
+ds-client = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

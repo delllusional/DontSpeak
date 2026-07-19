@@ -167,7 +167,7 @@ char *ds_log_colors_json(void);
 
 // One random Usage speaking-card pastel wash as JSON `{"r","g","b","a"}` (opaque sRGB +
 // wash alpha). Single recipe in ds-core (HSV random H, fixed S/V); hosts only paint and freeze
-// while tts_source is unchanged. New color each call. Owned `char*`, free with `ds_string_free`.
+// while speaking_source is unchanged. New color each call. Owned `char*`, free with `ds_string_free`.
 // HANDLE-FREE — no engine. On failure returns "{}" (host skips wash).
 char *ds_random_pastel_wash_json(void);
 
@@ -246,14 +246,6 @@ char *ds_human_size(uint64_t bytes);
 // model_status `tray_indicator` JSON string array (NULL/malformed → []). Owned `char*`, free
 // with `ds_string_free`. HANDLE-FREE. ONE mapping shared by every host.
 char *ds_tray_icon_kind(uint8_t stt_active, uint8_t tts_active, const char *tray_indicator_json);
-
-// Active TTS model_status object key for config token `tts_engine`: "kokoro" | "tts_system" |
-// "" when off/unknown. Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
-char *ds_active_tts_slot(const char *tts_engine);
-
-// Active STT model_status object key for config token `stt_engine`: "parakeet" | "claude_code" |
-// "system" | "" when off/unknown. Owned `char*`, free with `ds_string_free`. HANDLE-FREE.
-char *ds_active_stt_slot(const char *stt_engine);
 
 // Whether diarization UI/tools are shipped (`ds_tools::DIARIZATION_ENABLED`). ONE flip for
 // every host. Returns 1 when shown, 0 when hidden. HANDLE-FREE.

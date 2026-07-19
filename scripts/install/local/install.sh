@@ -1,31 +1,9 @@
 #!/bin/bash
-# install.sh — first-time / full CLI install of the DontSpeak RUST stack (macOS-first).
-#
-# The binary build+install is delegated to scripts/install/local/install-engine.sh (the SINGLE
-# source of truth, ALSO called by apps/macos/bundle.sh). It builds + installs the CLI
-# binaries (dontspeak MCP/hooks + ds-helper) into $INSTALL_DIR (default ~/.local/bin),
-# stable-signs them so the TCC grants survive rebuilds. Logging is
-# ~/Library/Logs/DontSpeak/ (macOS) / $XDG_STATE_HOME/dontspeak/logs/
-# (Linux) with in-process rotation (no conf needed).
-#
-# This wrapper adds the things specific to a fresh CLI install: reconciling every registry
-# client's whole integration (additive, backed-up; preview with --print-only, undo with
-# --remove) and the next-steps notes. docs/CLIENT-INTEGRATIONS.md owns the per-client matrix.
-#
-# ENGINE HOST: the engine runs IN-PROCESS inside the platform's resident host app on EVERY
-# platform — macOS DontSpeak.app (apps/macos/bundle.sh), Linux the GTK host ds-gtk
-# (apps/linux/install-gui.sh), Windows the WinUI app. The host owns the RPC socket, hosts
-# TTS/STT, and catches Caps-Lock, so a single TCC/permission grant lands on the app and there
-# is NO standalone daemon. The hooks work without the app up (warm socket if it is, else a
-# cold one-shot synth).
-#
-# SAFETY: idempotent. Touches $INSTALL_DIR and wires each client's
-# integration via `dontspeak wire <client>` — additive, backed-up, malformed-safe merges that
-# never clobber your other keys.
+# install.sh — full CLI install (macOS-first). Delegates bins to install-engine.sh;
+# adds wire --reconcile + next-steps. Engine is in-process in the host app (no daemon).
+# SAFETY: idempotent; wire merges are additive, backed-up, malformed-safe.
 set -euo pipefail
 
-# This installer lives three levels below the repo root. Shared installer helpers live
-# alongside the install categories in scripts/install/lib/.
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 . "$REPO/scripts/install/lib/common.sh"
 H="$HOME"
@@ -36,27 +14,16 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "MISSING: $1 — install it f
 
 need cargo
 
-# ==> 1-4. Build + install the engine binaries + hooks (shared with apps/macos/bundle.sh).
-# Echoes the BUILD_ID it baked in as its last line.
+# 1-4. Engine bins + hooks (shared with bundle.sh). Last line = BUILD_ID.
 BUILD_ID="$(DONTSPEAK_INSTALL_DIR="$INSTALL_DIR" bash "$REPO/scripts/install/local/install-engine.sh")"
 echo "==> binaries + hooks installed (BUILD_ID=$BUILD_ID)"
 
-# ==> 5. Wire every installed client declared by the registry.
-# The dontspeak binary owns the ONE cross-platform per-client integration definition + a SAFE
-# merge (additive, idempotent, timestamped backup first, malformed file left untouched), so every
-# platform installs the identical set. `wire <client>` does that client's WHOLE integration in one
-# step; the registry owns the exact surfaces and files.
-# Preview with --print-only; undo with --remove; a client that isn't installed is a clean skip.
+# 5. wire --reconcile (exclude_clients; skip missing clients)
 echo
 echo "==> 5. reconcile all detected client integrations"
-# `wire --reconcile` is the ONE wiring call every install flow uses (bundle.sh, the web
-# installers, the tarball installer) — it converges each client to config.toml's `exclude_clients`
-# (absent ⇒ all, so identical to `--all` on a fresh machine), and each client self-skips if not
-# installed.
 "$INSTALL_DIR/dontspeak" wire --reconcile \
   || echo "   !! wire --reconcile failed; run '$INSTALL_DIR/dontspeak wire --reconcile' manually" >&2
 
-# Per-platform log location (ds-config paths.rs: macOS Library/Logs, elsewhere XDG state).
 if [ "$UNAME" = "Darwin" ]; then LOG_HINT="~/Library/Logs/DontSpeak/dontspeak.log"
 else LOG_HINT="\${XDG_STATE_HOME:-~/.local/state}/dontspeak/logs/dontspeak.log"; fi
 

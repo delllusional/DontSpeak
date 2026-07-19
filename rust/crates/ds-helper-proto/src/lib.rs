@@ -1,12 +1,10 @@
-//! The `ds-helper --serve` child's stdout reply-token vocabulary.
+//! The `ds-helper --serve` child wire vocabulary.
 //!
-//! ONE shared definition for both sides of the helper→engine wire: `ds-helper`
-//! EMITS these lines (`serve.rs` / `listen.rs`) and `dontspeakd` PARSES them
-//! (`tts.rs` pre-READY wait + post-READY `reader_loop`). Engine→helper stdin is
-//! typed serde JSON and lives elsewhere. Constants only — no format/parse helpers —
-//! so call sites keep exact byte behaviour (notably the [`ERR`] no-trailing-space
-//! quirk). `#[cfg(test)]` pins make edits deliberate protocol changes;
-//! `dontspeakd` reader tests keep raw-byte fixtures as the parse-side drift guard.
+//! * **Stdout** — reply-token constants. `ds-helper` emits them; `dontspeakd` parses them.
+//!   Constants only (no format helpers) so call sites keep exact byte behaviour
+//!   (notably the [`ERR`] no-trailing-space quirk).
+//! * **Stdin** — typed JSON ops ([`HelperOp`] / [`HelperModel`]) for engine→helper
+//!   requests. Both ends share these enums so op typos fail at serde, not at runtime.
 //!
 //! Contract (every line `\n`-terminated; engine trims before matching):
 //!
@@ -34,6 +32,33 @@
 //! * `LDONE` — listen terminal (never `DONE`; demuxes concurrent speak on shared stdout).
 //! * `DIAR <json>` / `DIARERR <msg>` / `DDONE` — one-shot diarize.
 //! * `EMB <json>` / `ENROLLERR <msg>` / `EDONE` — one-shot enroll.
+
+// ── stdin ops (engine → helper JSON lines) ───────────────────────────────────
+
+/// One stdin request op (`{"op":…}`). Serde wire = snake_case token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HelperOp {
+    Stop,
+    Mute,
+    Stopfade,
+    Cue,
+    Speak,
+    Listen,
+    Lstop,
+    Diarize,
+    Enroll,
+    Unload,
+    Load,
+}
+
+/// `load` / `unload` target model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HelperModel {
+    Tts,
+    Stt,
+}
 
 // ── startup / lifecycle ──────────────────────────────────────────────────────
 
@@ -114,6 +139,20 @@ pub const EDONE: &str = "EDONE";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stdin_ops_serialize_to_wire_tokens() {
+        assert_eq!(serde_json::to_value(HelperOp::Stop).unwrap(), "stop");
+        assert_eq!(serde_json::to_value(HelperOp::Stopfade).unwrap(), "stopfade");
+        assert_eq!(serde_json::to_value(HelperOp::Lstop).unwrap(), "lstop");
+        assert_eq!(serde_json::to_value(HelperModel::Tts).unwrap(), "tts");
+        assert_eq!(serde_json::to_value(HelperModel::Stt).unwrap(), "stt");
+        assert_eq!(
+            serde_json::from_value::<HelperOp>(serde_json::json!("speak")).unwrap(),
+            HelperOp::Speak
+        );
+        assert!(serde_json::from_value::<HelperOp>(serde_json::json!("nope")).is_err());
+    }
 
     /// Wire contract predates this crate — any value change is a helper/engine protocol break.
     #[test]

@@ -127,8 +127,8 @@ internal sealed class DictationPanel : IDisposable
         _renderThread.Start();
     }
 
-    /// <summary>UI thread: publish Snapshot + wake. <paramref name="promptGlow"/> is core
-    /// <c>prompt_glow</c> — not recomputed (macOS parity).</summary>
+    /// <summary>UI thread: publish Snapshot + wake. <paramref name="promptGlow"/> is derived
+    /// from canonical dictation state.</summary>
     public void Update(bool visible, string text, bool hasTarget, bool promptGlow)
     {
         if (_disposed || _hwnd == IntPtr.Zero) return;

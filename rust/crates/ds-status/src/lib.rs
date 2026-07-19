@@ -1,23 +1,19 @@
-//! Typed `model_status` schema — single source for the engine → app status contract.
+//! Typed `model_status` schema — engine → app status contract (single source).
 //!
-//! Engine (`dontspeakd::status`) builds [`ModelStatus`]; `ds_core` ships the JSON; platform
-//! UIs hand-mirror the shape (winui `Native.cs`, macOS Swift). Round-trip test pins wire
-//! byte-shape (no codegen for a ~20-fn surface).
-//!
-//! serde field names are wire keys. `Option<String>` → JSON `null` (never omitted); apps
-//! read every key unconditionally.
+//! Engine builds [`ModelStatus`]; UIs hand-mirror closed-set wire tokens. Closed-set
+//! fields are enums that (de)serialize as those tokens — unknown values fail closed.
+//! `Option<_>` → JSON `null` (never omitted).
 
 mod dictation_state;
-mod selection;
+mod engines;
 mod state;
 mod tray;
 pub use dictation_state::DictationState;
-pub use selection::{ActiveSttSlot, ActiveTtsSlot};
+pub use engines::{StatusSttEngine, StatusTtsEngine};
 pub use state::EngineState;
-pub use tray::{TrayIconKind, tray_icon_kind};
+pub use tray::{StatusTrayKind, TrayIconKind, tray_icon_kind};
 
-/// f64 → JSON number; NaN/Infinity become 0.0. Default serde_json would emit `null`, which
-/// violates this numeric wire contract and breaks apps' non-optional float DTOs.
+/// NaN/Infinity → 0.0 (serde_json null would break non-optional float DTOs).
 mod finite_f64_or_zero {
     pub fn serialize<S: serde::Serializer>(value: &f64, ser: S) -> Result<S::Ok, S::Error> {
         serde::Serialize::serialize(&sanitize(*value), ser)
@@ -28,92 +24,84 @@ mod finite_f64_or_zero {
     }
 }
 
-/// One engine row. `state` is an [`EngineState`] wire token (status-dot mapping).
+/// Engine row. `state` = [`EngineState`] wire token.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct EngineObj {
-    pub present: bool,
-    pub removable: bool,
-    pub state: String,
-    /// Download fraction 0..1, byte-weighted across the whole model set (not per-file).
-    /// `0.0` unless `downloading`.
+pub struct EngineStatus {
+    pub state: EngineState,
+    /// Download fraction 0..1; `0.0` unless downloading.
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub progress: f64,
     pub error: Option<String>,
 }
 
-/// Flat "running" map for MCP `status`/`model_status`.
+/// Selected TTS engine, its realized provider, and its lifecycle status.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Running {
-    pub caps: bool,
-    pub caps_wanted: bool,
-    pub stt_active: bool,
-    pub tts_active: bool,
-    /// Wireable client token for the in-flight TTS utterance (`claude_code` / `codex` /
-    /// `qwen_code` / `grok` / `kimi_code`). `null` when idle or the producer is not a Usage
-    /// agent (greet / unknown / DontSpeak). Absent key (older engines) → `None`.
-    #[serde(default)]
-    pub tts_source: Option<String>,
-    pub muted: bool,
-    pub kokoro: bool,
-    pub tts_system: bool,
-    pub parakeet: bool,
-    pub system: bool,
-    pub claude_code: bool,
+pub struct TtsStatus {
+    pub engine: StatusTtsEngine,
+    /// `null` for system (`say`) / off engines.
+    pub provider: Option<String>,
+    /// `null` when speech is off.
+    pub status: Option<EngineStatus>,
 }
 
-/// Dictation confirm-panel fields (booleans + canonical [`DictationState`] token).
+/// Selected STT engine, its realized provider, and its lifecycle status.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Dictation {
-    pub recording: bool,
-    pub awaiting_confirm: bool,
-    pub text: String,
-    pub target: Option<String>,
-    pub local_stt: bool,
-    pub has_paste_target: bool,
-    pub prompt_glow: bool,
-    /// START refused (engine can't transcribe yet). Short window after Caps tap; same warning
-    /// glow as `has_paste_target == false`. `#[serde(default)]` for older engines → false.
-    #[serde(default)]
-    pub refused: bool,
-    /// [`DictationState`] token; panel shown when not `"hidden"`. Absent key → `""` (legacy
-    /// boolean fallback). `#[serde(default)]` for older engines.
-    #[serde(default)]
-    pub state: String,
+pub struct SttStatus {
+    pub engine: StatusSttEngine,
+    /// `null` for system/claude_code/off engines.
+    pub provider: Option<String>,
+    /// `null` when dictation is off.
+    pub status: Option<EngineStatus>,
+    /// Bound Claude Code voice key; `null` for other engines or an unusable binding.
+    pub delegation_key: Option<String>,
 }
 
-/// Models resident in the warm helper.
+/// Diarization lifecycle and UI details in one domain object.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Loaded {
-    pub tts: bool,
-    pub stt: bool,
-}
-
-/// Diarization stats (Settings expansion).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DiarStats {
+pub struct DiarizationStatus {
+    pub status: EngineStatus,
     pub enabled: bool,
-    pub present: bool,
-    pub runtime: String,
+    pub provider: String,
     pub speakers: Vec<String>,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub clustering_threshold: f64,
-    #[serde(serialize_with = "finite_f64_or_zero::serialize")]
-    pub speaker_threshold: f64,
+}
+
+/// Live app activity; names match what hosts render instead of implementation details.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Activity {
+    pub caps_enabled: bool,
+    pub caps_active: bool,
+    pub recording: bool,
+    pub speaking: bool,
+    /// Wireable client for the in-flight TTS utterance. `null` when idle or the producer
+    /// is not a Usage agent (greet / unknown / DontSpeak).
+    pub speaking_source: Option<ds_client::ClientSource>,
+    pub muted: bool,
+}
+
+/// Dictation confirm-panel content and canonical [`DictationState`] mode.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Dictation {
+    /// Panel shown when not [`DictationState::Hidden`].
+    pub state: DictationState,
+    pub text: String,
+    pub has_paste_target: bool,
 }
 
 /// Live TTS RTF / TTFA stats (`stats.tts`).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TtsSnapshot {
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
-    pub rtf_avg: f64,
-    #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub rtf_min: f64,
+    #[serde(serialize_with = "finite_f64_or_zero::serialize")]
+    pub rtf_avg: f64,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub rtf_max: f64,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
-    pub first_avg_ms: f64,
-    #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub first_min_ms: f64,
+    #[serde(serialize_with = "finite_f64_or_zero::serialize")]
+    pub first_avg_ms: f64,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub first_max_ms: f64,
     pub utterances: u64,
@@ -126,9 +114,9 @@ pub struct TtsSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SttSnapshot {
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
-    pub rtf_avg: f64,
-    #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub rtf_min: f64,
+    #[serde(serialize_with = "finite_f64_or_zero::serialize")]
+    pub rtf_avg: f64,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub rtf_max: f64,
     pub transcriptions: u64,
@@ -144,58 +132,35 @@ pub struct LifetimeSnapshot {
     pub stt_secs: u64,
 }
 
-/// `stats` sub-object (RTF, lifetime, loaded models, diarization).
+/// `stats` sub-object (TTS/STT realtime and lifetime totals).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     pub tts: TtsSnapshot,
     pub stt: SttSnapshot,
     pub lifetime: LifetimeSnapshot,
-    pub loaded: Loaded,
-    pub diarization: DiarStats,
-}
-
-/// Caps-trigger event for the live status panel. `kind`: press/release/start/stop/reset.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CapsEvent {
-    pub ts: u64,
-    pub kind: String,
 }
 
 /// Full `model_status` payload — engine → app status contract.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelStatus {
-    pub kokoro: EngineObj,
-    pub parakeet: EngineObj,
-    pub diarization: EngineObj,
-    pub system: EngineObj,
-    pub claude_code: EngineObj,
-    pub tts_system: EngineObj,
-    pub stt_engine: String,
-    /// `null` for system/claude_code engines.
-    pub stt_provider: Option<String>,
-    pub tts_engine: String,
-    /// `null` for system (`say`) / off engines.
-    pub tts_provider: Option<String>,
-    /// `null` unless claude_code is selected and usable.
-    pub claude_code_key: Option<String>,
-    pub running: Running,
-    pub dictation: Dictation,
-    pub tray_indicator: Vec<String>,
-    pub stats: Stats,
-    pub caps_events: Vec<CapsEvent>,
-    pub build_id: String,
+    /// Push sequence echoed by `WaitModelStatus` clients.
     pub seq: u64,
+    pub activity: Activity,
+    pub tts: TtsStatus,
+    pub stt: SttStatus,
+    pub diarization: DiarizationStatus,
+    pub dictation: Dictation,
+    pub stats: Stats,
+    pub tray_indicator: Vec<StatusTrayKind>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn engine_none() -> EngineObj {
-        EngineObj {
-            present: false,
-            removable: false,
-            state: EngineState::Missing.as_str().to_string(),
+    fn engine_none() -> EngineStatus {
+        EngineStatus {
+            state: EngineState::Missing,
             progress: 0.0,
             error: None,
         }
@@ -203,65 +168,44 @@ mod tests {
 
     fn sample() -> ModelStatus {
         ModelStatus {
-            kokoro: engine_none(),
-            parakeet: engine_none(),
-            diarization: engine_none(),
-            system: engine_none(),
-            claude_code: engine_none(),
-            tts_system: engine_none(),
-            stt_engine: "built_in".to_string(),
-            stt_provider: None,
-            tts_engine: "system".to_string(),
-            tts_provider: None,
-            claude_code_key: None,
-            running: Running {
-                caps: false,
-                caps_wanted: false,
-                stt_active: false,
-                tts_active: false,
-                tts_source: None,
+            seq: 0,
+            activity: Activity {
+                caps_enabled: false,
+                caps_active: false,
+                recording: false,
+                speaking: false,
+                speaking_source: None,
                 muted: false,
-                kokoro: false,
-                tts_system: true,
-                parakeet: false,
-                system: false,
-                claude_code: false,
+            },
+            tts: TtsStatus {
+                engine: StatusTtsEngine::System,
+                provider: None,
+                status: Some(engine_none()),
+            },
+            stt: SttStatus {
+                engine: StatusSttEngine::BuiltIn,
+                provider: None,
+                status: Some(engine_none()),
+                delegation_key: None,
+            },
+            diarization: DiarizationStatus {
+                status: engine_none(),
+                enabled: false,
+                provider: "ane".to_string(),
+                speakers: vec![],
+                clustering_threshold: 0.7,
             },
             dictation: Dictation {
-                recording: false,
-                awaiting_confirm: false,
+                state: DictationState::Hidden,
                 text: String::new(),
-                target: None,
-                local_stt: false,
                 has_paste_target: true,
-                prompt_glow: false,
-                refused: false,
-                state: DictationState::Hidden.as_str().to_string(),
             },
-            tray_indicator: vec!["stt".to_string(), "tts".to_string()],
             stats: Stats {
                 tts: TtsSnapshot::default(),
                 stt: SttSnapshot::default(),
                 lifetime: LifetimeSnapshot::default(),
-                loaded: Loaded {
-                    tts: false,
-                    stt: false,
-                },
-                diarization: DiarStats {
-                    enabled: false,
-                    present: false,
-                    runtime: "ane".to_string(),
-                    speakers: vec![],
-                    clustering_threshold: 0.7,
-                    speaker_threshold: 0.5,
-                },
             },
-            caps_events: vec![CapsEvent {
-                ts: 1,
-                kind: "press".to_string(),
-            }],
-            build_id: "test".to_string(),
-            seq: 0,
+            tray_indicator: vec![StatusTrayKind::Stt, StatusTrayKind::Tts],
         }
     }
 
@@ -270,61 +214,54 @@ mod tests {
     fn json_contract_round_trips() {
         let v = serde_json::to_value(sample()).unwrap();
 
-        for eng in [
-            "kokoro",
-            "parakeet",
+        let root = v.as_object().unwrap();
+        assert_eq!(root.len(), 8, "no duplicated root-level engine fields");
+        for key in [
+            "seq",
+            "activity",
+            "tts",
+            "stt",
             "diarization",
-            "system",
-            "claude_code",
-            "tts_system",
+            "dictation",
+            "stats",
+            "tray_indicator",
         ] {
-            assert!(v[eng]["state"].is_string(), "{eng}.state");
-            assert!(v[eng]["error"].is_null(), "{eng}.error null when None");
+            assert!(root.contains_key(key), "missing root field {key}");
         }
-        assert!(v["stt_provider"].is_null(), "stt_provider null when None");
-        assert!(v["tts_provider"].is_null(), "tts_provider null when None");
+        assert_eq!(v["activity"].as_object().unwrap().len(), 6);
+        assert_eq!(v["tts"].as_object().unwrap().len(), 3);
+        assert_eq!(v["stt"].as_object().unwrap().len(), 4);
+        assert_eq!(v["diarization"].as_object().unwrap().len(), 5);
+        assert_eq!(v["dictation"].as_object().unwrap().len(), 3);
+        assert_eq!(v["stats"].as_object().unwrap().len(), 3);
+
+        for path in [["tts", "status"], ["stt", "status"]] {
+            assert_eq!(v[path[0]][path[1]]["state"], "missing");
+            assert!(v[path[0]][path[1]]["error"].is_null());
+        }
+        assert_eq!(v["diarization"]["status"]["state"], "missing");
+        assert_eq!(v["tts"]["engine"], "system");
+        assert_eq!(v["stt"]["engine"], "built_in");
+        assert!(v["tts"]["provider"].is_null());
+        assert!(v["stt"]["provider"].is_null());
+        assert!(v["stt"]["delegation_key"].is_null());
+        assert_eq!(v["dictation"]["state"], "hidden");
         assert!(
-            v["claude_code_key"].is_null(),
-            "claude_code_key null when None"
+            v["activity"]["speaking_source"].is_null(),
+            "activity.speaking_source null when idle"
         );
-        assert!(
-            v["dictation"]["target"].is_null(),
-            "dictation.target null when None"
-        );
-        assert!(v["dictation"]["state"].is_string(), "dictation.state");
-        // Idle sample: tts_source is present and null (never omitted).
-        assert!(
-            v["running"]["tts_source"].is_null(),
-            "running.tts_source null when idle"
-        );
+        assert_eq!(v["tray_indicator"], serde_json::json!(["stt", "tts"]));
         assert!(v["seq"].is_u64());
         assert!(v["stats"]["tts"]["rtf_avg"].is_f64());
         assert!(v["stats"]["stt"]["transcriptions"].is_u64());
         assert!(v["stats"]["lifetime"]["tts_secs"].is_u64());
-        assert!(v["stats"]["diarization"]["speakers"].is_array());
-        assert!(v["caps_events"][0]["kind"].is_string());
-
-        // Additive fields: absent key must still parse (`#[serde(default)]`).
-        let mut old = v.clone();
-        old["dictation"].as_object_mut().unwrap().remove("refused");
-        let old: ModelStatus = serde_json::from_value(old).unwrap();
-        assert!(
-            !old.dictation.refused,
-            "absent dictation.refused reads false"
-        );
-
-        let mut old = v.clone();
-        old["dictation"].as_object_mut().unwrap().remove("state");
-        let old: ModelStatus = serde_json::from_value(old).unwrap();
-        assert!(
-            old.dictation.state.is_empty(),
-            "absent dictation.state reads \"\""
-        );
+        assert!(v["diarization"]["speakers"].is_array());
 
         let back: ModelStatus = serde_json::from_value(v).unwrap();
-        assert_eq!(back.stt_engine, "built_in");
-        assert!(back.stt_provider.is_none());
-        assert_eq!(back.caps_events.len(), 1);
+        assert_eq!(back.stt.engine, StatusSttEngine::BuiltIn);
+        assert_eq!(back.tts.engine, StatusTtsEngine::System);
+        assert_eq!(back.dictation.state, DictationState::Hidden);
+        assert!(back.stt.provider.is_none());
     }
 
     #[test]
@@ -334,18 +271,15 @@ mod tests {
         s.stats.tts.rtf_min = f64::NEG_INFINITY;
         s.stats.tts.audio_secs = f64::INFINITY;
         s.stats.stt.rtf_max = f64::NAN;
-        s.kokoro.progress = f64::INFINITY;
-        // Guarded fields stay numeric (serde_json would emit null for non-finite).
+        s.tts.status.as_mut().unwrap().progress = f64::INFINITY;
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["stats"]["tts"]["rtf_avg"].as_f64().unwrap(), 0.0);
         assert_eq!(v["stats"]["tts"]["rtf_min"].as_f64().unwrap(), 0.0);
         assert_eq!(v["stats"]["tts"]["audio_secs"].as_f64().unwrap(), 0.0);
         assert_eq!(v["stats"]["stt"]["rtf_max"].as_f64().unwrap(), 0.0);
-        assert_eq!(v["kokoro"]["progress"].as_f64().unwrap(), 0.0);
+        assert_eq!(v["tts"]["status"]["progress"].as_f64().unwrap(), 0.0);
     }
 
-    // Property tests: same null-not-omitted + round-trip as above, over many values.
-    // Strategies stay finite (serde_json can't represent NaN/Infinity).
     use proptest::prelude::*;
 
     fn finite_f64() -> impl Strategy<Value = f64> {
@@ -368,118 +302,139 @@ mod tests {
         prop::collection::vec(short_string(), 0..4)
     }
 
+    fn engine_state_strategy() -> impl Strategy<Value = EngineState> {
+        prop::sample::select(EngineState::ALL.to_vec())
+    }
+
+    fn status_stt_strategy() -> impl Strategy<Value = StatusSttEngine> {
+        prop::sample::select(StatusSttEngine::ALL.to_vec())
+    }
+
+    fn status_tts_strategy() -> impl Strategy<Value = StatusTtsEngine> {
+        prop::sample::select(StatusTtsEngine::ALL.to_vec())
+    }
+
+    fn dictation_state_strategy() -> impl Strategy<Value = DictationState> {
+        prop::sample::select(DictationState::ALL.to_vec())
+    }
+
+    fn tray_kind_strategy() -> impl Strategy<Value = StatusTrayKind> {
+        prop::sample::select(StatusTrayKind::ALL.to_vec())
+    }
+
+    fn client_source_strategy() -> impl Strategy<Value = ds_client::ClientSource> {
+        prop::sample::select(vec![
+            ds_client::ClientSource::ClaudeCode,
+            ds_client::ClientSource::Codex,
+            ds_client::ClientSource::QwenCode,
+            ds_client::ClientSource::Grok,
+            ds_client::ClientSource::KimiCode,
+            ds_client::ClientSource::DontSpeak,
+            ds_client::ClientSource::Unknown,
+        ])
+    }
+
     prop_compose! {
-        fn engine_obj_strategy()(
-            present in any::<bool>(),
-            removable in any::<bool>(),
-            state in short_string(),
+        fn engine_status_strategy()(
+            state in engine_state_strategy(),
             progress in unit_f64(),
             error in opt_short_string(),
-        ) -> EngineObj {
-            EngineObj { present, removable, state, progress, error }
+        ) -> EngineStatus {
+            EngineStatus { state, progress, error }
         }
     }
 
     prop_compose! {
-        fn running_strategy()(
-            caps in any::<bool>(),
-            caps_wanted in any::<bool>(),
-            stt_active in any::<bool>(),
-            tts_active in any::<bool>(),
-            tts_source in opt_short_string(),
+        fn activity_strategy()(
+            caps_enabled in any::<bool>(),
+            caps_active in any::<bool>(),
+            recording in any::<bool>(),
+            speaking in any::<bool>(),
+            speaking_source in prop::option::of(client_source_strategy()),
             muted in any::<bool>(),
-            kokoro in any::<bool>(),
-            tts_system in any::<bool>(),
-            parakeet in any::<bool>(),
-            system in any::<bool>(),
-            claude_code in any::<bool>(),
-        ) -> Running {
-            Running {
-                caps,
-                caps_wanted,
-                stt_active,
-                tts_active,
-                tts_source,
+        ) -> Activity {
+            Activity {
+                caps_enabled,
+                caps_active,
+                recording,
+                speaking,
+                speaking_source,
                 muted,
-                kokoro,
-                tts_system,
-                parakeet,
-                system,
-                claude_code,
             }
         }
     }
 
     prop_compose! {
         fn dictation_strategy()(
-            recording in any::<bool>(),
-            awaiting_confirm in any::<bool>(),
+            state in dictation_state_strategy(),
             text in short_string(),
-            target in opt_short_string(),
-            local_stt in any::<bool>(),
             has_paste_target in any::<bool>(),
-            prompt_glow in any::<bool>(),
-            refused in any::<bool>(),
-            state in short_string(),
         ) -> Dictation {
             Dictation {
-                recording,
-                awaiting_confirm,
-                text,
-                target,
-                local_stt,
-                has_paste_target,
-                prompt_glow,
-                refused,
                 state,
+                text,
+                has_paste_target,
             }
         }
     }
 
     prop_compose! {
-        fn loaded_strategy()(tts in any::<bool>(), stt in any::<bool>()) -> Loaded {
-            Loaded { tts, stt }
+        fn tts_status_strategy()(
+            engine in status_tts_strategy(),
+            provider in opt_short_string(),
+            status in prop::option::of(engine_status_strategy()),
+        ) -> TtsStatus {
+            TtsStatus { engine, provider, status }
         }
     }
 
     prop_compose! {
-        fn diar_stats_strategy()(
+        fn stt_status_strategy()(
+            engine in status_stt_strategy(),
+            provider in opt_short_string(),
+            status in prop::option::of(engine_status_strategy()),
+            delegation_key in opt_short_string(),
+        ) -> SttStatus {
+            SttStatus { engine, provider, status, delegation_key }
+        }
+    }
+
+    prop_compose! {
+        fn diarization_status_strategy()(
+            status in engine_status_strategy(),
             enabled in any::<bool>(),
-            present in any::<bool>(),
-            runtime in short_string(),
+            provider in short_string(),
             speakers in short_string_vec(),
             clustering_threshold in unit_f64(),
-            speaker_threshold in unit_f64(),
-        ) -> DiarStats {
-            DiarStats {
+        ) -> DiarizationStatus {
+            DiarizationStatus {
+                status,
                 enabled,
-                present,
-                runtime,
+                provider,
                 speakers,
                 clustering_threshold,
-                speaker_threshold,
             }
         }
     }
 
     prop_compose! {
         fn tts_snapshot_strategy()(
-            rtf_avg in finite_f64(),
             rtf_min in finite_f64(),
+            rtf_avg in finite_f64(),
             rtf_max in finite_f64(),
-            first_avg_ms in finite_f64(),
             first_min_ms in finite_f64(),
+            first_avg_ms in finite_f64(),
             first_max_ms in finite_f64(),
             utterances in any::<u64>(),
             audio_secs in finite_f64(),
             failures in any::<u64>(),
         ) -> TtsSnapshot {
             TtsSnapshot {
-                rtf_avg,
                 rtf_min,
+                rtf_avg,
                 rtf_max,
-                first_avg_ms,
                 first_min_ms,
+                first_avg_ms,
                 first_max_ms,
                 utterances,
                 audio_secs,
@@ -490,16 +445,16 @@ mod tests {
 
     prop_compose! {
         fn stt_snapshot_strategy()(
-            rtf_avg in finite_f64(),
             rtf_min in finite_f64(),
+            rtf_avg in finite_f64(),
             rtf_max in finite_f64(),
             transcriptions in any::<u64>(),
             audio_secs in finite_f64(),
             failures in any::<u64>(),
         ) -> SttSnapshot {
             SttSnapshot {
-                rtf_avg,
                 rtf_min,
+                rtf_avg,
                 rtf_max,
                 transcriptions,
                 audio_secs,
@@ -522,68 +477,31 @@ mod tests {
             tts in tts_snapshot_strategy(),
             stt in stt_snapshot_strategy(),
             lifetime in lifetime_snapshot_strategy(),
-            loaded in loaded_strategy(),
-            diarization in diar_stats_strategy(),
         ) -> Stats {
-            Stats {
-                tts,
-                stt,
-                lifetime,
-                loaded,
-                diarization,
-            }
-        }
-    }
-
-    prop_compose! {
-        fn caps_event_strategy()(
-            ts in any::<u64>(),
-            kind in short_string(),
-        ) -> CapsEvent {
-            CapsEvent { ts, kind }
+            Stats { tts, stt, lifetime }
         }
     }
 
     prop_compose! {
         fn model_status_strategy()(
-            kokoro in engine_obj_strategy(),
-            parakeet in engine_obj_strategy(),
-            diarization in engine_obj_strategy(),
-            system in engine_obj_strategy(),
-            claude_code in engine_obj_strategy(),
-            tts_system in engine_obj_strategy(),
-            stt_engine in short_string(),
-            stt_provider in opt_short_string(),
-            tts_engine in short_string(),
-            tts_provider in opt_short_string(),
-            claude_code_key in opt_short_string(),
-            running in running_strategy(),
-            dictation in dictation_strategy(),
-            tray_indicator in short_string_vec(),
-            stats in stats_strategy(),
-            caps_events in prop::collection::vec(caps_event_strategy(), 0..4),
-            build_id in short_string(),
             seq in any::<u64>(),
+            activity in activity_strategy(),
+            tts in tts_status_strategy(),
+            stt in stt_status_strategy(),
+            diarization in diarization_status_strategy(),
+            dictation in dictation_strategy(),
+            stats in stats_strategy(),
+            tray_indicator in prop::collection::vec(tray_kind_strategy(), 0..4),
         ) -> ModelStatus {
             ModelStatus {
-                kokoro,
-                parakeet,
-                diarization,
-                system,
-                claude_code,
-                tts_system,
-                stt_engine,
-                stt_provider,
-                tts_engine,
-                tts_provider,
-                claude_code_key,
-                running,
-                dictation,
-                tray_indicator,
-                stats,
-                caps_events,
-                build_id,
                 seq,
+                activity,
+                tts,
+                stt,
+                diarization,
+                dictation,
+                stats,
+                tray_indicator,
             }
         }
     }
@@ -594,29 +512,17 @@ mod tests {
         fn json_contract_round_trips_arbitrary_values(status in model_status_strategy()) {
             let v = serde_json::to_value(status.clone()).unwrap();
 
-            for eng in [
-                "kokoro",
-                "parakeet",
-                "diarization",
-                "system",
-                "claude_code",
-                "tts_system",
-            ] {
-                prop_assert!(v[eng]["state"].is_string(), "{eng}.state");
-                prop_assert!(v[eng].get("error").is_some(), "{eng}.error present");
-            }
-            prop_assert!(v.get("stt_provider").is_some(), "stt_provider present");
-            prop_assert!(v.get("tts_provider").is_some(), "tts_provider present");
-            prop_assert!(v.get("claude_code_key").is_some(), "claude_code_key present");
-            prop_assert!(
-                v["dictation"].get("target").is_some(),
-                "dictation.target present"
-            );
+            prop_assert!(v["tts"].get("status").is_some());
+            prop_assert!(v["stt"].get("status").is_some());
+            prop_assert!(v["diarization"]["status"]["state"].is_string());
+            prop_assert!(v["tts"].get("provider").is_some());
+            prop_assert!(v["stt"].get("provider").is_some());
+            prop_assert!(v["stt"].get("delegation_key").is_some());
             prop_assert!(v["seq"].is_u64());
             prop_assert!(v["stats"]["tts"]["rtf_avg"].is_f64());
             prop_assert!(v["stats"]["stt"]["transcriptions"].is_u64());
             prop_assert!(v["stats"]["lifetime"]["tts_secs"].is_u64());
-            prop_assert!(v["stats"]["diarization"]["speakers"].is_array());
+            prop_assert!(v["diarization"]["speakers"].is_array());
 
             let back: ModelStatus = serde_json::from_value(v).unwrap();
             prop_assert_eq!(back, status);

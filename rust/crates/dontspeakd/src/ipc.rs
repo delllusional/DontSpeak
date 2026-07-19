@@ -1,4 +1,4 @@
-//! The RPC server thread + its request-dispatch arms.
+//! Engine RPC accept loop + request dispatch.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,8 +10,7 @@ use crate::status::{EngineShared, model_status_json};
 use crate::stt_test::TestSession;
 use crate::ttsq::TtsQueue;
 
-/// INFO log for a client-originated request (` client=<token>`). Always `log_from`
-/// against `paths.log_file` — never `log_cached*` (that resolves real `$HOME`; issue #26).
+/// Client request log via `log_from` (never `log_cached*` — real $HOME; #26).
 fn log_client(paths: &Paths, client: ClientSource, msg: &str) {
     ds_log::log_from(
         &paths.log_file,
@@ -22,22 +21,18 @@ fn log_client(paths: &Paths, client: ClientSource, msg: &str) {
     );
 }
 
-/// Cancel on MarkActive? Skip voice-submit echoes (engine already applied `input_clears`).
+/// Cancel on MarkActive? Skip voice-submit echoes (`input_clears` already applied).
 pub(crate) fn should_cancel_on_submit(was_voice: bool, scope_configured: bool) -> bool {
     !was_voice && scope_configured
 }
 
-/// Legacy hooks omit earcon session — keep cues on the active stream (not global).
+/// Missing session → active stream (not global).
 fn earcon_session(ttsq: &TtsQueue, requested: Option<String>) -> Option<String> {
     requested.or_else(|| ttsq.active_session())
 }
 
-/// UserPromptSubmit MarkActive (typed/dictated, or `synthetic` harness continuation — #11).
-///
-/// `codex_sessions` nudge always runs (liveness + codex_stream re-discovery after restart).
-/// Grok-only: also nudge `grok_sessions` so the updates.jsonl tail attaches.
-/// Active-terminal claim + `input_clears` skipped when `synthetic` (no human "I've moved on").
-/// Classifier: `dontspeak::hook_speak::is_synthetic_continuation`.
+/// UserPromptSubmit MarkActive. Always nudge codex sessions; Grok also. Skip terminal
+/// claim + `input_clears` when `synthetic` (#11).
 fn handle_mark_active(
     ttsq: &TtsQueue,
     codex_sessions: &crate::codex_stream::SessionRegistry,
@@ -334,17 +329,14 @@ pub(crate) fn spawn_ipc_server(
                         &paths,
                         source,
                         &format!(
-                            "earcon event={event} session={}",
+                            "earcon event={} session={}",
+                            event.as_str(),
                             session.as_deref().unwrap_or("-")
                         ),
                     );
-                    if let Some(ev) = ds_earcon::EarconEvent::parse(&event) {
-                        match ttsq.dispatch_earcon(ev, source, session) {
-                            Ok(()) => emit(&ds_ipc::Response::Done),
-                            Err(e) => emit(&ds_ipc::Response::error(format!("earcon: {e}"))),
-                        }
-                    } else {
-                        emit(&ds_ipc::Response::Done);
+                    match ttsq.dispatch_earcon(event, source, session) {
+                        Ok(()) => emit(&ds_ipc::Response::Done),
+                        Err(e) => emit(&ds_ipc::Response::error(format!("earcon: {e}"))),
                     }
                 }
                 ds_ipc::Request::AuthorizeSystemStt => {

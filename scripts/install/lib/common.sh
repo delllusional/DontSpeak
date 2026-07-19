@@ -1,34 +1,17 @@
 #!/usr/bin/env bash
-# common.sh — shared helpers for the DontSpeak build/install scripts. SOURCE this file
-# (`. scripts/install/lib/common.sh`); do NOT execute it.
-#
-# It is the SINGLE source of truth for the two pieces of logic that the engine
-# installer (scripts/install/local/install-engine.sh) and the macOS app bundler
-# (apps/macos/bundle-lib.sh) MUST agree on:
-#   • compute_build_id   — the lockstep BUILD_ID stamped into BOTH the engine and the
-#                          app; the app compares them at runtime, so a hand-maintained
-#                          second copy that drifts triggers a false "rebuild needed".
-#   • find_codesign_id   — the codesigning identity, resolved identically everywhere.
-# Defining either twice is exactly what this file exists to prevent.
-#
-# Provides (all safe to call after sourcing): compute_build_id, find_codesign_id,
-# resolve_sign_identity, require_engine_symbol, swift_build_resilient. Sourcing also
-# normalizes PATH (below).
+# common.sh — source only. Single source for install-engine + macOS bundler helpers:
+# compute_build_id, find_codesign_id, resolve_sign_identity, require_engine_symbol,
+# swift_build_resilient. Also normalizes PATH.
 
-# Prepend the usual toolchain dirs (cargo + Homebrew) so cargo/swift/magick resolve the
-# same way under launchd/cron/IDE shells that don't load an interactive login PATH.
+# Toolchain dirs for non-interactive shells (launchd/cron/IDE).
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
-# compute_build_id [repo_dir] — the lockstep build id: a pinned $DONTSPEAK_BUILD_ID if
-# set, else git short-12 of repo_dir's HEAD (default: cwd) + "-dirty" when the tree has
-# uncommitted/staged changes, else "dev" with no git. Both honoring $DONTSPEAK_BUILD_ID
-# is what keeps the engine and app ids identical.
+# compute_build_id [repo_dir] — $DONTSPEAK_BUILD_ID, else git short-12 [+-dirty], else "dev".
 compute_build_id() {
   if [ -n "${DONTSPEAK_BUILD_ID:-}" ]; then printf '%s' "$DONTSPEAK_BUILD_ID"; return; fi
   local repo="${1:-.}" id
   id="$(git -C "$repo" rev-parse --short=12 HEAD 2>/dev/null || echo dev)"
-  # Only a real checkout can be dirty: outside a git repo `git diff` exits 128 too,
-  # which would otherwise turn the documented "dev" into "dev-dirty".
+  # Outside a repo, git diff exits 128 — don't turn "dev" into "dev-dirty".
   if [ "$id" != "dev" ] \
      && { ! git -C "$repo" diff --quiet 2>/dev/null || ! git -C "$repo" diff --cached --quiet 2>/dev/null; }; then
     id="${id}-dirty"
@@ -36,48 +19,31 @@ compute_build_id() {
   printf '%s' "$id"
 }
 
-# require_engine_symbol BIN — verify a macOS app binary has the Rust engine force-loaded
-# in (ds_engine_start via the C ABI); returns 1 when missing so callers fail the build.
-# A warm/stale SwiftPM tree can relink from cached inputs and silently drop the
-# `-force_load` of libds_core.a — an engineless app that launches then exits (the v0.1.0
-# failure). NB: `grep -c` (reads all input), NOT `grep -q` — under `set -o pipefail`,
-# -q short-circuits on the first match and closes the pipe, so nm dies with SIGPIPE and
-# the pipeline reports failure even when the symbol WAS found (a false FATAL).
+# require_engine_symbol BIN — has ds_engine_start (stale SwiftPM can drop force_load).
+# Use grep -c not -q (pipefail + SIGPIPE → false FATAL).
 require_engine_symbol() {
   local n
   n="$(nm "$1" 2>/dev/null | grep -cE '^[0-9a-fA-F]+ [Tt] _?ds_engine_start$' || true)"
   [ "${n:-0}" -gt 0 ]
 }
 
-# find_codesign_id — echo the first macOS codesigning identity, or EMPTY if none found.
-# Honors $DONTSPEAK_CODESIGN_ID. In dist mode ($DONTSPEAK_DIST=1) ONLY a "Developer ID
-# Application" identity qualifies (Apple Development / ad-hoc can't be notarized);
-# otherwise Apple Development is also accepted for local installs.
+# find_codesign_id — $DONTSPEAK_CODESIGN_ID, else first matching identity.
+# Dist: Developer ID only. Local: Apple Development + untrusted Local Dev (no -v).
 find_codesign_id() {
   if [ -n "${DONTSPEAK_CODESIGN_ID:-}" ]; then printf '%s' "$DONTSPEAK_CODESIGN_ID"; return; fi
   local pattern='"(Developer ID Application|Apple Development): [^"]+"'
   [ "${DONTSPEAK_DIST:-0}" = "1" ] && pattern='"Developer ID Application: [^"]+"'
   local id
   id="$(security find-identity -v -p codesigning 2>/dev/null | grep -Eo "$pattern" | head -1 | tr -d '"')"
-  # Local-dev fallback: a self-signed "DontSpeak Local Dev" cert. It's untrusted, so
-  # `find-identity -v` (valid-only) hides it — query WITHOUT -v. A stable signature
-  # keeps TCC grants (Accessibility / Input Monitoring) across rebuilds; without it
-  # ad-hoc rotates the cdhash and every grant breaks. Skipped in dist mode. See docs/SIGNING.md.
+  # Local Dev is untrusted (hidden by -v); stable cdhash keeps TCC across rebuilds.
   if [ -z "$id" ] && [ "${DONTSPEAK_DIST:-0}" != "1" ]; then
     id="$(security find-identity -p codesigning 2>/dev/null | grep -Eo '"DontSpeak Local Dev"' | head -1 | tr -d '"')"
   fi
   printf '%s' "$id"
 }
 
-# ensure_local_sign_identity — for LOCAL (non-dist) builds, guarantee a STABLE codesigning
-# identity exists so TCC grants (Accessibility / Input Monitoring) survive rebuilds. A clean
-# clone has no identity, so ad-hoc signing rotates the cdhash every build and every grant
-# breaks; this mints the self-signed "DontSpeak Local Dev" cert ONCE (the manual recipe from
-# docs/SIGNING.md, automated) and imports it into the login keychain. Idempotent: returns
-# immediately if any usable identity (Developer ID / Apple Development / the local-dev cert)
-# already exists. No-ops in dist mode (DONTSPEAK_DIST=1 requires a real Developer ID), when
-# DONTSPEAK_CODESIGN_ID pins one, or when DONTSPEAK_NO_AUTOSIGN=1 opts out. All chatter →
-# stderr so resolve_sign_identity's stdout stays a clean identity string.
+# ensure_local_sign_identity — mint Local Dev cert once if none (TCC-stable). No-op
+# dist / pinned id / NO_AUTOSIGN. Chatter → stderr (stdout = identity only).
 ensure_local_sign_identity() {
   [ "${DONTSPEAK_DIST:-0}" = "1" ] && return 0
   [ -n "${DONTSPEAK_CODESIGN_ID:-}" ] && return 0
@@ -95,8 +61,7 @@ ensure_local_sign_identity() {
        -addext "extendedKeyUsage=critical,codeSigning" \
        -addext "basicConstraints=critical,CA:false" \
        -addext "keyUsage=critical,digitalSignature" >/dev/null 2>&1; then
-    # OpenSSL 3 defaults to a MAC Apple's `security import` rejects → need -legacy; LibreSSL
-    # has no -legacy flag → try with, then without, so both toolchains work on a clean box.
+    # OpenSSL 3 needs -legacy for Apple import; LibreSSL has no -legacy — try both.
     for legacy in "-legacy" ""; do
       if openssl pkcs12 -export $legacy -inkey "$td/k.key" -in "$td/c.crt" -out "$td/id.p12" \
            -name "DontSpeak Local Dev" -passout "pass:$pw" >/dev/null 2>&1; then p12ok=1; break; fi
@@ -112,27 +77,14 @@ ensure_local_sign_identity() {
   return 0
 }
 
-# resolve_sign_identity — find_codesign_id, but echo "-" (ad-hoc) when none is found,
-# the form `codesign --sign` expects for an ad-hoc signature. First runs
-# ensure_local_sign_identity so a clean local build self-provisions a stable cert
-# (skipped in dist mode) instead of silently falling back to grant-breaking ad-hoc.
+# resolve_sign_identity — ensure local cert, then identity or "-" (ad-hoc).
 resolve_sign_identity() {
   ensure_local_sign_identity
   local id; id="$(find_codesign_id)"
   printf '%s' "${id:--}"
 }
 
-# swift_build_resilient PKG_DIR SWIFT_BUILD_ARGS… — `swift build ARGS…` in PKG_DIR with
-# ONE self-healing retry for a STALE module cache. SwiftPM bakes the absolute checkout
-# path into the precompiled .pcm files under .build/*/ModuleCache; if that tree was ever
-# built from a DIFFERENT path (a moved/copied checkout, a git worktree, a renamed parent
-# dir, or a sibling like DontSpeak-private) the next build here dies with
-#   "compiled with module cache path '…' but the path is currently '…'".
-# We clear the stale ModuleCache and retry ONLY for that signature, so a healthy build
-# never pays the (full-recompile) clear cost — every OTHER failure passes straight
-# through unchanged. Build output is buffered to a temp log (kept simple + correct under
-# `set -e` / bash 3.2 — no pipefail dependency) then echoed on the function's stdout, so
-# callers route it exactly as they did the bare `swift build` (e.g. append `>&2`).
+# swift_build_resilient PKG_DIR ARGS… — one retry on stale ModuleCache path mismatch only.
 swift_build_resilient() {
   local pkg="$1"; shift
   local log; log="$(mktemp)"

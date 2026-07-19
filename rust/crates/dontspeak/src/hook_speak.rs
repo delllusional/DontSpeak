@@ -1,37 +1,28 @@
-//! Engine-ping side effects for `notify` events (dispatched from [`crate::hook_core`]).
-//! Best-effort IPC pings; neither blocks the client nor synthesizes here (engine owns playback).
+//! Engine-ping side effects for `notify` (from [`crate::hook_core`]). Best-effort IPC;
+//! neither blocks the client nor synthesizes (engine owns playback).
 //!
-//! [`Ping`]:
-//!   Greet       — SessionStart → `GreetSession` (engine self-gates on `greet_on_open`).
-//!   MarkActive  — UserPromptSubmit → `MarkActive` so TTS follows this terminal. EXCEPT when
-//!                 the prompt is [`is_synthetic_continuation`] (harness-injected, e.g. Claude
-//!                 Code `<task-notification>` after a background task) — then skip
-//!                 claim-active / cancel-on-submit side effects engine-side; only liveness
-//!                 bookkeeping. See issue #11.
+//! Greet — SessionStart → `GreetSession` (engine self-gates on `greet_on_open`).
+//! MarkActive — UserPromptSubmit → TTS follows this terminal, EXCEPT
+//! [`is_synthetic_continuation`] (harness-injected, e.g. `<task-notification>`) — then only
+//! liveness bookkeeping; skip claim-active / cancel-on-submit (issue #11).
 //!
-//! Spoken replies are not here: streaming clients use MessageDisplay →
-//! `hook_narrate::message_display`; non-streaming final replies use Stop in `hook_core`.
+//! Spoken replies not here: MessageDisplay → `hook_narrate`; Stop → `hook_core`.
 
 use ds_config::{ClientSource, Paths};
 use serde::Deserialize;
 
-/// Which best-effort engine ping a notify event maps to.
 pub enum Ping {
-    /// SessionStart → greet in this agent's assigned voice (engine self-gates).
     Greet,
-    /// UserPromptSubmit → mark THIS terminal active so narration follows it.
     MarkActive,
 }
 
-/// Prefix markers (after leading whitespace) for harness-injected continuations — never
-/// substring, so a human prompt that merely mentions the tag mid-text isn't misclassified.
+/// Prefix markers (after leading whitespace) for harness continuations — never substring,
+/// so a human prompt that merely mentions the tag mid-text isn't misclassified.
 ///
-/// Only `<task-notification>` confirmed today (issue #11). Other harness shapes exist
-/// (Agent Teams, `/loop`) but Anthropic doesn't publish wrapper text — add entries only
-/// when observed or documented.
+/// Only `<task-notification>` confirmed today (issue #11). Add entries only when
+/// observed or documented (Anthropic doesn't publish other wrapper text).
 const SYNTHETIC_PROMPT_MARKERS: &[&str] = &["<task-notification>"];
 
-/// Pure: is this UserPromptSubmit `prompt` a harness continuation? See markers above.
 fn is_synthetic_continuation(prompt: &str) -> bool {
     let trimmed = prompt.trim_start();
     SYNTHETIC_PROMPT_MARKERS
@@ -39,7 +30,7 @@ fn is_synthetic_continuation(prompt: &str) -> bool {
         .any(|m| trimmed.starts_with(m))
 }
 
-/// UserPromptSubmit `prompt` field (fail-open: absent/malformed → `""`).
+/// UserPromptSubmit `prompt` (fail-open: absent/malformed → `""`).
 #[derive(Deserialize, Default)]
 struct PromptEnvelope {
     #[serde(default)]
@@ -52,7 +43,7 @@ fn prompt_from_payload(payload: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Build `MarkActive` from payload — split from [`engine_ping`] so shape is unit-testable.
+/// Split from [`engine_ping`] so shape is unit-testable.
 fn mark_active_request(payload: &str, client: ClientSource) -> ds_ipc::Request {
     ds_ipc::Request::MarkActive {
         session: crate::hook_core::session_id_from_payload(payload),
@@ -61,8 +52,7 @@ fn mark_active_request(payload: &str, client: ClientSource) -> ds_ipc::Request {
     }
 }
 
-/// One best-effort ping from hook `payload` (already read by notify — not re-read). Scopes
-/// by ambient `session_id` and stamps `client`. Engine down ⇒ no-op.
+/// Best-effort ping from already-read payload. Engine down ⇒ no-op.
 pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str, client: ClientSource) {
     let req = match ping {
         Ping::Greet => ds_ipc::Request::GreetSession {
@@ -78,47 +68,53 @@ pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str, client: ClientSourc
     }
 }
 
-fn earcon_request(payload: &str, event: &str, client: ClientSource) -> ds_ipc::Request {
+fn earcon_request(
+    payload: &str,
+    event: ds_earcon::EarconEvent,
+    client: ClientSource,
+) -> ds_ipc::Request {
     ds_ipc::Request::Earcon {
-        event: event.to_string(),
+        event,
         session: crate::hook_core::session_id_from_payload(payload),
         source: client,
     }
 }
 
-/// Enqueue earcon (`reply_done` / `needs_input`) behind this session's speech. Engine down ⇒ no-op.
-pub fn engine_earcon(paths: &Paths, event: &str, payload: &str, client: ClientSource) {
+/// Enqueue earcon behind this session's speech. Engine down ⇒ no-op.
+pub fn engine_earcon(
+    paths: &Paths,
+    event: ds_earcon::EarconEvent,
+    payload: &str,
+    client: ClientSource,
+) {
     let _ = ds_ipc::request(&paths.engine_sock, &earcon_request(payload, event, client));
 }
 
-/// Like [`engine_earcon`] with an explicit session (Grok Stop uses sticky `grok-stop:<session>`
-/// so reply_done queues behind sticky digests; MarkActive current-clear cannot prune the tag).
+/// Explicit session (Grok Stop sticky `grok-stop:<session>` so reply_done queues behind digests;
+/// MarkActive current-clear cannot prune the tag).
 pub fn engine_earcon_for_session(
     paths: &Paths,
-    event: &str,
+    event: ds_earcon::EarconEvent,
     session: Option<String>,
     client: ClientSource,
 ) {
     let _ = ds_ipc::request(
         &paths.engine_sock,
         &ds_ipc::Request::Earcon {
-            event: event.to_string(),
+            event,
             session,
             source: client,
         },
     );
 }
 
-/// Notification hook subset: which kind Claude Code surfaced.
 #[derive(Debug, Deserialize, Default)]
 struct NotificationHook {
-    // Grok camelCase alias.
     #[serde(default, alias = "notificationType")]
     notification_type: String,
 }
 
-/// Pure gate: only `permission_prompt` / `idle_prompt` warrant needs-input. Other types,
-/// missing field, or bad JSON → no (cue stays meaningful).
+/// Only `permission_prompt` / `idle_prompt` warrant needs-input (cue stays meaningful).
 fn wants_needs_input_earcon(payload: &str) -> bool {
     let kind = serde_json::from_str::<NotificationHook>(payload.trim())
         .map(|h| h.notification_type)
@@ -126,10 +122,10 @@ fn wants_needs_input_earcon(payload: &str) -> bool {
     matches!(kind.as_str(), "permission_prompt" | "idle_prompt")
 }
 
-/// Notification notify: needs-input earcon only for "waiting on you" types.
+/// Needs-input earcon only for "waiting on you" notification types.
 pub fn notification_earcon(paths: &Paths, payload: &str, client: ClientSource) {
     if wants_needs_input_earcon(payload) {
-        engine_earcon(paths, "needs_input", payload, client);
+        engine_earcon(paths, ds_earcon::EarconEvent::NeedsInput, payload, client);
     }
 }
 
@@ -178,7 +174,7 @@ mod tests {
         assert!(!wants_needs_input_earcon(""));
     }
 
-    /// No socket at tempdir engine_sock: connect fails fast; no panic / hang.
+    /// No socket: connect fails fast; no panic / hang.
     #[test]
     fn engine_ping_with_no_socket_returns_promptly() {
         let dir = tempfile::tempdir().unwrap();
@@ -194,7 +190,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
         engine_earcon(
             &paths,
-            "needs_input",
+            ds_earcon::EarconEvent::NeedsInput,
             r#"{"sessionId":"grok-session"}"#,
             ClientSource::Grok,
         );
@@ -212,7 +208,11 @@ mod tests {
                 "grok-session"
             };
             assert!(matches!(
-                earcon_request(payload, "reply_done", ClientSource::ClaudeCode),
+                earcon_request(
+                    payload,
+                    ds_earcon::EarconEvent::ReplyDone,
+                    ClientSource::ClaudeCode
+                ),
                 ds_ipc::Request::Earcon {
                     session: Some(ref session),
                     ..

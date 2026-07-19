@@ -286,12 +286,13 @@ public partial class App : Application
                     return;
                 }
             }
-            bool showPanel = s.Activity.EngineRunning && s.Dictation.ShowPanel(s.Activity.Recording);
-            bool hasTarget = s.Dictation.DictHasTarget && !s.Dictation.DictRefused;
+            bool showPanel = s.Activity.EngineRunning && s.Dictation.ShowPanel;
             ApplyStatus(s);
             _window?.ApplyPushed(s);
             if (!_testOverlay)
-                _panel?.Update(showPanel, s.Dictation.DictText, hasTarget, s.Dictation.DictPromptGlow);
+                _panel?.Update(
+                    showPanel, s.Dictation.DictText,
+                    s.Dictation.HasUsableTarget, s.Dictation.PromptGlow);
         }
     }
 

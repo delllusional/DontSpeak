@@ -9,6 +9,9 @@ authors.workspace = true
 publish.workspace = true
 description = "Audible earcons for DontSpeak: OS bundled-sound introspection + cue resolution — split out of ds-config (issue #6)."
 
+[dependencies]
+serde = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 directories = { workspace = true }
 
