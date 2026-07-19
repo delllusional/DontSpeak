@@ -47,11 +47,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("appears-late.bin");
         let path2 = path.clone();
+        // Writer delay is short; reader budget must absorb CI scheduling jitter
+        // (writer thread may start late under load — old 5×30ms budget flaked on macOS).
         let handle = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(80));
+            std::thread::sleep(Duration::from_millis(50));
             std::fs::write(&path2, b"hello").unwrap();
         });
-        let bytes = read_model_file_with(&path, 5, Duration::from_millis(30))
+        let bytes = read_model_file_with(&path, 40, Duration::from_millis(25))
             .expect("should eventually succeed once the file appears");
         handle.join().unwrap();
         assert_eq!(bytes, b"hello");
