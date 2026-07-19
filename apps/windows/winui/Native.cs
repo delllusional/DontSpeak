@@ -126,8 +126,7 @@ internal static class Native
     public static string AgentUsageCardJson(string agent, bool refresh)
         => TakeString(ds_agent_usage_card_json(agent, (byte)(refresh ? 1 : 0)));
 
-    /// <summary>BLOCKING user-initiated authorize + forced card load. Off UI, explicit
-    /// click only — may raise a native credential dialog (macOS engine builds).</summary>
+    /// <summary>Blocking authorize + force load. Off UI, click only; may ACL-prompt on macOS.</summary>
     public static string AgentUsageAuthorizeCardJson(string agent)
         => TakeString(ds_agent_usage_card_authorize_json(agent));
 

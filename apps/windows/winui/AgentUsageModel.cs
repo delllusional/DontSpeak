@@ -51,7 +51,7 @@ internal sealed record UsageCardDto(
     [property: JsonPropertyName("agent")] string Agent,
     [property: JsonPropertyName("rows")] List<UsageRowDto> Rows,
     [property: JsonPropertyName("account")] string? Account = null,
-    // Wire key absent when false; true = guarded credentials (authorize unlocks).
+    // Skip-when-false; true = guarded credentials (authorize unlocks).
     [property: JsonPropertyName("needs_auth")] bool NeedsAuth = false);
 
 internal sealed record UsageRowDto(

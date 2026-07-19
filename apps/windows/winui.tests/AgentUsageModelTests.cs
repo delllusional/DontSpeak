@@ -52,7 +52,7 @@ public class AgentUsageModelTests
         Assert.Empty(deck.Cards);
     }
 
-    // Wire key is absent when false (legacy cards) and true only when guarded.
+    // needs_auth defaults false; present only when true.
     [Fact]
     public void DecodesNeedsAuthDefaultingFalse()
     {

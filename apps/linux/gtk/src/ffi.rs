@@ -19,7 +19,7 @@ pub(crate) struct UsageCard {
     #[serde(default)]
     pub(crate) account: Option<String>,
     pub(crate) rows: Vec<UsageRow>,
-    /// Wire key absent when false; true = guarded credentials (authorize unlocks).
+    /// Skip-when-false; true = guarded credentials (authorize unlocks).
     #[serde(default)]
     pub(crate) needs_auth: bool,
 }
@@ -86,8 +86,7 @@ pub fn agent_usage_card(agent: &str, refresh: bool) -> Option<UsageCard> {
     )))
     .ok()
 }
-/// BLOCKING user-initiated authorize + forced card load. Background thread,
-/// explicit click only — may raise a native credential dialog (macOS engine parity).
+/// Blocking authorize + force load. Off UI; may ACL-prompt on macOS.
 pub fn agent_usage_card_authorize(agent: &str) -> Option<UsageCard> {
     let c = CString::new(agent).unwrap_or_default();
     serde_json::from_str(&take(sys::ds_agent_usage_card_authorize_json(c.as_ptr()))).ok()

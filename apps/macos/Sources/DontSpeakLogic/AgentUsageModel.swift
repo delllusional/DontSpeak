@@ -52,8 +52,7 @@ public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// One card (Rust UsageCard). `needsAuth` = credentials guarded (macOS keychain
-/// ACL); wire key absent when false.
+/// One card (Rust UsageCard). `needsAuth`: skip-when-false; true = keychain ACL.
 public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
     public var id: String { agent }
     public let agent: String

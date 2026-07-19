@@ -15,14 +15,12 @@ pub(crate) mod kimi;
 pub(crate) mod qwen;
 mod rpc;
 
-/// Crate-internal fetch error; the FFI boundary stays JSON (`UsageCard.needs_auth`).
+/// Internal; FFI surfaces Guarded as `UsageCard.needs_auth`.
 #[derive(Debug)]
 pub(crate) enum FetchError {
-    /// OS credential store holds the token but a silent read is disallowed.
-    /// Only the macOS Claude keychain probe constructs this.
+    /// Silent keychain read blocked (macOS Claude only).
     Guarded,
-    // Payload is diagnostic only (tests assert kinds); prod callers just branch
-    // on Guarded and drop the rows.
+    // Tests assert kinds; prod branches on Guarded only.
     Io(#[allow(dead_code)] std::io::Error),
 }
 

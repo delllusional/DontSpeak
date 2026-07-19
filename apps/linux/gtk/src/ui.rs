@@ -681,7 +681,7 @@ struct UsageRowWidgets {
 }
 
 /// Per-agent shell: stack for crossfade remounts; rows for in-place updates.
-/// `needs_auth` = mounted auth state; a toggle forces a remount (row set changes).
+/// Auth-state change forces remount (row set changes).
 struct MountedUsageCard {
     stack: gtk::Stack,
     account: gtk::Label,
@@ -850,8 +850,7 @@ impl UsagePage {
             return;
         }
 
-        // Matching period shape + unchanged auth state → in-place update; else
-        // crossfade remount (auth row appears/disappears with the remount).
+        // Same period shape + auth state → in-place; else crossfade remount.
         if let Some(mounted) = self.rendered.borrow().get(&card.agent)
             && mounted.needs_auth == card.needs_auth
             && try_update_usage_rows(&mounted.rows, &card)
@@ -1098,9 +1097,7 @@ impl UsagePage {
         (group, account, rows)
     }
 
-    /// Guarded-credentials row: caption + the only UI path that may prompt.
-    /// Click: disable, run the blocking authorize FFI on a named thread, apply
-    /// the result through the generation-checked path.
+    /// Authorize row (only UI path that may prompt). Blocking FFI off main loop.
     fn usage_auth_row(&self, agent: &str) -> gtk::Widget {
         let row = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
@@ -1144,7 +1141,7 @@ impl UsagePage {
             let button = button.clone();
             gtk::glib::spawn_future_local(async move {
                 let updated = rx.recv().await.ok().flatten();
-                // Re-enable regardless: on deny the identical card skips repaint.
+                // Re-enable always; deny keeps the same card (no repaint).
                 button.set_sensitive(true);
                 if page.generation.get() != generation {
                     return;

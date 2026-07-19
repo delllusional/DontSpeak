@@ -288,7 +288,7 @@ public sealed partial class MainWindow : Window
         UsageList.Children.Insert(insertAt, shell);
     }
 
-    // NeedsAuth included so auth-state transitions repaint the card body.
+    // NeedsAuth in equality so auth transitions repaint.
     private static bool UsageCardsEqual(UsageCardDto left, UsageCardDto right)
         => left.Agent == right.Agent
             && string.Equals(left.Account, right.Account, StringComparison.Ordinal)
@@ -413,9 +413,7 @@ public sealed partial class MainWindow : Window
         body.Content = rows;
     }
 
-    // Same shape: update in place so ProgressBar animates (remount would restart at zero).
-    // Auth-state toggles change the expected child list, so the shape check fails
-    // and the body rebuilds with/without the authorize row.
+    // Same shape → in-place (ProgressBar animates). Auth toggle changes child count → rebuild.
     private static bool TryUpdateUsageRows(StackPanel mountedRows, UsageCardDto card)
     {
         int expected = card.Rows.Count + (card.NeedsAuth ? 1 : 0);
@@ -446,7 +444,7 @@ public sealed partial class MainWindow : Window
 
     private sealed record UsageAuthRowView(Button Authorize);
 
-    /// <summary>Guarded-credentials row: caption + the only UI path that may prompt.</summary>
+    /// <summary>Authorize row — sole UI path that may prompt.</summary>
     private Grid BuildUsageAuthRow(string agent)
     {
         var grid = new Grid
@@ -473,8 +471,7 @@ public sealed partial class MainWindow : Window
         return grid;
     }
 
-    /// <summary>Disable the button, run the blocking authorize FFI off the UI thread,
-    /// apply the result through the generation-checked path.</summary>
+    /// <summary>Blocking authorize FFI off UI; generation-checked apply.</summary>
     private void StartUsageAuthorize(string agent, Button authorize)
     {
         if (!authorize.IsEnabled) return;
@@ -490,7 +487,7 @@ public sealed partial class MainWindow : Window
             catch { /* ignore */ }
             DispatcherQueue.TryEnqueue(() =>
             {
-                // Re-enable regardless: on deny the identical card skips repaint.
+                // Re-enable always; deny keeps the same card (no repaint).
                 authorize.IsEnabled = true;
                 if (generation != _usageGeneration) return;
                 if (updated != null && (updated.Rows.Count > 0 || updated.NeedsAuth))

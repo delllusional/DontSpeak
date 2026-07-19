@@ -167,10 +167,7 @@ pub extern "C" fn ds_agent_usage_card_json(agent: *const c_char, refresh: u8) ->
     })
 }
 
-/// USER-INITIATED authorize + forced card refresh. BLOCKING: network plus, on
-/// macOS, possibly the keychain ACL credential dialog. Host contract: off the UI
-/// thread, explicit click only — never startup / tab paint / MCP. Owned `char*`.
-/// HANDLE-FREE.
+/// User-click authorize + force refresh (off UI; may ACL-prompt on macOS). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_card_authorize_json(agent: *const c_char) -> *mut c_char {
     const EMPTY: &str = r#"{"agent":"unknown","rows":[]}"#;
@@ -553,7 +550,7 @@ mod tests {
         assert!(card.rows.is_empty());
     }
 
-    // Non-client token exits before Paths::resolve — no real dirs, no prompt.
+    // Non-client exits before Paths::resolve (no dirs, no prompt).
     #[test]
     fn agent_usage_card_authorize_json_unknown_agent_is_empty_without_auth() {
         let c = CString::new("not_a_client").unwrap();

@@ -57,9 +57,8 @@ pub struct UsageCard {
     pub account: Option<String>,
     /// Session → week → month. Empty until loaded / unavailable.
     pub rows: Vec<UsageRow>,
-    /// Credentials exist but a silent read is disallowed (macOS keychain ACL);
-    /// a user-initiated [`authorize_card`] can unlock. Absent on the wire when
-    /// false; the persisted cache never stores `true` (see `UsageCache::store`).
+    /// macOS keychain ACL blocks silent read; [`authorize_card`] unlocks.
+    /// Skip-when-false on wire; never cached (`UsageCache::store`).
     #[serde(default, skip_serializing_if = "is_false")]
     pub needs_auth: bool,
 }
@@ -293,8 +292,7 @@ fn installed_agents(paths: &ds_config::Paths) -> Vec<ClientSource> {
         .collect()
 }
 
-/// `interactive` only affects the Claude arm (macOS keychain); every other
-/// provider ignores it.
+/// Claude only honors `interactive`; other providers ignore it.
 fn fetch_rows(
     paths: &ds_config::Paths,
     agent: ClientSource,
@@ -356,15 +354,13 @@ pub fn skeleton() -> UsageDeck {
     UsageDeck { cards }
 }
 
-/// Blocking one-card refresh. Soft = 60s cache; keep last good card on empty (rate limits).
-/// Never prompts (interactive = false forever — MCP/CLI/implicit paths).
+/// Blocking one-card refresh. Soft = 60s cache; keep last good on empty.
+/// Never prompts (`interactive = false` — MCP/CLI/implicit).
 pub fn refresh_card(agent: ClientSource, force: bool) -> UsageCard {
     refresh_card_inner(agent, force, false)
 }
 
-/// USER-INITIATED authorize + forced refresh. BLOCKING: network plus, on macOS,
-/// possibly the keychain ACL dialog. Reachable only from
-/// `ds_agent_usage_card_authorize_json` — hosts call it on explicit click.
+/// User-click authorize + force refresh. May ACL-prompt on macOS.
 pub fn authorize_card(agent: ClientSource) -> UsageCard {
     refresh_card_inner(agent, true, true)
 }
@@ -413,10 +409,8 @@ where
     let requested_at = Instant::now();
     let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // Overlapping wait: reuse the result that finished after we started (even if
-    // force). Interactive skips reuse — a silent refresh finishing while we
-    // queued must not swallow the user's prompt request; the slot mutex still
-    // serializes the authorize against concurrent silent refreshes.
+    // Silent overlap reuse; interactive never reuses (silent finish must not
+    // swallow a prompt). Slot mutex still serializes concurrent refresh.
     if !interactive
         && slot
             .last_finished_at
@@ -446,9 +440,7 @@ where
     } else {
         cached_card(cache, paths, agent).map_or(card, |entry| entry.card)
     };
-    // Guarded refresh keeps stale cached rows AND shows the authorize state.
-    // Store only runs on has_data() (needs_auth == false there), so the on-disk
-    // cache never contains `needs_auth: true` and the skeleton never paints it.
+    // Keep cached rows under Guarded; store never sees needs_auth (has_data gate).
     returned.needs_auth = needs_auth;
     slot.last_finished_at = Some(Instant::now());
     returned
@@ -746,13 +738,13 @@ mod tests {
         assert!(!json.contains("\"schema_version\""));
         assert!(!json.contains("\"providers\""));
         assert!(!json.contains("\"client\""));
-        // Wire compat: needs_auth is skip-when-false, present only when true.
+        // needs_auth skip-when-false.
         assert!(!json.contains("needs_auth"));
     }
 
     #[test]
     fn needs_auth_serde_defaults_false_and_serializes_only_true() {
-        // Legacy cache/deck JSON without the key still parses.
+        // Legacy JSON without the key still parses.
         let legacy: UsageCard =
             serde_json::from_str(r#"{"agent":"claude_code","rows":[]}"#).unwrap();
         assert!(!legacy.needs_auth);
@@ -808,7 +800,7 @@ mod tests {
         assert_eq!(returned.rows, good.rows);
         assert!(returned.needs_auth);
 
-        // Cache invariant: the skeleton must never paint the authorize row.
+        // Cache never stores needs_auth (skeleton never paints authorize).
         let disk = std::fs::read_to_string(cache_path(&paths)).unwrap();
         assert!(!disk.contains("needs_auth"));
         let reloaded = cached_card(&cache, &paths, agent).unwrap().card;
@@ -821,7 +813,7 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
-        // A refresh "finishing" after any later request starts: future instant.
+        // Future finish time: silent path reuses; interactive must not.
         let finished_late = || {
             Mutex::new(RefreshSlot {
                 last_finished_at: Some(Instant::now() + Duration::from_secs(3600)),

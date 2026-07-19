@@ -9,8 +9,7 @@ use crate::{Period, UsageRow};
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
-/// `interactive` reaches the keychain probe only from the user-initiated
-/// authorize FFI; every implicit path passes `false` and can never prompt.
+/// `interactive` only from authorize FFI; implicit paths pass `false`.
 pub(crate) fn fetch(
     paths: &ds_config::Paths,
     interactive: bool,
@@ -50,8 +49,7 @@ pub(crate) fn account(paths: &ds_config::Paths) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Keychain probe outcome. `ItemPresent` = item exists but a silent data read
-/// was disallowed (macOS keychain ACL) — classified as [`FetchError::Guarded`].
+/// `ItemPresent` → [`FetchError::Guarded`] (ACL blocks silent data read).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum KeychainProbe {
     Data(Vec<u8>),
@@ -65,7 +63,7 @@ fn read_credentials(paths: &ds_config::Paths, interactive: bool) -> Result<Value
     {
         resolve_credentials(file, || keychain_probe(interactive))
     }
-    // Non-macOS: file-only; `Guarded` is unreachable by construction.
+    // Non-macOS: file-only (Guarded unreachable).
     #[cfg(not(target_os = "macos"))]
     {
         let _ = interactive;
@@ -73,7 +71,7 @@ fn read_credentials(paths: &ds_config::Paths, interactive: bool) -> Result<Value
     }
 }
 
-/// Pure classification: a readable plain file wins (probe never invoked).
+/// File wins; probe only on file miss.
 fn resolve_credentials(
     file: std::io::Result<Value>,
     probe: impl FnOnce() -> KeychainProbe,
@@ -99,11 +97,7 @@ fn resolve_credentials(
     }
 }
 
-/// Sole prompting path in the whole crate: step 2 runs only when `interactive`
-/// (user click through `ds_agent_usage_card_authorize_json`) and MAY raise the
-/// legacy-keychain ACL dialog, blocking until the user answers. Steps 1 and 3
-/// never raise UI: silent search skips protected items; the attributes-only
-/// probe does not decrypt the secret.
+/// Only interactive data search may prompt (ACL dialog). Silent + attributes: no UI.
 #[cfg(target_os = "macos")]
 fn keychain_probe(interactive: bool) -> KeychainProbe {
     use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
@@ -254,7 +248,7 @@ mod tests {
         assert_eq!(account(&paths).as_deref(), Some("me@anthropic.test"));
     }
 
-    // resolve_credentials classifier table — synthetic probes, no live keychain.
+    // resolve_credentials table — synthetic probes, no live keychain.
 
     fn miss() -> std::io::Result<Value> {
         Err(std::io::Error::new(

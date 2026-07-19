@@ -59,7 +59,7 @@ final class AgentUsageModelTests: XCTestCase {
         XCTAssertNil(UsageDeck.decodeDeck(Data(json.utf8)))
     }
 
-    /// Wire key is absent when false (legacy decks) and true only when guarded.
+    /// needs_auth defaults false; present only when true.
     func testDecodesNeedsAuthDefaultingFalse() throws {
         let legacy = #"{"agent":"claude_code","rows":[]}"#
         let card = try XCTUnwrap(UsageDeck.decodeCard(Data(legacy.utf8)))
@@ -71,7 +71,7 @@ final class AgentUsageModelTests: XCTestCase {
         XCTAssertTrue(guardedCard.withRows([]).needsAuth)
     }
 
-    /// Auth-state transitions must repaint: equality includes needsAuth.
+    /// Equality includes needsAuth so auth transitions repaint.
     func testWireEqualityDistinguishesNeedsAuth() {
         let plain = UsageCard(agent: "claude_code", rows: [])
         let guarded = UsageCard(agent: "claude_code", rows: [], needsAuth: true)

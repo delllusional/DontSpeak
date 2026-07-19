@@ -740,7 +740,7 @@ mod usage_output {
         })
         .expect("usage serializes");
 
-        // Wire-compat gate: needs_auth is skip-when-false — old decks unchanged.
+        // needs_auth skip-when-false (legacy decks omit the key).
         assert!(
             !value["cards"][0]
                 .as_object()

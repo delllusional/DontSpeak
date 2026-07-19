@@ -460,8 +460,7 @@ fn output_schema_for(output: Output) -> Value {
                                     .collect::<Vec<_>>()
                             },
                             "account": { "type": "string" },
-                            // Present (true) only when credentials are guarded
-                            // (macOS keychain ACL); host-only authorize FFI unlocks.
+                            // true only when guarded (macOS ACL); authorize FFI unlocks.
                             "needs_auth": { "type": "boolean" },
                             "rows": {
                                 "type": "array",

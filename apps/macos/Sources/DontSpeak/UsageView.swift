@@ -87,8 +87,7 @@ struct UsageView: View {
         settled = true
     }
 
-    /// User-click authorize: blocking FFI off the main actor, then the same
-    /// generation-checked apply as a refresh.
+    /// User-click authorize: blocking FFI off main actor, generation-checked apply.
     @MainActor private func authorize(_ agent: String) async {
         let gen = generation
         let updated = await AgentUsageDataSource.authorizeCard(agent)
@@ -135,11 +134,9 @@ private struct UsageCardView: View {
     let card: UsageCard
     /// TTS matches this agent — pastel wash (top bar stays brand purple).
     var speaking: Bool = false
-    /// Runs the blocking authorize FFI and applies the result (UsageView owns both).
     var onAuthorize: (String) async -> Void = { _ in }
     /// Session-only; resets when the view is recreated.
     @State private var accountRevealed = false
-    /// In-flight authorize; disables the button until the FFI returns.
     @State private var authorizing = false
     /// Frozen while speaking; re-rolled only on false → true.
     @State private var wash: Color?
@@ -235,7 +232,7 @@ private func prettifyUsageToken(_ token: String) -> String {
         .joined(separator: " ")
 }
 
-/// Guarded-credentials row: explanation + the only UI path that may prompt.
+/// Authorize row — sole UI path that may prompt.
 private struct UsageAuthRowView: View {
     let authorizing: Bool
     let onAuthorize: () -> Void

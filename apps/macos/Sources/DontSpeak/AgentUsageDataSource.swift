@@ -22,7 +22,7 @@ enum AgentUsageDataSource {
         }.value
     }
 
-    /// BLOCKING: network + possibly the keychain ACL dialog. Explicit click only.
+    /// Blocking authorize + force load. Explicit click only; may ACL-prompt.
     static func authorizeCard(_ agent: String) async -> UsageCard? {
         await Task.detached(priority: .userInitiated) {
             guard let json = ffiString({
