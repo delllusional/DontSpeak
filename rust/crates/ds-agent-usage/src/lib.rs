@@ -1,7 +1,5 @@
-//! Usage tab domain: one card per installed agent.
-//!
-//! [`skeleton`] = no network (install gate + cache). [`refresh_card`] = blocking one agent.
-//! Credentials read-only; install via wire `ClientSpec::present`.
+//! Agents tab: one card per installed agent. [`skeleton`] offline; [`refresh_card`]
+//! blocking. Credentials read-only; install via `ClientSpec::present`.
 
 mod providers;
 
@@ -48,7 +46,7 @@ impl UsageRow {
     }
 }
 
-/// One Usage tab card.
+/// One Agents tab card.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageCard {
     /// `claude_code` | `codex` | `qwen_code` | `grok` | `kimi_code`.

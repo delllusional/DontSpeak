@@ -1,11 +1,9 @@
-//! Tool + parameter description strings — human/LLM-facing catalog text, separate from
-//! structure in `lib.rs`. Canonical MCP descriptions; edit here. Referenced from `TOOLS`.
-//!
-//! WHAT not HOW. No model/runtime names (platform-specific engines can change).
+//! Tool + parameter description strings (canonical MCP text; referenced from `TOOLS`).
+//! WHAT not HOW. No model/runtime names (platform engines can change).
 
 pub const SPEAK: &str = "Queue text for spoken playback.";
 pub const SPEAK_TEXT: &str = "Text to speak.";
-pub const SPEAK_VOICE: &str = "Voice ID. Defaults to the configured voice.";
+pub const SPEAK_VOICE: &str = "Voice ID. Omit to use the calling agent's assigned voice.";
 pub const SPEAK_RATE: &str = "Playback speed. Defaults to the configured rate.";
 
 pub const STOP_SPEECH: &str = "Stop this session's speech, or all speech if no session. Fades out.";
@@ -24,7 +22,7 @@ pub const LISTEN_SECONDS: &str = "Max recording seconds. Default 30.";
 pub const GET_STATUS: &str = "Speech config and runtime state.";
 pub const STATUS_DETAIL: &str = "Include model, dictation, and runtime stats. Default false.";
 
-pub const GET_USAGE: &str = "Coding-agent subscription usage shown in the Usage tab.";
+pub const GET_USAGE: &str = "Coding-agent subscription usage shown in the Agents tab.";
 pub const USAGE_FORCE_REFRESH: &str =
     "Bypass the 60-second cache and query providers. Default false.";
 
@@ -40,8 +38,8 @@ pub const SPEAKERS_SECONDS: &str = "Enrollment seconds. Default 15.";
 pub const SET_CONFIG: &str = "Atomically update and reload persistent settings.";
 pub const SET_CONFIG_TTS_ENGINE: &str = "Speech: \"built_in\", \"system\", or \"off\". Omit to \
     keep the automatic preference. Unsupported engines are rejected.";
-pub const SET_CONFIG_TTS_VOICES: &str = "Ordered built-in voice IDs. First = default; rest = \
-    per-agent pool.";
+pub const SET_CONFIG_TTS_VOICES: &str = "Built-in voice IDs — the per-agent pool; each agent \
+    claims a stable voice.";
 pub const SET_CONFIG_TTS_SYSTEM_VOICE: &str =
     "System voice name; empty = OS default. System engine only.";
 pub const SET_CONFIG_TTS_RATE: &str = "Speech rate. 1.0 = normal.";

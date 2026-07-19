@@ -16,8 +16,7 @@ use crate::engine_launch::ensure_engine;
 use crate::mcp::{ok, structured_tool_result, tool_result};
 use crate::voices::voice_groups;
 
-/// `client` from MCP `initialize` `clientInfo.name` (see `mcp::client_from_initialize`),
-/// stamped on every engine request so the activity log attributes tool-driven speech.
+/// Test helper; production uses [`tools_call_cancellable`].
 #[cfg(test)]
 pub(crate) fn tools_call(
     id: Option<Value>,
@@ -95,7 +94,7 @@ pub(crate) fn tools_call_cancellable(
             Some(paths) => call_list_voices(&paths, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
-        // config.toml write; engine mtime-watch or Reload nudge. Engine need not be up.
+        // config.toml write; mtime-watch or Reload nudge. Engine need not be up.
         "set_config" => match Paths::resolve() {
             Some(paths) => call_set_config(&paths, &args).map(ToolSuccess::Text),
             None => Err("Cannot resolve data paths.".into()),
@@ -105,7 +104,7 @@ pub(crate) fn tools_call_cancellable(
             Some(paths) => call_status(&paths, sock, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
-        // Read-only subscription quotas; shared cache/provider logic with the Usage tab.
+        // Shared cache/provider logic with the Agents tab.
         "get_usage" => call_usage(&args).map(ToolSuccess::Structured),
         "speak" | "stop_speech" | "mute" | "listen" | "diarize" | "manage_speakers" => {
             let Some(sock) = sock else {
@@ -138,8 +137,7 @@ enum ToolSuccess {
     Structured(Value),
 }
 
-// Arg structs: deny_unknown_fields; fields == schema properties (pinned by
-// tool_schemas_match_arg_structs). tts_engine reuses ds_config's strict TtsEngine.
+// Arg structs: deny_unknown_fields; fields == schema (pinned by tool_schemas_match_arg_structs).
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -197,14 +195,15 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
     let a: ListVoicesArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid list_voices arguments: {e}"))?;
     let cfg = VoiceConfig::load(paths);
-    // Explicit arg, else resolved TTS ladder (still a catalog when spoken replies are off).
+    // Explicit arg, else resolved TTS ladder (catalog still available when speech is off).
     let engine = a
         .tts_engine
         .or_else(|| cfg.resolved_tts())
         .unwrap_or(ds_config::TtsEngine::Kokoro);
     // English-only build: never surface other Kokoro pack languages.
     let mut groups = voice_groups(engine, "en");
-    let current = cfg.current_voice();
+    // `active` = in per-agent pool — no privileged first entry.
+    let pool = cfg.active_voices().to_vec();
     let languages: Vec<Value> = groups
         .iter_mut()
         .map(|(subtag, voices)| {
@@ -214,7 +213,7 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
                     .and_then(|i| i.as_str())
                     .unwrap_or_default()
                     .to_string();
-                v["active"] = json!(id == current);
+                v["active"] = json!(pool.contains(&id));
             }
             json!({ "language": subtag, "voices": voices })
         })
@@ -227,8 +226,8 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
     Ok(out)
 }
 
-/// Configured engine/voice/rate + live playback. `detail` adds model lifecycle/stats
-/// (former `model_status`). Read-only probe — never spawns the engine.
+/// Configured engine/voice/rate + live playback. `detail` adds model lifecycle/stats.
+/// Read-only — never spawns the engine.
 fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Value, String> {
     let a: StatusArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid get_status arguments: {e}"))?;
@@ -243,8 +242,7 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
                 paused,
                 muted,
             }) => {
-                // muted: queue still drains silently. Surfaced in concise status (not only
-                // detail) because the narration path never calls a tool that could report it.
+                // muted in concise status: narration path never calls a tool that reports it.
                 json!({ "running": true, "tts_active": tts_active, "queued": queued, "paused": paused, "muted": muted })
             }
             Ok(_) => json!({ "running": true, "note": "unexpected engine response" }),
@@ -254,8 +252,7 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
     };
     let mut out = json!({
         "engine": cfg.resolved_tts().map(|e| e.brand()).unwrap_or("off"),
-        "voice": cfg.current_voice(),
-        // Shared Kokoro voice pool for both TTS backends.
+        // Shared pool — agents each claim one entry; no single "current" voice.
         "voices": cfg.active_voices().to_vec(),
         "rate": cfg.tts_rate,
         "state": state,
@@ -292,15 +289,13 @@ fn call_usage_with(
 // config.toml is source of truth; engine Reload nudge (mtime-watch if down).
 
 fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
-    // SetConfigArgs is the single settable surface — deny_unknown_fields + schema parity
-    // with ds-tools so handler and catalog cannot drift.
+    // SetConfigArgs single settable surface — deny_unknown_fields + schema parity with ds-tools.
     let parsed: ds_tools::SetConfigArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid set_config arguments: {e}"))?;
 
-    // System STT opt-in: only persist when the *running* engine can authorize on-device
-    // (model download / Speech permission). Gate on whether the new preference *resolves*
-    // to System on this machine — not merely whether the caller named `system`. Engine down
-    // ⇒ refuse (never enable blindly). apply() already rejects unusable static choices.
+    // System STT: only persist when *running* engine can authorize on-device. Gate on whether
+    // the new preference *resolves* to System — not merely whether caller named `system`.
+    // Engine down ⇒ refuse (never enable blindly). apply() rejects unusable static choices.
     let would_run_system = parsed.stt_engine.as_ref().is_some_and(|pref| {
         VoiceConfig {
             stt_engine: Some(pref.clone()),
@@ -337,9 +332,9 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
     Ok(format!("Updated {}.", changes.join(", ")))
 }
 
-/// Ambient Claude session for this MCP process (stdio = one process per session).
-/// Claude Code sets `CLAUDE_CODE_SESSION_ID` in the server env — undocumented for MCP but
-/// present in practice (claude-code #41836). Never a tool argument. `None` ⇒ machine-global.
+/// Ambient Claude session (stdio = one process per session). Claude sets
+/// `CLAUDE_CODE_SESSION_ID` (undocumented for MCP; claude-code #41836). Never a tool arg.
+/// `None` ⇒ machine-global.
 fn session_id() -> Option<String> {
     std::env::var("CLAUDE_CODE_SESSION_ID")
         .ok()
@@ -371,8 +366,7 @@ fn call_speak(sock: &Path, args: &Value, client: ClientSource) -> Result<String,
 }
 
 fn call_stop(sock: &Path, client: ClientSource) -> Result<String, String> {
-    // Scope barge to ambient session so one terminal doesn't stop another's voice.
-    // session_id() None (e.g. bare CLI) → global hard barge.
+    // Scope barge to ambient session; None (bare CLI) → global hard barge.
     let session = session_id();
     let scoped = session.is_some();
     let response = ds_ipc::request(
@@ -397,16 +391,14 @@ fn stop_response(response: Response, scoped: bool) -> Result<String, String> {
     }
 }
 
-/// Global mute via the same `SetMuted` path as tray / Caps-Lock (`ds_core::ds_set_muted`) —
-/// one canonical path so tool- and app-driven mute cannot diverge. Unlike `stop_speech`,
-/// mute silences future output too (queue drains inaudibly) until changed or restart.
+/// Same `SetMuted` path as tray / Caps-Lock — tool- and app-driven mute cannot diverge.
+/// Unlike `stop_speech`, silences future output too until changed or restart.
 fn call_mute(sock: &Path, args: &Value) -> Result<String, String> {
     let a: MuteArgs =
         serde_json::from_value(args.clone()).map_err(|e| format!("invalid mute arguments: {e}"))?;
     let Some(on) = a.on else {
         return Err("`on` is required.".into());
     };
-    // Plain confirmation; "put it in text" coaching is UserPromptSubmit + tool description.
     match ds_ipc::request(sock, &Request::SetMuted { on }) {
         Ok(response) => mute_response(response, on),
         Err(e) => Err(format!("engine unavailable: {e}")),
@@ -422,8 +414,7 @@ fn mute_response(response: Response, on: bool) -> Result<String, String> {
     }
 }
 
-/// One-shot diarization: record `seconds`, return who spoke when. Engine blocks ≤60s
-/// (within IPC timeout) — single request/response, no listen-style stream.
+/// One-shot diarization. Engine blocks ≤60s (within IPC timeout) — no stream.
 fn call_diarize(sock: &Path, args: &Value) -> Result<String, String> {
     let a: DiarizeArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid diarize arguments: {e}"))?;
@@ -450,8 +441,8 @@ fn call_diarize(sock: &Path, args: &Value) -> Result<String, String> {
     }
 }
 
-/// Enrolled voiceprints for `diarize` labels. Thin bridge to Enroll / ForgetSpeaker /
-/// ListSpeakers. Schema can't express "name only for enroll/forget" — validated per action.
+/// Voiceprints for `diarize` labels. Schema can't express "name only for enroll/forget" —
+/// validated per action.
 fn call_speakers(sock: &Path, args: &Value) -> Result<String, String> {
     let a: SpeakersArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid manage_speakers arguments: {e}"))?;
@@ -474,7 +465,6 @@ fn call_speakers(sock: &Path, args: &Value) -> Result<String, String> {
     }
 }
 
-/// Record `seconds`, extract embedding, persist under `name`. Blocks ≤60s.
 fn enroll_speaker(sock: &Path, name: String, seconds: u64) -> Result<String, String> {
     match ds_ipc::request(sock, &Request::Enroll { name, seconds }) {
         Ok(Response::Enrolled { name }) => Ok(format!("Enrolled \"{name}\".")),
@@ -508,15 +498,14 @@ fn list_speakers(sock: &Path) -> Result<String, String> {
     }
 }
 
-/// Trailing silence before listen finalizes (after speech has started). Long enough that a
+/// Trailing silence before listen finalizes (after speech started). Long enough that a
 /// between-sentence breath doesn't cut a multi-sentence answer short.
 const LISTEN_ENDPOINT_SILENCE: Duration = Duration::from_millis(1500);
 
-/// Live Parakeet session → final transcript. Auto-stops on end-of-speech (like Caps-Lock
-/// dictation, not a blind fixed window). EOS from the Partial stream (engine emits Partial
-/// only when transcript *changes*); watchdog on a second connection sends
-/// `TestRecognitionStop` after [`LISTEN_ENDPOINT_SILENCE`] of no new partial, or after the
-/// `seconds` hard cap. Cancellable + joined so it cannot leak a late stop onto a later session.
+/// Live session → transcript. Auto-stops on end-of-speech (like Caps-Lock, not a fixed window).
+/// EOS from Partial stream (engine emits Partial only when transcript *changes*); watchdog on
+/// a second connection sends `TestRecognitionStop` after silence or hard cap. Cancellable +
+/// joined so a late stop cannot leak onto a later session.
 fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<String, String> {
     use std::sync::atomic::AtomicU64;
 
@@ -529,8 +518,7 @@ fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<
         .send(&Request::TestRecognitionStart)
         .map_err(|e| format!("listen failed to start: {e}"))?;
 
-    // `spoke` gates silence so leading quiet never ends early; last_change_ms resets on
-    // each non-empty Partial.
+    // `spoke` gates silence so leading quiet never ends early; last_change_ms resets on Partial.
     let base = std::time::Instant::now();
     let now_ms = move || base.elapsed().as_millis() as u64;
     let spoke = Arc::new(AtomicBool::new(false));
@@ -543,7 +531,7 @@ fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<
         loop {
             match cancel_rx.recv_timeout(Duration::from_millis(100)) {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                _ => return, // cancelled/finished
+                _ => return,
             }
             let elapsed = base.elapsed();
             if cancelled.load(Ordering::Acquire) {
@@ -590,8 +578,8 @@ fn call_listen(sock: &Path, args: &Value, cancelled: Arc<AtomicBool>) -> Result<
 mod drift {
     use super::*;
 
-    /// Drift guard: every `ds_tools` catalog name must hit a real `tools_call` arm.
-    /// Bogus args + no socket keep paths side-effect-free; reject only `unknown tool:`.
+    /// Drift guard: every catalog name must hit a real arm. Bogus args + no socket keep
+    /// paths side-effect-free; reject only `unknown tool:`.
     #[test]
     fn router_handles_every_catalog_tool() {
         let bogus = json!({ "__not_a_real_field__": true });
@@ -625,7 +613,7 @@ mod drift {
         }
     }
 
-    /// Schema properties match populated args by name + scalar type (catalog or raw TOOLS).
+    /// Schema properties match populated args by name + scalar type.
     fn assert_schema_matches(tool: &str, schema: &Value, populated: Value) {
         let props = schema["properties"]
             .as_object()
@@ -654,7 +642,6 @@ mod drift {
         }
     }
 
-    /// Via filtered `catalog()` (respects `DIARIZATION_ENABLED`).
     fn assert_tool_matches(tool: &str, populated: Value) {
         let cat = ds_tools::catalog();
         let entry = cat
@@ -666,15 +653,15 @@ mod drift {
         assert_schema_matches(tool, &entry["inputSchema"], populated);
     }
 
-    /// Via raw `ds_tools::TOOLS` — keeps diarize/manage_speakers parity even when hidden.
+    /// Raw TOOLS — keeps diarize/manage_speakers parity even when hidden.
     fn assert_tool_matches_raw(tool: &str, populated: Value) {
         let schema =
             ds_tools::raw_input_schema(tool).unwrap_or_else(|| panic!("{tool} in ds_tools::TOOLS"));
         assert_schema_matches(tool, &schema, populated);
     }
 
-    /// Drift guard: exhaustive literals (no `..`) break compile on new fields; schema
-    /// name/type mismatch fails asserts. `rate` non-integral so it is `number` not `integer`.
+    /// Drift guard: exhaustive literals break compile on new fields; schema name/type mismatch
+    /// fails asserts. `rate` non-integral so it is `number` not `integer`.
     #[test]
     fn tool_schemas_match_arg_structs() {
         assert_tool_matches(
@@ -782,8 +769,8 @@ mod usage_output {
 mod status_output {
     use super::*;
 
-    /// Regression: `engine` (config) and `state` (live) must both appear — two `"engine"`
-    /// keys used to collide and drop the configured name.
+    /// Regression: `engine` (config) and `state` (live) must both appear — duplicate keys
+    /// used to drop the configured name.
     #[test]
     fn status_has_distinct_engine_and_state_keys() {
         let dir = tempfile::tempdir().unwrap();
@@ -814,7 +801,6 @@ mod status_output {
         );
     }
 
-    /// `detail` is opt-in; engine-down degrades `models` to a note.
     #[test]
     fn status_detail_gates_the_models_section() {
         let dir = tempfile::tempdir().unwrap();
@@ -837,7 +823,7 @@ mod status_output {
 
 #[cfg(test)]
 mod arg_validation {
-    //! Validation branches that error before IPC — dummy socket must never be dialed.
+    //! Error before IPC — dummy socket must never be dialed.
     use super::*;
 
     fn dead_sock() -> PathBuf {
@@ -935,7 +921,7 @@ mod arg_validation {
 
 #[cfg(test)]
 mod engine_unavailable {
-    //! Unbound socket → connect fails fast; handlers must fail closed, not panic/hang.
+    //! Unbound socket → fail closed, not panic/hang.
     use super::*;
 
     fn no_such_socket() -> (tempfile::TempDir, PathBuf) {
@@ -1069,36 +1055,48 @@ mod list_voices_tests {
     }
 
     #[test]
-    fn current_voice_is_marked_active() {
+    fn every_pool_voice_is_marked_active() {
+        // `active` = pool membership: ALL configured voices flag, not just entry 0 —
+        // there is no privileged "default" slot in the pool.
+        // Pool ids must come from `KOKORO_FALLBACK_IDS` — machines without the real
+        // voices bin (CI) only catalog those, and the test must pass on both.
         let (_dir, paths) = rooted_paths();
+        std::fs::write(
+            &paths.config_toml,
+            "tts_built_in_voices = [\"am_michael\", \"bf_emma\"]\n",
+        )
+        .unwrap();
         let out = call_list_voices(&paths, &json!({ "tts_engine": "built_in" }))
             .expect("list_voices succeeds with no engine running");
-        let cfg = VoiceConfig::load(&paths);
-        let current = cfg.current_voice();
+        let pool = VoiceConfig::load(&paths).active_voices().to_vec();
+        assert_eq!(pool, vec!["am_michael", "bf_emma"]);
 
         let languages = out["languages"].as_array().expect("languages array");
         assert!(
             !languages.is_empty(),
             "expected at least one language group"
         );
-        let mut found_active = false;
+        let mut active_seen = 0;
         for group in languages {
             for voice in group["voices"].as_array().expect("voices array") {
-                let is_current = voice["id"].as_str() == Some(current.as_str());
+                let in_pool = voice["id"]
+                    .as_str()
+                    .is_some_and(|id| pool.iter().any(|p| p == id));
                 assert_eq!(
                     voice["active"],
-                    json!(is_current),
-                    "voice {:?} active flag should match whether it's the current voice",
+                    json!(in_pool),
+                    "voice {:?} active flag should match pool membership",
                     voice["id"]
                 );
-                if is_current {
-                    found_active = true;
+                if in_pool {
+                    active_seen += 1;
                 }
             }
         }
-        assert!(
-            found_active,
-            "the current voice `{current}` must appear (and be marked active) in the catalog"
+        assert_eq!(
+            active_seen,
+            pool.len(),
+            "every pool voice must appear (and be marked active) in the catalog"
         );
     }
 }

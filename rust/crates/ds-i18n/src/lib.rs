@@ -1,15 +1,5 @@
-//! Shared localization catalog.
-//!
-//! User-facing strings live as YAML (`locales/*.yml`); **English is the source of truth
-//! and the fallback**. Looked up via `rust-i18n`, reached from every platform UI through
-//! ds-core's C ABI (`ds_t` / `ds_t_args` / `ds_set_locale` / `ds_locale`) — one catalog
-//! for macOS and Windows.
-//!
-//! Scope: **app-rendered** strings only. OS-rendered metadata (Info.plist usage
-//! descriptions, Windows app manifest) stays in native resources (can't cross FFI).
-//!
-//! Keys are mostly shared; a few are Windows-only. Platform-idiomatic terms stay on
-//! distinct keys on purpose (`tray.quit` vs `tray.exit`), not force-merged.
+//! Shared YAML catalog (`locales/*.yml`); English source + fallback. FFI via ds-core.
+//! App-rendered strings only (OS metadata stays native). Distinct keys for platform idioms.
 
 use std::sync::Once;
 
@@ -80,6 +70,7 @@ mod tests {
         set_locale("en");
         assert_eq!(t("tray.quit"), "Quit");
         assert_eq!(t("common.nav_status"), "Status");
+        assert_eq!(t("common.nav_agents"), "Agents");
         // Missing key returns itself (visible gap, not blank).
         assert_eq!(t("nope.not.here"), "nope.not.here");
     }

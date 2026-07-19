@@ -23,7 +23,7 @@ Queue text for spoken playback.
 | Param | Type | Required | Description |
 |---|---|---|---|
 | `text` | string | yes | Text to speak. |
-| `voice` | string | no | Voice ID. Defaults to the configured voice. |
+| `voice` | string | no | Voice ID. Omit to use the calling agent's assigned voice. |
 | `rate` | number 0.5–2.0 | no | Playback speed. Defaults to the configured rate. |
 
 ## listen
@@ -56,7 +56,7 @@ Speech config and runtime state.
 
 ## get_usage
 
-Coding-agent subscription usage shown in the Usage tab.
+Coding-agent subscription usage shown in the Agents tab.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
@@ -97,7 +97,7 @@ Atomically update and reload persistent settings.
 | Param | Type | Description |
 |---|---|---|
 | `tts_engine` | enum: `built_in`, `system`, `off` | Speech: "built_in", "system", or "off". Omit to keep the automatic preference. Unsupported engines are rejected. |
-| `tts_built_in_voices` | array of strings | Ordered built-in voice IDs. First = default; rest = per-agent pool. |
+| `tts_built_in_voices` | array of strings | Built-in voice IDs — the per-agent pool; each agent claims a stable voice. |
 | `tts_system_voice` | string | System voice name; empty = OS default. System engine only. |
 | `tts_rate` | number 0.5–2.0 | Speech rate. 1.0 = normal. |
 

@@ -2,19 +2,14 @@ import DontSpeakLogic
 import Foundation
 import SwiftUI
 
-/// Usage tab — card-backed model shared with WinUI/GTK.
-///
-/// On tab select:
-/// 1. Paint only cards that already have cached rows
-/// 2. Async load every installed agent; insert/update a card when that load has rows
-///
-/// First visit with no cache: list stays empty until at least one agent returns data.
+/// Agents tab — card model shared with WinUI/GTK.
+/// Tab select: paint cached rows, then async force-load each installed agent.
+/// No cache: empty until at least one agent returns data.
 struct UsageView: View {
     @Environment(Core.self) private var core
     @State private var cards: [UsageCard] = []
-    /// Rust skeleton order (`ClientSource::CLIENTS`).
+    /// ClientSource::CLIENTS order from the skeleton deck.
     @State private var canonicalAgents: [String] = []
-    /// Skeleton + all per-agent loads finished for this generation.
     @State private var settled = false
     @State private var generation = 0
 
@@ -34,7 +29,7 @@ struct UsageView: View {
                         ForEach(cards) { card in
                             UsageCardView(
                                 card: card,
-                                speaking: core.activity.ttsSource == card.agent
+                                speaking: core.activity.speakingSource == card.agent
                             )
                         }
                     }
@@ -53,7 +48,6 @@ struct UsageView: View {
         let gen = generation
         settled = false
 
-        // 1) Skeleton: installed agents + last-good cache, already decoded by the adapter.
         let deck = await AgentUsageDataSource.readCachedDeck()
         guard !Task.isCancelled, gen == generation else { return }
         guard let deck else {
@@ -74,7 +68,6 @@ struct UsageView: View {
             return
         }
 
-        // 2) Force-load each agent independently; UI updates as each finishes.
         await withTaskGroup(of: UsageCard?.self) { group in
             for agent in allAgents {
                 group.addTask { await AgentUsageDataSource.refreshCard(agent) }
@@ -106,7 +99,7 @@ struct UsageView: View {
                 cards[idx] = updated
             }
         } else {
-            // Rust owns agent identity and order; the skeleton deck carries both.
+            // Rust owns agent identity/order via the skeleton deck.
             let insert = {
                 cards.append(updated)
                 cards.sort { lhs, rhs in
@@ -128,11 +121,11 @@ struct UsageView: View {
 
 private struct UsageCardView: View {
     let card: UsageCard
-    /// In-flight TTS matches this agent — pastel from `ds_random_pastel_wash_json` (top-bar stays brand purple).
+    /// TTS matches this agent — pastel wash (top bar stays brand purple).
     var speaking: Bool = false
-    /// Session-only reveal; resets when the view is recreated (tab reload / process restart).
+    /// Session-only; resets when the view is recreated.
     @State private var accountRevealed = false
-    /// Frozen while `speaking` stays true; re-rolled only on false → true.
+    /// Frozen while speaking; re-rolled only on false → true.
     @State private var wash: Color?
 
     private var accountLabel: String? {
@@ -143,8 +136,7 @@ private struct UsageCardView: View {
     }
 
     var body: some View {
-        // Custom header: provider left / account right (same caption secondary as remaining).
-        // Email is fully transparent until tapped; reveal is not persisted.
+        // Account transparent until tapped; reveal not persisted.
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .lastTextBaseline) {
                 Text(providerTitle(card.agent))
@@ -180,7 +172,7 @@ private struct UsageCardView: View {
             }
         }
         .onAppear {
-            // First paint may already be speaking; onChange only fires on later edges.
+            // First paint may already be speaking; onChange only fires later edges.
             if speaking { wash = Brand.randomPastelWash() }
         }
         .onChange(of: speaking) { _, on in
@@ -190,7 +182,7 @@ private struct UsageCardView: View {
     }
 }
 
-/// Localized provider title, or a prettified agent token when the catalog has no entry.
+/// Catalog title, or prettified token when missing.
 private func providerTitle(_ agent: String) -> String {
     let key = "usage.provider.\(agent)"
     let localized = L.t(key)
@@ -220,11 +212,11 @@ private struct UsageRowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            // Bottom-align period + remaining so different font sizes share one baseline.
+            // Bottom-align period + remaining for a shared baseline.
             HStack(alignment: .lastTextBaseline) {
                 Text(periodTitle(row.period)).glassRowTitle()
                 Spacer(minLength: 8)
-                // Remaining till reset (minute-granularity) sits top-right; percent is the bar only.
+                // Remaining top-right; percent is the bar only.
                 if !row.remainingLabel.isEmpty {
                     Text(row.remainingLabel)
                         .font(.caption)

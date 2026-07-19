@@ -18,26 +18,22 @@ using Windows.UI;
 namespace DontSpeak;
 
 /// <summary>
-/// Fluent Usage/Status/Tools/Logs/Credits window. Status is
-/// push-driven by <see cref="App"/>; engine + tray live there. Close hides to tray.
+/// Fluent Agents/Status/Tools/Logs/Credits. Status push-driven by App; close hides to tray.
 /// </summary>
 public sealed partial class MainWindow : Window
 {
-    // Green/red standard; Orange = Brand.Warning (warming/download), matching macOS.
+    // Orange = Brand.Warning (warming/download), matching macOS.
     private static readonly SolidColorBrush Green = new(Color.FromArgb(255, 46, 160, 67));
     private static readonly SolidColorBrush Orange = new(Brand.Warning);
     private static readonly SolidColorBrush Red = new(Color.FromArgb(255, 232, 70, 70));
     private static readonly SolidColorBrush Gray = new(Color.FromArgb(120, 150, 150, 155));
-    // Cascadia Mono (Win11) / Consolas — tools/params; macOS uses SF Mono.
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
-    // See Native.DiarizationUiEnabled.
     private static readonly bool DiarizationUiEnabled = Native.DiarizationUiEnabled();
 
     public MainWindow()
     {
         InitializeComponent();
         UsageList.ChildrenTransitions = new TransitionCollection { new RepositionThemeTransition() };
-        // Compact width (= min); height provisional until CapHeightToStatusContent.
         AppWindow.Resize(new Windows.Graphics.SizeInt32(380, 620));
         var icoPath = System.IO.Path.Combine(AppContext.BaseDirectory, "AppIcon.ico");
         if (System.IO.File.Exists(icoPath)) AppWindow.SetIcon(icoPath);
@@ -58,26 +54,24 @@ public sealed partial class MainWindow : Window
         LoadTools();
         LoadLibraries();
         RefreshStatus();
-        // First tab is whatever XAML marks IsSelected (Usage). Pane visibility matches that in
-        // XAML; SelectionChanged → ApplyTabAsync runs when the user (or SelectTab) changes it.
 
-        // No poll timer — App's push calls ApplyPushed. One-shot on show; pushes no-op while hidden.
+        // No poll — App push calls ApplyPushed. One-shot on show; pushes no-op while hidden.
         AppWindow.Changed += (s, e) =>
         {
             if (e.DidVisibilityChange && s.IsVisible)
             {
                 RefreshStatus();
-                // Low priority: after arrange so ActualHeight is valid.
+                // After arrange so ActualHeight is valid.
                 DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, CapHeightToStatusContent);
             }
         };
 
-        // SizeChanged is post-arrange — don't Measure manually (corrupts layout → blank window).
+        // SizeChanged is post-arrange — don't Measure manually (corrupts layout → blank).
         if (StatusScroll?.Content is FrameworkElement statusPanel)
             statusPanel.SizeChanged += (_, _) => CapHeightToStatusContent();
     }
 
-    // WinUI 3 title bar ignores system theme by default (dark mode stays light/unreadable).
+    // WinUI 3 title bar ignores system theme by default.
     private void HookTitleBarTheme()
     {
         if (Content is not FrameworkElement root) return;
@@ -116,7 +110,7 @@ public sealed partial class MainWindow : Window
     {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         long style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
-        // checked: CA2020 — makes IntPtr conversion intent explicit for the analyzer.
+        // checked: CA2020
         SetWindowLongPtr(hwnd, GWL_STYLE, checked((IntPtr)(style & ~(WS_MINIMIZEBOX | WS_MAXIMIZEBOX))));
         SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
@@ -142,38 +136,36 @@ public sealed partial class MainWindow : Window
 
     private async void Nav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
-        // Null/empty → first menu item (XAML default), no hard-coded "usage".
+        // Null/empty → first menu item (XAML default).
         var tag = (args.SelectedItem as NavigationViewItem)?.Tag as string
             ?? (Nav.MenuItems.OfType<NavigationViewItem>().FirstOrDefault()?.Tag as string);
         await ApplyTabAsync(tag);
     }
 
-    /// <summary>Show the pane for <paramref name="tag"/> and run tab-enter side effects.</summary>
     private async System.Threading.Tasks.Task ApplyTabAsync(string? tag)
     {
         int loadGeneration = ++_logLoadGeneration;
         ++_logRenderGeneration;
         if (StatusScroll != null) StatusScroll.Visibility = tag == "status" ? Visibility.Visible : Visibility.Collapsed;
-        if (UsageTab != null) UsageTab.Visibility = tag == "usage" ? Visibility.Visible : Visibility.Collapsed;
+        if (UsageTab != null) UsageTab.Visibility = tag == "agents" ? Visibility.Visible : Visibility.Collapsed;
         if (ToolsScroll != null) ToolsScroll.Visibility = tag == "tools" ? Visibility.Visible : Visibility.Collapsed;
         if (CreditsScroll != null) CreditsScroll.Visibility = tag == "credits" ? Visibility.Visible : Visibility.Collapsed;
         if (LogTab != null) LogTab.Visibility = tag == "log" ? Visibility.Visible : Visibility.Collapsed;
-        if (tag == "usage") await LoadUsageOnTabSelectedAsync();
+        if (tag == "agents") await LoadUsageOnTabSelectedAsync();
         else ++_usageGeneration;
-        if (tag == "log") await LoadLogsAsync(loadGeneration); // reload on each select (no poll)
+        if (tag == "log") await LoadLogsAsync(loadGeneration); // reload each select (no poll)
     }
 
     private int _usageGeneration;
-    // Canonical ClientSource::CLIENTS order supplied by the Rust skeleton deck.
+    // ClientSource::CLIENTS order from the skeleton deck.
     private readonly List<string> _usageAgentOrder = new();
     private readonly Dictionary<string, ContentControl> _usageCardBodies = new();
     private readonly Dictionary<string, Border> _usageCardShells = new();
     private readonly Dictionary<string, TextBlock> _usageCardAccounts = new();
-    /// <summary>Session-only: which agent emails are currently revealed (not persisted).</summary>
+    /// <summary>Session-only email reveal (not persisted).</summary>
     private readonly HashSet<string> _usageAccountRevealed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, UsageCardDto> _usageCards = new();
 
-    /// <summary>Tab select: cache paint, then async force-load per agent.</summary>
     private async System.Threading.Tasks.Task LoadUsageOnTabSelectedAsync()
     {
         int generation = ++_usageGeneration;
@@ -198,7 +190,6 @@ public sealed partial class MainWindow : Window
         _usageAgentOrder.Clear();
         _usageAgentOrder.AddRange(agentsToLoad);
 
-        // Preserve mounted cards for installed agents; merge last-good cache without flicker.
         ReconcileUsageAgents(agentsToLoad);
         foreach (var card in cachedWithData)
             ApplyUsageCard(card);
@@ -258,7 +249,6 @@ public sealed partial class MainWindow : Window
         });
     }
 
-    /// <summary>Insert or transition a changed last-good card without remounting its shell.</summary>
     private void ApplyUsageCard(UsageCardDto card)
     {
         string agent = card.Agent;
@@ -273,7 +263,6 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        // Remove "unavailable" placeholder if present.
         if (UsageList.Children.Count == 1 && UsageList.Children[0] is TextBlock)
             UsageList.Children.Clear();
 
@@ -283,7 +272,6 @@ public sealed partial class MainWindow : Window
         _usageCardBodies[agent] = newBody;
         _usageCardShells[agent] = shell;
 
-        // Keep canonical agent order in the panel.
         int insertAt = 0;
         foreach (var child in UsageList.Children)
         {
@@ -314,8 +302,7 @@ public sealed partial class MainWindow : Window
         return rank >= 0 ? rank : int.MaxValue;
     }
 
-    /// <summary>Catalog title for <paramref name="agent"/>; unknown tokens get a prettified fallback
-    /// (snake_case → Title Case) so the header never shows a raw key.</summary>
+    /// <summary>Catalog title; unknown tokens → Title Case (never raw key).</summary>
     private static string UsageProviderTitle(string agent)
     {
         var key = $"usage.provider.{agent}";
@@ -326,7 +313,6 @@ public sealed partial class MainWindow : Window
             agent.Replace('_', ' ').ToLowerInvariant());
     }
 
-    /// <summary>Shared card shell: agent title + optional account (top-right) + body host for rows.</summary>
     private (Border shell, ContentControl body) BuildUsageCardShell(string agent)
     {
         var body = new ContentControl
@@ -339,8 +325,7 @@ public sealed partial class MainWindow : Window
             Spacing = 8,
             HorizontalAlignment = HorizontalAlignment.Stretch,
         };
-        // Title left / account right — same caption style as period remaining.
-        // Email is fully transparent until clicked; reveal is session-only (not persisted).
+        // Account transparent until clicked; session-only (not persisted).
         var heading = new Grid
         {
             ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition() },
@@ -365,7 +350,6 @@ public sealed partial class MainWindow : Window
         account.PointerPressed += (_, e) =>
         {
             if (account.Visibility != Visibility.Visible) return;
-            // Toggle session-only reveal (not persisted).
             if (_usageAccountRevealed.Remove(agent))
                 account.Opacity = 0;
             else
@@ -410,11 +394,9 @@ public sealed partial class MainWindow : Window
             return;
         }
         accountLabel.Visibility = Visibility.Visible;
-        // Keep session reveal; default remains fully transparent until click.
         accountLabel.Opacity = _usageAccountRevealed.Contains(agent) ? 1 : 0;
     }
 
-    /// <summary>Bind card rows into body — same layout as Swift/GTK UsageRow.</summary>
     private static void BindUsageCard(ContentControl body, UsageCardDto card)
     {
         if (body.Content is StackPanel mountedRows && TryUpdateUsageRows(mountedRows, card))
@@ -430,8 +412,7 @@ public sealed partial class MainWindow : Window
         body.Content = rows;
     }
 
-    // Keep matching rows mounted so a refresh animates from the displayed value instead
-    // of remounting ProgressBar at zero. Rebuild only when the provider's row shape changes.
+    // Matching shape: update in place so ProgressBar animates (not remount at zero).
     private static bool TryUpdateUsageRows(StackPanel mountedRows, UsageCardDto card)
     {
         if (mountedRows.Children.Count != card.Rows.Count) return false;
@@ -459,13 +440,13 @@ public sealed partial class MainWindow : Window
     private static StackPanel BuildUsageRow(UsageRowDto row)
     {
         var heading = new Grid { ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition() } };
-        // Bottom-align period + remaining so different font sizes share one baseline.
+        // Bottom-align period + remaining for a shared baseline.
         heading.Children.Add(new TextBlock
         {
             Text = Loc.T($"usage.{row.Period}"),
             VerticalAlignment = VerticalAlignment.Bottom,
         });
-        // Remaining till reset (minute-granularity) sits top-right; percent is the bar only.
+        // Remaining top-right; percent is the bar only.
         var remaining = new TextBlock
         {
             HorizontalAlignment = HorizontalAlignment.Right,
@@ -478,7 +459,7 @@ public sealed partial class MainWindow : Window
         Grid.SetColumn(remaining, 1);
         heading.Children.Add(remaining);
 
-        // Default WinUI track is 1px / MinHeight 3 — bump both for a readable usage bar.
+        // Default WinUI track is 1px — bump for a readable bar.
         const double barThickness = 6;
         var progress = new ProgressBar
         {
@@ -487,7 +468,6 @@ public sealed partial class MainWindow : Window
             Height = barThickness,
             MinHeight = barThickness,
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            // Brand seed purple (#5B4397) — same accent as tray speaking / tab underline.
             Foreground = new SolidColorBrush(Brand.SeedPurple),
         };
         progress.Resources["ProgressBarMinHeight"] = barThickness;
@@ -544,8 +524,7 @@ public sealed partial class MainWindow : Window
     private int _logLoadGeneration;
     private int _logRenderGeneration;
 
-    /// <summary>Load combined log off UI thread; render in batches. Generation guard drops
-    /// stale results if user left/re-entered Logs mid-flight.</summary>
+    /// <summary>Load off UI; render in batches. Generation drops stale mid-flight results.</summary>
     private async System.Threading.Tasks.Task LoadLogsAsync(int loadGeneration)
     {
         if (LogText == null) return;
@@ -568,16 +547,15 @@ public sealed partial class MainWindow : Window
         await RenderLogLinesAsync(++_logRenderGeneration);
     }
 
-    /// <summary>Confirm then <see cref="Native.LogsClear"/>. WinUI has no destructive button
-    /// style — AccentButtonStyle recolored to ERROR red (not brand accent). No DefaultButton:
-    /// that fights the red override and would make Enter trigger Clear.</summary>
+    /// <summary>Confirm then LogsClear. No destructive style — Accent recolored ERROR red.
+    /// No DefaultButton (would make Enter trigger Clear over the red override).</summary>
     private async void LogClear_Click(object sender, RoutedEventArgs e)
     {
         var danger = new SolidColorBrush(Brand.LogLevelColor("ERROR") ?? Color.FromArgb(255, 0xE8, 0x46, 0x46));
         var dialog = new ContentDialog
         {
             XamlRoot = Content.XamlRoot,
-            Title = Loc.T("logs.clear_confirm_title"), // title-only — no separate body, one line
+            Title = Loc.T("logs.clear_confirm_title"),
             PrimaryButtonText = Loc.T("logs.clear_confirm_action"),
             CloseButtonText = Loc.T("common.cancel"),
             PrimaryButtonStyle = (Style)Application.Current.Resources["AccentButtonStyle"],
@@ -595,7 +573,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>Filter + color-code lines; yield every 64 so large logs don't freeze input.</summary>
+    /// <summary>Filter + color; yield every 64 so large logs don't freeze input.</summary>
     private async System.Threading.Tasks.Task RenderLogLinesAsync(int renderGeneration)
     {
         LogText.Blocks.Clear();
@@ -638,7 +616,7 @@ public sealed partial class MainWindow : Window
         return brush;
     }
 
-    // First-appearance index into Brand.LogSourcePalette — same mapping every platform.
+    // First-appearance index into Brand.LogSourcePalette (shared mapping).
     private SolidColorBrush SourceBrush(string source)
     {
         if (_sourceBrush.TryGetValue(source, out var b)) return b;
@@ -663,7 +641,6 @@ public sealed partial class MainWindow : Window
         try
         {
             var probe = System.Threading.Tasks.Task.Run(HealthSnapshot.Probe);
-            // Cap so a stuck read can't keep _refreshing latched forever.
             var done = await System.Threading.Tasks.Task.WhenAny(
                 probe, System.Threading.Tasks.Task.Delay(2500));
             if (done == probe) snap = await probe;
@@ -675,7 +652,7 @@ public sealed partial class MainWindow : Window
         try { ApplyStatus(snap); } catch { /* one bad frame must not kill the loop */ }
     }
 
-    /// <summary>Push from App's WaitModelStatus thread (already on UI). No-op while hidden.</summary>
+    /// <summary>From App's WaitModelStatus thread (already on UI). No-op while hidden.</summary>
     internal void ApplyPushed(HealthSnapshot s)
     {
         if (!AppWindow.IsVisible) return;
@@ -690,36 +667,44 @@ public sealed partial class MainWindow : Window
         var v = Native.Version();
         VersionText.Text = v.Length > 0 ? v : Loc.T("common.dash");
 
-        if (s.EngineSelection.TtsEngine == "off")
-        { TtsDetail.Text = ""; ApplyOff(TtsDot, TtsRing); }
-        else if (s.EngineSelection.TtsEngine == "system")
-        { TtsDetail.Text = Loc.T("status.engine.system"); ApplyEngine(s.EngineDots.TtsSystem, TtsDot, TtsRing); }
-        else
-        { TtsDetail.Text = Loc.T("status.engine.kokoro"); ApplyEngine(s.EngineDots.Kokoro, TtsDot, TtsRing); }
-
-        switch (s.EngineSelection.SttEngine)
+        // Closed set matches ds-status StatusTtsEngine / StatusSttEngine wire tokens.
+        // Unknown → off (no fail-open to built-in labels).
+        switch (s.TtsEngine.Engine)
         {
-            case "off":
-                SttDetail.Text = "";
-                ApplyOff(SttDot, SttRing); break;
+            case "system":
+                TtsDetail.Text = Loc.T("status.engine.system");
+                ApplyEngine(s.TtsEngine.Status, TtsDot, TtsRing); break;
+            case "built_in":
+                TtsDetail.Text = Loc.T("status.engine.kokoro");
+                ApplyEngine(s.TtsEngine.Status, TtsDot, TtsRing); break;
+            default: // "off" and anything unexpected
+                TtsDetail.Text = "";
+                ApplyOff(TtsDot, TtsRing); break;
+        }
+
+        switch (s.SttEngine.Engine)
+        {
             case "claude_code":
                 SttDetail.Text = Loc.T("status.engine.claude_code");
-                ApplyEngine(s.EngineDots.ClaudeCode, SttDot, SttRing); break;
+                ApplyEngine(s.SttEngine.Status, SttDot, SttRing); break;
             case "system":
                 SttDetail.Text = Loc.T("status.engine.system");
-                ApplyEngine(s.EngineDots.System, SttDot, SttRing); break;
-            default:
+                ApplyEngine(s.SttEngine.Status, SttDot, SttRing); break;
+            case "built_in":
                 SttDetail.Text = Loc.T("status.engine.parakeet");
-                ApplyEngine(s.EngineDots.Parakeet, SttDot, SttRing); break;
+                ApplyEngine(s.SttEngine.Status, SttDot, SttRing); break;
+            default: // "off" and anything unexpected
+                SttDetail.Text = "";
+                ApplyOff(SttDot, SttRing); break;
         }
 
         // Shared formatter returns "" for ready states — emptiness is note-vs-stats (all platforms).
         // Runtime line only when ready (never stale "ORT CPU" under Downloading N%).
-        bool ttsSystem = s.EngineSelection.TtsEngine == "system";
-        var ttsInfo = s.ActiveTts;
+        bool ttsSystem = s.TtsEngine.Engine == "system";
+        var ttsInfo = s.TtsEngine.Status;
         bool ttsTrouble = !string.IsNullOrEmpty(ttsInfo.Word);
-        TtsRuntimeRow.Visibility = (!ttsSystem && !ttsTrouble && s.EngineSelection.TtsProvider.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
-        if (!ttsSystem) TtsRuntimeText.Text = Native.RuntimeLabel(s.EngineSelection.TtsProvider);
+        TtsRuntimeRow.Visibility = (!ttsSystem && !ttsTrouble && s.TtsEngine.Provider.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
+        if (!ttsSystem) TtsRuntimeText.Text = Native.RuntimeLabel(s.TtsEngine.Provider);
         TtsSystemSettingsRow.Visibility = Visibility.Collapsed;
         if (ttsTrouble)
             ShowMsg(TtsStatsMsg, TtsStatsGrid, ttsInfo.Word);
@@ -738,14 +723,14 @@ public sealed partial class MainWindow : Window
                 TtsFailures.Text = s.Tts.Failures.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        bool sttBuiltIn = s.EngineSelection.SttEngine == "built_in";
-        var sttInfo = s.ActiveStt;
+        bool sttBuiltIn = s.SttEngine.Engine == "built_in";
+        var sttInfo = s.SttEngine.Status;
         bool sttTrouble = !string.IsNullOrEmpty(sttInfo.Word);
-        SttRuntimeRow.Visibility = (sttBuiltIn && !sttTrouble && s.EngineSelection.SttProvider.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
-        if (sttBuiltIn) SttRuntimeText.Text = Native.RuntimeLabel(s.EngineSelection.SttProvider);
+        SttRuntimeRow.Visibility = (sttBuiltIn && !sttTrouble && s.SttEngine.Provider.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
+        if (sttBuiltIn) SttRuntimeText.Text = Native.RuntimeLabel(s.SttEngine.Provider);
         if (sttTrouble)
             ShowMsg(SttStatsMsg, SttStatsGrid, sttInfo.Word);
-        else if (s.EngineSelection.SttEngine == "claude_code")
+        else if (s.SttEngine.Engine == "claude_code")
             ShowMsg(SttStatsMsg, SttStatsGrid, ClaudeDelegationHint(s));
         else if (s.Stt.Transcriptions == 0)
             ShowMsg(SttStatsMsg, SttStatsGrid, Loc.T("status.no_data"));
@@ -761,7 +746,7 @@ public sealed partial class MainWindow : Window
 
         if (DiarizationUiEnabled)
         {
-            var diarInfo = s.EngineDots.Diarization;
+            var diarInfo = s.Diarization.Status;
             bool diarTrouble = !string.IsNullOrEmpty(diarInfo.Word);
             ApplyEngine(diarInfo, DiarDot, DiarRing);
             if (diarTrouble)
@@ -781,18 +766,18 @@ public sealed partial class MainWindow : Window
         }
 
         ApplyStateAccent(s.IndicatorState());
-        ApplyUsageSpeakingAccent(s.Activity.TtsSource);
-        CapsDot.Fill = s.Activity.Caps ? Green : Gray;
+        ApplyUsageSpeakingAccent(s.Activity.SpeakingSource);
+        CapsDot.Fill = s.Activity.CapsActive ? Green : Gray;
     }
 
     private TrayIcon.IconState _accentState = (TrayIcon.IconState)(-1);
     private string? _speakingUsageAgent;
-    /// Pre-multiplied α wash from <see cref="Brand.RandomPastelWash"/>; re-rolled when speaking agent changes.
+    /// Pastel wash; re-rolled when speaking agent changes.
     private Windows.UI.Color? _speakingWash;
 
     private void SizeStateStripe()
     {
-        double h = 48; // WinUI top-nav fallback
+        double h = 48;
         if (FindDescendant(Nav, "TopNavGrid") is FrameworkElement bar && bar.ActualHeight > 0)
             h = bar.ActualHeight;
         StateStripe.Height = h;
@@ -810,7 +795,7 @@ public sealed partial class MainWindow : Window
         return null;
     }
 
-    /// <summary>Top bar wash in tray Brand tints; idle clears. ~30% so tabs stay readable on Mica.</summary>
+    /// <summary>Top bar wash in tray Brand tints; idle clears. ~30% for Mica readability.</summary>
     private void ApplyStateAccent(TrayIcon.IconState state)
     {
         if (state == _accentState) return;
@@ -830,7 +815,7 @@ public sealed partial class MainWindow : Window
         StateStripe.Background = BrandWashBrush(basis);
     }
 
-    /// <summary>Random pastel wash on the speaking agent Usage card (top bar stays brand purple).</summary>
+    /// <summary>Pastel wash on speaking agent card (top bar stays brand purple).</summary>
     private void ApplyUsageSpeakingAccent(string? agent)
     {
         if (string.Equals(_speakingUsageAgent, agent, StringComparison.Ordinal)) return;
@@ -858,7 +843,6 @@ public sealed partial class MainWindow : Window
         return new SolidColorBrush(Windows.UI.Color.FromArgb(0, 0, 0, 0));
     }
 
-    /// <summary>~30% translucent brand wash for the top stripe only.</summary>
     private static SolidColorBrush BrandWashBrush(Windows.UI.Color basis)
     {
         const double Tint = 0.30;
@@ -866,8 +850,8 @@ public sealed partial class MainWindow : Window
             Windows.UI.Color.FromArgb((byte)(255 * Tint), basis.R, basis.G, basis.B));
     }
 
-    /// <summary>Dot color only (trouble note lives in expansion). Download → orange progress ring
-    /// with 0.02 floor so 0% still shows a sliver (macOS parity).</summary>
+    /// <summary>Dot only (trouble note in expansion). Download → orange ring with 0.02 floor
+    /// so 0% still shows a sliver (macOS parity).</summary>
     private static void ApplyEngine(EngineInfo e, Microsoft.UI.Xaml.Shapes.Ellipse dot,
                                     Microsoft.UI.Xaml.Controls.ProgressRing ring)
     {
@@ -898,10 +882,9 @@ public sealed partial class MainWindow : Window
         dot.Fill = Gray;
     }
 
-    /// <summary>Claude Code ready row names the delegated key instead of local STT stats.</summary>
     private static string ClaudeDelegationHint(HealthSnapshot s) =>
-        s.EngineSelection.ClaudeCodeKey.Length > 0
-            ? Loc.T("status.stt_claude_code", new Dictionary<string, string> { ["key"] = s.EngineSelection.ClaudeCodeKey })
+        s.SttEngine.DelegationKey.Length > 0
+            ? Loc.T("status.stt_claude_code", new Dictionary<string, string> { ["key"] = s.SttEngine.DelegationKey })
             : Loc.T("status.stt_claude_code_off");
 
     private static void ShowMsg(TextBlock msg, FrameworkElement grid, string text)
@@ -927,8 +910,7 @@ public sealed partial class MainWindow : Window
             await Windows.System.Launcher.LaunchUriAsync(uri);
     }
 
-    /// <summary>Startup one-shot pill (latestVersion null when available is false). Does not
-    /// change VersionLink (still opens homepage). SeedPurple wash only — not error/warning.</summary>
+    /// <summary>Startup pill. SeedPurple only — not error/warning. VersionLink still opens homepage.</summary>
     internal void ApplyUpdateCheck(bool available, string? latestVersion)
     {
         if (!available || latestVersion is null) return;
@@ -938,7 +920,7 @@ public sealed partial class MainWindow : Window
         VersionPill.Background = new SolidColorBrush(Color.FromArgb(40, purple.R, purple.G, purple.B));
     }
 
-    // HyperlinkButton.Click doesn't mark Tapped Handled — without this, bubbles to header expand.
+    // HyperlinkButton.Click doesn't mark Tapped Handled — else bubbles to header expand.
     private void VersionLink_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => e.Handled = true;
 
     private void TtsSystemSettings_Click(object sender, RoutedEventArgs e) => Native.OpenVoiceSettings();
@@ -953,14 +935,13 @@ public sealed partial class MainWindow : Window
         panel.Visibility = panel.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    // Tab strip + Status panel top/bottom margins → client height chrome (bottom == side pad).
     private const double StatusChromeDip = 84;
 
-    // Last auto-fit client height (-1 = never). Match ⇒ still tracking content; else honor user taller size.
+    // Last auto-fit client height (-1 = never). Match ⇒ still tracking; else honor user taller size.
     private int _lastFitClientPx = -1;
 
-    /// <summary>Min height = Status content (no shorter cut-off); no max. Auto-fit unless user
-    /// dragged taller. Use arranged ActualHeight — manual Measure blanks the window.</summary>
+    /// <summary>Min height = Status content; auto-fit unless user dragged taller.
+    /// Use arranged ActualHeight — manual Measure blanks the window.</summary>
     private void CapHeightToStatusContent()
     {
         if (AppWindow.Presenter is not Microsoft.UI.Windowing.OverlappedPresenter pr) return;
@@ -996,7 +977,6 @@ public sealed partial class MainWindow : Window
             var name = tool.Name ?? "";
             if (name.Length == 0) continue;
 
-            // Fluent Expander per tool; catalog order is authored display order (macOS same source).
             var body = new StackPanel { Spacing = 10 };
             var desc = tool.Description ?? "";
             if (desc.Length > 0)
@@ -1015,7 +995,7 @@ public sealed partial class MainWindow : Window
                     FontSize = 11,
                     FontWeight = FontWeights.SemiBold,
                     Opacity = 0.5,
-                    CharacterSpacing = 60,   // a touch of tracking — the Fluent caption/overline look
+                    CharacterSpacing = 60,
                 });
                 foreach (var p in ps)
                 {
@@ -1053,7 +1033,6 @@ public sealed partial class MainWindow : Window
 
     private static readonly JsonSerializerOptions ToolsJsonOptions = new() { PropertyNameCaseInsensitive = true };
 
-    /// <summary>Libraries from shared ds-model catalog — credits can't drift from what ships.</summary>
     private void LoadLibraries()
     {
         string json = Native.LibrariesJson();
@@ -1129,7 +1108,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    // Wire: ds-model libraries::catalog (ordered projects/files).
+    // Wire: ds-model libraries::catalog.
     private sealed record LibraryDto(
         [property: JsonPropertyName("name")] string? Name,
         [property: JsonPropertyName("usage")] string? Usage,
@@ -1143,7 +1122,7 @@ public sealed partial class MainWindow : Window
         [property: JsonPropertyName("url")] string? Url,
         [property: JsonPropertyName("size_bytes")] long? SizeBytes);
 
-    // Wire: ds-tools catalog_ui (ordered tools/params); macOS ToolDTO parity.
+    // Wire: ds-tools catalog_ui.
     private sealed record ToolDto(
         [property: JsonPropertyName("name")] string? Name,
         [property: JsonPropertyName("description")] string? Description,

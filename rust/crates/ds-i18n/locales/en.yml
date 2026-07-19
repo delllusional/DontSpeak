@@ -7,18 +7,18 @@ common:
   dash: "—"
   update_arrow: "→"
   nav_status: Status
-  nav_usage: Usage
+  nav_agents: Agents
   nav_tools: Tools
   nav_credits: Credits
   nav_log: Log
   cancel: Cancel
 
-# ─────────────────────────────── USAGE SCREEN ───────────────────────────────
+# ─────────────────────────────── AGENTS SCREEN ──────────────────────────────
 # Period keys MUST match the `period` wire tokens from ds-agent-usage
 # (`session` | `week` | `month`). Hosts look up `usage.<period>` with no
 # per-OS switch. Provider titles: `usage.provider.<client_source>`.
 usage:
-  unavailable: Usage unavailable
+  unavailable: Agents unavailable
   account_hidden: Account
   session: Session
   week: Week

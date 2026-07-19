@@ -1,13 +1,12 @@
-//! Health panel — `AdwApplicationWindow` of preference rows for live engine state (GTK4
-//! analogue of macOS `StatusView` / Windows status tab). Read-only; control is MCP.
-//!
-//! Strings only from shared `ds-i18n` via [`crate::ffi::t`]. State as colored dots (libadwaita
-//! semantic classes), never words — same as the other hosts.
+//! Health panel — AdwApplicationWindow of preference rows (macOS StatusView / Windows status).
+//! Read-only; control is MCP. Strings from ds-i18n; state as colored dots, never words.
 
 use std::collections::HashMap;
 
 use adw::prelude::*;
-use ds_status::{EngineObj, EngineState, ModelStatus};
+use ds_status::{
+    EngineState, EngineStatus, ModelStatus, StatusSttEngine, StatusTtsEngine,
+};
 
 use crate::ffi::{UsageCard, UsageDeck, UsageRow};
 use crate::status::Snapshot;
@@ -20,7 +19,6 @@ fn t(key: &str) -> String {
 #[derive(Clone)]
 pub struct Widgets {
     pub window: adw::ApplicationWindow,
-    /// Engine headline dot (green running / gray idle).
     engine: gtk::Image,
     tts_row: adw::ExpanderRow,
     tts_dot: gtk::Image,
@@ -37,15 +35,12 @@ pub struct Widgets {
     stt_transcribed: gtk::Label,
     stt_failures: gtk::Label,
     stt_failures_row: adw::ActionRow,
-    /// Caps Lock: green active / orange enabled-idle / gray off.
     caps_dot: gtk::Image,
     spoken: gtk::Label,
     heard: gtk::Label,
-    /// Headline version subtitle — same `GtkLabel` [`make_version_link`] wires for homepage
-    /// click. [`apply_update_check`] rewrites text to "current → new" and tints background
-    /// in place (one shared pill, not a separate badge).
+    /// Version subtitle: homepage click via make_version_link; apply_update_check rewrites
+    /// in place to "current → new" + badge (one pill, not a separate badge).
     version_subtitle: gtk::Label,
-    /// Usage tab — speaking-agent wash from `running.tts_source`.
     usage_page: UsagePage,
 }
 
@@ -67,8 +62,7 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         .build();
 
     let header = adw::HeaderBar::new();
-    // Close only: decoration-layout left`:`right (not CSS-hiding buttons). ":close" = nothing
-    // left, close right. Window lives in the tray; close just hides it (main.rs).
+    // Close only (":close"); tray-resident — close hides (main.rs).
     header.set_decoration_layout(Some(":close"));
 
     let content = gtk::Box::builder()
@@ -80,7 +74,6 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         .margin_end(18)
         .build();
 
-    // Headline: name + version, expandable lifetime totals; dot is the only state indicator.
     let engine_group = adw::PreferencesGroup::new();
     let version = crate::ffi::version();
     let status_row = adw::ExpanderRow::builder()
@@ -108,7 +101,6 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     engine_group.add(&status_row);
     content.append(&engine_group);
 
-    // TTS/STT: role + engine-name subtitle + lifecycle dot; expand for shared status_fmt stats.
     let voice_group = adw::PreferencesGroup::new();
 
     let tts_row = adw::ExpanderRow::builder()
@@ -150,7 +142,6 @@ pub fn build_window(app: &adw::Application) -> Widgets {
 
     content.append(&voice_group);
 
-    // Caps Lock at bottom; expands to tap/hold hint (peer parity).
     let caps_group = adw::PreferencesGroup::new();
     let caps_row = adw::ExpanderRow::builder()
         .title(t("status.caps_lock").as_str())
@@ -159,27 +150,25 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     let caps_hint = adw::ActionRow::builder()
         .title(t("status.caps_hint").as_str())
         .build();
-    caps_hint.set_title_lines(0); // wrap full hint instead of ellipsizing
+    caps_hint.set_title_lines(0); // wrap full hint
     caps_row.add_row(&caps_hint);
     caps_group.add(&caps_row);
     content.append(&caps_group);
 
-    // Usage / Status / Tools / Log / Credits — five-view HIG limit.
-    // First page is the launch default, matching macOS/Windows.
+    // Five-view HIG limit; Agents is launch default (macOS/Windows parity).
     let stack = adw::ViewStack::new();
     let usage_page = UsagePage::new();
     {
         let page = usage_page.clone();
         stack.connect_visible_child_name_notify(move |s| {
-            if s.visible_child_name().as_deref() == Some("usage") {
-                // Cache-first paint, then force-refresh each card async.
+            if s.visible_child_name().as_deref() == Some("agents") {
                 page.on_tab_selected();
             } else {
                 page.cancel_visible_request();
             }
         });
     }
-    stack.add_titled(&usage_page.root, Some("usage"), &t("common.nav_usage"));
+    stack.add_titled(&usage_page.root, Some("agents"), &t("common.nav_agents"));
     stack.add_titled(&scrolled(&content), Some("status"), &t("common.nav_status"));
     stack.add_titled(
         &scrolled(&build_tools_page()),
@@ -187,7 +176,6 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         &t("common.nav_tools"),
     );
     let (log_scroll, log_view) = build_log_page();
-    // Free-text filter (shared ds_log rules); no dedicated i18n placeholder on other hosts either.
     let log_filter = gtk::SearchEntry::builder().hexpand(true).build();
     let log_clear_button = gtk::Button::builder()
         .icon_name("user-trash-symbolic")
@@ -213,13 +201,12 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         Some("credits"),
         &t("common.nav_credits"),
     );
-    // Latest raw JSON from push; filter re-applies without another disk read.
+    // Cached JSON from push; filter re-applies without another disk read.
     let log_json: std::rc::Rc<std::cell::RefCell<String>> =
         std::rc::Rc::new(std::cell::RefCell::new(String::new()));
     let log_query: std::rc::Rc<std::cell::RefCell<String>> =
         std::rc::Rc::new(std::cell::RefCell::new(String::new()));
-    // Live log only while the tab is visible (`log_push`); stop when leaving.
-    // `Rc<RefCell>` for GTK closures; the push itself is a real OS thread.
+    // Live log only while tab visible; stop on leave.
     let log_push_stop: std::rc::Rc<
         std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     > = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -270,11 +257,9 @@ pub fn build_window(app: &adw::Application) -> Widgets {
             dialog.add_response("cancel", &t("common.cancel"));
             dialog.add_response("clear", &t("logs.clear_confirm_action"));
             dialog.set_response_appearance("clear", adw::ResponseAppearance::Destructive);
-            // AdwAlertDialog closes itself once a response is activated.
             dialog.connect_response(None, move |_dialog, response| {
                 if response == "clear" {
-                    // File removal can block — keep it off the GTK main loop; log-push
-                    // publishes the resulting empty tail.
+                    // File removal can block — off GTK main loop; log-push republishes empty tail.
                     let _ = std::thread::Builder::new()
                         .name("ds-logs-clear".into())
                         .spawn(crate::ffi::logs_clear);
@@ -321,13 +306,11 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     }
 }
 
-/// Apply a status push to the panel.
 pub fn update(w: &Widgets, snap: &Snapshot) {
     let Some(s) = &snap.status else {
-        // Engine down: idle dots, cleared names, dashed stats, failures hidden.
         let dash = t("common.dash");
         for dot in [&w.engine, &w.tts_dot, &w.stt_dot, &w.caps_dot] {
-            set_dot(dot, "idle");
+            set_dot(dot, EngineState::Idle);
         }
         w.tts_row.set_subtitle("");
         w.stt_row.set_subtitle("");
@@ -350,25 +333,25 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         return;
     };
 
-    let speaking = if s.running.tts_active {
-        s.running.tts_source.as_deref()
+    let speaking = if s.activity.speaking {
+        s.activity.speaking_source.map(|c| c.as_str())
     } else {
         None
     };
     w.usage_page.set_speaking_agent(speaking);
 
-    set_dot(&w.engine, "running");
+    set_dot(&w.engine, EngineState::Running);
 
     let (tts_name, tts_state, tts_o) = match tts_engine(s) {
         Some((name, state, obj)) => (name, state, Some(obj)),
-        None => (String::new(), "idle", None),
+        None => (String::new(), EngineState::Idle, None),
     };
     w.tts_row
         .set_subtitle(&engine_subtitle(&tts_name, tts_state, tts_o, None));
     set_dot(&w.tts_dot, tts_state);
     let tts = &s.stats.tts;
     w.tts_runtime
-        .set_text(&runtime_text(s.tts_provider.as_deref()));
+        .set_text(&runtime_text(s.tts.provider.as_deref()));
     w.tts_realtime.set_text(&crate::ffi::stats_range(
         tts.rtf_min,
         tts.rtf_avg,
@@ -389,7 +372,7 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
 
     let (stt_name, stt_state, stt_o) = match stt_engine(s) {
         Some((name, state, obj)) => (name, state, Some(obj)),
-        None => (String::new(), "idle", None),
+        None => (String::new(), EngineState::Idle, None),
     };
     w.stt_row.set_subtitle(&engine_subtitle(
         &stt_name,
@@ -400,7 +383,7 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
     set_dot(&w.stt_dot, stt_state);
     let stt = &s.stats.stt;
     w.stt_runtime
-        .set_text(&runtime_text(s.stt_provider.as_deref()));
+        .set_text(&runtime_text(s.stt.provider.as_deref()));
     w.stt_realtime.set_text(&crate::ffi::stats_range(
         stt.rtf_min,
         stt.rtf_avg,
@@ -414,12 +397,12 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
 
     set_dot(
         &w.caps_dot,
-        if s.running.caps {
-            "running"
-        } else if s.running.caps_wanted {
-            "warming"
+        if s.activity.caps_active {
+            EngineState::Running
+        } else if s.activity.caps_enabled {
+            EngineState::Warming
         } else {
-            "idle"
+            EngineState::Idle
         },
     );
 
@@ -429,7 +412,6 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         .set_text(&crate::ffi::duration_live(s.stats.lifetime.stt_secs as f64));
 }
 
-/// Shared `runtime_label` for the provider token, or dash when null (system/off/claude_code).
 fn runtime_text(provider: Option<&str>) -> String {
     match provider {
         Some(p) if !p.is_empty() => crate::ffi::runtime_label(p),
@@ -437,7 +419,7 @@ fn runtime_text(provider: Option<&str>) -> String {
     }
 }
 
-/// Failures row only when count > 0 (macOS/Windows parity).
+/// Failures row only when count > 0 (peer parity).
 fn set_failures(row: &adw::ActionRow, label: &gtk::Label, failures: u64) {
     if failures > 0 {
         label.set_text(&failures.to_string());
@@ -447,58 +429,40 @@ fn set_failures(row: &adw::ActionRow, label: &gtk::Label, failures: u64) {
     }
 }
 
-/// Active TTS row via [`ds_status::ActiveTtsSlot`].
-fn tts_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
-    use ds_status::ActiveTtsSlot;
-    match ActiveTtsSlot::from_engine(&s.tts_engine)? {
-        ActiveTtsSlot::Kokoro => Some((
-            t("status.engine.kokoro"),
-            s.kokoro.state.as_str(),
-            &s.kokoro,
-        )),
-        ActiveTtsSlot::TtsSystem => Some((
-            t("status.engine.system"),
-            s.tts_system.state.as_str(),
-            &s.tts_system,
-        )),
-    }
+fn tts_engine(s: &ModelStatus) -> Option<(String, EngineState, &EngineStatus)> {
+    let status = s.tts.status.as_ref()?;
+    let name = match s.tts.engine {
+        StatusTtsEngine::BuiltIn => t("status.engine.kokoro"),
+        StatusTtsEngine::System => t("status.engine.system"),
+        StatusTtsEngine::Off => return None,
+    };
+    Some((name, status.state, status))
 }
 
-/// Active STT row via [`ds_status::ActiveSttSlot`].
-fn stt_engine(s: &ModelStatus) -> Option<(String, &str, &EngineObj)> {
-    use ds_status::ActiveSttSlot;
-    match ActiveSttSlot::from_engine(&s.stt_engine)? {
-        ActiveSttSlot::Parakeet => Some((
-            t("status.engine.parakeet"),
-            s.parakeet.state.as_str(),
-            &s.parakeet,
-        )),
-        ActiveSttSlot::ClaudeCode => Some((
-            t("status.engine.claude_code"),
-            s.claude_code.state.as_str(),
-            &s.claude_code,
-        )),
-        ActiveSttSlot::System => Some((
-            t("status.engine.system"),
-            s.system.state.as_str(),
-            &s.system,
-        )),
-    }
+fn stt_engine(s: &ModelStatus) -> Option<(String, EngineState, &EngineStatus)> {
+    let status = s.stt.status.as_ref()?;
+    let name = match s.stt.engine {
+        StatusSttEngine::BuiltIn => t("status.engine.parakeet"),
+        StatusSttEngine::ClaudeCode => t("status.engine.claude_code"),
+        StatusSttEngine::System => t("status.engine.system"),
+        StatusSttEngine::Off => return None,
+    };
+    Some((name, status.state, status))
 }
 
-/// Name + lifecycle note when not ready ("Kokoro · Downloading 45%"), or `extra` when ready.
+/// Name + lifecycle note when not ready, or `extra` when ready.
 fn engine_subtitle(
     name: &str,
-    state: &str,
-    obj: Option<&EngineObj>,
+    state: EngineState,
+    obj: Option<&EngineStatus>,
     extra: Option<String>,
 ) -> String {
-    // Shared state-word returns "" for ready states — that emptiness IS the note-vs-ready
-    // gate (same as macOS/Windows). No local "is trouble" list to drift.
+    // Shared state-word returns "" for ready — that emptiness is the note-vs-ready gate
+    // (macOS/Windows). No local "is trouble" list to drift.
     let (prog, why) = obj
         .map(|o| (o.progress, o.error.as_deref().unwrap_or("")))
         .unwrap_or((0.0, ""));
-    let word = crate::ffi::engine_state_word(state, prog, why);
+    let word = crate::ffi::engine_state_word(state.as_str(), prog, why);
     if !word.is_empty() {
         return if name.is_empty() {
             word
@@ -513,12 +477,12 @@ fn engine_subtitle(
     }
 }
 
-/// Claude Code STT has no local transcription — name the key it sends (peer delegation hint).
+/// Claude Code STT: name the delegated key (no local transcription).
 fn claude_hint(s: &ModelStatus) -> Option<String> {
-    if s.stt_engine != "claude_code" {
+    if s.stt.engine != StatusSttEngine::ClaudeCode {
         return None;
     }
-    Some(match s.claude_code_key.as_deref() {
+    Some(match s.stt.delegation_key.as_deref() {
         Some(k) if !k.is_empty() => crate::ffi::t_args("status.stt_claude_code", &[("key", k)]),
         _ => t("status.stt_claude_code_off"),
     })
@@ -532,8 +496,7 @@ fn value_label() -> gtk::Label {
     l
 }
 
-/// First descendant with `class` — reaches into AdwExpanderRow/ActionRow template widgets
-/// (disclosure arrow, subtitle label) that aren't otherwise exposed.
+/// First descendant with `class` (reaches into Adw template widgets not otherwise exposed).
 fn find_by_css_class(w: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
     if w.has_css_class(class) {
         return Some(w.clone());
@@ -548,9 +511,8 @@ fn find_by_css_class(w: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
     None
 }
 
-/// Wire homepage click on the headline version subtitle without restyling it. Claims
-/// `GestureClick` on *press* so the row's expand gesture (also press) loses; claiming on
-/// release is too late. Returns the subtitle `GtkLabel` for [`apply_update_check`].
+/// Homepage click on version subtitle. Claim GestureClick on *press* so the row expand
+/// gesture loses (release is too late). Returns the subtitle for apply_update_check.
 fn make_version_link(row: &adw::ExpanderRow, url: &str) -> gtk::Label {
     let subtitle = find_by_css_class(row.upcast_ref::<gtk::Widget>(), "subtitle")
         .and_then(|w| w.downcast::<gtk::Label>().ok())
@@ -572,8 +534,7 @@ fn make_version_link(row: &adw::ExpanderRow, url: &str) -> gtk::Label {
     subtitle
 }
 
-/// Brand purple for update badge + usage progress (from [`crate::icon::brand_colors`]).
-/// Speaking-card wash color is dynamic (see [`UsagePage::set_speaking_agent`]).
+/// Brand purple for update badge + usage progress. Speaking wash is dynamic (set_speaking_agent).
 pub fn load_update_badge_css() {
     let (crate::icon::Rgb(r, g, b), _mic_orange) =
         crate::icon::brand_colors(&crate::ffi::brand_colors_json());
@@ -601,7 +562,7 @@ pub fn load_update_badge_css() {
     }
 }
 
-/// One roll from `ds_random_pastel_wash_json` — `(r,g,b,a)`; `None` if FFI/`{}`.
+/// One roll from ds_random_pastel_wash_json; None if FFI/`{}`.
 fn random_pastel_wash() -> Option<(u8, u8, u8, f64)> {
     let v: serde_json::Value = serde_json::from_str(&crate::ffi::random_pastel_wash_json()).ok()?;
     let r = v.get("r")?.as_u64()? as u8;
@@ -611,9 +572,8 @@ fn random_pastel_wash() -> Option<(u8, u8, u8, f64)> {
     Some((r, g, b, a.clamp(0.0, 1.0)))
 }
 
-/// One-shot startup update result. `{}` / missing-or-false `update_available` / missing
-/// `latest_version` → leave plain version (never show a pill on doubt). Rewrites the existing
-/// subtitle in place to "current → new" + badge class; homepage click unchanged.
+/// Startup update pill. Missing/false/malformed → leave plain version (never pill on doubt).
+/// Rewrites subtitle in place; homepage click unchanged.
 pub fn apply_update_check(w: &Widgets, json: &str) {
     let v: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
     let available = v
@@ -633,7 +593,7 @@ pub fn apply_update_check(w: &Widgets, json: &str) {
     w.version_subtitle.add_css_class("ds-update-badge");
     w.version_subtitle
         .set_tooltip_text(Some(&t("status.update_available")));
-    // Subtitle is hexpand/halign-fill by default; shrink-wrap so the badge hugs the text.
+    // Shrink-wrap so the badge hugs the text.
     w.version_subtitle.set_hexpand(false);
     w.version_subtitle.set_halign(gtk::Align::Start);
 }
@@ -644,7 +604,6 @@ fn action_row(title: &str, value: &impl IsA<gtk::Widget>) -> adw::ActionRow {
     row
 }
 
-/// Symbolic filled circle; recolored by libadwaita semantic class via [`set_dot`].
 fn status_dot() -> gtk::Image {
     let dot = gtk::Image::from_icon_name("media-record-symbolic");
     dot.set_pixel_size(12);
@@ -653,15 +612,14 @@ fn status_dot() -> gtk::Image {
     dot
 }
 
-/// Hide expander-row disclosure arrow with `set_visible(false)` (not CSS opacity) so the ~16px
-/// slot frees and trailing suffixes sit flush — dots align with non-expander rows.
+/// Hide native arrow with set_visible(false) (not opacity) so the slot frees; dots align.
 fn hide_expander_arrow(row: &adw::ExpanderRow) {
     if let Some(arrow) = find_by_css_class(row.upcast_ref::<gtk::Widget>(), "expander-row-arrow") {
         arrow.set_visible(false);
     }
 }
 
-/// Collapsed: status dot; expanded: chevron in the same slot (native arrow hidden).
+/// Collapsed: status dot; expanded: chevron in the same slot.
 fn expander_indicator(row: &adw::ExpanderRow) -> gtk::Image {
     hide_expander_arrow(row);
     let dot = status_dot();
@@ -682,17 +640,16 @@ fn expander_indicator(row: &adw::ExpanderRow) -> gtk::Image {
     dot
 }
 
-/// Recolor from `EngineObj.state`: running→success, warming/downloading/blocked→warning,
-/// failed→error, else dim-label. Shared engine→app contract.
-fn set_dot(dot: &gtk::Image, state: &str) {
+/// running→success, warming/downloading/blocked→warning, failed→error, else dim-label.
+fn set_dot(dot: &gtk::Image, state: EngineState) {
     for c in ["success", "warning", "error", "dim-label"] {
         dot.remove_css_class(c);
     }
-    dot.add_css_class(match EngineState::parse(state) {
-        Some(EngineState::Running) => "success",
-        Some(EngineState::Warming | EngineState::Downloading | EngineState::Blocked) => "warning",
-        Some(EngineState::Failed) => "error",
-        _ => "dim-label",
+    dot.add_css_class(match state {
+        EngineState::Running => "success",
+        EngineState::Warming | EngineState::Downloading | EngineState::Blocked => "warning",
+        EngineState::Failed => "error",
+        EngineState::Missing | EngineState::Idle => "dim-label",
     });
 }
 
@@ -717,8 +674,7 @@ fn page_box(group: &adw::PreferencesGroup) -> gtk::Box {
     b
 }
 
-/// Mounted period row widgets — kept so matching refreshes update in place (WinUI
-/// `UsageRowView` analogue). Remount only when period shape changes.
+/// Period row widgets for in-place refresh; remount only when period shape changes.
 #[derive(Clone)]
 struct UsageRowWidgets {
     period: String,
@@ -726,7 +682,7 @@ struct UsageRowWidgets {
     remaining: gtk::Label,
 }
 
-/// Stable per-agent shell: `stack` for crossfade remounts; `rows` for in-place updates.
+/// Per-agent shell: stack for crossfade remounts; rows for in-place updates.
 struct MountedUsageCard {
     stack: gtk::Stack,
     account: gtk::Label,
@@ -737,19 +693,16 @@ struct MountedUsageCard {
 struct UsagePage {
     root: gtk::Box,
     list: gtk::Box,
-    /// Canonical `ClientSource::CLIENTS` order supplied by the Rust skeleton deck.
+    /// ClientSource::CLIENTS order from the skeleton deck.
     canonical_agents: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
-    /// Latest cards (skeleton + independent loads).
     latest: std::rc::Rc<std::cell::RefCell<Vec<UsageCard>>>,
-    /// Stable card shells; matching row shape updates ProgressBar/labels in place.
     rendered: std::rc::Rc<std::cell::RefCell<HashMap<String, MountedUsageCard>>>,
     empty_label: gtk::Label,
     generation: std::rc::Rc<std::cell::Cell<u64>>,
-    /// In-flight TTS agent token (`running.tts_source`); drives `.ds-usage-speaking` wash.
+    /// `activity.speaking_source`; drives `.ds-usage-speaking` wash.
     speaking_agent: std::rc::Rc<std::cell::RefCell<Option<String>>>,
-    /// Pastel wash frozen while the same agent stays speaking; re-rolled on agent change.
+    /// Frozen while the same agent speaks; re-rolled on agent change.
     speaking_wash: std::rc::Rc<std::cell::RefCell<Option<(u8, u8, u8, f64)>>>,
-    /// Dynamic CSS for `.ds-usage-speaking` background (one provider, reloaded on re-roll).
     speaking_css: gtk::CssProvider,
 }
 
@@ -790,7 +743,6 @@ impl UsagePage {
         }
     }
 
-    /// Random pastel wash on the card whose agent matches the speaking TTS source.
     fn set_speaking_agent(&self, agent: Option<&str>) {
         let next = agent.map(str::to_string);
         if *self.speaking_agent.borrow() == next {
@@ -815,7 +767,7 @@ impl UsagePage {
                 }}"
             )
         } else {
-            // Radius only; no fill while idle (class may still briefly be present).
+            // Radius only while idle (class may briefly remain).
             ".ds-usage-speaking {
                 border-radius: 12px;
             }"
@@ -898,8 +850,7 @@ impl UsagePage {
             return;
         }
 
-        // Same period count + order → update labels/ProgressBar in place (WinUI
-        // TryUpdateUsageRows). Crossfade remount only when row shape changes.
+        // Matching period shape → in-place update; else crossfade remount.
         if let Some(mounted) = self.rendered.borrow().get(&card.agent)
             && try_update_usage_rows(&mounted.rows, &card)
         {
@@ -960,7 +911,6 @@ impl UsagePage {
         self.update_empty_state(false);
     }
 
-    /// Tab select: cache paint, then async force-load per agent.
     fn on_tab_selected(&self) {
         let generation = self.generation.get().saturating_add(1);
         self.generation.set(generation);
@@ -1044,7 +994,6 @@ fn finish_one(page: &UsagePage, remaining: &std::rc::Rc<std::cell::Cell<usize>>,
     }
 }
 
-/// In-place row update when period shape matches; remount only on shape change.
 fn try_update_usage_rows(mounted: &[UsageRowWidgets], card: &UsageCard) -> bool {
     if mounted.len() != card.rows.len() {
         return false;
@@ -1061,7 +1010,7 @@ fn try_update_usage_rows(mounted: &[UsageRowWidgets], card: &UsageCard) -> bool 
 }
 
 fn update_usage_row(view: &UsageRowWidgets, row: &UsageRow) {
-    // Percent is the progress bar only; remaining till reset sits top-right (no seconds).
+    // Percent is the bar only; remaining sits top-right (no seconds).
     view.progress
         .set_fraction((row.used_percent / 100.0).clamp(0.0, 1.0));
     let remaining = crate::ffi::usage_resets_in(row.resets_at_unix);
@@ -1069,7 +1018,7 @@ fn update_usage_row(view: &UsageRowWidgets, row: &UsageRow) {
     view.remaining.set_visible(!remaining.is_empty());
 }
 
-/// Localized agent title; unknown tokens get a prettified fallback instead of the raw i18n key.
+/// Localized agent title; unknown tokens → prettified fallback (not the raw key).
 fn agent_display_name(agent: &str) -> String {
     let key = format!("usage.provider.{agent}");
     let label = t(&key);
@@ -1080,7 +1029,7 @@ fn agent_display_name(agent: &str) -> String {
     }
 }
 
-/// `snake_case` → `Title Case` (e.g. `claude_code` → `Claude Code`).
+/// snake_case → Title Case.
 fn prettify_agent_token(agent: &str) -> String {
     agent
         .split('_')
@@ -1100,13 +1049,11 @@ fn prettify_agent_token(agent: &str) -> String {
         .join(" ")
 }
 
-/// Same layout as Swift/WinUI: agent title + account (top-right) + period rows.
 fn paint_usage_card(card: &UsageCard) -> (adw::PreferencesGroup, gtk::Label, Vec<UsageRowWidgets>) {
     let group = adw::PreferencesGroup::builder()
         .title(agent_display_name(&card.agent))
         .build();
-    // Account sits top-right of the group header (caption / dim, like remaining).
-    // Fully transparent until clicked; reveal lives only on this widget (UI reload resets).
+    // Account top-right; transparent until clicked (session-only, not persisted).
     let account = gtk::Label::builder()
         .halign(gtk::Align::End)
         .valign(gtk::Align::End)
@@ -1125,7 +1072,6 @@ fn paint_usage_card(card: &UsageCard) -> (adw::PreferencesGroup, gtk::Label, Vec
             if !label.is_visible() || label.text().is_empty() {
                 return;
             }
-            // Toggle session-only reveal (not persisted).
             let next = if label.opacity() < 0.5 { 1.0 } else { 0.0 };
             label.set_opacity(next);
         });
@@ -1148,7 +1094,7 @@ fn set_usage_account_label(label: &gtk::Label, account: Option<&str>) {
         Some(value) => {
             label.set_text(value);
             label.set_visible(true);
-            // Keep current reveal if the label was already shown; new widgets start at 0.
+            // Keep current reveal; new widgets start at 0.
         }
         None => {
             label.set_text("");
@@ -1158,7 +1104,6 @@ fn set_usage_account_label(label: &gtk::Label, account: Option<&str>) {
     }
 }
 
-/// Period + remaining | progress. Remaining label always mounted (may be hidden).
 fn usage_row_widget(row: &UsageRow) -> (gtk::Widget, UsageRowWidgets) {
     let outer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -1169,7 +1114,7 @@ fn usage_row_widget(row: &UsageRow) -> (gtk::Widget, UsageRowWidgets) {
         .margin_end(12)
         .build();
 
-    // Bottom-align period + remaining so different font sizes share one baseline.
+    // Bottom-align period + remaining for a shared baseline.
     let header = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
@@ -1184,7 +1129,6 @@ fn usage_row_widget(row: &UsageRow) -> (gtk::Widget, UsageRowWidgets) {
         .yalign(1.0)
         .build();
     period.add_css_class("heading");
-    // Remaining till reset sits top-right; percent is the bar only.
     let remaining_label = gtk::Label::builder()
         .halign(gtk::Align::End)
         .valign(gtk::Align::End)
@@ -1198,7 +1142,6 @@ fn usage_row_widget(row: &UsageRow) -> (gtk::Widget, UsageRowWidgets) {
     header.append(&remaining_label);
 
     let progress = gtk::ProgressBar::builder().hexpand(true).build();
-    // Brand seed purple fill — see `load_update_badge_css` / `.ds-usage-progress`.
     progress.add_css_class("ds-usage-progress");
 
     outer.append(&header);
@@ -1213,7 +1156,6 @@ fn usage_row_widget(row: &UsageRow) -> (gtk::Widget, UsageRowWidgets) {
     (outer.upcast(), view)
 }
 
-/// Tools catalog from `ds_tools_json` — expander per tool, params with shared `detail` string.
 fn build_tools_page() -> gtk::Widget {
     let group = adw::PreferencesGroup::new();
     if let Ok(serde_json::Value::Array(tools)) = serde_json::from_str(&crate::ffi::tools_json()) {
@@ -1230,7 +1172,7 @@ fn build_tools_page() -> gtk::Widget {
                     } else {
                         t("tools.param.optional")
                     };
-                    // Constraint qualifier pre-built by status_fmt::tool_param_detail.
+                    // Pre-built by status_fmt::tool_param_detail (no host-side derivation).
                     let detail = p["detail"].as_str().unwrap_or("");
                     let pdesc = p["description"].as_str().unwrap_or("");
                     let mut sub = format!("{ptype} · {req}");
@@ -1253,7 +1195,6 @@ fn build_tools_page() -> gtk::Widget {
     page_box(&group).upcast()
 }
 
-/// Credits from `ds_libraries_json` — expander per project: homepage, license link, file sizes.
 fn build_credits_page() -> gtk::Widget {
     let group = adw::PreferencesGroup::builder().build();
     if let Ok(serde_json::Value::Array(projects)) =
@@ -1267,7 +1208,6 @@ fn build_credits_page() -> gtk::Widget {
             if let Some(hp) = p["homepage"].as_str().filter(|s| !s.is_empty()) {
                 row.add_row(&link_row(&t("libraries.homepage"), hp));
             }
-            // License row labeled with the license name, opening its license page.
             if let (Some(lic), Some(lu)) = (
                 p["license"].as_str().filter(|s| !s.is_empty()),
                 p["license_url"].as_str().filter(|s| !s.is_empty()),
@@ -1326,7 +1266,6 @@ fn build_log_page() -> (gtk::ScrolledWindow, gtk::TextView) {
     (scroll, view)
 }
 
-/// Filter/flatten via [`ds_log`]; empty or no-match placeholders.
 fn set_log_from_json(view: &gtk::TextView, json: &str, query: &str) {
     let (total, shown, flat) = crate::ffi::filter_and_flatten_logs(json, query);
     let text = if total == 0 {
