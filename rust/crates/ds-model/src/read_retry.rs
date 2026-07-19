@@ -47,11 +47,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("appears-late.bin");
         let path2 = path.clone();
-        // Writer delay is short; reader budget must absorb CI scheduling jitter
-        // (writer thread may start late under load — old 5×30ms budget flaked on macOS).
+        // Publish via write-tmp + rename so the target is never a truncated empty file
+        // (plain fs::write can create-then-fill; a concurrent read then returns Ok([])).
+        // Reader budget absorbs CI scheduling jitter on the writer thread.
         let handle = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
-            std::fs::write(&path2, b"hello").unwrap();
+            let tmp = path2.with_extension("tmp");
+            std::fs::write(&tmp, b"hello").unwrap();
+            std::fs::rename(&tmp, &path2).unwrap();
         });
         let bytes = read_model_file_with(&path, 40, Duration::from_millis(25))
             .expect("should eventually succeed once the file appears");
