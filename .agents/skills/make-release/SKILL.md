@@ -11,7 +11,7 @@ description: Cut a DontSpeak release — tag the single-source version with anno
 Tag-triggered CI: push annotated `v<version>` → `release.yml` gates, builds, publishes
 with the **tag annotation as the release body** (`gh release create --notes-from-tag`).
 Monitor to completion and verify assets. Notes are **not** committed to the tree;
-after publish, CI patches **only** the Lines table's Binaries-avg size cells
+after publish, CI patches **only** the Lines table's Binaries size cells
 (release.yml's post-publish step) — humans still never hand-edit the published body.
 
 ## 1 — Preconditions
@@ -91,11 +91,12 @@ after publish, CI patches **only** the Lines table's Binaries-avg size cells
 3. Append `## Lines`: bare compare URL then the table from
    `scripts/release/release-stats.py <prev> HEAD` (the version commit is HEAD; the
    new tag doesn't exist yet — neither as a git ref nor as a release).
-   Table columns: Area / Code / Tests / Comments / **Binaries avg** — host app rows
-   show mean package size delta for that OS’s two arches; **Total** is the six-package
-   mean; `rust` is blank (install scripts / checksums excluded). At tag time the
-   Binaries avg column is written as `…` placeholders; CI fills real values
-   post-publish from the published artifacts vs `<prev>`.
+   Table columns: Area / Code / Tests / Comments / **Binaries $\overline{\Delta}$**
+   (markdown math so GH renders the overline average) — host app rows show mean
+   package size delta for that OS’s two arches; **Total** leaves the binaries cell
+   blank (no cross-OS mean); `rust` is blank (install scripts / checksums excluded).
+   At tag time host rows use `…` placeholders; CI fills real values post-publish
+   from the published artifacts vs `<prev>`.
 4. **Annotated tag** (required for real releases — body is the release notes; not a
    tree file). Then push:
 
@@ -132,7 +133,7 @@ done
    `APPLE_*` secrets else ad-hoc; Linux tarballs (upload best-effort)
 4. **publish** — assets + fixed-name installers + checksums + body from
    `--notes-from-tag` (the annotation written in step 2), then a soft-fail step
-   patches the body's Binaries-avg `…` cells with real published sizes
+   patches the body's Binaries `…` cells with real published sizes
 
 ## 4 — Monitor (mandatory)
 
@@ -161,7 +162,7 @@ Expect **9 assets**: `checksums.txt`, `install.sh`, `install.ps1`, linux
 `{x86_64,aarch64}.tar.gz`, macos `{aarch64,x86_64}.app.zip`, windows
 `{x86_64,aarch64}.zip`. Missing Linux = best-effort job fail (re-cut or ship without).
 Missing installer = release failure. Body = the tag annotation **plus** the CI-filled
-Binaries-avg column (they intentionally diverge in exactly that column; not empty
+Binaries size column (they intentionally diverge in exactly that column; not empty
 auto-notes). Check no `…` size cells remain; if the soft-fail patch step failed,
 recover with the scripted patch — never a hand-edit:
 
@@ -247,4 +248,4 @@ Web UI may show `untagged-<hash>` briefly — display-only; `tag_name` is correc
 - Don't skip step 7 after a real publish.
 - Real releases: always `git tag -a -F …`. Never commit release notes into the tree
   for CI to read — the annotation is the immutable transport; post-publish CI edits
-  only the body's Binaries-avg size cells.
+  only the body's Binaries size cells.

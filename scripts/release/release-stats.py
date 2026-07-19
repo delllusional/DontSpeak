@@ -1,27 +1,13 @@
 #!/usr/bin/env python3
-"""release-stats.py — code vs. test vs. comment line-change table for a release's diff.
+"""release-stats.py — code/test/comment line-change table for a release diff.
 
-Buckets the diff between two git refs into the workspace's four areas (the
-shared `rust/` workspace plus the three `apps/<platform>/` hosts — see
-AGENTS.md's "Workspace layout"), and within each bucket splits lines into
-"code" vs. "test": a changed line counts as test if it falls at/after the
-file's `#[cfg(test)]` module boundary, or the whole file's path has a
-component ending in `test`/`tests` case-insensitively (`tests/`, `Tests/`,
-`winui.tests/`, `*Tests.swift`/`.cs` — covers this repo's Rust integration
-tests, macOS XCTest target, and Windows xunit project). Full-line `//`
-comments are tallied separately in their own "comments" column, regardless
-of whether they fall in code or test regions.
+Buckets two git refs into rust + apps/{macos,windows,linux}. A changed line is
+"test" if it is at/after `#[cfg(test)]` or the path has a test/tests component
+(case-insensitive). Full-line `//` comments are a separate column.
 
-Also reports **Binaries** size deltas (GitHub Release host packages only — not
-install scripts or checksums): each host app row averages that OS's two arch
-packages; **Total** averages all six; `rust` is blank. At tag time the new
-release's assets don't exist yet, so the default mode writes `…` placeholders in
-that column; after publish, release.yml reruns this script in `--patch-sizes`
-mode, which rewrites ONLY those cells from the just-built artifacts on disk vs
-the previous release's published sizes, leaving the tag annotation untouched.
-
-Used by the `make-release` skill to generate the change-stats table appended
-to release notes. Run from the repo root:
+Binaries column: mean size delta of that OS's two arch packages (GH release
+host packages only). Total and rust leave it blank. Pre-tag: `…` placeholders;
+post-publish release.yml runs `--patch-sizes` to fill only those cells.
 
     scripts/release/release-stats.py v0.2.0 HEAD
     scripts/release/release-stats.py --patch-sizes body.md --old v0.2.0 --assets-dir artifacts
@@ -67,7 +53,7 @@ def is_comment(line):
 
 
 def test_module_boundary(rev, path):
-    """1-indexed line where a `#[cfg(test)]` module starts, or None."""
+    """1-indexed line of `#[cfg(test)]`, or None."""
     result = subprocess.run(
         ["git", "show", f"{rev}:{path}"],
         capture_output=True,
@@ -125,7 +111,7 @@ def fmt(added, removed):
 
 
 def release_binary_sizes(tag: str) -> dict[str, int] | None:
-    """Map platform package name → size bytes from `gh release view`, or None."""
+    """Package name → size from `gh release view`, or None."""
     result = subprocess.run(
         ["gh", "release", "view", tag, "--json", "assets"],
         capture_output=True,
@@ -147,7 +133,7 @@ def release_binary_sizes(tag: str) -> dict[str, int] | None:
 
 
 def fmt_size_bump(delta_bytes: float) -> str:
-    """Human size delta for the table (KiB if |Δ|<1 MiB, else MiB)."""
+    """Size delta: KiB if |Δ|<1 MiB, else MiB."""
     sign = "+" if delta_bytes >= 0 else "-"
     abs_b = abs(delta_bytes)
     if abs_b < 1024 * 1024:
@@ -156,7 +142,7 @@ def fmt_size_bump(delta_bytes: float) -> str:
 
 
 def platform_key(name: str) -> str | None:
-    """e.g. dontspeak-0.3.2-linux-x86_64.tar.gz → linux-x86_64."""
+    """Asset basename → platform key (e.g. linux-x86_64)."""
     m = re.search(
         r"-(linux-(?:x86_64|aarch64)|macos-(?:x86_64|aarch64)|windows-(?:x86_64|aarch64))\.",
         name,
@@ -164,8 +150,7 @@ def platform_key(name: str) -> str | None:
     return m.group(1) if m else None
 
 
-# Area row → which platform package keys feed that row's average.
-# `rust` is empty: shared code is not a published host package by itself.
+# Area row → package keys for that row's average. rust: no host package.
 AREA_PLATFORMS = {
     "rust": (),
     "apps/macos": ("macos-x86_64", "macos-aarch64"),
@@ -174,18 +159,8 @@ AREA_PLATFORMS = {
 }
 
 
-ALL_PLATFORMS = (
-    "linux-x86_64",
-    "linux-aarch64",
-    "macos-x86_64",
-    "macos-aarch64",
-    "windows-x86_64",
-    "windows-aarch64",
-)
-
-
 def sizes_by_platform_from_release(tag: str) -> dict[str, int] | None:
-    """Platform key → size bytes for a published release, or None (gh failure / no assets)."""
+    """Platform key → size for a published release, or None."""
     sizes = release_binary_sizes(tag)
     if sizes is None:
         return None
@@ -193,9 +168,7 @@ def sizes_by_platform_from_release(tag: str) -> dict[str, int] | None:
 
 
 def sizes_by_platform_from_dir(d: str) -> dict[str, int]:
-    """Platform key → size bytes for packages under `d` (recursive — handles the
-    release job's nested `artifacts/<artifact-name>/` layout). Basenames must match
-    BINARY_ASSET_RE; anything else (installers, checksums) is ignored."""
+    """Platform key → size under `d` (recursive; BINARY_ASSET_RE basenames only)."""
     out: dict[str, int] = {}
     for root, _dirs, files in os.walk(d):
         for name in files:
@@ -209,20 +182,17 @@ def sizes_by_platform_from_dir(d: str) -> dict[str, int]:
 def size_cells(
     old_by: dict[str, int] | None, new_by: dict[str, int] | None
 ) -> dict[str, str]:
-    """Map area label (and 'Total') → fifth-column cell text.
+    """Area/Total → fifth-column text.
 
-    Host app rows: mean size of that OS's packages (both arches when present in
-    both maps). Total: mean of all six packages. rust: blank. No new sizes (the
-    pre-tag run: the release doesn't exist yet) → `…` placeholders for CI's
-    post-publish --patch-sizes pass. No old sizes with real new ones (first-ever
-    release) → `—` via the no-common-platforms path.
+    Host rows: mean of that OS's packages present in both maps. Total/rust blank.
+    No new sizes → `…` (pre-tag). No common platforms → `—` (first release / partial).
     """
     cells = {label: "" for label, _ in BUCKETS}
+    cells["Total"] = ""
     if not new_by:
         for label, plats in AREA_PLATFORMS.items():
             if plats:
                 cells[label] = "…"
-        cells["Total"] = "…"
         return cells
     old_by = old_by or {}
 
@@ -235,21 +205,19 @@ def size_cells(
         return fmt_size_bump(new_avg - old_avg)
 
     for label, plats in AREA_PLATFORMS.items():
-        if plats:  # rust: no host package, stays blank
+        if plats:
             cells[label] = avg_delta(plats)
-    cells["Total"] = avg_delta(ALL_PLATFORMS)
     return cells
 
 
-LINES_HEADER_ROW = "| Area | Code | Tests | Comments | Binaries avg |"
+# GH markdown math so the overline average renders (ASCII "avg" did not).
+LINES_HEADER_ROW = "| Area | Code | Tests | Comments | Binaries $\\overline{\\Delta}$ |"
 
 
 def patch_lines_table(text: str, cells: dict[str, str]) -> str | None:
-    """Rewrite the fifth column of the first Lines table in `text`; None if absent.
+    """Rewrite fifth column of the first Lines table; None if absent.
 
-    Overwrites area/Total rows' Binaries-avg cells unconditionally (placeholder,
-    blank, or stale) with `cells` values, bolding Total to match the generator.
-    Preserves everything else byte-for-byte, including CRLF vs LF line endings.
+    Overwrites size cells unconditionally. Preserves all other bytes (incl. CRLF).
     """
     lines = text.splitlines(keepends=True)
     labels = {label for label, _ in BUCKETS} | {"Total"}
@@ -263,27 +231,31 @@ def patch_lines_table(text: str, cells: dict[str, str]) -> str | None:
     for i in range(header_idx + 1, len(lines)):
         body = lines[i].rstrip("\r\n")
         if not body.startswith("|"):
-            break  # contiguous table rows only
+            break
         ending = lines[i][len(body):]
         parts = body.split("|")
-        if len(parts) != 7:  # not a well-formed 5-column row
+        if len(parts) != 7:
             continue
         label = parts[1].strip().strip("`*")
         if label not in labels:
             continue
         value = cells.get(label, "")
-        parts[5] = f" **{value}** " if label == "Total" else f" {value} "
+        if label == "Total":
+            # Empty Total size cell: no bold (avoid `****`).
+            parts[5] = f" **{value}** " if value else "  "
+        else:
+            parts[5] = f" {value} "
         lines[i] = "|".join(parts) + ending
     return "".join(lines)
 
 
 def patch_sizes(body_path: str, old_tag: str, assets_dir: str) -> None:
-    """--patch-sizes mode: fill the body file's Binaries-avg cells in place."""
+    """Fill body file Binaries size cells in place (--patch-sizes)."""
     with open(body_path, newline="", encoding="utf-8") as f:
         text = f.read()
     old_by = sizes_by_platform_from_release(old_tag)
     if old_by is None:
-        # Transient gh hiccup must not overwrite placeholders with bogus `—`.
+        # gh hiccup must not overwrite placeholders with bogus `—`.
         print(
             f"error: no published sizes for {old_tag} (gh failed?) — {body_path} untouched",
             file=sys.stderr,
@@ -296,8 +268,8 @@ def patch_sizes(body_path: str, old_tag: str, assets_dir: str) -> None:
         return
     with open(body_path, "w", newline="", encoding="utf-8") as f:
         f.write(patched)
-    # ASCII-only status: Windows consoles may still be cp1252.
-    print(f"patched Binaries avg cells in {body_path} ({old_tag} vs {assets_dir})")
+    # ASCII-only: Windows consoles may still be cp1252.
+    print(f"patched Binaries size cells in {body_path} ({old_tag} vs {assets_dir})")
 
 
 def main():
@@ -306,7 +278,7 @@ def main():
     ap.add_argument(
         "--patch-sizes",
         metavar="BODY_FILE",
-        help="rewrite the Binaries-avg cells of BODY_FILE's Lines table in place",
+        help="rewrite the Binaries size cells of BODY_FILE's Lines table in place",
     )
     ap.add_argument("--old", metavar="PREV_TAG", help="previous published release tag")
     ap.add_argument(
@@ -344,10 +316,9 @@ def main():
             f"| `{label}` | {fmt(code_add, code_del)} | {fmt(test_add, test_del)} | "
             f"{fmt(comment_add, comment_del)} | {size} |"
         )
-    total_size = cells.get("Total", "—")
     print(
         f"| **Total** | **{fmt(totals[0], totals[1])}** | **{fmt(totals[2], totals[3])}** "
-        f"| **{fmt(totals[4], totals[5])}** | **{total_size}** |"
+        f"| **{fmt(totals[4], totals[5])}** |  |"
     )
 
 

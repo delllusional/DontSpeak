@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Tests for release-stats.py's pure size/patch logic (no gh, git, or network).
+"""Pure size/patch logic for release-stats.py (no gh/git/network).
 
-Guards the placeholder-then-CI-patch lifecycle: pre-tag runs must emit `…`
-cells, and release.yml's --patch-sizes pass must rewrite ONLY the Binaries-avg
-column of the Lines table — byte-identical everywhere else, either line ending.
+Pins pre-tag `…` placeholders and --patch-sizes rewriting only the Binaries
+column — byte-identical elsewhere, either line ending.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ import os
 import tempfile
 import unittest
 
-# The module filename has a dash, so import it by path.
+# Filename has a dash — import by path.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location(
     "release_stats", os.path.join(_HERE, "release-stats.py")
@@ -23,7 +22,7 @@ _spec.loader.exec_module(rs)
 KIB = 1024
 MIB = 1024 * 1024
 
-# Mirrors the release job's artifacts/<artifact-name>/<package> layout.
+# Nested artifacts/<name>/<package> layout (release job).
 ARTIFACT_FILES = {
     "windows-portable-x64/dontspeak-0.3.2-windows-x86_64.zip": 10 * MIB,
     "windows-portable-arm64/dontspeak-0.3.2-windows-aarch64.zip": 8 * MIB,
@@ -97,23 +96,24 @@ class SizeCellsTest(unittest.TestCase):
     def test_normal_deltas(self):
         cells = rs.size_cells(FULL_OLD, FULL_NEW)
         self.assertEqual(cells["rust"], "")
-        self.assertEqual(cells["apps/windows"], rs.fmt_size_bump(1 * MIB))  # +1.00 MiB
-        self.assertEqual(cells["apps/macos"], rs.fmt_size_bump(-512 * KIB))  # -512 KiB
-        self.assertEqual(cells["apps/linux"], rs.fmt_size_bump(0))  # +0 KiB
-        # Total: six-package sums 31 MiB → 32 MiB, so means differ by 1/6 MiB.
-        self.assertEqual(cells["Total"], rs.fmt_size_bump(MIB / 6))
+        self.assertEqual(cells["apps/windows"], rs.fmt_size_bump(1 * MIB))
+        self.assertEqual(cells["apps/macos"], rs.fmt_size_bump(-512 * KIB))
+        self.assertEqual(cells["apps/linux"], rs.fmt_size_bump(0))
+        self.assertEqual(cells["Total"], "")
 
     def test_no_new_sizes_gives_placeholders(self):
         for new_by in (None, {}):
             cells = rs.size_cells(FULL_OLD, new_by)
             self.assertEqual(cells["rust"], "")
-            for label in ("apps/macos", "apps/windows", "apps/linux", "Total"):
+            self.assertEqual(cells["Total"], "")
+            for label in ("apps/macos", "apps/windows", "apps/linux"):
                 self.assertEqual(cells[label], "…")
 
     def test_no_old_sizes_gives_dashes(self):
         cells = rs.size_cells(None, FULL_NEW)
         self.assertEqual(cells["rust"], "")
-        for label in ("apps/macos", "apps/windows", "apps/linux", "Total"):
+        self.assertEqual(cells["Total"], "")
+        for label in ("apps/macos", "apps/windows", "apps/linux"):
             self.assertEqual(cells[label], "—")
 
     def test_partial_platforms(self):
@@ -121,8 +121,7 @@ class SizeCellsTest(unittest.TestCase):
         cells = rs.size_cells(FULL_OLD, new_no_linux)
         self.assertEqual(cells["apps/linux"], "—")
         self.assertEqual(cells["apps/windows"], rs.fmt_size_bump(1 * MIB))
-        # Total averages the four common (non-linux) platforms: +0.25 MiB.
-        self.assertEqual(cells["Total"], rs.fmt_size_bump(0.25 * MIB))
+        self.assertEqual(cells["Total"], "")
 
 
 BODY_LF = (
@@ -134,13 +133,13 @@ BODY_LF = (
     "\n"
     "https://github.com/delllusional/DontSpeak/compare/v0.3.2...v0.3.3\n"
     "\n"
-    "| Area | Code | Tests | Comments | Binaries avg |\n"
+    "| Area | Code | Tests | Comments | Binaries $\\overline{\\Delta}$ |\n"
     "|---|---:|---:|---:|---:|\n"
     "| `rust` | +10 / -2 | +5 / -1 | +3 / -0 |  |\n"
     "| `apps/macos` | +1 / -0 | +0 / -0 | +0 / -0 | … |\n"
     "| `apps/windows` | +2 / -1 | +0 / -0 | +1 / -0 | … |\n"
     "| `apps/linux` | +0 / -0 | +0 / -0 | +0 / -0 | … |\n"
-    "| **Total** | **+13 / -3** | **+5 / -1** | **+4 / -0** | **…** |\n"
+    "| **Total** | **+13 / -3** | **+5 / -1** | **+4 / -0** |  |\n"
     "\n"
     "Trailing prose.\n"
 )
@@ -149,7 +148,7 @@ CELLS = {
     "apps/macos": "-512 KiB",
     "apps/windows": "+1.00 MiB",
     "apps/linux": "—",
-    "Total": "+0.25 MiB",
+    "Total": "",
 }
 
 
@@ -163,16 +162,15 @@ class PatchLinesTableTest(unittest.TestCase):
         for old, new in zip(old_lines, new_lines):
             if old == new:
                 continue
-            # Changed lines are table rows differing only in the fifth cell.
+            # Only fifth cell may change.
             self.assertEqual(old.split("|")[:5], new.split("|")[:5])
         self.assertIn("| `apps/macos` | +1 / -0 | +0 / -0 | +0 / -0 | -512 KiB |\n", patched)
         self.assertIn("| `apps/windows` | +2 / -1 | +0 / -0 | +1 / -0 | +1.00 MiB |\n", patched)
         self.assertIn("| `apps/linux` | +0 / -0 | +0 / -0 | +0 / -0 | — |\n", patched)
         self.assertIn(
-            "| **Total** | **+13 / -3** | **+5 / -1** | **+4 / -0** | **+0.25 MiB** |\n",
+            "| **Total** | **+13 / -3** | **+5 / -1** | **+4 / -0** |  |\n",
             patched,
         )
-        # rust stays blank; prose (even with a pipe) untouched.
         self.assertIn("| `rust` | +10 / -2 | +5 / -1 | +3 / -0 |  |\n", patched)
         self.assertIn("Some prose | with a pipe.\n", patched)
 
@@ -181,7 +179,6 @@ class PatchLinesTableTest(unittest.TestCase):
         patched = rs.patch_lines_table(body, CELLS)
         self.assertIsNotNone(patched)
         self.assertNotIn("…", patched)
-        # Every newline still CRLF.
         self.assertEqual(patched.count("\n"), patched.count("\r\n"))
         self.assertEqual(patched.replace("\r\n", "\n"), rs.patch_lines_table(BODY_LF, CELLS))
 
@@ -189,11 +186,18 @@ class PatchLinesTableTest(unittest.TestCase):
         self.assertIsNone(rs.patch_lines_table("chore: dev draft commit message\n", CELLS))
 
     def test_stale_values_overwritten(self):
-        stale = BODY_LF.replace("| … |", "| +9.99 MiB |").replace("**…**", "**wrong**")
+        stale = BODY_LF.replace("| … |", "| +9.99 MiB |")
+        stale = stale.replace(
+            "| **Total** | **+13 / -3** | **+5 / -1** | **+4 / -0** |  |",
+            "| **Total** | **+13 / -3** | **+5 / -1** | **+4 / -0** | **+0.25 MiB** |",
+        )
         patched = rs.patch_lines_table(stale, CELLS)
         self.assertNotIn("+9.99 MiB", patched)
-        self.assertNotIn("wrong", patched)
-        self.assertIn("**+0.25 MiB**", patched)
+        self.assertNotIn("+0.25 MiB", patched)
+        self.assertIn(
+            "| **Total** | **+13 / -3** | **+5 / -1** | **+4 / -0** |  |\n",
+            patched,
+        )
 
     def test_idempotent(self):
         once = rs.patch_lines_table(BODY_LF, CELLS)
@@ -213,7 +217,7 @@ class SpotChecksTest(unittest.TestCase):
     def test_fmt_size_bump(self):
         self.assertEqual(rs.fmt_size_bump(512 * KIB), "+512 KiB")
         self.assertEqual(rs.fmt_size_bump(-512 * KIB), "-512 KiB")
-        self.assertEqual(rs.fmt_size_bump(MIB - 1), "+1024 KiB")  # just under threshold
+        self.assertEqual(rs.fmt_size_bump(MIB - 1), "+1024 KiB")  # just under MiB threshold
         self.assertEqual(rs.fmt_size_bump(1.5 * MIB), "+1.50 MiB")
         self.assertEqual(rs.fmt_size_bump(-3 * MIB), "-3.00 MiB")
         self.assertEqual(rs.fmt_size_bump(0), "+0 KiB")
