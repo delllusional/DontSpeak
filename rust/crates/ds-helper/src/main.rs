@@ -1,32 +1,13 @@
 #![cfg_attr(windows, windows_subsystem = "windows")] // GUI subsystem: no console window (the engine pipes its stdio)
-//! ds-helper — the thin native Kokoro synth + playback helper.
+//! Kokoro synth + playback helper.
 //!
-//! Two modes:
-//!   • one-shot:  `ds-helper <text> <voice> <rate>` — synth + play once, then
-//!     exit. Spawned by `ds_tts::kokoro::spawn` (ds-speak / ds-narrate)
-//!     in its own process group so the single-speaker pidfile/barge-in contract
-//!     holds. The FALLBACK path when the engine is down. Replaces `uv run speak.py`.
-//!   • server:    `ds-helper --serve` — load the model ONCE, then read JSON
-//!     requests on stdin (one object per line) and synth+play each, so the engine
-//!     (and the UI's voice auditioning) is fast after the first load — no per-reply
-//!     model reload. This is the WARM path the engine supervises. A new
-//!     request OR a `stop` CANCELS the one playing.
-//!       Protocol (one JSON object per line):
-//!         {"op":"speak","voice":"af_sarah","rate":1.5,"text":"…"}  → play `text`
-//!         {"op":"stop"}                                            → cancel playback
-//!       Replies: `READY` once loaded; `DONE` per successful/cancelled speak;
-//!       `ERR <msg>` terminates a failed request. `stop` is silent (it writes no
-//!       line), so the response stream stays one-terminal-per-request. In
-//!       full-duplex mode the user dictates OVER the reply (a concurrent `listen`
-//!       thread, terminated by `LDONE`); stopping the voice is an explicit `stop`
-//!       op / Caps long-press, not an implicit talk-over barge.
-//!     Exits on stdin EOF.
+//! * one-shot: `ds-helper <text> <voice> <rate>` — own process group (pidfile/barge);
+//!   fallback when engine down.
+//! * `--serve`: load once; NDJSON ops on stdin. `speak` / `stop` (silent); replies
+//!   `READY`, `DONE`, `ERR`. Full-duplex listen ends with `LDONE`. Exit on stdin EOF.
 //!
-//! Fail-quiet: missing synth/frontend/runtime assets (or no audio) → non-zero exit.
-//! In `--serve`, macOS plays through ONE persistent `rodio` sink (per-request
-//! `Player`s on a mixer opened once) so sentences are GAPLESS — no per-chunk
-//! `afplay` launch. ort's C++ thread-pool AND cpal's CoreAudio backend abort on
-//! teardown on macOS 26, so we exit via libc `_exit` to skip ALL destructors.
+//! Fail-quiet if assets/audio missing. macOS: one rodio mixer (gapless). Exit via
+//! `_exit` — ort/cpal abort on Drop (macOS 26).
 
 mod duplex;
 mod listen;
@@ -110,14 +91,14 @@ fn main() {
 
     // One-shot mode: `first` is the text.
     let text = first;
-    let voice = {
-        let v = args.next().unwrap_or_default();
-        if v.trim().is_empty() {
-            ds_config::DEFAULT_KOKORO_VOICE.to_string()
-        } else {
-            v
-        }
-    };
+    // Voice is required — there is no fallback voice; the engine always passes the
+    // caller's assigned pool voice.
+    let voice = args.next().unwrap_or_default();
+    if voice.trim().is_empty() {
+        eprintln!("usage: ds-helper <text> <voice-id> [rate]");
+        // SAFETY: deliberate `_exit` teardown; see crate doc.
+        unsafe { _exit(2) };
+    }
     let rate: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0_f32);
 
     if text.trim().is_empty() {

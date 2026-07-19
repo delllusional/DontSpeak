@@ -1,12 +1,11 @@
 //! Engine-owned audio queue — single serializer for speech and earcons.
 //!
-//! Bounded FIFO; one worker on the warm child (`TtsManager`). No per-block model reload
-//! (exception: needs-input cue under focus hold — [`TtsQueue::dispatch_earcon`]).
+//! Bounded FIFO; one worker on the warm child. No per-block model reload
+//! (exception: needs-input under focus hold — [`TtsQueue::dispatch_earcon`]).
 //! Ordering, mic gate, barge/pause live here; child stays dumb.
 //!
-//! Focus gate (`pause_in_background`): hold queue while no terminal frontmost; self-arms
-//! after first frontmost sighting. Record barge (half-duplex): pause all, resume from top;
-//! full-duplex never pauses. Hard barge clears the queue.
+//! Focus (`pause_in_background`): hold while no terminal frontmost; self-arms after first
+//! sighting. Half-duplex record barge pauses all; full-duplex never pauses. Hard barge clears.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -26,8 +25,7 @@ impl Drop for HealingGuard {
     }
 }
 
-/// In-flight claim: which client produced the utterance and which session it belongs to.
-/// `session: None` = untagged/global item (still real work — distinct from idle worker).
+/// In-flight claim. `session: None` = untagged/global (still real work, not idle).
 #[derive(Clone, Debug)]
 struct PlayingClaim {
     source: ClientSource,
@@ -101,8 +99,7 @@ const GREETINGS: &[&str] = &[
     "Hi, {n} here — what are we building?",
 ];
 
-/// Name-less variants for when there's no voice to announce — the System engine on the
-/// OS-default voice (`tts_system_voice` empty). Same rotation, just without `{n}`.
+/// Name-less greetings (System on OS-default voice when `tts_system_voice` is empty).
 const GREETINGS_ANON: &[&str] = &[
     "I'm with you today.",
     "Ready when you are.",
@@ -112,10 +109,7 @@ const GREETINGS_ANON: &[&str] = &[
     "What are we building?",
 ];
 
-/// Build the greeting line for the resolved voice `name`: the named template when there's a
-/// name to announce, the name-less variant otherwise (System on the OS-default voice when the
-/// name can't be resolved). The `name` comes from the ONE shared resolver
-/// [`ds_tts::enumerate::voice_display_name`], so Kokoro/System on every OS agree.
+/// Greeting for resolved display `name` (from [`ds_tts::enumerate::voice_display_name`]).
 fn greeting_line(name: Option<&str>, idx: usize) -> String {
     match name.map(str::trim).filter(|n| !n.is_empty()) {
         Some(n) => GREETINGS[idx % GREETINGS.len()].replace("{n}", n),
@@ -123,13 +117,9 @@ fn greeting_line(name: Option<&str>, idx: usize) -> String {
     }
 }
 
-/// Pure agent pick: reuse the agent's assignment if it's still in `pool`; else roll among
-/// the voices no OTHER agent holds; when every voice is taken (agents outnumber voices),
-/// roll among the least-loaded voices so agents spread out before doubling up anywhere.
+/// Pure agent voice pick: reuse if still in `pool`; else free voice; else least-loaded.
 /// Stale assignments (pool edited without clear) must not linger.
-///
-/// `pool` must be non-empty (caller-checked). `roll(n)` returns an index `< n` —
-/// production passes `fastrand::usize(..n)`; tests inject fixed/seeded rolls.
+/// `pool` non-empty (caller-checked). `roll(n)` → index `< n` (tests inject rolls).
 fn pick_agent_voice(
     assignments: &HashMap<ClientSource, String>,
     pool: &[String],
@@ -188,56 +178,42 @@ impl QueueAction {
     }
 }
 
-/// One ordered audio action. Speech retains the old plain reply/narration FIFO semantics;
-/// earcons share the same session and cancellation path so they cannot overtake narration.
+/// One ordered audio action. Earcons share session/cancel path (cannot overtake narration).
 struct Item {
     action: QueueAction,
-    /// Who produced this utterance (`ClientSource` from IPC / stream adapters).
-    /// Surfaced as `running.tts_source` while this item is in flight.
+    /// Producer; wire as `activity.speaking_source` while in flight.
     source: ClientSource,
-    /// The client session this action belongs to (`None` = default/global), used for
-    /// active-terminal selection and scoped cancellation (voice resolution keys off
-    /// `source`, not the session).
+    /// Session tag (`None` = global). Active-terminal select + scoped cancel.
+    /// Voice keys off `source`, not session.
     session: Option<String>,
-    /// Batch-granular resume point: frontend batches an earlier run of this item
-    /// already PLAYED (the helper's `PROGRESS` high-water mark, merged in [`run`]
-    /// after a Kokoro speak). 0 = play from the top. Sent as `skip` on the next run,
-    /// so a record-barge resume drops the already-heard prefix instead of re-speaking
-    /// the whole block.
+    /// Batch resume high-water (`PROGRESS` after Kokoro speak). 0 = from top.
+    /// Record-barge resume sends as `skip` so the heard prefix is dropped.
     resume_skip: usize,
 }
 
-/// Which terminal (session) the worker is allowed to speak for. The portable focus
-/// model: there is no per-tab focus API, so "active" is the terminal you last
-/// submitted a prompt to (`explicit`, from the `UserPromptSubmit` hook), with a
-/// recency fallback (`recent`) for the window before any prompt-hook reports in.
+/// Active terminal for the worker. No per-tab focus API: last prompt submit
+/// (`explicit` via `MarkActive`), else most-recent enqueue (`recent`).
 #[derive(Default)]
 struct ActiveSel {
-    /// The session you last submitted a prompt to (authoritative when set). `None`
-    /// until the `MarkActive` RPC fires (e.g. hooks not re-wired yet).
+    /// Last prompt-target session. `None` until `MarkActive`.
     explicit: Option<String>,
-    /// Session of the most-recently enqueued item — the recency fallback, used ONLY
-    /// while `explicit` is `None`, so a multi-terminal setup with un-wired hooks
-    /// plays the most-recent terminal rather than interleaving all of them.
+    /// Recency fallback while `explicit` is `None` (avoids multi-terminal interleave).
     recent: Option<String>,
 }
 
 impl ActiveSel {
-    /// The session the worker should currently speak for: the explicit prompt-target
-    /// if known, else the most-recent producer, else `None` (= play FIFO).
+    /// Explicit if set, else recent, else `None` (= FIFO).
     fn effective(&self) -> Option<String> {
         self.explicit.clone().or_else(|| self.recent.clone())
     }
 }
 
-/// Grok Stop sticky tag prefix. Digests/earcons admit under `grok-stop:<real>` so MarkActive
-/// `input_clears=[current]` (exact prune of the real id) cannot drop them. Sticky is still the
-/// *same terminal* for `input_clears=[other]` keep and active-session priority. (Voice needs
-/// no sticky handling: it resolves off `source`, which is `Grok` either way.)
+/// Grok Stop sticky prefix. Digests/earcons under `grok-stop:<real>` so MarkActive
+/// `input_clears=[current]` (exact prune) cannot drop them. Same terminal for
+/// `input_clears=[other]` keep + active priority. Voice resolves off `source` only.
 const GROK_STOP_STICKY_PREFIX: &str = "grok-stop:";
 
-/// Sticky sibling tag for a real session id (`abc` → `grok-stop:abc`). Already-sticky tags
-/// and the bare `grok-stop` sentinel return `None` (no further sibling).
+/// Sticky sibling (`abc` → `grok-stop:abc`). Already-sticky / bare sentinel → `None`.
 fn grok_stop_sticky_sibling(session: &str) -> Option<String> {
     if session.starts_with(GROK_STOP_STICKY_PREFIX) || session == "grok-stop" {
         None
@@ -246,8 +222,7 @@ fn grok_stop_sticky_sibling(session: &str) -> Option<String> {
     }
 }
 
-/// Whether `item` is the Grok sticky tag for real session `keep` (or exact match).
-/// Used by `input_clears=[other]` so sticky digests of the submitting terminal are kept.
+/// Exact match or Grok sticky for `keep` — `input_clears=[other]` keep path.
 fn session_is_keep_or_sticky(item: &Option<String>, keep: &Option<String>) -> bool {
     if item == keep {
         return true;
@@ -258,8 +233,8 @@ fn session_is_keep_or_sticky(item: &Option<String>, keep: &Option<String>) -> bo
     }
 }
 
-/// Whether in-flight / preferred playback under `session` belongs to real terminal `target`
-/// (exact id or sticky sibling). Does **not** treat real as belonging to a sticky target.
+/// In-flight/preferred under `session` belongs to real `target` (exact or sticky).
+/// Does **not** treat real as belonging to a sticky target.
 fn session_belongs_to_real(session: &Option<String>, target: &str) -> bool {
     match session.as_deref() {
         Some(s) if s == target => true,
@@ -268,33 +243,20 @@ fn session_belongs_to_real(session: &Option<String>, target: &str) -> bool {
     }
 }
 
-/// Drop a single window's items, keeping every OTHER session's (and untagged global)
-/// item in place — the per-window barge for `StopSpeech { session }`. Split out so the
-/// "keep other terminals' queue" invariant is unit-testable without a live engine.
-///
-/// Exact-match only: sticky `grok-stop:<id>` is intentionally NOT pruned when `target` is
-/// the real id, so MarkActive `input_clears=[current]` cannot ding-only a Grok Stop that
-/// just enqueued digests. Callers that must silence sticky too (StopSpeech, SessionEnd)
-/// also clear the sticky sibling tag.
+/// Per-window barge prune (`StopSpeech { session }`): drop only `target`.
+/// Exact-match only — sticky NOT pruned when `target` is the real id, so MarkActive
+/// `input_clears=[current]` cannot ding-only a Grok Stop. Callers that must silence sticky
+/// (StopSpeech, SessionEnd) also clear the sticky sibling.
 fn prune_session(q: &mut VecDeque<Item>, target: &Option<String>) {
     q.retain(|it| &it.session != target);
 }
 
-/// The inverse of [`prune_session`]: keep ONLY `keep`'s items, dropping every other
-/// session's AND every untagged/global item — the `input_clears` `other` scope.
-/// Keeps exact `keep` and its Grok sticky sibling `grok-stop:<keep>` (same terminal).
+/// Inverse of [`prune_session`]: keep only `keep` + sticky sibling (`input_clears` other).
 fn retain_only_session(q: &mut VecDeque<Item>, keep: &Option<String>) {
     q.retain(|it| session_is_keep_or_sticky(&it.session, keep));
 }
 
-/// Whether a queued item's session tag is preferred under the active terminal.
-///
-/// Preferred tags:
-/// - untagged / global (`None`) — MCP `speak`, etc.
-/// - exact match with the active session id
-/// - Grok Stop sticky `grok-stop:<active>` — digests/earcons admitted under a sticky tag so
-///   MarkActive `input_clears=[current]` on the real id cannot prune them, but they must
-///   still play with the active terminal's priority (not lose to FIFO from another session)
+/// Preferred under active: untagged, exact match, or sticky `grok-stop:<active>`.
 fn session_preferred_for_active(item_session: &Option<String>, active: &str) -> bool {
     match item_session {
         None => true,
@@ -305,39 +267,25 @@ fn session_preferred_for_active(item_session: &Option<String>, active: &str) -> 
     }
 }
 
-/// Index of the first item the worker may play given the active terminal. `None`
-/// active → strict FIFO (back-compat single-terminal). `Some(s)` → PREFER the first
-/// item tagged `s`, untagged (`None` = global audio like the MCP `speak` tool), or the
-/// Grok sticky `grok-stop:<s>` sibling (see [`session_preferred_for_active`]); but
-/// if the active terminal has NOTHING preferred queued, fall back to plain FIFO so another
-/// terminal's reply is never starved forever (the active `explicit` session persists
-/// until the next MarkActive, so without this fallback a backgrounded window's reply
-/// is held indefinitely — the cross-window "one window goes silent" bug). PURE.
+/// First playable index. `None` active → FIFO. `Some(s)` → prefer active/untagged/sticky;
+/// if none, fall back to FIFO (else a backgrounded window starves until next MarkActive).
 fn select_pos(q: &VecDeque<Item>, active: &Option<String>) -> Option<usize> {
     match active {
         None => (!q.is_empty()).then_some(0),
         Some(active_id) => q
             .iter()
             .position(|it| session_preferred_for_active(&it.session, active_id))
-            // No item for the active terminal → don't starve the others: play FIFO.
             .or_else(|| (!q.is_empty()).then_some(0)),
     }
 }
 
-/// Why the queue is currently paused — lets a barge-watcher auto-resume tell its OWN
-/// speculative pause apart from a real Caps-gesture pause it must never touch. The two
-/// causes are guarded ASYMMETRICALLY on purpose: a `Dictation` pause/resume always
-/// applies unconditionally (engine.rs's own gesture always wins), while a
-/// `BargeSpeculative` pause/resume is a no-op whenever a `Dictation` pause is (or
-/// would be) in effect — see `pause_with_cause` and `resume_if_barge_speculative`.
+/// Pause reason — barge auto-resume must not clear a real Caps pause.
+/// Asymmetric: `Dictation` always wins; `BargeSpeculative` is no-op under Dictation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PauseCause {
-    /// A genuine user gesture: `engine.rs`'s `toggle_dictation` PauseVoice arm or
-    /// `start_recording`. Never auto-cleared by anything except the matching
-    /// `resume()` call from that SAME gesture's stop/ResumeVoice arm.
+    /// Caps/PTT gesture. Cleared only by matching `resume()`.
     Dictation,
-    /// `barge.rs`'s own "foreign mic looks live" watcher. The ONLY cause
-    /// `resume_if_barge_speculative` will ever auto-clear.
+    /// Foreign-mic watcher. Only cause `resume_if_barge_speculative` auto-clears.
     BargeSpeculative,
 }
 
@@ -349,107 +297,53 @@ struct PausedState {
 
 pub struct TtsQueue {
     items: Mutex<VecDeque<Item>>,
-    /// Stable narration IDs accepted during this engine lifetime. Always lock this before
-    /// `items`, matching [`enqueue_narration`](Self::enqueue_narration).
+    /// Accepted narration IDs this engine lifetime. Lock before `items` (see enqueue_narration).
     accepted_narrations: Mutex<AcceptedNarrations>,
     cv: Condvar,
-    /// Bumped on every barge/pause; the worker abandons its in-flight item when
-    /// the generation moves past the one it dequeued under.
+    /// Bumped on barge/pause; worker abandons in-flight when gen advances.
     generation: AtomicU64,
-    /// True while paused for a record-barge (resume mode): the worker stops
-    /// dequeuing until `resume()`. Tagged with WHY it's paused (`PauseCause`) so a
-    /// barge-watcher auto-resume (`resume_if_barge_speculative`) can tell its own
-    /// speculative pause apart from a real Caps/PTT `Dictation` pause it must never
-    /// touch — and so the PAUSE side of that same guard (`pause_with_cause`) can
-    /// refuse to relabel an already-`Dictation`-tagged pause as `BargeSpeculative`
-    /// during the `start_recording` race window (`pause_for_record()` fires before
-    /// `set_stt_active(true)`). Both sides guarded under ONE lock so the check-and-set
-    /// is atomic.
+    /// Record-barge pause + `PauseCause`. One lock for check-and-set so barge can't
+    /// relabel Dictation during `pause_for_record`→`set_stt_active` race.
     paused: Mutex<PausedState>,
-    /// Per-interruption requeue intent, keyed by the generation value in effect the
-    /// MOMENT each cancellation fired (the `fetch_add`'s PRE-bump value — exactly the
-    /// `gen0` whatever item was in flight at that instant is running under). `true` = a
-    /// record-barge pause (resume this item later via [`resume`](Self::resume)); `false` =
-    /// a hard cancel (`clear` / `clear_session` / `cancel_for_submit` / `skip_current`
-    /// — drop it). [`requeue_if_resuming`](Self::requeue_if_resuming) looks up ITS OWN
-    /// `gen0` here instead of re-reading the CURRENT `paused` flag, so a later, unrelated
-    /// record-barge pause can't resurrect an item an explicit `clear_session` already
-    /// dropped (and a later resume/clear can't retroactively change the fate of an item
-    /// a DIFFERENT, earlier bump already decided). Consumed (removed) on lookup.
+    /// Requeue intent keyed by cancel's PRE-bump gen (`true` = record-barge resume;
+    /// `false` = hard cancel). Lookup uses that gen, not live `paused`, so a later
+    /// pause can't resurrect a cleared item. Consumed on lookup.
     cancel_kind: Mutex<HashMap<u64, bool>>,
-    /// True while the worker is actively playing an item (set around playback,
-    /// cleared when it returns to waiting). Read-only signal for `Status`.
+    /// Actually playing (status / menu-bar TTS).
     tts_active: AtomicBool,
-    /// True from dequeue until the item reaches a terminal outcome, except while focus is
-    /// the gate holding it. Unlike `tts_active`, this includes readiness and mic-only holds,
-    /// closing the half-duplex gap where an item had left the deque but the listener
-    /// incorrectly considered the pipeline idle. Focus-held work deliberately reads idle so
-    /// always-listening remains usable in another app.
+    /// Claimed until terminal outcome (includes readiness/mic holds; not focus holds).
+    /// Focus-held reads idle so always-listening stays usable off-terminal.
     in_flight: AtomicBool,
-    /// Whether a terminal is the frontmost app — published by the engine poll thread
-    /// each tick (the worker thread can't call NSWorkspace; it's poll/main-thread
-    /// affine). The worker HOLDS the queue while this is false, so narration pauses
-    /// when you tab to a browser/other app and resumes when a terminal returns. Init
-    /// true: fail-open, never silence before the first sample.
+    /// Terminal frontmost (poll thread → worker; NSWorkspace not worker-safe). Init true.
     terminal_front: AtomicBool,
-    /// Latches true the first time a terminal IS seen frontmost. The focus gate only
-    /// engages once this is set — so a user whose terminal emulator isn't in the shared
-    /// terminal table (`ds_platform::KNOWN_TERMINALS`) (frontmost always reads false) is
-    /// NEVER silenced; they degrade to today's always-play instead of going mute.
+    /// Latches on first frontmost sighting — unrecognized terminals never mute.
     terminal_seen: AtomicBool,
-    /// Config `pause_in_background`: when true, the frontmost focus gate HOLDS the queue
-    /// while no terminal is frontmost; when false it's disabled (speech plays regardless of
-    /// which app is frontmost). Published by the engine poll thread each tick. Init false =
-    /// the shipped default (keep speaking); the first poll tick applies the live config.
+    /// Config focus gate. Init false (shipped default); first poll applies live config.
     pause_in_background: AtomicBool,
-    /// Last config published by the engine reload path. Playback reads this in memory
-    /// instead of reparsing config.toml for every queued item.
+    /// Live config from reload path (not reparsed per item).
     config: Mutex<VoiceConfig>,
-    /// AUTO voice assignments from the preferred-voices pool, keyed by agent
-    /// (`ClientSource`). Filled lazily — an agent's first utterance (or greeting) rolls a
-    /// random untaken pool voice, then keeps it for the engine runtime (`SessionEnd` does
-    /// NOT reclaim it), so every terminal of one agent speaks with that agent's one voice.
-    /// In-memory; re-rolled on engine restart. The voice list itself is persistent config
-    /// (`tts_built_in_voices`); this map only records which entry each agent claimed. No
-    /// size cap needed: cardinality is bounded by the `ClientSource` enum (≤ 6 entries).
+    /// Per-agent pool voice for engine runtime. Lazy roll; SessionEnd does not reclaim.
+    /// Bounded by `ClientSource` cardinality.
     agent_voices: Mutex<HashMap<ClientSource, String>>,
-    /// Which terminal the worker may currently speak for (see [`ActiveSel`]). Read by
-    /// the worker at each dequeue; written by the `MarkActive` RPC handler (explicit)
-    /// and by every enqueue (recent). One lock, always acquired INSIDE `items`.
+    /// Active terminal ([`ActiveSel`]). Always acquired inside `items`.
     active: Mutex<ActiveSel>,
-    /// The `session` tag of the item the worker is currently playing — meaningful
-    /// ONLY while `tts_active` is true (set alongside it at playback start, cleared
-    /// with it at the end). Lets [`clear_session`](Self::clear_session) decide whether
-    /// a per-window stop must cancel the in-flight item (its session matches) or only
-    /// prune that window's queued items, leaving another window's playback alone.
+    /// In-flight claim while playing — per-window stop cancels only matching session.
     playing: Mutex<Option<PlayingClaim>>,
     tts: Arc<TtsManager>,
-    /// The shared status-push gate: a `tts_active` transition bumps it so a blocked
-    /// `WaitModelStatus` sees playback start/stop immediately (the flag drives the
-    /// menu-bar TTS dot in `model_status`). Routed through [`set_tts_active`].
+    /// Status push; `tts_active` transitions bump via [`set_tts_active`].
     gate: Arc<StatusGate>,
-    /// When a VOICE submit (Caps dictation / hands-free) last pressed Enter. The
-    /// UserPromptSubmit hook fires for EVERY submit, so `MarkActive` consumes this to tell
-    /// a voice submit's own auto-Enter apart from a real text submit (the `text`
-    /// drop must not fire on a voice submit). See `note_voice_submit` / `take_recent_voice_submit`.
+    /// Last voice-submit Enter — MarkActive de-dups auto-Enter vs real text submit.
     last_voice_submit: Mutex<Option<Instant>>,
-    /// Shared read handle to the single mic-in-use watcher (CoreAudio listener on macOS, poll
-    /// thread elsewhere). The worker's focus-hold reads this CACHED state instead of querying
-    /// the audio device every 120 ms while holding an item.
+    /// Cached mic-in-use (worker hold reads this, not the device).
     mic: ds_platform::MicState,
-    /// Single-flight for [`heal_crashed_child`](Self::heal_crashed_child): true while a
-    /// heal thread is in flight, so tap-happy Caps presses during a multi-second heal
-    /// don't pile up threads that would all block on the manager's lifecycle lock.
+    /// Single-flight heal thread (avoid lifecycle-lock pile-up).
     healing: Arc<AtomicBool>,
-    /// Single-flight for the out-of-band needs-input cue (see
-    /// [`dispatch_earcon`](Self::dispatch_earcon)): true while the `ds-cue-oob` thread is
-    /// alive, so a burst of events coalesces into at most one immediate ding instead of N
-    /// threads serialized on the manager's cue lease dinging N times.
+    /// Single-flight oob needs-input cue thread (coalesce bursts).
     oob_cue: AtomicBool,
 }
 
 impl TtsQueue {
-    /// Create the queue and spawn its worker thread.
+    /// Queue + worker thread.
     pub fn start(
         tts: Arc<TtsManager>,
         paths: Paths,
@@ -490,14 +384,7 @@ impl TtsQueue {
         q
     }
 
-    /// Build a queue WITHOUT spawning its worker thread (unlike [`TtsQueue::start`]) — the
-    /// "real-enough" double for tests in OTHER modules that need `ttsq: Some(..)` (the
-    /// fields here are private, so `engine.rs`'s tests can't build one themselves). The
-    /// `TtsManager` points at a nonexistent helper binary and is never started — the same
-    /// "safe to call while stopped" stub `tts.rs`'s own `status_gate_tests::mk()` uses; a
-    /// fresh manager reports `stt_loaded() == false`, so an engine holding this queue is
-    /// exactly ON-but-NOT-READY for `built_in`. The `TempDir` behind `paths` is dropped on
-    /// return — fine, nothing here ever reads those paths.
+    /// Test double without worker (fields private). Unstarted helper → not STT-ready.
     #[cfg(test)]
     pub(crate) fn test_stub() -> Arc<Self> {
         let dir = tempfile::tempdir().unwrap();
@@ -509,10 +396,7 @@ impl TtsQueue {
         )
     }
 
-    /// [`test_stub`](Self::test_stub) with an explicit helper binary — for the readiness-gate
-    /// tests that need a REAL (fake-helper) child so `is_running()` turns true. `root` backs
-    /// `paths` and the lifetime file; keep its TempDir alive in the test when the helper will
-    /// actually be spawned. Test-only manager behavior is fixed before construction.
+    /// [`test_stub`](Self::test_stub) with real helper path (readiness tests). Keep `root` alive if spawning.
     #[cfg(test)]
     pub(crate) fn test_stub_with_helper(
         root: &std::path::Path,
@@ -530,8 +414,7 @@ impl TtsQueue {
             )),
             test_options,
         ));
-        // A real (briefly-lived) mic watcher: `MicState` has no other constructor. Dropped
-        // immediately — the handle just freezes at its last (safe) reading.
+        // MicState has no other ctor; drop freezes last reading.
         let mic = ds_platform::MicWatcher::spawn(|_| {}).handle();
         Arc::new(TtsQueue {
             items: Mutex::new(VecDeque::new()),
@@ -558,20 +441,13 @@ impl TtsQueue {
         })
     }
 
-    /// Force `tts_active` directly, bypassing the real playback pipeline — lets
-    /// `engine.rs`'s own test module simulate "TTS is speaking" (to drive
-    /// `Engine::handle_tap`'s defer-while-speaking path) on a [`test_stub`], which
-    /// deliberately never spawns the worker that would flip this for real. Test-only.
+    /// Force `tts_active` on a [`test_stub`] (no worker). Test-only.
     #[cfg(test)]
     pub(crate) fn set_active_for_test(&self, on: bool) {
         self.tts_active.store(on, Ordering::SeqCst);
     }
 
-    /// Enqueue one bounded unit of speech onto the FIFO. Empty text is ignored. Callers
-    /// (explicit `speak`, the greeting, and mid-turn narration) all land here and are played
-    /// in order. `voice`/`rate` are optional per-call overrides (narration passes `None` for
-    /// both → the session/config voice at play time). `source` is who produced the utterance
-    /// (surfaced as `running.tts_source` while playing when it is a wireable client).
+    /// Enqueue speech (empty ignored). Optional `voice`/`rate`; `source` → `activity.speaking_source`.
     pub fn enqueue(
         &self,
         text: String,
@@ -589,8 +465,7 @@ impl TtsQueue {
         self.enqueue_action(QueueAction::Speech { text, voice, rate }, source, session)
     }
 
-    /// Enqueue a cue as an ordered session action. Resolving the configured sound and checking
-    /// mute happen at dequeue so a later mute suppresses already-queued cues.
+    /// Enqueue ordered cue. Sound/mute resolved at dequeue (later mute suppresses).
     pub fn enqueue_earcon(
         &self,
         event: ds_earcon::EarconEvent,
@@ -600,47 +475,24 @@ impl TtsQueue {
         self.enqueue_action(QueueAction::Earcon(event), source, session)
     }
 
-    /// Route one earcon: an ordered queue action by default (77f9266 / #78), with ONE
-    /// narrow exception — a needs-input cue arriving while the `pause_in_background`
-    /// focus hold is silencing the queue AND playback is idle plays immediately on a
-    /// detached thread. The cue's whole purpose is alerting a user who is NOT looking
-    /// at the terminal; queued, it was held exactly when it mattered.
+    /// Route earcon: ordered queue by default.
+    /// Exception: needs-input under focus hold + idle → immediate detached play
+    /// (alert when user left the terminal). Idle gate required: focus holds only at
+    /// item boundaries; oob must not mix over in-flight speech. Thread re-checks
+    /// before play and falls back to queue on TOCTOU (speak starting mid-dispatch).
     ///
-    /// The idle gate (`tts_idle` in [`earcon_bypasses_queue`]) is required: the focus
-    /// gate holds at item boundaries only, so an utterance already in flight when the
-    /// user tabs away keeps sounding — the out-of-band cue must not mix over it,
-    /// violating the earcon contract (ARCHITECTURE.md). The spawned thread RE-CHECKS
-    /// the predicate immediately before playing and falls back to the ordered queue
-    /// when it no longer holds, shrinking the dispatch-to-play TOCTOU (which the
-    /// manager's cue-lease parking could otherwise stretch to a whole cue duration)
-    /// to milliseconds — including the refocus-concurrent race where a speak starts
-    /// between dispatch and play (the helper's speak-op `cancel_current` only ever
-    /// covered cue-then-speak, not speak-then-cue).
-    ///
-    /// Deliberate properties of the bypass:
-    /// * at most ONE out-of-band cue thread ever exists (`oob_cue` single-flight); a
-    ///   bypass raced by one already in flight is coalesced into it and dropped —
-    ///   a second simultaneous ding conveys nothing;
-    /// * it does NOT set `tts_active`/`in_flight` around the cue — during a focus hold
-    ///   `is_busy()` must stay false, or the always-listening capture would close
-    ///   mid-dictation for a one-second ding;
-    /// * an out-of-band cue is not a queue item and never registers in
-    ///   `playing`, so the per-session stops (`clear_session`/`end_session`/
-    ///   per-window StopSpeech) cannot reach it; only the GLOBAL helper ops
-    ///   (`clear()`'s cancel, `set_muted`, the record-barge stopfade) stop a sounding
-    ///   one. That is parity with the pre-77f9266 fire-and-forget cue behavior, now
-    ///   narrowed to this one out-of-band case;
-    /// * with no warm child the bypass fails with "TTS child not running", identical
-    ///   to the queued path (`cue_one` never calls `ensure_started`) — parity, not a
-    ///   regression.
+    /// Bypass properties:
+    /// * one `oob_cue` thread (bursts coalesce)
+    /// * does not set `tts_active`/`in_flight` (`is_busy` must stay false under hold)
+    /// * not a queue item / not in `playing` — only global cancel/mute/stopfade stops it
+    /// * no warm child → same "TTS child not running" as queued path
     pub fn dispatch_earcon(
         self: &Arc<Self>,
         event: ds_earcon::EarconEvent,
         source: ClientSource,
         session: Option<String>,
     ) -> Result<(), String> {
-        // Cheap event short-circuit FIRST: reply_done (the common case) must not pay the
-        // hold-state snapshot (a mutex + four atomics) just to be told it never bypasses.
+        // reply_done never bypasses — skip hold-state snapshot.
         if matches!(event, ds_earcon::EarconEvent::NeedsInput)
             && earcon_bypasses_queue(
                 event,
@@ -648,9 +500,7 @@ impl TtsQueue {
                 !self.tts_active.load(Ordering::SeqCst),
             )
         {
-            // The deliberate coalescing bound: at most ONE oob thread ever exists. A
-            // bypass raced by an in-flight one returns Ok with nothing enqueued — a
-            // second simultaneous ding conveys nothing.
+            // Single-flight: in-flight oob → Ok, nothing enqueued.
             if self
                 .oob_cue
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -664,13 +514,8 @@ impl TtsQueue {
             let spawned = std::thread::Builder::new()
                 .name("ds-cue-oob".into())
                 .spawn(move || {
-                    // Store-false-on-drop guard: `oob_cue` clears on EVERY exit,
-                    // including a panic in `cue_one`.
                     let _clear = InFlightGuard(&worker.oob_cue);
-                    // RE-CHECK at play time (see the doc above): between dispatch and
-                    // here a speak may have started or a half-duplex mic opened. Fall
-                    // back to the ordered queue — gate_earcon's focus-hold exemption
-                    // still lets a queued needs_input alert at the next idle moment.
+                    // Re-check: speak/mic may have started; fall back to queue.
                     if !earcon_bypasses_queue(
                         event,
                         worker.worker_hold_state(),
@@ -690,9 +535,7 @@ impl TtsQueue {
             match spawned {
                 Ok(_) => return Ok(()),
                 Err(e) => {
-                    // No thread ⇒ no guard ran; clear the single-flight flag and fall
-                    // through to the ordered queue — the alert must not be silently
-                    // dropped while the IPC client is told Done.
+                    // Spawn failed: clear flag, fall through to ordered queue.
                     log::error!(target: "ttsq", "failed to spawn out-of-band cue thread: {e}");
                     self.oob_cue.store(false, Ordering::SeqCst);
                 }
@@ -773,9 +616,7 @@ impl TtsQueue {
         Ok(())
     }
 
-    /// Enqueue identified narration exactly once at the admission boundary. A duplicate ID
-    /// returns success even when the queue is currently full because its original attempt was
-    /// already accepted; a rejected first attempt is not remembered and remains retryable.
+    /// Admit narration by id once. Dup id → Ok even if queue full; rejected first stays retryable.
     pub fn enqueue_narration(
         &self,
         text: String,
@@ -802,9 +643,7 @@ impl TtsQueue {
             .forget_session(session);
     }
 
-    /// Claim a selected item while the caller holds `items`. The generation snapshot and
-    /// playback-session publication must stay inside that lock so global and per-session clears
-    /// either remove the queued item first or cancel the fully published in-flight item.
+    /// Claim under `items` lock: gen snapshot + playing publish so clears can't race mid-claim.
     fn claim_item(&self, q: &mut VecDeque<Item>, pos: usize) -> (Item, u64) {
         let gen0 = self.generation.load(Ordering::SeqCst);
         let item = q.remove(pos).expect("select_pos returns a valid index");
@@ -816,25 +655,18 @@ impl TtsQueue {
         (item, gen0)
     }
 
-    /// Record the session of the most-recently enqueued item (the recency fallback
-    /// for active-terminal selection). MUST be called with the `items` lock held, so
-    /// the lock order stays `items` → `active` everywhere.
+    /// Update recency fallback. Caller holds `items` (lock order: items → active).
     fn note_recent(&self, session: &Option<String>) {
         self.active.lock().unwrap().recent = session.clone();
     }
 
-    /// Set global mute on the warm child. Speech drains silently; cues are suppressed/stopped.
+    /// Global mute on warm child (speech silent; cues suppressed).
     pub fn set_muted(&self, on: bool) {
         self.tts.set_muted(on);
     }
 
-    /// The 4-statement "hard cancel the in-flight item" sequence shared by every barge
-    /// that unconditionally cancels: reflect the stop immediately (`Status` never sees
-    /// stale `tts_active=true` mid-unwind), abandon the worker's current item via a
-    /// generation bump, record it as a drop (never requeue, regardless of `paused`),
-    /// and fade the helper's audio out (not an instant cut). Does NOT touch `items` or
-    /// `paused` — callers prune/retain the queue themselves first. `skip_current` does
-    /// NOT use this: it deliberately skips the `set_tts_active` toggle (see its own doc).
+    /// Hard-cancel in-flight: clear tts_active, gen bump, drop intent, fade.
+    /// Does not touch `items`/`paused`. `skip_current` skips the tts_active toggle.
     fn hard_cancel_in_flight(&self) {
         self.set_tts_active(false);
         let gen0 = self.generation.fetch_add(1, Ordering::SeqCst);
@@ -842,18 +674,12 @@ impl TtsQueue {
         self.tts.stop_fade();
     }
 
-    /// Scoped-cancel variant whose guard witnesses that queue pruning, the in-flight
-    /// identity snapshot, and the generation bump share one `items` critical section.
-    /// This orders the bump before any later [`claim_item`](Self::claim_item), preventing
-    /// a newly claimed foreign-session item from inheriting the cancellation.
+    /// Like hard cancel; `_items` witnesses prune + playing snapshot + bump share one section.
     fn hard_cancel_in_flight_locked(&self, _items: &MutexGuard<'_, VecDeque<Item>>) {
         self.hard_cancel_in_flight();
     }
 
-    /// Global hard barge (caps long-press reset / `StopSpeech{None}`): drop everything
-    /// pending, cancel whatever is playing, and clear any pause. The audio is faded out
-    /// over the short window (not an instant cut) so even this "stop everything" gesture
-    /// tapers instead of clicking.
+    /// Global hard barge: clear queue, cancel in-flight, clear pause (fade out).
     pub fn clear(&self) {
         self.items.lock().unwrap().clear();
         *self.paused.lock().unwrap() = PausedState::default();
@@ -861,32 +687,19 @@ impl TtsQueue {
         self.cv.notify_one();
     }
 
-    /// Skip the CURRENTLY-playing item and advance to the NEXT queued one — the caps
-    /// DOUBLE-TAP gesture. Unlike [`clear`](Self::clear) (the long-press "stop everything"),
-    /// the rest of the queue is KEPT: bumping the generation makes the worker abandon its
-    /// in-flight item, then it dequeues the next and plays it (or goes idle if none remain).
-    /// A no-op when nothing is playing (the engine only calls this while `is_tts_active`).
+    /// Skip in-flight only (caps double-tap). Keeps queue; no-op if nothing playing.
     pub fn skip_current(&self) {
-        // NB: do NOT clear `items` and do NOT touch `paused`/`tts_active` — the worker
-        // re-asserts `tts_active` when it dequeues the next item (or clears it if the queue
-        // is now empty). Fade the current audio out (no click), then wake the worker.
+        // Leave items/paused/tts_active alone — worker re-asserts on next dequeue.
         let gen0 = self.generation.fetch_add(1, Ordering::SeqCst);
-        // A skip drops the CURRENT item on purpose (it's not coming back) — never requeue it.
         self.record_cancel_kind(gen0, false);
         self.tts.stop_fade();
         self.cv.notify_one();
     }
 
-    /// Per-window barge (a `StopSpeech { session }` from one terminal — its new-reply
-    /// preempt or its SessionEnd close): drop only THIS session's queued items and
-    /// cancel the in-flight item ONLY if it belongs to this session. Another window's
-    /// queue and playback are untouched — the fix for the old global `clear()` that, in
-    /// the multi-window/one-voice-per-window model, silenced every terminal at once.
-    /// `StopSpeech { session: None }` still routes to [`clear`](Self::clear).
+    /// Per-window barge: drop this session's queue; cancel in-flight only if matching.
+    /// `StopSpeech { session: None }` → [`clear`](Self::clear).
     pub fn clear_session(&self, session: Option<String>) {
-        // Keep pruning and the in-flight identity snapshot under the same `items →
-        // playing` lock order as worker selection. The worker therefore cannot remove
-        // a target item between these operations and escape the session-scoped cancellation.
+        // items → playing same order as worker; prune + snapshot under one lock.
         let mut items = self.items.lock().unwrap();
         prune_session(&mut items, &session);
         let cancel_current = self
@@ -896,47 +709,24 @@ impl TtsQueue {
             .as_ref()
             .is_some_and(|p| p.session == session);
         if cancel_current {
-            // Per-window barge: fade the in-flight item out (short window) so a clear-on-
-            // submit / window close / newest-reply preempt tapers off instead of clicking.
-            // Every user-facing barge fades now (global + record-barge included); only the
-            // helper's internal block-to-block preempt stays an instant cut.
             self.hard_cancel_in_flight_locked(&items);
         }
         drop(items);
-        // Wake the worker so a held item for this (now-pruned) session re-evaluates,
-        // and so the active terminal's next item starts promptly after a cancel.
         self.cv.notify_one();
     }
 
-    /// Snapshot of "who is active" right now — the SAME resolution
-    /// [`cancel_for_submit`](Self::cancel_for_submit) needs. Exposed so a caller applying
-    /// MULTIPLE `input_clears` scopes for the SAME submit resolves it ONCE up front and
-    /// passes the result along, rather than each scope re-reading `active` independently
-    /// (which could observe a DIFFERENT session if a concurrent submit from another
-    /// terminal's `MarkActive` lands in between two separate calls).
+    /// Active session snapshot — resolve once for multi-scope `input_clears`.
     pub fn active_session(&self) -> Option<String> {
         self.active.lock().unwrap().effective()
     }
 
-    /// Apply `input_clears` for ONE submit, against a single already-resolved `target`
-    /// session (see [`active_session`](Self::active_session)) — atomic w.r.t. which
-    /// session is "current", so the `current` and `other` scopes can never disagree
-    /// about who that is even when both are configured. A no-op when `target` is `None`
-    /// (never guess-wipe or guess-spare audio when the caller doesn't know who's
-    /// submitting) or when neither scope is requested.
+    /// Apply `input_clears` against one resolved `target`. No-op if `target` is None
+    /// or neither scope requested.
     ///
-    /// `current` prunes `target`'s own queued items and cancels its in-flight item
-    /// UNCONDITIONALLY — the worker only ever plays the active session's (or untagged)
-    /// audio, so `target` IS what the helper is emitting; gating on `tts_active`/
-    /// `playing` would let a submit that landed in a record-barge transition
-    /// (flags briefly stale) leak several blocks before stopping. `other` keeps ONLY
-    /// `target`'s queued items — dropping every other session's AND untagged/global
-    /// audio — and cancels the in-flight item ONLY when it does NOT belong to `target`
-    /// (the worker can legitimately already be playing `target`'s own item, which must
-    /// be left alone). Running both in one call composes correctly: `current` first
-    /// drops `target`'s own items, then `other` retains only `target`'s items (now
-    /// none), so the combination empties the queue entirely, as a user configuring both
-    /// scopes would expect.
+    /// `current`: prune target (+ sticky) and hard-cancel in-flight unconditionally
+    /// (don't gate on stale tts_active/playing during record-barge).
+    /// `other`: retain only target (+ sticky); cancel in-flight iff not target's.
+    /// Both scopes together empty the queue.
     pub fn cancel_for_submit(
         &self,
         target: Option<String>,
@@ -952,20 +742,15 @@ impl TtsQueue {
         if cancel_current {
             let mut items = self.items.lock().unwrap();
             prune_session(&mut items, &Some(target.clone()));
-            // Voice/dictation submit applies current-scope clear via this path (not
-            // MarkActive's exact clear_session). Drop sticky digests of the same terminal
-            // too so a new submit cannot leave a prior Grok Stop ringing behind the prompt.
+            // Voice submit path (not MarkActive): also drop sticky of same terminal.
             if let Some(sticky) = grok_stop_sticky_sibling(&target) {
                 prune_session(&mut items, &Some(sticky));
             }
             self.hard_cancel_in_flight_locked(&items);
         }
         if cancel_other {
-            // Couple queue pruning to the in-flight identity snapshot. Reading the session
-            // before taking `items` allowed the worker to claim another session in between and
-            // start it after this submit returned.
+            // Prune + playing snapshot under items (avoid claim race after return).
             let mut items = self.items.lock().unwrap();
-            // Sticky digests for `target` are the same terminal — not "other".
             let playing_is_other = self
                 .playing
                 .lock()
@@ -980,15 +765,12 @@ impl TtsQueue {
         self.cv.notify_one();
     }
 
-    /// Mark that a VOICE submit just pressed Enter (Caps dictation / hands-free). Called on
-    /// every voice submit regardless of `input_clears`, so the `MarkActive` path can
-    /// de-dup the voice submit's own auto-Enter from a genuinely separate text submit.
+    /// Mark voice-submit Enter for MarkActive auto-Enter de-dup.
     pub fn note_voice_submit(&self) {
         *self.last_voice_submit.lock().unwrap() = Some(Instant::now());
     }
 
-    /// Consume the voice-submit mark: true iff a voice submit happened in the last ~3s — i.e.
-    /// the UserPromptSubmit hook now firing is that voice submit's echo, NOT a text submit.
+    /// True if voice submit within ~3s (UserPromptSubmit is that submit's echo).
     pub fn take_recent_voice_submit(&self) -> bool {
         let mut g = self.last_voice_submit.lock().unwrap();
         let recent = voice_submit_recent(*g, Instant::now());
@@ -998,20 +780,10 @@ impl TtsQueue {
         recent
     }
 
-    /// Shared body of `pause_for_record` / `pause_for_suspected_barge`: mark the queue
-    /// paused under `cause`, abandon the in-flight item into resume mode (generation
-    /// bump + resume intent), and fade the audio out. GUARD: a `BargeSpeculative`
-    /// request is a no-op — paused state and cause both left exactly as they were — if
-    /// the queue is ALREADY paused for `Dictation`. That closes the round-4 race:
-    /// `start_recording` calls `pause_for_record()` (tags `Dictation`) roughly 40 lines
-    /// before it calls `set_stt_active(true)`; in that window a genuinely-foreign mic
-    /// edge can fire the barge watcher, and it must not relabel (or touch at all) a
-    /// pause that's already correctly held for the real reason — the queue is already
-    /// paused, so the watcher's own pause action would be redundant even if it weren't
-    /// actively harmful (a later `resume_if_barge_speculative()` would otherwise
-    /// wrongly clear it). A `Dictation` request (`cause == Dictation`) is NEVER
-    /// guarded — engine.rs's own gesture always wins and applies unconditionally, same
-    /// as before this change.
+    /// Pause under `cause`, gen bump + requeue intent, fade.
+    /// GUARD: `BargeSpeculative` is no-op if already `Dictation` (race:
+    /// `pause_for_record` before `set_stt_active` — barge must not relabel/clear later).
+    /// `Dictation` always applies.
     fn pause_with_cause(&self, cause: PauseCause) {
         {
             let mut st = self.paused.lock().unwrap();
@@ -1021,76 +793,46 @@ impl TtsQueue {
             st.paused = true;
             st.cause = Some(cause);
         }
-        // Nothing is audibly playing while paused for the record-barge; the kept
-        // reply resumes on `resume()` (which re-enters the worker and re-sets it).
         self.set_tts_active(false);
         let gen0 = self.generation.fetch_add(1, Ordering::SeqCst);
-        // A record-barge pause means RESUME later — pin that intent to this specific
-        // transition (see `record_cancel_kind`) so a later, unrelated hard cancel of a
-        // DIFFERENT item can't be misread as this pause's outcome, or vice versa.
+        // Requeue intent pinned to this gen (not live paused).
         self.record_cancel_kind(gen0, true);
-        // Fade out (short) rather than hard-cut when you press caps to dictate, so the
-        // voice tapers as recording starts. ~60 ms keeps mic bleed minimal in half-duplex
-        // (full-duplex stands this watcher down entirely, so it never reaches here).
         self.tts.stop_fade();
     }
 
-    /// Record barge (a genuine Caps/PTT gesture — `engine.rs`'s `toggle_dictation`
-    /// PauseVoice arm and `start_recording`, UNCHANGED call sites/behavior): pause and
-    /// tag `Dictation`. Always applies, never guarded. Keeps the ENTIRE queue
-    /// (narration and reply); the worker re-enqueues the interrupted item on its
-    /// generation bump, so `resume()` continues the whole queue from where the mic
-    /// interrupted it.
+    /// Caps/PTT record barge — always applies; queue kept for resume.
     pub fn pause_for_record(&self) {
         self.pause_with_cause(PauseCause::Dictation);
     }
 
-    /// Speculative record barge (`barge.rs`'s own foreign-mic watcher, NEW entry point
-    /// replacing its direct `pause_for_record()` call): pause and tag `BargeSpeculative`
-    /// — UNLESS the queue is already paused for a real `Dictation` gesture, in which case
-    /// this is a no-op (see `pause_with_cause`'s guard doc for why).
+    /// Foreign-mic speculative barge — no-op under Dictation (see pause_with_cause).
     pub fn pause_for_suspected_barge(&self) {
         self.pause_with_cause(PauseCause::BargeSpeculative);
     }
 
-    /// Whether the warm child is running in full-duplex AEC mode (delegates to the
-    /// `TtsManager`). The mic-barge watcher reads it to stand down: in full-duplex
-    /// the input device is always live (VPIO), so the `is_mic_active()` edge is useless,
-    /// and the user cancels the voice via the Caps long-press instead.
+    /// Full-duplex AEC active (mic-barge stands down — VPIO mic always live).
     pub fn is_full_duplex(&self) -> bool {
         self.tts.is_full_duplex_active()
     }
 
-    /// One-shot speaker diarization on the warm helper (delegates to the `TtsManager`):
-    /// record `seconds` of mic, then return the `{"segments":[…]}` JSON. Blocks the
-    /// caller until the helper's terminal marker. Mutually exclusive with speak/listen.
+    /// One-shot diarize on warm helper. Blocks; exclusive with speak/listen.
     pub(crate) fn diarize(&self, seconds: u64) -> std::io::Result<String> {
         self.tts.diarize(seconds)
     }
 
-    /// One-shot voiceprint enrollment on the warm helper (delegates to the `TtsManager`):
-    /// record `seconds` of mic, then return the extracted embedding for the engine to
-    /// persist under a name. Blocks the caller until the helper's terminal marker.
+    /// One-shot enroll on warm helper. Blocks.
     pub(crate) fn enroll(&self, seconds: u64) -> std::io::Result<Vec<f32>> {
         self.tts.enroll(seconds)
     }
 
-    /// Mark the active terminal — the session you last submitted a prompt to
-    /// (`UserPromptSubmit` hook → `MarkActive`). The worker then speaks only this
-    /// session's items (plus untagged global audio) and HOLDS the rest until they
-    /// become active. Takes the `items` lock around the update so the worker — which
-    /// releases that lock only inside `cv.wait` — can never miss the wake (no lost
-    /// wakeup); lock order stays `items` → `active`.
+    /// Mark active terminal (`MarkActive`). Holds items around update (no lost wakeup).
     pub fn set_active_session(&self, session: Option<String>) {
         let _q = self.items.lock().unwrap();
         self.active.lock().unwrap().explicit = session;
         self.cv.notify_one();
     }
 
-    /// Publish whether a terminal is the frontmost app (engine poll thread → worker).
-    /// Latches `terminal_seen` the first time a terminal is seen, so the focus gate
-    /// self-disables for unrecognized terminal emulators (frontmost never true → the
-    /// queue is never silenced). Cheap; called every poll tick.
+    /// Poll → worker: terminal frontmost. Latches `terminal_seen` (unrecognized never mute).
     pub fn set_terminal_front(&self, front: bool) {
         if front {
             self.terminal_seen.store(true, Ordering::SeqCst);
@@ -1098,9 +840,7 @@ impl TtsQueue {
         self.terminal_front.store(front, Ordering::SeqCst);
     }
 
-    /// Publish the `pause_in_background` config (engine poll thread → worker). When
-    /// false, the worker's focus gate is disabled — speech plays regardless of which app
-    /// is frontmost. Cheap; called every poll tick alongside `set_terminal_front`.
+    /// Poll → worker: focus-gate config.
     pub fn set_pause_in_background(&self, pause: bool) {
         self.pause_in_background.store(pause, Ordering::SeqCst);
     }
@@ -1109,10 +849,7 @@ impl TtsQueue {
         *self.config.lock().unwrap() = config;
     }
 
-    /// Mic freed via a genuine Caps/PTT gesture (`engine.rs`'s `toggle_dictation`
-    /// ResumeVoice arm and `stop_recording`, UNCHANGED call sites): unconditionally lift
-    /// the pause regardless of cause — this IS the matching counterpart of whichever
-    /// gesture paused it. No-op when not paused.
+    /// Caps/PTT resume — lifts pause of any cause. No-op if not paused.
     pub fn resume(&self) {
         let notify = {
             let mut st = self.paused.lock().unwrap();
@@ -1129,12 +866,7 @@ impl TtsQueue {
         }
     }
 
-    /// `barge.rs`'s own resume (NEW entry point replacing its direct `resume()` call):
-    /// clears the pause ONLY when it's tagged `BargeSpeculative` — a `Dictation`-tagged
-    /// pause (or no pause) is left completely untouched, no matter when this is called.
-    /// This is the round-3 half of the fix (approved); `pause_for_suspected_barge`'s
-    /// guard above is the round-4 half that makes it actually safe, by ensuring the tag
-    /// can never have been wrongly stomped in the first place.
+    /// Clear pause only if `BargeSpeculative` (never touches Dictation).
     pub fn resume_if_barge_speculative(&self) {
         let notify = {
             let mut st = self.paused.lock().unwrap();
@@ -1151,9 +883,7 @@ impl TtsQueue {
         }
     }
 
-    /// Read-only playback snapshot: `(tts_active, queued, paused, muted)`.
-    /// `queued` counts items still waiting in the deque (excludes the one being played);
-    /// `muted` is the global mute (speech is silent and cues are suppressed while set).
+    /// `(tts_active, queued, paused, muted)`. Queued excludes in-flight.
     pub fn snapshot(&self) -> (bool, usize, bool, bool) {
         let queued = self.items.lock().unwrap().len();
         (
@@ -1164,16 +894,12 @@ impl TtsQueue {
         )
     }
 
-    /// Cheap, lock-free read of the live playback flag — true while audio is
-    /// actually playing. For the model-status JSON's `running.tts_active` (polled
-    /// often to drive the menu-bar icon), so it must NOT take the `items` lock the
-    /// way `snapshot()` does.
+    /// Lock-free `activity.speaking` (must not take `items`).
     pub fn is_tts_active(&self) -> bool {
         self.tts_active.load(Ordering::SeqCst)
     }
 
-    /// Live TTS for `model_status`: active flag + wireable client source of the in-flight
-    /// item (`None` when idle, or when the producer is not a Usage agent).
+    /// `(active, wireable client source)` for model_status.
     pub fn tts_running(&self) -> (bool, Option<ClientSource>) {
         let active = self.is_tts_active();
         if !active {
@@ -1189,31 +915,19 @@ impl TtsQueue {
         (true, source)
     }
 
-    /// Set the live playback flag and, on a real transition, bump the status-push gate
-    /// so a blocked `WaitModelStatus` sees playback start/stop immediately. The single
-    /// writer for `tts_active` — every barge/dequeue routes through here so the push
-    /// fires exactly once per change (no spurious bump when it's already in that state).
+    /// Sole `tts_active` writer; bumps gate only on real transitions.
     fn set_tts_active(&self, on: bool) {
         if self.tts_active.swap(on, Ordering::SeqCst) != on {
             self.gate.bump();
         }
     }
 
-    /// Cheap read of the live pause flag (cause-agnostic) — used by the worker's
-    /// dequeue loop, by `requeue_if_resuming`'s defensive fallback, and by `engine.rs`'s
-    /// refused-start regression test (hence `pub(crate)`).
+    /// Pause flag (cause-agnostic).
     pub(crate) fn is_paused(&self) -> bool {
         self.paused.lock().unwrap().paused
     }
 
-    /// Record the requeue intent for the generation transition a cancellation JUST made:
-    /// `gen0` is the PRE-bump value (`fetch_add`'s return), i.e. exactly the `gen0` whatever
-    /// item was in flight at that instant is running under — so
-    /// [`requeue_if_resuming`](Self::requeue_if_resuming) can later look up THIS bump's
-    /// intent by that same key, instead of re-reading the CURRENT (possibly since-changed)
-    /// `paused` flag. See the `cancel_kind` field doc for why that distinction matters.
-    /// Bounded defensively: bumps are rare user-triggered events, but if a burst of them is
-    /// never claimed (nothing was playing to consume them), don't grow forever.
+    /// Store requeue intent for cancel's PRE-bump gen. Cap map size if unclaimed.
     fn record_cancel_kind(&self, gen0: u64, requeue: bool) {
         let mut m = self.cancel_kind.lock().unwrap();
         m.insert(gen0, requeue);
@@ -1224,12 +938,8 @@ impl TtsQueue {
         }
     }
 
-    /// Whether the queue should close always-listening's microphone now.
-    ///
-    /// A focus hold deliberately reads idle so dictation can continue while the user is in
-    /// another app. Otherwise the `items` lock couples this read to the worker's dequeue +
-    /// `in_flight` store: sampling the flag before taking the lock left a false-idle
-    /// interleaving even though the writer published it under that same lock.
+    /// Close always-listening mic? Focus hold reads idle (dictation off-terminal).
+    /// Holds `items` with in_flight sample (avoids false-idle race).
     pub fn is_busy(&self) -> bool {
         if self.worker_focus_hold() && !self.tts_active.load(Ordering::SeqCst) {
             return false;
@@ -1240,29 +950,15 @@ impl TtsQueue {
             || !items.is_empty()
     }
 
-    /// Whether the warm helper's Parakeet (STT) model is resident + warm — the dictation
-    /// start-guard reads this through the queue (it owns the `TtsManager`).
+    /// STT resident+warm (dictation start-guard).
     pub fn stt_loaded(&self) -> bool {
         self.tts.is_stt_loaded()
     }
 
-    /// Non-blocking crash heal, shared by TWO callers that must never ride a blocking
-    /// start (a start holds the manager's `lifecycle` lock for seconds — up to the READY
-    /// handshake bound — while the model loads):
-    ///
-    /// * the DICTATION side: a Caps tap that finds Parakeet not resident may be looking
-    ///   at a warm child that CRASHED post-READY — and a user who only dictates never
-    ///   queues the speak that would heal it, so dictation would stay refused until an
-    ///   app restart. The tap lives on the input poll tick, which must not stall; the
-    ///   refusing tap stays refused — the NEXT one finds the model warm.
-    /// * the worker's readiness wait (`wait_until_ready_with_timeout`): while an item is
-    ///   claimed the mic is closed and `stop_speech` polls the same loop, so the wait
-    ///   must keep ticking instead of blocking inside a child restart (issue #59).
-    ///
-    /// Runs [`TtsManager::restart_if_crashed`] on a throwaway thread.
+    /// Non-blocking crash heal on a throwaway thread (must not block poll/readiness —
+    /// start holds lifecycle for seconds). Caps-only users never queue speak that would
+    /// heal; readiness wait must keep ticking (#59). Single-flight.
     pub fn heal_crashed_child(&self) {
-        // Single-flight: taps during a heal-in-progress (a start blocks for seconds while
-        // the model loads) must not pile up threads on the manager's lifecycle lock.
         if self
             .healing
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1278,17 +974,12 @@ impl TtsQueue {
         });
     }
 
-    /// SessionEnd (window closed for good): per-window barge like [`clear_session`]. The
-    /// agent's voice assignment survives — it's keyed by client, not session, and lives for
-    /// the engine runtime. Called with `Some` session; the `None`/global case routes to
-    /// [`clear`](Self::clear) at the IPC site.
+    /// SessionEnd: per-window barge. Agent voice survives (keyed by client).
     pub fn end_session(&self, session: Option<String>) {
         self.clear_session(session);
     }
 
-    /// Get-or-assign this agent's voice from the preferred pool (delegates to
-    /// [`pick_agent_voice`]), recording the roll so it's stable for the engine runtime.
-    /// `pool` must be non-empty (caller checks).
+    /// Get-or-assign agent voice ([`pick_agent_voice`]). Pool non-empty.
     fn assign_agent_voice(&self, agent: ClientSource, pool: &[String]) -> String {
         let mut map = self.agent_voices.lock().unwrap();
         let voice = pick_agent_voice(&map, pool, agent, &mut |n| fastrand::usize(..n));
@@ -1296,12 +987,7 @@ impl TtsQueue {
         voice
     }
 
-    /// Resolve the `(engine, voice)` for `source` — the ONE place the greeting and the playback
-    /// worker agree on "what speaks". The engine is the resolved `tts_engine` ladder rung; the
-    /// voice is the System voice, or this agent's CLAIMED Kokoro pool voice (stable for the
-    /// engine runtime; an empty pool and engine self-talk (`DontSpeak`) fall back to
-    /// `current_voice()`). `None` when TTS is off — no usable rung — so the caller
-    /// skips/no-ops.
+    /// Shared greeting+worker resolver: `(engine, voice)`. None if TTS off / empty pool.
     fn resolve_engine_voice(
         &self,
         cfg: &VoiceConfig,
@@ -1312,36 +998,24 @@ impl TtsQueue {
             ds_config::TtsEngine::System => cfg.tts_system_voice.clone(),
             ds_config::TtsEngine::Kokoro => {
                 let pool = cfg.active_voices();
-                if !pool.is_empty() && source != ClientSource::DontSpeak {
-                    self.assign_agent_voice(source, pool)
-                } else {
-                    cfg.current_voice()
+                if pool.is_empty() {
+                    return None;
                 }
+                self.assign_agent_voice(source, pool)
             }
         };
         Some((engine, voice))
     }
 
-    /// Greet a freshly-opened terminal in its agent's claimed / system voice (no-op unless
-    /// `greet_on_open` is set and TTS is on). Claims the agent's voice now via
-    /// [`resolve_engine_voice`](Self::resolve_engine_voice), so the assignment is locked in
-    /// at open rather than on first reply — a second terminal of the same agent greets in
-    /// the same voice. `source` is the opening client (`GreetSession`) so
-    /// `running.tts_source` can light that Usage card while greeting.
+    /// Greet on open (if enabled). Claims agent voice now so same agent matches on open.
     pub fn greet_session(&self, source: ClientSource, session: Option<String>) {
         let cfg = self.config.lock().unwrap().clone();
         if !cfg.greet_on_open {
             return;
         }
-        // Resolve the active engine + voice via the SAME shared helper the worker uses, so the
-        // greeting is NAMED by and SPOKEN in exactly the voice that will play (under System that
-        // means the system voice, not a Kokoro id handed to `say`). `None` ⇒ TTS off ⇒ no greeting.
         let Some((engine, voice)) = self.resolve_engine_voice(&cfg, source) else {
             return;
         };
-        // Name the greeting via the ONE shared resolver (Kokoro id → "Sarah"; System → the
-        // tidied `tts_system_voice`, or the OS-default voice's name). A None name (e.g. System
-        // OS-default where it can't be read) falls back to a name-less greeting.
         let name = ds_tts::enumerate::voice_display_name(engine, &voice);
         let idx = GREET_ROTATION.fetch_add(1, Ordering::Relaxed);
         let text = greeting_line(name.as_deref(), idx);
@@ -1350,8 +1024,7 @@ impl TtsQueue {
         }
     }
 
-    /// Snapshot the two hold gates together so the loop's hold and busy decisions cannot
-    /// disagree because they sampled the microphone/focus state at different moments.
+    /// Mic + focus hold snapshot (one sample for hold/busy agreement).
     fn worker_hold_state(&self) -> HoldState {
         hold_state(
             self.tts.is_full_duplex_active(),
@@ -1372,9 +1045,7 @@ impl TtsQueue {
 
     fn run(self: Arc<Self>) {
         'outer: loop {
-            // Wait for a PLAYABLE item (see [`select_pos`]) while not paused: items for
-            // other terminals are held in place until their terminal becomes active.
-            // Lock order: `items` then `active`.
+            // Wait for playable item ([`select_pos`]); lock order items → active.
             let (mut item, gen0) = {
                 let mut q = self.items.lock().unwrap();
                 loop {
@@ -1418,8 +1089,7 @@ impl TtsQueue {
         }
     }
 
-    /// Play one speech item, retrying one warm-child transport failure. A config reload can
-    /// replace the child after the readiness gate but before or during the request write.
+    /// Play speech; one retry on warm-child transport loss (reload mid-write).
     fn play_speech(
         &self,
         item: &Item,
@@ -1454,8 +1124,7 @@ impl TtsQueue {
                 Ok(()) => return (SpeechOutcome::Finished, resume_skip),
                 Err(e) if retries_left > 0 && should_retry_speak(engine, &e) => {
                     retries_left -= 1;
-                    // The retry re-enters readiness/hold gates. Publish playback as stopped
-                    // first so a cancellation or terminal gate there cannot strand it active.
+                    // Clear active before re-gate so cancel can't strand tts_active.
                     self.set_tts_active(false);
                     log::warn!(
                         target: "ttsq",
@@ -1470,11 +1139,8 @@ impl TtsQueue {
         }
     }
 
-    /// The combined pre-playback gate for one claimed item: hold, wait for readiness, then
-    /// hold AGAIN if the wait outlasted a focus/mic change. One loop, so an item can never
-    /// start playing under a hold that arrived during the (up to 60 s) readiness wait —
-    /// `set_terminal_front` only stores atomics and never bumps the generation, so nothing
-    /// else breaks that window.
+    /// Hold → readiness → re-hold if focus/mic changed during wait (up to 60s).
+    /// Focus only stores atomics (no gen bump), so the re-hold loop is required.
     fn gate_item(
         &self,
         item: &Item,
@@ -1483,20 +1149,9 @@ impl TtsQueue {
         rate_override: Option<f32>,
     ) -> GateOutcome {
         loop {
-            // HOLD this item (any kind) while we must stay silent — resume when the
-            // gate clears, dropping nothing. Two independent "hold, don't drop" gates:
-            //   * mic live (HALF-DUPLEX only): never speak into a recording. Full-duplex
-            //     skips this — the VPIO mic is always live (`is_mic_active()` permanently
-            //     true), so the AEC lets us speak into the open mic (coexist: playback and
-            //     dictation overlap; the voice stops only on an explicit `stop`/`stopfade`
-            //     op, not an implicit talk-over barge).
-            //   * no terminal frontmost: you've tabbed to a browser/other app — the
-            //     cross-platform focus gate (applies in BOTH duplex modes). The worker
-            //     reads the flag the poll thread publishes (NSWorkspace is poll/main-
-            //     thread affine). Self-arming via `terminal_seen`, so an unrecognized
-            //     terminal never goes mute. DISABLED when `pause_in_background` is false
-            //     (config) — then speech plays regardless of which app is frontmost.
-            // A generation bump (a pause edge or a hard StopSpeech/clear) breaks the
+            // Hold (don't drop): half-duplex mic live; focus gate (both duplex modes;
+            // self-arm via terminal_seen; off when pause_in_background false).
+            // Gen bump (pause/StopSpeech) breaks the
             // wait so it never sticks.
             while self.generation.load(Ordering::SeqCst) == gen0 {
                 let hold = self.worker_hold_state();
@@ -1519,11 +1174,10 @@ impl TtsQueue {
 
             let cfg = self.config.lock().unwrap().clone();
             // Engine + base voice come from config via the SAME shared helper the greeting
-            // uses — System reads `tts_system_voice`; Kokoro claims this agent's voice (an
-            // empty pool falls back to `current_voice()`). Off / no usable rung ⇒ a blank
-            // voice (speak_one no-ops, value unused). A per-call `item.voice` (e.g. the MCP
-            // `speak` voice arg) then overrides just the voice string within the chosen
-            // engine.
+            // uses — System reads `tts_system_voice`; Kokoro claims this agent's pool
+            // voice. Off / no usable rung / empty pool ⇒ a blank voice (speak_one no-ops,
+            // value unused). A per-call `item.voice` (e.g. the MCP `speak` voice arg) then
+            // overrides just the voice string within the chosen engine.
             let (engine, base_voice) = match self.resolve_engine_voice(&cfg, item.source) {
                 Some((e, v)) => (Some(e), v),
                 None => (None, String::new()),
@@ -1662,7 +1316,7 @@ impl TtsQueue {
                 // Clear it so the wait loop only fails on a FRESH error from this attempt;
                 // a genuinely permanent failure re-emits TTSLOADERR and still fails fast.
                 self.tts.clear_tts_load_error();
-                self.tts.load_engine("tts"); // fire-and-forget stdin write — non-blocking
+                self.tts.load_engine(ds_helper_proto::HelperModel::Tts); // fire-and-forget stdin write — non-blocking
                 load_requested = true;
             }
         } else {
@@ -1708,7 +1362,7 @@ impl TtsQueue {
                 if !load_requested {
                     // Same stale-error rule as the entry retry above.
                     self.tts.clear_tts_load_error();
-                    self.tts.load_engine("tts");
+                    self.tts.load_engine(ds_helper_proto::HelperModel::Tts);
                     load_requested = true;
                 }
             }
@@ -1971,6 +1625,18 @@ mod tests {
     }
 
     #[test]
+    fn fresh_pick_rolls_across_the_candidate_pool() {
+        let p = pool();
+        let a = HashMap::new();
+        for (roll, expect) in [(0, "af_sarah"), (1, "am_adam"), (2, "bf_emma")] {
+            assert_eq!(
+                pick_agent_voice(&a, &p, ClientSource::ClaudeCode, &mut |_| roll),
+                expect
+            );
+        }
+    }
+
+    #[test]
     fn distinct_agents_claim_distinct_voices_while_free() {
         // While free voices remain, every agent gets its own — under ANY roll.
         for mut roll in [
@@ -2015,7 +1681,7 @@ mod tests {
 
     #[test]
     fn agents_beyond_pool_reuse_least_loaded_voices() {
-        // More agents than voices → double up on the LEAST-loaded voice, never pile on
+        // More agents than voices → double up on the least-loaded voice, never pile on
         // one voice while another sits lighter.
         let p = vec!["af_sarah".to_string(), "am_adam".to_string()];
         let mut a = HashMap::new();
@@ -2700,7 +2366,7 @@ mod tests {
         assert_eq!(q.active_session(), None);
     }
 
-    /// In-flight claim carries the producer's `ClientSource` so `running.tts_source`
+    /// In-flight claim carries the producer's `ClientSource` so `activity.speaking_source`
     /// can highlight the matching Usage card. Non-client producers stay null.
     #[test]
     fn tts_running_exposes_wireable_playing_source_only() {
@@ -4185,7 +3851,7 @@ mod tests {
         let pool = vec!["af_sarah".to_string(), "am_adam".to_string()];
 
         let v1 = q.assign_agent_voice(ClientSource::ClaudeCode, &pool);
-        assert!(pool.contains(&v1), "the roll picks from the pool");
+        assert!(pool.contains(&v1), "the pick comes from the pool");
         assert_eq!(
             q.agent_voices
                 .lock()
@@ -4195,7 +3861,7 @@ mod tests {
         );
         // The same agent reuses its recorded pick.
         assert_eq!(q.assign_agent_voice(ClientSource::ClaudeCode, &pool), v1);
-        // A different agent rolls among the remaining free voices — with one voice left,
+        // A different agent picks among the remaining free voices — with one voice left,
         // that's deterministic: the other one.
         let v2 = q.assign_agent_voice(ClientSource::Codex, &pool);
         assert!(pool.contains(&v2));
@@ -4270,7 +3936,9 @@ mod tests {
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
-    fn resolve_engine_voice_kokoro_empty_pool_falls_back_to_current_voice() {
+    fn resolve_engine_voice_kokoro_empty_pool_is_none() {
+        // No fallback voice exists: an empty pool (only constructible directly — load()
+        // clamps it back to the default pool) resolves to nothing and claims nothing.
         let q = mk_queue();
         let empty_pool = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
@@ -4279,7 +3947,7 @@ mod tests {
         };
         assert_eq!(
             q.resolve_engine_voice(&empty_pool, ClientSource::ClaudeCode),
-            Some((ds_config::TtsEngine::Kokoro, empty_pool.current_voice()))
+            None
         );
         assert!(q.agent_voices.lock().unwrap().is_empty());
     }
@@ -4289,7 +3957,7 @@ mod tests {
     fn unknown_source_with_a_pool_claims_an_agent_voice() {
         // Behavior change from the session-keyed pool: session-less/global speech from a
         // client (e.g. MCP `speak` without a session) now resolves to the agent's stable
-        // voice, not `current_voice()`. All unknown clients share the one Unknown bucket.
+        // voice, not a shared fixed one. All unknown clients share the one Unknown bucket.
         let q = mk_queue();
         let cfg = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
@@ -4308,8 +3976,9 @@ mod tests {
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
-    fn dontspeak_source_resolves_to_current_voice_not_a_pool_slot() {
-        // Engine self-talk always uses the user's primary pick — never claims a slot.
+    fn dontspeak_source_claims_a_pool_voice_like_any_agent() {
+        // Engine self-talk is just another speaker: it claims a stable pool voice too —
+        // no special-cased fixed voice.
         let q = mk_queue();
         let cfg = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
@@ -4319,8 +3988,11 @@ mod tests {
         let (_, voice) = q
             .resolve_engine_voice(&cfg, ClientSource::DontSpeak)
             .expect("Kokoro is usable on this build");
-        assert_eq!(voice, cfg.current_voice());
-        assert!(q.agent_voices.lock().unwrap().is_empty());
+        assert!(cfg.tts_built_in_voices.contains(&voice));
+        assert_eq!(
+            q.agent_voices.lock().unwrap().get(&ClientSource::DontSpeak),
+            Some(&voice)
+        );
     }
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]

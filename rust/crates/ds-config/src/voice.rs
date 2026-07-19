@@ -1,12 +1,8 @@
-//! `VoiceConfig` — typed speech config from our `config.toml` (defaults, clamp, load, delta).
+//! `VoiceConfig` — typed speech config from `config.toml`.
 
 use std::{collections::HashSet, io};
 
 use serde::{Deserialize, Serialize};
-
-/// Default Kokoro voice — single source for empty-list/`current_voice`/helper fallback.
-/// Do not re-hardcode elsewhere.
-pub const DEFAULT_KOKORO_VOICE: &str = "af_sarah";
 
 use crate::enums::{
     de_diarizer_provider, de_exclude_clients, de_input_clears, de_listen_mode, de_narrate,
@@ -22,16 +18,12 @@ use crate::{
     SttEngine, TrayKind, TtsEngine,
 };
 
-/// Hands-free wake phrases (`[hands_free]`). START is fuzzy (STT mangles it); submit/cancel
-/// are exact. Shelved pending better on-device STT.
+/// Hands-free phrases. START fuzzy; submit/cancel exact. Shelved (STT quality).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HandsFreePhrases {
-    /// Default "computer".
     pub start: String,
-    /// Default "submit".
     pub submit: String,
-    /// Default "cancel".
     pub cancel: String,
 }
 
@@ -45,35 +37,28 @@ impl Default for HandsFreePhrases {
     }
 }
 
-/// Speech config from our `config.toml` (client-neutral). Never writes Claude Code's `voice`
-/// block. Every field `#[serde(default)]` (absent = today's behavior). TOML round-trip via
-/// enum `as_str()` tokens.
+/// Speech config from `config.toml`. Never writes CC voice. Absent field = default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceConfig {
-    /// Kokoro voice ids; first = current, rest = the per-agent pool (random stable pick).
+    /// Kokoro pool (stable per-agent pick).
     #[serde(default = "default_voices")]
     pub tts_built_in_voices: Vec<String>,
-    /// System TTS voice display name (e.g. "Ava (Premium)"); empty = OS default. Separate
-    /// from Kokoro list so engine switches don't cross-contaminate names.
+    /// System voice name; empty = OS default. Separate from Kokoro list.
     #[serde(default)]
     pub tts_system_voice: String,
-    /// SessionStart spoken greet (default on). Voice only — CC 2.1+ drops systemMessage.
+    /// SessionStart greet (default on). Voice only.
     #[serde(default = "default_enabled")]
     pub greet_on_open: bool,
 
-    // ── Narration ───────────────────────────────────────────────────────────
-    /// Narrate set (default both). Empty = off. See [`Self::narrates`] / enums::NarrateKind.
+    /// Narrate set (default both). Empty = off.
     #[serde(default = "default_narrate", deserialize_with = "de_narrate")]
     pub narrate: Vec<NarrateKind>,
 
-    // ── Long-press reset ────────────────────────────────────────────────────
-    /// Caps hold ≥ this (ms) → force-reset idle.
+    /// Caps hold ≥ ms → force-reset idle.
     #[serde(default = "default_long_press_ms")]
     pub long_press_ms: u64,
 
-    // ── Speech-to-text ──────────────────────────────────────────────────────
-    /// STT preference tri-state: None → ladder; Some([]) = off; `Some([e])` = force (no auto-sub).
-    /// See [`Self::resolved_stt`].
+    /// STT pref: None→ladder; Some([])=off; Some([e])=force. See resolved_stt.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -81,33 +66,30 @@ pub struct VoiceConfig {
         deserialize_with = "de_stt_engine_pref"
     )]
     pub stt_engine: Option<Vec<SttEngine>>,
-    /// STT ladder when preference unset (default system → built_in → claude_code). Empty = off.
-    /// Config-file only. See [`Self::resolved_stt`].
+    /// STT ladder if pref unset (default system→built_in→claude_code). Config-file only.
     #[serde(
         default = "default_stt_engine_ladder",
         deserialize_with = "de_stt_engine_ladder"
     )]
     pub stt_engine_ladder: Vec<SttEngine>,
 
-    // ── Diarization + enrollment ────────────────────────────────────────────
-    /// Diarizer ladder + on/off: empty = off; non-empty enables. See `resolved_diarizer_provider`.
+    /// Diarizer ladder; empty = off.
     #[serde(
         default = "default_diarizer_provider",
         deserialize_with = "de_diarizer_provider"
     )]
     pub diarizer_provider: Vec<DiarizerProvider>,
-    /// Clustering threshold 0.5–0.9 (lower = more speakers). Default 0.7.
+    /// Clustering 0.5–0.9 (lower = more speakers). Default 0.7.
     #[serde(default = "default_clustering_threshold")]
     pub clustering_threshold: f32,
     /// Enrolled-voiceprint cosine cutoff. Default 0.65.
     #[serde(default = "default_speaker_threshold")]
     pub speaker_threshold: f32,
-    /// When diarization on + enrolled: keep only enrolled speakers (Parakeet path; fail-open).
+    /// Keep only enrolled speakers when diarization on (Parakeet; fail-open).
     #[serde(default)]
     pub stt_speaker_lock: bool,
 
-    // ── Text-to-speech ──────────────────────────────────────────────────────
-    /// TTS preference tri-state (same shape as `stt_engine`). See [`Self::resolved_tts`].
+    /// TTS pref tri-state (same shape as stt_engine).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -115,110 +97,97 @@ pub struct VoiceConfig {
         deserialize_with = "de_tts_engine_pref"
     )]
     pub tts_engine: Option<Vec<TtsEngine>>,
-    /// TTS ladder when preference unset (default built_in → system). Empty = off. Config-file only.
+    /// TTS ladder if pref unset (default built_in→system). Config-file only.
     #[serde(
         default = "default_tts_engine_ladder",
         deserialize_with = "de_tts_engine_ladder"
     )]
     pub tts_engine_ladder: Vec<TtsEngine>,
-    /// 0.5–2.0 step 0.25; 1.0 = normal.
+    /// 0.5–2.0; 1.0 = normal.
     #[serde(default = "default_rate")]
     pub tts_rate: f32,
-    /// Shared compute ladder for Kokoro + Parakeet (default ane → cuda → cpu). Always has a backend.
+    /// Shared compute ladder (default ane→cuda→cpu). Always has a backend.
     #[serde(default = "default_provider", deserialize_with = "de_provider")]
     pub provider: Vec<Provider>,
 
-    // Engine on/off is the resolved engine (empty pref/ladder); no separate tts_enabled flag.
-    // caps_enabled is independent — still silences when dictation is off.
-    /// Caps-Lock loop (dictation + silence/cancel). Default on.
+    // On/off = resolved engine; no separate tts_enabled. caps_enabled independent.
+    /// Caps loop (dictation + silence/cancel). Default on.
     #[serde(default = "default_enabled")]
     pub caps_enabled: bool,
-    /// Menu-bar color set (default stt + tts_animated). Empty = never color. Engine pass-through.
+    /// Menu-bar color set. Empty = never color. Engine pass-through.
     #[serde(
         default = "default_tray_indicator",
         deserialize_with = "de_tray_indicator"
     )]
     pub tray_indicator: Vec<TrayKind>,
 
-    // ── Always-listening (docs/ALWAYS-LISTENING.md) ─────────────────────────
-    /// `record_submit` (default PTT) | `always` (hands-free). Exclusive.
+    /// `record_submit` (PTT) | `always`. Exclusive.
     #[serde(default, deserialize_with = "de_listen_mode")]
     pub listen_mode: ListenMode,
-    /// Hands-free wake phrases. Stop word only as final token + confirm silence.
     #[serde(default)]
     pub hands_free: HandsFreePhrases,
     /// Silence after stopword before submit (ms). Default 1000.
     #[serde(default = "default_submit_confirm_ms")]
     pub submit_confirm_ms: u64,
-    /// Trailing silence closing an always-mode utterance (ms). Default 700.
+    /// Trailing silence for always-mode (ms). Default 700.
     #[serde(default = "default_endpoint_silence_ms")]
     pub endpoint_silence_ms: u64,
 
-    // ── Full-duplex AEC (docs/AEC.md) ────────────────────────────────────────
-    /// Mic open during TTS with AEC (Parakeet+Kokoro only). Default off.
+    /// Mic open during TTS with AEC (Parakeet+Kokoro). Default off.
     #[serde(default)]
     pub full_duplex: bool,
-    /// Mic make-up gain before STT (1.0 = none). Next dictation; no restart.
+    /// Mic make-up gain before STT. Next dictation; no restart.
     #[serde(default = "default_capture_gain")]
     pub capture_gain: CaptureGain,
 
-    /// Default false: lone stop-tap submits, double-tap inserts. True swaps.
+    /// false: stop-tap submits, double-tap inserts. True swaps.
     #[serde(default)]
     pub double_tap_submits: bool,
 
-    /// ms between paste and Enter (async paste can drop a back-to-back Enter). Default 100.
+    /// ms paste→Enter (async paste can drop back-to-back Enter). Default 100.
     #[serde(default = "default_paste_submit_delay_ms")]
     pub paste_submit_delay_ms: u64,
 
-    /// Whose pending speech a submit cancels (default `["current"]`; `[]` = never).
+    /// Whose speech a submit cancels (default `["current"]`; `[]` = never).
     #[serde(default = "default_input_clears", deserialize_with = "de_input_clears")]
     pub input_clears: Vec<CancelSpeechScope>,
 
-    /// Pause playback when no terminal is frontmost. Default false. Gate is any terminal,
-    /// not which one (see docs/PER-TERMINAL-QUEUES.md).
+    /// Pause when no terminal frontmost. Default false. Any terminal, not which one.
     #[serde(default)]
     pub pause_in_background: bool,
 
-    // ── Earcons ─────────────────────────────────────────────────────────────
-    /// Reply-done ding: system sound name or path; empty = off. Default OS chime.
+    /// Reply-done ding; empty = off. Default OS chime.
     #[serde(default = "default_earcon_reply")]
     pub earcon_reply_sound: String,
-    /// Needs-input cue (Notification hook). Empty default = off.
+    /// Needs-input cue. Empty default = off.
     #[serde(default)]
     pub earcon_needs_input_sound: String,
 
-    // Codex mid-turn (docs/STREAMING-NARRATION.md): config-file only; re-read each loop.
-    /// Codex app-server subscriber (mid-turn narrate). Default on; inert without daemon.
+    /// Codex mid-turn (config-file; re-read each loop). Default on; inert without daemon.
     #[serde(default = "default_enabled")]
     pub codex_stream: bool,
-    /// Lazy-start app-server (managed standalone or engine-owned ordinary server).
-    /// Default off (no surprise spawns).
+    /// Lazy-start app-server. Default off.
     #[serde(default)]
     pub codex_stream_daemon_start: bool,
-    /// App-server endpoint; empty = default unix socket; `ws://…` for TCP.
+    /// App-server endpoint; empty = default socket; `ws://…` for TCP.
     #[serde(default)]
     pub codex_app_server_url: String,
-    /// Binary for lazy app-server start (PATH or absolute).
     #[serde(default = "default_codex_bin")]
     pub codex_bin: String,
 
-    // Grok mid-turn: tail interactive session `updates.jsonl` (ACP agent_message_chunk).
-    /// Grok file-tail mid-turn narrate. Default on; inert without `~/.grok` + active session.
+    /// Grok file-tail mid-turn. Default on; inert without `~/.grok` + session.
     #[serde(default = "default_enabled")]
     pub grok_stream: bool,
 
-    /// Extra terminal ids beyond `KNOWN_TERMINALS` (OS-native form). Gates frontmost /
-    /// pause / claude_code leak guard. Issue #14.
+    /// Extra terminal ids (OS-native). Frontmost/pause/claude_code leak. #14.
     #[serde(default)]
     pub extra_terminals: Vec<String>,
 
-    /// Extra custom-text-editor ids (Zed-style: a11y has no editable role but paste works).
-    /// OS-native form (exe basename / bundle id). Ignored on Linux. Issues #14/#15.
+    /// Extra custom-text-editor ids (OS-native). Ignored on Linux. #14/#15.
     #[serde(default)]
     pub extra_custom_text_editors: Vec<String>,
 
-    // ── Client wiring (config-file only; no set_config) ──────────────────────
-    /// Opt-out list of clients to unwire. None/`[]` = wire all. Engine reconciles at boot.
+    /// Opt-out unwire list. None/`[]` = wire all. Boot reconcile; no set_config.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -227,21 +196,19 @@ pub struct VoiceConfig {
     pub exclude_clients: Option<Vec<ClientSource>>,
 }
 
-/// Warm-subsystem delta from [`VoiceConfig::changes_since`] — surgical `set_config` apply.
-/// Per-call params (voice/rate/…) are not flagged; next call reads them fresh.
+/// Warm-subsystem delta for surgical set_config (not per-call params).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConfigChange {
     pub caps_toggled: bool,
-    /// Resolved TTS engine changed (incl. off) — warm/free Kokoro.
+    /// Resolved TTS changed (incl. off).
     pub tts_toggled: bool,
     pub stt_changed: bool,
     pub listen_mode_changed: bool,
-    /// Shared compute ladder changed — restart warm child (maybe fetch CUDA runtime).
+    /// Compute ladder changed — restart warm child.
     pub provider_changed: bool,
 }
 
 impl ConfigChange {
-    /// Only per-call params changed.
     pub fn is_noop(&self) -> bool {
         *self == ConfigChange::default()
     }
@@ -263,10 +230,11 @@ fn default_earcon_reply() -> String {
     }
 }
 fn default_voices() -> Vec<String> {
-    // Default to a single voice ([`DEFAULT_KOKORO_VOICE`]) out of the box. Add more ids
-    // via `set_config` to form a per-agent pool so different clients (Claude Code, Codex,
-    // …) speak with different voices; with one entry every agent uses that voice.
-    vec![DEFAULT_KOKORO_VOICE.to_string()]
+    // Out-of-the-box pool: Sarah + Emma, so two agent types already speak with different
+    // voices on a clean install. Every voice comes from this pool — there is no separate
+    // default/fallback voice. An empty list is invalid: `set_config` rejects it and
+    // `clamp` restores this default on load.
+    vec!["af_sarah".to_string(), "bf_emma".to_string()]
 }
 fn default_long_press_ms() -> u64 {
     600
@@ -535,6 +503,11 @@ impl VoiceConfig {
         if self.long_press_ms != 0 {
             self.long_press_ms = self.long_press_ms.clamp(100, 5000);
         }
+        // An empty voice pool is invalid (`set_config` rejects it); a hand-edited empty
+        // list fails open to the default pool, so a LOADED config always has voices.
+        if self.tts_built_in_voices.is_empty() {
+            self.tts_built_in_voices = default_voices();
+        }
     }
 
     /// True when resolved TTS configuration selects apple-native (FluidAudio Core ML / ANE)
@@ -596,20 +569,10 @@ impl VoiceConfig {
     /// The Kokoro voice pool — `voices`, shared by every TTS provider. Both backends draw
     /// from one list: the apple-native FluidAudio (Core ML / ANE) backend materializes any
     /// requested voice on demand from the same `voices-v1.0.bin` the ONNX path uses (see
-    /// `ds_tts::ane_voices`), so there is no separate apple-native voice set. First = default,
-    /// rest = the per-agent pool.
+    /// `ds_tts::ane_voices`), so there is no separate apple-native voice set. Every entry is
+    /// a per-agent pool voice — no privileged "default" slot.
     pub fn active_voices(&self) -> &[String] {
         &self.tts_built_in_voices
-    }
-
-    /// The default/current voice — `active_voices()[0]`, falling back to
-    /// [`DEFAULT_KOKORO_VOICE`] if the list is somehow empty. The per-agent pool
-    /// assignment (in the engine) hands each client a stable pool entry.
-    pub fn current_voice(&self) -> String {
-        self.active_voices()
-            .first()
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_KOKORO_VOICE.into())
     }
 
     /// Whether `kind` is in the narration set. `narrates(Digests)` gates both message-blockquote
@@ -674,15 +637,9 @@ pub(crate) mod tests {
     #[test]
     fn voice_defaults_when_absent() {
         let v: VoiceConfig = serde_json::from_str("{}").unwrap();
-        // Both the default pool and the empty-list fallback resolve to the ONE shared
-        // default constant — no independently-hardcoded literal can drift from it.
-        assert_eq!(v.tts_built_in_voices, vec![DEFAULT_KOKORO_VOICE]);
-        assert_eq!(v.current_voice(), DEFAULT_KOKORO_VOICE);
-        let empty = VoiceConfig {
-            tts_built_in_voices: vec![],
-            ..v.clone()
-        };
-        assert_eq!(empty.current_voice(), DEFAULT_KOKORO_VOICE);
+        // Default pool: two voices out of the box so agent types differ by ear. No
+        // separate default/fallback voice exists — everything speaks a pool entry.
+        assert_eq!(v.tts_built_in_voices, vec!["af_sarah", "bf_emma"]);
         assert!(v.tts_system_voice.is_empty());
         assert!(v.greet_on_open);
         // Default narration: shorts first, then digests — both on out of the box.
@@ -1545,7 +1502,7 @@ pub(crate) mod tests {
 
         // And load() reconstructs the written config.
         let lv = VoiceConfig::load(&paths);
-        assert_eq!(lv.current_voice(), "am_michael");
+        assert_eq!(lv.active_voices(), v.tts_built_in_voices);
         assert_eq!(lv.extra_terminals, v.extra_terminals);
         assert_eq!(lv.extra_custom_text_editors, v.extra_custom_text_editors);
     }
@@ -1611,7 +1568,7 @@ pub(crate) mod tests {
         assert!(r.full_duplex);
         assert_eq!(r.tts_rate, 1.25);
         assert_eq!(r.capture_gain.manual(), Some(3.5));
-        assert_eq!(r.current_voice(), "am_adam");
+        assert_eq!(r.active_voices(), ["am_adam", "af_bella"]);
     }
 
     #[test]
@@ -1624,6 +1581,20 @@ pub(crate) mod tests {
         assert_eq!(VoiceConfig::load(&paths).tts_rate, 2.0);
         std::fs::write(&paths.config_toml, "tts_rate = 0.1\n").unwrap();
         assert_eq!(VoiceConfig::load(&paths).tts_rate, 0.5);
+    }
+
+    #[test]
+    fn load_restores_default_pool_when_empty() {
+        // A hand-edited empty voice pool fails open to the default pool on load —
+        // `set_config` already rejects it, so a LOADED config never has zero voices.
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Paths::rooted_at(dir.path());
+        paths.config_toml = dir.path().join("config.toml");
+        std::fs::write(&paths.config_toml, "tts_built_in_voices = []\n").unwrap();
+        assert_eq!(
+            VoiceConfig::load(&paths).tts_built_in_voices,
+            default_voices()
+        );
     }
 
     #[test]

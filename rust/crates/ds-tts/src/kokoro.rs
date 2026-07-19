@@ -1,9 +1,5 @@
-//! KokoroTts — DEFAULT TTS. Native Kokoro via `ds-helper` (no Python/uv/speak.py).
-//!
-//! Spawns the helper in its OWN process group (`setsid`), preserving the SACRED
-//! single-speaker pidfile contract: [`spawn`] returns `(Child, pgid)` for barge-in
-//! and narrate's pidfile-takeover watch. Helper: ensure models → G2P → batch →
-//! synth → trim → play. Fail-quiet if models/audio missing (like STT "no model").
+//! Default TTS via `ds-helper` in own process group. [`spawn`] → `(Child, pgid)` for
+//! barge/pidfile. Fail-quiet if models/audio missing.
 
 use std::process::{Child, Command, Stdio};
 
@@ -24,7 +20,10 @@ impl KokoroTts {
 
 impl Tts for KokoroTts {
     fn speak(&self, text: &str, voice_id: Option<&str>, rate: f32) -> std::io::Result<SpeakHandle> {
-        let voice = voice_id.unwrap_or(ds_config::DEFAULT_KOKORO_VOICE);
+        // No fallback voice exists — Kokoro callers always name the assigned pool voice.
+        let voice = voice_id.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "kokoro needs a voice id")
+        })?;
         let (child, pgid) = spawn(&self.paths, text, voice, rate)?;
         // Trait path: return handle immediately; caller waits by pgid/pidfile.
         drop(child);

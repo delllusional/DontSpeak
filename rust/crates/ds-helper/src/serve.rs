@@ -1,7 +1,4 @@
-//! `--serve` warm-child loop: load the model ONCE, then read JSON requests on
-//! stdin (one object per line) and synth+play / listen / (un)load each. Owns the
-//! `State`/`Job` machine and the op dispatch (`listen`/`lstop`/`load`/`unload`/
-//! `speak`/etc.).
+//! Warm-child loop: load once; NDJSON ops (`speak`/`listen`/`lstop`/`load`/…).
 
 use ds_aec::DuplexAudio;
 use ds_helper_proto as proto;
@@ -221,16 +218,16 @@ use crate::stt_residency::SttResidencySlot;
 /// One stdin request (`--serve`, one JSON object per line).
 #[derive(Debug, Deserialize)]
 struct ServeReq {
-    op: String,
+    op: ds_helper_proto::HelperOp,
     #[serde(default)]
     voice: String,
     #[serde(default = "default_rate")]
     rate: f32,
     #[serde(default)]
     text: String,
-    /// `unload`/`load`: `"tts"` | `"stt"`.
+    /// `unload`/`load` target.
     #[serde(default)]
-    engine: String,
+    engine: Option<ds_helper_proto::HelperModel>,
     /// `diarize`/`enroll` capture length.
     #[serde(default)]
     seconds: Option<u64>,
@@ -443,7 +440,7 @@ pub(crate) fn serve() -> ! {
     let tts_wanted = std::env::var_os("DONTSPEAK_TTS_PRELOAD").is_some();
 
     // STT preloads on its own thread in parallel with TTS. ORT_DYLIB_PATH write is Once-
-    // serialized in ds-model. DONTSPEAK_STT_PROVIDER: ane|cpu. Shared Arc for preload +
+    // serialized in ds-model. DONTSPEAK_STT_PROVIDER: system|ane|cuda|cpu. Shared Arc for preload +
     // concurrent-listen + request loop.
     let parakeet_dir = ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE)
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
@@ -674,11 +671,7 @@ pub(crate) fn serve() -> ! {
                 let Ok(req) = serde_json::from_str::<ServeReq>(line) else {
                     continue; // ignore malformed lines rather than desync
                 };
-                let voice = if req.voice.trim().is_empty() {
-                    ds_config::DEFAULT_KOKORO_VOICE.to_string()
-                } else {
-                    req.voice
-                };
+                let voice = req.voice;
                 let cancel_current = || {
                     // Instant barge: flag + rodio stop, or VPIO ring drain in full-duplex.
                     cancel.store(true, Ordering::SeqCst);
@@ -736,8 +729,8 @@ pub(crate) fn serve() -> ! {
                             }
                         });
                 };
-                match req.op.as_str() {
-                    "stop" => {
+                match req.op {
+                    proto::HelperOp::Stop => {
                         cancel_current(); // silent: no enqueue, no DONE
                         let generation = listen_latest_generation.load(Ordering::SeqCst);
                         listen_stopped_through.fetch_max(generation, Ordering::SeqCst);
@@ -745,7 +738,7 @@ pub(crate) fn serve() -> ! {
                             sig.1.notify_one();
                         }
                     }
-                    "mute" => {
+                    proto::HelperOp::Mute => {
                         // Speech keeps draining silently. Cues are one-shot signals, so mute
                         // stops an active one and suppresses later ones rather than resurrecting
                         // them on unmute.
@@ -769,8 +762,8 @@ pub(crate) fn serve() -> ! {
                             p.set_volume(if on { 0.0 } else { 1.0 });
                         }
                     }
-                    "stopfade" => cancel_current_fade(), // graceful per-window barge (fade then stop)
-                    "cue" => {
+                    proto::HelperOp::Stopfade => cancel_current_fade(), // graceful per-window barge
+                    proto::HelperOp::Cue => {
                         // Cue playback stays off the stdin reader so mute/stop remain live, but
                         // its CUEDONE terminal makes the engine queue wait before starting the
                         // next action. The tracked handle lets mute stop an already-sounding cue.
@@ -831,7 +824,15 @@ pub(crate) fn serve() -> ! {
                             }
                         }
                     }
-                    "speak" => {
+                    proto::HelperOp::Speak => {
+                        // Voice is required — no fallback voice exists; the engine always
+                        // sends the caller's assigned pool voice.
+                        if voice.trim().is_empty() {
+                            use std::io::Write as _;
+                            println!("{} voice id required", proto::ERR);
+                            let _ = std::io::stdout().flush();
+                            continue;
+                        }
                         let text = req.text;
                         barge_then_publish(&shared, cancel_current, |state| {
                             state.req = Some(PlayReq {
@@ -842,7 +843,7 @@ pub(crate) fn serve() -> ! {
                             });
                         });
                     }
-                    "listen" => {
+                    proto::HelperOp::Listen => {
                         let generation = req.session.unwrap_or(1);
                         listen_latest_generation.fetch_max(generation, Ordering::SeqCst);
                         if let Some(sig) = &listen_sig {
@@ -866,7 +867,7 @@ pub(crate) fn serve() -> ! {
                             });
                         }
                     }
-                    "lstop" => {
+                    proto::HelperOp::Lstop => {
                         let generation = req.session.unwrap_or(u64::MAX);
                         listen_stopped_through.fetch_max(generation, Ordering::SeqCst);
                         // End the listen WITHOUT touching the speak (coexist). In
@@ -876,7 +877,7 @@ pub(crate) fn serve() -> ! {
                             sig.1.notify_one();
                         }
                     }
-                    "diarize" => {
+                    proto::HelperOp::Diarize => {
                         // One-shot record-then-diarize. Runs on the serve loop's single
                         // capture thread, so it's mutually exclusive with speak/listen —
                         // cancel any in-flight playback, then queue the job.
@@ -886,7 +887,7 @@ pub(crate) fn serve() -> ! {
                         cv.notify_one();
                         cancel_current();
                     }
-                    "enroll" => {
+                    proto::HelperOp::Enroll => {
                         // One-shot record-then-extract-voiceprint (same capture thread).
                         let secs = req.seconds.unwrap_or(15).clamp(1, 60);
                         let (m, cv) = &*shared;
@@ -894,31 +895,30 @@ pub(crate) fn serve() -> ! {
                         cv.notify_one();
                         cancel_current();
                     }
-                    "unload" => {
+                    proto::HelperOp::Unload => {
                         // Free a cached model the engine no longer needs while the
                         // OTHER engine keeps the helper warm. Idle-only (the playback
                         // loop runs it between jobs); no cancel.
                         let (m, cv) = &*shared;
                         let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
-                        match req.engine.as_str() {
-                            "tts" => s.unload_tts = true,
-                            "stt" => s.unload_stt = true,
-                            _ => {}
+                        match req.engine {
+                            Some(proto::HelperModel::Tts) => s.unload_tts = true,
+                            Some(proto::HelperModel::Stt) => s.unload_stt = true,
+                            None => {}
                         }
                         cv.notify_one();
                     }
-                    "load" => {
+                    proto::HelperOp::Load => {
                         // Eagerly (pre)load a model so it's resident before first use.
                         let (m, cv) = &*shared;
                         let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
-                        match req.engine.as_str() {
-                            "tts" => s.load_tts = true,
-                            "stt" => s.load_stt = true,
-                            _ => {}
+                        match req.engine {
+                            Some(proto::HelperModel::Tts) => s.load_tts = true,
+                            Some(proto::HelperModel::Stt) => s.load_stt = true,
+                            None => {}
                         }
                         cv.notify_one();
                     }
-                    _ => {} // unknown op: ignore
                 }
             }
             // stdin closed (engine/UI quit, or the engine was killed — the OS

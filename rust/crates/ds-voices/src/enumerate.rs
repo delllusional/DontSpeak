@@ -1,20 +1,8 @@
-//! Voice enumeration for the CURRENTLY-SELECTED engine, filtered to a language.
-//!
-//! Shared by the host picker (`ds-core` delegates `kokoro_ids` / `system_voices`
-//! here) and the MCP `list_voices` tool (no access to FFI `ds-core`).
-//!
-//! Two engines, two id conventions:
-//!   - Kokoro: opaque `<lang><gender>_name` ids from `voices-v1.0.bin` when present
-//!     (NEVER downloaded here), else a static fallback. Leading char = language
-//!     family (`a` American + `b` British English; Kokoro ships no German voices,
-//!     so German is intentionally absent), second char = gender (`f`/`m`).
-//!   - System: `say -v ?` (macOS) → [`SpeakerVoice`] with BCP-47 `language_tag`;
-//!     empty off-host.
-//!
-//! Everything except disk read (`kokoro_voice_ids`) and `say` shell-out
-//! (`system_voices`) is PURE and unit-tested (no model, audio, or network).
+//! Voice list for selected engine + language (host picker + MCP). Kokoro ids from
+//! `voices-v1.0.bin` (never downloads) or static fallback; system via `say -v ?`.
+//! Pure filter/label except disk/`say`.
 
-use ds_config::{TtsEngine, VoiceConfig};
+use ds_config::TtsEngine;
 
 use crate::{Gender, Quality, SpeakerVoice, say, voices};
 
@@ -262,19 +250,6 @@ pub fn voice_display_name(engine: TtsEngine, voice: &str) -> Option<String> {
     }
 }
 
-/// Voice CURRENTLY selected for the active engine — single source the UI shows
-/// and the greeting names. Wrapper over [`voice_display_name`] for the engine's
-/// current voice (Kokoro: `current_voice()`; System: `tts_system_voice`, else OS default).
-pub fn current_voice_name(cfg: &VoiceConfig) -> Option<String> {
-    // First usable rung of `tts_engine` ladder (None ⇒ TTS off).
-    let engine = cfg.resolved_tts()?;
-    let voice = match engine {
-        TtsEngine::Kokoro => cfg.current_voice(),
-        TtsEngine::System => cfg.tts_system_voice.clone(),
-    };
-    voice_display_name(engine, &voice)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,42 +406,6 @@ mod tests {
         assert_eq!(
             voice_display_name(TtsEngine::System, "Microsoft Zira Desktop").as_deref(),
             Some("Zira")
-        );
-    }
-
-    #[test]
-    fn current_voice_name_off_and_resolved_engine() {
-        // Empty ladder + unset preference never names a voice (every platform).
-        let off = VoiceConfig {
-            tts_engine_ladder: Vec::new(),
-            ..Default::default()
-        };
-        assert_eq!(current_voice_name(&off), None);
-
-        // Single-rung ladder names that engine's voice where usable, else off → None.
-        // Assert against `resolved_tts()` for platform-robustness (Kokoro unusable on
-        // x86_64 macOS; System unwired on Linux).
-        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-        {
-            let kokoro = VoiceConfig {
-                tts_engine_ladder: vec![TtsEngine::Kokoro],
-                tts_built_in_voices: vec!["am_michael".into()],
-                ..Default::default()
-            };
-            assert_eq!(
-                current_voice_name(&kokoro),
-                kokoro.resolved_tts().map(|_| "Michael".into())
-            );
-        }
-
-        let system = VoiceConfig {
-            tts_engine_ladder: vec![TtsEngine::System],
-            tts_system_voice: "Microsoft Zira Desktop".into(),
-            ..Default::default()
-        };
-        assert_eq!(
-            current_voice_name(&system),
-            system.resolved_tts().map(|_| "Zira".into())
         );
     }
 }

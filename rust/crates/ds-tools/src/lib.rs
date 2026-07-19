@@ -1,35 +1,24 @@
-//! ds-tools — the SINGLE source of truth for DontSpeak's tool catalog.
+//! SINGLE source of truth for DontSpeak's tool catalog.
 //!
-//! Tools + their parameters are authored ONCE here as structured data (`TOOLS`, in
-//! display order), and BOTH consumer shapes are GENERATED from it so they can't drift:
+//! Tools + params authored once (`TOOLS`, display order); both consumer shapes GENERATED:
 //!
-//! * [`catalog`] — MCP tool definitions with input/output schemas and behavioral annotations.
-//! * [`catalog_ui`] — `{ name, description, params: [ … ] }` with the params as an
-//!   ORDERED ARRAY, the form the app-facing FFI (`ds-core::ds_tools_json`)
-//!   hands the SwiftUI Tools window. An array (not the unordered JSON-Schema `properties`
-//!   object) so the authored order survives to the UI.
+//! * [`catalog`] — MCP definitions (schemas + annotations).
+//! * [`catalog_ui`] — ordered `params` array for app FFI (`ds_tools_json`) — not unordered
+//!   JSON-Schema `properties`, so authored order survives to the UI.
 //!
-//! The dispatch (actually running a tool) lives in the MCP server; this crate is the
-//! catalog only — pure data, no I/O. It depends on `ds-config` for the typed
-//! `SetConfigArgs` surface and the enum tokens it pins its authored strings against.
+//! Dispatch lives in the MCP server; this crate is pure catalog data, no I/O.
 
 use serde_json::{Map, Value, json};
 
-// The description strings live in ONE separate file (no structure, no logic) so they're easy to
-// read/edit in isolation; `TOOLS` below references them by name.
 mod descriptions;
 mod set_config;
 use descriptions::*;
 
 pub use set_config::SetConfigArgs;
 
-/// Diarization (`diarize`/`manage_speakers` + set_config's 4 diarization params) is
-/// implemented but hidden pending the validation tracked in issue #77. This is the one
-/// toggle that hides it from every user-facing surface (MCP
-/// tools/list, the set_config schema, and — via ds_tools_json — the macOS/Windows Tools
-/// windows). Dispatch/config/engine keep working end-to-end when called directly
-/// regardless of this flag (see dontspeak::tools::tools_call) — this is a VISIBILITY
-/// gate, not a functional rip-out.
+/// Diarization implemented but hidden pending issue #77 validation. One toggle hides it from
+/// every user-facing surface (MCP tools/list, set_config schema, Tools windows). Dispatch/
+/// config/engine still work when called directly — VISIBILITY gate, not a functional rip-out.
 pub const DIARIZATION_ENABLED: bool = false;
 
 const HIDDEN_TOOLS: &[&str] = &["diarize", "manage_speakers"];
@@ -40,7 +29,6 @@ const HIDDEN_SET_CONFIG_PARAMS: &[&str] = &[
     "stt_speaker_lock",
 ];
 
-/// The JSON-Schema shape of a tool parameter.
 enum PType {
     Str,
     Enum(&'static [&'static str]),
@@ -49,11 +37,10 @@ enum PType {
     Bool,
     StrArray,
     EnumArray(&'static [&'static str]),
-    /// `capture_gain`: `"auto"` OR a number `0.5–20` (JSON-Schema `oneOf`).
+    /// `capture_gain`: `"auto"` OR a number `0.5–20` (`oneOf`).
     Gain,
 }
 
-/// One tool parameter — authored once, in display order.
 struct Param {
     name: &'static str,
     ty: PType,
@@ -61,7 +48,7 @@ struct Param {
     description: &'static str,
 }
 
-/// One tool. `min_one` ⇒ `minProperties: 1` (for `set_config`).
+/// `min_one` ⇒ `minProperties: 1` (for `set_config`).
 struct Tool {
     name: &'static str,
     description: &'static str,
@@ -104,13 +91,7 @@ const fn p(name: &'static str, ty: PType, required: bool, description: &'static 
     }
 }
 
-/// The whole catalog, in display order — the ONE source both consumer shapes generate
-/// from, and the exact order the Tools window shows. Ordered to lead with the two core
-/// actions (speak · listen) so the highest-frequency tools sit first (primacy), then the
-/// output-control pair (stop_speech · mute), then read-only introspection
-/// (get_status · get_usage · list_voices), then
-/// speaker diarization (diarize · manage_speakers — the voiceprint library it labels with),
-/// and finally the rare admin tool (set_config) in the low-attention tail.
+/// Display order (Tools window): speak·listen, stop·mute, read-only, diarize, set_config last.
 static TOOLS: &[Tool] = &[
     Tool {
         name: "speak",
@@ -140,7 +121,6 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(false, true, true),
         output: None,
     },
-    // Global mute — same switch the app drives.
     Tool {
         name: "mute",
         description: MUTE,
@@ -183,7 +163,7 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(true, false, true),
         output: Some(Output::Voices),
     },
-    // Hidden when `DIARIZATION_ENABLED` is false (visibility only — see that flag).
+    // Hidden when DIARIZATION_ENABLED is false (visibility only).
     Tool {
         name: "diarize",
         description: DIARIZE,
@@ -192,7 +172,6 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(true, false, false),
         output: None,
     },
-    // One action-dispatched tool (list / enroll / forget) instead of three.
     Tool {
         name: "manage_speakers",
         description: MANAGE_SPEAKERS,
@@ -213,9 +192,8 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "set_config",
         description: SET_CONFIG,
-        // Grouped by concern — this order is what the Tools window shows.
+        // Grouped by concern — Tools window order.
         params: &[
-            // ── TTS output ──
             p(
                 "tts_engine",
                 PType::Enum(&["built_in", "system", "off"]),
@@ -235,7 +213,6 @@ static TOOLS: &[Tool] = &[
                 SET_CONFIG_TTS_SYSTEM_VOICE,
             ),
             p("tts_rate", PType::Num(0.5, 2.0), false, SET_CONFIG_TTS_RATE),
-            // ── Narration ──
             p(
                 "narrate",
                 PType::EnumArray(&["shorts", "digests"]),
@@ -255,7 +232,6 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_PAUSE_BG,
             ),
-            // ── Earcons ──
             p(
                 "earcon_reply_sound",
                 PType::Str,
@@ -268,7 +244,6 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_EARCON_INPUT,
             ),
-            // ── STT / dictation ──
             p("caps_enabled", PType::Bool, false, SET_CONFIG_CAPS),
             p(
                 "stt_engine",
@@ -290,14 +265,13 @@ static TOOLS: &[Tool] = &[
                 SET_CONFIG_PASTE_SUBMIT_DELAY_MS,
             ),
             p("full_duplex", PType::Bool, false, SET_CONFIG_FULL_DUPLEX),
-            // ── Compute backend ──
             p(
                 "provider",
                 PType::EnumArray(&["ane", "cuda", "coreml", "cpu"]),
                 false,
                 SET_CONFIG_PROVIDER,
             ),
-            // ── Diarization (hidden when gate is off) ──
+            // Diarization (hidden when gate off).
             p(
                 "diarizer_provider",
                 PType::EnumArray(&["apple_native"]),
@@ -322,7 +296,6 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_SPEAKER_LOCK,
             ),
-            // ── UI ──
             p(
                 "tray_indicator",
                 PType::EnumArray(&["stt", "tts", "stt_animated", "tts_animated"]),
@@ -347,13 +320,12 @@ fn visible_params(t: &Tool) -> Vec<&Param> {
         .collect()
 }
 
-/// Catalog (display) order. MCP dispatch pins against this via
-/// `router_handles_every_catalog_tool` in `dontspeak::tools`.
+/// Catalog order. MCP dispatch pins via `router_handles_every_catalog_tool`.
 pub fn tool_names() -> impl Iterator<Item = &'static str> {
     TOOLS.iter().filter(|t| is_visible(t)).map(|t| t.name)
 }
 
-/// Validate against the advertised `inputSchema`. Unknown/hidden tools → unavailable.
+/// Validate against advertised `inputSchema`. Unknown/hidden → unavailable.
 pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), String> {
     let tool = TOOLS
         .iter()
@@ -471,7 +443,6 @@ fn output_schema_for(output: Output) -> Value {
             "type": "object",
             "properties": {
                 "engine": { "type": "string", "enum": ["kokoro", "system", "off"] },
-                "voice": { "type": "string" },
                 "voices": { "type": "array", "items": { "type": "string" } },
                 "rate": { "type": "number" },
                 "state": {
@@ -489,7 +460,7 @@ fn output_schema_for(output: Output) -> Value {
                 },
                 "models": { "type": "object" }
             },
-            "required": ["engine", "voice", "voices", "rate", "state"],
+            "required": ["engine", "voices", "rate", "state"],
             "additionalProperties": false
         }),
         Output::Usage => json!({
@@ -502,7 +473,7 @@ fn output_schema_for(output: Output) -> Value {
                         "properties": {
                             "agent": {
                                 "type": "string",
-                                // Registry-driven so a new wireable client can't drift out.
+                                // Registry-driven — new wireable client can't drift out.
                                 "enum": ds_config::ClientSource::CLIENTS
                                     .iter()
                                     .map(|c| c.as_str())
@@ -585,14 +556,12 @@ pub fn output_schema(name: &str) -> Option<Value> {
         .map(output_schema_for)
 }
 
-/// RAW `inputSchema` by name, ignoring `DIARIZATION_ENABLED` — so hidden-tool
-/// schema/dispatch parity tests don't go through filtered `catalog()`.
+/// Raw `inputSchema` ignoring `DIARIZATION_ENABLED` — hidden-tool parity tests.
 pub fn raw_input_schema(name: &str) -> Option<Value> {
     TOOLS.iter().find(|t| t.name == name).map(input_schema)
 }
 
-/// App/UI catalog: params as an ORDERED array (authored order), not JSON-Schema
-/// `properties` object key order. Tools window renders this directly.
+/// App/UI catalog: ordered `params` array (not JSON-Schema property key order).
 pub fn catalog_ui() -> Value {
     Value::Array(
         TOOLS
@@ -660,7 +629,6 @@ fn param_schema(param: &Param) -> Value {
     }
 }
 
-/// UI param object for the ordered `params` array (type + enum/range for Tools window).
 fn param_ui(param: &Param) -> Value {
     let mut o = Map::new();
     o.insert("name".into(), json!(param.name));
@@ -750,15 +718,10 @@ mod tests {
         assert!(validate_arguments("unknown", &json!({})).is_err());
     }
 
-    /// DRIFT GUARD: `docs/MCP-TOOLS.md` is hand-written, not generated, so nothing else
-    /// forces it to track the catalog. Embed it at compile time and assert every tool's
-    /// name and description appear verbatim — catches a description edited here without
-    /// the doc following, or a tool added/removed without the doc updating to match.
+    /// DRIFT GUARD: hand-written `docs/MCP-TOOLS.md` must track catalog names + descriptions.
     #[test]
     fn mcp_tools_doc_matches_catalog_descriptions() {
-        // Normalize whitespace (the doc hand-wraps prose at ~90 cols, so a description
-        // spanning a wrap has a newline where the source has a space) and strip backticks
-        // (the doc's own markdown formatting, not part of the authored text) before comparing.
+        // Normalize whitespace (doc wraps) and strip backticks before comparing.
         fn normalize(s: &str) -> String {
             s.replace('`', "")
                 .split_whitespace()
@@ -781,9 +744,8 @@ mod tests {
         }
     }
 
-    /// DRIFT GUARD: every default stated by a `set_config` parameter description must agree
-    /// with the object used when `config.toml` is absent. This deliberately bridges the
-    /// authored catalog and `ds-config`; tests in either crate alone cannot catch that split.
+    /// DRIFT GUARD: set_config description defaults must agree with VoiceConfig::default().
+    /// Bridges catalog and ds-config — either crate alone cannot catch the split.
     #[test]
     fn set_config_descriptions_match_voice_defaults() {
         use ds_config::{
@@ -1001,7 +963,7 @@ mod tests {
         }
     }
 
-    /// UI catalog params are an ORDERED array (MCP `properties` can't convey order).
+    /// UI params are ordered (MCP `properties` can't convey order).
     #[test]
     fn catalog_ui_params_are_ordered() {
         let ui = catalog_ui();
@@ -1026,8 +988,7 @@ mod tests {
         );
     }
 
-    /// PARITY GUARD: every `set_config` enum must list EXACTLY the tokens of its backing
-    /// ds_config enum, so the authored strings can't silently drift from the Rust types.
+    /// PARITY GUARD: set_config enums must list exactly the backing ds_config tokens.
     #[test]
     fn set_config_enums_match_config_types() {
         use ds_config::{

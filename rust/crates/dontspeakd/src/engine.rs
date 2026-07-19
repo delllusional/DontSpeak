@@ -1,8 +1,5 @@
-//! The `Engine<P>` gesture state machine: the Caps-Lock "tap to dictate, hold to
-//! cancel" loop, plus the shared dictation-preview buffer it drives. The states are
-//! explicit enums: [`GestureState`] (idle / recording / deferred-submit armed),
-//! [`PressState`] (the physical Caps press in flight), and [`FinalState`] (the
-//! preview buffer's finalize lifecycle).
+//! Caps gesture machine + dictation-preview buffer.
+//! [`GestureState`], [`PressState`], [`FinalState`].
 
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,12 +16,11 @@ use crate::config_gate::{
     reconcile_helper_models,
 };
 use crate::listener;
-use crate::status::{CAPS_LOG_MAX, CapsEvent, CapsLog, StatusGate, now_ms};
+use crate::status::StatusGate;
 use crate::tts::TtsManager;
 use crate::ttsq::TtsQueue;
 
-/// Double-tap window. Playing: skip message. Stop-dictation: flip paste-vs-submit
-/// (`double_tap_submits`). Never armed from silence (zero-latency start).
+/// Skip-while-playing / paste-vs-submit flip. Not armed from silence.
 const DOUBLE_TAP_MS: u64 = 280;
 
 /// Finalize lifecycle for the dictation-preview buffer (armed flag + landed text
@@ -192,8 +188,6 @@ pub(crate) struct Engine<P: Platform + 'static> {
     pub(crate) caps_active: Option<Arc<AtomicBool>>,
     /// Live recording for status. `None` in tests.
     pub(crate) stt_active: Option<Arc<AtomicBool>>,
-    /// Recent caps events for Settings. `None` in tests.
-    pub(crate) caps_log: Option<CapsLog>,
     /// Hands-free runtime when `listen_mode == Always`.
     pub(crate) listener: Option<listener::Listener<P>>,
 
@@ -289,7 +283,6 @@ impl<P: Platform + 'static> Engine<P> {
             ttsq: None,
             caps_active: None,
             stt_active: None,
-            caps_log: None,
             listener: None,
             paste: Arc::new(Mutex::new(PasteBuf::default())),
             status_gate: None,
@@ -376,20 +369,10 @@ impl<P: Platform + 'static> Engine<P> {
         }
     }
 
-    /// Append a caps-trigger event to the shared log (newest last, bounded) so the
-    /// app can show it via `model_status`. No-op in tests (the field is `None`).
+    /// Log a caps-trigger event (press/release/tap/reset) for diagnostics. No longer
+    /// surfaced through `model_status` — just the engine's own debug log.
     fn record_caps(&self, kind: &'static str) {
-        if let Some(log) = &self.caps_log
-            && let Ok(mut q) = log.lock()
-        {
-            q.push_back(CapsEvent {
-                ts_ms: now_ms(),
-                kind,
-            });
-            while q.len() > CAPS_LOG_MAX {
-                q.pop_front();
-            }
-        }
+        log::debug!(target: "engine", "caps event: {kind}");
     }
 
     /// Publish the live recording state for the app's caps status dot. On a real
@@ -678,7 +661,7 @@ impl<P: Platform + 'static> Engine<P> {
             // A refused START must not be a silent no-op (the fresh-install trap: model
             // still downloading, Caps does "nothing", the user restarts the app). Arm the
             // refusal cue — the overlay pops up washed in the no-target warning glow for
-            // DICTATION_REFUSAL_MS on every platform (`dictation.refused`). Only for the
+            // DICTATION_REFUSAL_MS on every platform (`dictation.state = refused`). Only for the
             // engines with a runtime readiness gate (BuiltIn/System); dictation OFF keeps
             // its documented silent pause/resume tap (deliberate, not an error).
             if !ready && crate::config_gate::refusal_cue_on_refused_start(self.cfg.resolved_stt()) {
@@ -2898,8 +2881,8 @@ mod tests {
             "no abort on a no-op (per-call) reload"
         );
         assert_eq!(
-            d.cfg.current_voice(),
-            "am_michael",
+            d.cfg.active_voices(),
+            ["am_michael"],
             "new config recorded for next diff"
         );
     }
@@ -3263,7 +3246,7 @@ mod tests {
         assert!(!d.caps_enabled, "AX revoked → caps disabled live");
         assert!(
             !caps_active.load(Ordering::Relaxed),
-            "shared caps_active (RPC running.caps) flipped off"
+            "shared caps_active (RPC activity.caps_active) flipped off"
         );
         assert_ne!(gate.seq(), seq0, "status gate bumped on the OFF transition");
 

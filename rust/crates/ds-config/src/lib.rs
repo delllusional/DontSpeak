@@ -34,7 +34,7 @@ pub mod speakers;
 mod voice;
 mod wire;
 
-// ── Flat public re-export facade — preserves every `ds_config::X` path ──────────
+// Flat public re-export facade — preserves every `ds_config::X` path.
 pub use brand::{DISPLAY_NAME, VERSION, name_version};
 pub use claude_code::{ClaudeCodeVoice, read_claude_code_voice};
 /// Client identity from the `ds-client` leaf (ex-`WireTarget`). Lives below `ds-log`/`ds-ipc`
@@ -64,7 +64,7 @@ pub use paths::{
 };
 pub use pidfile::{evict_stale_engine, is_engine_pid_alive, is_pid_alive, read_engine_pid};
 pub use speakers::{Speaker, SpeakerStore};
-pub use voice::{CaptureGain, ConfigChange, DEFAULT_KOKORO_VOICE, HandsFreePhrases, VoiceConfig};
+pub use voice::{CaptureGain, ConfigChange, HandsFreePhrases, VoiceConfig};
 pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};
 pub use wire::grok_hooks::grok_hooks_value;
 pub use wire::hooks::{HookSpec, HooksMergeError, INSTALLED_BINS, merge_hooks, strip_hooks};
