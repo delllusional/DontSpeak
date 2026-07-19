@@ -334,7 +334,7 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
     };
 
     let speaking = if s.activity.speaking {
-        s.activity.speaking_source.map(|c| c.as_str())
+        s.activity.speaker.map(|c| c.as_str())
     } else {
         None
     };
@@ -360,9 +360,9 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         "status.stats.unit.times",
     ));
     w.tts_first.set_text(&crate::ffi::stats_range(
-        tts.first_min_ms / 1000.0,
-        tts.first_avg_ms / 1000.0,
-        tts.first_max_ms / 1000.0,
+        tts.ttfa_min_ms / 1000.0,
+        tts.ttfa_avg_ms / 1000.0,
+        tts.ttfa_max_ms / 1000.0,
         1,
         "status.stats.unit.seconds",
     ));
@@ -399,7 +399,7 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         &w.caps_dot,
         if s.activity.caps_active {
             EngineState::Running
-        } else if s.activity.caps_enabled {
+        } else if s.activity.caps {
             EngineState::Warming
         } else {
             EngineState::Idle
@@ -482,7 +482,7 @@ fn claude_hint(s: &ModelStatus) -> Option<String> {
     if s.stt.engine != StatusSttEngine::ClaudeCode {
         return None;
     }
-    Some(match s.stt.delegation_key.as_deref() {
+    Some(match s.stt.voice_key.as_deref() {
         Some(k) if !k.is_empty() => crate::ffi::t_args("status.stt_claude_code", &[("key", k)]),
         _ => t("status.stt_claude_code_off"),
     })
@@ -699,7 +699,7 @@ struct UsagePage {
     rendered: std::rc::Rc<std::cell::RefCell<HashMap<String, MountedUsageCard>>>,
     empty_label: gtk::Label,
     generation: std::rc::Rc<std::cell::Cell<u64>>,
-    /// `activity.speaking_source`; drives `.ds-usage-speaking` wash.
+    /// `activity.speaker`; drives `.ds-usage-speaking` wash.
     speaking_agent: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     /// Frozen while the same agent speaks; re-rolled on agent change.
     speaking_wash: std::rc::Rc<std::cell::RefCell<Option<(u8, u8, u8, f64)>>>,

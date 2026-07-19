@@ -237,7 +237,7 @@ pub fn friendly_system_name(raw: &str) -> String {
 ///   `None` if the default can't be read.
 pub fn voice_display_name(engine: TtsEngine, voice: &str) -> Option<String> {
     match engine {
-        TtsEngine::Kokoro => Some(kokoro_display_name(voice)),
+        TtsEngine::BuiltIn => Some(kokoro_display_name(voice)),
         TtsEngine::System => {
             let raw = if voice.trim().is_empty() {
                 crate::system::default_voice_name()?
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn voice_display_name_per_engine() {
         assert_eq!(
-            voice_display_name(TtsEngine::Kokoro, "af_sarah").as_deref(),
+            voice_display_name(TtsEngine::BuiltIn, "af_sarah").as_deref(),
             Some("Sarah")
         );
         // Explicit System voice tidies without the OS-default query path.

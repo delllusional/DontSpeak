@@ -11,7 +11,7 @@ final class EngineStatsTests: XCTestCase {
             from: Data(
                 """
                 {"tts":{"rtf_min":1.0,"rtf_avg":1.2,"rtf_max":1.5,
-                         "first_min_ms":200,"first_avg_ms":300,"first_max_ms":500,
+                         "ttfa_min_ms":200,"ttfa_avg_ms":300,"ttfa_max_ms":500,
                          "utterances":7,"audio_secs":33.5,"failures":2},
                  "stt":{"rtf_min":0.3,"rtf_avg":0.4,"rtf_max":0.6,
                          "transcriptions":3,"audio_secs":9.0,"failures":1},
@@ -23,7 +23,7 @@ final class EngineStatsTests: XCTestCase {
                 """
                 {"status":{"state":"idle","progress":0,"error":null},
                  "enabled":true,"provider":"coreml_ane","speakers":["alex"],
-                 "clustering_threshold":0.6,"future_detail":true}
+                 "cluster_threshold":0.6,"future_detail":true}
                 """.utf8))
 
         let s = EngineStats.from(stats)

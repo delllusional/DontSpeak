@@ -1,5 +1,5 @@
 //! Voice / language enumeration (Kokoro voices bin + `say` directly; no engine). Used by
-//! `list_voices`.
+//! `voices` (MCP).
 
 use ds_config::TtsEngine;
 use ds_voices::enumerate;
@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 pub(crate) fn voice_groups(engine: TtsEngine, language: &str) -> Vec<(String, Vec<Value>)> {
     let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
     match engine {
-        TtsEngine::Kokoro => {
+        TtsEngine::BuiltIn => {
             let ids = enumerate::kokoro_voice_ids();
             let voices: Vec<Value> = enumerate::kokoro_choices_from(&ids, language)
                 .into_iter()
@@ -21,7 +21,7 @@ pub(crate) fn voice_groups(engine: TtsEngine, language: &str) -> Vec<(String, Ve
                         "label": c.label,
                         "language_tag": enumerate::kokoro_language_tag(&c.id),
                         "gender": enumerate::gender_str(enumerate::kokoro_gender(&c.id)),
-                        "engine": "kokoro",
+                        "engine": "built_in",
                     })
                 })
                 .collect();

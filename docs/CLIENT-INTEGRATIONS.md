@@ -153,7 +153,7 @@ Qwen Coding Plan keys are read in client order from the process environment,
 **Layout (all hosts):** agent title → for each row: period + remaining (top-right),
 progress bar (percent as bar only). Strings from `ds-i18n` (`usage.*`).
 
-**Speaking highlight:** while TTS plays, `model_status.activity.speaking_source` is the
+**Speaking highlight:** while TTS plays, `model_status.activity.speaker` is the
 wireable client token of the in-flight utterance (`claude_code` / `codex` /
 `qwen_code` / `grok` / `kimi_code`; `null` when idle or non-client). Hosts wash that agent’s
 Usage card with a random pastel from `ds_random_pastel_wash_json` (top-bar speaking

@@ -128,7 +128,7 @@ impl Overlay {
         // Orange glow: speak-now, missing paste target, or refused start (reuses no-target glow).
         let state = s.dictation.state;
         let glow = state == DictationState::Recording && s.dictation.text.is_empty()
-            || !s.dictation.has_paste_target
+            || !s.dictation.can_paste
             || state == DictationState::Refused;
         if glow {
             self.window.add_css_class("glow");

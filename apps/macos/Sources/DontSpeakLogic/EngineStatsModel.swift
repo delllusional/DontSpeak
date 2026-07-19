@@ -78,7 +78,7 @@ public struct DiarizationStatusDTO: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case status, enabled, provider, speakers
-        case clusteringThreshold = "clustering_threshold"
+        case clusteringThreshold = "cluster_threshold"
     }
 }
 
@@ -99,9 +99,9 @@ public struct TtsStatsDTO: Decodable {
         case rtfMin = "rtf_min"
         case rtfAvg = "rtf_avg"
         case rtfMax = "rtf_max"
-        case firstMinMs = "first_min_ms"
-        case firstAvgMs = "first_avg_ms"
-        case firstMaxMs = "first_max_ms"
+        case firstMinMs = "ttfa_min_ms"
+        case firstAvgMs = "ttfa_avg_ms"
+        case firstMaxMs = "ttfa_max_ms"
         case utterances
         case audioSecs = "audio_secs"
         case failures

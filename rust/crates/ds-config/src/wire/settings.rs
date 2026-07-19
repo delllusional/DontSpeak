@@ -124,10 +124,10 @@ mod tests {
     #[test]
     fn ds_block_parses_from_json_wrapper() {
         let r: SettingsRoot =
-            serde_json::from_str(r#"{"dontspeak":{"tts_built_in_voices":["am_adam"]}}"#).unwrap();
+            serde_json::from_str(r#"{"dontspeak":{"tts_voices":["am_adam"]}}"#).unwrap();
         let v = r.dontspeak.unwrap();
-        assert_eq!(v.tts_built_in_voices, vec!["am_adam"]);
-        assert_eq!(v.tts_rate, 1.0);
+        assert_eq!(v.tts_voices, vec!["am_adam"]);
+        assert_eq!(v.rate, 1.0);
     }
 
     #[test]
@@ -155,7 +155,7 @@ mod tests {
             serde_json::json!({ "enabled": true, "mode": "tap", "autoSubmit": true })
         );
         assert_eq!(
-            merged["dontspeak"]["tts_built_in_voices"][0],
+            merged["dontspeak"]["tts_voices"][0],
             serde_json::json!("am_michael")
         );
         assert_eq!(
@@ -175,16 +175,16 @@ mod tests {
     fn voice_value_roundtrips_the_three_toggles_and_enums() {
         let v = sample_voice();
         let wire = voice_to_value(&v);
-        assert_eq!(wire["caps_enabled"], serde_json::json!(false));
+        assert_eq!(wire["caps"], serde_json::json!(false));
         assert_eq!(wire["tts_engine_ladder"], serde_json::json!(["system"]));
         let back = voice_from_value(wire);
-        assert_eq!(back.caps_enabled, v.caps_enabled);
+        assert_eq!(back.caps, v.caps);
         assert_eq!(back.tts_engine, v.tts_engine);
         assert_eq!(back.tts_engine_ladder, v.tts_engine_ladder);
         assert_eq!(back.stt_engine, v.stt_engine);
         assert_eq!(back.stt_engine_ladder, v.stt_engine_ladder);
-        assert_eq!(back.tts_built_in_voices, v.tts_built_in_voices);
-        assert_eq!(back.tts_rate, v.tts_rate);
+        assert_eq!(back.tts_voices, v.tts_voices);
+        assert_eq!(back.rate, v.rate);
     }
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
             let merged = merge_settings(garbage, &sample_voice());
             assert!(merged.is_object());
             assert_eq!(
-                merged["dontspeak"]["tts_built_in_voices"][0],
+                merged["dontspeak"]["tts_voices"][0],
                 serde_json::json!("am_michael")
             );
         }
@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(merged["keep"], serde_json::json!(true));
         assert!(merged["dontspeak"].is_object());
         assert_eq!(
-            merged["dontspeak"]["tts_built_in_voices"][0],
+            merged["dontspeak"]["tts_voices"][0],
             serde_json::json!("am_michael")
         );
     }
@@ -247,12 +247,12 @@ mod tests {
         let root: SettingsRoot = serde_json::from_str(&s).unwrap();
         let lv = root.dontspeak.unwrap();
 
-        assert_eq!(lv.tts_built_in_voices, v.tts_built_in_voices);
+        assert_eq!(lv.tts_voices, v.tts_voices);
         assert_eq!(lv.stt_engine, v.stt_engine);
         assert_eq!(lv.stt_engine_ladder, v.stt_engine_ladder);
         assert_eq!(lv.tts_engine, v.tts_engine);
         assert_eq!(lv.tts_engine_ladder, v.tts_engine_ladder);
-        assert_eq!(lv.tts_rate, v.tts_rate);
+        assert_eq!(lv.rate, v.rate);
         assert_eq!(lv.narrate, v.narrate);
         assert_eq!(lv.long_press_ms, v.long_press_ms);
     }
@@ -289,7 +289,7 @@ mod tests {
         );
         assert_eq!(
             loaded.tts_engine_ladder,
-            vec![TtsEngine::Kokoro, TtsEngine::System]
+            vec![TtsEngine::BuiltIn, TtsEngine::System]
         );
         let merged = merge_settings(Value::Null, &loaded);
         assert_eq!(

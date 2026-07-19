@@ -76,18 +76,18 @@ pub fn agent_usage_skeleton() -> Option<UsageDeck> {
 }
 
 /// BLOCKING single-card load. Background thread; force bypasses 60s soft cache.
-pub fn agent_usage_card(agent: &str, force_refresh: bool) -> Option<UsageCard> {
+pub fn agent_usage_card(agent: &str, refresh: bool) -> Option<UsageCard> {
     let c = CString::new(agent).unwrap_or_default();
     serde_json::from_str(&take(sys::ds_agent_usage_card_json(
         c.as_ptr(),
-        force_refresh as u8,
+        refresh as u8,
     )))
     .ok()
 }
 /// BLOCKING aggregate deck refresh (diagnostics).
 #[allow(dead_code)]
-pub fn agent_usage(force_refresh: bool) -> Option<UsageDeck> {
-    serde_json::from_str(&take(sys::ds_agent_usage_json(force_refresh as u8))).ok()
+pub fn agent_usage(refresh: bool) -> Option<UsageDeck> {
+    serde_json::from_str(&take(sys::ds_agent_usage_json(refresh as u8))).ok()
 }
 pub fn tools_json() -> String {
     take(sys::ds_tools_json())

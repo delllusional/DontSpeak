@@ -76,7 +76,7 @@ machine.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `codex_stream` | `true` | Subscriber on; set `false` to opt out |
-| `codex_stream_daemon_start` | `false` | Keep the subscriber active and opt into app-server auto-start when the endpoint is unavailable |
+| `codex_daemon` | `false` | Keep the subscriber active and opt into app-server auto-start when the endpoint is unavailable |
 | `codex_app_server_url` | `""` | Empty = default UDS/loopback; else loopback `ws://` |
 | `codex_bin` | `"codex"` | Binary for lazy start |
 

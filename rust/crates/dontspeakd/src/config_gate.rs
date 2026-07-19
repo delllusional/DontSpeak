@@ -19,9 +19,9 @@ pub(crate) fn normalize_long_press(ms: u64) -> u64 {
     if ms == 0 { DEFAULT_LONG_PRESS_MS } else { ms }
 }
 
-/// Caps-Lock dictation loop gated by `caps_enabled`.
+/// Caps-Lock dictation loop gated by `caps`.
 pub(crate) fn caps_loop_enabled(cfg: &VoiceConfig) -> bool {
-    cfg.caps_enabled
+    cfg.caps
 }
 
 /// Warm helper needed when either Kokoro TTS or local STT is in use.
@@ -31,7 +31,7 @@ pub(crate) fn helper_needed(cfg: &VoiceConfig) -> bool {
 
 /// Resolved TTS is Kokoro (helper hosts the model).
 pub(crate) fn helper_uses_tts(cfg: &VoiceConfig) -> bool {
-    cfg.resolved_tts() == Some(ds_config::TtsEngine::Kokoro)
+    cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
 }
 
 /// Resolved STT is BuiltIn or System (both run through the warm helper).
@@ -303,7 +303,7 @@ pub(crate) fn tts_can_play(engine: Option<ds_config::TtsEngine>, tts_loaded: boo
     match engine {
         None => false,
         Some(TtsEngine::System) => true,
-        Some(TtsEngine::Kokoro) => tts_loaded,
+        Some(TtsEngine::BuiltIn) => tts_loaded,
     }
 }
 
@@ -511,8 +511,8 @@ mod tests {
 
     #[test]
     fn caps_loop_enabled_mirrors_the_toggle() {
-        let cfg = |caps_enabled: bool| VoiceConfig {
-            caps_enabled,
+        let cfg = |caps: bool| VoiceConfig {
+            caps,
             ..VoiceConfig::default()
         };
         assert!(caps_loop_enabled(&cfg(true)));
@@ -651,8 +651,8 @@ mod tests {
         assert!(tts_can_play(Some(TtsEngine::System), false));
         assert!(tts_can_play(Some(TtsEngine::System), true));
         // Kokoro plays ONLY when its model is resident + warm — never mid-download/load.
-        assert!(!tts_can_play(Some(TtsEngine::Kokoro), false));
-        assert!(tts_can_play(Some(TtsEngine::Kokoro), true));
+        assert!(!tts_can_play(Some(TtsEngine::BuiltIn), false));
+        assert!(tts_can_play(Some(TtsEngine::BuiltIn), true));
     }
 
     #[test]
@@ -681,7 +681,7 @@ mod tests {
         // branches are tested with an injected value in ds-config instead of scanning Homebrew.
         #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
         {
-            let c2 = cfg(vec![TtsEngine::Kokoro], vec![SttEngine::BuiltIn]);
+            let c2 = cfg(vec![TtsEngine::BuiltIn], vec![SttEngine::BuiltIn]);
             assert!(helper_uses_tts(&c2));
             assert!(helper_uses_stt(&c2));
             assert!(helper_needed(&c2));

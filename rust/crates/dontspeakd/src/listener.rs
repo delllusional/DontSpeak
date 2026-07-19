@@ -267,7 +267,7 @@ pub struct ListenerShared {
     pub paste: PasteState,
     pub stt_active: Arc<AtomicBool>,
     /// The engine TTS queue, so a hands-free SUBMIT can drop this window's pending
-    /// speech per `input_clears`. `None` in tests.
+    /// speech per `clear_on_input`. `None` in tests.
     pub ttsq: Option<Arc<TtsQueue>>,
     /// The shared status-push gate: a hands-free recording start/stop bumps it so a
     /// blocked `WaitModelStatus` sees `stt_active` flip immediately (the confirm pill
@@ -288,10 +288,10 @@ pub struct Listener<P: KeyInjector + FrontmostWindow> {
     available: bool,
     /// Delay (ms) between the clipboard paste and the Enter keypress on submit, so
     /// the async paste settles before Enter arrives. Mirrors the engine's Caps path.
-    /// Live-updated by `set_paste_submit_delay_ms` — deliberately NOT baked into
+    /// Live-updated by `set_paste_delay_ms` — deliberately NOT baked into
     /// `endpointer`/`turn` at construction, so changing it doesn't need a rebuild.
-    paste_submit_delay_ms: u64,
-    /// A confirmed submit's Enter press, deferred by `paste_submit_delay_ms`. Polled
+    paste_delay_ms: u64,
+    /// A confirmed submit's Enter press, deferred by `paste_delay_ms`. Polled
     /// once per [`tick`] via [`crate::timer::deferred_ready`] instead of blocking
     /// this thread with `std::thread::sleep` — mirrors `Engine::pending_enter_at`.
     pending_enter_at: Option<Instant>,
@@ -346,7 +346,7 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
             paste,
             stt_active,
             available,
-            paste_submit_delay_ms: cfg.paste_submit_delay_ms,
+            paste_delay_ms: cfg.paste_delay_ms,
             pending_enter_at: None,
             ttsq,
             gate,
@@ -357,8 +357,8 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
 
     /// Live-update the paste→Enter delay without rebuilding the listener (see the
     /// field's doc) — called from `Engine::reload` on every config apply.
-    pub(crate) fn set_paste_submit_delay_ms(&mut self, ms: u64) {
-        self.paste_submit_delay_ms = ms;
+    pub(crate) fn set_paste_delay_ms(&mut self, ms: u64) {
+        self.paste_delay_ms = ms;
     }
 
     /// The resolved STT provider token this listener instance was built with — see the
@@ -382,7 +382,7 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
             paste: Arc::new(std::sync::Mutex::new(crate::PasteBuf::default())),
             stt_active: Arc::new(AtomicBool::new(false)),
             available: true,
-            paste_submit_delay_ms: 0,
+            paste_delay_ms: 0,
             pending_enter_at: None,
             ttsq: None,
             gate,
@@ -393,7 +393,7 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
     /// One poll tick. `tts_busy` is the half-duplex play-gate (queue speaking or
     /// pending): when true the mic stays closed so speech never feeds back and the
     /// queue can play; when false the mic is open and we drive the VAD + turn loop.
-    /// `cancel_current`/`cancel_other` mirror the live `input_clears` config.
+    /// `cancel_current`/`cancel_other` mirror the live `clear_on_input` config.
     pub fn tick(&mut self, tts_busy: bool, cancel_current: bool, cancel_other: bool) {
         // A submit's deferred Enter must still fire even if a reply starts speaking
         // (tts_busy) during the delay window, so poll it before the play-gate below.
@@ -482,7 +482,7 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
             TurnAction::SubmitText(text) => {
                 self.plat.type_text(&text);
                 if let Some(q) = &self.ttsq {
-                    // Apply `input_clears` immediately at submit, atomically per scope
+                    // Apply `clear_on_input` immediately at submit, atomically per scope
                     // (see `cancel_for_submit`'s doc for why both scopes must share one
                     // resolved "active") — must not wait on the deferred Enter below.
                     // Only on SubmitText — never on Cancel.
@@ -491,7 +491,7 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
                 // Let the async paste settle before Enter lands — deferred via a polled
                 // timer (`check_pending_enter`, run from `tick`) rather than a blocking
                 // sleep, since this runs on the engine's single tick thread.
-                if self.paste_submit_delay_ms > 0 {
+                if self.paste_delay_ms > 0 {
                     self.pending_enter_at = Some(Instant::now());
                 } else {
                     self.press_deferred_enter();
@@ -503,10 +503,10 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
         }
     }
 
-    /// Fire a deferred submit's Enter once `paste_submit_delay_ms` has elapsed. Run
+    /// Fire a deferred submit's Enter once `paste_delay_ms` has elapsed. Run
     /// once per [`tick`], mirrors `Engine::check_pending_enter`.
     fn check_pending_enter(&mut self) {
-        if crate::timer::deferred_ready(&mut self.pending_enter_at, self.paste_submit_delay_ms) {
+        if crate::timer::deferred_ready(&mut self.pending_enter_at, self.paste_delay_ms) {
             self.press_deferred_enter();
         }
     }

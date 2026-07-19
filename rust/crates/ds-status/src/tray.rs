@@ -1,11 +1,11 @@
 //! Tray icon kind + indicator tokens — single source for every host.
 //!
-//! Color only when `tray_indicator` lists STT/TTS kinds. Empty ⇒ idle.
+//! Color only when `tray` lists STT/TTS kinds. Empty ⇒ idle.
 //! Recording beats speaking (full-duplex). Download/warm stay on engine dots, not tray.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Config/status `tray_indicator` tokens (`stt` / `tts` / `*_animated`).
+/// Config/status `tray` tokens (`stt` / `tts` / `*_animated`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StatusTrayKind {
     Stt,
@@ -119,12 +119,12 @@ impl<'de> Deserialize<'de> for TrayIconKind {
 pub fn tray_icon_kind(
     stt_active: bool,
     tts_active: bool,
-    tray_indicator: &[StatusTrayKind],
+    tray: &[StatusTrayKind],
 ) -> TrayIconKind {
-    if stt_active && tray_indicator.iter().any(|k| k.is_stt()) {
+    if stt_active && tray.iter().any(|k| k.is_stt()) {
         return TrayIconKind::Recording;
     }
-    if tts_active && tray_indicator.iter().any(|k| k.is_tts()) {
+    if tts_active && tray.iter().any(|k| k.is_tts()) {
         return TrayIconKind::Speaking;
     }
     TrayIconKind::Idle

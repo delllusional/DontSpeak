@@ -242,7 +242,7 @@ mod tests {
         } else {
             ""
         };
-        assert_eq!(cfg.earcon_reply_sound, expected_name);
+        assert_eq!(cfg.earcon_reply, expected_name);
         let dir = tempfile::tempdir().unwrap();
         let sounds = dir.path().join("sounds");
         std::fs::create_dir_all(&sounds).unwrap();
@@ -251,8 +251,8 @@ mod tests {
         let want = want.canonicalize().ok();
         assert_eq!(
             resolve_cue_in(
-                &cfg.earcon_reply_sound,
-                &cfg.earcon_needs_input_sound,
+                &cfg.earcon_reply,
+                &cfg.earcon_input,
                 EarconEvent::ReplyDone,
                 std::slice::from_ref(&sounds),
                 sound_ext(),
@@ -260,11 +260,11 @@ mod tests {
             want
         );
         // Needs-input ships off (empty).
-        assert_eq!(cfg.earcon_needs_input_sound, "");
+        assert_eq!(cfg.earcon_input, "");
         assert_eq!(
             resolve_cue_in(
-                &cfg.earcon_reply_sound,
-                &cfg.earcon_needs_input_sound,
+                &cfg.earcon_reply,
+                &cfg.earcon_input,
                 EarconEvent::NeedsInput,
                 std::slice::from_ref(&sounds),
                 sound_ext(),

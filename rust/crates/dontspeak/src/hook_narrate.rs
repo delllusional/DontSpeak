@@ -29,7 +29,7 @@ pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
         },
     );
     // Grok digests use sticky tag so MarkActive cannot prune them; SessionEnd barges it too
-    // (SessionEnd reclaims forget_narration_session state; StopSpeech alone does not).
+    // (SessionEnd reclaims forget_narration_session state; Stop alone does not).
     if client == ClientSource::Grok {
         let sticky = session
             .as_deref()

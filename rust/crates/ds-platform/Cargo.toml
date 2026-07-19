@@ -48,7 +48,7 @@ windows = { workspace = true, features = [
     "Win32_System_ProcessStatus",
     # LoadLibraryW/GetProcAddress to dlopen nvml.dll for gpu_stats() (GPU usage).
     "Win32_System_LibraryLoader",
-    # UI Automation (the Windows AX analogue) for has_paste_target(): is the
+    # UI Automation (the Windows AX analogue) for can_paste(): is the
     # FOCUSED element an editable text control? Mirrors the macOS Accessibility probe.
     "Win32_UI_Accessibility",
     # WASAPI mic-in-use probe (is_mic_active): COM + audio endpoint/session APIs.

@@ -5,41 +5,41 @@ use serde::{Deserialize, Serialize};
 use ds_config::{
     CancelSpeechScope, CaptureGain, DiarizerProvider, NarrateKind, Provider, SttEngine, TrayKind,
     TtsEngine, VoiceConfig, de_opt_pref_stt_engine, de_opt_pref_tts_engine, default_provider,
-    normalize_tray_indicator,
+    normalize_tray,
 };
 
 /// SINGLE source for the `set_config` surface (schema / parse / apply can't drift —
-/// once `greet_on_open` was in `VoiceConfig` but unsettable). Guards:
+/// once `greet` was in `VoiceConfig` but unsettable). Guards:
 ///   • PARSE  — deserialize into this; `deny_unknown_fields` + strict enums (`strict_de!`).
 ///   • APPLY  — destructures EVERY field with no `..` → new field is a compile error.
 ///   • SCHEMA — `set_config_schema_matches_args` asserts property names match.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SetConfigArgs {
-    pub tts_rate: Option<f32>,
-    pub tts_built_in_voices: Option<Vec<String>>,
+    pub rate: Option<f32>,
+    pub tts_voices: Option<Vec<String>>,
     pub tts_system_voice: Option<String>,
     #[serde(deserialize_with = "de_opt_pref_tts_engine")]
     pub tts_engine: Option<Vec<TtsEngine>>,
     #[serde(deserialize_with = "de_opt_pref_stt_engine")]
     pub stt_engine: Option<Vec<SttEngine>>,
-    pub diarizer_provider: Option<Vec<DiarizerProvider>>,
-    pub clustering_threshold: Option<f32>,
-    pub speaker_threshold: Option<f32>,
-    pub stt_speaker_lock: Option<bool>,
+    pub diarizer: Option<Vec<DiarizerProvider>>,
+    pub cluster_threshold: Option<f32>,
+    pub match_threshold: Option<f32>,
+    pub speaker_lock: Option<bool>,
     pub full_duplex: Option<bool>,
     pub provider: Option<Vec<Provider>>,
     pub narrate: Option<Vec<NarrateKind>>,
-    pub caps_enabled: Option<bool>,
-    pub greet_on_open: Option<bool>,
-    pub tray_indicator: Option<Vec<TrayKind>>,
+    pub caps: Option<bool>,
+    pub greet: Option<bool>,
+    pub tray: Option<Vec<TrayKind>>,
     pub capture_gain: Option<CaptureGain>,
-    pub double_tap_submits: Option<bool>,
-    pub paste_submit_delay_ms: Option<u64>,
-    pub input_clears: Option<Vec<CancelSpeechScope>>,
-    pub pause_in_background: Option<bool>,
-    pub earcon_reply_sound: Option<String>,
-    pub earcon_needs_input_sound: Option<String>,
+    pub double_tap_submit: Option<bool>,
+    pub paste_delay_ms: Option<u64>,
+    pub clear_on_input: Option<Vec<CancelSpeechScope>>,
+    pub pause_bg: Option<bool>,
+    pub earcon_reply: Option<String>,
+    pub earcon_input: Option<String>,
 }
 
 impl SetConfigArgs {
@@ -47,52 +47,52 @@ impl SetConfigArgs {
     /// rate/`Manual` gain; rejects empty voices. NO `..` — new fields fail to compile.
     pub fn apply(self, cfg: &mut VoiceConfig) -> Result<Vec<String>, String> {
         let SetConfigArgs {
-            tts_rate,
-            tts_built_in_voices,
+            rate,
+            tts_voices,
             tts_system_voice,
             tts_engine,
             stt_engine,
-            diarizer_provider,
-            clustering_threshold,
-            speaker_threshold,
-            stt_speaker_lock,
+            diarizer,
+            cluster_threshold,
+            match_threshold,
+            speaker_lock,
             full_duplex,
             provider,
             narrate,
-            caps_enabled,
-            greet_on_open,
-            tray_indicator,
+            caps,
+            greet,
+            tray,
             capture_gain,
-            double_tap_submits,
-            paste_submit_delay_ms,
-            input_clears,
-            pause_in_background,
-            earcon_reply_sound,
-            earcon_needs_input_sound,
+            double_tap_submit,
+            paste_delay_ms,
+            clear_on_input,
+            pause_bg,
+            earcon_reply,
+            earcon_input,
         } = self;
 
         let mut changes = Vec::new();
-        if let Some(r) = tts_rate {
+        if let Some(r) = rate {
             let r = r.clamp(0.5, 2.0);
-            cfg.tts_rate = r;
-            changes.push(format!("tts_rate={r}"));
+            cfg.rate = r;
+            changes.push(format!("rate={r}"));
         }
-        if let Some(vs) = tts_built_in_voices {
+        if let Some(vs) = tts_voices {
             if vs.is_empty() || vs.iter().any(|s| s.trim().is_empty()) {
-                return Err("`tts_built_in_voices` needs non-empty voice ids".into());
+                return Err("`tts_voices` needs non-empty voice ids".into());
             }
             // English-only: Kokoro language family is the leading id char (`a`/`b`).
-            // Gate for the persistent pool (`list_voices` surfaces English only).
+            // Gate for the persistent pool (`voices` surfaces English only).
             if let Some(bad) = vs
                 .iter()
                 .find(|s| !matches!(s.chars().next(), Some('a') | Some('b')))
             {
                 return Err(format!(
-                    "`{bad}` is not English (ids start with a/b); see list_voices"
+                    "`{bad}` is not English (ids start with a/b); see voices"
                 ));
             }
-            changes.push(format!("tts_built_in_voices=[{}]", vs.join(", ")));
-            cfg.tts_built_in_voices = vs;
+            changes.push(format!("tts_voices=[{}]", vs.join(", ")));
+            cfg.tts_voices = vs;
         }
         if let Some(v) = tts_system_voice {
             // Empty = OS default; don't reject.
@@ -105,7 +105,7 @@ impl SetConfigArgs {
             if let Some(engine) = pref.first().copied() {
                 if !engine.is_tts_usable() {
                     return Err(format!(
-                        "`{}` not usable here — see get_status",
+                        "`{}` not usable here — see status",
                         engine.as_str()
                     ));
                 }
@@ -137,7 +137,7 @@ impl SetConfigArgs {
             if let Some(engine) = pref.first().copied() {
                 if !engine.is_stt_usable() {
                     return Err(format!(
-                        "`{}` not usable here — see get_status",
+                        "`{}` not usable here — see status",
                         engine.as_str()
                     ));
                 }
@@ -147,7 +147,7 @@ impl SetConfigArgs {
             }
             cfg.stt_engine = Some(pref);
         }
-        if let Some(rungs) = diarizer_provider {
+        if let Some(rungs) = diarizer {
             // Empty ladder = diarization off. De-dup, preserve order.
             let mut uniq: Vec<DiarizerProvider> = Vec::new();
             for p in rungs {
@@ -156,22 +156,22 @@ impl SetConfigArgs {
                 }
             }
             let toks: Vec<&str> = uniq.iter().map(|p| p.as_str()).collect();
-            changes.push(format!("diarizer_provider=[{}]", toks.join(",")));
-            cfg.diarizer_provider = uniq;
+            changes.push(format!("diarizer=[{}]", toks.join(",")));
+            cfg.diarizer = uniq;
         }
-        if let Some(t) = clustering_threshold {
+        if let Some(t) = cluster_threshold {
             let t = t.clamp(0.5, 0.9);
-            cfg.clustering_threshold = t;
-            changes.push(format!("clustering_threshold={t}"));
+            cfg.cluster_threshold = t;
+            changes.push(format!("cluster_threshold={t}"));
         }
-        if let Some(t) = speaker_threshold {
+        if let Some(t) = match_threshold {
             let t = t.clamp(0.0, 1.0);
-            cfg.speaker_threshold = t;
-            changes.push(format!("speaker_threshold={t}"));
+            cfg.match_threshold = t;
+            changes.push(format!("match_threshold={t}"));
         }
-        if let Some(b) = stt_speaker_lock {
-            cfg.stt_speaker_lock = b;
-            changes.push(format!("stt_speaker_lock={b}"));
+        if let Some(b) = speaker_lock {
+            cfg.speaker_lock = b;
+            changes.push(format!("speaker_lock={b}"));
         }
         if let Some(b) = full_duplex {
             cfg.full_duplex = b;
@@ -189,20 +189,20 @@ impl SetConfigArgs {
             changes.push(format!("narrate=[{}]", toks.join(",")));
             cfg.narrate = uniq;
         }
-        if let Some(b) = caps_enabled {
-            cfg.caps_enabled = b;
-            changes.push(format!("caps_enabled={b}"));
+        if let Some(b) = caps {
+            cfg.caps = b;
+            changes.push(format!("caps={b}"));
         }
-        if let Some(b) = greet_on_open {
-            cfg.greet_on_open = b;
-            changes.push(format!("greet_on_open={b}"));
+        if let Some(b) = greet {
+            cfg.greet = b;
+            changes.push(format!("greet={b}"));
         }
-        if let Some(kinds) = tray_indicator {
+        if let Some(kinds) = tray {
             // One token per state (animated wins); `[]` = never color.
-            let norm = normalize_tray_indicator(kinds);
+            let norm = normalize_tray(kinds);
             let toks: Vec<&str> = norm.iter().map(|k| k.as_str()).collect();
-            changes.push(format!("tray_indicator=[{}]", toks.join(",")));
-            cfg.tray_indicator = norm;
+            changes.push(format!("tray=[{}]", toks.join(",")));
+            cfg.tray = norm;
         }
         if let Some(g) = capture_gain {
             let g = match g {
@@ -215,16 +215,16 @@ impl SetConfigArgs {
                 CaptureGain::Manual(v) => format!("capture_gain={v}"),
             });
         }
-        if let Some(b) = double_tap_submits {
-            cfg.double_tap_submits = b;
-            changes.push(format!("double_tap_submits={b}"));
+        if let Some(b) = double_tap_submit {
+            cfg.double_tap_submit = b;
+            changes.push(format!("double_tap_submit={b}"));
         }
-        if let Some(d) = paste_submit_delay_ms {
+        if let Some(d) = paste_delay_ms {
             let d = d.clamp(0, 5000);
-            cfg.paste_submit_delay_ms = d;
-            changes.push(format!("paste_submit_delay_ms={d}"));
+            cfg.paste_delay_ms = d;
+            changes.push(format!("paste_delay_ms={d}"));
         }
-        if let Some(scopes) = input_clears {
+        if let Some(scopes) = clear_on_input {
             // Array IS the setting (`[]` = never cancel). De-dup, preserve order.
             let mut uniq: Vec<CancelSpeechScope> = Vec::new();
             for k in scopes {
@@ -233,21 +233,21 @@ impl SetConfigArgs {
                 }
             }
             let toks: Vec<&str> = uniq.iter().map(|k| k.as_str()).collect();
-            changes.push(format!("input_clears=[{}]", toks.join(",")));
-            cfg.input_clears = uniq;
+            changes.push(format!("clear_on_input=[{}]", toks.join(",")));
+            cfg.clear_on_input = uniq;
         }
-        if let Some(b) = pause_in_background {
-            cfg.pause_in_background = b;
-            changes.push(format!("pause_in_background={b}"));
+        if let Some(b) = pause_bg {
+            cfg.pause_bg = b;
+            changes.push(format!("pause_bg={b}"));
         }
-        if let Some(s) = earcon_reply_sound {
+        if let Some(s) = earcon_reply {
             // Sound IS on/off (empty = off). Resolution/fail-quiet is the engine's.
-            changes.push(format!("earcon_reply_sound={s}"));
-            cfg.earcon_reply_sound = s;
+            changes.push(format!("earcon_reply={s}"));
+            cfg.earcon_reply = s;
         }
-        if let Some(s) = earcon_needs_input_sound {
-            changes.push(format!("earcon_needs_input_sound={s}"));
-            cfg.earcon_needs_input_sound = s;
+        if let Some(s) = earcon_input {
+            changes.push(format!("earcon_input={s}"));
+            cfg.earcon_input = s;
         }
         Ok(changes)
     }
@@ -260,30 +260,30 @@ mod tests {
     #[test]
     fn set_config_args_apply_merges_only_provided_fields() {
         let mut cfg = VoiceConfig {
-            tts_rate: 1.0,
+            rate: 1.0,
             tts_engine: Some(Vec::new()), // off
             ..VoiceConfig::default()
         };
         let args: SetConfigArgs = serde_json::from_value(serde_json::json!({
-            "greet_on_open": false,
+            "greet": false,
             "narrate": ["digests", "shorts"],
-            "tts_rate": 1.5,
+            "rate": 1.5,
         }))
         .expect("valid args deserialize");
         let changes = args.apply(&mut cfg).expect("apply succeeds");
 
-        assert!(!cfg.greet_on_open);
+        assert!(!cfg.greet);
         assert_eq!(cfg.narrate, vec![NarrateKind::Digests, NarrateKind::Shorts]);
-        assert_eq!(cfg.tts_rate, 1.5);
+        assert_eq!(cfg.rate, 1.5);
         assert_eq!(
             cfg.tts_engine,
             Some(Vec::new()),
             "an unprovided field is left untouched"
         );
         assert_eq!(changes.len(), 3);
-        assert!(changes.contains(&"greet_on_open=false".to_string()));
+        assert!(changes.contains(&"greet=false".to_string()));
         assert!(changes.contains(&"narrate=[digests,shorts]".to_string()));
-        assert!(changes.contains(&"tts_rate=1.5".to_string()));
+        assert!(changes.contains(&"rate=1.5".to_string()));
     }
 
     #[test]
@@ -338,50 +338,48 @@ mod tests {
     }
 
     #[test]
-    fn set_config_tray_indicator_array_parses_and_rejects_bad_token() {
+    fn set_config_tray_array_parses_and_rejects_bad_token() {
         let args: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tray_indicator": ["tts", "stt"] }))
-                .unwrap();
+            serde_json::from_value(serde_json::json!({ "tray": ["tts", "stt"] })).unwrap();
         let mut cfg = VoiceConfig::default();
         let changes = args.apply(&mut cfg).unwrap();
-        assert_eq!(cfg.tray_indicator, vec![TrayKind::Stt, TrayKind::Tts]);
-        assert_eq!(changes, vec!["tray_indicator=[stt,tts]".to_string()]);
+        assert_eq!(cfg.tray, vec![TrayKind::Stt, TrayKind::Tts]);
+        assert_eq!(changes, vec!["tray=[stt,tts]".to_string()]);
 
         // `_animated` wins if both forms of a state appear.
         let anim: SetConfigArgs = serde_json::from_value(
-            serde_json::json!({ "tray_indicator": ["stt_animated", "tts", "tts_animated"] }),
+            serde_json::json!({ "tray": ["stt_animated", "tts", "tts_animated"] }),
         )
         .unwrap();
         let mut c3 = VoiceConfig::default();
         anim.apply(&mut c3).unwrap();
         assert_eq!(
-            c3.tray_indicator,
+            c3.tray,
             vec![TrayKind::SttAnimated, TrayKind::TtsAnimated]
         );
 
-        let err = serde_json::from_value::<SetConfigArgs>(
-            serde_json::json!({ "tray_indicator": ["both"] }),
-        )
-        .unwrap_err();
+        let err =
+            serde_json::from_value::<SetConfigArgs>(serde_json::json!({ "tray": ["both"] }))
+                .unwrap_err();
         assert!(err.to_string().contains("must be one of"), "got: {err}");
 
         // `[]` = never color.
         let off: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tray_indicator": [] })).unwrap();
+            serde_json::from_value(serde_json::json!({ "tray": [] })).unwrap();
         let mut c2 = VoiceConfig::default();
         let ch = off.apply(&mut c2).unwrap();
-        assert!(c2.tray_indicator.is_empty());
-        assert_eq!(ch, vec!["tray_indicator=[]".to_string()]);
+        assert!(c2.tray.is_empty());
+        assert_eq!(ch, vec!["tray=[]".to_string()]);
     }
 
     #[test]
     fn set_config_args_rate_is_clamped() {
         let mut cfg = VoiceConfig::default();
         let args: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_rate": 9.0 })).unwrap();
+            serde_json::from_value(serde_json::json!({ "rate": 9.0 })).unwrap();
         let changes = args.apply(&mut cfg).unwrap();
-        assert_eq!(cfg.tts_rate, 2.0);
-        assert_eq!(changes, vec!["tts_rate=2".to_string()]);
+        assert_eq!(cfg.rate, 2.0);
+        assert_eq!(changes, vec!["rate=2".to_string()]);
     }
 
     #[test]
@@ -441,39 +439,39 @@ mod tests {
     }
 
     #[test]
-    fn set_config_input_clears_array_parses_dedups_and_rejects_bad_token() {
+    fn set_config_clear_on_input_array_parses_dedups_and_rejects_bad_token() {
         let args: SetConfigArgs = serde_json::from_value(
-            serde_json::json!({ "input_clears": ["other", "current", "current"] }),
+            serde_json::json!({ "clear_on_input": ["other", "current", "current"] }),
         )
         .unwrap();
         let mut cfg = VoiceConfig::default();
         let changes = args.apply(&mut cfg).unwrap();
         assert_eq!(
-            cfg.input_clears,
+            cfg.clear_on_input,
             vec![CancelSpeechScope::Other, CancelSpeechScope::Current]
         );
-        assert_eq!(changes, vec!["input_clears=[other,current]".to_string()]);
+        assert_eq!(changes, vec!["clear_on_input=[other,current]".to_string()]);
 
         let err = serde_json::from_value::<SetConfigArgs>(
-            serde_json::json!({ "input_clears": ["any_input"] }),
+            serde_json::json!({ "clear_on_input": ["any_input"] }),
         )
         .unwrap_err();
         assert!(err.to_string().contains("must be one of"), "got: {err}");
 
         // `[]` = never cancel.
         let off: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "input_clears": [] })).unwrap();
+            serde_json::from_value(serde_json::json!({ "clear_on_input": [] })).unwrap();
         let mut c2 = VoiceConfig::default();
         let ch = off.apply(&mut c2).unwrap();
-        assert!(c2.input_clears.is_empty());
-        assert_eq!(ch, vec!["input_clears=[]".to_string()]);
+        assert!(c2.clear_on_input.is_empty());
+        assert_eq!(ch, vec!["clear_on_input=[]".to_string()]);
     }
 
     #[test]
     fn set_config_args_empty_voices_rejected() {
         let mut cfg = VoiceConfig::default();
         let args: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_built_in_voices": [] })).unwrap();
+            serde_json::from_value(serde_json::json!({ "tts_voices": [] })).unwrap();
         assert!(args.apply(&mut cfg).is_err());
     }
 
@@ -482,12 +480,11 @@ mod tests {
         // English-only: non-`a`/`b` Kokoro ids rejected.
         let mut cfg = VoiceConfig::default();
         let bad: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_built_in_voices": ["ef_dora"] }))
-                .unwrap();
+            serde_json::from_value(serde_json::json!({ "tts_voices": ["ef_dora"] })).unwrap();
         assert!(bad.apply(&mut cfg).is_err());
 
         let good: SetConfigArgs = serde_json::from_value(
-            serde_json::json!({ "tts_built_in_voices": ["af_sarah", "bm_george"] }),
+            serde_json::json!({ "tts_voices": ["af_sarah", "bm_george"] }),
         )
         .unwrap();
         assert!(good.apply(&mut cfg).is_ok());

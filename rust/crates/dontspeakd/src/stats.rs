@@ -115,9 +115,9 @@ impl TtsStats {
             rtf_min: s.rtf_min,
             rtf_avg: avg_rtf,
             rtf_max: s.rtf_max,
-            first_min_ms: s.first_min,
-            first_avg_ms: first_avg,
-            first_max_ms: s.first_max,
+            ttfa_min_ms: s.first_min,
+            ttfa_avg_ms: first_avg,
+            ttfa_max_ms: s.first_max,
             utterances: s.utterances,
             audio_secs: s.total_audio_ms / 1000.0,
             failures: s.failures,
@@ -402,9 +402,9 @@ mod tests {
         // min/max over the two utterances (rtf 0.55, 0.60; first 200, 180).
         assert!((j["rtf_min"].as_f64().unwrap() - 0.55).abs() < 1e-9);
         assert!((j["rtf_max"].as_f64().unwrap() - 0.60).abs() < 1e-9);
-        assert_eq!(j["first_min_ms"], 180.0);
-        assert_eq!(j["first_max_ms"], 200.0);
-        assert_eq!(j["first_avg_ms"], 190.0);
+        assert_eq!(j["ttfa_min_ms"], 180.0);
+        assert_eq!(j["ttfa_max_ms"], 200.0);
+        assert_eq!(j["ttfa_avg_ms"], 190.0);
         st.reset();
         assert_eq!(st.snapshot_json()["utterances"], 0);
     }

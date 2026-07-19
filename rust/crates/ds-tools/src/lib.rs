@@ -23,10 +23,10 @@ pub const DIARIZATION_ENABLED: bool = false;
 
 const HIDDEN_TOOLS: &[&str] = &["diarize", "manage_speakers"];
 const HIDDEN_SET_CONFIG_PARAMS: &[&str] = &[
-    "diarizer_provider",
-    "clustering_threshold",
-    "speaker_threshold",
-    "stt_speaker_lock",
+    "diarizer",
+    "cluster_threshold",
+    "match_threshold",
+    "speaker_lock",
 ];
 
 enum PType {
@@ -114,8 +114,8 @@ static TOOLS: &[Tool] = &[
         output: None,
     },
     Tool {
-        name: "stop_speech",
-        description: STOP_SPEECH,
+        name: "stop",
+        description: STOP,
         params: &[],
         min_one: false,
         annotations: annotations(false, true, true),
@@ -130,17 +130,17 @@ static TOOLS: &[Tool] = &[
         output: None,
     },
     Tool {
-        name: "get_status",
-        description: GET_STATUS,
+        name: "status",
+        description: STATUS,
         params: &[p("detail", PType::Bool, false, STATUS_DETAIL)],
         min_one: false,
         annotations: annotations(true, false, true),
         output: Some(Output::Status),
     },
     Tool {
-        name: "get_usage",
-        description: GET_USAGE,
-        params: &[p("force_refresh", PType::Bool, false, USAGE_FORCE_REFRESH)],
+        name: "usage",
+        description: USAGE,
+        params: &[p("refresh", PType::Bool, false, USAGE_REFRESH)],
         min_one: false,
         annotations: Annotations {
             read_only: true,
@@ -151,13 +151,13 @@ static TOOLS: &[Tool] = &[
         output: Some(Output::Usage),
     },
     Tool {
-        name: "list_voices",
-        description: LIST_VOICES,
+        name: "voices",
+        description: VOICES,
         params: &[p(
             "tts_engine",
             PType::Enum(&["built_in", "system"]),
             false,
-            LIST_VOICES_ENGINE,
+            VOICES_ENGINE,
         )],
         min_one: false,
         annotations: annotations(true, false, true),
@@ -201,7 +201,7 @@ static TOOLS: &[Tool] = &[
                 SET_CONFIG_TTS_ENGINE,
             ),
             p(
-                "tts_built_in_voices",
+                "tts_voices",
                 PType::StrArray,
                 false,
                 SET_CONFIG_TTS_VOICES,
@@ -212,39 +212,39 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_TTS_SYSTEM_VOICE,
             ),
-            p("tts_rate", PType::Num(0.5, 2.0), false, SET_CONFIG_TTS_RATE),
+            p("rate", PType::Num(0.5, 2.0), false, SET_CONFIG_TTS_RATE),
             p(
                 "narrate",
                 PType::EnumArray(&["shorts", "digests"]),
                 false,
                 SET_CONFIG_NARRATE,
             ),
-            p("greet_on_open", PType::Bool, false, SET_CONFIG_GREET),
+            p("greet", PType::Bool, false, SET_CONFIG_GREET),
             p(
-                "input_clears",
+                "clear_on_input",
                 PType::EnumArray(&["current", "other"]),
                 false,
                 SET_CONFIG_INPUT_CLEARS,
             ),
             p(
-                "pause_in_background",
+                "pause_bg",
                 PType::Bool,
                 false,
                 SET_CONFIG_PAUSE_BG,
             ),
             p(
-                "earcon_reply_sound",
+                "earcon_reply",
                 PType::Str,
                 false,
                 SET_CONFIG_EARCON_REPLY,
             ),
             p(
-                "earcon_needs_input_sound",
+                "earcon_input",
                 PType::Str,
                 false,
                 SET_CONFIG_EARCON_INPUT,
             ),
-            p("caps_enabled", PType::Bool, false, SET_CONFIG_CAPS),
+            p("caps", PType::Bool, false, SET_CONFIG_CAPS),
             p(
                 "stt_engine",
                 PType::Enum(&["built_in", "system", "claude_code", "off"]),
@@ -253,13 +253,13 @@ static TOOLS: &[Tool] = &[
             ),
             p("capture_gain", PType::Gain, false, SET_CONFIG_CAPTURE_GAIN),
             p(
-                "double_tap_submits",
+                "double_tap_submit",
                 PType::Bool,
                 false,
                 SET_CONFIG_DOUBLE_TAP_SUBMITS,
             ),
             p(
-                "paste_submit_delay_ms",
+                "paste_delay_ms",
                 PType::Int(0, 5000),
                 false,
                 SET_CONFIG_PASTE_SUBMIT_DELAY_MS,
@@ -273,31 +273,31 @@ static TOOLS: &[Tool] = &[
             ),
             // Diarization (hidden when gate off).
             p(
-                "diarizer_provider",
+                "diarizer",
                 PType::EnumArray(&["apple_native"]),
                 false,
                 SET_CONFIG_DIARIZER,
             ),
             p(
-                "clustering_threshold",
+                "cluster_threshold",
                 PType::Num(0.5, 0.9),
                 false,
                 SET_CONFIG_CLUSTERING,
             ),
             p(
-                "speaker_threshold",
+                "match_threshold",
                 PType::Num(0.0, 1.0),
                 false,
                 SET_CONFIG_SPEAKER_THRESH,
             ),
             p(
-                "stt_speaker_lock",
+                "speaker_lock",
                 PType::Bool,
                 false,
                 SET_CONFIG_SPEAKER_LOCK,
             ),
             p(
-                "tray_indicator",
+                "tray",
                 PType::EnumArray(&["stt", "tts", "stt_animated", "tts_animated"]),
                 false,
                 SET_CONFIG_TRAY,
@@ -320,7 +320,15 @@ fn visible_params(t: &Tool) -> Vec<&Param> {
         .collect()
 }
 
-/// Catalog order. MCP dispatch pins via `router_handles_every_catalog_tool`.
+/// Look up a visible primary tool name.
+pub fn resolve_tool_name(name: &str) -> Option<&'static str> {
+    TOOLS
+        .iter()
+        .find(|tool| tool.name == name && is_visible(tool))
+        .map(|tool| tool.name)
+}
+
+/// Visible primary catalog names. MCP dispatch pins via `router_handles_every_catalog_tool`.
 pub fn tool_names() -> impl Iterator<Item = &'static str> {
     TOOLS.iter().filter(|t| is_visible(t)).map(|t| t.name)
 }
@@ -409,19 +417,20 @@ fn validate_param(param: &Param, value: &Value) -> Result<(), String> {
     }
 }
 
+/// Visible primary tool definitions for MCP `tools/list`.
 pub fn catalog() -> Value {
     Value::Array(
         TOOLS
             .iter()
             .filter(|t| is_visible(t))
-            .map(tool_schema)
+            .map(|t| tool_schema(t, t.name))
             .collect(),
     )
 }
 
-fn tool_schema(t: &Tool) -> Value {
+fn tool_schema(t: &Tool, name: &str) -> Value {
     let mut tool = json!({
-        "name": t.name,
+        "name": name,
         "description": t.description,
         "inputSchema": input_schema(t),
         "annotations": {
@@ -442,7 +451,7 @@ fn output_schema_for(output: Output) -> Value {
         Output::Status => json!({
             "type": "object",
             "properties": {
-                "engine": { "type": "string", "enum": ["kokoro", "system", "off"] },
+                "engine": { "type": "string", "enum": ["built_in", "system", "off"] },
                 "voices": { "type": "array", "items": { "type": "string" } },
                 "rate": { "type": "number" },
                 "state": {
@@ -458,7 +467,7 @@ fn output_schema_for(output: Output) -> Value {
                     "required": ["running"],
                     "additionalProperties": false
                 },
-                "models": { "type": "object" }
+                "status": { "type": "object" }
             },
             "required": ["engine", "voices", "rate", "state"],
             "additionalProperties": false
@@ -512,7 +521,7 @@ fn output_schema_for(output: Output) -> Value {
         Output::Voices => json!({
             "type": "object",
             "properties": {
-                "engine": { "type": "string", "enum": ["kokoro", "system"] },
+                "engine": { "type": "string", "enum": ["built_in", "system"] },
                 "language": { "type": "string", "enum": ["en"] },
                 "languages": {
                     "type": "array",
@@ -529,7 +538,7 @@ fn output_schema_for(output: Output) -> Value {
                                         "label": { "type": "string" },
                                         "language_tag": { "type": ["string", "null"] },
                                         "gender": { "type": ["string", "null"] },
-                                        "engine": { "type": "string", "enum": ["kokoro", "system"] },
+                                        "engine": { "type": "string", "enum": ["built_in", "system"] },
                                         "active": { "type": "boolean" }
                                     },
                                     "required": ["id", "label", "language_tag", "gender", "engine", "active"],
@@ -688,23 +697,29 @@ mod tests {
             ("listen", json!({"seconds": 1.5}), false),
             ("mute", json!({"on": true}), true),
             ("mute", json!({"on": "true"}), false),
-            ("list_voices", json!({"tts_engine": "built_in"}), true),
-            ("list_voices", json!({"tts_engine": "off"}), false),
+            ("voices", json!({"tts_engine": "built_in"}), true),
+            ("voices", json!({"tts_engine": "off"}), false),
             ("set_config", json!({"narrate": ["shorts"]}), true),
             ("set_config", json!({"narrate": ["other"]}), false),
             (
                 "set_config",
-                json!({"tts_built_in_voices": ["af_sarah"]}),
+                json!({"tts_voices": ["af_sarah"]}),
                 true,
             ),
-            ("set_config", json!({"tts_built_in_voices": [7]}), false),
-            ("set_config", json!({"tts_rate": 0.49}), false),
+            ("set_config", json!({"tts_voices": [7]}), false),
+            ("set_config", json!({"rate": 0.49}), false),
             ("set_config", json!({"capture_gain": "auto"}), true),
             ("set_config", json!({"capture_gain": 20.1}), false),
             ("set_config", json!({}), false),
-            ("get_status", json!({"extra": true}), false),
-            ("get_usage", json!({"force_refresh": true}), true),
-            ("get_usage", json!({"force_refresh": "true"}), false),
+            ("status", json!({"extra": true}), false),
+            ("usage", json!({"refresh": true}), true),
+            ("usage", json!({"refresh": "true"}), false),
+            ("usage", json!({"extra": true}), false),
+            ("stop", json!({}), true),
+            ("get_usage", json!({}), false),
+            ("list_voices", json!({}), false),
+            ("get_status", json!({}), false),
+            ("stop_speech", json!({}), false),
         ];
 
         for (tool, arguments, valid) in cases {
@@ -714,7 +729,7 @@ mod tests {
                 "{tool} {arguments}"
             );
         }
-        assert!(validate_arguments("get_status", &json!([])).is_err());
+        assert!(validate_arguments("status", &json!([])).is_err());
         assert!(validate_arguments("unknown", &json!({})).is_err());
     }
 
@@ -774,61 +789,61 @@ mod tests {
         );
         mentions(
             SET_CONFIG_TTS_RATE,
-            &format!("{:.1} = normal", v.tts_rate),
-            "tts_rate",
+            &format!("{:.1} = normal", v.rate),
+            "rate",
         );
 
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
         mentions(SET_CONFIG_NARRATE, "Default both", "narrate");
         mentions(
             SET_CONFIG_GREET,
-            if v.greet_on_open {
+            if v.greet {
                 "Default on"
             } else {
                 "Default off"
             },
-            "greet_on_open",
+            "greet",
         );
         mentions(
             SET_CONFIG_INPUT_CLEARS,
             &format!(
                 "Default {}",
-                serde_json::to_string(&v.input_clears).unwrap()
+                serde_json::to_string(&v.clear_on_input).unwrap()
             ),
-            "input_clears",
+            "clear_on_input",
         );
         mentions(
             SET_CONFIG_PAUSE_BG,
-            if v.pause_in_background {
+            if v.pause_bg {
                 "Default true"
             } else {
                 "Default false"
             },
-            "pause_in_background",
+            "pause_bg",
         );
 
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-        assert!(!v.earcon_reply_sound.is_empty());
+        assert!(!v.earcon_reply.is_empty());
         mentions(
             SET_CONFIG_EARCON_REPLY,
             "Default: OS chime",
-            "earcon_reply_sound",
+            "earcon_reply",
         );
-        assert!(v.earcon_needs_input_sound.is_empty());
+        assert!(v.earcon_input.is_empty());
         mentions(
             SET_CONFIG_EARCON_INPUT,
             "Default off",
-            "earcon_needs_input_sound",
+            "earcon_input",
         );
 
         mentions(
             SET_CONFIG_CAPS,
-            if v.caps_enabled {
+            if v.caps {
                 "Default on"
             } else {
                 "Default off"
             },
-            "caps_enabled",
+            "caps",
         );
         assert!(v.stt_engine.is_none());
         mentions(
@@ -844,17 +859,17 @@ mod tests {
         );
         mentions(
             SET_CONFIG_DOUBLE_TAP_SUBMITS,
-            if v.double_tap_submits {
+            if v.double_tap_submit {
                 "Default true"
             } else {
                 "Default false"
             },
-            "double_tap_submits",
+            "double_tap_submit",
         );
         mentions(
             SET_CONFIG_PASTE_SUBMIT_DELAY_MS,
-            &format!("Default {}", v.paste_submit_delay_ms),
-            "paste_submit_delay_ms",
+            &format!("Default {}", v.paste_delay_ms),
+            "paste_delay_ms",
         );
 
         assert_eq!(
@@ -866,30 +881,30 @@ mod tests {
             &format!("Default {}", serde_json::to_string(&v.provider).unwrap()),
             "provider",
         );
-        assert!(v.diarizer_provider.is_empty());
+        assert!(v.diarizer.is_empty());
         mentions(
             SET_CONFIG_DIARIZER,
             "[] = off (default)",
-            "diarizer_provider",
+            "diarizer",
         );
         mentions(
             SET_CONFIG_CLUSTERING,
-            &format!("Default {}", v.clustering_threshold),
-            "clustering_threshold",
+            &format!("Default {}", v.cluster_threshold),
+            "cluster_threshold",
         );
         mentions(
             SET_CONFIG_SPEAKER_THRESH,
-            &format!("Default {}", v.speaker_threshold),
-            "speaker_threshold",
+            &format!("Default {}", v.match_threshold),
+            "match_threshold",
         );
         mentions(
             SET_CONFIG_SPEAKER_LOCK,
-            if v.stt_speaker_lock {
+            if v.speaker_lock {
                 "Default on"
             } else {
                 "Default off"
             },
-            "stt_speaker_lock",
+            "speaker_lock",
         );
         mentions(
             SET_CONFIG_FULL_DUPLEX,
@@ -900,16 +915,16 @@ mod tests {
             },
             "full_duplex",
         );
-        assert_eq!(v.tray_indicator, vec![TrayKind::Stt, TrayKind::TtsAnimated]);
+        assert_eq!(v.tray, vec![TrayKind::Stt, TrayKind::TtsAnimated]);
         mentions(
             SET_CONFIG_TRAY,
             &format!(
                 "Default {}",
-                serde_json::to_string(&v.tray_indicator).unwrap()
+                serde_json::to_string(&v.tray).unwrap()
             ),
-            "tray_indicator",
+            "tray",
         );
-        assert_eq!(v.input_clears, vec![CancelSpeechScope::Current]);
+        assert_eq!(v.clear_on_input, vec![CancelSpeechScope::Current]);
     }
 
     #[test]
@@ -917,7 +932,7 @@ mod tests {
         let c = catalog();
         let arr = c.as_array().expect("catalog is a JSON array");
         let expected = if DIARIZATION_ENABLED { 10 } else { 8 };
-        assert_eq!(arr.len(), expected, "expected {expected} visible tools");
+        assert_eq!(arr.len(), expected, "expected {expected} catalog entries");
         for t in arr {
             assert!(
                 t.get("name").and_then(|v| v.as_str()).is_some(),
@@ -935,7 +950,7 @@ mod tests {
                 .as_object()
                 .expect("each tool has annotations");
             assert_eq!(annotations.len(), 4, "all annotation hints are explicit");
-            assert_eq!(annotations["openWorldHint"], t["name"] == "get_usage");
+            assert_eq!(annotations["openWorldHint"], t["name"] == "usage");
             for hint in [
                 "readOnlyHint",
                 "destructiveHint",
@@ -953,7 +968,7 @@ mod tests {
         let tools = catalog.as_array().unwrap();
         for tool in tools {
             let name = tool["name"].as_str().unwrap();
-            if matches!(name, "get_status" | "get_usage" | "list_voices") {
+            if matches!(name, "status" | "usage" | "voices") {
                 assert_eq!(tool["outputSchema"]["type"], "object");
                 assert_eq!(output_schema(name), Some(tool["outputSchema"].clone()));
             } else {
@@ -961,6 +976,9 @@ mod tests {
                 assert!(output_schema(name).is_none(), "{name}");
             }
         }
+        assert!(output_schema("get_status").is_none());
+        assert!(output_schema("list_voices").is_none());
+        assert!(output_schema("get_usage").is_none());
     }
 
     /// UI params are ordered (MCP `properties` can't convey order).
@@ -969,7 +987,7 @@ mod tests {
         let ui = catalog_ui();
         let arr = ui.as_array().expect("ui catalog is an array");
         let expected = if DIARIZATION_ENABLED { 10 } else { 8 };
-        assert_eq!(arr.len(), expected, "same visible tools as the MCP catalog");
+        assert_eq!(arr.len(), expected, "UI lists primary tools only");
 
         let speak = arr
             .iter()
@@ -1041,26 +1059,26 @@ mod tests {
             schema_item_enum("provider"),
             toks(Provider::ALL, Provider::as_str)
         );
-        // `diarizer_provider` is one of the hidden diarization params (see
+        // `diarizer` is one of the hidden diarization params (see
         // `HIDDEN_SET_CONFIG_PARAMS`) — pin that it's actually absent from the wire
         // schema while the gate is off, rather than just skipping the assertion.
         if DIARIZATION_ENABLED {
             assert_eq!(
-                schema_item_enum("diarizer_provider"),
+                schema_item_enum("diarizer"),
                 toks(DiarizerProvider::ALL, DiarizerProvider::as_str)
             );
         } else {
             assert!(
-                props.get("diarizer_provider").is_none(),
-                "diarizer_provider should be hidden from the schema while DIARIZATION_ENABLED is false"
+                props.get("diarizer").is_none(),
+                "diarizer should be hidden from the schema while DIARIZATION_ENABLED is false"
             );
         }
         assert_eq!(
-            schema_item_enum("tray_indicator"),
+            schema_item_enum("tray"),
             toks(TrayKind::ALL, TrayKind::as_str)
         );
         assert_eq!(
-            schema_item_enum("input_clears"),
+            schema_item_enum("clear_on_input"),
             toks(CancelSpeechScope::ALL, CancelSpeechScope::as_str)
         );
     }
@@ -1097,28 +1115,28 @@ mod tests {
         };
 
         let populated = SetConfigArgs {
-            tts_rate: Some(1.25),
-            tts_built_in_voices: Some(vec!["af_sarah".to_string()]),
+            rate: Some(1.25),
+            tts_voices: Some(vec!["af_sarah".to_string()]),
             tts_system_voice: Some("Samantha".to_string()),
-            tts_engine: Some(vec![TtsEngine::Kokoro]),
+            tts_engine: Some(vec![TtsEngine::BuiltIn]),
             stt_engine: Some(vec![SttEngine::ClaudeCode]),
             provider: Some(vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]),
-            diarizer_provider: Some(vec![DiarizerProvider::AppleNative]),
-            clustering_threshold: Some(0.7),
-            speaker_threshold: Some(0.65),
-            stt_speaker_lock: Some(false),
+            diarizer: Some(vec![DiarizerProvider::AppleNative]),
+            cluster_threshold: Some(0.7),
+            match_threshold: Some(0.65),
+            speaker_lock: Some(false),
             full_duplex: Some(true),
             narrate: Some(vec![ds_config::NarrateKind::Digests]),
-            caps_enabled: Some(true),
-            greet_on_open: Some(true),
-            tray_indicator: Some(vec![TrayKind::Stt, TrayKind::Tts]),
+            caps: Some(true),
+            greet: Some(true),
+            tray: Some(vec![TrayKind::Stt, TrayKind::Tts]),
             capture_gain: Some(CaptureGain::Manual(2.0)),
-            double_tap_submits: Some(true),
-            paste_submit_delay_ms: Some(100),
-            input_clears: Some(vec![CancelSpeechScope::Current, CancelSpeechScope::Other]),
-            pause_in_background: Some(true),
-            earcon_reply_sound: Some("Tink".to_string()),
-            earcon_needs_input_sound: Some("Funk".to_string()),
+            double_tap_submit: Some(true),
+            paste_delay_ms: Some(100),
+            clear_on_input: Some(vec![CancelSpeechScope::Current, CancelSpeechScope::Other]),
+            pause_bg: Some(true),
+            earcon_reply: Some("Tink".to_string()),
+            earcon_input: Some("Funk".to_string()),
         };
         let args = serde_json::to_value(&populated).expect("SetConfigArgs serializes");
         let fields = args.as_object().expect("serializes to an object");

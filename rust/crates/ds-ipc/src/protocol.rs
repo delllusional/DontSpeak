@@ -14,7 +14,7 @@ use serde_json::Value;
 ///
 /// Seven **client-originated** variants require `source: ClientSource` (hook `--client` or
 /// MCP `initialize` `clientInfo`): [`Self::GreetSession`], [`Self::MarkActive`],
-/// [`Self::SessionEnd`], [`Self::StopSpeech`], [`Self::Speak`], [`Self::SpeakNarration`],
+/// [`Self::SessionEnd`], [`Self::Stop`], [`Self::Speak`], [`Self::SpeakNarration`],
 /// [`Self::Earcon`]. No `#[serde(default)]` / `Option` — absent field is a hard decode error
 /// (CLI/engine/wiring ship together; stale hooks are rejected, not mis-attributed).
 /// Unrecognised *token* → `ClientSource::Unknown` (forward-open, like [`Response::Unknown`]).
@@ -37,7 +37,7 @@ pub enum Request {
     EnsureCodexStream,
     /// Global mute (tray / Caps). Speech drains silently; cues suppressed.
     SetMuted { on: bool },
-    /// SessionStart: optional agent-voice greeting when `greet_on_open`.
+    /// SessionStart: optional agent-voice greeting when `greet`.
     GreetSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
@@ -48,7 +48,7 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
         /// Harness-injected continuation (issue #11) — liveness only: must NOT claim
-        /// active-terminal or apply `input_clears`. Classifier:
+        /// active-terminal or apply `clear_on_input`. Classifier:
         /// `dontspeak::hook_speak::is_synthetic_continuation`.
         /// `#[serde(default)]` = wire compactness (omit when false), not legacy-hook compat
         /// (stale hooks fail on missing `source` first).
@@ -81,12 +81,12 @@ pub enum Request {
         source: ClientSource,
     },
     /// Barge-in. `Some(session)` scopes drop/cancel; `None` = global hard barge.
-    StopSpeech {
+    Stop {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
         source: ClientSource,
     },
-    /// SessionEnd: per-window [`Self::StopSpeech`] (agent voice assignment survives).
+    /// SessionEnd: per-window [`Self::Stop`] (agent voice assignment survives).
     SessionEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
@@ -240,11 +240,11 @@ mod tests {
                 narration_id: Some("narration-1".into()),
                 source: ClientSource::QwenCode,
             },
-            Request::StopSpeech {
+            Request::Stop {
                 session: None,
                 source: ClientSource::Unknown,
             },
-            Request::StopSpeech {
+            Request::Stop {
                 session: Some("sess-1".into()),
                 source: ClientSource::ClaudeCode,
             },
@@ -355,7 +355,7 @@ mod tests {
             r#"{"cmd":"greet_session"}"#,
             r#"{"cmd":"mark_active","session":"sess-1"}"#,
             r#"{"cmd":"session_end","session":"sess-1"}"#,
-            r#"{"cmd":"stop_speech"}"#,
+            r#"{"cmd":"stop"}"#,
             r#"{"cmd":"speak","text":"hi"}"#,
             r#"{"cmd":"speak_narration","text":"hi"}"#,
             r#"{"cmd":"earcon","event":"reply_done"}"#,

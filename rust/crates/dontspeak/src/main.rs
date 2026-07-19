@@ -2,7 +2,7 @@
 //! `GROK_HOOK_EVENT` is set). With a subcommand: client launcher, hook executor, or installer.
 //!
 //! MCP: newline-delimited JSON-RPC 2.0 on stdio (MCP 2025-11-25) + `ds-ipc` to the resident
-//! engine. Catalog in `ds_tools::catalog()`. `list_voices` is config-direct; config writes go
+//! engine. Catalog in `ds_tools::catalog()`. `voices` is config-direct; config writes go
 //! through `set_config` / `config.toml` (engine mtime reload) — no per-session voice override.
 //!
 //! Transport: stdout is JSON-RPC only; logging to stderr. One response per request id;
@@ -37,7 +37,7 @@ enum Subcommand<'a> {
     Launch(ClientSource, &'a [String]),
     Version,
     Help,
-    /// Points at MCP `get_status`; no engine call.
+    /// Points at MCP `status`; no engine call.
     Status,
     /// No argv\[1\]: stdio MCP (or Grok bare hook).
     Server,
@@ -93,7 +93,7 @@ Usage:
   dontspeak provide         query-hook executor (stdin JSON)
   dontspeak --version       print package version
   dontspeak --help          this help
-  dontspeak status          how to query runtime status (MCP get_status)
+  dontspeak status          how to query runtime status (MCP status)
 
 Engine via local socket; speech config is OS data-dir config.toml (not client settings).
 ";
@@ -180,7 +180,7 @@ fn main() {
         }
         Subcommand::Status => {
             println!(
-                "dontspeak {}: runtime status is via MCP tool get_status (or the host app UI)",
+                "dontspeak {}: runtime status is via MCP tool status (or the host app UI)",
                 env!("CARGO_PKG_VERSION")
             );
             std::process::exit(0);

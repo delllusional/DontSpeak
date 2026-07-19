@@ -16,8 +16,8 @@ never fails the hook. MCP identity comes from `initialize` `clientInfo.name`.
 | Event | Verb | Role |
 |-------|------|------|
 | `MessageDisplay` | `notify` | Streaming narration: top-level blockquotes as they complete |
-| `SessionStart` | `notify` | Greet + claim agent voice (`greet_on_open`) |
-| `SessionEnd` | `notify` | Session-scoped `StopSpeech` |
+| `SessionStart` | `notify` | Greet + claim agent voice (`greet`) |
+| `SessionEnd` | `notify` | Session-scoped `Stop` |
 | `UserPromptSubmit` | `notify` | `MarkActive` — this terminal is foreground for narration |
 | `UserPromptSubmit` | `provide` | Sync: inject narrate spec as `additionalContext` when on |
 | `Stop` | `notify` | Reply-done earcon; non-streaming clients also voice final reply |

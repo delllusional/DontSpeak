@@ -1,6 +1,6 @@
 //! `tools/call` router and `call_*` handlers (strict arg structs). Most bridge to the
-//! engine over `ds-ipc`; `list_voices`/`set_config`/`get_status`/`get_usage` are direct
-//! and never spawn the engine (`set_config` still best-effort-nudges Reload).
+//! engine over `ds-ipc`; `voices`/`set_config`/`status`/`usage` are direct and never
+//! spawn the engine (`set_config` still best-effort-nudges Reload).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -90,8 +90,8 @@ pub(crate) fn tools_call_cancellable(
 
     let result: Result<ToolSuccess, String> = match name {
         // Config-direct; no engine.
-        "list_voices" => match Paths::resolve() {
-            Some(paths) => call_list_voices(&paths, &args).map(ToolSuccess::Structured),
+        "voices" => match Paths::resolve() {
+            Some(paths) => call_voices(&paths, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
         // config.toml write; mtime-watch or Reload nudge. Engine need not be up.
@@ -100,13 +100,13 @@ pub(crate) fn tools_call_cancellable(
             None => Err("Cannot resolve data paths.".into()),
         },
         // Read-only; must not spawn engine / start playback.
-        "get_status" => match Paths::resolve() {
+        "status" => match Paths::resolve() {
             Some(paths) => call_status(&paths, sock, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
         // Shared cache/provider logic with the Agents tab.
-        "get_usage" => call_usage(&args).map(ToolSuccess::Structured),
-        "speak" | "stop_speech" | "mute" | "listen" | "diarize" | "manage_speakers" => {
+        "usage" => call_usage(&args).map(ToolSuccess::Structured),
+        "speak" | "stop" | "mute" | "listen" | "diarize" | "manage_speakers" => {
             let Some(sock) = sock else {
                 return ok(
                     id,
@@ -116,7 +116,7 @@ pub(crate) fn tools_call_cancellable(
             ensure_engine(sock);
             match name {
                 "speak" => call_speak(sock, &args, client).map(ToolSuccess::Text),
-                "stop_speech" => call_stop(sock, client).map(ToolSuccess::Text),
+                "stop" => call_stop(sock, client).map(ToolSuccess::Text),
                 "mute" => call_mute(sock, &args).map(ToolSuccess::Text),
                 "diarize" => call_diarize(sock, &args).map(ToolSuccess::Text),
                 "manage_speakers" => call_speakers(sock, &args).map(ToolSuccess::Text),
@@ -148,7 +148,7 @@ struct StatusArgs {
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct UsageArgs {
-    force_refresh: Option<bool>,
+    refresh: Option<bool>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -167,7 +167,7 @@ struct MuteArgs {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct ListVoicesArgs {
+struct VoicesArgs {
     tts_engine: Option<TtsEngine>,
 }
 
@@ -191,15 +191,15 @@ struct SpeakersArgs {
     seconds: Option<u64>,
 }
 
-fn call_list_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
-    let a: ListVoicesArgs = serde_json::from_value(args.clone())
-        .map_err(|e| format!("invalid list_voices arguments: {e}"))?;
+fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
+    let a: VoicesArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid voices arguments: {e}"))?;
     let cfg = VoiceConfig::load(paths);
     // Explicit arg, else resolved TTS ladder (catalog still available when speech is off).
     let engine = a
         .tts_engine
         .or_else(|| cfg.resolved_tts())
-        .unwrap_or(ds_config::TtsEngine::Kokoro);
+        .unwrap_or(ds_config::TtsEngine::BuiltIn);
     // English-only build: never surface other Kokoro pack languages.
     let mut groups = voice_groups(engine, "en");
     // `active` = in per-agent pool — no privileged first entry.
@@ -219,7 +219,7 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
         })
         .collect();
     let out = json!({
-        "engine": engine.brand(),
+        "engine": engine.as_str(),
         "language": "en",
         "languages": languages,
     });
@@ -230,7 +230,7 @@ fn call_list_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
 /// Read-only — never spawns the engine.
 fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Value, String> {
     let a: StatusArgs = serde_json::from_value(args.clone())
-        .map_err(|e| format!("invalid get_status arguments: {e}"))?;
+        .map_err(|e| format!("invalid status arguments: {e}"))?;
     let cfg = VoiceConfig::load(paths);
     // Keyed "state" not "engine" — serde_json keeps only the last of a duplicate key
     // (previously silently dropped the configured engine name).
@@ -251,14 +251,14 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         None => json!({ "running": false, "note": "cannot resolve engine socket" }),
     };
     let mut out = json!({
-        "engine": cfg.resolved_tts().map(|e| e.brand()).unwrap_or("off"),
+        "engine": cfg.resolved_tts().map(|e| e.as_str()).unwrap_or("off"),
         // Shared pool — agents each claim one entry; no single "current" voice.
         "voices": cfg.active_voices().to_vec(),
-        "rate": cfg.tts_rate,
+        "rate": cfg.rate,
         "state": state,
     });
     if a.detail.unwrap_or(false) {
-        out["models"] = match sock {
+        out["status"] = match sock {
             Some(sock) => match ds_ipc::request(sock, &Request::ModelStatus) {
                 Ok(Response::ModelStatus { status }) if status.is_object() => status,
                 Ok(Response::ModelStatus { .. }) => {
@@ -281,9 +281,9 @@ fn call_usage_with(
     snapshot: impl FnOnce(bool) -> ds_agent_usage::UsageDeck,
 ) -> Result<Value, String> {
     let a: UsageArgs = serde_json::from_value(args.clone())
-        .map_err(|e| format!("invalid get_usage arguments: {e}"))?;
-    serde_json::to_value(snapshot(a.force_refresh.unwrap_or(false)))
-        .map_err(|e| format!("get_usage failed: {e}"))
+        .map_err(|e| format!("invalid usage arguments: {e}"))?;
+    serde_json::to_value(snapshot(a.refresh.unwrap_or(false)))
+        .map_err(|e| format!("usage failed: {e}"))
 }
 
 // config.toml is source of truth; engine Reload nudge (mtime-watch if down).
@@ -371,7 +371,7 @@ fn call_stop(sock: &Path, client: ClientSource) -> Result<String, String> {
     let scoped = session.is_some();
     let response = ds_ipc::request(
         sock,
-        &Request::StopSpeech {
+        &Request::Stop {
             session,
             source: client,
         },
@@ -386,13 +386,13 @@ fn stop_response(response: Response, scoped: bool) -> Result<String, String> {
     match response {
         Response::Done if scoped => Ok("Stopped this session's speech.".into()),
         Response::Done => Ok("Stopped all speech.".into()),
-        Response::Error { message } => Err(format!("stop_speech failed: {message}")),
-        _ => Err("stop_speech failed: unexpected engine response".into()),
+        Response::Error { message } => Err(format!("stop failed: {message}")),
+        _ => Err("stop failed: unexpected engine response".into()),
     }
 }
 
 /// Same `SetMuted` path as tray / Caps-Lock — tool- and app-driven mute cannot diverge.
-/// Unlike `stop_speech`, silences future output too until changed or restart.
+/// Unlike `stop`, silences future output too until changed or restart.
 fn call_mute(sock: &Path, args: &Value) -> Result<String, String> {
     let a: MuteArgs =
         serde_json::from_value(args.clone()).map_err(|e| format!("invalid mute arguments: {e}"))?;
@@ -674,20 +674,20 @@ mod drift {
             .unwrap(),
         );
         assert_tool_matches(
-            "list_voices",
-            serde_json::to_value(ListVoicesArgs {
-                tts_engine: Some(TtsEngine::Kokoro),
+            "voices",
+            serde_json::to_value(VoicesArgs {
+                tts_engine: Some(TtsEngine::BuiltIn),
             })
             .unwrap(),
         );
         assert_tool_matches(
-            "get_status",
+            "status",
             serde_json::to_value(StatusArgs { detail: Some(true) }).unwrap(),
         );
         assert_tool_matches(
-            "get_usage",
+            "usage",
             serde_json::to_value(UsageArgs {
-                force_refresh: Some(true),
+                refresh: Some(true),
             })
             .unwrap(),
         );
@@ -723,8 +723,8 @@ mod usage_output {
 
     #[test]
     fn usage_returns_the_shared_deck_and_forwards_refresh() {
-        let value = call_usage_with(&json!({ "force_refresh": true }), |force_refresh| {
-            assert!(force_refresh);
+        let value = call_usage_with(&json!({ "refresh": true }), |refresh| {
+            assert!(refresh);
             UsageDeck {
                 cards: vec![UsageCard {
                     agent: ClientSource::Codex,
@@ -757,8 +757,8 @@ mod usage_output {
 
     #[test]
     fn usage_defaults_to_the_soft_cache() {
-        call_usage_with(&json!({}), |force_refresh| {
-            assert!(!force_refresh);
+        call_usage_with(&json!({}), |refresh| {
+            assert!(!refresh);
             UsageDeck::empty()
         })
         .expect("empty deck serializes");
@@ -785,7 +785,7 @@ mod status_output {
             "`engine` must be a string (configured engine name), got {engine:?}"
         );
         assert!(
-            matches!(engine.as_str(), Some("kokoro") | Some("system")),
+            matches!(engine.as_str(), Some("built_in") | Some("system")),
             "`engine` should be a known engine token, got {engine:?}"
         );
 
@@ -802,22 +802,22 @@ mod status_output {
     }
 
     #[test]
-    fn status_detail_gates_the_models_section() {
+    fn status_detail_gates_the_status_section() {
         let dir = tempfile::tempdir().unwrap();
         let mut paths = Paths::rooted_at(dir.path());
         paths.config_toml = dir.path().join("config.toml");
 
         let concise = call_status(&paths, None, &json!({})).unwrap();
         assert!(
-            concise.get("models").is_none(),
-            "concise status omits `models`"
+            concise.get("status").is_none(),
+            "concise status omits nested `status`"
         );
 
         let detailed = call_status(&paths, None, &json!({ "detail": true })).unwrap();
-        let models = detailed
-            .get("models")
-            .expect("detail adds a `models` section");
-        assert!(models.is_object(), "`models` is an object, got {models:?}");
+        let status = detailed
+            .get("status")
+            .expect("detail adds a nested `status` section");
+        assert!(status.is_object(), "`status` is an object, got {status:?}");
     }
 }
 
@@ -862,11 +862,11 @@ mod arg_validation {
         );
         assert_eq!(
             stop_response(Response::error("busy"), true).unwrap_err(),
-            "stop_speech failed: busy"
+            "stop failed: busy"
         );
         assert_eq!(
             stop_response(Response::Pong, true).unwrap_err(),
-            "stop_speech failed: unexpected engine response"
+            "stop failed: unexpected engine response"
         );
     }
 
@@ -1011,17 +1011,17 @@ mod set_config_tests {
         assert!(!paths.config_toml.exists());
 
         let msg =
-            call_set_config(&paths, &json!({ "tts_rate": 1.2 })).expect("a valid change applies");
-        assert_eq!(msg, "Updated tts_rate=1.2.");
+            call_set_config(&paths, &json!({ "rate": 1.2 })).expect("a valid change applies");
+        assert_eq!(msg, "Updated rate=1.2.");
         assert!(paths.config_toml.exists(), "config.toml was written");
 
         let cfg = VoiceConfig::load(&paths);
-        assert_eq!(cfg.tts_rate, 1.2);
+        assert_eq!(cfg.rate, 1.2);
     }
 }
 
 #[cfg(test)]
-mod list_voices_tests {
+mod voices_tests {
     //! Pure config + catalog read (no IPC): engine override and `active` marking.
     use super::*;
 
@@ -1035,9 +1035,9 @@ mod list_voices_tests {
     #[test]
     fn tts_engine_argument_overrides_the_configured_engine() {
         let (_dir, paths) = rooted_paths();
-        let out = call_list_voices(&paths, &json!({ "tts_engine": "built_in" }))
-            .expect("list_voices succeeds with no engine running");
-        assert_eq!(out["engine"], json!("kokoro"));
+        let out = call_voices(&paths, &json!({ "tts_engine": "built_in" }))
+            .expect("voices succeeds with no engine running");
+        assert_eq!(out["engine"], json!("built_in"));
         assert_eq!(out["language"], json!("en"));
     }
 
@@ -1046,10 +1046,10 @@ mod list_voices_tests {
     #[test]
     fn tts_engine_argument_off_is_now_a_hard_error_not_an_empty_list() {
         let (_dir, paths) = rooted_paths();
-        let err = call_list_voices(&paths, &json!({ "tts_engine": "off" }))
+        let err = call_voices(&paths, &json!({ "tts_engine": "off" }))
             .expect_err("\"off\" is no longer a recognized tts_engine token");
         assert!(
-            err.contains("invalid list_voices arguments") && err.contains("must be one of"),
+            err.contains("invalid voices arguments") && err.contains("must be one of"),
             "got: {err}"
         );
     }
@@ -1063,11 +1063,11 @@ mod list_voices_tests {
         let (_dir, paths) = rooted_paths();
         std::fs::write(
             &paths.config_toml,
-            "tts_built_in_voices = [\"am_michael\", \"bf_emma\"]\n",
+            "tts_voices = [\"am_michael\", \"bf_emma\"]\n",
         )
         .unwrap();
-        let out = call_list_voices(&paths, &json!({ "tts_engine": "built_in" }))
-            .expect("list_voices succeeds with no engine running");
+        let out = call_voices(&paths, &json!({ "tts_engine": "built_in" }))
+            .expect("voices succeeds with no engine running");
         let pool = VoiceConfig::load(&paths).active_voices().to_vec();
         assert_eq!(pool, vec!["am_michael", "bf_emma"]);
 

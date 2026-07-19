@@ -1,7 +1,7 @@
 # MCP tools
 
-Eight tools by default: `speak`, `listen`, `stop_speech`, `mute`, `get_status`,
-`get_usage`, `list_voices`, `set_config` — Tools window order. Source: `ds-tools`
+Eight tools by default: `speak`, `listen`, `stop`, `mute`, `status`,
+`usage`, `voices`, `set_config` — Tools window order. Source: `ds-tools`
 (`lib.rs` + `descriptions.rs`); parity test pins names/descriptions.
 
 Client wiring is not an MCP tool — engine converges to `exclude_clients` at boot.
@@ -10,10 +10,10 @@ Manual: `dontspeak wire <client>` / `wire --reconcile`.
 `diarize`, `manage_speakers`, and four diarization `set_config` params are implemented
 but hidden (issue #77, `DIARIZATION_ENABLED`).
 
-Annotations: `get_usage` queries provider APIs (`openWorldHint=true`); the rest are local
-only. Read-only: `get_status`, `get_usage`, `list_voices`, `listen`, `diarize`. Idempotent:
-`stop_speech`, `mute`, `set_config`. Destructive when discarding queue/state. `get_status`,
-`get_usage`, and `list_voices`: `structuredContent` + same JSON in text. Stdio: 1 JSON-RPC
+Annotations: `usage` queries provider APIs (`openWorldHint=true`); the rest are local
+only. Read-only: `status`, `usage`, `voices`, `listen`, `diarize`. Idempotent:
+`stop`, `mute`, `set_config`. Destructive when discarding queue/state. `status`,
+`usage`, and `voices`: `structuredContent` + same JSON in text. Stdio: 1 JSON-RPC
 line ≤1 MiB; max 8 concurrent; cancel stops `listen`.
 
 ## speak
@@ -34,7 +34,7 @@ Record the mic → transcript. Stops on end-of-speech or time limit.
 |---|---|---|---|
 | `seconds` | integer 1–60 | no | Max recording seconds. Default 30. |
 
-## stop_speech
+## stop
 
 Stop this session's speech, or all speech if no session. Fades out. No parameters.
 
@@ -46,7 +46,7 @@ Global mute until changed or engine restart. Muted speech drains silently; earco
 |---|---|---|---|
 | `on` | boolean | yes | True to mute, false to unmute. |
 
-## get_status
+## status
 
 Speech config and runtime state.
 
@@ -54,15 +54,18 @@ Speech config and runtime state.
 |---|---|---|---|
 | `detail` | boolean | no | Include model, dictation, and runtime stats. Default false. |
 
-## get_usage
+With `detail=true`, nested model lifecycle/stats land under the `status` key
+(not `models`). Engine tokens are config tokens (`built_in` / `system` / `off`).
+
+## usage
 
 Coding-agent subscription usage shown in the Agents tab.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `force_refresh` | boolean | no | Bypass the 60-second cache and query providers. Default false. |
+| `refresh` | boolean | no | Bypass the 60-second cache and query providers. Default false. |
 
-## list_voices
+## voices
 
 List English voices by engine and language.
 
@@ -97,54 +100,49 @@ Atomically update and reload persistent settings.
 | Param | Type | Description |
 |---|---|---|
 | `tts_engine` | enum: `built_in`, `system`, `off` | Speech: "built_in", "system", or "off". Omit to keep the automatic preference. Unsupported engines are rejected. |
-| `tts_built_in_voices` | array of strings | Built-in voice IDs — the per-agent pool; each agent claims a stable voice. |
+| `tts_voices` | array of strings | Built-in voice IDs — the per-agent pool; each agent claims a stable voice. |
 | `tts_system_voice` | string | System voice name; empty = OS default. System engine only. |
-| `tts_rate` | number 0.5–2.0 | Speech rate. 1.0 = normal. |
+| `rate` | number 0.5–2.0 | Speech rate. 1.0 = normal. |
 
 **Narration**
 
 | Param | Type | Description |
 |---|---|---|
 | `narrate` | array of `shorts`, `digests` | What to narrate. Default both: "digests" = long-reply summaries; "shorts" = short replies whole. [] off. |
-| `greet_on_open` | boolean | Greet each new terminal in its agent's pool voice. Default on. |
-| `input_clears` | array of `current`, `other` | Queues to clear on submit: "current" this terminal, "other" the rest (incl. global). Default ["current"]; [] none. |
-| `pause_in_background` | boolean | Pause speech when no terminal is frontmost. Default false. |
+| `greet` | boolean | Greet each new terminal in its agent's pool voice. Default on. |
+| `clear_on_input` | array of `current`, `other` | Queues to clear on submit: "current" this terminal, "other" the rest (incl. global). Default ["current"]; [] none. |
+| `pause_bg` | boolean | Pause speech when no terminal is frontmost. Default false. |
 
 **Earcons**
 
 | Param | Type | Description |
 |---|---|---|
-| `earcon_reply_sound` | string | Reply-done sound name/path. Default: OS chime; empty = off. |
-| `earcon_needs_input_sound` | string | Needs-input sound name/path. Default off. |
+| `earcon_reply` | string | Reply-done sound name/path. Default: OS chime; empty = off. |
+| `earcon_input` | string | Needs-input sound name/path. Default off. |
 
 **STT**
 
 | Param | Type | Description |
 |---|---|---|
-| `caps_enabled` | boolean | Caps Lock PTT and speech cancel. Default on. Still silences speech when dictation is off. |
+| `caps` | boolean | Caps Lock PTT and speech cancel. Default on. Still silences speech when dictation is off. |
 | `stt_engine` | enum: `built_in`, `system`, `claude_code`, `off` | Dictation: "built_in", "system", "claude_code", or "off". Omit to keep the automatic preference. Unsupported/unauthorized rejected. |
-| `capture_gain` | `"auto"` or number 0.5–20.0 | Mic gain: "auto" (default) or 0.5–20.0 fixed. |
-| `double_tap_submits` | boolean | Double-tap submits; single-tap inserts only. Default false (swaps those). |
-| `paste_submit_delay_ms` | integer 0–5000 | Paste→submit delay (ms). Default 100; 0 = immediate. |
+| `capture_gain` | `"auto"` or number 0.5–20 | Mic gain: "auto" (default) or 0.5–20.0 fixed. |
+| `double_tap_submit` | boolean | Double-tap submits; single-tap inserts only. Default false (swaps those). |
+| `paste_delay_ms` | integer 0–5000 | Paste→submit delay (ms). Default 100; 0 = immediate. |
 | `full_duplex` | boolean | Mic open during replies (platform AEC). Default false; built-in STT+TTS only. |
-
-**Compute**
-
-| Param | Type | Description |
-|---|---|---|
 | `provider` | array of `ane`, `cuda`, `coreml`, `cpu` | Compute provider preference order. Default ["ane","cuda","cpu"]. |
 
-**Diarization** (hidden #77)
+**Diarization** (hidden while `DIARIZATION_ENABLED` is false)
 
 | Param | Type | Description |
 |---|---|---|
-| `diarizer_provider` | array of `apple_native` | Diarization: ["apple_native"] on, [] = off (default). macOS only. |
-| `clustering_threshold` | number 0.5–0.9 | Diarization sensitivity; lower → more speakers. Default 0.7. |
-| `speaker_threshold` | number 0.0–1.0 | Min voiceprint match; higher → stricter. Default 0.65. |
-| `stt_speaker_lock` | boolean | Transcribe enrolled speakers only. Needs diarization + ≥1 voice. Built-in STT only. Default off. |
+| `diarizer` | array of `apple_native` | Diarization: ["apple_native"] on, [] = off (default). macOS only. |
+| `cluster_threshold` | number 0.5–0.9 | Diarization sensitivity; lower → more speakers. Default 0.7. |
+| `match_threshold` | number 0.0–1.0 | Min voiceprint match; higher → stricter. Default 0.65. |
+| `speaker_lock` | boolean | Transcribe enrolled speakers only. Needs diarization + ≥1 voice. Built-in STT only. Default off. |
 
-**UI**
+**Tray**
 
 | Param | Type | Description |
 |---|---|---|
-| `tray_indicator` | array of `stt`, `tts`, `stt_animated`, `tts_animated` | Tray icon speech states. Default ["stt","tts_animated"]; [] off. |
+| `tray` | array of `stt`, `tts`, `stt_animated`, `tts_animated` | Tray icon speech states. Default ["stt","tts_animated"]; [] off. |

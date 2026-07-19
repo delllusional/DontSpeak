@@ -31,8 +31,8 @@ public class HealthSnapshotTests
     public void ActivityAndSequenceMapTogether()
     {
         var s = Parse("""
-            {"seq":42,"activity":{"caps_enabled":true,"caps_active":true,
-             "recording":true,"speaking":false,"speaking_source":null,"muted":true}}
+            {"seq":42,"activity":{"caps":true,"caps_active":true,
+             "recording":true,"speaking":false,"speaker":null,"muted":true}}
             """);
         Assert.True(s.Activity.EngineRunning);
         Assert.Equal(42UL, s.StatusSeq);
@@ -40,26 +40,26 @@ public class HealthSnapshotTests
         Assert.True(s.Activity.CapsActive);
         Assert.True(s.Activity.Recording);
         Assert.False(s.Activity.Speaking);
-        Assert.Null(s.Activity.SpeakingSource);
+        Assert.Null(s.Activity.Speaker);
         Assert.True(s.Activity.Muted);
     }
 
     [Fact]
-    public void SpeakingSourceIsClearedWhenIdle()
+    public void SpeakerIsClearedWhenIdle()
     {
-        var speaking = Parse("""{"activity":{"speaking":true,"speaking_source":"claude_code"}}""");
-        Assert.Equal("claude_code", speaking.Activity.SpeakingSource);
+        var speaking = Parse("""{"activity":{"speaking":true,"speaker":"claude_code"}}""");
+        Assert.Equal("claude_code", speaking.Activity.Speaker);
 
-        var idle = Parse("""{"activity":{"speaking":false,"speaking_source":"claude_code"}}""");
-        Assert.Null(idle.Activity.SpeakingSource);
+        var idle = Parse("""{"activity":{"speaking":false,"speaker":"claude_code"}}""");
+        Assert.Null(idle.Activity.Speaker);
     }
 
     [Fact]
     public void TrayIndicatorReplacesTheDefault()
     {
         Assert.Equal(DefaultIndicator, Parse("""{"seq":1}""").Activity.TrayIndicator);
-        Assert.Equal(TtsOnly, Parse("""{"tray_indicator":["tts"]}""").Activity.TrayIndicator);
-        Assert.Empty(Parse("""{"tray_indicator":[]}""").Activity.TrayIndicator);
+        Assert.Equal(TtsOnly, Parse("""{"tray":["tts"]}""").Activity.TrayIndicator);
+        Assert.Empty(Parse("""{"tray":[]}""").Activity.TrayIndicator);
     }
 
     [Theory]
@@ -69,7 +69,7 @@ public class HealthSnapshotTests
     [InlineData("refused", true)]
     public void DictationUsesItsCanonicalState(string state, bool visible)
     {
-        var d = Parse($$"""{"dictation":{"state":"{{state}}","text":"","has_paste_target":true} }""").Dictation;
+        var d = Parse($$"""{"dictation":{"state":"{{state}}","text":"","can_paste":true} }""").Dictation;
         Assert.Equal(visible, d.ShowPanel);
         Assert.Equal(state == "recording", d.PromptGlow);
         Assert.Equal(state != "refused", d.HasUsableTarget);
@@ -81,13 +81,13 @@ public class HealthSnapshotTests
         var s = Parse("""
             {"tts":{"engine":"system","provider":null,
                     "status":{"state":"idle","progress":0,"error":null}},
-             "stt":{"engine":"claude_code","provider":null,"delegation_key":"Space",
+             "stt":{"engine":"claude_code","provider":null,"voice_key":"Space",
                     "status":{"state":"running","progress":0,"error":null}}}
             """);
         Assert.Equal("system", s.TtsEngine.Engine);
         Assert.Equal(EngineState.Idle, s.TtsEngine.Status.State);
         Assert.Equal("claude_code", s.SttEngine.Engine);
-        Assert.Equal("Space", s.SttEngine.DelegationKey);
+        Assert.Equal("Space", s.SttEngine.VoiceKey);
         Assert.Equal(EngineState.Running, s.SttEngine.Status.State);
     }
 
@@ -111,7 +111,7 @@ public class HealthSnapshotTests
     {
         var s = Parse("""
             {"diarization":{"status":{"state":"running","progress":1.0,"error":null},
-             "enabled":true,"provider":"ane","speakers":["Alex"],"clustering_threshold":0.72}}
+             "enabled":true,"provider":"ane","speakers":["Alex"],"cluster_threshold":0.72}}
             """);
         Assert.Equal(EngineState.Running, s.Diarization.Status.State);
         Assert.True(s.Diarization.Enabled);

@@ -135,14 +135,14 @@ pub trait Diarizer {
     }
 }
 
-/// THE `diarizer_provider` → backend gate — the single place a provider rung is mapped to
+/// THE `diarizer` → backend gate — the single place a provider rung is mapped to
 /// (the availability of) a diarizer backend; every diarize entry point (the warm helper's
 /// `diarize`/`enroll` ops) delegates here rather than re-deriving the mapping. Takes an
 /// ALREADY-RESOLVED rung (callers walk the ladder via
-/// `VoiceConfig::resolved_diarizer_provider`): `Ok` ⇒ the Core ML / ANE backend
+/// `VoiceConfig::resolved_diarizer`): `Ok` ⇒ the Core ML / ANE backend
 /// (`CoremlDiarizer`, the only diarizer wired today) is the right backend for it. `Err` (a
 /// user-facing message) for any other provider — and for EVERY provider off macOS — so
-/// `diarizer_provider` is honored instead of silently falling through to Core ML.
+/// `diarizer` is honored instead of silently falling through to Core ML.
 pub fn ensure_coreml_backend(provider: DiarizerProvider) -> Result<(), String> {
     match provider {
         #[cfg(target_os = "macos")]
@@ -152,7 +152,7 @@ pub fn ensure_coreml_backend(provider: DiarizerProvider) -> Result<(), String> {
         // fall through. Off macOS this arm rejects every provider, `AppleNative` included.
         #[allow(unreachable_patterns)]
         other => Err(format!(
-            "diarizer_provider={} is not available on this platform (only apple-native is wired)",
+            "diarizer={} is not available on this platform (only apple-native is wired)",
             other.as_str()
         )),
     }
@@ -394,7 +394,7 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert_eq!(
             res.unwrap_err(),
-            "diarizer_provider=apple_native is not available on this platform \
+            "diarizer=apple_native is not available on this platform \
              (only apple-native is wired)"
         );
     }

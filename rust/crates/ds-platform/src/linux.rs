@@ -199,7 +199,7 @@ impl LinuxPlatform {
 
         // Does NOT own the Caps key here — the engine calls `ds_platform::acquire_caps_key`
         // right after construction, only if caps dictation starts enabled (see
-        // `Engine::assemble`), so a `caps_enabled=false` startup never remaps the key at
+        // `Engine::assemble`), so a `caps=false` startup never remaps the key at
         // all instead of remapping-then-immediately-suppressing.
         Ok(plat)
     }
@@ -363,8 +363,8 @@ impl FrontmostWindow for LinuxPlatform {
         *self.extra_terminals.borrow_mut() = extra;
     }
 
-    // Deliberately no `set_extra_custom_text_editors` override — `LinuxPlatform` doesn't
-    // override `has_paste_target` at all (it uses the trait's always-true default), so an
+    // Deliberately no `set_extra_editors` override — `LinuxPlatform` doesn't
+    // override `can_paste` at all (it uses the trait's always-true default), so an
     // exemption list would be dead code: the "no paste target" glow can never appear here.
     // Add one only if Linux ever grows a real focus probe.
 }

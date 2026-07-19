@@ -779,7 +779,7 @@ mod tests {
         let calls = [
             json!({"params": {"name": "unknown", "arguments": {}}}),
             json!({"params": {"arguments": {}}}),
-            json!({"params": {"name": "get_status", "arguments": []}}),
+            json!({"params": {"name": "status", "arguments": []}}),
         ];
         for (index, call) in calls.into_iter().enumerate() {
             let request = json!({
@@ -798,9 +798,9 @@ mod tests {
         let calls = [
             json!({"name": "speak", "arguments": {}}),
             json!({"name": "listen", "arguments": {"seconds": 61}}),
-            json!({"name": "get_status", "arguments": {"extra": true}}),
+            json!({"name": "status", "arguments": {"extra": true}}),
             json!({"name": "mute", "arguments": {"on": "yes"}}),
-            json!({"name": "list_voices", "arguments": {"tts_engine": "off"}}),
+            json!({"name": "voices", "arguments": {"tts_engine": "off"}}),
         ];
         for (index, params) in calls.into_iter().enumerate() {
             let request = json!({
@@ -883,7 +883,7 @@ mod tests {
             input.push_str(
                 &json!({
                     "jsonrpc": "2.0", "id": format!("call-{id}"), "method": "tools/call",
-                    "params": {"name": "get_status", "arguments": {}}
+                    "params": {"name": "status", "arguments": {}}
                 })
                 .to_string(),
             );

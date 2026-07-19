@@ -53,7 +53,7 @@ pub struct SttStatus {
     /// `null` when dictation is off.
     pub status: Option<EngineStatus>,
     /// Bound Claude Code voice key; `null` for other engines or an unusable binding.
-    pub delegation_key: Option<String>,
+    pub voice_key: Option<String>,
 }
 
 /// Diarization lifecycle and UI details in one domain object.
@@ -64,19 +64,19 @@ pub struct DiarizationStatus {
     pub provider: String,
     pub speakers: Vec<String>,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
-    pub clustering_threshold: f64,
+    pub cluster_threshold: f64,
 }
 
 /// Live app activity; names match what hosts render instead of implementation details.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Activity {
-    pub caps_enabled: bool,
+    pub caps: bool,
     pub caps_active: bool,
     pub recording: bool,
     pub speaking: bool,
     /// Wireable client for the in-flight TTS utterance. `null` when idle or the producer
     /// is not a Usage agent (greet / unknown / DontSpeak).
-    pub speaking_source: Option<ds_client::ClientSource>,
+    pub speaker: Option<ds_client::ClientSource>,
     pub muted: bool,
 }
 
@@ -86,7 +86,7 @@ pub struct Dictation {
     /// Panel shown when not [`DictationState::Hidden`].
     pub state: DictationState,
     pub text: String,
-    pub has_paste_target: bool,
+    pub can_paste: bool,
 }
 
 /// Live TTS RTF / TTFA stats (`stats.tts`).
@@ -99,11 +99,11 @@ pub struct TtsSnapshot {
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub rtf_max: f64,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
-    pub first_min_ms: f64,
+    pub ttfa_min_ms: f64,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
-    pub first_avg_ms: f64,
+    pub ttfa_avg_ms: f64,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
-    pub first_max_ms: f64,
+    pub ttfa_max_ms: f64,
     pub utterances: u64,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub audio_secs: f64,
@@ -151,7 +151,7 @@ pub struct ModelStatus {
     pub diarization: DiarizationStatus,
     pub dictation: Dictation,
     pub stats: Stats,
-    pub tray_indicator: Vec<StatusTrayKind>,
+    pub tray: Vec<StatusTrayKind>,
 }
 
 #[cfg(test)]
@@ -170,11 +170,11 @@ mod tests {
         ModelStatus {
             seq: 0,
             activity: Activity {
-                caps_enabled: false,
+                caps: false,
                 caps_active: false,
                 recording: false,
                 speaking: false,
-                speaking_source: None,
+                speaker: None,
                 muted: false,
             },
             tts: TtsStatus {
@@ -186,26 +186,26 @@ mod tests {
                 engine: StatusSttEngine::BuiltIn,
                 provider: None,
                 status: Some(engine_none()),
-                delegation_key: None,
+                voice_key: None,
             },
             diarization: DiarizationStatus {
                 status: engine_none(),
                 enabled: false,
                 provider: "ane".to_string(),
                 speakers: vec![],
-                clustering_threshold: 0.7,
+                cluster_threshold: 0.7,
             },
             dictation: Dictation {
                 state: DictationState::Hidden,
                 text: String::new(),
-                has_paste_target: true,
+                can_paste: true,
             },
             stats: Stats {
                 tts: TtsSnapshot::default(),
                 stt: SttSnapshot::default(),
                 lifetime: LifetimeSnapshot::default(),
             },
-            tray_indicator: vec![StatusTrayKind::Stt, StatusTrayKind::Tts],
+            tray: vec![StatusTrayKind::Stt, StatusTrayKind::Tts],
         }
     }
 
@@ -224,7 +224,7 @@ mod tests {
             "diarization",
             "dictation",
             "stats",
-            "tray_indicator",
+            "tray",
         ] {
             assert!(root.contains_key(key), "missing root field {key}");
         }
@@ -244,13 +244,13 @@ mod tests {
         assert_eq!(v["stt"]["engine"], "built_in");
         assert!(v["tts"]["provider"].is_null());
         assert!(v["stt"]["provider"].is_null());
-        assert!(v["stt"]["delegation_key"].is_null());
+        assert!(v["stt"]["voice_key"].is_null());
         assert_eq!(v["dictation"]["state"], "hidden");
         assert!(
-            v["activity"]["speaking_source"].is_null(),
-            "activity.speaking_source null when idle"
+            v["activity"]["speaker"].is_null(),
+            "activity.speaker null when idle"
         );
-        assert_eq!(v["tray_indicator"], serde_json::json!(["stt", "tts"]));
+        assert_eq!(v["tray"], serde_json::json!(["stt", "tts"]));
         assert!(v["seq"].is_u64());
         assert!(v["stats"]["tts"]["rtf_avg"].is_f64());
         assert!(v["stats"]["stt"]["transcriptions"].is_u64());
@@ -346,19 +346,19 @@ mod tests {
 
     prop_compose! {
         fn activity_strategy()(
-            caps_enabled in any::<bool>(),
+            caps in any::<bool>(),
             caps_active in any::<bool>(),
             recording in any::<bool>(),
             speaking in any::<bool>(),
-            speaking_source in prop::option::of(client_source_strategy()),
+            speaker in prop::option::of(client_source_strategy()),
             muted in any::<bool>(),
         ) -> Activity {
             Activity {
-                caps_enabled,
+                caps,
                 caps_active,
                 recording,
                 speaking,
-                speaking_source,
+                speaker,
                 muted,
             }
         }
@@ -368,12 +368,12 @@ mod tests {
         fn dictation_strategy()(
             state in dictation_state_strategy(),
             text in short_string(),
-            has_paste_target in any::<bool>(),
+            can_paste in any::<bool>(),
         ) -> Dictation {
             Dictation {
                 state,
                 text,
-                has_paste_target,
+                can_paste,
             }
         }
     }
@@ -393,9 +393,9 @@ mod tests {
             engine in status_stt_strategy(),
             provider in opt_short_string(),
             status in prop::option::of(engine_status_strategy()),
-            delegation_key in opt_short_string(),
+            voice_key in opt_short_string(),
         ) -> SttStatus {
-            SttStatus { engine, provider, status, delegation_key }
+            SttStatus { engine, provider, status, voice_key }
         }
     }
 
@@ -405,14 +405,14 @@ mod tests {
             enabled in any::<bool>(),
             provider in short_string(),
             speakers in short_string_vec(),
-            clustering_threshold in unit_f64(),
+            cluster_threshold in unit_f64(),
         ) -> DiarizationStatus {
             DiarizationStatus {
                 status,
                 enabled,
                 provider,
                 speakers,
-                clustering_threshold,
+                cluster_threshold,
             }
         }
     }
@@ -422,9 +422,9 @@ mod tests {
             rtf_min in finite_f64(),
             rtf_avg in finite_f64(),
             rtf_max in finite_f64(),
-            first_min_ms in finite_f64(),
-            first_avg_ms in finite_f64(),
-            first_max_ms in finite_f64(),
+            ttfa_min_ms in finite_f64(),
+            ttfa_avg_ms in finite_f64(),
+            ttfa_max_ms in finite_f64(),
             utterances in any::<u64>(),
             audio_secs in finite_f64(),
             failures in any::<u64>(),
@@ -433,9 +433,9 @@ mod tests {
                 rtf_min,
                 rtf_avg,
                 rtf_max,
-                first_min_ms,
-                first_avg_ms,
-                first_max_ms,
+                ttfa_min_ms,
+                ttfa_avg_ms,
+                ttfa_max_ms,
                 utterances,
                 audio_secs,
                 failures,
@@ -491,7 +491,7 @@ mod tests {
             diarization in diarization_status_strategy(),
             dictation in dictation_strategy(),
             stats in stats_strategy(),
-            tray_indicator in prop::collection::vec(tray_kind_strategy(), 0..4),
+            tray in prop::collection::vec(tray_kind_strategy(), 0..4),
         ) -> ModelStatus {
             ModelStatus {
                 seq,
@@ -501,7 +501,7 @@ mod tests {
                 diarization,
                 dictation,
                 stats,
-                tray_indicator,
+                tray,
             }
         }
     }
@@ -517,7 +517,7 @@ mod tests {
             prop_assert!(v["diarization"]["status"]["state"].is_string());
             prop_assert!(v["tts"].get("provider").is_some());
             prop_assert!(v["stt"].get("provider").is_some());
-            prop_assert!(v["stt"].get("delegation_key").is_some());
+            prop_assert!(v["stt"].get("voice_key").is_some());
             prop_assert!(v["seq"].is_u64());
             prop_assert!(v["stats"]["tts"]["rtf_avg"].is_f64());
             prop_assert!(v["stats"]["stt"]["transcriptions"].is_u64());

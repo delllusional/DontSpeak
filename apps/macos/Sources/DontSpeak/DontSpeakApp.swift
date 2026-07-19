@@ -55,7 +55,7 @@ private struct MenuBarLabel: View {
 enum TrayState: Equatable {
     case idle, recording, speaking
 
-    /// True only for `_animated` tray_indicator forms. Drives TrayAnimator breathing
+    /// True only for `_animated` tray forms. Drives TrayAnimator breathing
     /// (macOS-only; Windows tints without breathing). Independent of shared kind resolution.
     @MainActor static func animated(_ core: Core) -> Bool {
         let cfg = core.activity.trayIndicator
@@ -66,7 +66,7 @@ enum TrayState: Equatable {
         }
     }
 
-    /// `tray_indicator` gates color ([] = never). Shared `ds_tray_icon_kind` — one rule with Win/Linux.
+    /// `tray` gates color ([] = never). Shared `ds_tray_icon_kind` — one rule with Win/Linux.
     @MainActor static func current(_ core: Core) -> TrayState {
         switch Core.trayIconKind(
             sttActive: core.activity.recording,

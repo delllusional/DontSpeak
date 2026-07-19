@@ -716,7 +716,7 @@ public sealed partial class MainWindow : Window
         {
             ShowGrid(TtsStatsMsg, TtsStatsGrid);
             TtsSpeed.Text = Native.StatsRange(s.Tts.RtfMin, s.Tts.RtfAvg, s.Tts.RtfMax, 2, "status.stats.unit.times");
-            TtsFirst.Text = Native.StatsRange(s.Tts.FirstMinMs / 1000, s.Tts.FirstAvgMs / 1000, s.Tts.FirstMaxMs / 1000, 1, "status.stats.unit.seconds");
+            TtsFirst.Text = Native.StatsRange(s.Tts.TtfaMinMs / 1000, s.Tts.TtfaAvgMs / 1000, s.Tts.TtfaMaxMs / 1000, 1, "status.stats.unit.seconds");
             TtsSpoken.Text = Native.StatsCount((ulong)s.Tts.Utterances, s.Tts.AudioSecs);
             TtsFailuresRow.Visibility = s.Tts.Failures > 0 ? Visibility.Visible : Visibility.Collapsed;
             if (s.Tts.Failures > 0)
@@ -766,7 +766,7 @@ public sealed partial class MainWindow : Window
         }
 
         ApplyStateAccent(s.IndicatorState());
-        ApplyUsageSpeakingAccent(s.Activity.SpeakingSource);
+        ApplyUsageSpeakingAccent(s.Activity.Speaker);
         CapsDot.Fill = s.Activity.CapsActive ? Green : Gray;
     }
 
@@ -883,8 +883,8 @@ public sealed partial class MainWindow : Window
     }
 
     private static string ClaudeDelegationHint(HealthSnapshot s) =>
-        s.SttEngine.DelegationKey.Length > 0
-            ? Loc.T("status.stt_claude_code", new Dictionary<string, string> { ["key"] = s.SttEngine.DelegationKey })
+        s.SttEngine.VoiceKey.Length > 0
+            ? Loc.T("status.stt_claude_code", new Dictionary<string, string> { ["key"] = s.SttEngine.VoiceKey })
             : Loc.T("status.stt_claude_code_off");
 
     private static void ShowMsg(TextBlock msg, FrameworkElement grid, string text)

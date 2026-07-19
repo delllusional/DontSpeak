@@ -160,24 +160,24 @@ pub extern "C" fn ds_agent_usage_skeleton_json() -> *mut c_char {
     guard_str(EMPTY, || to_cstring(ds_agent_usage::skeleton().to_json()))
 }
 
-/// Blocking card refresh (`ClientSource` token). Off UI thread. `force_refresh` skips soft cache.
+/// Blocking card refresh (`ClientSource` token). Off UI thread. `refresh` skips soft cache.
 /// Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
-pub extern "C" fn ds_agent_usage_card_json(agent: *const c_char, force_refresh: u8) -> *mut c_char {
+pub extern "C" fn ds_agent_usage_card_json(agent: *const c_char, refresh: u8) -> *mut c_char {
     const EMPTY: &str = r#"{"agent":"unknown","rows":[]}"#;
     guard_str(EMPTY, || {
         let token = cstr_or_empty(agent);
         let source = ds_agent_usage::parse_agent(&token);
-        to_cstring(ds_agent_usage::refresh_card(source, force_refresh != 0).to_json())
+        to_cstring(ds_agent_usage::refresh_card(source, refresh != 0).to_json())
     })
 }
 
 /// Aggregate refresh (tests/tooling). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
-pub extern "C" fn ds_agent_usage_json(force_refresh: u8) -> *mut c_char {
+pub extern "C" fn ds_agent_usage_json(refresh: u8) -> *mut c_char {
     const EMPTY: &str = r#"{"cards":[]}"#;
     guard_str(EMPTY, || {
-        to_cstring(ds_agent_usage::snapshot(force_refresh != 0).to_json())
+        to_cstring(ds_agent_usage::snapshot(refresh != 0).to_json())
     })
 }
 
@@ -275,7 +275,7 @@ pub extern "C" fn ds_log_colors_json() -> *mut c_char {
 }
 
 /// One random Usage speaking-card wash: `{"r","g","b","a"}` (opaque RGB + wash alpha).
-/// New color each call; hosts freeze while `speaking_source` is unchanged. Owned `char*`.
+/// New color each call; hosts freeze while `speaker` is unchanged. Owned `char*`.
 /// HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_random_pastel_wash_json() -> *mut c_char {

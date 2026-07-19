@@ -128,7 +128,7 @@ Missing hook field: log raw stdin at top of `notify` in `main.rs` before
 
 ## Config defaults can mask deploy bugs
 
-`narrate` and `greet_on_open` default on; many opt-ins default off. Wrong config path
+`narrate` and `greet` default on; many opt-ins default off. Wrong config path
 → default-on still "works", opt-in stays silent. Log `cfg.<field>` and
 `paths.config_toml` before debugging feature logic.
 

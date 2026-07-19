@@ -21,7 +21,7 @@ fn log_client(paths: &Paths, client: ClientSource, msg: &str) {
     );
 }
 
-/// Cancel on MarkActive? Skip voice-submit echoes (`input_clears` already applied).
+/// Cancel on MarkActive? Skip voice-submit echoes (`clear_on_input` already applied).
 pub(crate) fn should_cancel_on_submit(was_voice: bool, scope_configured: bool) -> bool {
     !was_voice && scope_configured
 }
@@ -32,7 +32,7 @@ fn earcon_session(ttsq: &TtsQueue, requested: Option<String>) -> Option<String> 
 }
 
 /// UserPromptSubmit MarkActive. Always nudge codex sessions; Grok also. Skip terminal
-/// claim + `input_clears` when `synthetic` (#11).
+/// claim + `clear_on_input` when `synthetic` (#11).
 fn handle_mark_active(
     ttsq: &TtsQueue,
     codex_sessions: &crate::codex_stream::SessionRegistry,
@@ -53,11 +53,11 @@ fn handle_mark_active(
         return; // no active-terminal steal, no TTS queue touch
     }
     ttsq.set_active_session(session.clone());
-    // Voice-submit echo: engine already applied input_clears; skip re-cancel.
+    // Voice-submit echo: engine already applied clear_on_input; skip re-cancel.
     let was_voice = ttsq.take_recent_voice_submit();
     // Skip config read when was_voice already forces no cancel.
     if !was_voice {
-        let scopes = VoiceConfig::load(paths).input_clears;
+        let scopes = VoiceConfig::load(paths).clear_on_input;
         if should_cancel_on_submit(was_voice, scopes.contains(&CancelSpeechScope::Current)) {
             ttsq.clear_session(session.clone());
         }
@@ -130,7 +130,7 @@ pub(crate) fn spawn_ipc_server(
                 }
                 ds_ipc::Request::GreetSession { session, source } => {
                     // New terminal opened → greet in its agent's assigned voice (no-op unless
-                    // `greet_on_open` is set). Claims the agent's voice at open time.
+                    // `greet` is set). Claims the agent's voice at open time.
                     // Also the codex_stream supervisor's session DISCOVERY: a session id
                     // the hooks vouch for may map to a codex app-server thread (CC/Qwen
                     // ids simply never match one).
@@ -231,7 +231,7 @@ pub(crate) fn spawn_ipc_server(
                     ttsq.set_muted(on);
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::StopSpeech { session, source } => {
+                ds_ipc::Request::Stop { session, source } => {
                     // None = global hard barge (drop the whole queue + cancel the
                     // current item). Some(s) = per-window: prune only that session's
                     // items and cancel playback only if it's that session's, so one
@@ -242,7 +242,7 @@ pub(crate) fn spawn_ipc_server(
                     log_client(
                         &paths,
                         source,
-                        &format!("stop_speech session={}", session.as_deref().unwrap_or("-")),
+                        &format!("stop session={}", session.as_deref().unwrap_or("-")),
                     );
                     match session {
                         None => ttsq.clear(),
@@ -494,14 +494,14 @@ fn run_bounded_capture<T: Send + 'static>(
 }
 
 /// Parse the helper's diarize JSON (`{segments, speakers}`), match each speaker cluster
-/// to an enrolled voiceprint (cosine ≥ `speaker_threshold`), attach the matched name to
+/// to an enrolled voiceprint (cosine ≥ `match_threshold`), attach the matched name to
 /// that cluster's segments, and return the segments as a JSON array. Unmatched clusters
 /// keep their numeric id. No enrolled speakers ⇒ segments pass through unnamed.
 fn diarize_named_segments(json: &str, paths: &Paths) -> Result<serde_json::Value, String> {
     let mut out = ds_stt::diarize::parse_output(json)?;
     let store = ds_config::SpeakerStore::load(&paths.speakers_json);
     if !store.is_empty() {
-        let threshold = VoiceConfig::load(paths).speaker_threshold;
+        let threshold = VoiceConfig::load(paths).match_threshold;
         let mut id_to_name: std::collections::HashMap<String, String> = Default::default();
         for (id, emb) in &out.speakers {
             if let Some(name) = ds_stt::diarize::match_speaker(emb, &store, threshold) {
@@ -549,7 +549,7 @@ mod tests {
     fn mark_active_synthetic_does_not_claim_active_or_cancel_speech() {
         let ttsq = TtsQueue::test_stub();
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::rooted_at(dir.path()); // no config.toml → default input_clears=[current]
+        let paths = Paths::rooted_at(dir.path()); // no config.toml → default clear_on_input=[current]
         let codex_sessions = crate::codex_stream::SessionRegistry::new();
         let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
@@ -617,7 +617,7 @@ mod tests {
         assert_eq!(
             ttsq.snapshot().1,
             0,
-            "default input_clears=[current] still prunes a genuine submit's own queued item"
+            "default clear_on_input=[current] still prunes a genuine submit's own queued item"
         );
     }
 

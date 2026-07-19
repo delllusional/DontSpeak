@@ -5,10 +5,10 @@ use std::{collections::HashSet, io};
 use serde::{Deserialize, Serialize};
 
 use crate::enums::{
-    de_diarizer_provider, de_exclude_clients, de_input_clears, de_listen_mode, de_narrate,
-    de_provider, de_stt_engine_ladder, de_stt_engine_pref, de_tray_indicator, de_tts_engine_ladder,
-    de_tts_engine_pref, default_diarizer_provider, default_input_clears, default_narrate,
-    default_provider, default_stt_engine_ladder, default_tray_indicator, default_tts_engine_ladder,
+    de_diarizer, de_exclude_clients, de_clear_on_input, de_listen_mode, de_narrate,
+    de_provider, de_stt_engine_ladder, de_stt_engine_pref, de_tray, de_tts_engine_ladder,
+    de_tts_engine_pref, default_diarizer, default_clear_on_input, default_narrate,
+    default_provider, default_stt_engine_ladder, default_tray, default_tts_engine_ladder,
     se_stt_engine_pref, se_tts_engine_pref,
 };
 use ds_log::{LogLevel, log};
@@ -40,15 +40,15 @@ impl Default for HandsFreePhrases {
 /// Speech config from `config.toml`. Never writes CC voice. Absent field = default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceConfig {
-    /// Kokoro pool (stable per-agent pick).
+    /// Built-in TTS pool (stable per-agent pick). Brand/model: Kokoro.
     #[serde(default = "default_voices")]
-    pub tts_built_in_voices: Vec<String>,
-    /// System voice name; empty = OS default. Separate from Kokoro list.
+    pub tts_voices: Vec<String>,
+    /// System voice name; empty = OS default. Separate from built-in list.
     #[serde(default)]
     pub tts_system_voice: String,
     /// SessionStart greet (default on). Voice only.
     #[serde(default = "default_enabled")]
-    pub greet_on_open: bool,
+    pub greet: bool,
 
     /// Narrate set (default both). Empty = off.
     #[serde(default = "default_narrate", deserialize_with = "de_narrate")]
@@ -74,20 +74,17 @@ pub struct VoiceConfig {
     pub stt_engine_ladder: Vec<SttEngine>,
 
     /// Diarizer ladder; empty = off.
-    #[serde(
-        default = "default_diarizer_provider",
-        deserialize_with = "de_diarizer_provider"
-    )]
-    pub diarizer_provider: Vec<DiarizerProvider>,
+    #[serde(default = "default_diarizer", deserialize_with = "de_diarizer")]
+    pub diarizer: Vec<DiarizerProvider>,
     /// Clustering 0.5–0.9 (lower = more speakers). Default 0.7.
-    #[serde(default = "default_clustering_threshold")]
-    pub clustering_threshold: f32,
+    #[serde(default = "default_cluster_threshold")]
+    pub cluster_threshold: f32,
     /// Enrolled-voiceprint cosine cutoff. Default 0.65.
-    #[serde(default = "default_speaker_threshold")]
-    pub speaker_threshold: f32,
+    #[serde(default = "default_match_threshold")]
+    pub match_threshold: f32,
     /// Keep only enrolled speakers when diarization on (Parakeet; fail-open).
     #[serde(default)]
-    pub stt_speaker_lock: bool,
+    pub speaker_lock: bool,
 
     /// TTS pref tri-state (same shape as stt_engine).
     #[serde(
@@ -105,21 +102,18 @@ pub struct VoiceConfig {
     pub tts_engine_ladder: Vec<TtsEngine>,
     /// 0.5–2.0; 1.0 = normal.
     #[serde(default = "default_rate")]
-    pub tts_rate: f32,
+    pub rate: f32,
     /// Shared compute ladder (default ane→cuda→cpu). Always has a backend.
     #[serde(default = "default_provider", deserialize_with = "de_provider")]
     pub provider: Vec<Provider>,
 
-    // On/off = resolved engine; no separate tts_enabled. caps_enabled independent.
+    // On/off = resolved engine; no separate tts_enabled. caps independent.
     /// Caps loop (dictation + silence/cancel). Default on.
     #[serde(default = "default_enabled")]
-    pub caps_enabled: bool,
+    pub caps: bool,
     /// Menu-bar color set. Empty = never color. Engine pass-through.
-    #[serde(
-        default = "default_tray_indicator",
-        deserialize_with = "de_tray_indicator"
-    )]
-    pub tray_indicator: Vec<TrayKind>,
+    #[serde(default = "default_tray", deserialize_with = "de_tray")]
+    pub tray: Vec<TrayKind>,
 
     /// `record_submit` (PTT) | `always`. Exclusive.
     #[serde(default, deserialize_with = "de_listen_mode")]
@@ -142,33 +136,36 @@ pub struct VoiceConfig {
 
     /// false: stop-tap submits, double-tap inserts. True swaps.
     #[serde(default)]
-    pub double_tap_submits: bool,
+    pub double_tap_submit: bool,
 
     /// ms paste→Enter (async paste can drop back-to-back Enter). Default 100.
-    #[serde(default = "default_paste_submit_delay_ms")]
-    pub paste_submit_delay_ms: u64,
+    #[serde(default = "default_paste_delay_ms")]
+    pub paste_delay_ms: u64,
 
     /// Whose speech a submit cancels (default `["current"]`; `[]` = never).
-    #[serde(default = "default_input_clears", deserialize_with = "de_input_clears")]
-    pub input_clears: Vec<CancelSpeechScope>,
+    #[serde(
+        default = "default_clear_on_input",
+        deserialize_with = "de_clear_on_input"
+    )]
+    pub clear_on_input: Vec<CancelSpeechScope>,
 
     /// Pause when no terminal frontmost. Default false. Any terminal, not which one.
     #[serde(default)]
-    pub pause_in_background: bool,
+    pub pause_bg: bool,
 
     /// Reply-done ding; empty = off. Default OS chime.
     #[serde(default = "default_earcon_reply")]
-    pub earcon_reply_sound: String,
+    pub earcon_reply: String,
     /// Needs-input cue. Empty default = off.
     #[serde(default)]
-    pub earcon_needs_input_sound: String,
+    pub earcon_input: String,
 
     /// Codex mid-turn (config-file; re-read each loop). Default on; inert without daemon.
     #[serde(default = "default_enabled")]
     pub codex_stream: bool,
     /// Lazy-start app-server. Default off.
     #[serde(default)]
-    pub codex_stream_daemon_start: bool,
+    pub codex_daemon: bool,
     /// App-server endpoint; empty = default socket; `ws://…` for TCP.
     #[serde(default)]
     pub codex_app_server_url: String,
@@ -185,7 +182,7 @@ pub struct VoiceConfig {
 
     /// Extra custom-text-editor ids (OS-native). Ignored on Linux. #14/#15.
     #[serde(default)]
-    pub extra_custom_text_editors: Vec<String>,
+    pub extra_editors: Vec<String>,
 
     /// Opt-out unwire list. None/`[]` = wire all. Boot reconcile; no set_config.
     #[serde(
@@ -242,10 +239,10 @@ fn default_long_press_ms() -> u64 {
 fn default_rate() -> f32 {
     1.0
 }
-fn default_clustering_threshold() -> f32 {
+fn default_cluster_threshold() -> f32 {
     0.7
 }
-fn default_speaker_threshold() -> f32 {
+fn default_match_threshold() -> f32 {
     0.65
 }
 fn default_submit_confirm_ms() -> u64 {
@@ -254,7 +251,7 @@ fn default_submit_confirm_ms() -> u64 {
 fn default_endpoint_silence_ms() -> u64 {
     700
 }
-fn default_paste_submit_delay_ms() -> u64 {
+fn default_paste_delay_ms() -> u64 {
     100
 }
 fn default_capture_gain() -> CaptureGain {
@@ -312,42 +309,42 @@ impl<'de> serde::Deserialize<'de> for CaptureGain {
 impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
-            tts_built_in_voices: default_voices(),
+            tts_voices: default_voices(),
             tts_system_voice: String::new(),
-            greet_on_open: true,
+            greet: true,
             narrate: default_narrate(),
             long_press_ms: default_long_press_ms(),
             stt_engine: None,
             stt_engine_ladder: default_stt_engine_ladder(),
-            diarizer_provider: default_diarizer_provider(),
-            clustering_threshold: default_clustering_threshold(),
-            speaker_threshold: default_speaker_threshold(),
-            stt_speaker_lock: false,
+            diarizer: default_diarizer(),
+            cluster_threshold: default_cluster_threshold(),
+            match_threshold: default_match_threshold(),
+            speaker_lock: false,
             tts_engine: None,
             tts_engine_ladder: default_tts_engine_ladder(),
-            tts_rate: default_rate(),
+            rate: default_rate(),
             provider: default_provider(),
-            caps_enabled: default_enabled(),
-            tray_indicator: default_tray_indicator(),
+            caps: default_enabled(),
+            tray: default_tray(),
             listen_mode: ListenMode::default(),
             hands_free: HandsFreePhrases::default(),
             submit_confirm_ms: default_submit_confirm_ms(),
             endpoint_silence_ms: default_endpoint_silence_ms(),
             full_duplex: false,
             capture_gain: default_capture_gain(),
-            double_tap_submits: false,
-            paste_submit_delay_ms: default_paste_submit_delay_ms(),
-            input_clears: default_input_clears(),
-            pause_in_background: false,
-            earcon_reply_sound: default_earcon_reply(),
-            earcon_needs_input_sound: String::new(),
+            double_tap_submit: false,
+            paste_delay_ms: default_paste_delay_ms(),
+            clear_on_input: default_clear_on_input(),
+            pause_bg: false,
+            earcon_reply: default_earcon_reply(),
+            earcon_input: String::new(),
             codex_stream: true,
-            codex_stream_daemon_start: false,
+            codex_daemon: false,
             codex_app_server_url: String::new(),
             codex_bin: default_codex_bin(),
             grok_stream: true,
             extra_terminals: Vec::new(),
-            extra_custom_text_editors: Vec::new(),
+            extra_editors: Vec::new(),
             exclude_clients: None,
         }
     }
@@ -388,7 +385,7 @@ impl VoiceConfig {
     /// Warm-subsystem delta for surgical `set_config` apply (not per-call params).
     pub fn changes_since(&self, prev: &VoiceConfig) -> ConfigChange {
         ConfigChange {
-            caps_toggled: self.caps_enabled != prev.caps_enabled,
+            caps_toggled: self.caps != prev.caps,
             // Diff RESOLVED TTS (not raw ladder) so reorder-only is a no-op.
             tts_toggled: self.resolved_tts() != prev.resolved_tts(),
             // Provider also rebuilds STT runtime.
@@ -494,19 +491,19 @@ impl VoiceConfig {
 
     /// Clamp numerics so hand-edits can't feed the engine bad values.
     fn clamp(&mut self) {
-        self.tts_rate = self.tts_rate.clamp(0.5, 2.0);
-        self.clustering_threshold = self.clustering_threshold.clamp(0.5, 0.9);
-        self.speaker_threshold = self.speaker_threshold.clamp(0.0, 1.0);
+        self.rate = self.rate.clamp(0.5, 2.0);
+        self.cluster_threshold = self.cluster_threshold.clamp(0.5, 0.9);
+        self.match_threshold = self.match_threshold.clamp(0.0, 1.0);
         // Real timer param (not just compared) — same 0..5000 as set_config.
-        self.paste_submit_delay_ms = self.paste_submit_delay_ms.clamp(0, 5000);
+        self.paste_delay_ms = self.paste_delay_ms.clamp(0, 5000);
         // 0 is long_press sentinel ("use default") — do not clamp it to 100.
         if self.long_press_ms != 0 {
             self.long_press_ms = self.long_press_ms.clamp(100, 5000);
         }
         // An empty voice pool is invalid (`set_config` rejects it); a hand-edited empty
         // list fails open to the default pool, so a LOADED config always has voices.
-        if self.tts_built_in_voices.is_empty() {
-            self.tts_built_in_voices = default_voices();
+        if self.tts_voices.is_empty() {
+            self.tts_voices = default_voices();
         }
     }
 
@@ -514,7 +511,7 @@ impl VoiceConfig {
     /// Kokoro. This is only the architecture/provider choice; runtime gates separately verify
     /// the shim, DontSpeak-managed Core ML assets, and shared G2P assets.
     pub fn uses_apple_native_model(&self) -> bool {
-        self.resolved_tts() == Some(TtsEngine::Kokoro)
+        self.resolved_tts() == Some(TtsEngine::BuiltIn)
             && cfg!(target_os = "macos")
             && self.resolved_tts_provider() == Provider::Ane
     }
@@ -548,18 +545,18 @@ impl VoiceConfig {
         self.resolved_tts_provider().as_str()
     }
 
-    /// Whether diarization is ON — i.e. the `diarizer_provider` ladder is non-empty. The
+    /// Whether diarization is ON — i.e. the `diarizer` ladder is non-empty. The
     /// single gate for the `diarize`/`enroll` tools and speaker-lock (folds in the old
     /// `diarization_enabled` flag).
     pub fn is_diarization_on(&self) -> bool {
-        !self.diarizer_provider.is_empty()
+        !self.diarizer.is_empty()
     }
 
-    /// The concrete diarizer runtime the `diarizer_provider` ladder resolves to on THIS
+    /// The concrete diarizer runtime the `diarizer` ladder resolves to on THIS
     /// platform: the first rung usable here, else `apple_native` (the only rung). What the
     /// `diarize`/`enroll` tools actually load (only meaningful when [`Self::is_diarization_on`]).
-    pub fn resolved_diarizer_provider(&self) -> DiarizerProvider {
-        self.diarizer_provider
+    pub fn resolved_diarizer(&self) -> DiarizerProvider {
+        self.diarizer
             .iter()
             .copied()
             .find(|p| p.is_diarizer_usable())
@@ -572,7 +569,7 @@ impl VoiceConfig {
     /// `ds_tts::ane_voices`), so there is no separate apple-native voice set. Every entry is
     /// a per-agent pool voice — no privileged "default" slot.
     pub fn active_voices(&self) -> &[String] {
-        &self.tts_built_in_voices
+        &self.tts_voices
     }
 
     /// Whether `kind` is in the narration set. `narrates(Digests)` gates both message-blockquote
@@ -639,9 +636,9 @@ pub(crate) mod tests {
         let v: VoiceConfig = serde_json::from_str("{}").unwrap();
         // Default pool: two voices out of the box so agent types differ by ear. No
         // separate default/fallback voice exists — everything speaks a pool entry.
-        assert_eq!(v.tts_built_in_voices, vec!["af_sarah", "bf_emma"]);
+        assert_eq!(v.tts_voices, vec!["af_sarah", "bf_emma"]);
         assert!(v.tts_system_voice.is_empty());
-        assert!(v.greet_on_open);
+        assert!(v.greet);
         // Default narration: shorts first, then digests — both on out of the box.
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
         assert!(v.narrates(NarrateKind::Digests) && v.narrates(NarrateKind::Shorts));
@@ -653,18 +650,18 @@ pub(crate) mod tests {
         // SpeechAnalyzer, then Parakeet, then claude_code (always-usable, LAST).
         assert_eq!(
             v.tts_engine_ladder,
-            vec![TtsEngine::Kokoro, TtsEngine::System]
+            vec![TtsEngine::BuiltIn, TtsEngine::System]
         );
         assert_eq!(
             v.stt_engine_ladder,
             vec![SttEngine::System, SttEngine::BuiltIn, SttEngine::ClaudeCode]
         );
-        assert!(v.diarizer_provider.is_empty());
-        assert_eq!(v.clustering_threshold, 0.7);
-        assert_eq!(v.speaker_threshold, 0.65);
-        assert!(!v.stt_speaker_lock);
-        assert_eq!(v.tts_rate, 1.0);
-        assert!(v.caps_enabled);
+        assert!(v.diarizer.is_empty());
+        assert_eq!(v.cluster_threshold, 0.7);
+        assert_eq!(v.match_threshold, 0.65);
+        assert!(!v.speaker_lock);
+        assert_eq!(v.rate, 1.0);
+        assert!(v.caps);
         // Always-listening defaults: unset == today (record-and-submit PTT).
         assert_eq!(v.listen_mode, ListenMode::RecordSubmit);
         assert_eq!(v.hands_free.start, "computer");
@@ -674,31 +671,31 @@ pub(crate) mod tests {
         assert_eq!(v.endpoint_silence_ms, 700);
         assert!(!v.full_duplex);
         assert_eq!(v.capture_gain, CaptureGain::Auto);
-        assert!(!v.double_tap_submits);
-        assert_eq!(v.paste_submit_delay_ms, 100);
-        assert_eq!(v.input_clears, vec![CancelSpeechScope::Current]);
-        assert!(!v.pause_in_background);
+        assert!(!v.double_tap_submit);
+        assert_eq!(v.paste_delay_ms, 100);
+        assert_eq!(v.clear_on_input, vec![CancelSpeechScope::Current]);
+        assert!(!v.pause_bg);
         #[cfg(target_os = "macos")]
-        assert_eq!(v.earcon_reply_sound, "Tink");
+        assert_eq!(v.earcon_reply, "Tink");
         #[cfg(target_os = "windows")]
-        assert_eq!(v.earcon_reply_sound, "ding");
+        assert_eq!(v.earcon_reply, "ding");
         #[cfg(target_os = "linux")]
-        assert_eq!(v.earcon_reply_sound, "message");
+        assert_eq!(v.earcon_reply, "message");
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-        assert!(v.earcon_reply_sound.is_empty());
-        assert!(v.earcon_needs_input_sound.is_empty());
+        assert!(v.earcon_reply.is_empty());
+        assert!(v.earcon_input.is_empty());
         assert_eq!(
             v.provider,
             vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]
         );
-        assert_eq!(v.tray_indicator, vec![TrayKind::Stt, TrayKind::TtsAnimated]);
+        assert_eq!(v.tray, vec![TrayKind::Stt, TrayKind::TtsAnimated]);
         assert!(v.codex_stream);
-        assert!(!v.codex_stream_daemon_start);
+        assert!(!v.codex_daemon);
         assert!(v.codex_app_server_url.is_empty());
         assert_eq!(v.codex_bin, "codex");
         assert!(v.grok_stream);
         assert!(v.extra_terminals.is_empty());
-        assert!(v.extra_custom_text_editors.is_empty());
+        assert!(v.extra_editors.is_empty());
         assert!(v.exclude_clients.is_none());
     }
 
@@ -709,24 +706,24 @@ pub(crate) mod tests {
         // control socket, binary = bare "codex".
         let v: VoiceConfig = serde_json::from_str("{}").unwrap();
         assert!(v.codex_stream);
-        assert!(!v.codex_stream_daemon_start);
+        assert!(!v.codex_daemon);
         assert_eq!(v.codex_app_server_url, "");
         assert_eq!(v.codex_bin, "codex");
         // All four are plain-typed overrides.
         let v: VoiceConfig = serde_json::from_str(
-            r#"{"codex_stream":false,"codex_stream_daemon_start":true,
+            r#"{"codex_stream":false,"codex_daemon":true,
                 "codex_app_server_url":"ws://127.0.0.1:4550","codex_bin":"/opt/codex/bin/codex"}"#,
         )
         .unwrap();
         assert!(!v.codex_stream);
-        assert!(v.codex_stream_daemon_start);
+        assert!(v.codex_daemon);
         assert_eq!(v.codex_app_server_url, "ws://127.0.0.1:4550");
         assert_eq!(v.codex_bin, "/opt/codex/bin/codex");
         // The fields serialize, so `known_keys` covers them (no spurious unknown-key warns).
         let keys = VoiceConfig::known_keys();
         for k in [
             "codex_stream",
-            "codex_stream_daemon_start",
+            "codex_daemon",
             "codex_app_server_url",
             "codex_bin",
         ] {
@@ -760,15 +757,15 @@ pub(crate) mod tests {
     fn extra_terminals_and_custom_editors_default_empty_and_parse() {
         // Default: both empty (no escape-hatch entries out of the box).
         assert!(VoiceConfig::default().extra_terminals.is_empty());
-        assert!(VoiceConfig::default().extra_custom_text_editors.is_empty());
+        assert!(VoiceConfig::default().extra_editors.is_empty());
 
         // A flat pass-through list: no dedup/validation, order preserved.
         let v: VoiceConfig = serde_json::from_str(
-            r#"{"extra_terminals":["foo"],"extra_custom_text_editors":["bar.exe"]}"#,
+            r#"{"extra_terminals":["foo"],"extra_editors":["bar.exe"]}"#,
         )
         .unwrap();
         assert_eq!(v.extra_terminals, vec!["foo".to_string()]);
-        assert_eq!(v.extra_custom_text_editors, vec!["bar.exe".to_string()]);
+        assert_eq!(v.extra_editors, vec!["bar.exe".to_string()]);
 
         // Neither field is `skip_serializing_if`, so both appear in the default struct's
         // serialized table already — asserted explicitly so a future refactor that adds
@@ -776,7 +773,7 @@ pub(crate) mod tests {
         // in config.toml" warning.
         let keys = VoiceConfig::known_keys();
         assert!(keys.contains("extra_terminals"));
-        assert!(keys.contains("extra_custom_text_editors"));
+        assert!(keys.contains("extra_editors"));
     }
 
     #[test]
@@ -958,29 +955,29 @@ pub(crate) mod tests {
         let diar = |j: &str| {
             serde_json::from_str::<VoiceConfig>(j)
                 .unwrap()
-                .diarizer_provider
+                .diarizer
         };
         // Default is EMPTY = diarization OFF (opt-in); the on/off flag is folded in.
-        assert!(VoiceConfig::default().diarizer_provider.is_empty());
+        assert!(VoiceConfig::default().diarizer.is_empty());
         assert!(!VoiceConfig::default().is_diarization_on());
         // A non-empty ladder keeps its order (deduped) and turns diarization ON.
-        let on = diar(r#"{"diarizer_provider":["apple_native"]}"#);
+        let on = diar(r#"{"diarizer":["apple_native"]}"#);
         assert_eq!(on, vec![DiarizerProvider::AppleNative]);
         // Empty, all-unknown (old `auto`/`onnx`), and non-array all read as OFF (empty).
-        assert!(diar(r#"{"diarizer_provider":["auto"]}"#).is_empty());
-        assert!(diar(r#"{"diarizer_provider":["onnx"]}"#).is_empty());
-        assert!(diar(r#"{"diarizer_provider":[]}"#).is_empty());
-        assert!(diar(r#"{"diarizer_provider":"apple_native"}"#).is_empty());
+        assert!(diar(r#"{"diarizer":["auto"]}"#).is_empty());
+        assert!(diar(r#"{"diarizer":["onnx"]}"#).is_empty());
+        assert!(diar(r#"{"diarizer":[]}"#).is_empty());
+        assert!(diar(r#"{"diarizer":"apple_native"}"#).is_empty());
 
         // is_diarization_on() = non-empty; resolution walks to the first platform-usable rung.
         let cfg = |r: Vec<DiarizerProvider>| VoiceConfig {
-            diarizer_provider: r,
+            diarizer: r,
             ..VoiceConfig::default()
         };
         assert!(cfg(vec![DiarizerProvider::AppleNative]).is_diarization_on());
         let ladder = vec![DiarizerProvider::AppleNative];
         assert_eq!(
-            cfg(ladder).resolved_diarizer_provider(),
+            cfg(ladder).resolved_diarizer(),
             DiarizerProvider::AppleNative
         );
     }
@@ -990,44 +987,44 @@ pub(crate) mod tests {
         let tray = |j: &str| {
             serde_json::from_str::<VoiceConfig>(j)
                 .unwrap()
-                .tray_indicator
+                .tray
         };
         // The array form normalizes to one token per state, canonical order (stt, then tts);
         // an empty array = never color.
         assert_eq!(
-            tray(r#"{"tray_indicator":["stt","tts"]}"#),
+            tray(r#"{"tray":["stt","tts"]}"#),
             vec![TrayKind::Stt, TrayKind::Tts]
         );
-        assert_eq!(tray(r#"{"tray_indicator":["tts"]}"#), vec![TrayKind::Tts]);
+        assert_eq!(tray(r#"{"tray":["tts"]}"#), vec![TrayKind::Tts]);
         assert!(
-            tray(r#"{"tray_indicator":[]}"#).is_empty(),
+            tray(r#"{"tray":[]}"#).is_empty(),
             "empty array = none"
         );
         // The `_animated` form colors AND breathes, and wins if both forms of a state appear.
         assert_eq!(
-            tray(r#"{"tray_indicator":["stt_animated","tts"]}"#),
+            tray(r#"{"tray":["stt_animated","tts"]}"#),
             vec![TrayKind::SttAnimated, TrayKind::Tts]
         );
         assert_eq!(
-            tray(r#"{"tray_indicator":["tts","tts_animated"]}"#),
+            tray(r#"{"tray":["tts","tts_animated"]}"#),
             vec![TrayKind::TtsAnimated]
         );
         // Unknown tokens drop, duplicates collapse, order canonicalizes.
         assert_eq!(
-            tray(r#"{"tray_indicator":["tts","both","tts","stt"]}"#),
+            tray(r#"{"tray":["tts","both","tts","stt"]}"#),
             vec![TrayKind::Stt, TrayKind::Tts]
         );
         // A legacy string / wrong-typed value degrades to the default set (NO migration of the
         // old none/both tokens — clean rename, no compat shim).
         for raw in [
-            r#"{"tray_indicator":"both"}"#,
-            r#"{"tray_indicator":"none"}"#,
-            r#"{"tray_indicator":3}"#,
+            r#"{"tray":"both"}"#,
+            r#"{"tray":"none"}"#,
+            r#"{"tray":3}"#,
         ] {
             assert_eq!(
                 serde_json::from_str::<VoiceConfig>(raw)
                     .unwrap()
-                    .tray_indicator,
+                    .tray,
                 vec![TrayKind::Stt, TrayKind::TtsAnimated],
                 "{raw} → default set"
             );
@@ -1138,10 +1135,10 @@ pub(crate) mod tests {
                 .unwrap()
                 .tts_engine_ladder
         };
-        let default = vec![TtsEngine::Kokoro, TtsEngine::System];
+        let default = vec![TtsEngine::BuiltIn, TtsEngine::System];
         assert_eq!(
             p(r#"{"tts_engine_ladder":["system","built_in"]}"#),
-            vec![TtsEngine::System, TtsEngine::Kokoro]
+            vec![TtsEngine::System, TtsEngine::BuiltIn]
         );
         // ARRAYS ONLY: a bare scalar string degrades to the default ladder (no one-rung
         // shorthand); `[]` is the only disable.
@@ -1164,7 +1161,7 @@ pub(crate) mod tests {
         // A scalar token ⇒ Some(vec![engine]) — the forced single choice.
         assert_eq!(
             p(r#"{"tts_engine":"built_in"}"#),
-            Some(vec![TtsEngine::Kokoro])
+            Some(vec![TtsEngine::BuiltIn])
         );
         assert_eq!(
             p(r#"{"tts_engine":"system"}"#),
@@ -1222,12 +1219,12 @@ pub(crate) mod tests {
                 ..VoiceConfig::default()
             };
             assert_eq!(
-                c(vec![TtsEngine::System, TtsEngine::Kokoro]).resolved_tts(),
+                c(vec![TtsEngine::System, TtsEngine::BuiltIn]).resolved_tts(),
                 Some(TtsEngine::System)
             );
             assert_eq!(
-                c(vec![TtsEngine::Kokoro, TtsEngine::System]).resolved_tts(),
-                Some(TtsEngine::Kokoro)
+                c(vec![TtsEngine::BuiltIn, TtsEngine::System]).resolved_tts(),
+                Some(TtsEngine::BuiltIn)
             );
         }
     }
@@ -1238,7 +1235,7 @@ pub(crate) mod tests {
         let deferring_engine = if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
             TtsEngine::System
         } else {
-            TtsEngine::Kokoro
+            TtsEngine::BuiltIn
         };
         let deferring = VoiceConfig {
             tts_engine: None,
@@ -1257,7 +1254,7 @@ pub(crate) mod tests {
         // Explicit off (Some(vec![])) is off regardless of what the ladder would resolve to.
         let explicit_off = VoiceConfig {
             tts_engine: Some(Vec::new()),
-            tts_engine_ladder: vec![TtsEngine::Kokoro, TtsEngine::System],
+            tts_engine_ladder: vec![TtsEngine::BuiltIn, TtsEngine::System],
             ..VoiceConfig::default()
         };
         assert_eq!(explicit_off.resolved_tts(), None);
@@ -1272,7 +1269,7 @@ pub(crate) mod tests {
         {
             let explicit_system = VoiceConfig {
                 tts_engine: Some(vec![TtsEngine::System]),
-                tts_engine_ladder: vec![TtsEngine::Kokoro],
+                tts_engine_ladder: vec![TtsEngine::BuiltIn],
                 ..VoiceConfig::default()
             };
             assert_eq!(explicit_system.resolved_tts(), Some(TtsEngine::System));
@@ -1329,12 +1326,12 @@ pub(crate) mod tests {
         let sub = |j: &str| {
             serde_json::from_str::<VoiceConfig>(j)
                 .unwrap()
-                .double_tap_submits
+                .double_tap_submit
         };
         // Absent ⇒ default off (a lone tap submits); explicit booleans pass through.
         assert!(!sub("{}"));
-        assert!(sub(r#"{"double_tap_submits":true}"#));
-        assert!(!sub(r#"{"double_tap_submits":false}"#));
+        assert!(sub(r#"{"double_tap_submit":true}"#));
+        assert!(!sub(r#"{"double_tap_submit":false}"#));
     }
 
     #[test]
@@ -1396,23 +1393,23 @@ pub(crate) mod tests {
     /// A non-default config so the merge is observably distinct from defaults.
     pub(crate) fn sample_voice() -> VoiceConfig {
         VoiceConfig {
-            tts_built_in_voices: vec!["am_michael".into(), "am_adam".into()],
+            tts_voices: vec!["am_michael".into(), "am_adam".into()],
             tts_system_voice: "Samantha (Enhanced)".into(),
-            greet_on_open: true,
+            greet: true,
             stt_engine: None,
             stt_engine_ladder: vec![SttEngine::BuiltIn],
-            diarizer_provider: vec![DiarizerProvider::AppleNative],
-            clustering_threshold: 0.55,
-            speaker_threshold: 0.7,
-            stt_speaker_lock: false,
+            diarizer: vec![DiarizerProvider::AppleNative],
+            cluster_threshold: 0.55,
+            match_threshold: 0.7,
+            speaker_lock: false,
             tts_engine: None,
             tts_engine_ladder: vec![TtsEngine::System],
             provider: vec![Provider::OrtCoreMl],
-            tts_rate: 1.25,
+            rate: 1.25,
             narrate: vec![NarrateKind::Digests],
             long_press_ms: 750,
-            caps_enabled: false,
-            tray_indicator: vec![TrayKind::Stt],
+            caps: false,
+            tray: vec![TrayKind::Stt],
             listen_mode: ListenMode::Always,
             hands_free: HandsFreePhrases {
                 submit: "go ahead".into(),
@@ -1422,19 +1419,19 @@ pub(crate) mod tests {
             endpoint_silence_ms: 650,
             full_duplex: true,
             capture_gain: CaptureGain::Manual(2.5),
-            double_tap_submits: true,   // non-default (default is false)
-            paste_submit_delay_ms: 150, // non-default (default is 100)
-            input_clears: vec![CancelSpeechScope::Other], // non-default (default is [current])
-            pause_in_background: true,  // non-default (default is false)
-            earcon_reply_sound: "Glass".into(), // non-default (default is the OS chime)
-            earcon_needs_input_sound: "Funk".into(),
+            double_tap_submit: true,   // non-default (default is false)
+            paste_delay_ms: 150, // non-default (default is 100)
+            clear_on_input: vec![CancelSpeechScope::Other], // non-default (default is [current])
+            pause_bg: true,  // non-default (default is false)
+            earcon_reply: "Glass".into(), // non-default (default is the OS chime)
+            earcon_input: "Funk".into(),
             codex_stream: false,             // non-default (default is true)
-            codex_stream_daemon_start: true, // non-default (default is false)
+            codex_daemon: true, // non-default (default is false)
             codex_app_server_url: "ws://127.0.0.1:4550".into(), // non-default (default is empty)
             codex_bin: "/opt/codex/bin/codex".into(), // non-default (default is "codex")
             grok_stream: false,              // non-default (default is true)
             extra_terminals: vec!["myterm".into()], // non-default (default is [])
-            extra_custom_text_editors: vec!["myeditor.exe".into()], // non-default (default is [])
+            extra_editors: vec!["myeditor.exe".into()], // non-default (default is [])
             exclude_clients: Some(vec![ClientSource::ClaudeCode]), // non-default (default is None)
         }
     }
@@ -1445,15 +1442,15 @@ pub(crate) mod tests {
 
         // A per-call-only change (voice/rate) flags nothing warm.
         let only_voice = VoiceConfig {
-            tts_built_in_voices: vec!["am_michael".into()],
-            tts_rate: 1.5,
+            tts_voices: vec!["am_michael".into()],
+            rate: 1.5,
             ..base.clone()
         };
         assert!(only_voice.changes_since(&base).is_noop());
 
         // Each toggle/engine field flags exactly its subsystem.
         let caps = VoiceConfig {
-            caps_enabled: !base.caps_enabled,
+            caps: !base.caps,
             ..base.clone()
         };
         assert!(caps.changes_since(&base).caps_toggled);
@@ -1502,9 +1499,9 @@ pub(crate) mod tests {
 
         // And load() reconstructs the written config.
         let lv = VoiceConfig::load(&paths);
-        assert_eq!(lv.active_voices(), v.tts_built_in_voices);
+        assert_eq!(lv.active_voices(), v.tts_voices);
         assert_eq!(lv.extra_terminals, v.extra_terminals);
-        assert_eq!(lv.extra_custom_text_editors, v.extra_custom_text_editors);
+        assert_eq!(lv.extra_editors, v.extra_editors);
     }
 
     #[test]
@@ -1537,9 +1534,9 @@ pub(crate) mod tests {
             tts_engine_ladder: vec![TtsEngine::System],
             narrate: Vec::new(),
             full_duplex: true,
-            tts_rate: 1.25,
+            rate: 1.25,
             capture_gain: CaptureGain::Manual(3.5),
-            tts_built_in_voices: vec!["am_adam".into(), "af_bella".into()],
+            tts_voices: vec!["am_adam".into(), "af_bella".into()],
             ..VoiceConfig::default()
         };
         write_settings(&paths, &v).unwrap();
@@ -1566,7 +1563,7 @@ pub(crate) mod tests {
             "empty narrate set round-trips through TOML"
         );
         assert!(r.full_duplex);
-        assert_eq!(r.tts_rate, 1.25);
+        assert_eq!(r.rate, 1.25);
         assert_eq!(r.capture_gain.manual(), Some(3.5));
         assert_eq!(r.active_voices(), ["am_adam", "af_bella"]);
     }
@@ -1577,10 +1574,10 @@ pub(crate) mod tests {
         let mut paths = Paths::rooted_at(dir.path());
         paths.config_toml = dir.path().join("config.toml");
         // A hand-edited rate well past the 0.5–2.0 range is clamped on load.
-        std::fs::write(&paths.config_toml, "tts_rate = 5.0\n").unwrap();
-        assert_eq!(VoiceConfig::load(&paths).tts_rate, 2.0);
-        std::fs::write(&paths.config_toml, "tts_rate = 0.1\n").unwrap();
-        assert_eq!(VoiceConfig::load(&paths).tts_rate, 0.5);
+        std::fs::write(&paths.config_toml, "rate = 5.0\n").unwrap();
+        assert_eq!(VoiceConfig::load(&paths).rate, 2.0);
+        std::fs::write(&paths.config_toml, "rate = 0.1\n").unwrap();
+        assert_eq!(VoiceConfig::load(&paths).rate, 0.5);
     }
 
     #[test]
@@ -1590,9 +1587,9 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut paths = Paths::rooted_at(dir.path());
         paths.config_toml = dir.path().join("config.toml");
-        std::fs::write(&paths.config_toml, "tts_built_in_voices = []\n").unwrap();
+        std::fs::write(&paths.config_toml, "tts_voices = []\n").unwrap();
         assert_eq!(
-            VoiceConfig::load(&paths).tts_built_in_voices,
+            VoiceConfig::load(&paths).tts_voices,
             default_voices()
         );
     }
@@ -1637,6 +1634,6 @@ pub(crate) mod tests {
         paths.config_toml = dir.path().join("config.toml");
         std::fs::write(&paths.config_toml, "tts_engine = \"built_in\"\n").unwrap();
         let cfg = VoiceConfig::load(&paths);
-        assert_eq!(cfg.tts_engine, Some(vec![TtsEngine::Kokoro]));
+        assert_eq!(cfg.tts_engine, Some(vec![TtsEngine::BuiltIn]));
     }
 }

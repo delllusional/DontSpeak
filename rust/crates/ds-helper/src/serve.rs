@@ -272,7 +272,7 @@ fn record_16k(seconds: u64, cancel: &std::sync::atomic::AtomicBool) -> Result<Ve
 /// Gate via [`ds_stt::diarize::ensure_coreml_backend`] (sole provider→backend mapping).
 #[cfg(target_os = "macos")]
 fn ensure_coreml_diarizer(cfg: &ds_config::VoiceConfig) -> Result<(), String> {
-    ds_stt::diarize::ensure_coreml_backend(cfg.resolved_diarizer_provider())
+    ds_stt::diarize::ensure_coreml_backend(cfg.resolved_diarizer())
 }
 
 /// One-shot diarize: record → cluster (config threshold). Emits `DIAR`/`DIARERR` + `DDONE`.
@@ -294,7 +294,7 @@ fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
         return emit_err("config unavailable");
     };
     if !cfg.is_diarization_on() {
-        return emit_err("diarization is disabled (set diarizer_provider to a non-empty ladder)");
+        return emit_err("diarization is disabled (set diarizer to a non-empty ladder)");
     }
     if let Err(e) = ensure_coreml_diarizer(&cfg) {
         return emit_err(&e);
@@ -304,7 +304,7 @@ fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
         Ok(p) => p,
         Err(e) => return emit_err(&e),
     };
-    let mut diarizer = CoremlDiarizer::with_threshold(cfg.clustering_threshold);
+    let mut diarizer = CoremlDiarizer::with_threshold(cfg.cluster_threshold);
     match diarizer.diarize_pcm_16k_full(&pcm) {
         Ok(out) => {
             let segments: Vec<_> = out
@@ -341,7 +341,7 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
         return emit_err("config unavailable");
     };
     if !cfg.is_diarization_on() {
-        return emit_err("diarization is disabled (set diarizer_provider to a non-empty ladder)");
+        return emit_err("diarization is disabled (set diarizer to a non-empty ladder)");
     }
     if let Err(e) = ensure_coreml_diarizer(&cfg) {
         return emit_err(&e);

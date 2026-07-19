@@ -1,7 +1,7 @@
 # Per-terminal narration: focus-gated TTS
 
 One session-tagged TTS FIFO. Worker plays only the active session. With
-`pause_in_background`, pauses when no terminal is frontmost (all three OSes).
+`pause_bg`, pauses when no terminal is frontmost (all three OSes).
 
 ## Focus signals
 
@@ -13,7 +13,7 @@ Engine poll thread publishes atomics (worker can't call platform focus APIs):
    not last-to-speak, so background agents don't steal the voice. `synthetic` MarkActive
    (harness auto-reinvoke) does **not** reassign (issue #11).
 
-No portable window→session map; active = last prompted. `pause_in_background` default
+No portable window→session map; active = last prompted. `pause_bg` default
 `false`.
 
 ## Queue shape

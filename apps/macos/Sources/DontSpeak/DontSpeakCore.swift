@@ -28,7 +28,7 @@ struct Perms: Sendable, Equatable {
 struct Activity: Sendable, Equatable {
     var engineRunning = false
     var capsActive = false
-    /// Raw `caps_enabled` (pre-permission). `true` + `capsActive == false` ⇒ blocked by missing grant.
+    /// Raw `caps` (pre-permission). `true` + `capsActive == false` ⇒ blocked by missing grant.
     var capsEnabled = false
     var recording = false
     var speaking = false
@@ -321,23 +321,23 @@ final class Core {
         s.stt.engine = dto.stt.engine
         s.stt.provider = dto.stt.provider
         s.stt.status = dto.stt.status.engineStatus
-        s.stt.delegationKey = dto.stt.delegationKey
+        s.stt.delegationKey = dto.stt.voiceKey
         s.diarization.status = dto.diarization.status.engineStatus
         s.diarization.enabled = dto.diarization.enabled
         s.diarization.provider = dto.diarization.provider
         s.diarization.speakers = dto.diarization.speakers
         s.diarization.clusteringThreshold = dto.diarization.clusteringThreshold
         s.activity.capsActive = dto.activity.capsActive
-        s.activity.capsEnabled = dto.activity.capsEnabled
+        s.activity.capsEnabled = dto.activity.caps
         s.activity.recording = dto.activity.recording
         s.activity.speaking = dto.activity.speaking
-        s.activity.speakingSource = dto.activity.speaking ? dto.activity.speakingSource : nil
+        s.activity.speakingSource = dto.activity.speaking ? dto.activity.speaker : nil
         s.activity.muted = dto.activity.muted
-        s.activity.trayIndicator = dto.trayIndicator
+        s.activity.trayIndicator = dto.tray
         s.stats = EngineStats.from(dto.stats)
         s.dictation.state = dto.dictation.state
         s.dictation.text = dto.dictation.text
-        s.dictation.hasTarget = dto.dictation.hasPasteTarget
+        s.dictation.hasTarget = dto.dictation.canPaste
         return (s, dto.seq)
     }
 
@@ -395,19 +395,19 @@ extension Optional where Wrapped == EngineStatusDTO {
 }
 
 struct ActivityDTO: Decodable {
-    var capsEnabled: Bool
+    var caps: Bool
     var capsActive: Bool
     var recording: Bool
     var speaking: Bool
-    var speakingSource: String?
+    var speaker: String?
     var muted: Bool
 
     enum CodingKeys: String, CodingKey {
-        case capsEnabled = "caps_enabled"
+        case caps
         case capsActive = "caps_active"
         case recording
         case speaking
-        case speakingSource = "speaking_source"
+        case speaker
         case muted
     }
 }
@@ -415,12 +415,12 @@ struct ActivityDTO: Decodable {
 struct DictationDTO: Decodable {
     var state: String
     var text: String
-    var hasPasteTarget: Bool
+    var canPaste: Bool
 
     enum CodingKeys: String, CodingKey {
         case state
         case text
-        case hasPasteTarget = "has_paste_target"
+        case canPaste = "can_paste"
     }
 }
 
@@ -434,11 +434,11 @@ struct SttStatusDTO: Decodable {
     var engine: String
     var provider: String?
     var status: EngineStatusDTO?
-    var delegationKey: String?
+    var voiceKey: String?
 
     enum CodingKeys: String, CodingKey {
         case engine, provider, status
-        case delegationKey = "delegation_key"
+        case voiceKey = "voice_key"
     }
 }
 
@@ -450,7 +450,7 @@ struct ModelStatusDTO: Decodable {
     var diarization: DiarizationStatusDTO
     var dictation: DictationDTO
     var stats: StatsDTO
-    var trayIndicator: [String]
+    var tray: [String]
 
     enum CodingKeys: String, CodingKey {
         case seq
@@ -458,6 +458,6 @@ struct ModelStatusDTO: Decodable {
         case diarization
         case dictation
         case stats
-        case trayIndicator = "tray_indicator"
+        case tray
     }
 }

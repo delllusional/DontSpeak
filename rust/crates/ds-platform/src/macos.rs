@@ -201,7 +201,7 @@ pub struct MacOsPlatform {
     /// `ds_platform::acquire_caps_key`, not yet followed by `release_caps_key`). Unlike Linux's
     /// persistent marker file, `hidutil`'s `UserKeyMapping` is a single global, and
     /// `capskey::release_caps_key()` clears the WHOLE thing unconditionally — with no
-    /// guard, a `release_caps_key()` call when we never acquired (e.g. `caps_enabled`
+    /// guard, a `release_caps_key()` call when we never acquired (e.g. `caps`
     /// was false all session, or a double release) would wipe a user's own unrelated
     /// hidutil remap. Gating on this in-process flag is enough here (no persistence
     /// needed): the remap is per-login anyway, so there's nothing to reconcile across
@@ -211,10 +211,10 @@ pub struct MacOsPlatform {
     /// Same single-poll-thread reasoning as `owns_key` above (`Rc<MacOsPlatform>` is
     /// `!Send`, so plain interior mutability suffices).
     extra_terminals: RefCell<Vec<String>>,
-    /// User config.toml `extra_custom_text_editors` — extends `CUSTOM_TEXT_BUNDLES` at
+    /// User config.toml `extra_editors` — extends `CUSTOM_TEXT_BUNDLES` at
     /// lookup time. Same single-poll-thread reasoning as `extra_terminals` above
     /// (`Rc<MacOsPlatform>` is `!Send`, so plain interior mutability suffices).
-    extra_custom_text_editors: RefCell<Vec<String>>,
+    extra_editors: RefCell<Vec<String>>,
 }
 
 impl MacOsPlatform {
@@ -237,7 +237,7 @@ impl MacOsPlatform {
         let led = led::RetryingCapsLed::new();
         // Does NOT own the Caps key here — the engine calls `ds_platform::acquire_caps_key`
         // right after construction, only if caps dictation starts enabled (see
-        // `Engine::assemble`), so a `caps_enabled=false` startup never remaps the key at
+        // `Engine::assemble`), so a `caps=false` startup never remaps the key at
         // all instead of remapping-then-immediately-suppressing.
         Ok(Self {
             caps,
@@ -246,7 +246,7 @@ impl MacOsPlatform {
             caps_down,
             owns_key: Cell::new(false),
             extra_terminals: RefCell::new(Vec::new()),
-            extra_custom_text_editors: RefCell::new(Vec::new()),
+            extra_editors: RefCell::new(Vec::new()),
         })
     }
 }
@@ -393,12 +393,12 @@ fn is_known_terminal_bundle(bid: &str, extra: &[String]) -> bool {
 ///   by the config escape hatch below rather than this built-in list.
 ///
 /// A user can extend this table without a code change via config.toml's
-/// `extra_custom_text_editors` (see [`crate::FrontmostWindow::set_extra_custom_text_editors`])
+/// `extra_editors` (see [`crate::FrontmostWindow::set_extra_editors`])
 /// — unioned in at lookup time by [`is_custom_text_bundle`], never merged into this slice.
 const CUSTOM_TEXT_BUNDLES: &[&str] = &["dev.zed.Zed", "dev.zed.Zed-Preview"];
 
 /// Is `bid` one of the built-in [`CUSTOM_TEXT_BUNDLES`], OR one of the user's config.toml
-/// `extra_custom_text_editors` entries? Case-insensitive for the user-supplied extras
+/// `extra_editors` entries? Case-insensitive for the user-supplied extras
 /// only (the built-in table's exact-match behavior for its own literals is untouched),
 /// matching `is_known_terminal_bundle`'s semantics.
 fn is_custom_text_bundle(bid: &str, extra: &[String]) -> bool {
@@ -446,7 +446,7 @@ impl FrontmostWindow for MacOsPlatform {
         app.localizedName().map(|n| n.to_string())
     }
 
-    fn has_paste_target(&self) -> bool {
+    fn can_paste(&self) -> bool {
         // Custom-drawn-editor exemption (macOS mirror of windows.rs's CUSTOM_TEXT_EXES):
         // a frontmost CUSTOM_TEXT_BUNDLES editor accepts a paste even though its buffer
         // is invisible to the AX probe below. Same off-main NSWorkspace read as
@@ -455,7 +455,7 @@ impl FrontmostWindow for MacOsPlatform {
         // `is_terminal_frontmost()`, and macOS terminals expose an AXTextArea anyway.
         let ws = NSWorkspace::sharedWorkspace();
         if let Some(bid) = ws.frontmostApplication().and_then(|a| a.bundleIdentifier())
-            && is_custom_text_bundle(&bid.to_string(), &self.extra_custom_text_editors.borrow())
+            && is_custom_text_bundle(&bid.to_string(), &self.extra_editors.borrow())
         {
             return true;
         }
@@ -471,8 +471,8 @@ impl FrontmostWindow for MacOsPlatform {
         *self.extra_terminals.borrow_mut() = extra;
     }
 
-    fn set_extra_custom_text_editors(&self, extra: Vec<String>) {
-        *self.extra_custom_text_editors.borrow_mut() = extra;
+    fn set_extra_editors(&self, extra: Vec<String>) {
+        *self.extra_editors.borrow_mut() = extra;
     }
 }
 
@@ -515,7 +515,7 @@ impl CapsKeyMonitor for MacOsPlatform {
     fn release_caps_key(&self) {
         // Only if WE actually own it — `capskey::release_caps_key()` clears hidutil's
         // ENTIRE UserKeyMapping unconditionally (unlike the Linux port's marker-gated
-        // release), so calling it when we never acquired (e.g. `caps_enabled` was false
+        // release), so calling it when we never acquired (e.g. `caps` was false
         // all session) would wipe a user's own unrelated hidutil remap. See `owns_key`'s
         // doc on why an in-process flag is enough here (no cross-restart persistence
         // needed, unlike Linux's GNOME/KDE settings).

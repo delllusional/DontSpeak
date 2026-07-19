@@ -86,22 +86,22 @@ impl SttEngine {
     }
 }
 
-/// TTS backend. Config TOKEN is `built_in` (mirror of STT); brand/model name stays `kokoro`
-/// in listings/`model_status`. Variant is `Kokoro` (model identity); only `as_str` → token.
+/// TTS backend. Config/wire TOKEN is `built_in` (mirror of STT); brand/model name stays
+/// `kokoro` in listings/`model_status` via [`brand`](TtsEngine::brand) only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TtsEngine {
     #[default]
-    Kokoro,
+    BuiltIn,
     System,
 }
 
 impl TtsEngine {
     /// All variants, canonical-token order — catalog parity single source.
-    pub const ALL: &'static [TtsEngine] = &[TtsEngine::Kokoro, TtsEngine::System];
+    pub const ALL: &'static [TtsEngine] = &[TtsEngine::BuiltIn, TtsEngine::System];
 
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "built_in" => Some(TtsEngine::Kokoro),
+            "built_in" => Some(TtsEngine::BuiltIn),
             "system" => Some(TtsEngine::System),
             _ => None,
         }
@@ -110,7 +110,7 @@ impl TtsEngine {
     /// Config TOKEN (`built_in` / `system`); brand name is [`brand`](TtsEngine::brand).
     pub fn as_str(self) -> &'static str {
         match self {
-            TtsEngine::Kokoro => "built_in",
+            TtsEngine::BuiltIn => "built_in",
             TtsEngine::System => "system",
         }
     }
@@ -120,7 +120,7 @@ impl TtsEngine {
     pub fn is_tts_usable(self) -> bool {
         // Intel mac: Kokoro ONNX is runtime (Homebrew/ORT_DYLIB_PATH), not in (os,arch).
         let intel_mac_ort_available = cfg!(all(target_os = "macos", target_arch = "x86_64"))
-            && matches!(self, TtsEngine::Kokoro)
+            && matches!(self, TtsEngine::BuiltIn)
             && intel_mac_builtin_ort_available();
         self.tts_usable_with_intel_mac_ort(
             std::env::consts::OS,
@@ -135,7 +135,7 @@ impl TtsEngine {
         arch: &str,
         intel_mac_ort_available: bool,
     ) -> bool {
-        if matches!(self, TtsEngine::Kokoro) && os == "macos" && arch == "x86_64" {
+        if matches!(self, TtsEngine::BuiltIn) && os == "macos" && arch == "x86_64" {
             intel_mac_ort_available
         } else {
             self.tts_usable_on(os, arch)
@@ -145,7 +145,7 @@ impl TtsEngine {
     /// Pure `(os, arch)` form of [`is_tts_usable`](TtsEngine::is_tts_usable).
     pub(crate) fn tts_usable_on(self, os: &str, arch: &str) -> bool {
         match self {
-            TtsEngine::Kokoro => built_in_usable_on(os, arch),
+            TtsEngine::BuiltIn => built_in_usable_on(os, arch),
             TtsEngine::System => system_tts_buildable_on(os),
         }
     }
@@ -153,7 +153,7 @@ impl TtsEngine {
     /// Brand/model name for listings and status (`kokoro`/`system`) — not the config token.
     pub fn brand(self) -> &'static str {
         match self {
-            TtsEngine::Kokoro => "kokoro",
+            TtsEngine::BuiltIn => "kokoro",
             TtsEngine::System => "system",
         }
     }
@@ -186,8 +186,8 @@ impl ListenMode {
     }
 }
 
-/// Diarization runtime rung. `diarizer_provider: Vec` is also on/off: empty = off; first
-/// usable rung wins ([`crate::VoiceConfig::resolved_diarizer_provider`]). macOS-only today.
+/// Diarization runtime rung. `diarizer: Vec` is also on/off: empty = off; first
+/// usable rung wins ([`crate::VoiceConfig::resolved_diarizer`]). macOS-only today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DiarizerProvider {
     /// FluidAudio Core ML / ANE (macOS only).
@@ -365,7 +365,7 @@ impl std::fmt::Display for RealizedProvider {
     }
 }
 
-/// Menu-bar color/breathe set (`tray_indicator`). At most one form per state; animated wins.
+/// Menu-bar color/breathe set (`tray`). At most one form per state; animated wins.
 /// Default `["stt", "tts_animated"]`; `[]` = never color. Engine passes through only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayKind {
@@ -415,7 +415,7 @@ impl TrayKind {
 }
 
 /// At most one token per state (animated wins); stt then tts. `[]` stays empty.
-pub fn normalize_tray_indicator(kinds: Vec<TrayKind>) -> Vec<TrayKind> {
+pub fn normalize_tray(kinds: Vec<TrayKind>) -> Vec<TrayKind> {
     let mut stt: Option<bool> = None; // Some(animated?)
     let mut tts: Option<bool> = None;
     for k in kinds {
@@ -443,9 +443,9 @@ pub fn normalize_tray_indicator(kinds: Vec<TrayKind>) -> Vec<TrayKind> {
     out
 }
 
-/// Whose pending speech a submit cancels (`input_clears` set). Any submit triggers permanent
+/// Whose pending speech a submit cancels (`clear_on_input` set). Any submit triggers permanent
 /// cancel. `current` = submitting session; `other` = everything else (incl. untagged MCP).
-/// Empty = never cancel. See [`crate::VoiceConfig::input_clears`].
+/// Empty = never cancel. See [`crate::VoiceConfig::clear_on_input`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelSpeechScope {
     Current,
@@ -556,20 +556,20 @@ macro_rules! fail_open_de {
 }
 
 fail_open_de!(de_listen_mode, ListenMode);
-/// Default when `input_clears` absent: cancel current session only. Explicit `[]` = never.
-pub(crate) fn default_input_clears() -> Vec<CancelSpeechScope> {
+/// Default when `clear_on_input` absent: cancel current session only. Explicit `[]` = never.
+pub(crate) fn default_clear_on_input() -> Vec<CancelSpeechScope> {
     vec![CancelSpeechScope::Current]
 }
-/// Fail-open `input_clears`: array keeps known tokens; empty = never cancel; non-array →
-/// [`default_input_clears`] (not empty — that would invert the default).
-pub(crate) fn de_input_clears<'de, D>(d: D) -> Result<Vec<CancelSpeechScope>, D::Error>
+/// Fail-open `clear_on_input`: array keeps known tokens; empty = never cancel; non-array →
+/// [`default_clear_on_input`] (not empty — that would invert the default).
+pub(crate) fn de_clear_on_input<'de, D>(d: D) -> Result<Vec<CancelSpeechScope>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(true));
     Ok(
         fail_open_vec!(&v, CancelSpeechScope, CancelSpeechScope::parse)
-            .unwrap_or_else(default_input_clears),
+            .unwrap_or_else(default_clear_on_input),
     )
 }
 
@@ -632,20 +632,20 @@ where
 }
 
 /// Default tray: stt static + tts_animated.
-pub(crate) fn default_tray_indicator() -> Vec<TrayKind> {
+pub(crate) fn default_tray() -> Vec<TrayKind> {
     vec![TrayKind::Stt, TrayKind::TtsAnimated]
 }
 
-/// Fail-open `tray_indicator`: array of known tokens (then normalize); empty = never color;
+/// Fail-open `tray`: array of known tokens (then normalize); empty = never color;
 /// non-array → default. No legacy token migration.
-pub(crate) fn de_tray_indicator<'de, D>(d: D) -> Result<Vec<TrayKind>, D::Error>
+pub(crate) fn de_tray<'de, D>(d: D) -> Result<Vec<TrayKind>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(true));
     let parsed =
-        fail_open_vec!(&v, TrayKind, TrayKind::parse).unwrap_or_else(default_tray_indicator);
-    Ok(normalize_tray_indicator(parsed))
+        fail_open_vec!(&v, TrayKind, TrayKind::parse).unwrap_or_else(default_tray);
+    Ok(normalize_tray(parsed))
 }
 
 /// Default provider ladder: ANE → CUDA → CPU. `OrtCoreMl` explicit-only (not default).
@@ -665,12 +665,12 @@ where
 }
 
 /// Default diarizer ladder: empty = off (opt-in; no separate enable flag).
-pub(crate) fn default_diarizer_provider() -> Vec<DiarizerProvider> {
+pub(crate) fn default_diarizer() -> Vec<DiarizerProvider> {
     Vec::new()
 }
 
-/// Fail-open `diarizer_provider`: empty/non-array = off.
-pub(crate) fn de_diarizer_provider<'de, D>(d: D) -> Result<Vec<DiarizerProvider>, D::Error>
+/// Fail-open `diarizer`: empty/non-array = off.
+pub(crate) fn de_diarizer<'de, D>(d: D) -> Result<Vec<DiarizerProvider>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -705,7 +705,7 @@ fn system_tts_buildable_on(os: &str) -> bool {
 
 /// Default TTS ladder: built_in → system. `[]` = off.
 pub(crate) fn default_tts_engine_ladder() -> Vec<TtsEngine> {
-    vec![TtsEngine::Kokoro, TtsEngine::System]
+    vec![TtsEngine::BuiltIn, TtsEngine::System]
 }
 
 /// Default STT ladder: system → built_in → claude_code. `system` macOS-only usable;
@@ -899,8 +899,8 @@ mod tests {
     fn engine_usability_uses_mocked_intel_mac_ort_availability() {
         // Exercise both Intel-macOS runtime branches without reading ORT_DYLIB_PATH or scanning
         // Homebrew. Other targets ignore that injected capability and follow the static matrix.
-        assert!(!TtsEngine::Kokoro.tts_usable_with_intel_mac_ort("macos", "x86_64", false));
-        assert!(TtsEngine::Kokoro.tts_usable_with_intel_mac_ort("macos", "x86_64", true));
+        assert!(!TtsEngine::BuiltIn.tts_usable_with_intel_mac_ort("macos", "x86_64", false));
+        assert!(TtsEngine::BuiltIn.tts_usable_with_intel_mac_ort("macos", "x86_64", true));
         assert!(!SttEngine::BuiltIn.stt_usable_with_intel_mac_ort("macos", "x86_64", false));
         assert!(SttEngine::BuiltIn.stt_usable_with_intel_mac_ort("macos", "x86_64", true));
 
@@ -938,7 +938,7 @@ mod tests {
             (
                 "macos",
                 "aarch64",
-                Some(TtsEngine::Kokoro),
+                Some(TtsEngine::BuiltIn),
                 Some(SttEngine::System),
             ),
             (
@@ -950,25 +950,25 @@ mod tests {
             (
                 "windows",
                 "x86_64",
-                Some(TtsEngine::Kokoro),
+                Some(TtsEngine::BuiltIn),
                 Some(SttEngine::BuiltIn),
             ),
             (
                 "windows",
                 "aarch64",
-                Some(TtsEngine::Kokoro),
+                Some(TtsEngine::BuiltIn),
                 Some(SttEngine::BuiltIn),
             ),
             (
                 "linux",
                 "x86_64",
-                Some(TtsEngine::Kokoro),
+                Some(TtsEngine::BuiltIn),
                 Some(SttEngine::BuiltIn),
             ),
             (
                 "linux",
                 "aarch64",
-                Some(TtsEngine::Kokoro),
+                Some(TtsEngine::BuiltIn),
                 Some(SttEngine::BuiltIn),
             ),
         ];
@@ -1084,7 +1084,7 @@ mod tests {
         // Array: known tokens, in order, deduped.
         assert_eq!(
             parse_tts_ladder(&arr(&["system", "built_in", "system"])),
-            vec![TtsEngine::System, TtsEngine::Kokoro]
+            vec![TtsEngine::System, TtsEngine::BuiltIn]
         );
         // An empty array yields EMPTY (= off).
         assert!(parse_tts_ladder(&arr(&[])).is_empty());
@@ -1092,7 +1092,7 @@ mod tests {
         // the user gave an array, so we honor its emptiness).
         assert_eq!(
             parse_tts_ladder(&arr(&["festival", "built_in"])),
-            vec![TtsEngine::Kokoro]
+            vec![TtsEngine::BuiltIn]
         );
         assert!(parse_tts_ladder(&arr(&["festival"])).is_empty());
         // ARRAYS ONLY: a bare scalar string is NO LONGER a one-rung shorthand — any scalar

@@ -118,7 +118,7 @@ fn target_hosts_engine(target: DownloadTarget, kokoro: bool, parakeet: bool) -> 
 pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceConfig) -> bool {
     target_hosts_engine(
         target,
-        cfg.resolved_tts() == Some(ds_config::TtsEngine::Kokoro),
+        cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn),
         cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn),
     )
 }
@@ -371,7 +371,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
     // `uses_apple_native_model()` is arch-blind; `apple_native_tts_active` is shim-aware
     // so exactly one flavor (ONNX vs Core ML) fetches — never both/neither.
-    let tts_is_kokoro = cfg.resolved_tts() == Some(ds_config::TtsEngine::Kokoro);
+    let tts_is_kokoro = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn);
     let ane_active = apple_native_tts_active(cfg);
     let kokoro_model = tts_is_kokoro
         && !ane_active
@@ -411,7 +411,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
         );
     // Speaker-lock on + model absent: without it lock fails open (unfiltered).
     let sepformer_model = cfg!(target_os = "macos")
-        && cfg.stt_speaker_lock
+        && cfg.speaker_lock
         && cfg.is_diarization_on()
         && !exists(ds_model::model_path(ds_model::SEPFORMER_FILE));
     DownloadNeeds {

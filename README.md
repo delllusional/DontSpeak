@@ -67,7 +67,7 @@ LED: **lit = recording, dark = idle.**
 | **Double tap** | Skip current spoken message | Stop + paste **without** Enter |
 
 Idle double-tap only while speech plays; else first tap starts recording.
-`double_tap_submits` (default false) swaps stop gestures; `long_press_ms` sets threshold.
+`double_tap_submit` (default false) swaps stop gestures; `long_press_ms` sets threshold.
 Always-listening does not use Caps Lock.
 
 ## Models & runtimes
@@ -86,8 +86,8 @@ Always-listening does not use Caps Lock.
 
 ## MCP tools
 
-`speak` · `listen` · `stop_speech` · `mute` · `get_status` · `get_usage` ·
-`list_voices` · `set_config` —
+`speak` · `listen` · `stop` · `mute` · `status` · `usage` ·
+`voices` · `set_config` —
 [docs/MCP-TOOLS.md](docs/MCP-TOOLS.md). Wiring automatic (`exclude_clients`); inspect with
 `dontspeak wire --list` / `wire <client>`.
 

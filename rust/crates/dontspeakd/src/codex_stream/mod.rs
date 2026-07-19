@@ -1391,7 +1391,7 @@ fn supervise(
             continue;
         }
         #[cfg(any(unix, windows))]
-        if !cfg.codex_stream_daemon_start
+        if !cfg.codex_daemon
             && !launch_kept_warm
             && !launch_requested
             && owned_server.is_some()
@@ -1402,7 +1402,7 @@ fn supervise(
                 "codex-stream: stopped the engine-owned app-server after auto-start was disabled client=codex"
             );
         }
-        let force_start = cfg.codex_stream_daemon_start || launch_kept_warm || launch_requested;
+        let force_start = cfg.codex_daemon || launch_kept_warm || launch_requested;
         // Auto-start must not wait for a registered session: a remote TUI cannot connect
         // (and therefore cannot fire SessionStart) until the app-server already exists.
         // Without auto-start, preserve the cheap no-session park.

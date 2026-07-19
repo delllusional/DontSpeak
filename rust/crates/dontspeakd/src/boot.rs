@@ -266,7 +266,7 @@ pub fn engine_run(
             },
         ));
     }
-    caps_active.store(daemon.caps_enabled, Ordering::Relaxed);
+    caps_active.store(daemon.caps, Ordering::Relaxed);
     let poll = Duration::from_millis(POLL_MS);
 
     status_gate.bump();

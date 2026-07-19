@@ -195,7 +195,7 @@ pub(crate) fn model_status_json(
             (
                 text,
                 awaiting,
-                p.has_paste_target,
+                p.can_paste,
                 // Same refusal clock as tick digest.
                 crate::engine::refusal_live(p.refused_until, std::time::Instant::now()),
             )
@@ -218,7 +218,7 @@ pub(crate) fn model_status_json(
         Some(TargetState::Failed(e)) => Some(e.clone()),
         _ => None,
     };
-    let kokoro_enabled = resolved_tts == Some(ds_config::TtsEngine::Kokoro);
+    let kokoro_enabled = resolved_tts == Some(ds_config::TtsEngine::BuiltIn);
     // Load error only while present (clean install "not downloaded" is missing, not failed).
     let kokoro_error = combined_error(
         kokoro_present,
@@ -281,7 +281,7 @@ pub(crate) fn model_status_json(
     let dict_local = dictation_local_stt(parakeet_running, system_running);
 
     let tts_status = match resolved_tts {
-        Some(ds_config::TtsEngine::Kokoro) => Some(engine_status(
+        Some(ds_config::TtsEngine::BuiltIn) => Some(engine_status(
             RowState {
                 present: kokoro_present,
                 downloading: kokoro_downloading,
@@ -355,11 +355,11 @@ pub(crate) fn model_status_json(
                 || downloading(DownloadTarget::SepformerModel),
             error: dl_err_for(DownloadTarget::DiarizationCoreml)
                 .or_else(|| dl_err_for(DownloadTarget::SepformerModel)),
-            running: cfg.stt_speaker_lock
+            running: cfg.speaker_lock
                 && cfg.is_diarization_on()
                 && diar_present
                 && sepformer_present,
-            enabled: cfg.stt_speaker_lock,
+            enabled: cfg.speaker_lock,
         },
         frac_for(DownloadTarget::DiarizationCoreml).max(frac_for(DownloadTarget::SepformerModel)),
     );
@@ -367,11 +367,11 @@ pub(crate) fn model_status_json(
     let status = ModelStatus {
         seq,
         activity: Activity {
-            caps_enabled: caps_loop_enabled(&cfg),
+            caps: caps_loop_enabled(&cfg),
             caps_active: caps_active.load(Ordering::Relaxed),
             recording: dict_recording,
             speaking: tts_active,
-            speaking_source: tts_source,
+            speaker: tts_source,
             muted: tts.is_muted(),
         },
         tts: TtsStatus {
@@ -383,7 +383,7 @@ pub(crate) fn model_status_json(
             engine: status_stt_engine(resolved_stt),
             provider: stt_provider_token(resolved_stt, &tts.stt_realized_provider()),
             status: stt_status,
-            delegation_key: claude_code_key,
+            voice_key: claude_code_key,
         },
         diarization: DiarizationStatus {
             status: diarization_status,
@@ -391,20 +391,20 @@ pub(crate) fn model_status_json(
             // Realized compute token hosts pass to `ds_runtime_label` (ANE for AppleNative).
             provider: ds_config::Provider::Ane.as_str().to_string(),
             speakers: ds_config::SpeakerStore::load(&paths.speakers_json).names(),
-            clustering_threshold: cfg.clustering_threshold as f64,
+            cluster_threshold: cfg.cluster_threshold as f64,
         },
         dictation: Dictation {
             state: dictation_state(dict_recording, dict_awaiting, dict_local, dict_refused),
             text: dict_text,
-            has_paste_target: dict_has_target,
+            can_paste: dict_has_target,
         },
         stats: Stats {
             tts: tts_stats.snapshot(),
             stt: stt_stats.snapshot(),
             lifetime: lifetime.snapshot(),
         },
-        tray_indicator: cfg
-            .tray_indicator
+        tray: cfg
+            .tray
             .iter()
             .copied()
             .map(status_tray_kind)
@@ -437,7 +437,7 @@ fn tts_provider_token(
     child_provider: &str,
 ) -> Option<String> {
     match resolved_tts {
-        Some(ds_config::TtsEngine::Kokoro) => {
+        Some(ds_config::TtsEngine::BuiltIn) => {
             Some(realized_ort_token(child_provider).as_str().to_string())
         }
         _ => None,
@@ -528,7 +528,7 @@ fn status_stt_engine(resolved: Option<ds_config::SttEngine>) -> StatusSttEngine 
 
 fn status_tts_engine(resolved: Option<ds_config::TtsEngine>) -> StatusTtsEngine {
     match resolved {
-        Some(ds_config::TtsEngine::Kokoro) => StatusTtsEngine::BuiltIn,
+        Some(ds_config::TtsEngine::BuiltIn) => StatusTtsEngine::BuiltIn,
         Some(ds_config::TtsEngine::System) => StatusTtsEngine::System,
         None => StatusTtsEngine::Off,
     }
@@ -629,7 +629,7 @@ mod tests {
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(
             &paths.config_toml,
-            "stt_engine_ladder = [\"built_in\"]\ntts_engine_ladder = [\"built_in\"]\ncaps_enabled = false\ntray_indicator = []\n",
+            "stt_engine_ladder = [\"built_in\"]\ntts_engine_ladder = [\"built_in\"]\ncaps = false\ntray = []\n",
         )
         .unwrap();
         // SAFETY: process-wide test environment mutation is serialized by ENV_LOCK and restored
@@ -656,7 +656,7 @@ mod tests {
         {
             let mut p = paste.lock().unwrap();
             p.partial = "live words".to_string();
-            p.has_paste_target = false;
+            p.can_paste = false;
         }
         let downloads = Arc::new(Mutex::new(DownloadState::default()));
         {
@@ -716,16 +716,16 @@ mod tests {
         assert_eq!(status.stt.engine, StatusSttEngine::BuiltIn);
         assert_eq!(status.tts.engine, StatusTtsEngine::BuiltIn);
         assert!(status.activity.caps_active);
-        assert!(!status.activity.caps_enabled);
+        assert!(!status.activity.caps);
         assert!(status.activity.recording);
         assert!(status.activity.speaking);
         assert_eq!(status.dictation.text, "live words");
-        assert!(!status.dictation.has_paste_target);
+        assert!(!status.dictation.can_paste);
         assert_eq!(status.dictation.state, DictationState::Hidden);
         assert_eq!(status.stats.tts.utterances, 1);
         assert_eq!(status.stats.stt.transcriptions, 1);
         assert_eq!(status.seq, 1);
-        assert!(status.tray_indicator.is_empty());
+        assert!(status.tray.is_empty());
     }
 
     /// The gate's two real transitions, exercised directly (no test anywhere else
@@ -948,7 +948,7 @@ mod tests {
         // shared `realized_ort_token`, so for the SAME reported runtime they MUST yield the SAME
         // token. TTS and STT can never drift into different labels for the same EP — the whole point
         // of routing both through one mapper (and one `ds_model::cuda_session_builder`).
-        let k = Some(TtsEngine::Kokoro);
+        let k = Some(TtsEngine::BuiltIn);
         let b = Some(SttEngine::BuiltIn);
         for realized in ["CUDA", "CPU", "CoreML-ANE", "CoreML", "System", "surprise"] {
             assert_eq!(
@@ -962,7 +962,7 @@ mod tests {
     #[test]
     fn provider_tokens_reflect_the_realized_runtime() {
         // The token is the REALIZED EP the child reports, not a preference — CPU fallback included.
-        let k = Some(TtsEngine::Kokoro);
+        let k = Some(TtsEngine::BuiltIn);
         let b = Some(SttEngine::BuiltIn);
         assert_eq!(tts_provider_token(k, "CUDA").as_deref(), Some("cuda"));
         assert_eq!(stt_provider_token(b, "CUDA").as_deref(), Some("cuda"));

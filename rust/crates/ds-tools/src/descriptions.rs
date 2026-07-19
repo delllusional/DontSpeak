@@ -6,24 +6,24 @@ pub const SPEAK_TEXT: &str = "Text to speak.";
 pub const SPEAK_VOICE: &str = "Voice ID. Omit to use the calling agent's assigned voice.";
 pub const SPEAK_RATE: &str = "Playback speed. Defaults to the configured rate.";
 
-pub const STOP_SPEECH: &str = "Stop this session's speech, or all speech if no session. Fades out.";
+pub const STOP: &str = "Stop this session's speech, or all speech if no session. Fades out.";
 
 pub const MUTE: &str = "Global mute until changed or engine restart. Muted speech drains \
     silently; earcons off.";
 pub const MUTE_ON: &str = "True to mute, false to unmute.";
 
-pub const LIST_VOICES: &str = "List English voices by engine and language.";
-pub const LIST_VOICES_ENGINE: &str = "Engine to inspect. Defaults to configured speech engine, \
+pub const VOICES: &str = "List English voices by engine and language.";
+pub const VOICES_ENGINE: &str = "Engine to inspect. Defaults to configured speech engine, \
     or built-in when speech is off.";
 
 pub const LISTEN: &str = "Record the mic → transcript. Stops on end-of-speech or time limit.";
 pub const LISTEN_SECONDS: &str = "Max recording seconds. Default 30.";
 
-pub const GET_STATUS: &str = "Speech config and runtime state.";
+pub const STATUS: &str = "Speech config and runtime state.";
 pub const STATUS_DETAIL: &str = "Include model, dictation, and runtime stats. Default false.";
 
-pub const GET_USAGE: &str = "Coding-agent subscription usage shown in the Agents tab.";
-pub const USAGE_FORCE_REFRESH: &str =
+pub const USAGE: &str = "Coding-agent subscription usage shown in the Agents tab.";
+pub const USAGE_REFRESH: &str =
     "Bypass the 60-second cache and query providers. Default false.";
 
 pub const DIARIZE: &str = "Record mic and label who spoke when. Needs diarization; macOS only.";

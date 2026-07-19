@@ -4,7 +4,7 @@
 //! (exception: needs-input under focus hold — [`TtsQueue::dispatch_earcon`]).
 //! Ordering, mic gate, barge/pause live here; child stays dumb.
 //!
-//! Focus (`pause_in_background`): hold while no terminal frontmost; self-arms after first
+//! Focus (`pause_bg`): hold while no terminal frontmost; self-arms after first
 //! sighting. Half-duplex record barge pauses all; full-duplex never pauses. Hard barge clears.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -181,7 +181,7 @@ impl QueueAction {
 /// One ordered audio action. Earcons share session/cancel path (cannot overtake narration).
 struct Item {
     action: QueueAction,
-    /// Producer; wire as `activity.speaking_source` while in flight.
+    /// Producer; wire as `activity.speaker` while in flight.
     source: ClientSource,
     /// Session tag (`None` = global). Active-terminal select + scoped cancel.
     /// Voice keys off `source`, not session.
@@ -209,8 +209,8 @@ impl ActiveSel {
 }
 
 /// Grok Stop sticky prefix. Digests/earcons under `grok-stop:<real>` so MarkActive
-/// `input_clears=[current]` (exact prune) cannot drop them. Same terminal for
-/// `input_clears=[other]` keep + active priority. Voice resolves off `source` only.
+/// `clear_on_input=[current]` (exact prune) cannot drop them. Same terminal for
+/// `clear_on_input=[other]` keep + active priority. Voice resolves off `source` only.
 const GROK_STOP_STICKY_PREFIX: &str = "grok-stop:";
 
 /// Sticky sibling (`abc` → `grok-stop:abc`). Already-sticky / bare sentinel → `None`.
@@ -222,7 +222,7 @@ fn grok_stop_sticky_sibling(session: &str) -> Option<String> {
     }
 }
 
-/// Exact match or Grok sticky for `keep` — `input_clears=[other]` keep path.
+/// Exact match or Grok sticky for `keep` — `clear_on_input=[other]` keep path.
 fn session_is_keep_or_sticky(item: &Option<String>, keep: &Option<String>) -> bool {
     if item == keep {
         return true;
@@ -243,15 +243,15 @@ fn session_belongs_to_real(session: &Option<String>, target: &str) -> bool {
     }
 }
 
-/// Per-window barge prune (`StopSpeech { session }`): drop only `target`.
+/// Per-window barge prune (`Stop { session }`): drop only `target`.
 /// Exact-match only — sticky NOT pruned when `target` is the real id, so MarkActive
-/// `input_clears=[current]` cannot ding-only a Grok Stop. Callers that must silence sticky
-/// (StopSpeech, SessionEnd) also clear the sticky sibling.
+/// `clear_on_input=[current]` cannot ding-only a Grok Stop. Callers that must silence sticky
+/// (Stop, SessionEnd) also clear the sticky sibling.
 fn prune_session(q: &mut VecDeque<Item>, target: &Option<String>) {
     q.retain(|it| &it.session != target);
 }
 
-/// Inverse of [`prune_session`]: keep only `keep` + sticky sibling (`input_clears` other).
+/// Inverse of [`prune_session`]: keep only `keep` + sticky sibling (`clear_on_input` other).
 fn retain_only_session(q: &mut VecDeque<Item>, keep: &Option<String>) {
     q.retain(|it| session_is_keep_or_sticky(&it.session, keep));
 }
@@ -319,7 +319,7 @@ pub struct TtsQueue {
     /// Latches on first frontmost sighting — unrecognized terminals never mute.
     terminal_seen: AtomicBool,
     /// Config focus gate. Init false (shipped default); first poll applies live config.
-    pause_in_background: AtomicBool,
+    pause_bg: AtomicBool,
     /// Live config from reload path (not reparsed per item).
     config: Mutex<VoiceConfig>,
     /// Per-agent pool voice for engine runtime. Lazy roll; SessionEnd does not reclaim.
@@ -362,7 +362,7 @@ impl TtsQueue {
             in_flight: AtomicBool::new(false),
             terminal_front: AtomicBool::new(true),
             terminal_seen: AtomicBool::new(false),
-            pause_in_background: AtomicBool::new(false),
+            pause_bg: AtomicBool::new(false),
             config: Mutex::new(config),
             agent_voices: Mutex::new(HashMap::new()),
             active: Mutex::new(ActiveSel::default()),
@@ -427,7 +427,7 @@ impl TtsQueue {
             in_flight: AtomicBool::new(false),
             terminal_front: AtomicBool::new(true),
             terminal_seen: AtomicBool::new(false),
-            pause_in_background: AtomicBool::new(false),
+            pause_bg: AtomicBool::new(false),
             config: Mutex::new(VoiceConfig::load(&paths)),
             agent_voices: Mutex::new(HashMap::new()),
             active: Mutex::new(ActiveSel::default()),
@@ -447,7 +447,7 @@ impl TtsQueue {
         self.tts_active.store(on, Ordering::SeqCst);
     }
 
-    /// Enqueue speech (empty ignored). Optional `voice`/`rate`; `source` → `activity.speaking_source`.
+    /// Enqueue speech (empty ignored). Optional `voice`/`rate`; `source` → `activity.speaker`.
     pub fn enqueue(
         &self,
         text: String,
@@ -697,7 +697,7 @@ impl TtsQueue {
     }
 
     /// Per-window barge: drop this session's queue; cancel in-flight only if matching.
-    /// `StopSpeech { session: None }` → [`clear`](Self::clear).
+    /// `Stop { session: None }` → [`clear`](Self::clear).
     pub fn clear_session(&self, session: Option<String>) {
         // items → playing same order as worker; prune + snapshot under one lock.
         let mut items = self.items.lock().unwrap();
@@ -715,12 +715,12 @@ impl TtsQueue {
         self.cv.notify_one();
     }
 
-    /// Active session snapshot — resolve once for multi-scope `input_clears`.
+    /// Active session snapshot — resolve once for multi-scope `clear_on_input`.
     pub fn active_session(&self) -> Option<String> {
         self.active.lock().unwrap().effective()
     }
 
-    /// Apply `input_clears` against one resolved `target`. No-op if `target` is None
+    /// Apply `clear_on_input` against one resolved `target`. No-op if `target` is None
     /// or neither scope requested.
     ///
     /// `current`: prune target (+ sticky) and hard-cancel in-flight unconditionally
@@ -841,8 +841,8 @@ impl TtsQueue {
     }
 
     /// Poll → worker: focus-gate config.
-    pub fn set_pause_in_background(&self, pause: bool) {
-        self.pause_in_background.store(pause, Ordering::SeqCst);
+    pub fn set_pause_bg(&self, pause: bool) {
+        self.pause_bg.store(pause, Ordering::SeqCst);
     }
 
     pub(crate) fn set_config(&self, config: VoiceConfig) {
@@ -996,7 +996,7 @@ impl TtsQueue {
         let engine = cfg.resolved_tts()?;
         let voice = match engine {
             ds_config::TtsEngine::System => cfg.tts_system_voice.clone(),
-            ds_config::TtsEngine::Kokoro => {
+            ds_config::TtsEngine::BuiltIn => {
                 let pool = cfg.active_voices();
                 if pool.is_empty() {
                     return None;
@@ -1010,7 +1010,7 @@ impl TtsQueue {
     /// Greet on open (if enabled). Claims agent voice now so same agent matches on open.
     pub fn greet_session(&self, source: ClientSource, session: Option<String>) {
         let cfg = self.config.lock().unwrap().clone();
-        if !cfg.greet_on_open {
+        if !cfg.greet {
             return;
         }
         let Some((engine, voice)) = self.resolve_engine_voice(&cfg, source) else {
@@ -1029,7 +1029,7 @@ impl TtsQueue {
         hold_state(
             self.tts.is_full_duplex_active(),
             self.mic.is_active(),
-            self.pause_in_background.load(Ordering::SeqCst),
+            self.pause_bg.load(Ordering::SeqCst),
             self.terminal_seen.load(Ordering::SeqCst),
             self.terminal_front.load(Ordering::SeqCst),
         )
@@ -1037,7 +1037,7 @@ impl TtsQueue {
 
     fn worker_focus_hold(&self) -> bool {
         focus_holds(
-            self.pause_in_background.load(Ordering::SeqCst),
+            self.pause_bg.load(Ordering::SeqCst),
             self.terminal_seen.load(Ordering::SeqCst),
             self.terminal_front.load(Ordering::SeqCst),
         )
@@ -1117,7 +1117,7 @@ impl TtsQueue {
 
             self.set_tts_active(true);
             let result = self.speak_one(engine, text, &voice, rate, resume_skip);
-            if matches!(engine, Some(ds_config::TtsEngine::Kokoro)) {
+            if matches!(engine, Some(ds_config::TtsEngine::BuiltIn)) {
                 resume_skip = resume_skip.max(self.tts.last_speak_progress());
             }
             match result {
@@ -1150,8 +1150,8 @@ impl TtsQueue {
     ) -> GateOutcome {
         loop {
             // Hold (don't drop): half-duplex mic live; focus gate (both duplex modes;
-            // self-arm via terminal_seen; off when pause_in_background false).
-            // Gen bump (pause/StopSpeech) breaks the
+            // self-arm via terminal_seen; off when pause_bg false).
+            // Gen bump (pause/Stop) breaks the
             // wait so it never sticks.
             while self.generation.load(Ordering::SeqCst) == gen0 {
                 let hold = self.worker_hold_state();
@@ -1183,7 +1183,7 @@ impl TtsQueue {
                 None => (None, String::new()),
             };
             let voice = voice_override.cloned().unwrap_or(base_voice);
-            let rate = rate_override.unwrap_or(cfg.tts_rate);
+            let rate = rate_override.unwrap_or(cfg.rate);
 
             // Never send Kokoro work before its model is ready. Accepted work is HELD during
             // an ordinary warm-up and remains busy; it is dropped only for an explicit cancel,
@@ -1238,8 +1238,8 @@ impl TtsQueue {
         }
         let cfg = self.config.lock().unwrap().clone();
         let Some(path) = ds_earcon::resolve_cue(
-            &cfg.earcon_reply_sound,
-            &cfg.earcon_needs_input_sound,
+            &cfg.earcon_reply,
+            &cfg.earcon_input,
             event,
         ) else {
             return Ok(());
@@ -1269,7 +1269,7 @@ impl TtsQueue {
         match engine {
             None => Err(std::io::Error::other("TTS is disabled")),
             Some(ds_config::TtsEngine::System) => self.tts.speak_system(text, voice, rate),
-            Some(ds_config::TtsEngine::Kokoro) => {
+            Some(ds_config::TtsEngine::BuiltIn) => {
                 self.tts.ensure_started();
                 self.tts.speak(text, voice, rate, skip)
             }
@@ -1294,7 +1294,7 @@ impl TtsQueue {
         match engine {
             None => return ReadyOutcome::Unavailable("TTS is disabled".to_string()),
             Some(TtsEngine::System) => return ReadyOutcome::Ready,
-            Some(TtsEngine::Kokoro) => {}
+            Some(TtsEngine::BuiltIn) => {}
         }
 
         // Complete mark_dead's "next speak heals" contract WITHOUT blocking: the heal
@@ -1302,7 +1302,7 @@ impl TtsQueue {
         // synchronous `restart_if_crashed` — a start can hold the manager's `lifecycle`
         // lock across a whole spawn+READY handshake (bounded since issue #59, but still
         // up to `READY_HANDSHAKE_TIMEOUT`), and riding it here kept the claimed item
-        // `in_flight` (mic closed, `stop_speech` unheard) for the duration. This worker
+        // `in_flight` (mic closed, `stop` unheard) for the duration. This worker
         // instead keeps polling at the 50 ms tick, so cancel/ready/error all stay live.
         // `heal_kicked`/`load_requested` bound the side effects to one heal kick / one
         // `load` write per child incarnation, not one per tick.
@@ -1433,7 +1433,7 @@ enum SpeechOutcome {
 }
 
 fn should_retry_speak(engine: Option<ds_config::TtsEngine>, error: &std::io::Error) -> bool {
-    matches!(engine, Some(ds_config::TtsEngine::Kokoro))
+    matches!(engine, Some(ds_config::TtsEngine::BuiltIn))
         && matches!(
             error.kind(),
             std::io::ErrorKind::BrokenPipe
@@ -1445,7 +1445,7 @@ fn should_retry_speak(engine: Option<ds_config::TtsEngine>, error: &std::io::Err
 }
 
 /// Whether an interrupted item (narration OR reply) should be RE-ENQUEUED to resume later.
-/// Only when we were PAUSED for a record-barge (resume mode) — a hard clear/StopSpeech
+/// Only when we were PAUSED for a record-barge (resume mode) — a hard clear/Stop
 /// leaves `paused == false` and re-enqueues nothing (it dropped on purpose). Empty text is
 /// never requeued. Pure, so the "resume keeps the item, clear drops it" rule is unit-tested.
 fn should_requeue(resuming: bool, action: &QueueAction) -> bool {
@@ -1457,7 +1457,7 @@ fn should_requeue(resuming: bool, action: &QueueAction) -> bool {
 /// - MIC LIVE (half-duplex only): never speak into a recording. Full-duplex skips this
 ///   — the VPIO mic is always live, so the AEC handles the overlap instead (coexist;
 ///   the voice stops only on an explicit `stop`/`stopfade` op, never a talk-over barge).
-/// - FOCUS (both modes, only when `pause_in_background`): no terminal frontmost (you
+/// - FOCUS (both modes, only when `pause_bg`): no terminal frontmost (you
 ///   tabbed to a browser) → hold. Self-arming via `terminal_seen`, so an unrecognized
 ///   terminal emulator (never seen frontmost) degrades to always-play, never mute.
 ///
@@ -1485,20 +1485,20 @@ fn mic_holds(full_duplex: bool, mic_active: bool) -> bool {
     !full_duplex && mic_active
 }
 
-fn focus_holds(pause_in_background: bool, terminal_seen: bool, terminal_front: bool) -> bool {
-    pause_in_background && terminal_seen && !terminal_front
+fn focus_holds(pause_bg: bool, terminal_seen: bool, terminal_front: bool) -> bool {
+    pause_bg && terminal_seen && !terminal_front
 }
 
 fn hold_state(
     full_duplex: bool,
     mic_active: bool,
-    pause_in_background: bool,
+    pause_bg: bool,
     terminal_seen: bool,
     terminal_front: bool,
 ) -> HoldState {
     HoldState {
         mic: mic_holds(full_duplex, mic_active),
-        focus: focus_holds(pause_in_background, terminal_seen, terminal_front),
+        focus: focus_holds(pause_bg, terminal_seen, terminal_front),
     }
 }
 
@@ -1536,7 +1536,7 @@ mod tests {
             !hold_state(true, true, false, false, false).any(),
             "full-duplex ignores mic"
         );
-        // FOCUS gate: only when pause_in_background AND a terminal has been seen AND none
+        // FOCUS gate: only when pause_bg AND a terminal has been seen AND none
         // is frontmost. Self-arming: unseen terminal never holds (degrade to always-play).
         assert!(
             hold_state(false, false, true, true, false).any(),
@@ -1552,7 +1552,7 @@ mod tests {
         );
         assert!(
             !hold_state(false, false, false, true, false).any(),
-            "pause_in_background off → play"
+            "pause_bg off → play"
         );
         // Nothing gating → play.
         assert!(!hold_state(false, false, false, false, false).any());
@@ -1585,7 +1585,7 @@ mod tests {
         };
         // Resume mode (paused) keeps a non-empty item → re-enqueued to continue.
         assert!(should_requeue(true, &speech));
-        // A hard clear / StopSpeech leaves paused == false → dropped on purpose.
+        // A hard clear / Stop leaves paused == false → dropped on purpose.
         assert!(!should_requeue(false, &speech));
         // Empty / whitespace-only text is never requeued, even when paused.
         assert!(!should_requeue(
@@ -1735,7 +1735,7 @@ mod tests {
     #[test]
     fn stale_assignment_is_dropped_when_voice_leaves_the_pool() {
         // Regression: an agent assigned under the OLD pool keeps speaking the old
-        // voice after the user changes `tts_built_in_voices` (the assignment cache
+        // voice after the user changes `tts_voices` (the assignment cache
         // survives a config hot-reload). The stale pick must be discarded and a voice
         // from the CURRENT pool chosen instead — otherwise the agent keeps using a
         // voice the user dropped ("Sarah introduces herself as Nicole").
@@ -1848,7 +1848,7 @@ mod tests {
 
     #[test]
     fn retain_only_session_is_the_exact_inverse_of_prune_session() {
-        // `input_clears = [other]`: keeping "a" drops b's item AND the untagged/global
+        // `clear_on_input = [other]`: keeping "a" drops b's item AND the untagged/global
         // one — unlike `prune_session`, untagged audio does NOT survive here.
         let mut q = deque(&[Some("a"), Some("b"), None, Some("a")]);
         retain_only_session(&mut q, &Some("a".into()));
@@ -1858,7 +1858,7 @@ mod tests {
 
     #[test]
     fn retain_only_session_keeps_grok_stop_sticky_of_target() {
-        // Sticky digests for the submitting terminal must survive input_clears=[other].
+        // Sticky digests for the submitting terminal must survive clear_on_input=[other].
         let mut q = deque(&[
             Some("a"),
             Some("grok-stop:a"),
@@ -2192,7 +2192,7 @@ mod tests {
         let s = Some("term-1".to_string());
 
         // Engage the focus hold: config on, terminal seen frontmost once, then backgrounded.
-        q.set_pause_in_background(true);
+        q.set_pause_bg(true);
         q.set_terminal_front(true);
         q.set_terminal_front(false);
 
@@ -2270,7 +2270,7 @@ mod tests {
         // live microphone must not add a mic hold to the focus-only one.
         let q = mk_queue();
         q.tts.set_full_duplex_active_for_test(true);
-        q.set_pause_in_background(true);
+        q.set_pause_bg(true);
         q.set_terminal_front(true);
         q.set_terminal_front(false);
 
@@ -2366,7 +2366,7 @@ mod tests {
         assert_eq!(q.active_session(), None);
     }
 
-    /// In-flight claim carries the producer's `ClientSource` so `activity.speaking_source`
+    /// In-flight claim carries the producer's `ClientSource` so `activity.speaker`
     /// can highlight the matching Usage card. Non-client producers stay null.
     #[test]
     fn tts_running_exposes_wireable_playing_source_only() {
@@ -3353,7 +3353,7 @@ mod tests {
     fn focus_hold_keeps_listener_open_even_with_multiple_pending_items() {
         let q = mk_queue();
         q.set_terminal_front(true); // arm the self-disabling focus gate
-        q.set_pause_in_background(true);
+        q.set_pause_bg(true);
         q.set_terminal_front(false);
         q.items
             .lock()
@@ -3399,7 +3399,7 @@ mod tests {
                 .with_first_spawn_env(&[("DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS", delay_ms)]),
         );
         *q.config.lock().unwrap() = VoiceConfig {
-            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
             ..VoiceConfig::default()
         };
         (dir, q)
@@ -3491,7 +3491,7 @@ mod tests {
         ] {
             let error = std::io::Error::new(kind, "child replaced");
             assert!(should_retry_speak(
-                Some(ds_config::TtsEngine::Kokoro),
+                Some(ds_config::TtsEngine::BuiltIn),
                 &error
             ));
             assert!(!should_retry_speak(
@@ -3500,7 +3500,7 @@ mod tests {
             ));
         }
         assert!(!should_retry_speak(
-            Some(ds_config::TtsEngine::Kokoro),
+            Some(ds_config::TtsEngine::BuiltIn),
             &std::io::Error::other("helper rejected the utterance")
         ));
     }
@@ -3518,7 +3518,7 @@ mod tests {
         );
         let stale = q.generation.load(Ordering::SeqCst).wrapping_add(1);
         assert_eq!(
-            q.wait_until_ready(Some(ds_config::TtsEngine::Kokoro), stale),
+            q.wait_until_ready(Some(ds_config::TtsEngine::BuiltIn), stale),
             ReadyOutcome::Cancelled
         );
     }
@@ -3534,7 +3534,7 @@ mod tests {
         );
         let started = std::time::Instant::now();
         let outcome = q.wait_until_ready(
-            Some(ds_config::TtsEngine::Kokoro),
+            Some(ds_config::TtsEngine::BuiltIn),
             q.generation.load(Ordering::SeqCst),
         );
         assert!(
@@ -3554,7 +3554,7 @@ mod tests {
         let q = mk_queue();
         q.tts.suppress_heal_for_test(); // no spawn attempt → no error short-circuit
         let outcome = q.wait_until_ready_with_timeout(
-            Some(ds_config::TtsEngine::Kokoro),
+            Some(ds_config::TtsEngine::BuiltIn),
             q.generation.load(Ordering::SeqCst),
             Duration::from_millis(200),
         );
@@ -3603,7 +3603,7 @@ mod tests {
         });
 
         let outcome = q.wait_until_ready(
-            Some(ds_config::TtsEngine::Kokoro),
+            Some(ds_config::TtsEngine::BuiltIn),
             q.generation.load(Ordering::SeqCst),
         );
         stop_flipping.store(true, Ordering::SeqCst);
@@ -3621,7 +3621,7 @@ mod tests {
     /// the full 3 s handshake bound — but the heal now runs on `heal_crashed_child`'s
     /// background thread, so the wait itself returns at ITS OWN (200 ms) deadline.
     /// Before this fix the wait called `restart_if_crashed` synchronously and sat inside
-    /// the handshake (then unbounded: forever, mic closed, `stop_speech` unheard).
+    /// the handshake (then unbounded: forever, mic closed, `stop` unheard).
     #[test]
     fn wait_until_ready_does_not_block_on_a_wedged_child_spawn() {
         let bin = crate::tts::wedge_recovery_tests::fake_helper_bin();
@@ -3638,7 +3638,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         let outcome = q.wait_until_ready_with_timeout(
-            Some(ds_config::TtsEngine::Kokoro),
+            Some(ds_config::TtsEngine::BuiltIn),
             q.generation.load(Ordering::SeqCst),
             Duration::from_millis(200),
         );
@@ -3666,14 +3666,14 @@ mod tests {
         q.tts.set_tts_loaded_for_test();
         assert_eq!(
             q.wait_until_ready(
-                Some(ds_config::TtsEngine::Kokoro),
+                Some(ds_config::TtsEngine::BuiltIn),
                 q.generation.load(Ordering::SeqCst)
             ),
             ReadyOutcome::Ready
         );
     }
 
-    /// Regression (audit): `pause_in_background` focus loss DURING the readiness wait must
+    /// Regression (audit): `pause_bg` focus loss DURING the readiness wait must
     /// re-enter the hold gate once the model becomes ready — the old shape went straight to
     /// playback, speaking into whatever app was frontmost after up to 60 s of warm-up.
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
@@ -3682,11 +3682,11 @@ mod tests {
         let q = mk_queue();
         q.tts.suppress_heal_for_test();
         *q.config.lock().unwrap() = VoiceConfig {
-            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
             ..VoiceConfig::default()
         };
         q.set_terminal_front(true); // arm the self-disabling focus gate
-        q.set_pause_in_background(true);
+        q.set_pause_bg(true);
 
         let gen0 = q.generation.load(Ordering::SeqCst);
         let gated = Arc::clone(&q);
@@ -3742,7 +3742,7 @@ mod tests {
     }
 
     #[test]
-    fn set_terminal_front_latches_seen_and_set_pause_in_background_publishes() {
+    fn set_terminal_front_latches_seen_and_set_pause_bg_publishes() {
         let q = mk_queue();
         assert!(!q.terminal_seen.load(Ordering::SeqCst));
 
@@ -3767,10 +3767,10 @@ mod tests {
         );
         assert!(!q.terminal_front.load(Ordering::SeqCst));
 
-        q.set_pause_in_background(true);
-        assert!(q.pause_in_background.load(Ordering::SeqCst));
-        q.set_pause_in_background(false);
-        assert!(!q.pause_in_background.load(Ordering::SeqCst));
+        q.set_pause_bg(true);
+        assert!(q.pause_bg.load(Ordering::SeqCst));
+        q.set_pause_bg(false);
+        assert!(!q.pause_bg.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -3784,7 +3784,7 @@ mod tests {
             (true, true, false),
             (true, true, true),
         ] {
-            q.pause_in_background.store(pause_bg, Ordering::SeqCst);
+            q.pause_bg.store(pause_bg, Ordering::SeqCst);
             q.terminal_seen.store(seen, Ordering::SeqCst);
             q.terminal_front.store(front, Ordering::SeqCst);
             let expected = hold_state(
@@ -3904,15 +3904,15 @@ mod tests {
     fn resolve_engine_voice_kokoro_with_pool_delegates_to_agent_assignment() {
         let q = mk_queue();
         let cfg = VoiceConfig {
-            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
-            tts_built_in_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            tts_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
             ..VoiceConfig::default()
         };
         let (engine, voice) = q
             .resolve_engine_voice(&cfg, ClientSource::ClaudeCode)
             .expect("Kokoro is usable on this build");
-        assert_eq!(engine, ds_config::TtsEngine::Kokoro);
-        assert!(cfg.tts_built_in_voices.contains(&voice));
+        assert_eq!(engine, ds_config::TtsEngine::BuiltIn);
+        assert!(cfg.tts_voices.contains(&voice));
         // The source is threaded through to the agent-voice map.
         assert_eq!(
             q.agent_voices
@@ -3941,8 +3941,8 @@ mod tests {
         // clamps it back to the default pool) resolves to nothing and claims nothing.
         let q = mk_queue();
         let empty_pool = VoiceConfig {
-            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
-            tts_built_in_voices: vec![],
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            tts_voices: vec![],
             ..VoiceConfig::default()
         };
         assert_eq!(
@@ -3960,14 +3960,14 @@ mod tests {
         // voice, not a shared fixed one. All unknown clients share the one Unknown bucket.
         let q = mk_queue();
         let cfg = VoiceConfig {
-            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
-            tts_built_in_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            tts_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
             ..VoiceConfig::default()
         };
         let (_, voice) = q
             .resolve_engine_voice(&cfg, ClientSource::Unknown)
             .expect("Kokoro is usable on this build");
-        assert!(cfg.tts_built_in_voices.contains(&voice));
+        assert!(cfg.tts_voices.contains(&voice));
         assert_eq!(
             q.agent_voices.lock().unwrap().get(&ClientSource::Unknown),
             Some(&voice)
@@ -3981,14 +3981,14 @@ mod tests {
         // no special-cased fixed voice.
         let q = mk_queue();
         let cfg = VoiceConfig {
-            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
-            tts_built_in_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            tts_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
             ..VoiceConfig::default()
         };
         let (_, voice) = q
             .resolve_engine_voice(&cfg, ClientSource::DontSpeak)
             .expect("Kokoro is usable on this build");
-        assert!(cfg.tts_built_in_voices.contains(&voice));
+        assert!(cfg.tts_voices.contains(&voice));
         assert_eq!(
             q.agent_voices.lock().unwrap().get(&ClientSource::DontSpeak),
             Some(&voice)
@@ -4002,9 +4002,9 @@ mod tests {
         // reply from the same agent resolves to that exact voice.
         let q = mk_queue();
         let cfg = VoiceConfig {
-            tts_engine_ladder: vec![ds_config::TtsEngine::Kokoro],
-            tts_built_in_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
-            greet_on_open: true,
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            tts_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            greet: true,
             ..VoiceConfig::default()
         };
         *q.config.lock().unwrap() = cfg.clone();

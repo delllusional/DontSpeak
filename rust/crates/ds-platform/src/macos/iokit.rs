@@ -206,7 +206,7 @@ fn ax_strings() -> Option<&'static AxStrings> {
 }
 
 /// Whether the system-wide FOCUSED accessibility element is an editable field that
-/// would accept a paste right now — the macOS `has_paste_target` probe.
+/// would accept a paste right now — the macOS `can_paste` probe.
 ///
 /// `AXUIElementCreateSystemWide` + `kAXFocusedUIElementAttribute` yields whatever
 /// element currently has keyboard focus (nil/error ⇒ nothing focused ⇒ no paste
@@ -222,8 +222,8 @@ fn ax_strings() -> Option<&'static AxStrings> {
 /// (some Electron/Java/custom-drawn UIs, including most terminal TTY views) read as "no
 /// target" here — the engine compensates by also treating a frontmost terminal as a paste
 /// target (see `Engine::tick`), so a terminal never shows a spurious "no target" glow.
-/// The caller (`MacOsPlatform::has_paste_target`) additionally short-circuits frontmost
-/// `CUSTOM_TEXT_BUNDLES`/`extra_custom_text_editors` editors before this probe runs.
+/// The caller (`MacOsPlatform::can_paste`) additionally short-circuits frontmost
+/// `CUSTOM_TEXT_BUNDLES`/`extra_editors` editors before this probe runs.
 pub fn focused_element_accepts_paste() -> bool {
     let Some(strings) = ax_strings() else {
         return false;

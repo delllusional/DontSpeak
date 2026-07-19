@@ -61,12 +61,12 @@ balance, charts, or raw provider errors.
 ### Speaking highlight
 
 While TTS is playing an utterance from a wireable client, `model_status.activity`
-includes `speaking_source` (`claude_code` / `codex` / `qwen_code` / `grok` / `kimi_code`; `null` when
+includes `speaker` (`claude_code` / `codex` / `qwen_code` / `grok` / `kimi_code`; `null` when
 idle or non-client). Hosts wash that agent’s Usage card with a **random pastel tint**
 from `ds_random_pastel_wash_json` (single recipe in `ds-core`: HSV random H, S=0.42,
-V=0.92, α=0.30 → `{"r","g","b","a"}`). A new pastel is chosen when `speaking_source`
+V=0.92, α=0.30 → `{"r","g","b","a"}`). A new pastel is chosen when `speaker`
 becomes non-null or changes agent; the color is **frozen** for the continuous
-highlight on that agent. Clear on idle (`speaking_source` null).
+highlight on that agent. Clear on idle (`speaker` null).
 
 The **top-bar speaking stripe** remains brand purple. Usage progress bars remain
 brand purple. Pastel wash is Usage-card-only; hosts only paint and freeze (no local HSV).
@@ -78,11 +78,11 @@ brand purple. Pastel wash is Usage-card-only; hosts only paint and freeze (no lo
    session.
 2. Worker claim publishes `PlayingClaim { source, session }`.
 3. `tts_running()` → `(tts_active, Option<source>)` filtering `ClientSource::is_client()`.
-4. Hosts: if `speaking_source == card.agent`, apply speaking pastel wash.
+4. Hosts: if `speaker == card.agent`, apply speaking pastel wash.
 
 Queued earcons that set `tts_active` use the same claim. Out-of-band needs-input
 cues under focus hold do **not** claim playback (pre-existing half-duplex rule) and
-therefore leave `speaking_source` null.
+therefore leave `speaker` null.
 
 ## Scope boundaries
 
@@ -171,8 +171,8 @@ Rules:
 | Symbol | Behavior |
 | --- | --- |
 | `ds_agent_usage_skeleton_json()` | Installed agents + cache; **no network** |
-| `ds_agent_usage_card_json(agent, force_refresh)` | Blocking single-card load |
-| `ds_agent_usage_json(force_refresh)` | Aggregate all cards (tests/tooling) |
+| `ds_agent_usage_card_json(agent, refresh)` | Blocking single-card load |
+| `ds_agent_usage_json(refresh)` | Aggregate all cards (tests/tooling) |
 | `ds_usage_resets_in(resets_at_unix)` | Remaining duration string (no seconds) |
 
 Mirrors: `ds-core/src/ffi.rs`, `dontspeak.h`, `Native.cs`, `apps/linux/gtk/src/ffi.rs`.

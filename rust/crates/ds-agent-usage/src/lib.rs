@@ -410,7 +410,7 @@ where
 }
 
 /// Aggregate refresh (tests/tooling). UI prefers skeleton + per-card.
-pub fn snapshot(force_refresh: bool) -> UsageDeck {
+pub fn snapshot(refresh: bool) -> UsageDeck {
     let Some(paths) = ds_config::Paths::resolve() else {
         return UsageDeck::empty();
     };
@@ -421,7 +421,7 @@ pub fn snapshot(force_refresh: bool) -> UsageDeck {
     std::thread::scope(|scope| {
         let handles: Vec<_> = agents
             .iter()
-            .map(|&agent| scope.spawn(move || refresh_card(agent, force_refresh)))
+            .map(|&agent| scope.spawn(move || refresh_card(agent, refresh)))
             .collect();
         let cards = handles
             .into_iter()

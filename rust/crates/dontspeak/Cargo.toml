@@ -20,7 +20,7 @@ name = "dontspeak"
 path = "src/main.rs"
 
 # Thin bridge: JSON-RPC over stdin/stdout — the ONLY transport. Most tools forward to the
-# resident engine over ds-ipc; get_usage shares the Agents tab's read-only HTTP probes. No
+# resident engine over ds-ipc; usage shares the Agents tab's read-only HTTP probes. No
 # async runtime (the workspace's no-tokio stance).
 [dependencies]
 # Shared quota cache/provider pipeline; do not duplicate Usage-tab fetch logic here.
@@ -54,7 +54,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
-# Tempdir-rooted Paths/config files for the tools tests (set_config / list_voices / status).
+# Tempdir-rooted Paths/config files for the tools tests (set_config / voices / status).
 tempfile = { workspace = true }
 
 [lints]

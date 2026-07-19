@@ -40,7 +40,7 @@ pub(crate) enum FinalState {
 
 /// Engine ↔ confirm-panel channel. `HelperStt` writes partials/finals; engine pastes
 /// on confirm, clears on long-press cancel. Via `model_status.dictation`.
-/// Manual `Default` so `has_paste_target` starts true (fail-open).
+/// Manual `Default` so `can_paste` starts true (fail-open).
 pub(crate) struct PasteBuf {
     /// Live PARTIAL mirror (detached helper thread). Not in [`FinalState`] — coexists
     /// with every finalize state.
@@ -50,7 +50,7 @@ pub(crate) struct PasteBuf {
     /// App focused when recording started.
     pub target: Option<String>,
     /// Editable field focused? Sampled each tick while panel up. Init true (fail-open).
-    pub has_paste_target: bool,
+    pub can_paste: bool,
     /// Caps physically held — suppress `Ready` while held (might become long-press cancel).
     pub caps_held: bool,
     /// Session counter: detached `stop` joiner deposits only if epoch still matches.
@@ -82,7 +82,7 @@ impl Default for PasteBuf {
             partial: String::new(),
             final_state: FinalState::Idle,
             target: None,
-            has_paste_target: true, // fail-open: no orange warning before the first probe
+            can_paste: true, // fail-open: no orange warning before the first probe
             caps_held: false,
             epoch: 0,
             refused_until: None,
@@ -133,7 +133,7 @@ pub(crate) enum GestureState {
         stop_tap_at: Option<Instant>,
         /// Press began inside flip window → not a new recording.
         double_pending: bool,
-        /// Enter after paste? Armed to `!double_tap_submits`; second tap toggles.
+        /// Enter after paste? Armed to `!double_tap_submit`; second tap toggles.
         enter_after_paste: bool,
     },
 }
@@ -173,13 +173,13 @@ pub(crate) struct Engine<P: Platform + 'static> {
     press: PressState,
     /// Deferred tap while speaking (double-tap skip). Coexists with every gesture mode.
     pending_tap_at: Option<Instant>,
-    /// Deferred Enter after paste (`paste_submit_delay_ms`); polled via `deferred_ready`.
+    /// Deferred Enter after paste (`paste_delay_ms`); polled via `deferred_ready`.
     pending_enter_at: Option<Instant>,
 
     /// Last applied config for surgical [`Engine::reload`] diffs.
     pub(crate) cfg: VoiceConfig,
     /// Caps loop live; false ⇒ `tick` no-op.
-    pub(crate) caps_enabled: bool,
+    pub(crate) caps: bool,
     /// Warm helper; barge-in / tts toggle. `None` in tests.
     pub(crate) tts: Option<Arc<TtsManager>>,
     /// TTS queue; start-tap barge-in. `None` in tests.
@@ -257,7 +257,7 @@ impl<P: Platform + 'static> Engine<P> {
         paths: Option<ds_config::Paths>,
     ) -> Self {
         // Caps dictation needs Accessibility trust AND the config toggle(s).
-        let caps_enabled = caps_loop_enabled(&cfg) && plat.preflight().is_ok();
+        let caps = caps_loop_enabled(&cfg) && plat.preflight().is_ok();
         let mut engine = Self {
             plat,
             stt,
@@ -270,7 +270,7 @@ impl<P: Platform + 'static> Engine<P> {
             pending_tap_at: None,
             pending_enter_at: None,
             cfg,
-            // Starts `false` regardless of the computed `caps_enabled` — the call to
+            // Starts `false` regardless of the computed `caps` — the call to
             // `set_caps_gate` below is the ONE place that decides whether to acquire the
             // physical Caps key, so "acquire only when starting enabled" is expressed
             // once, not re-derived here too (and here, again, on every future edit to
@@ -278,7 +278,7 @@ impl<P: Platform + 'static> Engine<P> {
             // touches (`gesture`, `caps_active`, `status_gate`) is still
             // at its just-initialized default right below, so the call is a pure
             // acquire-or-not with no side effect on them.
-            caps_enabled: false,
+            caps: false,
             tts: None,
             ttsq: None,
             caps_active: None,
@@ -294,7 +294,7 @@ impl<P: Platform + 'static> Engine<P> {
             paths,
         };
         // Push the user's extra paste-target identifiers to the freshly-constructed platform
-        // (config.toml `extra_terminals`/`extra_custom_text_editors`, ADDED TO — never
+        // (config.toml `extra_terminals`/`extra_editors`, ADDED TO — never
         // replacing — the compiled-in KNOWN_TERMINALS/CUSTOM_TEXT_EXES tables at lookup
         // time). `reload` below refreshes this on every config.toml change too.
         engine
@@ -302,8 +302,8 @@ impl<P: Platform + 'static> Engine<P> {
             .set_extra_terminals(engine.cfg.extra_terminals.clone());
         engine
             .plat
-            .set_extra_custom_text_editors(engine.cfg.extra_custom_text_editors.clone());
-        engine.set_caps_gate(caps_enabled);
+            .set_extra_editors(engine.cfg.extra_editors.clone());
+        engine.set_caps_gate(caps);
         engine
     }
 
@@ -352,7 +352,7 @@ impl<P: Platform + 'static> Engine<P> {
                 (
                     t,
                     a,
-                    p.has_paste_target,
+                    p.can_paste,
                     refusal_live(p.refused_until, Instant::now()),
                 )
             })
@@ -457,7 +457,7 @@ impl<P: Platform + 'static> Engine<P> {
     /// confirm/cancel) — i.e. any non-`Idle` [`FinalState`]. Gates the live
     /// paste-target probe in `tick` — without the `Armed` state counting here too,
     /// that probe would skip the exact window `dictation_preview` keeps the panel
-    /// visible through, leaving `has_paste_target` stale for the length of the async
+    /// visible through, leaving `can_paste` stale for the length of the async
     /// final.
     fn awaiting_confirm(&self) -> bool {
         self.paste
@@ -479,7 +479,7 @@ impl<P: Platform + 'static> Engine<P> {
 
     /// Submit the just-finalized dictation: paste the pending transcript into the focused
     /// text field — ANY app, the synthetic Cmd+V lands wherever the cursor is — then press
-    /// Return whenever `enter_after_paste` is set (armed per `double_tap_submits` and the
+    /// Return whenever `enter_after_paste` is set (armed per `double_tap_submit` and the
     /// stop gesture's tap count — one of the two gestures always submits, the other always
     /// just inserts).
     /// Driven by the deferred-submit check once the stop tap's async final lands.
@@ -499,7 +499,7 @@ impl<P: Platform + 'static> Engine<P> {
         };
         // The confirm tap ALWAYS pastes — there's no focus refusal. The "is there a
         // paste target?" cue is a live glow on the panel (the engine samples
-        // `has_paste_target` (the platform probe) each tick → `has_paste_target` (the
+        // `can_paste` (the platform probe) each tick → `can_paste` (the
         // status field) → the app tints it orange when there's nowhere to land).
         let text = self.paste.lock().ok().and_then(|mut p| {
             p.partial.clear();
@@ -522,30 +522,30 @@ impl<P: Platform + 'static> Engine<P> {
             // ANY focused app — terminal, chat box, search field, editor); the other always
             // just inserts the transcript and the user presses Return themselves. Which TAP
             // COUNT (single vs double) submits for this transcript is `enter_after_paste`,
-            // armed per `double_tap_submits` and possibly flipped by a second tap on the
+            // armed per `double_tap_submit` and possibly flipped by a second tap on the
             // stop gesture (captured from the `ConfirmArmed` variant at entry above).
             let submit = enter_after_paste;
             if submit {
                 if let Some(q) = &self.ttsq {
-                    // Apply `input_clears` immediately at submit — must not wait on the
+                    // Apply `clear_on_input` immediately at submit — must not wait on the
                     // deferred Enter below; a playing reply is silenced (or not)
                     // exactly when the user submits, not delayed by
-                    // `paste_submit_delay_ms`. `current` drops this window's own
+                    // `paste_delay_ms`. `current` drops this window's own
                     // now-stale pending speech, `other` drops every other window's (and
                     // untagged global audio). Resolve "active" ONCE and hand it to
                     // `cancel_for_submit` so the two scopes can't disagree (see its doc).
                     q.cancel_for_submit(
                         q.active_session(),
-                        self.cfg.input_clears.contains(&CancelSpeechScope::Current),
-                        self.cfg.input_clears.contains(&CancelSpeechScope::Other),
+                        self.cfg.clear_on_input.contains(&CancelSpeechScope::Current),
+                        self.cfg.clear_on_input.contains(&CancelSpeechScope::Other),
                     );
                 }
                 // Let the async paste settle before Enter lands — deferred via a polled
                 // timer (see `pending_enter_at`) rather than a blocking sleep, since this
                 // runs on the engine's single tick thread.
-                if self.cfg.paste_submit_delay_ms > 0 {
+                if self.cfg.paste_delay_ms > 0 {
                     self.pending_enter_at = Some(
-                        Instant::now() + Duration::from_millis(self.cfg.paste_submit_delay_ms),
+                        Instant::now() + Duration::from_millis(self.cfg.paste_delay_ms),
                     );
                 } else {
                     self.press_deferred_enter();
@@ -733,7 +733,7 @@ impl<P: Platform + 'static> Engine<P> {
         // needed. See Engine::assemble for why this lives here too (first-boot coverage).
         self.plat.set_extra_terminals(cfg.extra_terminals.clone());
         self.plat
-            .set_extra_custom_text_editors(cfg.extra_custom_text_editors.clone());
+            .set_extra_editors(cfg.extra_editors.clone());
 
         // STT engine: rebuild when the engine SELECTION changed OR when local availability
         // FLIPPED. The latter is the fresh-install case: a model download makes Parakeet
@@ -818,7 +818,7 @@ impl<P: Platform + 'static> Engine<P> {
         // Always-listening lifecycle: (re)build the listener when the mode turns
         // on or its params change; drop it when the mode turns off. Compared
         // against the still-current self.cfg (replaced just below).
-        // `paste_submit_delay_ms` deliberately does NOT gate a rebuild: unlike
+        // `paste_delay_ms` deliberately does NOT gate a rebuild: unlike
         // `submit_confirm_ms`/`endpoint_silence_ms`, which are baked into
         // `TurnLogic::new`/`Endpointer::new` at construction, it's just a plain `u64`
         // the listener reads at submit time — pushed live below instead, so changing
@@ -882,7 +882,7 @@ impl<P: Platform + 'static> Engine<P> {
         // Live-push the delay onto whatever listener now exists (freshly built above,
         // or untouched) — cheap field copy, no rebuild needed.
         if let Some(l) = self.listener.as_mut() {
-            l.set_paste_submit_delay_ms(cfg.paste_submit_delay_ms);
+            l.set_paste_delay_ms(cfg.paste_delay_ms);
         }
 
         // Record the applied config so the NEXT reload diffs against it.
@@ -896,14 +896,14 @@ impl<P: Platform + 'static> Engine<P> {
             target: "engine",
             "dontspeakd reloaded config (caps={} stt={}{} tts={} long_press={}ms narrate={} \
              extra_terminals={} extra_custom_editors={})",
-            self.caps_enabled,
+            self.caps,
             cfg.resolved_stt().map(|e| e.as_str()).unwrap_or("off"),
             if change.stt_changed { " [rebuilt]" } else { "" },
             cfg.resolved_tts().map(|e| e.as_str()).unwrap_or("off"),
             self.long_press_ms,
             cfg.narrate_summary(),
             cfg.extra_terminals.len(),
-            cfg.extra_custom_text_editors.len(),
+            cfg.extra_editors.len(),
         );
     }
 
@@ -931,7 +931,7 @@ impl<P: Platform + 'static> Engine<P> {
         if !now_on && !matches!(self.gesture, GestureState::Idle) {
             self.teardown_hold();
         }
-        if now_on != self.caps_enabled {
+        if now_on != self.caps {
             if now_on {
                 ds_platform::acquire_caps_key(self.plat.as_ref());
             } else {
@@ -951,7 +951,7 @@ impl<P: Platform + 'static> Engine<P> {
                 self.plat.release_caps_key();
             }
         }
-        self.caps_enabled = now_on;
+        self.caps = now_on;
         if let Some(ca) = &self.caps_active
             && ca.swap(now_on, Ordering::Relaxed) != now_on
             && let Some(gate) = &self.status_gate
@@ -965,7 +965,7 @@ impl<P: Platform + 'static> Engine<P> {
     /// turns dictation green without a reload/restart, and revoking turns it off.
     pub(crate) fn refresh_caps_gate(&mut self) {
         let now_on = caps_loop_enabled(&self.cfg) && self.plat.preflight().is_ok();
-        if now_on != self.caps_enabled {
+        if now_on != self.caps {
             self.set_caps_gate(now_on);
             log::info!(
                 target: "engine",
@@ -991,9 +991,9 @@ impl<P: Platform + 'static> Engine<P> {
     }
 
     /// Discard any backlog an event-driven platform (Windows) queued while `tick` was
-    /// taking an early return (Always-listen mode, or `caps_enabled` off) instead of
+    /// taking an early return (Always-listen mode, or `caps` off) instead of
     /// draining it. No-op on polled platforms (`is_caps_event_driven` false) — they have
-    /// no queue, just a sampled boolean. `caps_enabled` and `listen_mode` are independent
+    /// no queue, just a sampled boolean. `caps` and `listen_mode` are independent
     /// config axes (see `tick`'s two early returns below), so a platform can still be
     /// physically OWNED — and so still queuing — while either one alone would suggest
     /// otherwise; belt-and-suspenders with `Platform::release_caps_key` actually
@@ -1026,18 +1026,18 @@ impl<P: Platform + 'static> Engine<P> {
         // early-return, since narration plays even when caps is off or in always-listen
         // mode. Cheap in-process read (NSWorkspace / GetForegroundWindow).
         if let Some(q) = &self.ttsq {
-            // `pause_in_background` is the SOLE consumer of `terminal_front` (the worker's
-            // focus gate uses `pause_in_background && terminal_seen && !terminal_front`).
+            // `pause_bg` is the SOLE consumer of `terminal_front` (the worker's
+            // focus gate uses `pause_bg && terminal_seen && !terminal_front`).
             // When it's off, the frontmost probe is dead — so skip the poll/main-thread
             // NSWorkspace round-trip (~33×/s forever in the common idle case) and publish
             // `true`, which keeps the gate's `!terminal_front` term false (never silences).
-            let front = if self.cfg.pause_in_background {
+            let front = if self.cfg.pause_bg {
                 self.plat.is_terminal_frontmost()
             } else {
                 true
             };
             q.set_terminal_front(front);
-            q.set_pause_in_background(self.cfg.pause_in_background);
+            q.set_pause_bg(self.cfg.pause_bg);
         }
 
         // LIVE paste-target probe: while the dictation panel is up (recording or awaiting
@@ -1052,14 +1052,14 @@ impl<P: Platform + 'static> Engine<P> {
         if recording || self.awaiting_confirm() {
             // A focused editable field is the primary signal, but terminals — the app's
             // MAIN dictation target — frequently don't expose an AX-settable text element
-            // (custom-drawn TTY views), so `has_paste_target` reads "no target" even
+            // (custom-drawn TTY views), so `can_paste` reads "no target" even
             // though a synthetic Cmd+V lands fine. Treat a frontmost terminal as a paste
             // target too: both the Caps (`confirm_paste`) and voice-submit
             // (`listener::exec`) paths paste unconditionally into whatever is focused —
             // there's no focus refusal — so the glow must not warn there.
-            let present = self.plat.has_paste_target() || self.plat.is_terminal_frontmost();
+            let present = self.plat.can_paste() || self.plat.is_terminal_frontmost();
             if let Ok(mut p) = self.paste.lock() {
-                p.has_paste_target = present;
+                p.can_paste = present;
             }
         }
 
@@ -1075,13 +1075,13 @@ impl<P: Platform + 'static> Engine<P> {
         // Caps state is ignored while this mode is active.
         if self.cfg.listen_mode == ds_config::ListenMode::Always {
             let busy = self.ttsq.as_ref().map(|q| q.is_busy()).unwrap_or(false);
-            // A hands-free submit applies `input_clears` per scope, same as any other submit.
-            let cancel_current = self.cfg.input_clears.contains(&CancelSpeechScope::Current);
-            let cancel_other = self.cfg.input_clears.contains(&CancelSpeechScope::Other);
+            // A hands-free submit applies `clear_on_input` per scope, same as any other submit.
+            let cancel_current = self.cfg.clear_on_input.contains(&CancelSpeechScope::Current);
+            let cancel_other = self.cfg.clear_on_input.contains(&CancelSpeechScope::Other);
             if let Some(l) = self.listener.as_mut() {
                 l.tick(busy, cancel_current, cancel_other);
             }
-            // Always-listen bypasses the Caps gesture, but `caps_enabled` (and so the
+            // Always-listen bypasses the Caps gesture, but `caps` (and so the
             // platform's key ownership) is a SEPARATE axis — an event-driven platform
             // (Windows) may still be queuing every physical press regardless of mode.
             // Discard rather than let it accumulate: an unbounded/backlogged queue would
@@ -1093,9 +1093,9 @@ impl<P: Platform + 'static> Engine<P> {
             return;
         }
 
-        // caps_enabled gate: when the dictation loop is off, the engine does no
+        // caps gate: when the dictation loop is off, the engine does no
         // polling and no emits — it's a pure RPC host for the other subsystems.
-        if !self.caps_enabled {
+        if !self.caps {
             // Same reasoning as above — belt-and-suspenders in case the platform's own
             // key release didn't (or couldn't) stop the backlog from growing.
             self.discard_stale_caps_backlog();
@@ -1195,7 +1195,7 @@ impl<P: Platform + 'static> Engine<P> {
     ///     gestures always submits and the other always inserts, so the window always
     ///     matters to whichever outcome lands.
     ///
-    /// Deliberately does NOT also check `enter_after_paste`: with `double_tap_submits`
+    /// Deliberately does NOT also check `enter_after_paste`: with `double_tap_submit`
     /// on, the stop tap arms with it FALSE (insert-only provisionally), and a real
     /// double tap must still be waited for to flip it to `true` — gating on the
     /// current value would see `false` from the very first tick and never wait.
@@ -1342,7 +1342,7 @@ impl<P: Platform + 'static> Engine<P> {
         }
     }
 
-    /// Fire a deferred submit's Enter once `paste_submit_delay_ms` has elapsed. Run
+    /// Fire a deferred submit's Enter once `paste_delay_ms` has elapsed. Run
     /// once per [`tick`], regardless of gesture state, so a delay armed by
     /// `confirm_paste` still fires even if the gesture moves on in the meantime.
     fn check_pending_enter(&mut self) {
@@ -1503,13 +1503,13 @@ impl<P: Platform + 'static> Engine<P> {
         if self.stt.defers_paste() {
             // Arm the deferred submit, anchoring the flip double-tap window on this
             // stop gesture: a second tap within DOUBLE_TAP_MS flips the armed outcome
-            // (see handle_tap / deferred_submit_held). `double_tap_submits` off
+            // (see handle_tap / deferred_submit_held). `double_tap_submit` off
             // (default) arms a lone tap to submit; on, it arms a lone tap to
             // insert-only and a double to submit.
             self.gesture = GestureState::ConfirmArmed {
                 stop_tap_at: Some(Instant::now()),
                 double_pending: false,
-                enter_after_paste: !self.cfg.double_tap_submits,
+                enter_after_paste: !self.cfg.double_tap_submit,
             };
             // Mirror into the shared buffer BEFORE the panel's next status read (see
             // `FinalState::Armed`) — keeps the panel up across the gap between this
@@ -1790,7 +1790,7 @@ mod tests {
         caps_phys_down: Cell<bool>,
         lock_state: Cell<bool>,
         terminal_frontmost: Cell<bool>,
-        /// Whether an editable field is "focused" — backs `has_paste_target`, which
+        /// Whether an editable field is "focused" — backs `can_paste`, which
         /// the engine samples live to drive the dictation "no target" glow. Defaults
         /// false (Cell default).
         paste_target: Cell<bool>,
@@ -1820,15 +1820,15 @@ mod tests {
         /// Count of shared acquisition attempts / `release_caps_key` calls — lets tests assert the
         /// engine takes/gives up physical key ownership on exactly the right
         /// construction/ON/OFF transitions (`caps_key_ownership_*` tests below), not just
-        /// that `caps_enabled`/`gesture` end up in the right state.
+        /// that `caps`/`gesture` end up in the right state.
         acquire_caps_key_calls: Cell<u32>,
         normalize_caps_lock_calls: Cell<u32>,
         release_caps_key_calls: Cell<u32>,
-        /// Records every `set_extra_terminals`/`set_extra_custom_text_editors` call, in
+        /// Records every `set_extra_terminals`/`set_extra_editors` call, in
         /// order — lets `reload_pushes_extra_paste_target_lists_to_the_platform` assert
         /// both `Engine::assemble`'s initial push AND `Engine::reload`'s subsequent one.
         set_extra_terminals_calls: RefCell<Vec<Vec<String>>>,
-        set_extra_custom_text_editors_calls: RefCell<Vec<Vec<String>>>,
+        set_extra_editors_calls: RefCell<Vec<Vec<String>>>,
         /// Every chord actually tapped, in order — lets tests assert WHICH chord
         /// `ClaudeNative` taps (e.g. distinguishing an injected-`Paths`-derived chord
         /// from the default), not just how many taps happened.
@@ -1855,14 +1855,14 @@ mod tests {
         fn is_terminal_frontmost(&self) -> bool {
             self.terminal_frontmost.get()
         }
-        fn has_paste_target(&self) -> bool {
+        fn can_paste(&self) -> bool {
             self.paste_target.get()
         }
         fn set_extra_terminals(&self, extra: Vec<String>) {
             self.set_extra_terminals_calls.borrow_mut().push(extra);
         }
-        fn set_extra_custom_text_editors(&self, extra: Vec<String>) {
-            self.set_extra_custom_text_editors_calls
+        fn set_extra_editors(&self, extra: Vec<String>) {
+            self.set_extra_editors_calls
                 .borrow_mut()
                 .push(extra);
         }
@@ -1918,7 +1918,7 @@ mod tests {
         // Zero the paste-submit delay so submit-path tests can assert
         // `press_enter_calls` synchronously instead of waiting out a real
         // Instant-based timer — mirrors `listener.rs`'s `for_test` doing the same.
-        d.cfg.paste_submit_delay_ms = 0;
+        d.cfg.paste_delay_ms = 0;
         d
     }
 
@@ -2519,7 +2519,7 @@ mod tests {
     #[test]
     fn frontmost_terminal_is_a_paste_target_even_without_ax_focus() {
         // Regression: the "no target" glow used only the AX focused-element probe
-        // (`has_paste_target`). Terminals — the app's main dictation target —
+        // (`can_paste`). Terminals — the app's main dictation target —
         // often don't expose an AX-settable editable element, so the probe read
         // false and the bar glowed orange even though a Cmd+V paste lands fine.
         // A frontmost terminal must itself count as a paste target.
@@ -2534,7 +2534,7 @@ mod tests {
         d.plat.terminal_frontmost.set(true);
         d.tick();
         assert!(
-            d.paste.lock().unwrap().has_paste_target,
+            d.paste.lock().unwrap().can_paste,
             "frontmost terminal is a paste target even when the AX probe sees no editable field"
         );
 
@@ -2542,7 +2542,7 @@ mod tests {
         d.plat.terminal_frontmost.set(false);
         d.tick();
         assert!(
-            !d.paste.lock().unwrap().has_paste_target,
+            !d.paste.lock().unwrap().can_paste,
             "no editable field and no terminal ⇒ no paste target"
         );
 
@@ -2550,7 +2550,7 @@ mod tests {
         d.plat.paste_target.set(true);
         d.tick();
         assert!(
-            d.paste.lock().unwrap().has_paste_target,
+            d.paste.lock().unwrap().can_paste,
             "a focused editable field is a paste target on its own"
         );
     }
@@ -2582,13 +2582,13 @@ mod tests {
 
     /// Arm the deferred submit via start+stop, optionally landing a SECOND tap inside
     /// the double-tap window before returning — the setup shared by the four
-    /// lone-tap/double-tap × default/inverted `double_tap_submits` tests below, so the
+    /// lone-tap/double-tap × default/inverted `double_tap_submit` tests below, so the
     /// arm+tap choreography can't drift between the two config directions.
-    fn arm_stop_tap(double_tap_submits: bool, second_tap: bool) -> Engine<MockPlatform> {
+    fn arm_stop_tap(double_tap_submit: bool, second_tap: bool) -> Engine<MockPlatform> {
         let mut d = mk(600);
         d.plat.terminal_frontmost.set(true);
         d.stt = Box::new(DeferStt);
-        d.cfg.double_tap_submits = double_tap_submits;
+        d.cfg.double_tap_submit = double_tap_submit;
         MockPlatform::tap(&mut d); // start
         MockPlatform::tap(&mut d); // stop — arms the deferred submit
         if second_tap {
@@ -2659,7 +2659,7 @@ mod tests {
 
     #[test]
     fn double_tap_submits_inverts_a_lone_tap_to_insert_only() {
-        // With double_tap_submits ON, a LONE stop tap (no second tap lands) is
+        // With double_tap_submit ON, a LONE stop tap (no second tap lands) is
         // insert-only — the opposite of the default gesture. Also proves the fast-final
         // race is closed: the paste must still HOLD out the double-tap window even
         // though the armed outcome starts as insert-only (see `deferred_submit_held`).
@@ -2687,13 +2687,13 @@ mod tests {
         assert_eq!(
             d.plat.press_enter_calls.get(),
             0,
-            "lone tap → insert only when double_tap_submits is on"
+            "lone tap → insert only when double_tap_submit is on"
         );
     }
 
     #[test]
     fn double_tap_submits_inverts_a_double_tap_to_submit() {
-        // With double_tap_submits ON, a genuine double tap on the stop gesture SUBMITS
+        // With double_tap_submit ON, a genuine double tap on the stop gesture SUBMITS
         // (paste + Enter) instead of the default insert-only.
         let mut d = arm_stop_tap(true, true);
         assert!(
@@ -2716,7 +2716,7 @@ mod tests {
         assert_eq!(
             d.plat.press_enter_calls.get(),
             1,
-            "double tap submits when double_tap_submits is on"
+            "double tap submits when double_tap_submit is on"
         );
     }
 
@@ -2773,7 +2773,7 @@ mod tests {
         assert_eq!(
             d.plat.press_enter_calls.get(),
             0,
-            "double tap on stop (default double_tap_submits=false) is insert-only"
+            "double tap on stop (default double_tap_submit=false) is insert-only"
         );
     }
 
@@ -2866,7 +2866,7 @@ mod tests {
         d.gesture = GestureState::Recording;
 
         let cfg = VoiceConfig {
-            tts_built_in_voices: vec!["am_michael".into()],
+            tts_voices: vec!["am_michael".into()],
             ..Default::default()
         };
         d.reload(&cfg);
@@ -2889,16 +2889,16 @@ mod tests {
 
     #[test]
     fn reload_caps_toggle_off_ends_hold() {
-        // Flipping caps_enabled OFF mid-hold must end the HOLD cleanly (abort).
+        // Flipping caps OFF mid-hold must end the HOLD cleanly (abort).
         let mut d = mk(600);
         arm_claude_native(&mut d);
         d.gesture = GestureState::Recording;
         let cfg = VoiceConfig {
-            caps_enabled: false,
+            caps: false,
             ..Default::default()
         };
         d.reload(&cfg);
-        assert!(!d.caps_enabled, "caps loop disabled");
+        assert!(!d.caps, "caps loop disabled");
         assert!(!d.is_recording(), "HOLD ended when caps disabled mid-hold");
         assert_eq!(d.plat.tap_up_calls.get(), 1, "in-flight HOLD released");
     }
@@ -2918,18 +2918,18 @@ mod tests {
         d.caps_active = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             false,
         )));
-        d.caps_enabled = false; // known baseline, set directly (no bump fired yet)
+        d.caps = false; // known baseline, set directly (no bump fired yet)
 
         let on_cfg = VoiceConfig {
-            caps_enabled: true,
+            caps: true,
             ..Default::default()
         };
         d.reload(&on_cfg);
-        assert!(d.caps_enabled, "caps loop turned on");
+        assert!(d.caps, "caps loop turned on");
         let seq_after_on = gate.seq();
         assert_ne!(seq_after_on, 0, "a real OFF->ON transition bumps the gate");
 
-        // A second reload with the SAME caps_enabled value must not bump again.
+        // A second reload with the SAME caps value must not bump again.
         d.reload(&on_cfg);
         assert_eq!(
             gate.seq(),
@@ -2939,11 +2939,11 @@ mod tests {
 
         // ON->OFF is a real transition too.
         let off_cfg = VoiceConfig {
-            caps_enabled: false,
+            caps: false,
             ..Default::default()
         };
         d.reload(&off_cfg);
-        assert!(!d.caps_enabled, "caps loop turned off");
+        assert!(!d.caps, "caps loop turned off");
         assert_ne!(
             gate.seq(),
             seq_after_on,
@@ -2956,7 +2956,7 @@ mod tests {
         // `mk`/`Engine::new` start with caps enabled (preflight Ok, default config) —
         // construction must acquire exactly once, never release (nothing to release yet).
         let d = mk(600);
-        assert!(d.caps_enabled, "starts enabled by default");
+        assert!(d.caps, "starts enabled by default");
         assert_eq!(
             d.plat.acquire_caps_key_calls.get(),
             1,
@@ -2987,7 +2987,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/ds-test-nonexistent.pid"),
             600,
         );
-        assert!(!d.caps_enabled, "preflight denied — caps loop starts off");
+        assert!(!d.caps, "preflight denied — caps loop starts off");
         assert_eq!(
             d.plat.acquire_caps_key_calls.get(),
             0,
@@ -3011,11 +3011,11 @@ mod tests {
         );
 
         let off_cfg = VoiceConfig {
-            caps_enabled: false,
+            caps: false,
             ..Default::default()
         };
         d.reload(&off_cfg);
-        assert!(!d.caps_enabled);
+        assert!(!d.caps);
         assert_eq!(
             d.plat.release_caps_key_calls.get(),
             1,
@@ -3036,11 +3036,11 @@ mod tests {
         );
 
         let on_cfg = VoiceConfig {
-            caps_enabled: true,
+            caps: true,
             ..Default::default()
         };
         d.reload(&on_cfg);
-        assert!(d.caps_enabled);
+        assert!(d.caps);
         assert_eq!(
             d.plat.acquire_caps_key_calls.get(),
             2,
@@ -3074,7 +3074,7 @@ mod tests {
         };
         d.plat.set_caps_off_calls.set(0);
         let off_cfg = VoiceConfig {
-            caps_enabled: false,
+            caps: false,
             ..Default::default()
         };
         d.reload(&off_cfg);
@@ -3091,9 +3091,9 @@ mod tests {
 
     #[test]
     fn tick_discards_a_queued_backlog_while_always_listen_mode_bypasses_the_gesture() {
-        // Always-listen mode and `caps_enabled` are independent axes — the platform can
+        // Always-listen mode and `caps` are independent axes — the platform can
         // still be event-driven and queuing physical presses (e.g. Windows, still
-        // acquired because `caps_enabled` is true) while Always mode bypasses the
+        // acquired because `caps` is true) while Always mode bypasses the
         // gesture entirely. Without discarding, that backlog would replay in a burst
         // the instant `listen_mode` switches back, corrupting the tap/double-tap state
         // machine exactly like the bug `release_caps_key` otherwise closes.
@@ -3182,7 +3182,7 @@ mod tests {
         );
         assert_eq!(
             d.plat
-                .set_extra_custom_text_editors_calls
+                .set_extra_editors_calls
                 .borrow()
                 .as_slice(),
             &[Vec::<String>::new()]
@@ -3190,7 +3190,7 @@ mod tests {
 
         let cfg = VoiceConfig {
             extra_terminals: vec!["myterm".into()],
-            extra_custom_text_editors: vec!["myeditor.exe".into()],
+            extra_editors: vec!["myeditor.exe".into()],
             ..Default::default()
         };
         d.reload(&cfg);
@@ -3199,7 +3199,7 @@ mod tests {
             Some(&vec!["myterm".to_string()])
         );
         assert_eq!(
-            d.plat.set_extra_custom_text_editors_calls.borrow().last(),
+            d.plat.set_extra_editors_calls.borrow().last(),
             Some(&vec!["myeditor.exe".to_string()])
         );
     }
@@ -3237,13 +3237,13 @@ mod tests {
         d.caps_active = Some(caps_active.clone());
         let gate = StatusGate::new();
         d.status_gate = Some(gate.clone());
-        assert!(d.caps_enabled, "starts enabled — preflight Ok by default");
+        assert!(d.caps, "starts enabled — preflight Ok by default");
 
         // AX trust revoked: the re-probe must flip the gate off live, without a reload.
         d.plat.preflight_denied.set(true);
         let seq0 = gate.seq();
         d.refresh_caps_gate();
-        assert!(!d.caps_enabled, "AX revoked → caps disabled live");
+        assert!(!d.caps, "AX revoked → caps disabled live");
         assert!(
             !caps_active.load(Ordering::Relaxed),
             "shared caps_active (RPC activity.caps_active) flipped off"
@@ -3258,7 +3258,7 @@ mod tests {
         // AX trust regranted: the re-probe flips back on live.
         d.plat.preflight_denied.set(false);
         d.refresh_caps_gate();
-        assert!(d.caps_enabled, "AX regranted → caps re-enabled live");
+        assert!(d.caps, "AX regranted → caps re-enabled live");
         assert!(
             caps_active.load(Ordering::Relaxed),
             "shared caps_active flipped back on"

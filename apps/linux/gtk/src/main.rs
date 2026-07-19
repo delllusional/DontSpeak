@@ -121,7 +121,7 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
                         ds_status::tray_icon_kind(
                             s.activity.recording,
                             s.activity.speaking,
-                            &s.tray_indicator,
+                            &s.tray,
                         ),
                         s.activity.muted,
                     ),

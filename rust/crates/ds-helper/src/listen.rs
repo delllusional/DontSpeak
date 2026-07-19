@@ -614,7 +614,7 @@ fn try_streaming(
     let speaker_lock = ds_config::Paths::resolve()
         .map(|p| {
             let cfg = ds_config::VoiceConfig::load(&p);
-            cfg.stt_speaker_lock && cfg.is_diarization_on()
+            cfg.speaker_lock && cfg.is_diarization_on()
         })
         .unwrap_or(false);
     if speaker_lock {
@@ -784,7 +784,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Speaker-lock for the FINAL dictation buffer: when `stt_speaker_lock` is on, diarization
+/// Speaker-lock for the FINAL dictation buffer: when `speaker_lock` is on, diarization
 /// is enabled, and ≥1 voice is enrolled, SEPARATE the mixture into its constituent voices
 /// (SepFormer) and transcribe only the stream whose voiceprint matches the enrolled user —
 /// removing a co-channel background voice (other person / TV / a video) that frame-gating
@@ -802,7 +802,7 @@ fn speaker_locked_pcm(pcm: &[f32]) -> Vec<f32> {
         return pcm.to_vec();
     };
     let cfg = ds_config::VoiceConfig::load(&paths);
-    if !cfg.stt_speaker_lock || !cfg.is_diarization_on() {
+    if !cfg.speaker_lock || !cfg.is_diarization_on() {
         return pcm.to_vec();
     }
     let store = ds_config::SpeakerStore::load(&paths.speakers_json);
@@ -872,7 +872,7 @@ fn speaker_locked_pcm(pcm: &[f32]) -> Vec<f32> {
     // voice is "the stream that looks MORE like them than the other does". Pick the top
     // stream when it (a) clears a low absolute floor (not pure noise/silence) AND (b) beats
     // the runner-up by a margin (clearly the user, not a coin-flip). The absolute enrolled-
-    // match threshold (`speaker_threshold`, tuned for CLEAN enrollment audio) is too strict
+    // match threshold (`match_threshold`, tuned for CLEAN enrollment audio) is too strict
     // for separated streams, which carry mild artifacts and score lower. Anything uncertain
     // FAILS OPEN — transcribe the mixture, never drop the user.
     const FLOOR: f32 = 0.15; // below this the top stream isn't plausibly the user

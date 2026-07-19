@@ -65,15 +65,15 @@ pub trait FrontmostWindow {
     }
 
     /// Warn-only paste check; never gates delivery. Default true.
-    fn has_paste_target(&self) -> bool {
+    fn can_paste(&self) -> bool {
         true
     }
 
     /// config.toml `extra_terminals` union on reload.
     fn set_extra_terminals(&self, _extra: Vec<String>) {}
 
-    /// `extra_custom_text_editors` for paste exemption (Win/macOS).
-    fn set_extra_custom_text_editors(&self, _extra: Vec<String>) {}
+    /// `extra_editors` for paste exemption (Win/macOS).
+    fn set_extra_editors(&self, _extra: Vec<String>) {}
 }
 
 /// Caps physical hold + LED (long-press + recording).

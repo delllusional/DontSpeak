@@ -60,7 +60,7 @@ fn is_known_terminal_exe(exe: &str, extra: &[String]) -> bool {
 /// surface with a custom GPU/canvas toolkit rather than a native Win32 edit control, so UI
 /// Automation exposes no Edit/Document role (and no settable Value pattern) on the focused
 /// buffer even though a synthetic paste + Enter lands in it fine. Same underlying cause as
-/// the terminal exemption in `has_paste_target()` below (a custom-drawn text view with no
+/// the terminal exemption in `can_paste()` below (a custom-drawn text view with no
 /// AX/UIA text pattern) — kept as a SEPARATE list rather than folded into the shared
 /// `KNOWN_TERMINALS` terminal table, because `is_terminal_frontmost()` also gates
 /// unrelated behavior (mic pause-in-background in `ttsq.rs`, dictation-key/transcript
@@ -72,12 +72,12 @@ fn is_known_terminal_exe(exe: &str, extra: &[String]) -> bool {
 ///   zed-industries/zed discussion #6576) and doesn't yet expose the buffer as Edit/Document.
 ///
 /// A user can extend this table without a code change via config.toml's
-/// `extra_custom_text_editors` (see [`crate::FrontmostWindow::set_extra_custom_text_editors`])
+/// `extra_editors` (see [`crate::FrontmostWindow::set_extra_editors`])
 /// — unioned in at lookup time by [`is_custom_text_exe`], never merged into this slice.
 const CUSTOM_TEXT_EXES: &[&str] = &["zed.exe"];
 
 /// Is `exe` one of the built-in [`CUSTOM_TEXT_EXES`], OR one of the user's config.toml
-/// `extra_custom_text_editors` entries? Case-insensitive for the user-supplied extras
+/// `extra_editors` entries? Case-insensitive for the user-supplied extras
 /// only (the built-in table's exact-match behavior for its own literals is untouched).
 fn is_custom_text_exe(exe: &str, extra: &[String]) -> bool {
     CUSTOM_TEXT_EXES.contains(&exe) || extra.iter().any(|e| e.eq_ignore_ascii_case(exe))
@@ -86,7 +86,7 @@ fn is_custom_text_exe(exe: &str, extra: &[String]) -> bool {
 /// `GetForegroundWindow` -> `GetWindowThreadProcessId` -> `OpenProcess(LIMITED)` ->
 /// `QueryFullProcessImageNameW` -> the lowercased basename, or `None` on any failure (no
 /// foreground window, access denied, query failure). Shared by `is_terminal_frontmost()`
-/// and the `has_paste_target()` custom-editor exemption so the raw Win32 FFI to resolve
+/// and the `can_paste()` custom-editor exemption so the raw Win32 FFI to resolve
 /// "what process owns the foreground window" isn't duplicated between them.
 fn frontmost_process_basename() -> Option<String> {
     // SAFETY: Win32 FFI with locally owned buffers — `pid`/`buf`/`size` are stack locals
@@ -314,7 +314,7 @@ fn ensure_caps_hook() -> bool {
 /// (bounded — see below) for the unhook to be CONFIRMED complete before returning — not
 /// just requested. Also clears the latched Caps state (`CAPS_DOWN` / `CAPS_EDGES`) so a
 /// later [`ensure_caps_hook`] starts clean — this is what makes `release_caps_key` +
-/// the shared `acquire_caps_key` safe to call on every live `caps_enabled` toggle, not just at
+/// the shared `acquire_caps_key` safe to call on every live `caps` toggle, not just at
 /// process start/exit: a burst of presses made while released never survives to
 /// replay against the fresh hook — and resets `HOOK_STARTED` so the NEXT
 /// acquisition reinstalls a fresh hook rather than silently staying
@@ -386,19 +386,19 @@ pub struct WindowsPlatform {
     /// written through ordinary `&self` trait methods on the engine's single poll thread
     /// (via `Rc<WindowsPlatform>`, which is `!Send`), so plain interior mutability suffices.
     extra_terminals: RefCell<Vec<String>>,
-    /// User config.toml `extra_custom_text_editors` — extends `CUSTOM_TEXT_EXES` at lookup
+    /// User config.toml `extra_editors` — extends `CUSTOM_TEXT_EXES` at lookup
     /// time. Same single-thread reasoning as `extra_terminals` above.
-    extra_custom_text_editors: RefCell<Vec<String>>,
+    extra_editors: RefCell<Vec<String>>,
 }
 
 impl WindowsPlatform {
     /// Does NOT acquire the Caps key — the engine calls `ds_platform::acquire_caps_key`
     /// right after construction, only if caps dictation starts enabled (see
-    /// `Engine::assemble`), so a `caps_enabled=false` startup never installs the hook.
+    /// `Engine::assemble`), so a `caps=false` startup never installs the hook.
     pub fn new() -> Result<Self, PreflightError> {
         Ok(WindowsPlatform {
             extra_terminals: RefCell::new(Vec::new()),
-            extra_custom_text_editors: RefCell::new(Vec::new()),
+            extra_editors: RefCell::new(Vec::new()),
         })
     }
 
@@ -558,7 +558,7 @@ impl FrontmostWindow for WindowsPlatform {
             .is_some_and(|base| is_known_terminal_exe(&base, &self.extra_terminals.borrow()))
     }
 
-    fn has_paste_target(&self) -> bool {
+    fn can_paste(&self) -> bool {
         // Mirror the macOS AX probe (`focused_element_accepts_paste`): a paste target
         // exists when the FOCUSED element is an editable text control. The Windows
         // analogue of Accessibility is UI Automation — the focused element accepts a
@@ -584,7 +584,7 @@ impl FrontmostWindow for WindowsPlatform {
         // matching macOS where a terminal's AXTextArea reads as editable.
         if frontmost_process_basename().is_some_and(|base| {
             is_known_terminal_exe(&base, &self.extra_terminals.borrow())
-                || is_custom_text_exe(&base, &self.extra_custom_text_editors.borrow())
+                || is_custom_text_exe(&base, &self.extra_editors.borrow())
         }) {
             return true;
         }
@@ -653,8 +653,8 @@ impl FrontmostWindow for WindowsPlatform {
         *self.extra_terminals.borrow_mut() = extra;
     }
 
-    fn set_extra_custom_text_editors(&self, extra: Vec<String>) {
-        *self.extra_custom_text_editors.borrow_mut() = extra;
+    fn set_extra_editors(&self, extra: Vec<String>) {
+        *self.extra_editors.borrow_mut() = extra;
     }
 }
 
@@ -1143,7 +1143,7 @@ mod caps_key_ownership {
         assert!(lock_state_is_on(0x8001_u16 as i16));
     }
 
-    /// The regression this closes: while `caps_enabled` was OFF, a still-installed hook
+    /// The regression this closes: while `caps` was OFF, a still-installed hook
     /// would keep queuing every physical press into `CAPS_EDGES` even though nothing
     /// drains it — so the moment ownership is re-acquired, the whole backlog would
     /// replay in one burst and desync the tap/double-tap gesture state machine (see

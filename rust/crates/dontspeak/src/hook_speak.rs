@@ -1,7 +1,7 @@
 //! Engine-ping side effects for `notify` (from [`crate::hook_core`]). Best-effort IPC;
 //! neither blocks the client nor synthesizes (engine owns playback).
 //!
-//! Greet — SessionStart → `GreetSession` (engine self-gates on `greet_on_open`).
+//! Greet — SessionStart → `GreetSession` (engine self-gates on `greet`).
 //! MarkActive — UserPromptSubmit → TTS follows this terminal, EXCEPT
 //! [`is_synthetic_continuation`] (harness-injected, e.g. `<task-notification>`) — then only
 //! liveness bookkeeping; skip claim-active / cancel-on-submit (issue #11).

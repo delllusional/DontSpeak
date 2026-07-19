@@ -7,5 +7,5 @@ internal static class AgentUsageDataSource
         => AgentUsageModel.DecodeDeck(Native.AgentUsageSkeletonJson());
 
     internal static UsageCardDto? RefreshCard(string agent)
-        => AgentUsageModel.DecodeCard(Native.AgentUsageCardJson(agent, forceRefresh: true));
+        => AgentUsageModel.DecodeCard(Native.AgentUsageCardJson(agent, refresh: true));
 }

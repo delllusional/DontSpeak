@@ -19,8 +19,8 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_model_status_json();
     [DllImport(Dll)] private static extern IntPtr ds_model_status_wait(ulong since, uint timeoutMs);
     [DllImport(Dll)] private static extern IntPtr ds_agent_usage_skeleton_json();
-    [DllImport(Dll)] private static extern IntPtr ds_agent_usage_card_json([MarshalAs(UnmanagedType.LPUTF8Str)] string agent, byte forceRefresh);
-    [DllImport(Dll)] private static extern IntPtr ds_agent_usage_json(byte forceRefresh);
+    [DllImport(Dll)] private static extern IntPtr ds_agent_usage_card_json([MarshalAs(UnmanagedType.LPUTF8Str)] string agent, byte refresh);
+    [DllImport(Dll)] private static extern IntPtr ds_agent_usage_json(byte refresh);
     [DllImport(Dll)] private static extern IntPtr ds_tools_json();
     [DllImport(Dll)] private static extern IntPtr ds_libraries_json();
     [DllImport(Dll)] private static extern IntPtr ds_logs_json(uint maxBytes);
@@ -124,12 +124,12 @@ internal static class Native
     public static string AgentUsageSkeletonJson() => TakeString(ds_agent_usage_skeleton_json());
 
     /// <summary>BLOCKING single-card load. Off UI; force bypasses 60s soft cache.</summary>
-    public static string AgentUsageCardJson(string agent, bool forceRefresh)
-        => TakeString(ds_agent_usage_card_json(agent, (byte)(forceRefresh ? 1 : 0)));
+    public static string AgentUsageCardJson(string agent, bool refresh)
+        => TakeString(ds_agent_usage_card_json(agent, (byte)(refresh ? 1 : 0)));
 
     /// <summary>BLOCKING aggregate deck (diagnostics).</summary>
-    public static string AgentUsageJson(bool forceRefresh)
-        => TakeString(ds_agent_usage_json((byte)(forceRefresh ? 1 : 0)));
+    public static string AgentUsageJson(bool refresh)
+        => TakeString(ds_agent_usage_json((byte)(refresh ? 1 : 0)));
 
     /// <summary>BLOCKS until seq ≠ since or timeout. Background thread only; since=0 first. "{}" if down.</summary>
     public static string ModelStatusWait(ulong since, uint timeoutMs) => TakeString(ds_model_status_wait(since, timeoutMs));
@@ -171,7 +171,7 @@ public sealed record Activity
     // Mute silences voice without stopping playback (tray slash + menu checkmark).
     public bool Muted;
     /// Wireable client of the in-flight TTS utterance (`claude_code`/…); null when idle.
-    public string? SpeakingSource;
+    public string? Speaker;
     // Tray tint tokens: stt/tts or stt_animated/tts_animated. Default ["stt","tts_animated"];
     // [] = never tint. Fallback only — engine is source of truth.
     public string[] TrayIndicator = { "stt", "tts_animated" };
@@ -189,7 +189,7 @@ public sealed record SttEngineStatus
     public string Engine = "off";
     public string Provider = "";
     public EngineInfo Status;
-    public string DelegationKey = "";
+    public string VoiceKey = "";
 }
 
 /// <summary>Dictation confirm-panel wire object.</summary>
@@ -197,19 +197,19 @@ public sealed record Dictation
 {
     public string DictText = "";
     // Editable paste target focused?
-    public bool DictHasTarget = true;
+    public bool DictCanPaste = true;
     // Canonical token (ds-status dictation_state.rs).
     public string DictState = "hidden";
 
     public bool ShowPanel => DictState != "hidden";
     public bool PromptGlow => DictState == "recording" && string.IsNullOrWhiteSpace(DictText);
-    public bool HasUsableTarget => DictHasTarget && DictState != "refused";
+    public bool HasUsableTarget => DictCanPaste && DictState != "refused";
 }
 
 public sealed record TtsStats
 {
     public double RtfMin, RtfAvg, RtfMax;
-    public double FirstMinMs, FirstAvgMs, FirstMaxMs;
+    public double TtfaMinMs, TtfaAvgMs, TtfaMaxMs;
     public double AudioSecs;
     public int Utterances, Failures;
 }
@@ -290,7 +290,7 @@ internal sealed class HealthSnapshot
                 s.Activity.CapsEnabled = activity.CapsEnabled;
                 s.Activity.Recording = activity.Recording;
                 s.Activity.Speaking = activity.Speaking;
-                s.Activity.SpeakingSource = activity.Speaking ? activity.SpeakingSource : null;
+                s.Activity.Speaker = activity.Speaking ? activity.Speaker : null;
                 s.Activity.Muted = activity.Muted;
             }
             // Override default only when key present (null ⇒ keep default).
@@ -299,7 +299,7 @@ internal sealed class HealthSnapshot
             if (dto.Dictation is { } d)
             {
                 s.Dictation.DictText = d.Text ?? "";
-                s.Dictation.DictHasTarget = d.HasPasteTarget;
+                s.Dictation.DictCanPaste = d.CanPaste;
                 s.Dictation.DictState = d.State ?? "hidden";
             }
             if (dto.Tts is { } ttsStatus)
@@ -312,7 +312,7 @@ internal sealed class HealthSnapshot
             {
                 s.SttEngine.Engine = sttStatus.Engine ?? "off";
                 s.SttEngine.Provider = sttStatus.Provider ?? "";
-                s.SttEngine.DelegationKey = sttStatus.DelegationKey ?? "";
+                s.SttEngine.VoiceKey = sttStatus.VoiceKey ?? "";
                 s.SttEngine.Status = ToEngine(sttStatus.Status, stateWord);
             }
             if (dto.Diarization is { } diarization)
@@ -328,7 +328,7 @@ internal sealed class HealthSnapshot
                 if (stats.Tts is { } tts)
                 {
                     s.Tts.RtfMin = tts.RtfMin; s.Tts.RtfAvg = tts.RtfAvg; s.Tts.RtfMax = tts.RtfMax;
-                    s.Tts.FirstMinMs = tts.FirstMinMs; s.Tts.FirstAvgMs = tts.FirstAvgMs; s.Tts.FirstMaxMs = tts.FirstMaxMs;
+                    s.Tts.TtfaMinMs = tts.TtfaMinMs; s.Tts.TtfaAvgMs = tts.TtfaAvgMs; s.Tts.TtfaMaxMs = tts.TtfaMaxMs;
                     s.Tts.Utterances = (int)tts.Utterances; s.Tts.AudioSecs = tts.AudioSecs; s.Tts.Failures = (int)tts.Failures;
                 }
                 if (stats.Stt is { } stt)
@@ -382,7 +382,7 @@ internal sealed record ModelStatusDto
     [JsonPropertyName("diarization")] public DiarizationStatusDto? Diarization { get; init; }
     [JsonPropertyName("dictation")] public DictationDto? Dictation { get; init; }
     [JsonPropertyName("stats")] public StatsDto? Stats { get; init; }
-    [JsonPropertyName("tray_indicator")] public string?[]? TrayIndicator { get; init; }
+    [JsonPropertyName("tray")] public string?[]? TrayIndicator { get; init; }
 }
 
 internal sealed record EngineStatusDto
@@ -394,11 +394,11 @@ internal sealed record EngineStatusDto
 
 internal sealed record ActivityDto
 {
-    [JsonPropertyName("caps_enabled")] public bool CapsEnabled { get; init; }
+    [JsonPropertyName("caps")] public bool CapsEnabled { get; init; }
     [JsonPropertyName("caps_active")] public bool CapsActive { get; init; }
     [JsonPropertyName("recording")] public bool Recording { get; init; }
     [JsonPropertyName("speaking")] public bool Speaking { get; init; }
-    [JsonPropertyName("speaking_source")] public string? SpeakingSource { get; init; }
+    [JsonPropertyName("speaker")] public string? Speaker { get; init; }
     [JsonPropertyName("muted")] public bool Muted { get; init; }
 }
 
@@ -414,14 +414,14 @@ internal sealed record SttStatusDto
     [JsonPropertyName("engine")] public string? Engine { get; init; }
     [JsonPropertyName("provider")] public string? Provider { get; init; }
     [JsonPropertyName("status")] public EngineStatusDto? Status { get; init; }
-    [JsonPropertyName("delegation_key")] public string? DelegationKey { get; init; }
+    [JsonPropertyName("voice_key")] public string? VoiceKey { get; init; }
 }
 
 internal sealed record DictationDto
 {
     [JsonPropertyName("state")] public string? State { get; init; }
     [JsonPropertyName("text")] public string? Text { get; init; }
-    [JsonPropertyName("has_paste_target")] public bool HasPasteTarget { get; init; }
+    [JsonPropertyName("can_paste")] public bool CanPaste { get; init; }
 }
 
 internal sealed record StatsDto
@@ -436,9 +436,9 @@ internal sealed record TtsStatsDto
     [JsonPropertyName("rtf_min")] public double RtfMin { get; init; }
     [JsonPropertyName("rtf_avg")] public double RtfAvg { get; init; }
     [JsonPropertyName("rtf_max")] public double RtfMax { get; init; }
-    [JsonPropertyName("first_min_ms")] public double FirstMinMs { get; init; }
-    [JsonPropertyName("first_avg_ms")] public double FirstAvgMs { get; init; }
-    [JsonPropertyName("first_max_ms")] public double FirstMaxMs { get; init; }
+    [JsonPropertyName("ttfa_min_ms")] public double TtfaMinMs { get; init; }
+    [JsonPropertyName("ttfa_avg_ms")] public double TtfaAvgMs { get; init; }
+    [JsonPropertyName("ttfa_max_ms")] public double TtfaMaxMs { get; init; }
     [JsonPropertyName("utterances")] public long Utterances { get; init; }
     [JsonPropertyName("audio_secs")] public double AudioSecs { get; init; }
     [JsonPropertyName("failures")] public long Failures { get; init; }
@@ -466,6 +466,6 @@ internal sealed record DiarizationStatusDto
     [JsonPropertyName("enabled")] public bool Enabled { get; init; }
     [JsonPropertyName("provider")] public string? Provider { get; init; }
     [JsonPropertyName("speakers")] public string?[]? Speakers { get; init; }
-    [JsonPropertyName("clustering_threshold")] public double ClusteringThreshold { get; init; }
+    [JsonPropertyName("cluster_threshold")] public double ClusteringThreshold { get; init; }
 }
 

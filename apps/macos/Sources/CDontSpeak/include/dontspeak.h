@@ -95,16 +95,16 @@ char *ds_model_status_json(void);
 char *ds_model_status_wait(uint64_t since, uint32_t timeout_ms);
 
 // Weekly/monthly coding-agent quota snapshot. BLOCKING: call off the UI thread.
-// `force_refresh != 0` bypasses the 60-second in-process cache. JSON strings are
+// `refresh != 0` bypasses the 60-second in-process cache. JSON strings are
 // owned `char*`, free with `ds_string_free`. HANDLE-FREE — no engine needed.
 /* Instant deck: installed agent cards + cached rows. No network.
  * JSON: { cards: [ { agent, account?, rows: [...] } ] } */
 char *ds_agent_usage_skeleton_json(void);
-/* Blocking single-card load. agent = client token; force_refresh bypasses 60s cache.
+/* Blocking single-card load. agent = client token; refresh bypasses 60s cache.
  * JSON: { agent, account?, rows: [ { period, used_percent, resets_at_unix } ] } */
-char *ds_agent_usage_card_json(const char *agent, uint8_t force_refresh);
+char *ds_agent_usage_card_json(const char *agent, uint8_t refresh);
 /* Aggregate deck refresh (tests/tooling). */
-char *ds_agent_usage_json(uint8_t force_refresh);
+char *ds_agent_usage_json(uint8_t refresh);
 
 // The tool catalog for the app's Tools window — a JSON array of
 // `{name, description, params:[…]}` with the args as an ORDERED array (the UI form of
@@ -167,7 +167,7 @@ char *ds_log_colors_json(void);
 
 // One random Usage speaking-card pastel wash as JSON `{"r","g","b","a"}` (opaque sRGB +
 // wash alpha). Single recipe in ds-core (HSV random H, fixed S/V); hosts only paint and freeze
-// while speaking_source is unchanged. New color each call. Owned `char*`, free with `ds_string_free`.
+// while speaker is unchanged. New color each call. Owned `char*`, free with `ds_string_free`.
 // HANDLE-FREE — no engine. On failure returns "{}" (host skips wash).
 char *ds_random_pastel_wash_json(void);
 
@@ -243,7 +243,7 @@ char *ds_human_size(uint64_t bytes);
 
 // Tray / state-stripe kind: "idle" | "recording" | "speaking". `stt_active` / `tts_active`
 // are non-zero when Caps dictation / TTS playback is live. `tray_indicator_json` is the
-// model_status `tray_indicator` JSON string array (NULL/malformed → []). Owned `char*`, free
+// model_status `tray` JSON string array (NULL/malformed → []). Owned `char*`, free
 // with `ds_string_free`. HANDLE-FREE. ONE mapping shared by every host.
 char *ds_tray_icon_kind(uint8_t stt_active, uint8_t tts_active, const char *tray_indicator_json);
 
