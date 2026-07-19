@@ -7,19 +7,13 @@
 //! Non-streaming: SessionStart greet-only; SessionEnd/Stop/Notification notify;
 //! UserPromptSubmit notify+provide. "Ours" = basename `dontspeak` ([`command_is_ours`]).
 
-use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
+use super::cmdline::{ShellOverride, command_is_ours, shell_client_command};
 use ds_client::ClientSource;
 use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table as TomlTable, value};
 
 /// No `shell`/`args` → inlined verbs + `--client`; spaced bin → 8.3.
 fn kimi_command(bin: &str, verb: &str, client: ClientSource) -> String {
-    inline_command(
-        host_inline_flavor(),
-        bin,
-        [verb, "--client", client.as_str()],
-        ShellOverride::Unsupported,
-    )
-    .0
+    shell_client_command(bin, verb, client, ShellOverride::Unsupported)
 }
 
 /// Flat entries, SECONDS, sync (no `async` key). Stop at Kimi's 600s cap (`kimi doctor`).

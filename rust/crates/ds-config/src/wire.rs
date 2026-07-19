@@ -4,6 +4,7 @@
 //! String-runner clients share [`cmdline`] (Windows quoting was wrong per-client before).
 
 pub(crate) mod cmdline;
+pub(crate) mod yaml_doc;
 
 pub mod codex;
 pub mod grok_hooks;

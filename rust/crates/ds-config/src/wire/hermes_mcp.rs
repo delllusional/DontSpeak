@@ -1,20 +1,11 @@
 //! Hermes Agent MCP (`~/.hermes/config.yaml` `mcp_servers.DontSpeak`).
 //!
 //! Same YAML document as shell hooks; snake_case `mcp_servers` (not Claude
-//! `mcpServers`). Comment loss on re-emit accepted.
+//! `mcpServers`). Comment loss on re-emit accepted. Shape mirrors
+//! [`super::toml_mcp`] (different serializer).
 
+use super::yaml_doc;
 use serde_json::{Map, Value, json};
-
-fn parse_yaml(existing: &str) -> Result<Value, String> {
-    if existing.trim().is_empty() {
-        return Ok(Value::Object(Map::new()));
-    }
-    serde_saphyr::from_str(existing).map_err(|e| format!("invalid YAML: {e}"))
-}
-
-fn emit_yaml(root: &Value) -> Result<String, String> {
-    serde_saphyr::to_string(root).map_err(|e| format!("YAML serialize failed: {e}"))
-}
 
 /// Merge/update `mcp_servers.<name>` stdio entry. Rendered YAML or unmergeable Err.
 pub fn merge_hermes_mcp(
@@ -23,7 +14,7 @@ pub fn merge_hermes_mcp(
     command: &str,
     args: &[&str],
 ) -> Result<String, String> {
-    let mut root = parse_yaml(existing)?;
+    let mut root = yaml_doc::parse(existing).map_err(|e| format!("invalid YAML: {e}"))?;
     if !root.is_object() {
         return Err("config.yaml root is not a mapping".into());
     }
@@ -48,7 +39,7 @@ pub fn merge_hermes_mcp(
     } else {
         entry.insert("args".to_string(), json!(args));
     }
-    emit_yaml(&root)
+    yaml_doc::emit(&root).map_err(|e| format!("YAML serialize failed: {e}"))
 }
 
 /// Strip `mcp_servers.<name>`; drop empty table.
@@ -56,7 +47,7 @@ pub fn strip_hermes_mcp(existing: &str, name: &str) -> Result<String, String> {
     if existing.trim().is_empty() {
         return Ok(existing.to_string());
     }
-    let mut root = parse_yaml(existing)?;
+    let mut root = yaml_doc::parse(existing).map_err(|e| format!("invalid YAML: {e}"))?;
     let Some(obj) = root.as_object_mut() else {
         return Ok(existing.to_string());
     };
@@ -66,7 +57,7 @@ pub fn strip_hermes_mcp(existing: &str, name: &str) -> Result<String, String> {
             obj.remove("mcp_servers");
         }
     }
-    emit_yaml(&root)
+    yaml_doc::emit(&root).map_err(|e| format!("YAML serialize failed: {e}"))
 }
 
 #[cfg(test)]

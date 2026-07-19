@@ -139,6 +139,23 @@ fn host_short_path(_long: &str) -> Option<String> {
     None
 }
 
+/// Inline-shell hook command: `bin` + `verb` + `--client <token>`.
+/// Shared by Kimi / Hermes (and any client without a `shell`/`args` field).
+pub(crate) fn shell_client_command(
+    bin: &str,
+    verb: &str,
+    client: ds_client::ClientSource,
+    shell_override: ShellOverride,
+) -> String {
+    inline_command(
+        host_inline_flavor(),
+        bin,
+        [verb, "--client", client.as_str()],
+        shell_override,
+    )
+    .0
+}
+
 /// Ours? Leading path stem == `dontspeak` in any dialect we emit (self-heal + strip).
 /// OS-separator-independent (`Path` won't split `\` on Linux). Basename only — path
 /// substring match would skip re-wire and delete user groups on unwire.

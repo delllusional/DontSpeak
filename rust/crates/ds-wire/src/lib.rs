@@ -737,6 +737,8 @@ mod tests {
         assert_eq!(wire_client(ClientSource::Hermes, &paths, false, false), 0);
 
         let text = std::fs::read_to_string(&paths.hermes_config_yaml).unwrap();
+        // serde-saphyr may fold long Windows paths with `>-` (newlines in the scalar).
+        let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
         for event in [
             "on_session_start",
             "pre_llm_call",
@@ -746,11 +748,11 @@ mod tests {
             assert!(text.contains(event), "{event} wired: {text}");
         }
         assert!(
-            text.contains(" notify --greet-only --client hermes"),
+            flat.contains("notify --greet-only --client hermes"),
             "SessionStart greet-only: {text}"
         );
         assert!(
-            text.contains(" provide --client hermes"),
+            flat.contains("provide --client hermes"),
             "provide wired: {text}"
         );
         assert!(

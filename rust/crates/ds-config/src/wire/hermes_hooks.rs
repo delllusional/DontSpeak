@@ -10,19 +10,14 @@
 //!
 //! Re-emit loses comments (accepted; no format-preserving YAML editor).
 
-use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
+use super::cmdline::{ShellOverride, command_is_ours, shell_client_command};
+use super::yaml_doc;
 use ds_client::ClientSource;
 use serde_json::{Map, Value, json};
 
 /// No `shell`/`args` → inlined verbs + `--client`; spaced bin → 8.3.
 fn hermes_command(bin: &str, verb: &str, client: ClientSource) -> String {
-    inline_command(
-        host_inline_flavor(),
-        bin,
-        [verb, "--client", client.as_str()],
-        ShellOverride::Unsupported,
-    )
-    .0
+    shell_client_command(bin, verb, client, ShellOverride::Unsupported)
 }
 
 /// `(event, verb-fragment, timeout_secs)` — timeouts within Hermes 300 max.
@@ -58,14 +53,11 @@ impl std::fmt::Display for HermesMergeError {
 impl std::error::Error for HermesMergeError {}
 
 fn parse_yaml(existing: &str) -> Result<Value, HermesMergeError> {
-    if existing.trim().is_empty() {
-        return Ok(Value::Object(Map::new()));
-    }
-    serde_saphyr::from_str(existing).map_err(|e| HermesMergeError::Parse(e.to_string()))
+    yaml_doc::parse(existing).map_err(HermesMergeError::Parse)
 }
 
 fn emit_yaml(root: &Value) -> Result<String, HermesMergeError> {
-    serde_saphyr::to_string(root).map_err(|e| HermesMergeError::Parse(e.to_string()))
+    yaml_doc::emit(root).map_err(HermesMergeError::Parse)
 }
 
 fn entry_command(entry: &Value) -> Option<&str> {
@@ -245,7 +237,7 @@ pub fn strip_hermes_hooks(existing: &str) -> Result<String, HermesMergeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::cmdline::{InlineFlavor, inline_command};
+    use super::super::cmdline::{InlineFlavor, ShellOverride, inline_command};
 
     const BIN: &str = "/home/u/.local/bin/dontspeak";
 

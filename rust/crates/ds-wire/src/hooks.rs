@@ -282,6 +282,10 @@ pub(crate) fn kimi_toml_hooks(
 }
 
 /// Shared YAML text body (Hermes config.yaml): same contract as [`toml_hooks_body`].
+///
+/// `write_action(remove)` labels the backup write; `load_hint` prints after a
+/// successful non-remove write (MCP); `fatal_err` makes merge/strip errors
+/// exit 1 (MCP) vs leave-unchanged exit 0 (hooks).
 #[allow(clippy::too_many_arguments)]
 fn yaml_text_body<E: std::fmt::Display>(
     cfg: &std::path::Path,
@@ -293,6 +297,9 @@ fn yaml_text_body<E: std::fmt::Display>(
     panic_ctx: &'static str,
     merge: impl FnOnce(&str, &str) -> Result<String, E>,
     strip: impl FnOnce(&str) -> Result<String, E>,
+    write_action: impl FnOnce(bool) -> &'static str,
+    load_hint: Option<&str>,
+    fatal_err: bool,
 ) -> i32 {
     let existing = match seed {
         Some(PreviewDoc::Yaml(s)) => s,
@@ -328,17 +335,28 @@ fn yaml_text_body<E: std::fmt::Display>(
                 0
             }
         },
-        Ok(merged) if merged != existing => io::backup_then_write(
-            "wire",
-            cfg,
-            "yaml",
-            &WriteBody::Str(&merged),
-            hook_action(remove),
-        ),
+        Ok(merged) if merged != existing => {
+            let code = io::backup_then_write(
+                "wire",
+                cfg,
+                "yaml",
+                &WriteBody::Str(&merged),
+                write_action(remove),
+            );
+            if code == 0 && !remove && let Some(hint) = load_hint {
+                eprintln!("wire: {hint}");
+            }
+            code
+        }
         Ok(_) => 0,
         Err(e) => {
-            eprintln!("wire: {} left unchanged ({e})", cfg.display());
-            0
+            if fatal_err {
+                eprintln!("wire: {e}");
+                1
+            } else {
+                eprintln!("wire: {} left unchanged ({e})", cfg.display());
+                0
+            }
         }
     }
 }
@@ -363,6 +381,9 @@ pub(crate) fn hermes_yaml_hooks(
         "hermes_yaml_hooks",
         |existing, bin| ds_config::merge_hermes_hooks(existing, bin, client),
         ds_config::strip_hermes_hooks,
+        hook_action,
+        None,
+        false,
     )
 }
 
@@ -376,59 +397,28 @@ pub(crate) fn hermes_yaml_mcp(
     capture: Option<&mut Option<PreviewDoc>>,
     load_hint: &str,
 ) -> i32 {
-    let existing = match seed {
-        Some(PreviewDoc::Yaml(s)) => s,
-        Some(PreviewDoc::Json(_) | PreviewDoc::Toml(_)) => {
-            panic!("hermes_yaml_mcp: seed must be PreviewDoc::Yaml for a YAML mechanism")
-        }
-        None => match std::fs::read_to_string(cfg) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                eprintln!("wire: could not read {} ({e})", cfg.display());
-                return 1;
-            }
+    yaml_text_body(
+        cfg,
+        remove,
+        print_only,
+        seed,
+        capture,
+        paths,
+        "hermes_yaml_mcp",
+        |existing, bin| {
+            ds_config::merge_hermes_mcp(existing, crate::SERVER_NAME, bin, &[])
         },
-    };
-    let result = if remove {
-        ds_config::strip_hermes_mcp(&existing, crate::SERVER_NAME)
-    } else {
-        let Some(bin) = io::resolve_dontspeak_bin_at(Some(paths)) else {
-            eprintln!("wire: could not resolve the dontspeak binary path");
-            return 1;
-        };
-        ds_config::merge_hermes_mcp(&existing, crate::SERVER_NAME, &bin, &[])
-    };
-    match result {
-        Ok(merged) if print_only => match capture {
-            Some(slot) => {
-                *slot = Some(PreviewDoc::Yaml(merged));
-                0
-            }
-            None => {
-                println!("// {}\n{merged}", cfg.display());
-                0
-            }
-        },
-        Ok(merged) if merged != existing => {
-            let action = if remove {
+        |existing| ds_config::strip_hermes_mcp(existing, crate::SERVER_NAME),
+        |rm| {
+            if rm {
                 "removed dontspeak MCP server from"
             } else {
                 "registered dontspeak MCP server ->"
-            };
-            let code =
-                io::backup_then_write("wire", cfg, "yaml", &WriteBody::Str(&merged), action);
-            if code == 0 && !remove {
-                eprintln!("wire: {load_hint}");
             }
-            code
-        }
-        Ok(_) => 0,
-        Err(e) => {
-            eprintln!("wire: {e}");
-            1
-        }
-    }
+        },
+        Some(load_hint),
+        true,
+    )
 }
 
 /// Hermes shell-hooks allowlist JSON (consent for every wired `(event, command)`).
