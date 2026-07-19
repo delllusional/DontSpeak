@@ -79,7 +79,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_variant_round_trips_through_parse_and_as_str() {
+    fn every_variant_round_trips_parse_serde_and_display() {
         for c in [
             ClientSource::ClaudeCode,
             ClientSource::Codex,
@@ -90,6 +90,10 @@ mod tests {
             ClientSource::Unknown,
         ] {
             assert_eq!(ClientSource::parse(c.as_str()), Some(c), "{c:?}");
+            let s = serde_json::to_string(&c).unwrap();
+            assert_eq!(s, format!("\"{}\"", c.as_str()), "{c:?}");
+            let back: ClientSource = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, c, "{c:?} round-trips through serde");
         }
     }
 
@@ -119,26 +123,10 @@ mod tests {
             assert!(c.is_client(), "{c:?} is wire-able");
         }
         // DontSpeak must never count as a client (`exclude_clients = ["dontspeak"]`);
-        // Unknown is not wire-able either.
+        // Unknown is not wire-able either. Default fails open to Unknown.
         assert!(!ClientSource::DontSpeak.is_client());
         assert!(!ClientSource::Unknown.is_client());
-    }
-
-    #[test]
-    fn default_is_unknown() {
         assert_eq!(ClientSource::default(), ClientSource::Unknown);
-    }
-
-    #[test]
-    fn serializes_as_the_bare_token() {
-        assert_eq!(
-            serde_json::to_string(&ClientSource::QwenCode).unwrap(),
-            r#""qwen_code""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ClientSource::Unknown).unwrap(),
-            r#""unknown""#
-        );
     }
 
     #[test]
@@ -153,22 +141,5 @@ mod tests {
         // Fail-open is for unrecognised strings only; wrong type still errors.
         assert!(serde_json::from_str::<ClientSource>("42").is_err());
         assert!(serde_json::from_str::<ClientSource>("null").is_err());
-    }
-
-    #[test]
-    fn every_token_round_trips_through_serde() {
-        for c in [
-            ClientSource::ClaudeCode,
-            ClientSource::Codex,
-            ClientSource::QwenCode,
-            ClientSource::Grok,
-            ClientSource::KimiCode,
-            ClientSource::DontSpeak,
-            ClientSource::Unknown,
-        ] {
-            let s = serde_json::to_string(&c).unwrap();
-            let back: ClientSource = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, c, "{c:?} round-trips through serde");
-        }
     }
 }

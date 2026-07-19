@@ -903,18 +903,16 @@ mod arg_validation {
     }
 
     #[test]
-    fn speakers_enroll_requires_name() {
-        let err = call_speakers(&dead_sock(), &json!({ "action": "enroll" })).unwrap_err();
-        assert_eq!(err, "manage_speakers: `name` is required for this action");
-
+    fn speakers_enroll_and_forget_require_name() {
+        for action in ["enroll", "forget"] {
+            let err = call_speakers(&dead_sock(), &json!({ "action": action })).unwrap_err();
+            assert_eq!(
+                err, "manage_speakers: `name` is required for this action",
+                "{action}"
+            );
+        }
         let err =
             call_speakers(&dead_sock(), &json!({ "action": "enroll", "name": "  " })).unwrap_err();
-        assert_eq!(err, "manage_speakers: `name` is required for this action");
-    }
-
-    #[test]
-    fn speakers_forget_requires_name() {
-        let err = call_speakers(&dead_sock(), &json!({ "action": "forget" })).unwrap_err();
         assert_eq!(err, "manage_speakers: `name` is required for this action");
     }
 }
@@ -931,57 +929,39 @@ mod engine_unavailable {
     }
 
     #[test]
-    fn speak_reports_engine_unavailable() {
+    fn every_ipc_tool_reports_engine_unavailable() {
         let (_dir, sock) = no_such_socket();
-        let err =
-            call_speak(&sock, &json!({ "text": "hello" }), ClientSource::ClaudeCode).unwrap_err();
-        assert!(err.starts_with("engine unavailable: "), "got: {err}");
-    }
-
-    #[test]
-    fn stop_reports_engine_unavailable() {
-        let (_dir, sock) = no_such_socket();
-        let err = call_stop(&sock, ClientSource::ClaudeCode).unwrap_err();
-        assert!(err.starts_with("engine unavailable: "), "got: {err}");
-    }
-
-    #[test]
-    fn mute_reports_engine_unavailable() {
-        let (_dir, sock) = no_such_socket();
-        let err = call_mute(&sock, &json!({ "on": true })).unwrap_err();
-        assert!(err.starts_with("engine unavailable: "), "got: {err}");
-    }
-
-    #[test]
-    fn diarize_reports_engine_unavailable() {
-        let (_dir, sock) = no_such_socket();
-        let err = call_diarize(&sock, &json!({})).unwrap_err();
-        assert!(err.starts_with("engine unavailable: "), "got: {err}");
-    }
-
-    #[test]
-    fn speakers_list_reports_engine_unavailable() {
-        let (_dir, sock) = no_such_socket();
-        let err = call_speakers(&sock, &json!({ "action": "list" })).unwrap_err();
-        assert!(err.starts_with("engine unavailable: "), "got: {err}");
-    }
-
-    #[test]
-    fn speakers_enroll_reports_engine_unavailable() {
-        let (_dir, sock) = no_such_socket();
-        let err = call_speakers(
-            &sock,
-            &json!({ "action": "enroll", "name": "Alex", "seconds": 5 }),
-        )
-        .unwrap_err();
-        assert!(err.starts_with("engine unavailable: "), "got: {err}");
-    }
-
-    #[test]
-    fn speakers_forget_reports_engine_unavailable() {
-        let (_dir, sock) = no_such_socket();
-        let err = call_speakers(&sock, &json!({ "action": "forget", "name": "Alex" })).unwrap_err();
-        assert!(err.starts_with("engine unavailable: "), "got: {err}");
+        let calls: &[(&str, Result<String, String>)] = &[
+            (
+                "speak",
+                call_speak(&sock, &json!({ "text": "hello" }), ClientSource::ClaudeCode),
+            ),
+            ("stop", call_stop(&sock, ClientSource::ClaudeCode)),
+            ("mute", call_mute(&sock, &json!({ "on": true }))),
+            ("diarize", call_diarize(&sock, &json!({}))),
+            (
+                "speakers list",
+                call_speakers(&sock, &json!({ "action": "list" })),
+            ),
+            (
+                "speakers enroll",
+                call_speakers(
+                    &sock,
+                    &json!({ "action": "enroll", "name": "Alex", "seconds": 5 }),
+                ),
+            ),
+            (
+                "speakers forget",
+                call_speakers(&sock, &json!({ "action": "forget", "name": "Alex" })),
+            ),
+        ];
+        for (name, result) in calls {
+            let err = result.as_ref().unwrap_err();
+            assert!(
+                err.starts_with("engine unavailable: "),
+                "{name}: got: {err}"
+            );
+        }
     }
 }
 

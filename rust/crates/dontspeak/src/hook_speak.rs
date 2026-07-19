@@ -134,44 +134,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn permission_prompt_wants_the_earcon() {
-        assert!(wants_needs_input_earcon(
-            r#"{"notification_type":"permission_prompt"}"#
-        ));
-    }
-
-    #[test]
-    fn idle_prompt_wants_the_earcon() {
-        assert!(wants_needs_input_earcon(
-            r#"{"notification_type":"idle_prompt"}"#
-        ));
-    }
-
-    #[test]
-    fn other_notification_types_are_silent() {
-        assert!(!wants_needs_input_earcon(
-            r#"{"notification_type":"auth_success"}"#
-        ));
-        assert!(!wants_needs_input_earcon(
-            r#"{"notification_type":"mcp_elicitation"}"#
-        ));
-    }
-
-    #[test]
-    fn missing_field_is_silent_not_a_panic() {
-        assert!(!wants_needs_input_earcon(r#"{}"#));
-        assert!(!wants_needs_input_earcon(r#"{"other_key":"value"}"#));
-    }
-
-    #[test]
-    fn malformed_json_is_silent_not_a_panic() {
-        assert!(!wants_needs_input_earcon("not json at all"));
-        assert!(!wants_needs_input_earcon("{unterminated"));
-    }
-
-    #[test]
-    fn empty_string_is_silent_not_a_panic() {
-        assert!(!wants_needs_input_earcon(""));
+    fn needs_input_earcon_is_gated_on_notification_type() {
+        for payload in [
+            r#"{"notification_type":"permission_prompt"}"#,
+            r#"{"notification_type":"idle_prompt"}"#,
+        ] {
+            assert!(wants_needs_input_earcon(payload), "{payload}");
+        }
+        // Unknown types, missing field, malformed JSON, empty — fail closed, no panic.
+        for payload in [
+            r#"{"notification_type":"auth_success"}"#,
+            r#"{"notification_type":"mcp_elicitation"}"#,
+            r#"{}"#,
+            r#"{"other_key":"value"}"#,
+            "not json at all",
+            "{unterminated",
+            "",
+        ] {
+            assert!(!wants_needs_input_earcon(payload), "{payload:?}");
+        }
     }
 
     /// No socket: connect fails fast; no panic / hang.
@@ -243,26 +224,17 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_human_prompt_is_not_synthetic() {
+    fn ordinary_empty_and_malformed_prompts_are_not_synthetic() {
         assert!(!is_synthetic_continuation("fix the bug in foo.rs"));
-    }
-
-    #[test]
-    fn empty_and_missing_prompt_are_not_synthetic() {
         assert!(!is_synthetic_continuation(""));
-        assert_eq!(prompt_from_payload(r#"{"session_id":"s1"}"#), "");
-        assert!(!is_synthetic_continuation(&prompt_from_payload(
-            r#"{"session_id":"s1"}"#
-        )));
-    }
-
-    #[test]
-    fn malformed_json_prompt_payload_is_not_synthetic() {
-        assert_eq!(prompt_from_payload("not json at all"), "");
-        assert_eq!(prompt_from_payload("{unterminated"), "");
-        assert!(!is_synthetic_continuation(&prompt_from_payload(
-            "not json at all"
-        )));
+        for payload in [
+            r#"{"session_id":"s1"}"#,
+            "not json at all",
+            "{unterminated",
+        ] {
+            assert_eq!(prompt_from_payload(payload), "");
+            assert!(!is_synthetic_continuation(&prompt_from_payload(payload)));
+        }
     }
 
     #[test]

@@ -229,18 +229,15 @@ mod tests {
     }
 
     #[test]
-    fn wire_token_resolves_to_wire_with_trailing_args() {
-        let argv = argv(&["dontspeak", "wire", "claude_code", "--remove"]);
+    fn wire_token_resolves_to_wire_with_optional_trailing_args() {
+        let bare = argv(&["dontspeak", "wire"]);
+        assert_eq!(resolve_subcommand(&bare), Subcommand::Wire(&[]));
+
+        let with_args = argv(&["dontspeak", "wire", "claude_code", "--remove"]);
         assert_eq!(
-            resolve_subcommand(&argv),
+            resolve_subcommand(&with_args),
             Subcommand::Wire(&["claude_code".to_string(), "--remove".to_string()])
         );
-    }
-
-    #[test]
-    fn wire_token_with_no_trailing_args_resolves_to_wire_with_empty_slice() {
-        let argv = argv(&["dontspeak", "wire"]);
-        assert_eq!(resolve_subcommand(&argv), Subcommand::Wire(&[]));
     }
 
     #[test]
@@ -328,15 +325,12 @@ mod tests {
 
     #[test]
     fn no_args_resolves_to_server() {
-        let argv = argv(&["dontspeak"]);
-        assert_eq!(resolve_subcommand(&argv), Subcommand::Server);
-    }
-
-    #[test]
-    fn truly_empty_argv_resolves_to_server() {
-        // Even with no argv[0], argv.get(1) is still None.
-        let argv: Vec<String> = Vec::new();
-        assert_eq!(resolve_subcommand(&argv), Subcommand::Server);
+        // argv[1] missing — with or without argv[0] — is the bare-server path.
+        assert_eq!(
+            resolve_subcommand(&argv(&["dontspeak"])),
+            Subcommand::Server
+        );
+        assert_eq!(resolve_subcommand(&Vec::<String>::new()), Subcommand::Server);
     }
 
     #[test]

@@ -66,14 +66,6 @@ mod tests {
     }
 
     #[test]
-    fn value_round_trips_through_serde_json() {
-        let v = value();
-        let s = serde_json::to_string(&v).unwrap();
-        let back: Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(v, back);
-    }
-
-    #[test]
     fn exactly_the_five_expected_events_present() {
         let v = value();
         let hooks = v["hooks"].as_object().unwrap();

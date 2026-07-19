@@ -109,21 +109,19 @@ mod tests {
     }
 
     #[test]
-    fn clear_error_on_loaded_is_a_noop() {
-        let slot = ModelSlot::new();
+    fn clear_error_is_a_noop_outside_failed() {
+        // Loaded: already clear; Idle: never had an error — neither must bump the gate.
+        let loaded = ModelSlot::new();
         let gate = StatusGate::new();
-        slot.transition(ModelState::Loaded, Some(&gate));
+        loaded.transition(ModelState::Loaded, Some(&gate));
         let seq1 = gate.seq();
-        slot.clear_error(Some(&gate));
+        loaded.clear_error(Some(&gate));
         assert_eq!(gate.seq(), seq1, "clear_error on Loaded must not touch it");
-        assert!(slot.is_loaded());
-    }
+        assert!(loaded.is_loaded());
 
-    #[test]
-    fn clear_error_on_idle_is_a_noop() {
-        let slot = ModelSlot::new();
+        let idle = ModelSlot::new();
         let gate = StatusGate::new();
-        slot.clear_error(Some(&gate));
+        idle.clear_error(Some(&gate));
         assert_eq!(
             gate.seq(),
             0,
@@ -139,6 +137,13 @@ mod tests {
         idle_slot.mark_loaded_optimistic();
         assert_eq!(gate.seq(), 0);
         assert!(idle_slot.is_loaded());
+
+        // Already Loaded: re-mark is a pure noop (stays loaded, no gate side-effect).
+        let loaded_slot = ModelSlot::new();
+        loaded_slot.transition(ModelState::Loaded, None);
+        loaded_slot.mark_loaded_optimistic();
+        assert!(loaded_slot.is_loaded());
+        assert_eq!(gate.seq(), 0);
 
         // From `Failed`: no bump, and (per `mark_loaded_optimistic_leaves_a_failed_state_alone`
         // below) no transition either — covered again here to also assert the gate side.
@@ -173,13 +178,5 @@ mod tests {
             Some("boom"),
             "the error message must survive unchanged"
         );
-    }
-
-    #[test]
-    fn mark_loaded_optimistic_is_a_noop_from_loaded() {
-        let slot = ModelSlot::new();
-        slot.transition(ModelState::Loaded, None);
-        slot.mark_loaded_optimistic();
-        assert!(slot.is_loaded());
     }
 }

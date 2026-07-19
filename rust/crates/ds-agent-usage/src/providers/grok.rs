@@ -738,41 +738,41 @@ mod tests {
     }
 
     #[test]
-    fn merge_preserves_cli_not_found_category() {
-        let cli = std::io::Error::new(std::io::ErrorKind::NotFound, "Grok CLI unavailable");
-        let web = std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Grok web billing response unusable",
-        );
-        let merged = merge_cli_web_errors(cli, web);
-        assert_eq!(merged.kind(), std::io::ErrorKind::NotFound);
-        assert!(merged.to_string().contains("CLI"));
-        assert!(merged.to_string().contains("web"));
-        assert!(!merged.to_string().contains("Bearer"));
-    }
-
-    #[test]
-    fn merge_preserves_cli_timeout_category() {
-        let cli = std::io::Error::new(std::io::ErrorKind::TimedOut, "provider RPC timed out");
-        let web = std::io::Error::other("Grok web billing failed: connection refused");
-        let merged = merge_cli_web_errors(cli, web);
-        assert_eq!(merged.kind(), std::io::ErrorKind::TimedOut);
-    }
-
-    #[test]
-    fn merge_preserves_cli_rpc_other_category() {
-        let cli = std::io::Error::other("provider RPC returned an error");
-        let web = std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Grok web billing response unusable",
-        );
-        let merged = merge_cli_web_errors(cli, web);
-        assert_eq!(merged.kind(), std::io::ErrorKind::Other);
-        assert!(
-            merged
-                .to_string()
-                .contains("provider RPC returned an error")
-        );
+    fn merge_preserves_cli_error_category() {
+        for (cli, web, want_kind, must_contain) in [
+            (
+                std::io::Error::new(std::io::ErrorKind::NotFound, "Grok CLI unavailable"),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Grok web billing response unusable",
+                ),
+                std::io::ErrorKind::NotFound,
+                &["CLI", "web"][..],
+            ),
+            (
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "provider RPC timed out"),
+                std::io::Error::other("Grok web billing failed: connection refused"),
+                std::io::ErrorKind::TimedOut,
+                &[][..],
+            ),
+            (
+                std::io::Error::other("provider RPC returned an error"),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Grok web billing response unusable",
+                ),
+                std::io::ErrorKind::Other,
+                &["provider RPC returned an error"][..],
+            ),
+        ] {
+            let merged = merge_cli_web_errors(cli, web);
+            assert_eq!(merged.kind(), want_kind);
+            let msg = merged.to_string();
+            for needle in must_contain {
+                assert!(msg.contains(needle), "missing `{needle}` in {msg}");
+            }
+            assert!(!msg.contains("Bearer"), "must not leak credentials: {msg}");
+        }
     }
 
     #[test]
@@ -803,14 +803,12 @@ mod tests {
         assert!(secret.is_empty());
         // clear() after volatile zeros; capacity may remain but contents empty.
         assert_eq!(secret.len(), 0);
-    }
 
-    #[test]
-    fn secret_string_clear_empties() {
-        let mut secret = SecretString(String::from("token-abc"));
-        assert_eq!(secret.as_str(), "token-abc");
-        secret.clear();
-        assert_eq!(secret.as_str(), "");
+        // SecretString::clear is the same zero_string path on the wrapper.
+        let mut wrapped = SecretString(String::from("token-abc"));
+        assert_eq!(wrapped.as_str(), "token-abc");
+        wrapped.clear();
+        assert_eq!(wrapped.as_str(), "");
     }
 
     fn write_varint(out: &mut Vec<u8>, mut value: u64) {

@@ -365,30 +365,18 @@ mod tests {
     }
 
     /// Guard hits before `Paths::resolve()` (no $HOME I/O).
+    /// `dontspeak` parses as ClientSource but has no client_spec → "unknown client".
     #[test]
-    fn no_client_and_no_all_is_a_hard_error() {
-        assert_eq!(run(&args(&[])), 1);
-    }
-
-    #[test]
-    fn unknown_client_token_is_a_hard_error() {
-        assert_eq!(run(&args(&["not_a_real_client"])), 1);
-    }
-
-    /// `dontspeak` parses as `ClientSource` but has no `client_spec` → "unknown client".
-    #[test]
-    fn wire_dontspeak_token_is_a_hard_error() {
-        assert_eq!(run(&args(&["dontspeak"])), 1);
-    }
-
-    #[test]
-    fn wire_unknown_token_is_a_hard_error() {
-        assert_eq!(run(&args(&["unknown"])), 1);
-    }
-
-    #[test]
-    fn two_positional_clients_is_a_hard_error() {
-        assert_eq!(run(&args(&["codex", "claude_code"])), 1);
+    fn missing_or_invalid_client_selection_is_a_hard_error() {
+        for argv in [
+            &[][..],
+            &["not_a_real_client"][..],
+            &["dontspeak"][..],
+            &["unknown"][..],
+            &["codex", "claude_code"][..],
+        ] {
+            assert_eq!(run(&args(argv)), 1, "{argv:?}");
+        }
     }
 
     #[test]
