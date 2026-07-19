@@ -6,8 +6,7 @@ use serde_json::Value;
 use super::{integer_at, number_at, resolve_binary, rpc, string_at};
 use crate::{Period, UsageRow};
 
-/// CodexBar classifies Codex rate windows by exact duration minutes:
-/// 300 → session/five-hour, 10080 → weekly.
+/// 300 min → session; 10080 → week.
 const FIVE_HOUR_MINUTES: i64 = 5 * 60;
 const WEEK_MINUTES: i64 = 7 * 24 * 60;
 const FIVE_HOUR_SECONDS: i64 = FIVE_HOUR_MINUTES * 60;
@@ -36,17 +35,16 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
     Ok(parse(&result))
 }
 
-/// Local identity from `~/.codex/auth.json` JWT `id_token` email claim. No network.
+/// Local email from auth.json JWT. No network.
 pub(crate) fn account(paths: &ds_config::Paths) -> Option<String> {
     let auth = super::read_json_file(&paths.codex_dir.join("auth.json")).ok()?;
     let token = string_at(&auth, &["tokens", "id_token"])?;
     jwt_claim(token, "email").or_else(|| jwt_claim(token, "preferred_username"))
 }
 
-/// JWT payload claim (middle segment). No signature check — local credential.
+/// JWT middle segment; no signature check (local).
 fn jwt_claim(token: &str, claim: &str) -> Option<String> {
     let payload = token.split('.').nth(1)?;
-    // JWT uses unpadded base64url (`-`/`_`). Already in the graph via ds-http/attohttpc.
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
         .ok()?;

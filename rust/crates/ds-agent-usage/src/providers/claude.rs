@@ -36,7 +36,7 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
     Ok(parse(&json))
 }
 
-/// Local identity from `~/.claude.json` (`oauthAccount.emailAddress`). No network.
+/// Local email from `~/.claude.json`. No network.
 pub(crate) fn account(paths: &ds_config::Paths) -> Option<String> {
     let config = read_json_file(&paths.claude_code_config).ok()?;
     string_at(&config, &["oauthAccount", "emailAddress"])
@@ -100,7 +100,7 @@ fn read_keychain_credentials() -> std::io::Result<Value> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
-/// Five-hour + seven-day windows only (session/week). No model-scoped or $ extra-usage.
+/// `five_hour` + `seven_day` only (no model-scoped / $ extra).
 fn parse(json: &Value) -> Vec<UsageRow> {
     [
         parse_window(json.get("five_hour"), Period::Session),
@@ -113,7 +113,7 @@ fn parse(json: &Value) -> Vec<UsageRow> {
 
 fn parse_window(value: Option<&Value>, period: Period) -> Option<UsageRow> {
     let window = value?.as_object()?;
-    // `utilization` is already 0..100 percent (1.0 = 1%, not full).
+    // Already 0..100 (1.0 = 1%, not full).
     let used = window.get("utilization").and_then(|v| {
         v.as_f64()
             .or_else(|| v.as_i64().map(|n| n as f64))

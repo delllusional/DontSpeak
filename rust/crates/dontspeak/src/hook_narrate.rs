@@ -1,26 +1,24 @@
 //! Notify-side narration — Claude/Qwen adapter over `ds-narrate`. Dispatched from
-//! [`crate::hook_core::notify`]. Parses hook payload → client-neutral `StreamBatch` →
+//! [`crate::hook_core::notify`]. Payload → client-neutral `StreamBatch` →
 //! [`ds_narrate::deliver_batch`] → engine.
 //!
-//! [`message_display`]: Claude sends per-batch `delta` + `index` + sticky `final`; Qwen
-//! sends cumulative `displayed_text` + `is_final` — same [`MessageDisplayHook`] (serde
-//! aliases). digests → top-level blockquotes once each; shorts → short blockquote-less
-//! final whole. Fire-and-forget.
+//! [`message_display`]: Claude `delta`+`index`+sticky `final`; Qwen cumulative
+//! `displayed_text`+`is_final` — one [`MessageDisplayHook`] (serde aliases). digests →
+//! top-level blockquotes; shorts → short blockquote-less final whole. Fire-and-forget.
 //!
-//! [`speak_reply`] (Stop): non-streaming final reply, gated by streaming witness so it
-//! never double-speaks MessageDisplay / Codex app-server narration. [`mark_streaming_session`]
-//! seeds the witness at SessionStart for streaming clients; non-streaming pass `--greet-only`.
-//! Codex witness is seeded by the engine on app-server `thread/resume` — plain-TUI keeps Stop.
+//! [`speak_reply`] (Stop): non-streaming final reply, gated by streaming witness (no double-
+//! speak vs MessageDisplay / Codex app-server). [`mark_streaming_session`] seeds witness at
+//! SessionStart for streaming clients; non-streaming pass `--greet-only`. Codex witness seeded
+//! by engine on app-server `thread/resume` — plain-TUI keeps Stop.
 //!
-//! [`barge_session`] (SessionEnd): scoped barge for this session only (`None` → global).
-//! `narrate` is a set of "digests"/"shorts" (VoiceConfig).
+//! [`barge_session`] (SessionEnd): scoped barge (`None` → global).
 
 use ds_config::{ClientSource, NarrateKind, Paths, VoiceConfig};
 use ds_narrate::{BatchPayload, StreamBatch};
 use serde::Deserialize;
 use std::borrow::Cow;
 
-/// SessionEnd: barge this session only (no id → global). Stamps `client` on the request.
+/// SessionEnd: barge this session only (no id → global).
 pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
     let session = crate::hook_core::session_id_from_payload(payload);
     let _ = ds_ipc::request(
@@ -30,9 +28,8 @@ pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
             source: client,
         },
     );
-    // Grok Stop digests use sticky session tag (see `grok_stop_session_tag`) so MarkActive
-    // cannot prune them; SessionEnd must barge that tag too (SessionEnd, not only StopSpeech,
-    // so forget_narration_session state is reclaimed).
+    // Grok digests use sticky tag so MarkActive cannot prune them; SessionEnd barges it too
+    // (SessionEnd reclaims forget_narration_session state; StopSpeech alone does not).
     if client == ClientSource::Grok {
         let sticky = session
             .as_deref()
@@ -49,8 +46,8 @@ pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
             let _ = std::fs::remove_file(last_spoken_fingerprint_path(paths, s));
         }
     }
-    // Terminal for this session: reclaim display-state + lock/tmp or they accumulate forever.
-    // Codex has no SessionEnd hook — cleanup is engine codex_stream.
+    // Reclaim display-state + lock/tmp or they accumulate. Codex has no SessionEnd —
+    // cleanup is engine codex_stream.
     if let Some(s) = &session {
         ds_narrate::clear_session_state(paths, s);
     }
@@ -58,7 +55,7 @@ pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
 
 /// SessionStart: seed streaming witness so Stop's `streamed` guard is true before first Stop
 /// (closes double-narration race). Streaming clients wire plain notify; Codex uses
-/// `--greet-only` and engine seeds on app-server resume instead. Idempotent, non-destructive.
+/// `--greet-only` and engine seeds on app-server resume. Idempotent, non-destructive.
 pub fn mark_streaming_session(paths: &Paths, payload: &str) {
     let Some(session) = crate::hook_core::session_id_from_payload(payload) else {
         return; // no session id ⇒ can't scope a witness (per-batch write still covers it)
@@ -68,10 +65,8 @@ pub fn mark_streaming_session(paths: &Paths, payload: &str) {
 
 // ── Stop (final reply — non-streaming) ──────────────────────────────────────────
 
-/// Stop payload subset. CC/Codex/Qwen supply `last_assistant_message`. Grok is metadata-only
-/// (live-verified) — fall back to `transcriptPath` chat_history.jsonl. Kimi Code guarantees
-/// only `hook_event_name`/`session_id`/`cwd` — fall back to the session wire.jsonl. CamelCase
-/// aliases for forward-compat.
+/// Stop payload subset. CC/Codex/Qwen: `last_assistant_message`. Grok metadata-only →
+/// chat_history.jsonl. Kimi: only event/session/cwd → session wire.jsonl. CamelCase aliases.
 #[derive(Debug, Deserialize, Default)]
 struct StopHook {
     #[serde(default, alias = "lastAssistantMessage")]
@@ -80,20 +75,20 @@ struct StopHook {
     session_id: Option<String>,
     #[serde(default, alias = "transcriptPath")]
     transcript_path: Option<String>,
-    /// Live Grok per-turn id — dedupe direct text without suppressing a later identical turn.
+    /// Grok per-turn id — dedupe direct text without suppressing a later identical turn.
     #[serde(default, alias = "promptId")]
     prompt_id: Option<String>,
-    /// Reconstruct `~/.grok/sessions/<encoded-cwd>/<sessionId>/chat_history.jsonl` when path missing.
+    /// Reconstruct sessions path when transcriptPath missing.
     #[serde(default)]
     cwd: Option<String>,
 }
 
-/// JSONL assistant/user line from Grok chat_history (or similar).
+/// JSONL assistant/user line (Grok chat_history or similar).
 #[derive(Debug, Deserialize, Default)]
 struct TranscriptEntry {
     #[serde(default, rename = "type")]
     r#type: Option<String>,
-    /// Plain string or content-block array; other shapes skip the line.
+    /// Plain string or content-block array; other shapes skip.
     #[serde(default)]
     content: Option<serde_json::Value>,
 }
@@ -119,7 +114,7 @@ impl TranscriptEntry {
 }
 
 impl StopHook {
-    /// Direct field, else Grok transcript fallback.
+    /// Direct field, else Grok/Kimi transcript fallbacks.
     fn last_assistant_text(&self, client: ClientSource, paths: &Paths) -> Option<Cow<'_, str>> {
         if let Some(t) = self
             .last_assistant_message
@@ -135,7 +130,7 @@ impl StopHook {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or("-");
-            // Tests / non-speak_reply paths assume digests on (live default).
+            // Non-speak_reply paths assume digests on (live default).
             return select_grok_stop_text(self, paths, session, true)
                 .map(|(text, _fp)| Cow::Owned(text));
         }
@@ -150,9 +145,8 @@ impl StopHook {
 
 // ── Kimi Code Stop fallback (session wire.jsonl) ─────────────────────────────
 
-/// Kimi wire journal path. Order: (1) `transcript_path` when present; (2) the derived
-/// workDirKey bucket under `<kimi_dir>/sessions`; (3) a scan across workDirKeys, accepted
-/// only when exactly one bucket holds this session. Silent (`None`) on any miss.
+/// Wire journal path: (1) transcript_path; (2) workDirKey bucket; (3) scan — only when
+/// exactly one bucket holds this session. `None` on miss.
 fn resolve_kimi_wire_path(hook: &StopHook, paths: &Paths) -> Option<std::path::PathBuf> {
     if let Some(raw) = hook
         .transcript_path
@@ -198,9 +192,9 @@ fn resolve_kimi_wire_path(hook: &StopHook, paths: &Paths) -> Option<std::path::P
     matches.next().is_none().then_some(only)
 }
 
-/// kimi-code `encodeWorkDirKey`: `wd_<slug>_<sha256(normalized cwd)[:12]>`. Windows-shaped
-/// paths (drive-letter or UNC) are segment-resolved then slash-folded, case preserved —
-/// verified upstream: `C:\Users\usr` hashes as `C:/Users/usr` → `wd_usr_3030c6a48c39`.
+/// kimi-code `encodeWorkDirKey`: `wd_<slug>_<sha256(normalized cwd)[:12]>`.
+/// Windows paths: segment-resolved, slash-folded, case preserved
+/// (`C:\Users\usr` → `C:/Users/usr` → `wd_usr_3030c6a48c39`).
 fn kimi_workdir_key(cwd: &str) -> String {
     use sha2::Digest;
     let normalized = kimi_normalize_workdir(cwd);
@@ -213,7 +207,7 @@ fn kimi_workdir_key(cwd: &str) -> String {
     format!("wd_{slug}_{hash}")
 }
 
-/// kimi-code `normalizeWorkDir`: win32/pathe `resolve` (dot segments out), `\` → `/`.
+/// kimi-code `normalizeWorkDir`: resolve dots, `\` → `/`.
 fn kimi_normalize_workdir(cwd: &str) -> String {
     let bytes = cwd.as_bytes();
     let is_drive = bytes.len() >= 3
@@ -244,8 +238,7 @@ fn kimi_normalize_workdir(cwd: &str) -> String {
     }
 }
 
-/// kimi-code `slugifyWorkDirName`: lowercase, non `[a-z0-9._-]` runs collapse to one `-`,
-/// `-` trimmed, 40 chars max, empty/`.`/`..` → `workspace`.
+/// kimi-code slugify: lower, non-alnum runs → `-`, trim, max 40; empty/`.`/`..` → `workspace`.
 fn kimi_slug(name: &str) -> String {
     let mut slug = String::new();
     let mut pending_dash = false;
@@ -270,11 +263,9 @@ fn kimi_slug(name: &str) -> String {
 /// Bounded-tail read budget for transcript JSONL (Kimi wire + Grok chat_history).
 const TAIL_BYTES: u64 = 256 * 1024;
 
-/// Last [`TAIL_BYTES`] of a JSONL file trimmed to complete lines, plus the absolute file
-/// offset of the buffer's first byte (stable line offsets for fingerprints). Mid-line seek:
-/// the partial first line is dropped at BYTE level — the seek can split a multi-byte UTF-8
-/// char (CJK-heavy Kimi output), so a string-level read would fail. `None` on unreadable
-/// file, or a mid-file tail containing no newline at all.
+/// Last [`TAIL_BYTES`] trimmed to complete lines + absolute offset of first byte (stable
+/// fingerprints). Drop partial first line at BYTE level — seek can split multi-byte UTF-8
+/// (CJK Kimi output); string-level read would fail. `None` if unreadable / no newline in tail.
 fn jsonl_tail(path: &std::path::Path) -> Option<(Vec<u8>, u64)> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -294,8 +285,7 @@ fn jsonl_tail(path: &std::path::Path) -> Option<(Vec<u8>, u64)> {
     ))
 }
 
-/// Assistant reply of the last wire turn: ordered `content.part` text parts of the highest
-/// turnId, concatenated. Think parts, other record types, and malformed lines are skipped.
+/// Last wire turn: `content.part` text of highest turnId, concatenated. Skips think/other/bad.
 fn kimi_last_turn_text(path: &std::path::Path) -> Option<String> {
     let (complete, _) = jsonl_tail(path)?;
 
@@ -319,7 +309,7 @@ fn kimi_last_turn_text(path: &std::path::Path) -> Option<String> {
         let Some(turn) = wire_turn_id(event) else {
             continue;
         };
-        // Raw text: parts are stream chunks, so their boundary whitespace is meaningful.
+        // Parts are stream chunks — boundary whitespace is meaningful.
         let text = event
             .get("part")
             .filter(|part| part.get("type").and_then(serde_json::Value::as_str) == Some("text"))
@@ -349,15 +339,13 @@ fn wire_turn_id(event: &serde_json::Value) -> Option<i64> {
         .or_else(|| raw.as_str()?.trim().parse().ok())
 }
 
-/// Sticky admit key for Grok Stop digests + reply_done so MarkActive cannot prune them;
-/// SessionEnd barges this tag explicitly.
+/// Sticky admit key for Grok Stop digests + reply_done (MarkActive cannot prune; SessionEnd barges).
 fn grok_stop_session_tag(session: &str) -> String {
     format!("grok-stop:{session}")
 }
 
-/// Grok chat transcript path. Order: (1) transcriptPath, remapping updates.jsonl → sibling
-/// chat_history (bare updates is non-terminal — fall through); (2) encoded-cwd+session under
-/// `~/.grok/sessions`; (3) scan `sessions/*/sessionId/chat_history` (newest mtime on skew).
+/// Grok transcript: (1) transcriptPath (updates.jsonl → sibling chat_history; bare updates
+/// falls through); (2) encoded-cwd+session; (3) scan sessions/*/sessionId (newest mtime).
 fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::path::PathBuf> {
     if let Some(raw) = hook
         .transcript_path
@@ -368,7 +356,7 @@ fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::p
         let p = std::path::PathBuf::from(raw);
         if p.is_file() {
             let preferred = ds_config::prefer_chat_history_transcript(p);
-            // Bare updates.jsonl must not shadow a valid sessions/.../chat_history for the budget.
+            // Bare updates must not shadow a valid chat_history.
             if !ds_config::is_updates_jsonl(&preferred) {
                 return Some(preferred);
             }
@@ -388,14 +376,14 @@ fn resolve_grok_transcript_path(hook: &StopHook, paths: &Paths) -> Option<std::p
     ds_config::resolve_grok_chat_history(paths, session, cwd)
 }
 
-/// Prefer digest-bearing assistant over a newer tool-status line in "last non-empty" scans.
+/// Prefer digest-bearing assistant over a newer tool-status line.
 fn has_digest_blockquote(text: &str) -> bool {
     !ds_config::all_blockquotes(text).is_empty()
 }
 
-/// Turn fingerprint so re-fired Stop does not re-voice after successful enqueue. Transcript
-/// selections use absolute assistant-line byte offset so identical body on a later turn still
-/// speaks, and a sliding 256 KiB tail cannot rewrite identity when the user line leaves the window.
+/// Turn fingerprint so re-fired Stop does not re-voice after enqueue. Absolute assistant-line
+/// offset: identical body on a later turn still speaks; sliding tail can't rewrite identity
+/// when the user line leaves the window.
 fn digest_fingerprint(
     last_user_text: &str,
     turn_byte_offset: Option<u64>,
@@ -438,7 +426,7 @@ fn store_last_spoken_fingerprint(paths: &Paths, session: &str, fp: u64) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Concurrent Stop may race; temp+rename is best-effort (Windows rename-over may fail).
+    // Concurrent Stop race; temp+rename best-effort (Windows rename-over may fail).
     let tmp = path.with_extension("fp.tmp");
     if std::fs::write(&tmp, fp.to_string()).is_ok() && std::fs::rename(&tmp, &path).is_err() {
         let _ = std::fs::write(&path, fp.to_string());
@@ -454,13 +442,12 @@ enum ChatRole {
     },
     Assistant {
         text: String,
-        /// Fallback turn identity when a large tool result pushes the user line out of the tail.
+        /// Fallback identity when a large tool result pushes the user line out of the tail.
         byte_offset: u64,
     },
 }
 
-/// Bounded-tail JSONL roles (oldest first), via [`jsonl_tail`]. Offsets are absolute file
-/// positions for stable fingerprints.
+/// Bounded-tail JSONL roles (oldest first). Offsets absolute for stable fingerprints.
 fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
     let Some((complete_lines, complete_start_abs)) = jsonl_tail(path) else {
         return Vec::new();
@@ -476,7 +463,7 @@ fn chat_roles_chronological(path: &std::path::Path) -> Vec<ChatRole> {
         };
         match entry.r#type.as_deref() {
             Some("user") => {
-                // Keep empty text so the turn boundary still moves.
+                // Empty text still moves the turn boundary.
                 out.push(ChatRole::User {
                     text: entry.text_content().unwrap_or_default(),
                     byte_offset: line_start,
@@ -509,8 +496,8 @@ struct CurrentAssistant {
     byte_offset: u64,
 }
 
-/// Assistants after the last user only (newest first). Never crosses into a previous turn —
-/// live bug was re-playing prior digests when Stop raced the chat_history flush.
+/// Assistants after the last user only (newest first). Never crosses prior turns — live bug
+/// re-played prior digests when Stop raced the chat_history flush.
 fn current_turn_from_path(path: &std::path::Path) -> CurrentTurn {
     let roles = chat_roles_chronological(path);
     let last_user_idx = roles
@@ -541,7 +528,7 @@ fn current_turn_from_path(path: &std::path::Path) -> CurrentTurn {
     }
 }
 
-/// Retry while path/turn empty (late chat_history flush). Tests use a small count.
+/// Retry while path/turn empty (late chat_history flush).
 fn stop_retry_attempts() -> usize {
     #[cfg(test)]
     {
@@ -571,9 +558,8 @@ struct GrokStopSelection {
     path: std::path::PathBuf,
 }
 
-/// Grok Stop narration from transcript. Live rules: re-resolve path each attempt; current
-/// turn only; prefer digest-bearing assistant when digests on; skip last successfully-spoken
-/// fingerprint; shorts fallback; full budget while empty. Does not persist fingerprints.
+/// Grok Stop from transcript: re-resolve each attempt; current turn only; prefer digests;
+/// skip last-spoken fingerprint; shorts fallback. Does not persist fingerprints.
 fn select_grok_stop_text(
     hook: &StopHook,
     paths: &Paths,
@@ -583,7 +569,7 @@ fn select_grok_stop_text(
     select_grok_stop_text_detailed(hook, paths, session, messages_on).map(|s| (s.text, s.digest_fp))
 }
 
-/// Shorts fallback: when digests off, prefer non-digest line (digest-only would silence shorts).
+/// When digests off, prefer non-digest line (digest-only would silence shorts).
 fn shorts_fallback_text(turn: &CurrentTurn, messages_on: bool) -> Option<String> {
     if messages_on {
         return turn
@@ -602,7 +588,7 @@ fn shorts_fallback_text(turn: &CurrentTurn, messages_on: bool) -> Option<String>
         })
 }
 
-/// Direct Grok reply fingerprint: promptId, else transcript offset, else text-only.
+/// Direct Grok reply fingerprint: promptId → transcript offset → text-only.
 fn direct_grok_reply_fingerprint(hook: &StopHook, paths: &Paths, text: &str) -> u64 {
     if let Some(prompt_id) = hook
         .prompt_id
@@ -682,7 +668,7 @@ fn select_grok_stop_text_detailed_with_retry(
                     path,
                 });
             }
-            // Same as last spoken: keep full retry (newer flush may still land).
+            // Same as last spoken: keep retry (newer flush may land).
         } else if let Some(text) = shorts_fallback_text(&turn, messages_on)
             && shorts_fallback.is_none()
         {
@@ -703,19 +689,17 @@ fn select_grok_stop_text_detailed_with_retry(
     shorts_fallback
 }
 
-/// Streaming-pass witness for Stop: state file exists. CC/Qwen seed at SessionStart;
-/// Codex file appears only when engine app-server resumed the thread — else Stop narrates.
-/// `pub(crate)` for hook_core greet-only tests.
+/// Streaming witness for Stop. CC/Qwen seed at SessionStart; Codex only when engine
+/// app-server resumed — else Stop narrates. `pub(crate)` for hook_core greet-only tests.
 pub(crate) fn streamed_via_message_display(paths: &Paths, session: &str) -> bool {
     ds_narrate::witness_exists(paths, session)
 }
 
-/// Pure Stop decision (re-export so hook_core double-narration tests keep this seam).
+/// Pure Stop decision (re-export for hook_core double-narration tests).
 pub(crate) use ds_narrate::stop_utterances;
 
-/// Stop: voice final reply once when not already streamed. Guarded by
-/// [`streamed_via_message_display`]; pure decision in [`stop_utterances`].
-/// Returns `Some(session)` for reply_done under Grok sticky tag; `None` → payload session.
+/// Stop: voice final reply once when not already streamed. Returns `Some(session)` for
+/// Grok sticky reply_done; `None` → payload session.
 pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option<Option<String>> {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests);
@@ -729,9 +713,8 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     let session = hook.session_id.clone().filter(|s| !s.trim().is_empty());
     let streamed = streamed_via_message_display(paths, session.as_deref().unwrap_or_default());
 
-    // Final retry for queue-full rejections; witness still suppresses whole-reply fallback.
-    // Grok mid-turn (engine file-tail): also flush trailing digests/shorts with is_final.
-    // Do NOT re-voice chat_history when the witness is present.
+    // Retry queue-full; witness still suppresses whole-reply fallback. Grok mid-turn:
+    // flush trailing digests/shorts with is_final. No chat_history re-voice if witness set.
     if streamed {
         let session_id = session.as_deref().unwrap_or_default();
         let session_tag = session.clone();
@@ -772,8 +755,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
 
     let mic_active = ds_platform::is_mic_active();
 
-    // Grok: direct lastAssistantMessage if present; else turn-scoped transcript + deferred fp.
-    // When already streamed mid-turn, skip chat_history selection (witness owns silence).
+    // Grok: direct field else transcript + deferred fp. Streamed mid-turn → skip chat_history.
     let (assistant_text, grok_selection, direct_fp): (
         Option<String>,
         Option<GrokStopSelection>,
@@ -817,7 +799,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
         mic_active,
         streamed,
     );
-    // Sticky tag: MarkActive cannot prune digests (ding-only race); barge_session clears it.
+    // Sticky tag: MarkActive cannot prune digests (ding-only race); barge_session clears.
     let admit_session = if client == ClientSource::Grok {
         session
             .as_deref()
@@ -874,7 +856,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     }
     let mut any_enqueued = false;
     let mut any_failed = false;
-    // Deterministic ids collapse concurrent Stop at engine admission (fp alone is sequential).
+    // Deterministic ids collapse concurrent Stop at admission (fp alone is sequential).
     let narration_fp = direct_fp.or_else(|| grok_selection.as_ref().and_then(|s| s.digest_fp));
     let real_sess = session.as_deref().unwrap_or("-");
     for (i, line) in speak.into_iter().enumerate() {
@@ -899,7 +881,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
             }
         }
     }
-    // Commit fingerprint only after full list admitted — partial multi-line must not skip rest.
+    // Commit fp only after full list admitted — partial multi-line must not skip rest.
     if any_enqueued
         && !any_failed
         && let (Some(fp), Some(s)) = (narration_fp, session.as_deref())
@@ -916,8 +898,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
 
 // ── MessageDisplay (speak-as-it-streams) ────────────────────────────────────────
 
-/// Two clients, one struct: CC incremental `delta` (+ optional cumulative displayedText);
-/// Qwen cumulative snake_case via aliases.
+/// CC incremental `delta` (+ optional cumulative displayedText); Qwen cumulative via aliases.
 #[derive(Debug, Deserialize, Default, Clone)]
 struct MessageDisplayHook {
     #[serde(default, rename = "displayedText", alias = "displayed_text")]
@@ -941,7 +922,7 @@ fn message_key(s: &str) -> String {
     s.chars().take(48).collect()
 }
 
-/// Hook → client-neutral [`StreamBatch`]. Cumulative `displayed_text` wins over `delta`.
+/// Hook → [`StreamBatch`]. Cumulative `displayed_text` wins over `delta`.
 fn batch_from_hook(hook: &MessageDisplayHook) -> StreamBatch {
     let key = match hook.message_id.as_deref().filter(|s| !s.is_empty()) {
         Some(id) => id.to_string(),
@@ -968,8 +949,8 @@ fn batch_from_hook(hook: &MessageDisplayHook) -> StreamBatch {
     }
 }
 
-/// MessageDisplay: narrate this streamed batch. Gates on `narrate` + not-mid-recording —
-/// not focus; session-tagged, engine holds background terminals. Fire-and-forget.
+/// MessageDisplay: narrate streamed batch. Gates on `narrate` + not-mid-recording (not focus);
+/// session-tagged; engine holds background terminals. Fire-and-forget.
 pub fn message_display(paths: &Paths, payload: &str, client: ClientSource) {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests);
@@ -983,7 +964,7 @@ pub fn message_display(paths: &Paths, payload: &str, client: ClientSource) {
     let session = hook.session_id.clone().unwrap_or_default();
     let batch = batch_from_hook(&hook);
 
-    // Lock held through admission so races don't double-offer; rejected work stays pending.
+    // Lock through admission so races don't double-offer; rejected work stays pending.
     let session_tag = Some(session.clone()).filter(|s| !s.is_empty());
     if let Err(message) = ds_narrate::deliver_batch(
         paths,

@@ -1,9 +1,6 @@
-//! Blocking HTTP for model downloads and bounded JSON probes.
-//! Provider URLs, auth, schemas, retries stay in owning crates.
-//!
-//! Default `max_redirections(0)`: attohttpc re-sends `Authorization` cross-origin.
-//! Opt in for unauthenticated CDN GETs. Connect + read inactivity always; optional
-//! `total_timeout` wall-clock after connect (`Some` probes, `None` large downloads).
+//! Blocking HTTP for downloads and JSON probes. Auth/schema/retry stay in callers.
+//! Default `max_redirections(0)` (Authorization re-sent cross-origin). CDN GETs opt in.
+//! Connect + read inactivity; optional `total_timeout` after connect.
 
 use std::io::Read;
 use std::sync::OnceLock;

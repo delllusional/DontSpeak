@@ -1,11 +1,5 @@
-//! UI-agnostic core of DontSpeak: engine liveness ([`engine`]), model presence
-//! ([`models`]), model-status JSON, in-process engine lifecycle, and locale/provider
-//! controls over a small C ABI ([`ffi`], committed `dontspeak.h`). Rich config/voice
-//! control lives in DontSpeak. `ds_update_check_json` is the only network FFI call;
-//! everything else is disk/IPC.
-//!
-//! - macOS: SwiftUI staticlib (`apps/macos/`)
-//! - Linux: GTK staticlib (`ds-gtk`); Windows: WinUI cdylib (`ds_core.dll`)
+//! UI-agnostic core: engine liveness, model presence/status, lifecycle + locale via
+//! C ABI ([`ffi`], `dontspeak.h`). Only network FFI: `ds_update_check_json`.
 
 pub mod engine;
 pub mod ffi;

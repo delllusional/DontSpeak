@@ -1,47 +1,25 @@
-//! The ONE client-identity enum.
-//!
-//! WHO is talking to DontSpeak — an AI client, DontSpeak itself, or a caller we
-//! cannot name. The same [`ClientSource`] flows through the wiring registry, hook
-//! cmdline (`--client`), `ds-ipc` `Request::source`, MCP `clientInfo.name`, and the
-//! activity-log `client=<token>` key.
-//!
-//! ## Why a leaf crate
-//!
-//! `ds-log` needs a client identity but must not depend on `ds-config` (`ds-config`
-//! depends on `ds-log` for `VoiceConfig::load` diagnostics — reverse edge = cycle;
-//! see `ds-log`'s `default_log_file`). `ds-ipc` needs the type with no heavy deps.
-//! So the enum sits below both, not in `ds-config` (where ancestor `WireTarget` lived).
+//! Client-identity enum for wiring, hooks, `ds-ipc`, MCP, and log `client=`.
+//! Leaf crate: breaks `ds-log` ↔ `ds-config` cycle; `ds-ipc` stays light.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// WHO is talking to DontSpeak — shared by wiring, hooks, `ds-ipc`, MCP, and the log.
-///
-/// [`ClientSource::CLIENTS`] are the wire-able clients. `DontSpeak` / `Unknown` are the
-/// non-wireable ends of the same axis.
+/// Wire-able clients in [`CLIENTS`]; also `DontSpeak` / `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ClientSource {
-    /// Claude Code — hooks in `~/.claude/settings.json` + MCP in `~/.claude.json`.
     ClaudeCode,
-    /// OpenAI Codex — hooks + MCP in `~/.codex/config.toml`.
     Codex,
-    /// Qwen Code — hooks + MCP in `~/.qwen/settings.json`.
     QwenCode,
-    /// Grok (Grok Build) — hooks in `~/.grok/hooks/dontspeak.json`, MCP in `~/.grok/config.toml`.
     Grok,
-    /// Kimi Code — hooks in `~/.kimi-code/config.toml`, MCP in `~/.kimi-code/mcp.json`.
     KimiCode,
-    /// DontSpeak itself. Never wired (`client_spec(DontSpeak)` is `None`).
+    /// Never wired (`client_spec` is `None`).
     DontSpeak,
-    /// Unknown caller (foreign MCP name, or no `--client`). Domain value, not a legacy shim —
-    /// do not delete as "compat".
+    /// Domain value (not legacy) — foreign MCP / missing `--client`.
     #[default]
     Unknown,
 }
 
 impl ClientSource {
-    /// Wire-able clients in canonical-token order — single source for `wire --all`, boot
-    /// reconcile, and installers. Registry pins this list (`registry_matches_the_canonical_client_list`).
-    /// `DontSpeak`/`Unknown` are deliberately omitted.
+    /// Wire-able clients in token order (registry drift-tested).
     pub const CLIENTS: &'static [ClientSource] = &[
         ClientSource::ClaudeCode,
         ClientSource::Codex,
@@ -50,8 +28,7 @@ impl ClientSource {
         ClientSource::KimiCode,
     ];
 
-    /// Parse a canonical token (case/whitespace tolerant). `None` for anything else —
-    /// fail-open to [`ClientSource::Unknown`] stays at each call site (IPC decode, `--client`).
+    /// Case/whitespace tolerant. Fail-open to Unknown at call sites.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "claude_code" => Some(ClientSource::ClaudeCode),
@@ -65,8 +42,7 @@ impl ClientSource {
         }
     }
 
-    /// Canonical lowercase token (round-trips through [`ClientSource::parse`]) — hook cmdline,
-    /// `ds-ipc` wire, log `client=` suffix.
+    /// Canonical token (hooks, IPC, log `client=`).
     pub fn as_str(self) -> &'static str {
         match self {
             ClientSource::ClaudeCode => "claude_code",
@@ -79,27 +55,20 @@ impl ClientSource {
         }
     }
 
-    /// Wire-able? Gate for client sets / `wire <token>`; `parse` also accepts non-clients.
     pub fn is_client(self) -> bool {
         Self::CLIENTS.contains(&self)
     }
 }
 
-/// Serialize as the `as_str()` token (hand-written so this crate needs no `ds-config` macro).
+/// `as_str()` token (no `ds-config` macro).
 impl Serialize for ClientSource {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(self.as_str())
     }
 }
 
-/// Fail-open on unrecognised TOKEN → [`ClientSource::Unknown`]; non-string still errors.
-///
-/// Forward-skew (not legacy): an as-yet-unwired client must not hard-error a `ds-ipc` line
-/// (same idea as `ds_ipc::Response`'s `#[serde(other)]`).
-///
-/// Deliberate asymmetry: unrecognised TOKEN fails open; ABSENT field fails closed —
-/// `Request::source` is required (pinned by `request_without_source_is_a_hard_decode_error`).
-/// This impl only sees a present value.
+/// Unknown token → [`ClientSource::Unknown`]; non-string errors. Absent field fails
+/// closed at `Request::source` (not here).
 impl<'de> Deserialize<'de> for ClientSource {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;

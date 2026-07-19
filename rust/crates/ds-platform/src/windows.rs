@@ -1,9 +1,4 @@
-//! Windows platform (cfg target_os=windows; release CI matrix).
-//!
-//! * Caps LED: `IOCTL_KEYBOARD_SET_INDICATORS` as pure recording-state output; logical
-//!   toggle only during shared acquisition normalize.
-//! * Dictation: `SendInput` chord press+release.
-//! * Frontmost: `GetForegroundWindow` → image basename vs terminal list.
+//! Windows: Caps LED (recording-only), SendInput chords, GetForegroundWindow terminals.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;

@@ -1,32 +1,28 @@
-//! Hook writers for the registry mechanisms: [`claude_json_hooks`], [`claude_toml_hooks`],
-//! [`kimi_toml_hooks`], [`grok_json_hooks`], plus [`seed_and_prune`]. Target file comes from
-//! the registry; hook sets/merges live in `ds-config`; path resolve / read / backup+write
-//! live in `super::io`.
+//! Hook writers: [`claude_json_hooks`], [`claude_toml_hooks`], [`kimi_toml_hooks`],
+//! [`grok_json_hooks`], plus [`seed_and_prune`]. Target from registry; merges in `ds-config`;
+//! path resolve / read / backup+write in `super::io`.
 //!
-//! Additive, idempotent, backed-up. Malformed/unmergeable file left untouched (non-fatal).
+//! Additive, idempotent, backed-up. Malformed/unmergeable → leave untouched (non-fatal).
 //! Print-only `seed`/`capture`: issue #30 / `crate::wire_surfaces_print_only`.
 
 use super::io::{self, WriteBody};
 use crate::PreviewDoc;
 use ds_config::{ClientSource, HookCommandStyle, HookSpec, INSTALLED_BINS, Paths};
 
-/// Dropped binary names (single-binary consolidation + in-process engine). Explicit list —
-/// not a `dontspeak*`/`ds-*` prefix (shared install dir is not ours exclusively). Add here on
-/// rename/drop. See [`is_stale_ds_bin`].
+/// Dropped binary names. Explicit list — not a prefix (shared install dir isn't ours alone).
 const KNOWN_LEGACY_BINS: &[&str] = &["ds-mcp", "ds-speak", "ds-narrate", "dontspeakd"];
 
-/// Exact match against [`KNOWN_LEGACY_BINS`] (modulo exe suffix), and not [`INSTALLED_BINS`].
-/// Prefix matching used to delete `dontspeak-uninstall` and would hit foreign `ds-sync` tools.
+/// Exact match vs [`KNOWN_LEGACY_BINS`] (modulo exe suffix), not in [`INSTALLED_BINS`].
+/// Prefix matching used to delete `dontspeak-uninstall` and foreign `ds-sync`.
 fn is_stale_ds_bin(name: &str) -> bool {
     match name.strip_suffix(std::env::consts::EXE_SUFFIX) {
-        // EXE_SUFFIX is "" on unix, so strip_suffix yields Some(name) there.
+        // EXE_SUFFIX is "" on unix → strip_suffix yields Some(name).
         Some(stem) => KNOWN_LEGACY_BINS.contains(&stem) && !INSTALLED_BINS.contains(&stem),
         None => false,
     }
 }
 
-/// Best-effort prune of known-legacy bins beside `current_exe`. Regular files only; unix
-/// requires execute bit. Permission errors logged, not fatal.
+/// Best-effort prune beside `current_exe`. Regular files only; unix requires execute bit.
 fn prune_stale_bins() {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -64,7 +60,7 @@ fn prune_stale_bins() {
     }
 }
 
-/// Seed missing `config.toml` + prune known-legacy bins. Idempotent; interactive wire only.
+/// Seed missing `config.toml` + prune legacy bins. Interactive wire only (not engine reconcile).
 pub(crate) fn seed_and_prune(paths: &Paths) {
     if !paths.config_toml.exists() {
         if let Err(e) = ds_config::write_settings(paths, &ds_config::VoiceConfig::default()) {
@@ -80,9 +76,8 @@ pub(crate) fn seed_and_prune(paths: &Paths) {
     prune_stale_bins();
 }
 
-/// Claude-contract JSON hooks (`ClaudeJsonHooks`). `streaming` ⇒ `MessageDisplay`;
-/// `command_style` is ArgsArray vs InlineShell; `client` → `--client` on every verb.
-/// Malformed/unmergeable file left untouched (exit 0). `seed`/`capture`: print-only grouping.
+/// Claude-contract JSON hooks. Malformed/unmergeable → leave untouched (exit 0).
+/// `seed`/`capture`: print-only grouping (issue #30).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn claude_json_hooks(
     cfg: &std::path::Path,
@@ -157,7 +152,7 @@ pub(crate) fn claude_json_hooks(
             },
         }
     } else {
-        // Load-bearing: every-boot reconcile must be zero-write when unchanged.
+        // Load-bearing: every-boot reconcile zero-write when unchanged.
         if merged == before {
             return 0;
         }
@@ -179,10 +174,8 @@ fn hook_action(remove: bool) -> &'static str {
     }
 }
 
-/// Shared body for the TOML hook mechanisms: format-preserving, malformed/unmergeable
-/// config left unchanged (exit 0), zero-write when unchanged, backup before write,
-/// print-only `seed`/`capture` grouping. Bin resolution happens only on the merge path
-/// (strip never needs it). `merge` is `(existing, bin) -> merged`.
+/// Shared TOML hook body: format-preserving; malformed/unmergeable → exit 0; zero-write when
+/// unchanged; backup before write; print-only seed/capture. Bin resolve only on merge path.
 #[allow(clippy::too_many_arguments)]
 fn toml_hooks_body<E: std::fmt::Display>(
     cfg: &std::path::Path,
@@ -244,8 +237,7 @@ fn toml_hooks_body<E: std::fmt::Display>(
     }
 }
 
-/// Claude-contract TOML hooks (`ClaudeTomlHooks`, e.g. Codex). Format-preserving.
-/// Malformed config left unchanged (exit 0). `seed`/`capture`: same as JSON writer.
+/// Claude-contract TOML hooks (e.g. Codex). Same writer contract as JSON path.
 pub(crate) fn claude_toml_hooks(
     cfg: &std::path::Path,
     client: ClientSource,
@@ -268,8 +260,7 @@ pub(crate) fn claude_toml_hooks(
     )
 }
 
-/// Kimi Code flat-`[[hooks]]` TOML hooks (`KimiTomlHooks`). Same writer contract as
-/// [`claude_toml_hooks`] (shared [`toml_hooks_body`]), over Kimi's own shaper.
+/// Kimi flat-`[[hooks]]` TOML. Same writer contract as [`claude_toml_hooks`].
 pub(crate) fn kimi_toml_hooks(
     cfg: &std::path::Path,
     client: ClientSource,
@@ -292,8 +283,7 @@ pub(crate) fn kimi_toml_hooks(
     )
 }
 
-/// Own-the-file JSON hooks (`GrokJsonHooks`): overwrite on wire, delete on remove (backed up).
-/// No merge — file is exclusively ours.
+/// Own-the-file JSON hooks (Grok): overwrite on wire, delete on remove (backed up). No merge.
 pub(crate) fn grok_json_hooks(
     cfg: &std::path::Path,
     remove: bool,
@@ -301,7 +291,7 @@ pub(crate) fn grok_json_hooks(
     paths: &Paths,
 ) -> i32 {
     if remove {
-        // Issue #95: clear AGENTS.md digests even if hooks file was never created.
+        // Issue #95: clear AGENTS.md digests even if hooks file never created.
         if !print_only {
             sync_grok_narrate_rules(paths, /*digests_on*/ false);
         }
@@ -350,11 +340,11 @@ pub(crate) fn grok_json_hooks(
         return 0;
     }
 
-    // Issue #95: Grok ignores hook `additionalContext` — sync AGENTS.md digests (best-effort).
+    // Issue #95: Grok ignores hook additionalContext — sync AGENTS.md digests.
     let digests_on = ds_config::VoiceConfig::load(paths).narrates(ds_config::NarrateKind::Digests);
     sync_grok_narrate_rules(paths, digests_on);
 
-    // Load-bearing zero-write when already identical (every-boot reconcile).
+    // Load-bearing zero-write when identical (every-boot reconcile).
     if std::fs::read_to_string(cfg)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -373,7 +363,7 @@ pub(crate) fn grok_json_hooks(
     )
 }
 
-/// Best-effort AGENTS.md narrate section; errors on stderr only.
+/// Best-effort AGENTS.md narrate section; errors on stderr only (non-fatal).
 fn sync_grok_narrate_rules(paths: &Paths, digests_on: bool) {
     match ds_config::sync_grok_narrate_agents_md(&paths.grok_agents_md, digests_on) {
         Ok(true) if digests_on => {

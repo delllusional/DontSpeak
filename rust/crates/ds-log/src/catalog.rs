@@ -1,5 +1,4 @@
-//! Logs-tab pure rules: combined-log JSON parse, free-text filter, first-appearance sources.
-//! Single place for every host (was reimplemented per platform).
+//! Logs-tab pure rules: parse, filter, first-appearance sources (one place for every host).
 
 use serde_json::Value;
 

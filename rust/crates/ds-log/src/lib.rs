@@ -1,11 +1,6 @@
-//! Workspace unified activity log — wire format and rotation live in `log.rs`.
-//!
-//! Split from `ds-config` (issue #6): API takes `&Path` instead of `ds_config::Paths`,
-//! so this crate has zero dep on `ds-config` and `ds-config` can depend here for
-//! `VoiceConfig::load` diagnostics without a cycle.
-//!
-//! Logs-tab pure rules: [`parse_logs_json`] / [`filter_logs`] / [`distinct_sources`] —
-//! one algorithm for every host UI.
+//! Unified activity log (wire + rotation in `log.rs`). Path-based API (no `ds-config`
+//! dep — avoids cycle). Logs-tab pure rules: [`parse_logs_json`] / [`filter_logs`] /
+//! [`distinct_sources`].
 mod catalog;
 mod facade;
 mod log;

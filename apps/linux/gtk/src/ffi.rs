@@ -1,6 +1,5 @@
-//! Safe Rust wrappers over the `ds-core` C ABI — the same surface the macOS (Swift) and
-//! Windows (C#) hosts bind. Entry points are `pub extern "C" fn` in Rust (safe to call);
-//! owned `*mut c_char` returns are copied into `String` and freed with `ds_string_free`.
+//! Safe wrappers over the `ds-core` C ABI (same surface as macOS/Windows hosts).
+//! Owned `*mut c_char` returns are copied into `String` and freed with `ds_string_free`.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -8,17 +7,15 @@ use std::os::raw::c_char;
 use ds_core::ffi as sys;
 use serde::Deserialize;
 
-/// Typed Usage deck decoded immediately at the C ABI boundary.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct UsageDeck {
     pub(crate) cards: Vec<UsageCard>,
 }
 
-/// Typed per-agent last-good value consumed by the GTK view.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct UsageCard {
     pub(crate) agent: String,
-    /// Signed-in account (usually email) when the client exposes one.
+    /// Signed-in account when the client exposes one.
     #[serde(default)]
     pub(crate) account: Option<String>,
     pub(crate) rows: Vec<UsageRow>,
@@ -31,19 +28,18 @@ pub(crate) struct UsageRow {
     pub(crate) resets_at_unix: i64,
 }
 
-/// Copy an owned C string from a `ds_*` return into a Rust `String`, then free it. NULL → "".
+/// Owned `ds_*` C string → Rust String + free. NULL → "".
 fn take(p: *mut c_char) -> String {
     if p.is_null() {
         return String::new();
     }
-    // SAFETY: `p` is non-null; every `ds_*` return is either NULL or a valid NUL-terminated
-    // string owned by `ds-core` until `ds_string_free`. Copy before free.
+    // SAFETY: non-null; every ds_* return is NULL or a valid NUL-terminated string
+    // owned by ds-core until ds_string_free. Copy before free.
     let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
     sys::ds_string_free(p);
     s
 }
 
-// ── Engine lifecycle ─────────────────────────────────────────────────────────
 pub fn engine_start() -> bool {
     sys::ds_engine_start() != 0
 }
@@ -55,7 +51,6 @@ pub fn engine_reload() -> bool {
     sys::ds_engine_reload() != 0
 }
 
-// ── Control ──────────────────────────────────────────────────────────────────
 pub fn set_muted(on: bool) -> bool {
     sys::ds_set_muted(on as u8) != 0
 }
@@ -65,23 +60,22 @@ pub fn set_provider(which: &str) -> bool {
     sys::ds_set_provider(c.as_ptr()) != 0
 }
 
-// ── Status ───────────────────────────────────────────────────────────────────
-// BLOCKING (same ds_ipc round-trip as wait). No longer called from on_activate (see main.rs);
-// kept for parity with the other hosts' one-shot status fetch.
+// BLOCKING (same ds_ipc round-trip as wait). Not used from on_activate (main thread);
+// kept for host parity.
 #[allow(dead_code)]
 pub fn model_status_json() -> String {
     take(sys::ds_model_status_json())
 }
-/// BLOCKING until status seq differs from `since` or `timeout_ms`. Background thread only.
+/// BLOCKING until status seq ≠ `since` or timeout. Background thread only.
 pub fn model_status_wait(since: u64, timeout_ms: u32) -> String {
     take(sys::ds_model_status_wait(since, timeout_ms))
 }
-/// Instant typed deck: installed agent cards + last-good cache. No network.
+/// Instant deck: installed agents + last-good cache. No network.
 pub fn agent_usage_skeleton() -> Option<UsageDeck> {
     serde_json::from_str(&take(sys::ds_agent_usage_skeleton_json())).ok()
 }
 
-/// Blocking typed single-card load. Background thread; force bypasses 60s soft cache.
+/// BLOCKING single-card load. Background thread; force bypasses 60s soft cache.
 pub fn agent_usage_card(agent: &str, force_refresh: bool) -> Option<UsageCard> {
     let c = CString::new(agent).unwrap_or_default();
     serde_json::from_str(&take(sys::ds_agent_usage_card_json(
@@ -90,7 +84,7 @@ pub fn agent_usage_card(agent: &str, force_refresh: bool) -> Option<UsageCard> {
     )))
     .ok()
 }
-/// Blocking aggregate deck refresh for diagnostics.
+/// BLOCKING aggregate deck refresh (diagnostics).
 #[allow(dead_code)]
 pub fn agent_usage(force_refresh: bool) -> Option<UsageDeck> {
     serde_json::from_str(&take(sys::ds_agent_usage_json(force_refresh as u8))).ok()
@@ -98,24 +92,22 @@ pub fn agent_usage(force_refresh: bool) -> Option<UsageDeck> {
 pub fn tools_json() -> String {
     take(sys::ds_tools_json())
 }
-/// Shared libraries catalog (`ds-model::libraries::catalog`) — same JSON Windows renders.
+/// Shared libraries catalog (ds-model) — same JSON every host renders.
 pub fn libraries_json() -> String {
     take(sys::ds_libraries_json())
 }
-/// Raw activity-log JSON tail (`[{source,level,text},…]`). Push path keeps JSON so the UI
-/// can filter with shared [`ds_log`] rules before flattening.
+/// Activity-log JSON tail. Keep JSON so UI can filter with shared ds_log rules.
 pub fn log_tail_json(max_bytes: u32) -> String {
     take(sys::ds_logs_json(max_bytes))
 }
 
-/// Like [`log_tail_json`] but BLOCKS until any `*.log` under the logs dir changes or
-/// `timeout_ms` elapses. Client-side fs watch (not engine IPC). Background thread only.
+/// Like log_tail_json but BLOCKS on log-dir change or timeout (client fs watch).
+/// Background thread only.
 pub fn log_wait_json(max_bytes: u32, timeout_ms: u32) -> String {
     take(sys::ds_logs_wait(max_bytes, timeout_ms))
 }
 
-/// Parse + filter combined-log JSON with shared [`ds_log`] rules, then flatten for the text view.
-/// Empty result distinguishes no lines vs no match via the optional out-params.
+/// Parse + filter with shared ds_log rules; returns (total, shown, flat).
 pub fn filter_and_flatten_logs(json: &str, query: &str) -> (usize, usize, String) {
     let lines = ds_log::parse_logs_json(json);
     let total = lines.len();
@@ -126,19 +118,16 @@ pub fn filter_and_flatten_logs(json: &str, query: &str) -> (usize, usize, String
     let shown = filtered.len();
     (total, shown, ds_log::flatten_log_lines(&filtered))
 }
-/// Erase the on-disk activity log (unified + rotated + aux). Irreversible — confirm first
-/// (AdwAlertDialog in `ui.rs`).
+/// Erase on-disk activity log. Irreversible — confirm first.
 pub fn logs_clear() {
     sys::ds_logs_clear();
 }
-/// Localized lifecycle note for a not-ready engine (`status_fmt::engine_state_word`).
 pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
     let s = CString::new(state).unwrap_or_default();
     let w = CString::new(why).unwrap_or_default();
     take(sys::ds_engine_state_word(s.as_ptr(), progress, w.as_ptr()))
 }
 
-// ── Metadata + i18n ──────────────────────────────────────────────────────────
 pub fn version() -> String {
     take(sys::ds_version())
 }
@@ -148,12 +137,11 @@ pub fn homepage_url() -> String {
 pub fn brand_colors_json() -> String {
     take(sys::ds_brand_colors_json())
 }
-/// One random Usage speaking wash `{"r","g","b","a"}` from ds-core (shared recipe).
+/// One random Usage speaking wash `{"r","g","b","a"}` (shared recipe).
 pub fn random_pastel_wash_json() -> String {
     take(sys::ds_random_pastel_wash_json())
 }
-/// Startup update check (`ds_update_check_json`): blocking HTTP to GitHub. Background thread
-/// only (see `main.rs`). `"{}"` on any failure; missing `update_available` ⇒ false.
+/// BLOCKING HTTP to GitHub. Background thread only. `"{}"` on failure.
 pub fn update_check_json() -> String {
     take(sys::ds_update_check_json())
 }
@@ -162,12 +150,12 @@ pub fn set_locale(locale: &str) {
         sys::ds_set_locale(c.as_ptr());
     }
 }
-/// Localized string by key (English fallback; missing key returns the key).
+/// Localized string (missing key returns the key).
 pub fn t(key: &str) -> String {
     let c = CString::new(key).unwrap_or_default();
     take(sys::ds_t(c.as_ptr()))
 }
-/// Localized string with `%{name}` placeholders via `ds_t_args` (same as macOS/Windows).
+/// Localized string with `%{name}` placeholders via ds_t_args.
 pub fn t_args(key: &str, args: &[(&str, &str)]) -> String {
     let key_c = CString::new(key).unwrap_or_default();
     let mut obj = serde_json::Map::with_capacity(args.len());
@@ -183,35 +171,29 @@ pub fn t_args(key: &str, args: &[(&str, &str)]) -> String {
     take(sys::ds_t_args(key_c.as_ptr(), args_c.as_ptr()))
 }
 
-// ── Formatters (`status_fmt` — shared with macOS/Windows) ────────────────────
-/// Duration with leading+trailing zero units dropped (e.g. "12m 04s", "1d 05h").
+// Shared status_fmt builders (macOS/Windows parity).
 pub fn duration_live(secs: f64) -> String {
     take(sys::ds_duration_live(secs))
 }
 
-/// Usage remaining duration from UTC epoch (e.g. "2d 05h"; no seconds).
 pub fn usage_resets_in(resets_at_unix: i64) -> String {
     take(sys::ds_usage_resets_in(resets_at_unix))
 }
 
-/// Runtime label for a resolved provider token (cpu/cuda/coreml/ane).
 pub fn runtime_label(provider: &str) -> String {
     let c = CString::new(provider).unwrap_or_default();
     take(sys::ds_runtime_label(c.as_ptr()))
 }
 
-/// Stat range `"avg<unit>  ·  lo–hi"` (`precision` decimals; `unit_key` = catalog unit key).
 pub fn stats_range(lo: f64, avg: f64, hi: f64, precision: u32, unit_key: &str) -> String {
     let c = CString::new(unit_key).unwrap_or_default();
     take(sys::ds_stats_range(lo, avg, hi, precision, c.as_ptr()))
 }
 
-/// Count + audio-duration stat `"<count>  <secs> s"`.
 pub fn stats_count(count: u64, audio_secs: f64) -> String {
     take(sys::ds_stats_count(count, audio_secs))
 }
 
-/// Decimal file size ("325 MB" / "12 KB") — same builder every Libraries tab uses.
 pub fn human_size(bytes: u64) -> String {
     take(sys::ds_human_size(bytes))
 }

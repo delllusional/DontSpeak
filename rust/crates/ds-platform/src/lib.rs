@@ -1,9 +1,5 @@
-//! Platform abstraction for the dontspeak engine.
-//!
-//! Capability traits: [`KeyInjector`] (dictation key tap), [`FrontmostWindow`] (terminal
-//! focus gate), [`CapsKeyMonitor`] (physical Caps edges + LED). [`Platform`] aggregates
-//! them plus `preflight()`. [`current()`] / [`is_mic_active()`] dispatch per OS; [`KeyChord`]
-//! lives in `chord`. All three ports behind `cfg(target_os=…)`; full matrix in release CI.
+//! Platform traits: [`KeyInjector`], [`FrontmostWindow`], [`CapsKeyMonitor`];
+//! [`Platform`] + `preflight`. Per-OS `cfg`; full matrix in release CI.
 
 use std::error::Error;
 use std::fmt;
@@ -12,38 +8,33 @@ use std::time::Instant;
 mod chord;
 pub use chord::{KeyBase, KeyChord};
 
-/// One physical Caps transition. Event-driven ports queue these so a down+up inside
-/// one poll gap still replays. `at` is for long-press threshold vs the down edge.
+/// Physical Caps edge. Queued so down+up in one poll gap still replays. `at` for long-press.
 #[derive(Clone, Copy, Debug)]
 pub struct CapsEdge {
-    /// `true` = DOWN, `false` = UP.
+    /// true = DOWN.
     pub down: bool,
     pub at: Instant,
 }
 
-/// Inject Claude Code voice dictation keypresses (TAP toggles recording; key from
-/// `voice:pushToTalk`, default Space).
+/// Dictation key tap (`voice:pushToTalk`, default Space).
 pub trait KeyInjector {
-    /// One discrete tap (down+up). Default no-op. Caller (ds-stt) gates on
-    /// `is_terminal_frontmost()`. Unsupported chords: log + skip.
+    /// Down+up. Caller gates terminal frontmost.
     fn tap_key(&self, _chord: &KeyChord) {}
 
-    /// Inject transcript text into focused app. Default no-op; caller gates frontmost.
+    /// Inject text; caller gates frontmost.
     fn type_text(&self, _text: &str) {}
 
-    /// Press Enter once (always-listening submit). Default no-op; caller gates frontmost.
+    /// Enter submit; caller gates frontmost.
     fn press_enter(&self) {}
 }
 
-/// Shared "can't synthesize dictation key" warning (one message for all ports).
 pub fn warn_unsupported_dictation_key(base: &KeyBase) {
     eprintln!(
         "dontspeak: can't synthesize claude_code dictation key {base:?} — bind voice:pushToTalk to Space or a Ctrl+<letter>"
     );
 }
 
-/// Restore clipboard after paste, off the caller thread. Wait for async paste, then put
-/// back snapshot (`Some`) or clear (`None`) only if clipboard still holds our transcript.
+/// After paste: restore `prev` or clear if clipboard still holds our text.
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub fn restore_clipboard_after_paste(prev: Option<String>, pasted: String) {
     std::thread::spawn(move || {
@@ -64,37 +55,34 @@ pub fn restore_clipboard_after_paste(prev: Option<String>, pasted: String) {
     });
 }
 
-/// Focus gate: only inject dictation/transcript while a terminal is frontmost.
+/// Inject only when terminal is frontmost.
 pub trait FrontmostWindow {
     fn is_terminal_frontmost(&self) -> bool;
 
-    /// Frontmost app name for the confirm panel ("→ Terminal"). Default None.
+    /// Confirm panel label. Default None.
     fn frontmost_app_name(&self) -> Option<String> {
         None
     }
 
-    /// Best-effort: can focus accept paste? Warn-only, never gates delivery. Default true.
+    /// Warn-only paste check; never gates delivery. Default true.
     fn has_paste_target(&self) -> bool {
         true
     }
 
-    /// Replace config.toml `extra_terminals` union (assemble + every reload). Default no-op.
+    /// config.toml `extra_terminals` union on reload.
     fn set_extra_terminals(&self, _extra: Vec<String>) {}
 
-    /// Replace `extra_custom_text_editors` for `has_paste_target` exemption (Win/macOS;
-    /// Linux no-op — default always-true). Default no-op.
+    /// `extra_custom_text_editors` for paste exemption (Win/macOS).
     fn set_extra_custom_text_editors(&self, _extra: Vec<String>) {}
 }
 
-/// Physical Caps hold + LED write (long-press + recording indicator).
+/// Caps physical hold + LED (long-press + recording).
 pub trait CapsKeyMonitor {
-    /// Physical hold, independent of LED/toggle. Engine uses for long-press reset.
     fn is_caps_physically_down(&self) -> bool;
-    /// Force Caps LED/lock (e.g. long-press drift recovery OFF).
+    /// Force LED/lock (long-press drift recovery).
     fn set_caps_lock(&self, on: bool);
 
-    /// macOS-only: IOHID/LED resource stuck denied despite grant (needs process relaunch).
-    /// Default false. Engine polls + relaunches; prefer [`Self::caps_monitor_stuck_detail`].
+    /// macOS: IOHID/LED stuck denied → relaunch. Prefer `caps_monitor_stuck_detail`.
     fn caps_monitor_stuck(&self) -> bool {
         false
     }

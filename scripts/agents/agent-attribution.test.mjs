@@ -44,8 +44,7 @@ function temporaryDirectory(t) {
   return directory;
 }
 
-// Tests that reach ensureCommitMessageHook or spawn the capture/commit scripts
-// must never read the developer's real git config.
+// ensureCommitMessageHook / capture+commit scripts must not touch real git config.
 function isolatedGitEnvironment(t) {
   const configFile = join(temporaryDirectory(t), "gitconfig");
   writeFileSync(configFile, "", "utf8");
@@ -58,8 +57,7 @@ function isolatedGitEnvironment(t) {
       else process.env[key] = value;
     }
   });
-  // Strip host agent markers so spawnSync git/hooks see a clean "no CLI" env
-  // (this harness may run under Grok/Claude with GROK_AGENT etc. set).
+  // Strip host agent markers so hooks see a clean "no CLI" env.
   const env = { ...process.env };
   for (const key of [
     "GROK_AGENT",
@@ -279,7 +277,7 @@ test("shell wrapper payloads are parsed recursively", () => {
       .map((invocation) => invocation.workingDirectory),
     [join(base, "rust")],
   );
-  // -c after a non-flag argument belongs to the script, not the shell.
+  // -c after a non-flag arg belongs to the script, not the shell.
   assert.deepEqual(gitCommitInvocations("sh script.sh -c \"git commit -m x\"", base), []);
 });
 
@@ -374,7 +372,7 @@ test("Grok prefers summary model/effort and falls back when only GROK_AGENT is s
     git_root_dir: cwd,
     last_active_at: "2026-07-18T20:00:00Z",
   }));
-  // Per-turn build slug must not override the product model the user selected.
+  // Per-turn build slug must not override the product model.
   jsonLines(join(session, "chat_history.jsonl"), [
     { type: "assistant", model_id: "grok-4.5-build", reasoning_effort: "high" },
   ]);
@@ -462,9 +460,7 @@ test("commit-msg live-resolves Grok when the PreToolUse cache is missing", (t) =
     USERPROFILE: home,
     HOME: home,
   };
-  // Copy scripts into a real repo and point commit-msg at them.
   const { root, scripts } = initializedRepository(t, env);
-  // Make the session match this repo root (path key).
   writeFileSync(join(session, "summary.json"), JSON.stringify({
     current_model_id: "grok-4.5",
     reasoning_effort: "high",
@@ -474,7 +470,7 @@ test("commit-msg live-resolves Grok when the PreToolUse cache is missing", (t) =
   ensureCommitMessageHook(root);
   writeFileSync(join(root, "f.txt"), "x\n");
   assert.equal(spawnSync("git", ["add", "f.txt"], { cwd: root, env, encoding: "utf8" }).status, 0);
-  // No PreToolUse cache file — live path must stamp high.
+  // No PreToolUse cache — live path must stamp high.
   const cache = join(privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE);
   assert.equal(existsSync(cache), false);
   const commit = spawnSync("git", ["commit", "-m", "Live resolve\n\nAgent: grok-4.5 none"], {
@@ -585,8 +581,7 @@ test("an attribution-shaped subject fails closed instead of being stripped", () 
 test("message equality with HEAD gates the lone-trailer preserve", (t) => {
   const { env } = isolatedGitEnvironment(t);
   const { root } = initializedRepository(t, env);
-  // Unborn HEAD: never preserve.
-  assert.equal(messageMatchesHead("Base commit\n", root), false);
+  assert.equal(messageMatchesHead("Base commit\n", root), false); // unborn HEAD
   const committed = spawnSync(
     "git",
     ["commit", "--allow-empty", "-m", "Base commit\n\nDetails here"],
@@ -594,7 +589,7 @@ test("message equality with HEAD gates the lone-trailer preserve", (t) => {
   );
   assert.equal(committed.status, 0, committed.stderr);
   assert.equal(messageMatchesHead("Base commit\n\nDetails here\n", root), true);
-  // Comment lines and trailing whitespace differ before --cleanup runs.
+  // # comments / trailing WS differ before --cleanup.
   assert.equal(messageMatchesHead("Base commit\n\nDetails here  \n# template comment\n", root), true);
   assert.equal(messageMatchesHead("Different subject\n\nDetails here\n", root), false);
 });
@@ -636,7 +631,7 @@ test("freshness caps depend on the agent environment and uses must be positive",
     uses: 1,
     capturedAt: new Date(now - 8 * 60_000).toISOString(),
   };
-  // 8 minutes old: fine under agent env (15-minute cap), stale env-less (5).
+  // 8m: ok under agent env (15m cap), stale env-less (5m).
   assert.deepEqual(validateCacheRecord(record, "/repo", { CODEX_THREAD_ID: "one" }, now), []);
   assert.match(validateCacheRecord(record, "/repo", {}, now).join("\n"), /stale/);
   const fresh = { ...record, capturedAt: new Date(now - 4 * 60_000).toISOString() };
@@ -664,7 +659,7 @@ test("old-capture records without uses stay usable during transition", () => {
     capturedAt: new Date(now).toISOString(),
   };
   assert.deepEqual(validateCacheRecord(record, "/repo", { CODEX_THREAD_ID: "one" }, now), []);
-  assert.equal(normalizeCacheRecord(record).uses, 1); // single use
+  assert.equal(normalizeCacheRecord(record).uses, 1);
 });
 
 test("transcript selector retries once with a larger tail cap", (t) => {
@@ -679,7 +674,7 @@ test("transcript selector retries once with a larger tail cap", (t) => {
 
 test("the retry drops the row straddling the first-pass boundary", (t) => {
   const file = join(temporaryDirectory(t), "boundary.jsonl");
-  // Each serialized row is exactly 99 bytes + newline = 100 bytes.
+  // Each row is exactly 99 bytes + newline = 100 bytes (pins the straddle).
   const row = (marker) => {
     const overhead = JSON.stringify({ marker, pad: "" }).length;
     return { marker, pad: "x".repeat(99 - overhead) };
@@ -690,9 +685,9 @@ test("the retry drops the row straddling the first-pass boundary", (t) => {
     (parsed) => (parsed.marker === marker ? parsed.marker : undefined),
     { maxBytes: 150, retryMaxBytes: 4096 },
   );
-  assert.equal(find("tail"), "tail"); // first pass
-  assert.equal(find("early"), "early"); // retry head region
-  assert.equal(find("straddle"), undefined); // straddling row dropped whole
+  assert.equal(find("tail"), "tail");
+  assert.equal(find("early"), "early");
+  assert.equal(find("straddle"), undefined);
 });
 
 test("hook installation is isolated to the current worktree config", (t) => {
@@ -760,7 +755,7 @@ test("a user-set worktree hooksPath is chained, not clobbered", (t) => {
   const hooks = ensureCommitMessageHook(root);
   assert.equal(readFileSync(join(hooks, "upstream-hooks-path"), "utf8").trim(), custom);
   assert.match(readFileSync(join(hooks, "commit-msg"), "utf8"), /custom-hooks/);
-  // Re-run after our own path took over worktree scope: still chained.
+  // Re-run after our path took worktree scope: still chained.
   ensureCommitMessageHook(root);
   assert.equal(readFileSync(join(hooks, "upstream-hooks-path"), "utf8").trim(), custom);
 });
@@ -795,7 +790,7 @@ test("a linked worktree does not chain to the main worktree's managed hook", (t)
     encoding: "utf8",
   });
   assert.equal(added.status, 0, added.stderr);
-  // New linked worktrees copy the main worktree's config, including its private hook path.
+  // Linked worktrees inherit main's core.hooksPath (including private hooks).
   const inherited = spawnSync("git", ["config", "--path", "--get", "core.hooksPath"], {
     cwd: linked,
     encoding: "utf8",
@@ -831,7 +826,7 @@ test("unexpected git failures during capture still fail loudly", (t) => {
   const { env: isolatedEnv } = isolatedGitEnvironment(t);
   const directory = temporaryDirectory(t);
   const broken = { ...isolatedEnv, CODEX_THREAD_ID: "session-1" };
-  // Empty PATH: git cannot spawn at all — a real failure, not a non-repo skip.
+  // Empty PATH: real spawn failure, not a non-repo skip.
   for (const key of Object.keys(broken)) {
     if (key.toUpperCase() === "PATH") delete broken[key];
   }
@@ -845,7 +840,7 @@ test("capture keys on the first invocation whose repository resolves", (t) => {
   const { env: isolatedEnv } = isolatedGitEnvironment(t);
   const env = { ...isolatedEnv, CODEX_THREAD_ID: "session-1" };
   const { root, scripts } = initializedRepository(t, env);
-  const outside = temporaryDirectory(t).replaceAll("\\", "/"); // exists, not a repo
+  const outside = temporaryDirectory(t).replaceAll("\\", "/"); // not a repo
   captureCodex(root, scripts, env, `git -C ${outside} commit -m a && git commit -m b && git commit -m c`);
   const record = JSON.parse(readFileSync(join(privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE), "utf8"));
   assert.equal(record.uses, 2);
@@ -918,14 +913,14 @@ test("amend preserves the proven pair only when the message is kept", (t) => {
 test("the Claude wrapper forwards commit payloads byte-intact", (t) => {
   const settingsPath = join(sourceScripts, "..", "..", ".claude", "settings.json");
   const command = JSON.parse(readFileSync(settingsPath, "utf8")).hooks.PreToolUse[0].hooks[0].command;
-  // Safe read + unquoted heredoc delimiter: expansion without re-scanning.
+  // Pins safe read + unquoted heredoc (expansion without re-scanning).
   assert.match(command, /IFS= read -rd ''/);
   assert.match(command, /<<DONTSPEAK_JSON\n/);
   const bin = temporaryDirectory(t);
   const outFile = join(bin, "captured.json");
   writeFileSync(join(bin, "node"), `#!/bin/sh\ncat > '${outFile.replaceAll("\\", "/")}'\n`, { mode: 0o755 });
   const payload = JSON.stringify({ tool_input: { command: "git commit -m `date` $(hostname)" } });
-  // Prefer Git Bash over Windows' System32 bash.exe (WSL launcher), which is not a POSIX shell.
+  // Prefer Git Bash over System32 bash.exe (WSL launcher, not POSIX).
   const bashCandidates = [
     "C:\\Program Files\\Git\\bin\\bash.exe",
     "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
@@ -946,8 +941,7 @@ test("the Claude wrapper forwards commit payloads byte-intact", (t) => {
   };
   const run = spawnSync(bash, ["-c", command], { input: payload, env, encoding: "utf8" });
   if (run.error || run.status !== 0) {
-    // No usable POSIX bash on this host; the string assertions above already pin
-    // the safe wrapper form.
+    // No usable POSIX bash; string assertions above already pin the wrapper form.
     return;
   }
   assert.equal(readFileSync(outFile, "utf8"), `${payload}\n`);

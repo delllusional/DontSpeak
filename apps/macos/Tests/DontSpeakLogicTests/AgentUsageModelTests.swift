@@ -21,7 +21,7 @@ final class AgentUsageModelTests: XCTestCase {
         XCTAssertEqual(card.rows.first?.remainingLabel, "")
     }
 
-    /// Unknown period tokens must not fail card decode (m2 / Windows+Linux parity).
+    /// Unknown period tokens must not fail card decode (peer parity).
     func testDecodesUnknownPeriodAsOpaqueString() throws {
         let cardJson = #"{"agent":"claude_code","rows":[{"period":"daily","used_percent":15,"resets_at_unix":1800000000}]}"#
         let card = try XCTUnwrap(UsageDeck.decodeCard(Data(cardJson.utf8)))

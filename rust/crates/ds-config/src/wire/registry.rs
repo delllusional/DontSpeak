@@ -8,174 +8,123 @@ use std::path::Path;
 use crate::paths::Paths;
 use ds_client::ClientSource;
 
-/// What KIND of application a client is — i.e. where the integration runs and, by
-/// convention, where its config lives.
+/// Where the integration runs / config lives by convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientKind {
-    /// A terminal CLI agent. Config lives under a dot-dir in `$HOME` on every OS
-    /// (`~/.claude`, `~/.codex`, …), so the paths are platform-uniform.
+    /// Terminal CLI. Config under a `$HOME` dot-dir on every OS (`~/.claude`, …).
     TerminalCli,
-    /// A desktop GUI app. Config lives under the per-OS application-support dir
-    /// (macOS `~/Library/Application Support`, Windows `%APPDATA%`, Linux `~/.config`),
-    /// so the path is platform-resolved by [`Paths`].
+    /// Desktop GUI. Config under per-OS app-support (resolved by [`Paths`]).
     DesktopApp,
 }
 
 /// How `dontspeak <client>` launches one supported client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchMode {
-    /// Start the client normally after making sure the resident DontSpeak host is running.
+    /// Start normally after ensuring the resident host is running.
     Direct,
-    /// Ask the engine to attach to an app-server, then start Codex's interactive TUI with
-    /// the returned `--remote` endpoint. Noninteractive Codex commands still pass through.
+    /// Attach engine to app-server, then Codex TUI with `--remote`. Noninteractive passes through.
     CodexRemote,
 }
 
-/// The executable and public command names for one client launcher. This lives beside the
-/// wiring facts so the command surface cannot silently omit a supported integration.
+/// Executable + public command names — lives beside wiring so launch surface cannot omit a client.
 pub struct LaunchSpec {
     /// Preferred `dontspeak <name>` token and executable name.
     pub command: &'static str,
-    /// Accepted compatibility names (normally the canonical [`ClientSource`] token).
+    /// Compatibility names (usually the canonical [`ClientSource`] token).
     pub aliases: &'static [&'static str],
     pub mode: LaunchMode,
 }
 
-/// HOW one integration surface is written into a client's config file. Every mechanism is
-/// additive + idempotent + user-preserving; the writers live in the `dontspeak` crate, the
-/// pure shapers in this crate's sibling `wire::*` modules.
+/// HOW one integration surface is written. Every mechanism is additive + idempotent +
+/// user-preserving; writers in `dontspeak`, pure shapers in sibling `wire::*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireMechanism {
-    /// DontSpeak's voice hooks merged into a JSON settings file using Claude Code's hook
-    /// contract (`hooks.<Event>` groups; JSON on stdin; `Stop` carries
+    /// Claude-contract voice hooks in JSON (`hooks.<Event>`; stdin JSON; `Stop` has
     /// `last_assistant_message`). Shaper: `merge_hooks`/`strip_hooks`.
     ClaudeJsonHooks,
-    /// The SAME Claude-contract hooks, but in a TOML config edited format-preservingly
-    /// (`toml_edit`) — `[[hooks.<Event>]]` tables. Shaper:
-    /// `merge_codex_hooks`/`strip_codex_hooks`.
+    /// Same contract in format-preserving TOML (`[[hooks.<Event>]]`).
+    /// Shaper: `merge_codex_hooks`/`strip_codex_hooks`.
     ClaudeTomlHooks,
-    /// DontSpeak's voice hooks written to a DEDICATED JSON file we own outright (Grok's
-    /// `~/.grok/hooks/dontspeak.json`). The Claude hooks-contract shape, but with one BARE
-    /// binary command per event and seconds timeouts. The target matches what Grok's Claude
-    /// adapter produces after dropping `args`, so Grok deduplicates native and imported
-    /// registrations; the runtime dispatches from the reserved `GROK_HOOK_EVENT` marker.
-    /// Because the file is exclusively ours, there is nothing to merge: wire OVERWRITES it
-    /// (a backup is taken first) and unwire DELETES it. Shaper: `grok_hooks_value`.
+    /// Dedicated JSON file we own outright (`~/.grok/hooks/dontspeak.json`). Claude shape with
+    /// bare binary + seconds timeouts; matches Grok adapter after dropping `args` so native and
+    /// imported registrations dedupe; runtime dispatches on `GROK_HOOK_EVENT`. Wire OVERWRITES
+    /// (backup first), unwire DELETES. Shaper: `grok_hooks_value`.
     GrokJsonHooks,
-    /// Kimi Code's voice hooks: a FLAT top-level `[[hooks]]` array-of-tables in
-    /// `~/.kimi-code/config.toml`, edited format-preservingly (`toml_edit`). Each entry may
-    /// carry ONLY `event`/`matcher`/`command`/`timeout` (any extra key breaks Kimi's config
-    /// load), so the shape differs from [`WireMechanism::ClaudeTomlHooks`]'s grouped
-    /// `[[hooks.<Event>]]` tables and needs its own shaper:
-    /// `merge_kimi_hooks`/`strip_kimi_hooks`.
+    /// Flat `[[hooks]]` in `~/.kimi-code/config.toml`. Entry may carry ONLY
+    /// `event`/`matcher`/`command`/`timeout` (extra keys break Kimi load) — needs its own shaper
+    /// vs grouped [`WireMechanism::ClaudeTomlHooks`]: `merge_kimi_hooks`/`strip_kimi_hooks`.
     KimiTomlHooks,
-    /// The stdio `mcpServers.DontSpeak` entry merged into a JSON config. Shaper:
-    /// `merge_mcp_server`/`strip_mcp_server`.
+    /// Stdio `mcpServers.DontSpeak` in JSON. Shaper: `merge_mcp_server`/`strip_mcp_server`.
     JsonMcp,
-    /// The stdio `mcp_servers.DontSpeak` entry merged into a TOML config (Grok style).
-    /// Shaper: `merge_mcp_server_toml`/`strip_mcp_server_toml`.
+    /// Stdio `mcp_servers.DontSpeak` in TOML. Shaper: `merge_mcp_server_toml`/`strip_mcp_server_toml`.
     TomlMcp,
 }
 
-/// HOW the client's hook runner EXECUTES one wired command entry — the dialect the
-/// `ClaudeJsonHooks` shaper must emit. Two clients share the JSON hook contract but run
-/// the commands completely differently.
+/// How the client's hook runner executes one wired command entry (`ClaudeJsonHooks` dialect).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookCommandStyle {
-    /// Claude Code: spawns `command` + the `args` array directly (no shell);
-    /// `timeout` is in SECONDS.
+    /// Claude Code: spawn `command` + `args` array (no shell); `timeout` in SECONDS.
     ArgsArray,
-    /// Qwen Code: passes ONLY the `command` string to a shell (`executeCommandHook` spawns
-    /// `shellConfig.executable` with `[...argsPrefix, hookConfig.command]`); its
-    /// `CommandHookConfig` has NO `args` field, so the verbs must be inlined into the
-    /// command string; `timeout` is in MILLISECONDS (default 60000).
+    /// Qwen Code: only `command` string to a shell (no `args` field); verbs inlined;
+    /// `timeout` in MILLISECONDS (default 60000).
     InlineShell,
 }
 
-/// ONE config file the wire edits for a client, and how.
+/// One config file the wire edits, and how.
 pub struct Surface {
     pub mechanism: WireMechanism,
-    /// The config file this surface edits, resolved per-OS by [`Paths`].
+    /// Resolved per-OS by [`Paths`].
     pub config_file: fn(&Paths) -> &Path,
-    /// For [`WireMechanism::JsonMcp`]: how the user loads the newly registered server
-    /// (printed after a successful wire). Hook surfaces take effect on the next turn, so
-    /// they carry no hint.
+    /// For [`WireMechanism::JsonMcp`]: how the user loads the new server (printed after wire).
+    /// Hook surfaces take effect next turn — no hint.
     pub load_hint: Option<&'static str>,
-    /// For [`WireMechanism::ClaudeJsonHooks`]: whether the client streams assistant messages
-    /// via `MessageDisplay` (Claude Code and Qwen Code → `true`). Non-streaming clients
-    /// omit the hook and voice the reply whole from `Stop`. Ignored by
-    /// [`WireMechanism::JsonMcp`] and [`WireMechanism::ClaudeTomlHooks`] (Codex's streaming-ness
-    /// is baked into its own TOML shaper's fixed hook set).
+    /// For [`WireMechanism::ClaudeJsonHooks`]: `true` ⇒ install `MessageDisplay`. Non-streaming
+    /// clients omit it and voice the reply whole from `Stop`. Ignored by MCP and
+    /// [`WireMechanism::ClaudeTomlHooks`] (Codex streaming-ness is baked into its shaper).
     pub hook_streaming: bool,
-    /// For [`WireMechanism::ClaudeJsonHooks`]: how the client's hook runner executes a wired
-    /// command entry (see [`HookCommandStyle`]). Ignored by the other mechanisms — same
-    /// convention as [`hook_streaming`](Self::hook_streaming).
+    /// For [`WireMechanism::ClaudeJsonHooks`] only; ignored by other mechanisms.
     pub hook_command_style: HookCommandStyle,
 }
 
-/// A pointer to the OFFICIAL documentation a wiring is derived from — so every registry
-/// entry names its sources and a contract change is checkable against the upstream doc
-/// rather than against folklore.
+/// Official doc a wiring is derived from — contract changes checkable against upstream.
 pub struct DocRef {
-    /// What the document specifies: `"hooks"` or `"mcp"`.
+    /// `"hooks"` or `"mcp"`.
     pub topic: &'static str,
     pub url: &'static str,
 }
 
-/// One wireable client: WHO it is, WHERE it lives, HOW it's wired, and the docs saying so.
+/// One wireable client: WHO, WHERE, HOW, and the docs saying so.
 pub struct ClientSpec {
-    /// The canonical [`ClientSource`] token (`claude_code` / `codex`). Always a
-    /// [`ClientSource::CLIENTS`] member — `DontSpeak`/`Unknown` have no registry entry, by
-    /// design (they are identities, not things we wire).
+    /// Canonical [`ClientSource`] token. Always a [`ClientSource::CLIENTS`] member —
+    /// `DontSpeak`/`Unknown` have no entry (identities, not wire targets).
     pub target: ClientSource,
-    /// Human-facing name for messages ("Claude Code", "OpenAI Codex", …).
     pub display_name: &'static str,
     pub kind: ClientKind,
-    /// How the installed client is started through `dontspeak <client>`.
     pub launch: LaunchSpec,
-    /// The prefix of the `clientInfo.name` this client announces itself with in the MCP
-    /// `initialize` handshake — the MCP half of the client-identity story (the hooks' half is
-    /// the `--client <token>` verb the wiring stamps). Matched by [`client_from_mcp_name`] as
-    /// `normalized_name.starts_with(mcp_client_prefix)` (after normalizing case / `_`→`-`), so
-    /// every observed variant (`qwen-code`, `qwen-code-mcp-client`,
-    /// `qwen-cli-mcp-client-DontSpeak`, …) is covered by one short token instead of a
-    /// hand-maintained exact-alias list. DELIBERATE TRADE-OFF: an unrelated client whose own
-    /// name happens to start with the same token (e.g. a `codex-community-fork`) is
-    /// misattributed to this client rather than landing on [`ClientSource::Unknown`] — accepted
-    /// because it eliminates the per-client-version alias-list upkeep (see git history prior to
-    /// this field for what that upkeep looked like). Anything not starting with any registered
-    /// prefix is [`ClientSource::Unknown`] — the honest answer, not a fallback to a guess.
-    ///
-    /// Every `initialize` logs the RAW `clientInfo.name` it saw (see `dontspeak::mcp`), which is
-    /// how the `verify-wiring` skill confirms a client still sends a name starting with this
-    /// prefix (or corrects the prefix if it doesn't).
+    /// Prefix of MCP `initialize` `clientInfo.name` (after normalize: lowercase, `_`→`-`).
+    /// Matched by [`client_from_mcp_name`] as `starts_with`. Covers variants without a
+    /// hand-maintained alias list. TRADE-OFF: a foreign client sharing the prefix
+    /// (e.g. `codex-community-fork`) is misattributed rather than `Unknown` — accepted to
+    /// avoid per-version alias upkeep. No match → [`ClientSource::Unknown`].
+    /// Every `initialize` logs the RAW name (`dontspeak::mcp`) for verify-wiring.
     pub mcp_client_prefix: &'static str,
-    /// Is the client installed? A REAL wire (not `--remove`, not `--print-only`) of a
-    /// [`gate_on_presence`](Self::gate_on_presence) client is skipped when this is false,
-    /// so we never scatter a stray config on a machine without the client.
+    /// Real wire of a [`gate_on_presence`](Self::gate_on_presence) client skips when false.
     pub present: fn(&Paths) -> bool,
-    /// The directory whose existence [`present`](Self::present) probes — named in the
-    /// "not detected (…)" skip message.
+    /// Directory named in the "not detected" skip message.
     pub detect_dir: fn(&Paths) -> &Path,
-    /// `false` only for Claude Code: the installers wire it unconditionally (our hooks
-    /// write CREATES `~/.claude`, which then satisfies the MCP surface's gate) — it is
-    /// DontSpeak's primary client. Everything else gates.
+    /// `false` only for Claude Code: installers wire unconditionally (hooks create `~/.claude`
+    /// that then satisfies the MCP gate). Everything else gates.
     pub gate_on_presence: bool,
     pub surfaces: &'static [Surface],
-    /// The official docs this entry's mechanisms and paths were derived from.
     pub docs: &'static [DocRef],
-    /// The VERSION PIN: the client version current when this wiring was last verified —
-    /// i.e. the [`docs`](Self::docs) were (re-)read and the merge shape confirmed against
-    /// them. NOT a compatibility floor (the contracts are stable across versions until
-    /// proven otherwise); it says "implemented per the docs as of this client version".
-    /// Update it whenever a wiring is re-checked or changed.
+    /// Version pin: client version when wiring was last verified against [`docs`](Self::docs).
+    /// Not a compatibility floor — "implemented per docs as of this version".
     pub verified_client_version: &'static str,
     /// ISO date of that verification (`YYYY-MM-DD`).
     pub verified_on: &'static str,
 }
 
-/// The registry. Order matches [`ClientSource::CLIENTS`] (pinned by test): this is the SAME
-/// canonical client list, with the wiring facts attached.
+/// Order matches [`ClientSource::CLIENTS`] (pinned by test).
 pub const CLIENT_REGISTRY: &[ClientSpec] = &[
     ClientSpec {
         target: ClientSource::ClaudeCode,
@@ -186,8 +135,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             aliases: &["claude_code"],
             mode: LaunchMode::Direct,
         },
-        // VERIFIED: Claude Code announces itself as `claude-code` in `initialize`'s
-        // `clientInfo.name`.
+        // Verified: announces as `claude-code` in `clientInfo.name`.
         mcp_client_prefix: "claude",
         present: |p| p.claude_dir.exists(),
         detect_dir: |p| &p.claude_dir,
@@ -230,36 +178,16 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             aliases: &[],
             mode: LaunchMode::CodexRemote,
         },
-        // `codex-mcp-client` is the constant codex-rs sets in its MCP connection manager; the
-        // prefix also covers the plain CLI (`codex`) and the VS Code surface (`codex-vscode`).
+        // `codex-mcp-client` is codex-rs's constant; prefix also covers CLI + VS Code.
         mcp_client_prefix: "codex",
         present: |p| p.codex_dir.exists(),
         detect_dir: |p| &p.codex_dir,
         gate_on_presence: true,
-        // Codex adopted Claude Code's hook contract (same events, same stdin JSON,
-        // `Stop.last_assistant_message`), so the SAME dontspeak binary serves it; only
-        // the file format (TOML) differs. Its hook set is three events — `SessionStart`
-        // (greet-only), `UserPromptSubmit` (ONE group, two inner hooks: `notify` for
-        // mark-active routing + the engine's codex_stream session re-discovery, and the
-        // synchronous `provide` for the narration spec), `Stop`; `SessionStart` landed in
-        // Codex CLI 0.142.x, it didn't exist when Codex was first wired. Codex's hook
-        // event list has NO `SessionEnd` and no `Notification` (confirmed against the
-        // hooks doc, 2026-07-07) — per-session cleanup for Codex is owned by the
-        // engine's codex_stream supervisor, not a hook. MID-TURN narration doesn't ride
-        // hooks at all: the engine subscribes to the shared app-server (managed or
-        // engine-owned start + `codex --remote`) — see the "app-server" DocRef and
-        // docs/STREAMING-NARRATION.md. Verified live with Codex 0.144.1 on 2026-07-12:
-        // `--remote` sessions still fire SessionStart, UserPromptSubmit, and Stop, and
-        // the hook session id equals the app-server thread id used by the subscriber.
-        //
-        // Codex ALSO registers external MCP servers via `[mcp_servers.<name>]` in the
-        // SAME `~/.codex/config.toml` (confirmed against the mcp doc + `codex mcp
-        // list`/`add`/`remove` on the locally installed 0.142.5 binary, 2026-07-10) —
-        // the identical stdio table shape (`command`/`args`/`env`/`startup_timeout_sec`/
-        // `tool_timeout_sec`) Grok uses, so it reuses the SAME `TomlMcp` mechanism and
-        // shaper, just pointed at Codex's own config file. Hooks and MCP share one file,
-        // same pattern as Qwen Code sharing `~/.qwen/settings.json` between its
-        // `ClaudeJsonHooks` and `JsonMcp` surfaces.
+        // Claude hook contract in TOML. Events: SessionStart (greet-only), UserPromptSubmit
+        // (notify + provide), Stop. No SessionEnd/Notification — cleanup via engine codex_stream.
+        // Mid-turn narration: engine app-server subscriber (`codex --remote`), not hooks
+        // (docs/STREAMING-NARRATION.md). MCP: `[mcp_servers.<name>]` in the SAME config.toml
+        // (TomlMcp). Verified live 0.144.1: --remote still fires hooks; session id = thread id.
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::ClaudeTomlHooks,
@@ -306,27 +234,15 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             aliases: &["qwen_code"],
             mode: LaunchMode::Direct,
         },
-        // Live verified (2026-07-16): Qwen Code sends
-        // clientInfo.name="qwen-cli-mcp-client-DontSpeak", normalized to
-        // "qwen-cli-mcp-client-dontspeak" — starts with "qwen", same as the older
-        // "qwen-code"/"qwen-code-mcp-client" names it used previously.
+        // Live: `qwen-cli-mcp-client-DontSpeak` (and older `qwen-code*`) → prefix "qwen".
         mcp_client_prefix: "qwen",
         present: |p| p.qwen_dir.exists(),
         detect_dir: |p| &p.qwen_dir,
         gate_on_presence: true,
-        // Qwen Code reuses Claude Code's hook contract (same events, same stdin JSON,
-        // `Stop.last_assistant_message`, `UserPromptSubmit` honors `additionalContext`), so the
-        // SAME dontspeak binary serves it via the JSON writer — but its RUNNER differs: it
-        // passes ONLY the `command` string to a shell (no `args` field exists in its
-        // `CommandHookConfig`, `timeout` is milliseconds), so the surface is
-        // `HookCommandStyle::InlineShell` — verbs inlined into the command string, timeouts
-        // scaled. Version 0.19.10 ships `MessageDisplay` with a cumulative snake_case payload
-        // (`displayed_text` + `is_final`), so the streaming hook is enabled. Hooks + MCP both
-        // live in the ONE `~/.qwen/settings.json`, so the two surfaces share a config_file.
-        // The InlineShell + streaming combination (inlined notify command, ms-scaled timeout,
-        // and plain-notify SessionStart witness seed) is pinned by
-        // `inline_streaming_wires_messagedisplay_with_ms_timeout_and_plain_sessionstart`
-        // in wire/hooks.rs.
+        // Claude hook contract via JSON writer, but runner is InlineShell (no `args`;
+        // timeout ms). MessageDisplay with cumulative snake_case. Hooks + MCP share one
+        // settings.json. Inline+streaming pinned by
+        // `inline_streaming_wires_messagedisplay_with_ms_timeout_and_plain_sessionstart`.
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::ClaudeJsonHooks,
@@ -365,38 +281,22 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             aliases: &[],
             mode: LaunchMode::Direct,
         },
-        // Live verified (2026-07-13): Grok sends clientInfo.name="grok-shell-DontSpeak",
-        // normalized to "grok-shell-dontspeak" — starts with "grok", same as the older
-        // "grok"/"grok-cli" names.
+        // Live: `grok-shell-DontSpeak` → prefix "grok".
         mcp_client_prefix: "grok",
         present: |p| p.grok_dir.exists(),
         detect_dir: |p| &p.grok_dir,
         gate_on_presence: true,
-        // Grok (Grok Build) uses TOML for MCP servers under `[mcp_servers.<name>]` in
-        // `~/.grok/config.toml` (and project `.grok/config.toml`), so the MCP surface reuses
-        // the same `TomlMcp` mechanism/shaper Codex uses, pointed at Grok's config file.
-        //
-        // Grok reads native hooks from `~/.grok/hooks/*.json`; DontSpeak owns and replaces its
-        // dedicated file. The five lifecycle hooks provide greeting, session routing, and
-        // earcons independently of Claude compatibility. Grok deduplicates an imported Claude
-        // entry with the identical bare command, and `GROK_HOOK_EVENT` distinguishes that hook
-        // launch from DontSpeak's no-argument MCP mode.
-        //
-        // Live 0.2.93 captures on 2026-07-13 showed camelCase data keys and lowercase-snake
-        // `hookEventName` values, which the runtime normalizes mechanically. Stop is
-        // metadata-only (no final assistant text field); end-of-turn narration falls back to
-        // the last assistant entry in `transcriptPath` / chat_history when no stream witness.
-        // MID-TURN narration is engine file-tail of session `updates.jsonl`
-        // (`dontspeakd::grok_stream`), not MessageDisplay — so `hook_streaming` stays false
-        // and SessionStart remains greet-only. Grok ignores passive-hook stdout, so digest
-        // instructions are also written to `~/.grok/AGENTS.md` (issue #95). The MCP handshake
-        // identified itself as `grok-shell-DontSpeak`, normalized to the alias above.
+        // MCP: TomlMcp in ~/.grok/config.toml. Hooks: own file under ~/.grok/hooks/*.json.
+        // Five lifecycle hooks; Grok dedupes imported Claude entry with identical bare command;
+        // GROK_HOOK_EVENT distinguishes hook launch from no-arg MCP. Stop is metadata-only →
+        // chat_history fallback. Mid-turn = engine updates.jsonl tail (not MessageDisplay) →
+        // hook_streaming false, SessionStart greet-only. Digests also → AGENTS.md (issue #95).
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::GrokJsonHooks,
                 config_file: |p| &p.grok_hooks_json, // ~/.grok/hooks/dontspeak.json
                 load_hint: None,
-                hook_streaming: false, // mid-turn = engine updates.jsonl tail, not MessageDisplay
+                hook_streaming: false, // mid-turn = engine updates.jsonl tail
                 hook_command_style: HookCommandStyle::ArgsArray, // ignored by GrokJsonHooks
             },
             Surface {
@@ -433,19 +333,10 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         present: |p| p.kimi_dir.exists(),
         detect_dir: |p| &p.kimi_dir,
         gate_on_presence: true,
-        // Kimi Code's hooks are a FLAT top-level `[[hooks]]` array-of-tables in
-        // `~/.kimi-code/config.toml`, where an entry may carry ONLY
-        // `event`/`matcher`/`command`/`timeout` — any extra key (`async`, `args`, `shell`)
-        // makes Kimi fail to load the config, so the grouped Codex TOML shape cannot be
-        // reused and `KimiTomlHooks` has its own shaper. Commands are inline shell strings
-        // (seconds timeouts; no `matcher` emitted). Non-streaming client (no MessageDisplay):
-        // SessionStart is greet-only, Stop voices the reply; Kimi DOES have SessionEnd and
-        // Notification events (unlike Codex), so all five lifecycle events are wired.
-        // Stdin payloads carry snake_case `hook_event_name`, which the runtime already parses.
-        //
-        // MCP is a separate file, `~/.kimi-code/mcp.json`, in Claude's `mcpServers` shape —
-        // the unmodified `JsonMcp` mechanism. `~/.kimi-code` itself is overridable via
-        // KIMI_CODE_HOME (see `Paths::resolve`).
+        // Flat [[hooks]] — only event/matcher/command/timeout; own KimiTomlHooks shaper.
+        // Inline shell, seconds timeouts, no matcher. Non-streaming: greet-only SessionStart;
+        // has SessionEnd + Notification (unlike Codex). MCP: separate mcp.json (JsonMcp).
+        // KIMI_CODE_HOME overrides ~/.kimi-code (see Paths::resolve).
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::KimiTomlHooks,
@@ -477,35 +368,25 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
     },
 ];
 
-/// Spec for a wireable client; `None` for DontSpeak/Unknown (by design — not wireable).
+/// `None` for DontSpeak/Unknown (by design — not wireable).
 pub fn client_spec(target: ClientSource) -> Option<&'static ClientSpec> {
     CLIENT_REGISTRY.iter().find(|s| s.target == target)
 }
 
-/// Resolve a public `dontspeak <client>` token through the registry's preferred command
-/// names and aliases. Internal verbs (`notify`, `provide`, `wire`) are not registry names.
+/// Resolve `dontspeak <client>` via preferred command + aliases. Internal verbs not registry names.
 pub fn client_spec_for_launch(name: &str) -> Option<&'static ClientSpec> {
     CLIENT_REGISTRY
         .iter()
         .find(|spec| spec.launch.command == name || spec.launch.aliases.contains(&name))
 }
 
-/// Normalize an MCP `clientInfo.name` for alias matching: trim, lowercase, `_` → `-`. Both
-/// sides of the comparison go through this, so the registry's aliases are written in the
-/// normalized form and a client sending `Claude_Code` still matches `claude-code`.
+/// Normalize MCP `clientInfo.name` for matching: trim, lowercase, `_` → `-`.
 fn normalize_mcp_name(name: &str) -> String {
     name.trim().to_ascii_lowercase().replace('_', "-")
 }
 
-/// Which client is this MCP caller? Maps the `initialize` handshake's `clientInfo.name`
-/// (free-form, per the MCP lifecycle spec) onto a [`ClientSource`] via the registry's
-/// [`ClientSpec::mcp_client_prefix`].
-///
-/// PREFIX match after normalization: `starts_with`, not exact-equal. See
-/// [`ClientSpec::mcp_client_prefix`] for the accepted trade-off (a foreign client whose name
-/// happens to share the prefix, e.g. `codex-community-fork`, is misattributed rather than
-/// falling to `Unknown`). A name that matches no registered prefix is [`ClientSource::Unknown`]:
-/// the honest answer, and the thing the MCP server's raw-name capture line exists to catch.
+/// Map MCP `clientInfo.name` → [`ClientSource`] via registry prefixes (see
+/// [`ClientSpec::mcp_client_prefix`]). No match → [`ClientSource::Unknown`].
 pub fn client_from_mcp_name(name: &str) -> ClientSource {
     let n = normalize_mcp_name(name);
     if n.is_empty() {
@@ -521,17 +402,14 @@ pub fn client_from_mcp_name(name: &str) -> ClientSource {
 mod tests {
     use super::*;
 
-    /// The registry IS `ClientSource::CLIENTS` with wiring facts attached — same set, same
-    /// order. A client added to one place but not the other fails here, not in the field.
+    /// Registry IS CLIENTS with wiring facts — same set, same order.
     #[test]
     fn registry_matches_the_canonical_client_list() {
         let registry: Vec<ClientSource> = CLIENT_REGISTRY.iter().map(|s| s.target).collect();
         assert_eq!(registry, ClientSource::CLIENTS);
     }
 
-    /// Every entry is fully specified: at least one surface, and at least one official
-    /// doc reference per DISTINCT mechanism it uses — the registry's contract is that a
-    /// wiring names its sources.
+    /// Surfaces nonempty; ≥1 doc ref; version pin + ISO date present.
     #[test]
     fn every_client_has_surfaces_and_documentation() {
         for spec in CLIENT_REGISTRY {
@@ -572,10 +450,7 @@ mod tests {
         }
     }
 
-    /// `client_spec` resolves every WIRE-ABLE client — and only those. `DontSpeak` and
-    /// `Unknown` are `ClientSource` members but NOT clients, so they have no registry entry
-    /// by design; that `None` is the guard `ds_wire::run` relies on to reject
-    /// `dontspeak wire dontspeak` cleanly.
+    /// DontSpeak/Unknown have no entry — guard `ds_wire::run` relies on for `wire dontspeak`.
     #[test]
     fn lookup_covers_every_client() {
         for &t in ClientSource::CLIENTS {
@@ -589,8 +464,7 @@ mod tests {
         assert!(client_spec(ClientSource::Unknown).is_none());
     }
 
-    /// The launcher is another registry consumer: every preferred name and compatibility
-    /// alias must be nonempty, unique, and resolve back to the declaring client.
+    /// Launcher names nonempty, unique, resolve back to declaring client.
     #[test]
     fn launcher_names_are_complete_unique_and_resolvable() {
         let mut names = std::collections::HashSet::new();
@@ -620,10 +494,7 @@ mod tests {
         }
     }
 
-    /// The prefix table's own hygiene: every entry declares a nonempty prefix, already in the
-    /// NORMALIZED form `client_from_mcp_name` compares against (lowercase, `-` not `_`,
-    /// trimmed) — a prefix written `Qwen_Code` would silently never match, since only the
-    /// incoming name is normalized.
+    /// Prefixes nonempty and already normalized (else match silently fails).
     #[test]
     fn mcp_client_prefix_is_present_and_already_normalized() {
         for spec in CLIENT_REGISTRY {
@@ -642,8 +513,6 @@ mod tests {
         }
     }
 
-    /// Every client's own `clientInfo.name` (as actually observed live) maps back to itself,
-    /// case/underscore-tolerantly.
     #[test]
     fn known_mcp_names_map_to_their_client() {
         for (name, want) in [
@@ -670,11 +539,7 @@ mod tests {
         }
     }
 
-    /// A name that shares a REGISTERED prefix but is actually a foreign/forked client is
-    /// misattributed rather than falling to `Unknown` — the accepted trade-off documented on
-    /// [`ClientSpec::mcp_client_prefix`]. This test pins that this is intentional, not a
-    /// regression: if it starts failing because someone tightened the match back to exact, the
-    /// [`mcp_client_prefix`] docs need updating too, not just this test.
+    /// Prefix collision is intentional (see [`ClientSpec::mcp_client_prefix`]).
     #[test]
     fn prefix_match_accepts_the_foreign_client_collision_tradeoff() {
         assert_eq!(
@@ -687,7 +552,6 @@ mod tests {
         );
     }
 
-    /// A name sharing NO registered prefix is `Unknown` — never guessed onto a client.
     #[test]
     fn unrecognised_mcp_names_are_unknown_not_guessed() {
         for name in ["gemini-cli-mcp-client", "", "   ", "🙂"] {

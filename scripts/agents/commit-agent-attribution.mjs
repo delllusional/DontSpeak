@@ -42,9 +42,8 @@ const record = normalizeCacheRecord(readAttributionCache(root, hooksDirectory));
 const active = activeAgentEnvironment();
 
 if (!record) {
-  // Grok tool shells often skip PreToolUse capture (GROK_AGENT without
-  // GROK_SESSION_ID, or project hooks not trusted). Prove attribution live from
-  // ~/.grok/sessions + active_sessions.json so the trailer is still correct.
+  // Grok often skips PreToolUse (no session id / untrusted hooks). Live-resolve
+  // from ~/.grok/sessions + active_sessions.json so the trailer still stamps.
   if (active?.client === "grok") {
     const resolved = resolveAttribution(
       "grok",
@@ -70,10 +69,9 @@ if (!record) {
 const errors = validateCacheRecord(record, root);
 if (errors.length > 0) fail(errors);
 
-// Uses are interchangeable, so chain reordering (|| branches, skipped commits)
-// cannot select wrong semantics: the preserve decision keys on message
-// identity with HEAD, and the worst spoof inherits HEAD's own proven pair.
-// Which agent actually ran the commit stays honor-system.
+// Uses are interchangeable: reordering/skipped commits can't pick wrong semantics
+// (preserve keys on HEAD message identity; spoof inherits HEAD's proven pair).
+// Which agent ran the commit is honor-system.
 try {
   stamp(messageFile, message, root, record.model, record.effort);
   record.uses -= 1;

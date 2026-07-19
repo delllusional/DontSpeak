@@ -1,14 +1,9 @@
-//! Client-wiring orchestrator — shared by CLI `wire` ([`run`]) and engine boot/config
-//! reconcile ([`reconcile`]). One step wires/unwires a client's full integration (hooks + MCP).
+//! Client-wiring orchestrator — CLI `wire` ([`run`]) and engine boot/config reconcile
+//! ([`reconcile`]). Walks `ds_config::CLIENT_REGISTRY` surfaces; same path for interactive
+//! wire and engine reconcile (no drift). Additive, idempotent, backed-up; absent client ⇒ skip.
 //!
-//! WHAT to wire is declared in `ds_config::CLIENT_REGISTRY`; this crate walks surfaces and
-//! dispatches on mechanism (`ClaudeJsonHooks`/`ClaudeTomlHooks`/`KimiTomlHooks`/
-//! `GrokJsonHooks`/`JsonMcp`/`TomlMcp`). Same code path for interactive wire and engine
-//! reconcile (no drift). Additive, idempotent, backed-up; absent client ⇒ clean skip.
-//! `wire --list` prints the registry.
-//!
-//! `--print-only` (issue #30): surfaces sharing one file must not each re-read disk (preview
-//! never writes). `wire_surfaces_print_only` groups by config path and threads `PreviewDoc`.
+//! `--print-only` (issue #30): surfaces sharing one file must not each re-read disk.
+//! `wire_surfaces_print_only` groups by path and threads `PreviewDoc`.
 
 pub(crate) mod hooks;
 mod io;
@@ -28,16 +23,15 @@ pub(crate) enum PreviewDoc {
 /// MCP registry key / `serverInfo.name`. Must match `dontspeak::mcp::SERVER_NAME`.
 pub const SERVER_NAME: &str = "DontSpeak";
 
-/// CLI entry: `wire <client> [--remove] [--print-only]` / `--all` / `--reconcile` / `--list`.
-/// Exit 0 ok/skip, 1 hard error. Wire-able tokens only (`client_spec` gate rejects
-/// `dontspeak`/`unknown`). `--reconcile` → [`reconcile`]; `--all` wires every client.
+/// CLI entry. Exit 0 ok/skip, 1 hard error. Wire-able tokens only (`client_spec` rejects
+/// `dontspeak`/`unknown`).
 pub fn run(args: &[String]) -> i32 {
     let mut client: Option<ClientSource> = None;
     let mut remove = false;
     let mut print_only = false;
     let mut all = false;
     let mut do_reconcile = false;
-    // Token list from registry (usage text can't go stale).
+    // Registry-driven usage tokens (can't go stale).
     let tokens = || {
         ds_config::CLIENT_REGISTRY
             .iter()
@@ -65,7 +59,6 @@ pub fn run(args: &[String]) -> i32 {
             other if other.starts_with('-') => eprintln!("wire: ignoring unknown flag {other:?}"),
             other => match ClientSource::parse(other) {
                 Some(t) if ds_config::client_spec(t).is_some() => {
-                    // Exactly one client token (no silent overwrite of the first).
                     if let Some(prev) = client {
                         eprintln!(
                             "wire: multiple clients given ({} and {other}); pass exactly one client, or use --all",
@@ -82,7 +75,6 @@ pub fn run(args: &[String]) -> i32 {
             },
         }
     }
-    // `--reconcile` has no client token; exempt from missing-client guard.
     if !all && !do_reconcile && client.is_none() {
         eprintln!("wire: missing client ({}), or use --all", tokens());
         return 1;
@@ -92,12 +84,12 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     };
 
-    // Interactive wire only: seed config + prune legacy bins (engine `reconcile` never does).
+    // Interactive wire only (engine reconcile never seeds/prunes).
     if !remove && !print_only {
         hooks::seed_and_prune(&paths);
     }
 
-    // Before `--all` so `wire --reconcile` is not also an unconditional wire.
+    // Before `--all` so `--reconcile` is not also an unconditional wire.
     if do_reconcile {
         return reconcile(&paths);
     }
@@ -113,8 +105,8 @@ pub fn run(args: &[String]) -> i32 {
     wire_client(client.expect("checked above"), &paths, remove, print_only)
 }
 
-/// Converge every registry client to `exclude_clients` (absent/empty ⇒ wire all). No
-/// seed/prune. Engine boot + `wire --reconcile`. Worst exit code wins.
+/// Converge every client to `exclude_clients` (absent/empty ⇒ wire all). No seed/prune.
+/// Engine boot + `wire --reconcile`. Worst exit code wins.
 pub fn reconcile(paths: &Paths) -> i32 {
     let excluded = ds_config::VoiceConfig::load(paths).excluded_clients();
     ClientSource::CLIENTS
@@ -131,19 +123,17 @@ pub fn reconcile(paths: &Paths) -> i32 {
         .unwrap_or(0)
 }
 
-/// Wire/unwire one client. All surfaces run in order even if one fails (worst code wins) so
-/// `--remove` cannot leave a dangling MCP entry. Order matters for `claude_code` (hooks create
-/// `~/.claude` that MCP presence then sees).
+/// All surfaces run even if one fails (worst code wins) so `--remove` cannot leave dangling MCP.
+/// Order matters for `claude_code` (hooks create `~/.claude` that MCP presence then sees).
 fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bool) -> i32 {
     let spec = ds_config::client_spec(client).expect(
-        "wire_client is only ever called with a ClientSource::CLIENTS member (run's parse arm \
-         gates on client_spec(t).is_some(); --all / reconcile iterate CLIENTS), and every one \
-         of those has a registry entry",
+        "wire_client only called with CLIENTS members (run gates on client_spec; \
+         --all / reconcile iterate CLIENTS)",
     );
 
     if !print_only && spec.gate_on_presence {
         if remove {
-            // No existing config files ⇒ nothing to strip; don't scatter on remove.
+            // No config files ⇒ nothing to strip; don't scatter on remove.
             if !spec
                 .surfaces
                 .iter()
@@ -162,7 +152,7 @@ fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bo
     }
 
     let code = if print_only {
-        // Issue #30 threading — real writes always pass seed/capture = None.
+        // Issue #30 — real writes always pass seed/capture = None.
         wire_surfaces_print_only(spec, paths, remove)
             .into_iter()
             .map(|(_file, code, _doc)| code)
@@ -181,9 +171,8 @@ fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bo
     code
 }
 
-/// Dispatch one surface. `seed`/`capture` are print-only grouping only (`wire_surfaces_print_only`);
-/// always `None` on real write. `GrokJsonHooks` ignores both (files never shared).
-#[allow(clippy::too_many_arguments)] // 5 mechanisms + seed/capture; struct wouldn't shrink callers
+/// `seed`/`capture` are print-only only; always `None` on real write. Grok ignores both.
+#[allow(clippy::too_many_arguments)] // 5 mechanisms + seed/capture
 fn dispatch_surface(
     s: &'static Surface,
     spec: &'static ClientSpec,
@@ -246,9 +235,8 @@ fn dispatch_surface(
     }
 }
 
-/// Print-only: group surfaces by config file and thread merged `PreviewDoc`s (issue #30).
-/// Returns one `(file, worst code, union doc)` per distinct path for tests / printing.
-/// `GrokJsonHooks` never participates (`doc` is `None`; it prints itself).
+/// Print-only: group by config file, thread merged `PreviewDoc`s (issue #30).
+/// Grok never participates (`doc` is `None`; it prints itself).
 pub(crate) fn wire_surfaces_print_only(
     spec: &'static ClientSpec,
     paths: &Paths,
@@ -295,7 +283,7 @@ pub(crate) fn wire_surfaces_print_only(
         .collect()
 }
 
-/// Print a captured preview as the writer would (`// {path}\n{body}`, issue #33).
+/// Print captured preview as the writer would (`// {path}\n{body}`, issue #33).
 fn print_captured_doc(mechanism: WireMechanism, cfg: &Path, doc: &PreviewDoc) -> i32 {
     match (mechanism, doc) {
         (WireMechanism::ClaudeJsonHooks | WireMechanism::JsonMcp, PreviewDoc::Json(v)) => {
@@ -326,7 +314,7 @@ fn print_captured_doc(mechanism: WireMechanism, cfg: &Path, doc: &PreviewDoc) ->
     }
 }
 
-/// `wire --list` registry dump (paths, presence, mechanisms, docs).
+/// `wire --list` dump.
 fn print_registry(paths: Option<&Paths>) {
     for spec in ds_config::CLIENT_REGISTRY {
         println!("{} ({})", spec.display_name, spec.target.as_str());

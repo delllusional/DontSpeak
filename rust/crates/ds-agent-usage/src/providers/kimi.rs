@@ -5,8 +5,7 @@ use super::{
 };
 use crate::{Period, UsageRow};
 
-/// Managed-usage endpoint base (`packages/oauth/src/managed-usage.ts`); env override is
-/// trimmed of trailing slashes so `{base}/usages` never doubles one.
+/// Base for `/usages`; env override trimmed of trailing `/`.
 const DEFAULT_BASE: &str = "https://api.kimi.com/coding/v1";
 
 pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
@@ -39,13 +38,12 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
     Ok(parse(&json))
 }
 
-/// snake_case OAuth file; `accessToken` tolerated as a drift alias.
+/// OAuth file; camel `accessToken` alias.
 fn access_token(credentials: &Value) -> Option<&str> {
     string_at(credentials, &["access_token"]).or_else(|| string_at(credentials, &["accessToken"]))
 }
 
-/// Top-level `usage` is the weekly limit; `limits[]` carries timed windows — only the
-/// five-hour one is a quota row. `boosterWallet` is not a subscription quota.
+/// `usage` = week; `limits[]` 5h = session. `boosterWallet` ignored.
 fn parse(json: &Value) -> Vec<UsageRow> {
     let mut rows: Vec<UsageRow> = parse_window(json.get("usage"), Period::Week)
         .into_iter()

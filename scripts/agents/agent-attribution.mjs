@@ -130,9 +130,9 @@ export function readJsonLinesReverse(file, selector, options = {}) {
     return undefined;
   }
   if (size <= maxBytes || retryMaxBytes <= maxBytes) return undefined;
-  // The retry reads only the not-yet-scanned head region. The line straddling
-  // the first-pass boundary is dropped whole — it must never parse as two
-  // bogus rows (its tail half was already dropped by readFileTail).
+  // Retry scans only the not-yet-read head. Drop the whole boundary-straddling
+  // line — its tail half was already discarded by readFileTail; parsing it
+  // would invent two bogus rows.
   const start = Math.max(0, size - retryMaxBytes);
   let text = readFileSlice(file, start, size - maxBytes);
   if (start > 0) {
@@ -198,7 +198,7 @@ function findGrokSession(home, sessionId) {
   return undefined;
 }
 
-/// Live sessions from `~/.grok/active_sessions.json` (array of {session_id, cwd, …}).
+// Live sessions from ~/.grok/active_sessions.json ({session_id, cwd, …}).
 function findActiveGrokSession(home) {
   const rows = loadJson(join(home, ".grok", "active_sessions.json"));
   if (!Array.isArray(rows)) return undefined;
@@ -215,7 +215,7 @@ function isGrokSubagentSession(summary) {
   return kind === "subagent" || kind === "subagent_resume";
 }
 
-/// Newest non-subagent Grok session whose summary cwd/git_root matches `cwd`.
+// Newest non-subagent Grok session whose summary cwd/git_root matches `cwd`.
 function findLatestGrokSession(home, cwd) {
   if (!cwd) return undefined;
   const base = join(home, ".grok", "sessions");
@@ -281,10 +281,8 @@ function grokSessionValues(sessionDirectory) {
     const effort = normalizedEffort(firstString(row.reasoning_effort, row.reasoningEffort));
     return model || effort ? { model, effort } : undefined;
   });
-  // Prefer the session's configured product slug (`current_model_id`, e.g. grok-4.5)
-  // over per-turn build variants (`grok-4.5-build`) so the Agent trailer matches
-  // what the user selected. Effort: turn rows first, then summary.reasoning_effort
-  // (always written on modern Grok sessions even when chat lines are sparse).
+  // Prefer product slug (current_model_id) over per-turn build variants so the
+  // trailer matches the user-selected model. Effort: turn rows, then summary.
   return {
     model: firstString(summary?.current_model_id, assistant?.model, event?.model),
     effort: normalizedEffort(firstString(
@@ -316,7 +314,7 @@ function modelDoesNotReason(home, model) {
 function resolveCodex(input) {
   const hookModel = firstString(input?.model, input?.model_id, input?.modelId);
   const hookEffort = directEffort(input);
-  // Transcript scan only when the hook input is incomplete.
+  // Transcript only when hook input is incomplete.
   if (hookModel && hookEffort) return { model: hookModel, effort: hookEffort };
   const context = codexContextFromTranscript(transcriptPath(input), hookModel);
   return {
@@ -350,9 +348,8 @@ function resolveQwen(input, root, home) {
 
 function resolveGrok(input, env, home, root) {
   const sessionId = firstString(input?.sessionId, input?.session_id, env.GROK_SESSION_ID);
-  // Shell tools often set GROK_AGENT=1 without GROK_SESSION_ID. Fall back:
-  // 1) newest parent session matching worktree/git root / hook cwd
-  // 2) ~/.grok/active_sessions.json
+  // GROK_AGENT often lacks GROK_SESSION_ID. Fall back: newest parent matching
+  // worktree/cwd, then ~/.grok/active_sessions.json.
   const cwdHint = firstString(
     input?.cwd,
     input?.workspaceRoot,
@@ -409,7 +406,7 @@ export function validateAttribution(model, effort) {
     !/^\S+$/.test(model)
     || /^(?:unknown|default|auto)$/i.test(model)
     || /^gpt-\d+(?:\.\d+)?$/i.test(model)
-    // Best-effort bare family-word list; "human" stays valid ("Agent: human none").
+    // Bare family words only; "human" stays valid ("Agent: human none").
     || /^(?:claude|sonnet|opus|haiku|fable|gpt|codex|grok|gemini|qwen)$/i.test(model)
   ) {
     errors.push(`model is not an exact slug: ${JSON.stringify(model)}`);
@@ -424,7 +421,7 @@ export function validateAttribution(model, effort) {
 
 export function detectClient(requested, input, env = process.env) {
   if (requested && requested !== "auto") return requested;
-  // GROK_AGENT is set on tool shells even when GROK_SESSION_ID is omitted.
+  // GROK_AGENT marks tool shells even without GROK_SESSION_ID.
   if (env.GROK_SESSION_ID || env.GROK_AGENT) return "grok";
   if (env.CODEX_THREAD_ID) return "codex";
   if (env.QWEN_CODE || env.QWEN_PROJECT_DIR) return "qwen";
@@ -442,8 +439,7 @@ const SHELL_COMMAND_FLAG = /^-[a-zA-Z]*c[a-zA-Z]*$/;
 
 function shellTokens(command) {
   const tokens = [];
-  // Collapse backslash-newline continuations first — an approximation that may
-  // touch quoted content, acceptable for path/flag detection.
+  // Collapse backslash-newline first (may touch quoted content; ok for path/flag detection).
   const source = command.replace(/\\\r?\n/g, " ");
   const matcher = /"(?:\\.|[^"\\])*"|'[^']*'|\|\||&&|[;&|()]|\r?\n|[^\s;&|()]+/g;
   for (const match of source.matchAll(matcher)) {
@@ -466,21 +462,20 @@ function shellTokens(command) {
   return tokens;
 }
 
-// Fail-closed literal check: only a plain literal path may steer cwd tracking.
-// Unquoted tokens must fully match the allowlist (no backslash: unquoted
-// backslash is a bash escape). Tildes are left to resolveShellPath, the single
-// tilde authority (~/… expands, ~user fails closed).
+// Fail-closed: only a plain literal path may steer cwd tracking. Unquoted tokens
+// must match the allowlist (no backslash — unquoted \ is a bash escape). Tildes
+// are resolveShellPath's job (~/… expands, ~user fails closed).
 function unsafePathToken(token) {
-  if (token.argv) return false; // argv elements are post-shell, exact
+  if (token.argv) return false; // post-shell argv is exact
   const value = token.value;
   if (token.quoted) {
-    if (value.startsWith("~")) return true; // quoted ~ is literal; the resolver would expand it
+    if (value.startsWith("~")) return true; // quoted ~ is literal; resolver would expand it
     return Boolean(token.doubleQuoted) && /[$`]/.test(value);
   }
   return !/^[A-Za-z0-9._:@+,\/~=-]+$/.test(value);
 }
 
-// Pure so tests exercise the win32 branches on any host.
+// Pure so tests can exercise win32 branches on any host.
 export function resolveShellPath(baseCwd, arg, options = {}) {
   const platform = options.platform ?? process.platform;
   const paths = platform === "win32" ? win32 : posix;
@@ -500,7 +495,7 @@ export function resolveShellPath(baseCwd, arg, options = {}) {
 function isCommandToken(token, nameRe) {
   if (token.separator) return false;
   const match = nameRe.exec(token.value);
-  // Quoted bare names are data ('git commit' in prose); quoted paths still count.
+  // Quoted bare names are data; quoted paths still count.
   return match !== null && (!token.quoted || match[1] !== "");
 }
 
@@ -520,7 +515,7 @@ function parseGitInvocation(segment, start, cwd, settings) {
       cursor += 2;
       continue;
     }
-    // Repository redirected away from cwd: fail closed on that invocation.
+    // --git-dir / --work-tree redirect away from cwd: fail closed.
     if (value === "--git-dir" || value === "--work-tree") {
       workingDirectory = undefined;
       cursor += 2;
@@ -540,9 +535,8 @@ function parseGitInvocation(segment, start, cwd, settings) {
       continue;
     }
     if (value === "commit" || value === "merge") {
-      // This subcommand list must stay in sync with the wrapper pre-filters in
-      // .claude/settings.json (command) and .codex/hooks.json (command and
-      // commandWindows).
+      // Keep in sync with wrapper pre-filters in .claude/settings.json and
+      // .codex/hooks.json (command / commandWindows).
       if (workingDirectory === undefined) return { end: cursor }; // fail closed, consume only
       return { end: cursor, invocation: { workingDirectory, subcommand: value } };
     }
@@ -554,8 +548,7 @@ function parseGitInvocation(segment, start, cwd, settings) {
 function recurseShellPayload(segment, start, cwd, settings, out, depth) {
   for (let index = start + 1; index + 1 < segment.length; index += 1) {
     const flag = segment[index];
-    // Only the wrapper's leading flag run counts: `sh script.sh -c "…"` passes
-    // -c to the script, not to the shell.
+    // Only leading flag run counts: `sh script.sh -c "…"` passes -c to the script.
     if (flag.quoted || !flag.value.startsWith("-")) return undefined;
     if (SHELL_COMMAND_FLAG.test(flag.value)) {
       if (cwd !== undefined && depth < 3) {
@@ -575,7 +568,7 @@ function processSegment(segment, state, settings, out, depth) {
     );
     if (command === "pushd") {
       if (!target) {
-        // Bare pushd rotates the stack: cwd and stack both become unknown.
+        // Bare pushd rotates the stack → cwd/stack both unknown.
         state.cwd = undefined;
         state.dirStack = [];
         return;
@@ -591,7 +584,7 @@ function processSegment(segment, state, settings, out, depth) {
     return;
   }
   if (command === "popd") {
-    state.cwd = state.dirStack.pop(); // empty stack → unknown
+    state.cwd = state.dirStack.pop(); // empty → unknown
     return;
   }
   let index = 0;
@@ -627,7 +620,7 @@ function invocationsFromTokens(tokens, baseCwd, settings, depth) {
   while (index < tokens.length) {
     const token = tokens[index];
     if (token.separator) {
-      // Subshell scoping: cd/pushd inside (...) must not leak past the ).
+      // Subshell: cd/pushd inside (...) must not leak past ).
       if (token.value === "(") {
         subshells.push({ cwd: state.cwd, dirStack: [...state.dirStack] });
       } else if (token.value === ")") {
@@ -648,7 +641,6 @@ function invocationsFromTokens(tokens, baseCwd, settings, depth) {
   return out;
 }
 
-// Ordered {workingDirectory, subcommand} per commit/merge invocation.
 export function gitCommitInvocations(command, baseCwd = process.cwd(), options = {}) {
   const settings = { platform: options.platform ?? process.platform, home: options.home };
   let tokens;
@@ -676,7 +668,7 @@ export function commandFromHookInput(input) {
   ];
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) {
-      // argv arrays pass through untouched; the parser takes them pre-split.
+      // argv arrays pass through pre-split.
       if (candidate.length > 0 && candidate.every((element) => typeof element === "string")) {
         return candidate;
       }
@@ -709,9 +701,7 @@ export function repositoryRoot(cwd) {
   return git(cwd, "rev-parse", "--show-toplevel");
 }
 
-// Discriminates capture-skip conditions from real failures: missing directory
-// or "not a git repository" → undefined (silent skip); anything else throws
-// into the caller's exit-2 path.
+// Missing dir / "not a git repository" → undefined (silent skip); else throws (exit 2).
 export function resolveRepositoryRoot(directory) {
   if (!existsSync(directory)) return undefined;
   const result = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: directory, encoding: "utf8" });
@@ -748,14 +738,14 @@ function writeIfChanged(file, contents, mode) {
   try {
     if (readFileSync(file, "utf8") === contents) return false;
   } catch {
-    // Missing or unreadable: write it.
+    // missing / unreadable → write
   }
   writeFileSync(file, contents, mode === undefined ? "utf8" : { encoding: "utf8", mode });
   return true;
 }
 
 export function ensureCommitMessageHook(root) {
-  // One spawn: rev-parse prints one result per line in argument order.
+  // One spawn: rev-parse prints one result per arg line.
   const [hooksPath, commonDir] = git(
     root,
     "rev-parse",
@@ -767,12 +757,10 @@ export function ensureCommitMessageHook(root) {
   mkdirSync(hooksDirectory, { recursive: true });
   const upstreamFile = join(hooksDirectory, UPSTREAM_HOOKS_FILE);
   const fallback = resolve(root, commonDir, "hooks");
-  // One spawn lists every scope; walk highest precedence first (last line
-  // first). The first foreign value from any scope — including worktree, so a
-  // user-set worktree hooksPath is chained, not clobbered — is the upstream,
-  // unwrapped if it is another managed dir. Our own dir is skipped, but its
-  // marker is kept as a last resort: it preserves an upstream whose scope our
-  // worktree entry now shadows.
+  // Walk scopes highest-first (last line first). First foreign value from any
+  // scope (incl. worktree — chain, don't clobber user hooksPath) is upstream,
+  // unwrapped if managed. Skip our own dir; keep its marker as last resort when
+  // our worktree entry shadows the prior upstream scope.
   let upstream;
   let managedMarker;
   const scoped = optionalGit(root, "config", "--show-scope", "--path", "--get-all", "core.hooksPath");
@@ -812,11 +800,11 @@ export function ensureCommitMessageHook(root) {
     "",
   );
   writeIfChanged(hook, contents.join("\n"), 0o755);
-  // Always: repairs a lost exec bit even when the contents are identical.
+  // Always chmod: repairs a lost exec bit when contents are identical.
   try {
     chmodSync(hook, 0o755);
   } catch {
-    // Git for Windows does not use POSIX execute bits.
+    // Git for Windows ignores POSIX execute bits.
   }
   if (optionalGit(root, "config", "--worktree", "--get", "core.hooksPath") !== hooksDirectory) {
     git(root, "config", "--local", "extensions.worktreeConfig", "true");
@@ -830,7 +818,7 @@ export function writeAttributionCache(root, record, hooksDirectory) {
   mkdirSync(dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, "utf8");
-  // AV/indexers transiently lock the target on Windows; retry briefly.
+  // Windows AV/indexers can lock the target; retry briefly.
   for (let attempt = 0; ; attempt += 1) {
     try {
       renameSync(temporary, file);
@@ -850,7 +838,7 @@ export function removeAttributionCache(root, hooksDirectory) {
   try {
     unlinkSync(attributionCachePath(root, hooksDirectory));
   } catch {
-    // A missing cache is already the desired state.
+    // missing is fine
   }
 }
 
@@ -866,8 +854,7 @@ export function sessionIdFromInput(input, env = process.env) {
 }
 
 export function activeAgentEnvironment(env = process.env) {
-  // GROK_AGENT alone marks an agent shell (session id may be absent on some
-  // Grok tool runners). Prefer GROK_SESSION_ID when both are present.
+  // GROK_AGENT alone marks an agent shell (session id may be absent).
   if (env.GROK_SESSION_ID || env.GROK_AGENT) {
     return { client: "grok", sessionId: env.GROK_SESSION_ID || undefined };
   }
@@ -883,9 +870,8 @@ function parseAgentTrailer(line) {
   return { model: match[1], effort: match[2], line };
 }
 
-// Single definition of the trailing trailer block, shared by validation and
-// rewrite: pop trailing blank, Agent:, and prohibited-attribution lines until
-// the first other line. Mutates `lines`; never consumes the subject.
+// Trailing trailer block for validate + rewrite: pop blanks, Agent:, prohibited
+// lines. Mutates `lines`; never consumes the subject.
 function popTrailerBlock(lines) {
   const trailers = [];
   const prohibited = [];
@@ -939,21 +925,17 @@ export function rewriteCommitMessage(message, model, effort, { preserveLone = fa
   if (pairErrors.length > 0) throw new Error(pairErrors.join("; "));
 
   const lines = message.trimEnd().split(/\r?\n/);
-  // An attribution-shaped subject cannot be stripped without destroying the
-  // message; fail closed instead.
+  // Attribution-shaped subject cannot be stripped without destroying the message.
   if (lines.length > 0 && (lines[0].startsWith("Agent:") || PROHIBITED_ATTRIBUTION.test(lines[0]))) {
     throw new Error(`commit subject looks like an attribution line: ${lines[0]}`);
   }
   const { trailers: existing } = popTrailerBlock(lines);
-  // Preserve candidates come from the trailing block only, but stray Agent:
-  // and prohibited lines anywhere in the body are stripped — mid-body guessed
-  // trailers must not survive the rewrite.
+  // Preserve only trailing-block candidates; strip mid-body Agent:/prohibited lines.
   const body = lines.filter((line) => !line.startsWith("Agent:") && !PROHIBITED_ATTRIBUTION.test(line));
   while (body.length > 0 && body.at(-1).trim() === "") body.pop();
 
   const trailers = [];
-  // >=2 = squash, preserved as before. preserveLone = the message provably
-  // re-presents one this hook already stamped, so its lone trailer is proven.
+  // >=2 = squash, keep all. preserveLone = message re-presents a proven lone trailer.
   if (existing.length > 1 || (preserveLone && existing.length === 1)) {
     for (const line of existing) {
       const parsed = parseAgentTrailer(line);
@@ -966,14 +948,13 @@ export function rewriteCommitMessage(message, model, effort, { preserveLone = fa
   const current = `Agent: ${model} ${effort}`;
   if (!trailers.includes(current)) trailers.push(current);
   const rewritten = `${body.join("\n")}\n\n${trailers.join("\n")}\n`;
-  // The hook must never emit a message the CI checker would reject.
+  // Never emit a message the CI checker would reject.
   const messageErrors = validateCommitMessage(rewritten);
   if (messageErrors.length > 0) throw new Error(messageErrors.join("; "));
   return rewritten;
 }
 
-// Comparison-only normalization: commit-msg runs before --cleanup, so git
-// comment lines and trailing whitespace may differ. Never applied to output.
+// Comparison only (commit-msg runs before --cleanup). Never applied to output.
 export function normalizedMessageForComparison(message) {
   const lines = message
     .replace(/\r\n/g, "\n")
@@ -984,16 +965,15 @@ export function normalizedMessageForComparison(message) {
   return lines.join("\n");
 }
 
-// Preserve-lone gate: the incoming message re-presents HEAD's message (amend
-// --no-edit / -C HEAD). Any failure (unborn HEAD, spawn error) → no preserve.
+// preserveLone gate: message re-presents HEAD (amend --no-edit / -C HEAD).
+// Unborn HEAD / spawn error → no preserve.
 export function messageMatchesHead(message, root) {
   const head = optionalGit(root, "show", "-s", "--format=%B", "HEAD");
   if (head === undefined) return false;
   return normalizedMessageForComparison(message) === normalizedMessageForComparison(head);
 }
 
-// Transitional: old-capture (pre-`uses`) version-1 records get a single use;
-// dead code once every checkout runs the new capture script.
+// Transitional: pre-`uses` version-1 records get a single use.
 export function normalizeCacheRecord(record) {
   if (record && record.version === 1 && !("uses" in record)) {
     return { ...record, uses: 1 };
@@ -1010,11 +990,7 @@ export function validateCacheRecord(record, root, env = process.env, now = Date.
   }
   if (!record.root || resolve(record.root) !== resolve(root)) errors.push("runtime capture belongs to a different worktree");
   const active = activeAgentEnvironment(env);
-  // 15 minutes covers long agent command chains, which carry agent env
-  // (CLAUDE_CODE_SESSION_ID confirmed present in Claude Bash subprocesses,
-  // 2026-07-18; other clients unverified and just degrade to 5 minutes).
-  // Env-less (human terminal) consumption keeps the pre-change 5-minute
-  // exposure.
+  // Agent env: 15m (long command chains). Env-less human terminal: 5m.
   const maxAge = active ? ATTRIBUTION_CACHE_MAX_AGE_MS : ENVLESS_ATTRIBUTION_CACHE_MAX_AGE_MS;
   const captured = Date.parse(record.capturedAt);
   if (!Number.isFinite(captured) || now - captured > maxAge || captured > now + 30_000) {

@@ -7,9 +7,9 @@ use super::{
 };
 use crate::{Period, UsageRow};
 
-/// CodexBar web billing endpoint used when `grok agent stdio` lacks `x.ai/billing`.
+/// Web fallback when CLI lacks `x.ai/billing`.
 const WEB_BILLING_URL: &str = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
-/// Empty protobuf message framed as gRPC-web (flags=0, length=0).
+/// Empty gRPC-web frame.
 const GRPC_WEB_EMPTY_FRAME: &[u8] = &[0x00, 0x00, 0x00, 0x00, 0x00];
 const OIDC_SCOPE_PREFIX: &str = "https://auth.x.ai::";
 const LEGACY_SESSION_SCOPE: &str = "https://accounts.x.ai/sign-in";
@@ -37,7 +37,7 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
     }
 }
 
-/// Prefer sanitized CLI category when web also fails; empty CLI is treated as unusable payload.
+/// Prefer CLI ErrorKind when both fail; empty CLI → unusable payload.
 fn finalize_after_web(cli_err: Option<std::io::Error>, web_err: std::io::Error) -> std::io::Error {
     match cli_err {
         Some(cli) => merge_cli_web_errors(cli, web_err),
@@ -59,7 +59,7 @@ fn merge_cli_web_errors(cli: std::io::Error, web: std::io::Error) -> std::io::Er
     std::io::Error::new(kind, format!("Grok CLI: {cli_msg}; web: {web_msg}"))
 }
 
-/// Categories only — never provider bodies, paths with tokens, or Authorization material.
+/// Categories only — never bodies/tokens/Authorization.
 fn sanitize_error_message(error: &std::io::Error) -> String {
     let raw = error.to_string();
     // Drop anything that could look like a bearer / cookie fragment if a lower layer slipped.
@@ -150,7 +150,7 @@ fn fetch_web(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
         })
 }
 
-/// Bearer material: overwritten on clear/drop so it does not linger in the heap as a live `String`.
+/// Zeroed on clear/drop.
 struct SecretString(String);
 
 impl SecretString {
@@ -180,7 +180,7 @@ fn zero_string(value: &mut String) {
     value.clear();
 }
 
-/// Prefer SuperGrok OIDC scope entries, then legacy session scopes (CodexBar).
+/// OIDC scope first, then legacy sign-in.
 fn access_token(auth: &Value) -> Option<String> {
     let object = auth.as_object()?;
     let mut oidc = None;
@@ -198,7 +198,7 @@ fn access_token(auth: &Value) -> Option<String> {
     oidc.or(legacy)
 }
 
-/// Local identity from `~/.grok/auth.json` session entry `email`. No network.
+/// Local email from auth.json. No network.
 pub(crate) fn account(paths: &ds_config::Paths) -> Option<String> {
     let auth = read_json_file(&paths.grok_dir.join("auth.json")).ok()?;
     account_from_auth(&auth)
@@ -245,7 +245,7 @@ fn parse_cli(json: &Value) -> Option<UsageRow> {
     UsageRow::checked(Period::Month, used / limit * 100.0, reset)
 }
 
-/// Parse CodexBar-compatible gRPC-web billing: fixed32 percent + future reset.
+/// gRPC-web: fixed32 percent + future reset.
 fn parse_web_billing(body: &[u8], now_unix: i64) -> Option<UsageRow> {
     let payloads = grpc_web_data_frames(body);
     if payloads.is_empty() {
@@ -445,7 +445,7 @@ impl ProtobufScan {
     }
 }
 
-/// Length-delimited protobuf → fixed32 + varint leaves. `None` on wire types 3/4/6/7 (no 1-byte advance; #109 m6).
+/// fixed32 + varint leaves. `None` on wire 3/4/6/7 (no 1-byte advance; #109).
 fn scan_protobuf(data: &[u8], depth: u8, path: &[u64]) -> Option<ProtobufScan> {
     let mut scan = ProtobufScan::default();
     let mut index = 0;

@@ -16,7 +16,7 @@ mod rpc;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
-/// Wall-clock budget for credential-bearing usage probes (connect + body).
+/// Credential probes: connect + body wall-clock.
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_CREDENTIAL_BYTES: u64 = 1024 * 1024;
@@ -97,7 +97,7 @@ fn integer_at(value: &Value, key: &str) -> Option<i64> {
         .or_else(|| raw.as_str()?.trim().parse().ok())
 }
 
-/// Anthropic fractional seconds (plain Rfc3339 rejects).
+/// Rfc3339; strips fractional seconds Anthropic sends.
 fn rfc3339_timestamp(raw: &str) -> Option<i64> {
     use time::format_description::well_known::Rfc3339;
     if let Ok(date) = time::OffsetDateTime::parse(raw, &Rfc3339) {
@@ -113,7 +113,7 @@ fn rfc3339_timestamp(raw: &str) -> Option<i64> {
         .map(|date| date.unix_timestamp())
 }
 
-/// PATH + common GUI-missed install roots. Returned paths exist.
+/// PATH + GUI-missed install roots; returned paths exist.
 fn resolve_binary(name: &str, paths: &ds_config::Paths) -> Option<PathBuf> {
     let path = std::env::var_os("PATH");
     let override_path = match name {
@@ -204,7 +204,7 @@ fn resolve_binary_in(
     let _ = app_data;
 
     dirs.into_iter().find_map(|dir| {
-        // Windows: skip extensionless npm shebangs (CreateProcess); prefer PE then .cmd.
+        // Windows: skip extensionless shebangs; prefer .exe/.cmd.
         #[cfg(windows)]
         let candidates = [
             format!("{name}.exe"),
@@ -221,7 +221,7 @@ fn resolve_binary_in(
     })
 }
 
-/// Login-shell PATH once (GUI apps get a minimal PATH); searched before ambient.
+/// Login-shell PATH once (GUI apps); before ambient PATH.
 #[cfg(not(windows))]
 fn login_shell_path() -> Option<&'static OsStr> {
     static LOGIN_PATH: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();

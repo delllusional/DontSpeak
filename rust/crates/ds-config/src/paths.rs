@@ -1,4 +1,4 @@
-//! Well-known paths from `$HOME`, plus per-OS data/model dirs.
+//! Well-known paths from `$HOME` + per-OS data/model dirs.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -209,34 +209,19 @@ fn client_config_dir(
     }
 }
 
-/// Our brand subfolder under each OS base dir. PascalCase on Windows/macOS (the native
-/// `<Company>\<Product>`-style convention — here just the product, no extra `data`/`config`
-/// leaf); lowercase on Linux (the XDG convention is a lowercase app id).
+/// Brand subfolder: PascalCase (Win/macOS), lowercase (Linux XDG).
 #[cfg(not(target_os = "linux"))]
 const APP_DIR: &str = "DontSpeak";
 #[cfg(target_os = "linux")]
 const APP_DIR: &str = "dontspeak";
 
-/// Our roaming user-settings root — `config.toml` and `speakers.json`.
-/// Idiomatic, no vendor/`data` leaf, per platform:
-///   Windows: `%APPDATA%\DontSpeak`                       (Roaming — settings follow the user)
-///   macOS:   `~/Library/Application Support/DontSpeak`
-///   Linux:   `$XDG_CONFIG_HOME`/`~/.config/dontspeak`
+/// Roaming settings root (`config.toml`, `speakers.json`).
 pub fn data_dir() -> Option<PathBuf> {
     Some(BaseDirs::new()?.config_dir().join(APP_DIR))
 }
 
-/// Downloaded model assets (kokoro onnx + voices, parakeet, the onnxruntime dylib) — a
-/// `models/` subdir under the OS CACHE root. These are large, machine-specific,
-/// re-downloadable blobs, so they belong in the per-OS cache location (Microsoft's
-/// guidance: large/regenerable data → `%LOCALAPPDATA%`, not roaming `%APPDATA%`):
-///   Windows: `%LOCALAPPDATA%\DontSpeak\models`
-///   macOS:   `~/Library/Caches/DontSpeak/models`
-///   Linux:   `$XDG_CACHE_HOME`/`~/.cache/dontspeak/models`
+/// Model cache (`…/DontSpeak/models`). Override: absolute `DONTSPEAK_MODEL_DIR`.
 pub fn model_dir() -> Option<PathBuf> {
-    // Portable / bundled builds ship the models alongside the app and point this at them via
-    // DONTSPEAK_MODEL_DIR, so an EXTRACTED, no-install copy reads its bundled models in place
-    // (and an offline installer can target the per-user cache explicitly). Empty = ignored.
     if let Some(d) = std::env::var_os("DONTSPEAK_MODEL_DIR")
         && !d.is_empty()
     {

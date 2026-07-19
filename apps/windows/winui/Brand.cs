@@ -6,32 +6,30 @@ using GdiColor = System.Drawing.Color;
 namespace DontSpeak;
 
 /// <summary>
-/// Brand tints from the Rust core via <see cref="Native.BrandColorsJson"/> (same source as
-/// <c>macos/.../Brand.swift</c>), with brand-hex fallbacks. Cached once. Exposed as both
-/// <c>Windows.UI.Color</c> (WinUI) and <c>System.Drawing.Color</c> (GDI+ tray/overlay).
+/// Brand tints from Native.BrandColorsJson (same source as Brand.swift). Cached once.
+/// WinColor for WinUI; GdiColor for tray/overlay.
 /// </summary>
 internal static class Brand
 {
-    public static readonly WinColor SeedPurple;   // speaking / icon seed (#5B4397)
+    public static readonly WinColor SeedPurple;   // speaking / seed (#5B4397)
     public static readonly WinColor MicOrange;    // recording (#FF9F0A)
-    public static readonly WinColor Warning;      // warming/blocked/download + no-target glow
+    public static readonly WinColor Warning;      // warming/blocked + no-target glow
 
     public static GdiColor SeedPurpleGdi => Gdi(SeedPurple);
     public static GdiColor MicOrangeGdi => Gdi(MicOrange);
 
-    /// <summary>Logs-tab source palette from <c>ds_log_colors_json</c> (shared across platforms);
-    /// first-appearance index picks the color. Brand-hex fallback if engine returns "{}".</summary>
+    /// <summary>Logs source palette (ds_log_colors_json); first-appearance index. Fallback if "{}".</summary>
     public static readonly WinColor[] LogSourcePalette;
     private static readonly System.Collections.Generic.Dictionary<string, WinColor> LogLevelColors =
         new(StringComparer.Ordinal);
 
-    /// <summary>ERROR/WARN level color from the shared Rust log-colors source; null for INFO/unknown.</summary>
+    /// <summary>ERROR/WARN from shared map; null for INFO/unknown.</summary>
     public static WinColor? LogLevelColor(string level) =>
         LogLevelColors.TryGetValue(level, out var c) ? c : null;
 
     static Brand()
     {
-        // Fallbacks match Brand.swift — used if the engine returns "{}".
+        // Match Brand.swift when engine returns "{}".
         SeedPurple = FromHex("#5B4397");
         MicOrange = FromHex("#FF9F0A");
         Warning = FromHex("#FF9F0A");
@@ -45,7 +43,6 @@ internal static class Brand
         }
         catch { /* engine down / malformed → keep fallbacks */ }
 
-        // Fallbacks mirror Rust defaults so coloring works if the engine returns "{}".
         WinColor[] palette =
         {
             FromHex("#8B7BD8"), FromHex("#3FA7A1"), FromHex("#5B8DEF"), FromHex("#4CAF6E"),
@@ -70,7 +67,7 @@ internal static class Brand
                     if (p.Value.ValueKind == JsonValueKind.String && p.Value.GetString() is string s)
                         LogLevelColors[p.Name] = FromHex(s);
         }
-        catch { /* engine down / malformed → keep fallback palette + level colors */ }
+        catch { /* keep fallback palette + level colors */ }
         LogSourcePalette = palette;
     }
 
@@ -80,7 +77,7 @@ internal static class Brand
         e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is string s
             ? FromHex(s) : fallback;
 
-    /// <summary>Parse "#RRGGBB" (opaque); magenta on garbage so bad hex is visible.</summary>
+    /// <summary>"#RRGGBB" (opaque); magenta on garbage so bad hex is visible.</summary>
     private static WinColor FromHex(string hex)
     {
         var h = hex.TrimStart('#');
@@ -92,9 +89,7 @@ internal static class Brand
         return WinColor.FromArgb(0xFF, 0xFF, 0x00, 0xFF);
     }
 
-    /// <summary>
-    /// One roll from <c>ds_random_pastel_wash_json</c> (Rust recipe). Null if engine down / malformed.
-    /// </summary>
+    /// <summary>One roll from ds_random_pastel_wash_json. Null if engine down / malformed.</summary>
     public static WinColor? RandomPastelWash()
     {
         try

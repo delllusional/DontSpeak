@@ -18,7 +18,7 @@ const API_KEY_NAMES: [&str; 4] = [
     "DASHSCOPE_API_KEY",
 ];
 
-/// Pure parts of the Coding Plan quota POST (fixture-testable; no network).
+/// Coding Plan quota POST (fixture-testable).
 struct QuotaRequest {
     url: String,
     base: &'static str,
@@ -53,12 +53,7 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
     Ok(parse(&json))
 }
 
-/// Model Studio HTTP auth is `Authorization: Bearer` for both international and
-/// China (official curl/SDK examples). Token Plan FAQ treats `x-api-key` as an
-/// alternate, not an additional required header; current docs do not list
-/// `X-DashScope-API-Key` for these HTTP contracts. Residual: the console
-/// `/data/api.json` quota gateway itself is not publicly documented for API-key
-/// auth and may still require a browser session (`ConsoleNeedLogin`).
+/// Bearer only (intl + CN). Gateway may still need browser session.
 fn credential_headers(token: &str) -> Vec<(&'static str, String)> {
     vec![("Authorization", format!("Bearer {token}"))]
 }
@@ -167,7 +162,7 @@ fn unescape_double_quoted(value: &str) -> Option<String> {
     Some(out)
 }
 
-/// Coding Plan: five-hour / weekly / billing-month (emit complete used/total/reset triples).
+/// Session / week / month when used+total+reset present.
 fn parse(json: &Value) -> Vec<UsageRow> {
     let Some(quota) = find_quota_object(json) else {
         return Vec::new();

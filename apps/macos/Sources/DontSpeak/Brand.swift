@@ -1,12 +1,12 @@
-// Brand colors from the shared cross-platform map (`ds_brand_colors_json` / ds-core) —
-// same C ABI as Windows, so tints can't drift. Hardcoded hexes are FFI-failure fallbacks.
+// Brand colors from ds_brand_colors_json (same ABI as Windows — tints can't drift).
+// Hardcoded hexes are FFI-failure fallbacks.
 
 import AppKit
 import CDontSpeak
 import SwiftUI
 
 enum Brand {
-    /// Key → "#RRGGBB", read once from ds-core.
+    /// Key → "#RRGGBB", once from ds-core.
     private static let colors: [String: String] = {
         guard let json = ffiString(ds_brand_colors_json), let data = json.data(using: .utf8),
             let map = (try? JSONSerialization.jsonObject(with: data)) as? [String: String]
@@ -14,7 +14,7 @@ enum Brand {
         return map
     }()
 
-    /// "#RRGGBB" → sRGB NSColor; nil if malformed. Single hex parser for brand + log colors.
+    /// "#RRGGBB" → sRGB; nil if malformed. Single parser for brand + log colors.
     static func nsColor(fromHex hex: String?) -> NSColor? {
         guard let hex, hex.hasPrefix("#"), hex.count == 7,
             let v = Int(hex.dropFirst(), radix: 16)
@@ -31,19 +31,19 @@ enum Brand {
         nsColor(fromHex: colors[key]) ?? fallback
     }
 
-    /// Seed / menu-bar "speaking" pill (`#5B4397`). See `assets/seed-color.txt`.
+    /// Speaking pill / seed (`#5B4397`).
     static let seedPurple = color(
         "seed_purple", fallback: NSColor(srgbRed: 0.357, green: 0.263, blue: 0.592, alpha: 1.0))
 
-    /// Menu-bar recording pill — system mic-in-use orange (`#FF9F0A`).
+    /// Recording pill — mic-in-use orange (`#FF9F0A`).
     static let micOrange = color(
         "mic_orange", fallback: NSColor(srgbRed: 1.0, green: 0.624, blue: 0.039, alpha: 1.0))
 
-    /// Warming / blocked / no-focus "attention" orange (`#FF9F0A`).
+    /// Warming / blocked / no-focus attention (`#FF9F0A`).
     static let warning = color(
         "warning", fallback: NSColor(srgbRed: 1.0, green: 0.624, blue: 0.039, alpha: 1.0))
 
-    // MARK: - Logs-tab colors (`ds_log_colors_json` — same shared source as Windows)
+    // MARK: - Logs colors (ds_log_colors_json — shared with Windows)
 
     private static let logColors: (levels: [String: String], palette: [String]) = {
         guard let json = ffiString(ds_log_colors_json), let data = json.data(using: .utf8),
@@ -54,25 +54,23 @@ enum Brand {
         return (levels, palette)
     }()
 
-    /// Per-source palette; Logs assigns first-appearance index. Empty → default text color.
+    /// Per-source palette; first-appearance index. Empty → default text color.
     static let logSourcePalette: [NSColor] = logColors.palette.compactMap { nsColor(fromHex: $0) }
 
-    /// ERROR / WARN from the shared map; nil for INFO / unknown.
+    /// ERROR/WARN from shared map; nil for INFO/unknown.
     static func logLevelColor(_ level: String) -> NSColor? {
         nsColor(fromHex: logColors.levels[level])
     }
 }
 
 extension Color {
-    /// Shared warning orange (warming dot + dictation no-focus glow).
     static let smWarning = Color(nsColor: Brand.warning)
-
-    /// Brand accent for neutral "notice me" cues (e.g. update-available pill) — not a warning.
+    /// Neutral accent (update pill) — not a warning.
     static let smSeedPurple = Color(nsColor: Brand.seedPurple)
 }
 
 extension Brand {
-    /// One roll from `ds_random_pastel_wash_json` (Rust recipe). Nil if FFI fails.
+    /// One roll from ds_random_pastel_wash_json. Nil if FFI fails.
     static func randomPastelWash() -> Color? {
         guard let json = ffiString(ds_random_pastel_wash_json),
             let data = json.data(using: .utf8),

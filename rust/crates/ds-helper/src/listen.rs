@@ -1,13 +1,6 @@
-//! STT capture/transcribe cluster: the shared [`transcribe_loop`] and its two
-//! callers ([`run_listen`] half-duplex, [`run_concurrent_listen`] full-duplex),
-//! plus the make-up gain ([`auto_gain`]) and silence trim ([`trim_silence_16k`]).
-//!
-//! For the cross-platform ONNX "parakeet" engine (`cpu`/`cuda`), the macOS Core ML/ANE engine,
-//! and the macOS System engine, all three callers route to [`try_streaming`] — a cache-aware
-//! backend (see [`ds_stt::streaming::StreamingStt`]) that encodes/decodes each frame once (no
-//! whole-tail re-encode); it REPLACED the old whole-buffer engine for all three. `transcribe_loop`
-//! is now only the FALLBACK path used when a streaming backend fails to build (missing model,
-//! absent shim, etc.), not the steady-state path for any of them.
+//! STT capture: [`run_listen`] / [`run_concurrent_listen`], gain, silence trim.
+//! Steady path is [`try_streaming`] ([`StreamingStt`]); [`transcribe_loop`] only if
+//! streaming backend fails to build.
 
 use std::sync::{Mutex, OnceLock};
 

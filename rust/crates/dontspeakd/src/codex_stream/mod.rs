@@ -1,13 +1,5 @@
-//! Codex app-server subscriber — mid-turn narration (no MessageDisplay hooks; #10).
-//! Engine attaches to shared app-server, resumes registered sessions only, feeds
-//! `ds_narrate::StreamBatch`es (docs/STREAMING-NARRATION.md).
-//!
-//! Guarantees: session-keyed (never narrate-everything); witness parity so Stop stays
-//! silent for streamed sessions; never double-speak ([`ds_narrate::deliver_batch`] HWM);
-//! cleanup here (no SessionEnd hook). Config re-read per loop: `codex_stream`,
-//! `codex_stream_daemon_start`, `codex_app_server_url`, `codex_bin`. Unix standalone
-//! installs use Codex's managed daemon; other installs use the same engine-owned direct
-//! app-server lifecycle as Windows.
+//! Codex app-server mid-turn narration (#10; docs/STREAMING-NARRATION.md).
+//! Session-keyed only; witness parity; no double-speak (HWM); cleanup here (no SessionEnd).
 
 mod client;
 mod proto;
@@ -26,12 +18,7 @@ use client::WsClient;
 
 // ── The session registry (fed by the IPC hook arms, drained here) ────────────────
 
-/// Session ids the hooks have told the engine about (`GreetSession` at SessionStart,
-/// `MarkActive` at every prompt submit) — the ONLY ids the supervisor will ever resume
-/// threads for. Every nudge bumps the epoch and wakes the supervisor, which re-arms
-/// resolution for sessions that previously failed to match a loaded thread (the
-/// "negative-cached until the next nudge" rule). Entries carry their last-nudge time so
-/// long-dead ids (closed terminals — Codex has no SessionEnd hook) age out.
+/// Hook-registered session ids only. Nudge re-arms negative cache; ages out dead ids.
 pub(crate) struct SessionRegistry {
     inner: Mutex<RegInner>,
     cv: Condvar,

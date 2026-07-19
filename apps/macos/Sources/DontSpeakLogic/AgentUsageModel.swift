@@ -1,9 +1,7 @@
 import Foundation
 
-/// One gauge. Mirrors Rust `UsageRow`.
-///
-/// `period` is an opaque wire token so unknown periods still decode.
-/// `remainingLabel` filled at data-source via `ds_usage_resets_in` (not in SwiftUI body).
+/// One gauge (Rust UsageRow). `period` is an opaque wire token so unknown periods still decode.
+/// `remainingLabel` filled at data-source via ds_usage_resets_in (not in SwiftUI body).
 public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
     public var id: String { period }
     public let period: String
@@ -54,7 +52,7 @@ public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// One card. Mirrors Rust `UsageCard`.
+/// One card (Rust UsageCard).
 public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
     public var id: String { agent }
     public let agent: String
@@ -92,7 +90,7 @@ public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// Tab deck. Mirrors Rust `UsageDeck`.
+/// Tab deck (Rust UsageDeck).
 public struct UsageDeck: Decodable, Equatable, Sendable {
     public let cards: [UsageCard]
 

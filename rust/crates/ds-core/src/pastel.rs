@@ -1,7 +1,4 @@
-//! Usage-card speaking wash: one pastel recipe for every host.
-//!
-//! HSV with fixed S/V, random H; wash α matches the former brand-purple overlay.
-//! Hosts call [`crate::ffi::ds_random_pastel_wash_json`] and only paint — no local HSV.
+//! Usage-card speaking wash (fixed S/V, random H). Hosts paint FFI JSON only.
 
 /// Saturation of the pastel base (0…1).
 pub const PASTEL_S: f64 = 0.42;

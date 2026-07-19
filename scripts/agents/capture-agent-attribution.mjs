@@ -32,9 +32,8 @@ async function main() {
     }
     return rootByDirectory.get(directory);
   };
-  // Cache root = first invocation whose repository resolves; invocations
-  // targeting another repository are dropped (fail closed there). If no
-  // invocation resolves, the commit fails on its own — nothing to capture.
+  // Cache root = first invocation whose repo resolves; other repos dropped.
+  // No resolve → nothing to capture (commit fails on its own).
   let root;
   let uses = 0;
   for (const invocation of invocations) {
