@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import smkokoro
+@testable import dskokoro
 
 final class SystemFinalizationTests: XCTestCase {
     /// macOS 15: final dropped a suffix the last partial (popup) already showed.

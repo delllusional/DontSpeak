@@ -262,10 +262,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// FluidAudio Core ML shim for `tts_provider=apple-native`. Absent (e.g. Intel) → ONNX path.
     private func useBundledKokoroCoreMLIfPresent() {
-        guard let dylib = Bundle.main.privateFrameworksURL?.appendingPathComponent("libsmkokoro.dylib"),
+        guard let dylib = Bundle.main.privateFrameworksURL?.appendingPathComponent("libdskokoro.dylib"),
             FileManager.default.fileExists(atPath: dylib.path)
         else { return }
-        setenv("SMKOKORO_DYLIB_PATH", dylib.path, 1)
+        setenv("DSKOKORO_DYLIB_PATH", dylib.path, 1)
     }
 
     /// Speaker-lock sepformer model. Absent → fail open (unfiltered STT).

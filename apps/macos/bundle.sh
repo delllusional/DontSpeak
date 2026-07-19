@@ -45,8 +45,8 @@ compile_icon "$ICONOUT"
 echo "==> 3. assemble + sign $APP"
 SIGN="$(resolve_sign_identity)"
 # Shim arch from built app binary (not uname — Rosetta).
-DONTSPEAK_SMKOKORO_DYLIB="$(build_smkokoro_dylib "$(lipo -archs "$EXE" | awk '{print $1}')")"
-export DONTSPEAK_SMKOKORO_DYLIB
+DONTSPEAK_DSKOKORO_DYLIB="$(build_dskokoro_dylib "$(lipo -archs "$EXE" | awk '{print $1}')")"
+export DONTSPEAK_DSKOKORO_DYLIB
 # Helper from install-engine dir; menubar svg at repo assets/.
 assemble_app "$APP" "$EXE" "$_bin_dir/ds-helper" \
   "$ICONOUT/Assets.car" "$ICONOUT/AppIcon.icns" "$DIR/Bundle/Info.plist" \

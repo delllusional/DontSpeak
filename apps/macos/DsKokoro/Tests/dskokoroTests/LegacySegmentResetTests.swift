@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import smkokoro
+@testable import dskokoro
 
 /// Pins legacySegmentDidReset: prefix-ratio + gap agree on same-phrase / genuine resets;
 /// one documented blind spot (long reset with coincidental >=50% prefix inside gap window).

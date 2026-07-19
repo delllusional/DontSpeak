@@ -1,5 +1,5 @@
-//! Shared FluidAudio C-ABI shim loader (`libsmkokoro`). One place for
-//! `SMKOKORO_DYLIB_PATH` + dlopen so `ds-stt` and `ds-tts` can't drift (neither
+//! Shared FluidAudio C-ABI shim loader (`libdskokoro`). One place for
+//! `DSKOKORO_DYLIB_PATH` + dlopen so `ds-stt` and `ds-tts` can't drift (neither
 //! depends on the other). Each caller keeps its own `Library` (dlopen refcounts).
 
 use std::ffi::{CStr, CString};
@@ -11,7 +11,7 @@ use libloading::Library;
 // Borrowed-result callbacks: shim fires once, sync, on this thread before return.
 // We copy out; no free. Stack `&mut Option<…>` ctx — no channel/Send.
 
-/// smkokoro.h borrowed-result callbacks; buffer valid only during the call.
+/// dskokoro.h borrowed-result callbacks; buffer valid only during the call.
 pub type PcmCb = unsafe extern "C" fn(*mut c_void, *const f32, usize, i32);
 pub type StrCb = unsafe extern "C" fn(*mut c_void, *const c_char);
 
@@ -21,7 +21,7 @@ unsafe extern "C" fn pcm_sink(ctx: *mut c_void, ptr: *const f32, len: usize, _ra
     *slot = Some(if ptr.is_null() || len == 0 {
         Vec::new()
     } else {
-        // SAFETY: non-null `ptr` is `len` f32s owned by the shim for this callback (smkokoro.h).
+        // SAFETY: non-null `ptr` is `len` f32s owned by the shim for this callback (dskokoro.h).
         unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
     });
 }
@@ -59,7 +59,7 @@ pub fn collect_str(call: impl FnOnce(*mut c_void, StrCb) -> i32) -> Result<Strin
     Ok(out.unwrap_or_default())
 }
 
-/// `smk_*_init` modelDir: our [`ds_config::coreml_dir`] (uninstaller wipe root), else `""`.
+/// `dsk_*_init` modelDir: our [`ds_config::coreml_dir`] (uninstaller wipe root), else `""`.
 pub fn model_dir_arg() -> CString {
     if let Some(dir) = ds_config::coreml_dir() {
         let _ = std::fs::create_dir_all(&dir);
@@ -72,12 +72,12 @@ pub fn model_dir_arg() -> CString {
     CString::new("").unwrap()
 }
 
-/// The directory to hand the shim's `smk_asr_stream_start` (the STREAMING Parakeet EOU set),
+/// The directory to hand the shim's `dsk_asr_stream_start` (the STREAMING Parakeet EOU set),
 /// as a `CString`. Unlike the offline [`model_dir_arg`], this is the EOU model's OWN subdir —
 /// `ds_model::coreml_repo::parakeet_eou_dir` (the ONE source of truth shared with the download
 /// target), since FluidAudio's `StreamingEouAsrManager.loadModels(from:)` loads the `.mlmodelc`
 /// files FLAT from the dir it's given. NOT created here: the dir exists only once the model is
-/// downloaded, and an absent dir makes `smk_asr_stream_start` fail → the caller cleanly falls
+/// downloaded, and an absent dir makes `dsk_asr_stream_start` fail → the caller cleanly falls
 /// back to the offline path. Falls back to `""` only if the path can't resolve.
 pub fn eou_model_dir_arg() -> CString {
     if let Some(dir) = crate::coreml_repo::parakeet_eou_dir()
@@ -92,7 +92,7 @@ pub fn eou_model_dir_arg() -> CString {
 fn validated_bundled_shim(path: &Path) -> Result<PathBuf, String> {
     let dylib = path
         .canonicalize()
-        .map_err(|e| format!("resolve SMKOKORO_DYLIB_PATH: {e}"))?;
+        .map_err(|e| format!("resolve DSKOKORO_DYLIB_PATH: {e}"))?;
     let executable = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|e| format!("resolve current executable: {e}"))?;
@@ -108,9 +108,9 @@ fn validated_bundled_shim(path: &Path) -> Result<PathBuf, String> {
         .join("Frameworks")
         .canonicalize()
         .map_err(|e| format!("resolve app Frameworks directory: {e}"))?;
-    let expected = frameworks_dir.join("libsmkokoro.dylib");
+    let expected = frameworks_dir.join("libdskokoro.dylib");
     if dylib != expected {
-        return Err("SMKOKORO_DYLIB_PATH is not the bundled libsmkokoro.dylib".to_string());
+        return Err("DSKOKORO_DYLIB_PATH is not the bundled libdskokoro.dylib".to_string());
     }
     let app_bundle = contents_dir
         .parent()
@@ -127,12 +127,12 @@ fn validated_bundled_shim(path: &Path) -> Result<PathBuf, String> {
 }
 
 /// `dlopen` the app-bundled, signature-verified shim dylib selected by
-/// `SMKOKORO_DYLIB_PATH`. The caller fails quiet or falls back on rejection.
+/// `DSKOKORO_DYLIB_PATH`. The caller fails quiet or falls back on rejection.
 pub fn open() -> Result<Library, String> {
-    let path = std::env::var("SMKOKORO_DYLIB_PATH")
-        .map_err(|_| "SMKOKORO_DYLIB_PATH not set".to_string())?;
+    let path = std::env::var("DSKOKORO_DYLIB_PATH")
+        .map_err(|_| "DSKOKORO_DYLIB_PATH not set".to_string())?;
     let path = validated_bundled_shim(Path::new(&path))?;
     // SAFETY: `validated_bundled_shim` restricts this to the canonical Frameworks
-    // member sealed by the verified DontSpeak app signature; its ABI is smkokoro.h.
+    // member sealed by the verified DontSpeak app signature; its ABI is dskokoro.h.
     unsafe { Library::new(&path) }.map_err(|e| format!("dlopen {}: {e}", path.display()))
 }

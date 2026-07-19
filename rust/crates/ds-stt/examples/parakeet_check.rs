@@ -3,7 +3,7 @@
 //!
 //!   cargo run -p ds-stt --example parakeet_check -- some_16k.wav cpu
 //!   cargo run -p ds-stt --example parakeet_check -- some_16k.wav cuda /path/to/models
-//!   SMKOKORO_DYLIB_PATH=/path/to/libsmkokoro.dylib \
+//!   DSKOKORO_DYLIB_PATH=/path/to/libdskokoro.dylib \
 //!     cargo run -p ds-stt --example parakeet_check -- some_16k.wav ane
 use std::path::PathBuf;
 

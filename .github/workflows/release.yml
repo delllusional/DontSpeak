@@ -152,7 +152,7 @@ jobs:
   # ── macOS app DMGs (arm64 + x86_64) ─────────────────────────────────────────
   # Both slices build on the arm64 macos-26 runner: arm64 native, x86_64 cross-compiled
   # (Rust via the added target, Swift via `swift build --arch x86_64`). The Intel slice
-  # ships WITHOUT the Apple-Silicon-only Core ML shim (libsmkokoro) — its engine ladder
+  # ships WITHOUT the Apple-Silicon-only Core ML shim (libdskokoro) — its engine ladder
   # resolves to the system `say` voice + claude_code dictation, which need no onnxruntime.
   macos:
     needs: [check, tests]

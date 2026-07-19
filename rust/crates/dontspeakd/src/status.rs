@@ -614,7 +614,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let previous_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
         let previous_ort = std::env::var_os("ORT_DYLIB_PATH");
-        let previous_shim = std::env::var_os("SMKOKORO_DYLIB_PATH");
+        let previous_shim = std::env::var_os("DSKOKORO_DYLIB_PATH");
 
         let temp = tempfile::tempdir().unwrap();
         let model_dir = tempfile::tempdir().unwrap();
@@ -630,7 +630,7 @@ mod tests {
         unsafe {
             std::env::set_var("DONTSPEAK_MODEL_DIR", model_dir.path());
             std::env::remove_var("ORT_DYLIB_PATH");
-            std::env::remove_var("SMKOKORO_DYLIB_PATH");
+            std::env::remove_var("DSKOKORO_DYLIB_PATH");
         }
 
         let tts_stats = Arc::new(TtsStats::new());
@@ -694,8 +694,8 @@ mod tests {
                 None => std::env::remove_var("ORT_DYLIB_PATH"),
             }
             match previous_shim {
-                Some(value) => std::env::set_var("SMKOKORO_DYLIB_PATH", value),
-                None => std::env::remove_var("SMKOKORO_DYLIB_PATH"),
+                Some(value) => std::env::set_var("DSKOKORO_DYLIB_PATH", value),
+                None => std::env::remove_var("DSKOKORO_DYLIB_PATH"),
             }
         }
 

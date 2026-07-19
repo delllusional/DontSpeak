@@ -750,7 +750,7 @@ impl StreamSession {
     ///
     /// The tail-flush `accept_16k` is BEST-EFFORT: on the Core ML/system backends,
     /// `backend.finalize()` is what tears down the Swift-side session
-    /// (`smk_asr_stream_finish`/`smk_sys_stream_finish`) — skipping it after a failed tail
+    /// (`dsk_asr_stream_finish`/`dsk_sys_stream_finish`) — skipping it after a failed tail
     /// flush used to leak that session, since nothing else ever finishes it and the next
     /// utterance's `reset()` would then clobber the reference with no cleanup. So a tail-flush
     /// error is logged, not propagated, and `finalize()` always runs. `OnnxStreamer::finalize`

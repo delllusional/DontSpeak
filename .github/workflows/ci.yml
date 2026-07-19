@@ -1,7 +1,7 @@
 name: CI
 
 # Run the project's ACTUAL test suite. The bulk lives in the Rust workspace
-# (cargo test --workspace); the macOS SwiftPM packages add app and SmKokoro tests, and
+# (cargo test --workspace); the macOS SwiftPM packages add app and DsKokoro tests, and
 # the WinUI app adds winui.tests (xunit) — each on its own OS leg.
 #
 # Cost/coverage split:
@@ -271,11 +271,11 @@ jobs:
             echo "no Swift test targets in apps/macos/Package.swift — skipping"
           fi
 
-      - name: swift test (macOS SmKokoro shim)
+      - name: swift test (macOS DsKokoro shim)
         if: runner.os == 'macOS'
         env:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
-        working-directory: apps/macos/SmKokoro
+        working-directory: apps/macos/DsKokoro
         run: swift test
 
       # WinUI xunit tests; the composite is shared with csharp.yml.

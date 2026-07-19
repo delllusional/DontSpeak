@@ -39,10 +39,10 @@ pub(crate) fn helper_uses_stt(cfg: &VoiceConfig) -> bool {
     )
 }
 
-/// macOS + `SMKOKORO_DYLIB_PATH`. Pair with model-asset gates before advertising.
+/// macOS + `DSKOKORO_DYLIB_PATH`. Pair with model-asset gates before advertising.
 #[cfg(target_os = "macos")]
 pub(crate) fn apple_native_shim_available() -> bool {
-    std::env::var_os("SMKOKORO_DYLIB_PATH")
+    std::env::var_os("DSKOKORO_DYLIB_PATH")
         .map(|p| std::path::Path::new(&p).exists())
         .unwrap_or(false)
 }
@@ -367,7 +367,7 @@ pub(crate) fn debug_enabled() -> bool {
 }
 
 /// Serializes every `dontspeakd`-crate test (here and in `tts.rs`) that mutates the
-/// process-wide `DONTSPEAK_MODEL_DIR` / `SMKOKORO_DYLIB_PATH` / `ORT_DYLIB_PATH` env vars —
+/// process-wide `DONTSPEAK_MODEL_DIR` / `DSKOKORO_DYLIB_PATH` / `ORT_DYLIB_PATH` env vars —
 /// mirrors `ds-model/src/spec.rs`'s own `ENV_LOCK` idiom (`spec.rs:326`). ONE shared lock, not
 /// a per-file one, so a `config_gate.rs` test and a `tts.rs` test touching the SAME var can't
 /// interleave (`dontspeakd`'s test binary runs multi-threaded by default).

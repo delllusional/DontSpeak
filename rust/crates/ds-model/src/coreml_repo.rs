@@ -79,7 +79,7 @@ fn kokoro_g2p_target() -> Option<PathBuf> {
 }
 
 /// `model_dir()/parakeet-tdt-0.6b-v2` — FluidAudio's ASR loader appends this folder name to
-/// the PARENT of the dir we pass `smk_asr_init` (we pass `coreml_dir`, whose parent is
+/// the PARENT of the dir we pass `dsk_asr_init` (we pass `coreml_dir`, whose parent is
 /// `model_dir`), so this is where it looks.
 fn parakeet_target() -> Option<PathBuf> {
     Some(ds_config::model_dir()?.join("parakeet-tdt-0.6b-v2"))
@@ -100,7 +100,7 @@ fn parakeet_eou_target() -> Option<PathBuf> {
 }
 
 /// The exact dir FluidAudio's `StreamingEouAsrManager.loadModels(from:)` reads the streaming
-/// `.mlmodelc` set + `vocab.json` from (handed to the shim's `smk_asr_stream_start`). The download
+/// `.mlmodelc` set + `vocab.json` from (handed to the shim's `dsk_asr_stream_start`). The download
 /// writes the repo's `320ms/` subtree under `parakeet_eou_target`, so the loadable dir is that
 /// subfolder. ONE source of truth so the download target and the shim load path (via
 /// `ds_stt::coreml::CoremlStreamer`) can't drift.
@@ -114,12 +114,12 @@ pub fn parakeet_eou_dir() -> Option<PathBuf> {
 /// test) all derive from this so they can't drift.
 pub const DIARIZATION_COREML_DIR_NAME: &str = "speaker-diarization-coreml";
 /// The two `.mlmodelc` bundles the diarizer shim loads from [`diarization_dir`]. Mirrored as
-/// literals in the Swift shim (`smk_diar_init`) — a Rust-side rename trips
+/// literals in the Swift shim (`dsk_diar_init`) — a Rust-side rename trips
 /// `diarization_model_names_match_prefixes` so the cross-language pair can't silently drift.
 pub const DIARIZATION_SEGMENTATION_MODEL: &str = "pyannote_segmentation.mlmodelc";
 pub const DIARIZATION_EMBEDDING_MODEL: &str = "wespeaker_v2.mlmodelc";
 
-/// `coreml_dir()/speaker-diarization-coreml` — a dir WE choose; the shim's `smk_diar_init`
+/// `coreml_dir()/speaker-diarization-coreml` — a dir WE choose; the shim's `dsk_diar_init`
 /// loads the two diarization `.mlmodelc` ([`DIARIZATION_SEGMENTATION_MODEL`] /
 /// [`DIARIZATION_EMBEDDING_MODEL`]) from here via FluidAudio's explicit local-file API.
 fn diarization_target() -> Option<PathBuf> {
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn diarization_model_names_match_prefixes() {
-        // Drift: Rust prefixes vs Swift `smk_diar_init` literals (cross-language).
+        // Drift: Rust prefixes vs Swift `dsk_diar_init` literals (cross-language).
         assert_eq!(
             DIARIZATION_COREML.include_prefixes,
             [

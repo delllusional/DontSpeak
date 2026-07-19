@@ -51,8 +51,8 @@ windows = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_F
 zip = { workspace = true }
 libc = { workspace = true }
 
-# macOS: the shared FluidAudio Core ML / ANE shim loader (shim.rs) dlopens libsmkokoro at
-# runtime (resolved via SMKOKORO_DYLIB_PATH), like ort's load-dynamic onnxruntime. Both the
+# macOS: the shared FluidAudio Core ML / ANE shim loader (shim.rs) dlopens libdskokoro at
+# runtime (resolved via DSKOKORO_DYLIB_PATH), like ort's load-dynamic onnxruntime. Both the
 # STT backends (ds-stt) and the apple-native Kokoro TTS backend (ds-tts) go through it.
 [target.'cfg(target_os = "macos")'.dependencies]
 libloading = { workspace = true }

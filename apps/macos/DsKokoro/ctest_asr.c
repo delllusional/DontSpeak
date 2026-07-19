@@ -1,7 +1,7 @@
-// STT ABI check: dlopen libsmkokoro.dylib, load a 16 kHz mono int16 WAV,
-// and transcribe it through the C ABI (smk_asr_init + smk_transcribe).
+// STT ABI check: dlopen libdskokoro.dylib, load a 16 kHz mono int16 WAV,
+// and transcribe it through the C ABI (dsk_asr_init + dsk_transcribe).
 // The transcript is BORROWED to a callback fired synchronously during the call (see
-// include/smkokoro.h) — we copy it out there; nothing to free.
+// include/dskokoro.h) — we copy it out there; nothing to free.
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -50,27 +50,27 @@ static float *load_wav_16k(const char *path, size_t *out_n) {
 }
 
 int main(int argc, char **argv) {
-    const char *dylib = argc > 1 ? argv[1] : "./.build/arm64-apple-macosx/release/libsmkokoro.dylib";
+    const char *dylib = argc > 1 ? argv[1] : "./.build/arm64-apple-macosx/release/libdskokoro.dylib";
     const char *wav = argc > 2 ? argv[2] : "warm16k.wav";
 
     void *h = dlopen(dylib, RTLD_NOW | RTLD_LOCAL);
     if (!h) { printf("dlopen failed: %s\n", dlerror()); return 1; }
-    asr_init_fn smk_asr_init = (asr_init_fn)dlsym(h, "smk_asr_init");
-    transcribe_fn smk_transcribe = (transcribe_fn)dlsym(h, "smk_transcribe");
-    if (!smk_asr_init || !smk_transcribe) { printf("dlsym failed\n"); return 2; }
+    asr_init_fn dsk_asr_init = (asr_init_fn)dlsym(h, "dsk_asr_init");
+    transcribe_fn dsk_transcribe = (transcribe_fn)dlsym(h, "dsk_transcribe");
+    if (!dsk_asr_init || !dsk_transcribe) { printf("dlsym failed\n"); return 2; }
 
     size_t n = 0;
     float *samples = load_wav_16k(wav, &n);
     if (!samples) { printf("could not load %s\n", wav); return 3; }
     printf("loaded %s: %zu samples (%.2fs @16k)\n", wav, n, n / 16000.0);
 
-    int32_t r = smk_asr_init("", 0);
-    printf("smk_asr_init = %d (loads Parakeet from the default cache)\n", r);
+    int32_t r = dsk_asr_init("", 0);
+    printf("dsk_asr_init = %d (loads Parakeet from the default cache)\n", r);
     if (r != 0) return 4;
 
     char text[4096] = {0};
-    r = smk_transcribe(samples, n, 16000, text, on_str);
-    printf("smk_transcribe = %d\n", r);
+    r = dsk_transcribe(samples, n, 16000, text, on_str);
+    printf("dsk_transcribe = %d\n", r);
     if (r == 0) printf("TRANSCRIPT: %s\n", text);
     free(samples);
     return r;

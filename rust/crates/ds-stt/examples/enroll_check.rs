@@ -1,9 +1,9 @@
 //! On-device check for the enrollment primitive: embed three clips (two of the SAME
 //! voice, one different), enroll the first as "Alex", and confirm `match_speaker`
 //! recognizes the same voice and rejects the different one. macOS only; needs
-//! `SMKOKORO_DYLIB_PATH`.
+//! `DSKOKORO_DYLIB_PATH`.
 //!
-//!   SMKOKORO_DYLIB_PATH=…/libsmkokoro.dylib cargo run -p ds-stt --example enroll_check -- \
+//!   DSKOKORO_DYLIB_PATH=…/libdskokoro.dylib cargo run -p ds-stt --example enroll_check -- \
 //!     enroll.wav same.wav different.wav
 
 #[cfg(target_os = "macos")]
@@ -12,9 +12,9 @@ fn main() {
     use ds_stt::diarize::{CoremlDiarizer, Diarizer, cosine, match_speaker};
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 3 || std::env::var_os("SMKOKORO_DYLIB_PATH").is_none() {
+    if args.len() != 3 || std::env::var_os("DSKOKORO_DYLIB_PATH").is_none() {
         eprintln!(
-            "usage: SMKOKORO_DYLIB_PATH=… enroll_check <enroll.wav> <same.wav> <different.wav>"
+            "usage: DSKOKORO_DYLIB_PATH=… enroll_check <enroll.wav> <same.wav> <different.wav>"
         );
         std::process::exit(2);
     }

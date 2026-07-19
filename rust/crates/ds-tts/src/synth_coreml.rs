@@ -1,9 +1,9 @@
-//! Apple-native Kokoro TTS (macOS): `dlopen` `libsmkokoro.dylib` (FluidAudio ANE
+//! Apple-native Kokoro TTS (macOS): `dlopen` `libdskokoro.dylib` (FluidAudio ANE
 //! Core ML) → 24 kHz mono f32. Same [`crate::g2p`] chunks as ONNX (no platform
 //! pronunciation drift).
 //!
 //! `DONTSPEAK_PROVIDER=apple-native`; fallback ONNX CPU if dylib/models missing.
-//! Dylib via `SMKOKORO_DYLIB_PATH`. See `apps/macos/SmKokoro/include/smkokoro.h`.
+//! Dylib via `DSKOKORO_DYLIB_PATH`. See `apps/macos/DsKokoro/include/dskokoro.h`.
 
 use std::ffi::{CString, c_char, c_void};
 
@@ -12,7 +12,7 @@ use libloading::{Library, Symbol};
 
 type InitFn = unsafe extern "C" fn(*const c_char, i32) -> i32;
 // Synthesis still BLOCKS and returns its status; the PCM comes back through a borrowed callback
-// (copied out by `ds_model::shim::collect_pcm`), so there is no out-param and no `smk_free`.
+// (copied out by `ds_model::shim::collect_pcm`), so there is no out-param and no `dsk_free`.
 type SynthFn = unsafe extern "C" fn(*const c_char, *const c_char, f32, *mut c_void, PcmCb) -> i32;
 type ShutdownFn = unsafe extern "C" fn();
 
@@ -23,19 +23,19 @@ const FALLBACK_VOICE: &str = "af_heart";
 /// FluidAudio's Core ML Kokoro behind the C ABI. One per helper process.
 pub struct KokoroCoremlTts {
     lib: Library,
-    /// Set only after `smk_init` returns success — gates `Drop` so a `load()` that
-    /// fails partway through never calls `smk_shutdown` on a store that was never
+    /// Set only after `dsk_init` returns success — gates `Drop` so a `load()` that
+    /// fails partway through never calls `dsk_shutdown` on a store that was never
     /// (successfully) initialized.
     initialized: bool,
 }
 
 impl KokoroCoremlTts {
     /// `dlopen` the shim and initialize it from DontSpeak's pre-populated model cache.
-    /// Honors `SMKOKORO_DYLIB_PATH`. Errors (missing dylib, model gap, or initialization
+    /// Honors `DSKOKORO_DYLIB_PATH`. Errors (missing dylib, model gap, or initialization
     /// failure) are returned so the helper can fall back to ONNX.
     pub fn load() -> Result<Self, String> {
         // Shared shim loader (also used by the Parakeet STT backend) — resolves
-        // SMKOKORO_DYLIB_PATH + dlopens, so the two backends can't drift.
+        // DSKOKORO_DYLIB_PATH + dlopens, so the two backends can't drift.
         let lib = ds_model::shim::open()?;
         let mut me = KokoroCoremlTts {
             lib,
@@ -44,20 +44,20 @@ impl KokoroCoremlTts {
         // Pass our DontSpeak-controlled, pre-populated Core ML cache dir (not "" →
         // FluidAudio's scattered default). The shim is offline-only, so a cache gap fails
         // instead of downloading here; compute_units 0 → default ANE routing.
-        // SAFETY: `smk_init` is looked up by NUL-terminated name from the app-signed shim
-        // and has exactly `InitFn`'s signature (smkokoro.h); the Symbol borrows `me.lib`,
+        // SAFETY: `dsk_init` is looked up by NUL-terminated name from the app-signed shim
+        // and has exactly `InitFn`'s signature (dskokoro.h); the Symbol borrows `me.lib`,
         // so it can't outlive the dylib, and `dir` is a live CString across the blocking
         // call.
         let rc = unsafe {
             let init: Symbol<InitFn> = me
                 .lib
-                .get(b"smk_init\0")
-                .map_err(|e| format!("smk_init symbol: {e}"))?;
+                .get(b"dsk_init\0")
+                .map_err(|e| format!("dsk_init symbol: {e}"))?;
             let dir = ds_model::shim::model_dir_arg();
             init(dir.as_ptr(), 0)
         };
         if rc != 0 {
-            return Err(format!("smk_init failed (rc={rc})"));
+            return Err(format!("dsk_init failed (rc={rc})"));
         }
         me.initialized = true;
         // Absorb Core ML's one-time graph specialization here (≈1 s) with a throwaway
@@ -131,37 +131,37 @@ impl KokoroCoremlTts {
     fn synthesize_one(&self, phonemes: &str, voice: &str, speed: f32) -> Result<Vec<f32>, String> {
         let c_phonemes = CString::new(phonemes).map_err(|_| "phonemes contain NUL".to_string())?;
         let c_voice = CString::new(voice).map_err(|_| "voice contains NUL".to_string())?;
-        // SAFETY: `smk_synthesize_phonemes` in the app-signed shim has exactly `SynthFn`'s
-        // signature (smkokoro.h); the returned Symbol borrows `self.lib`, so it can't
+        // SAFETY: `dsk_synthesize_phonemes` in the app-signed shim has exactly `SynthFn`'s
+        // signature (dskokoro.h); the returned Symbol borrows `self.lib`, so it can't
         // outlive the dylib.
-        let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"smk_synthesize_phonemes\0") }
-            .map_err(|e| format!("smk_synthesize_phonemes symbol: {e}"))?;
+        let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"dsk_synthesize_phonemes\0") }
+            .map_err(|e| format!("dsk_synthesize_phonemes symbol: {e}"))?;
         // The shim BORROWS the PCM to our sink, which copies it into a `Vec<f32>` while the shim
-        // still owns it — so there's no ownership transfer, no `smk_free`, and no raw-pointer/len
+        // still owns it — so there's no ownership transfer, no `dsk_free`, and no raw-pointer/len
         // guards here. The call blocks; the C strings live across it. The sample rate is
         // 24_000 for Kokoro (the pipeline assumes 24 kHz, so we don't resample); an empty/no-audio
         // result comes back as an empty Vec.
         // SAFETY: `c_phonemes`/`c_voice` are live NUL-terminated CStrings across the blocking
         // call, and `ctx`/`cb` are the borrowed-result pair `collect_pcm` supplies (its
-        // own stack slot + sink, fired synchronously per smkokoro.h's callback contract).
+        // own stack slot + sink, fired synchronously per dskokoro.h's callback contract).
         ds_model::shim::collect_pcm(|ctx, cb| unsafe {
             synth(c_phonemes.as_ptr(), c_voice.as_ptr(), speed, ctx, cb)
         })
-        .map_err(|rc| format!("smk_synthesize_phonemes failed (rc={rc})"))
+        .map_err(|rc| format!("dsk_synthesize_phonemes failed (rc={rc})"))
     }
 }
 
 impl Drop for KokoroCoremlTts {
     fn drop(&mut self) {
-        // Gated on `initialized`: calling smk_shutdown after a failed/incomplete
-        // smk_init is UB, and `load()` returns this struct via `Err(...)` early-outs
+        // Gated on `initialized`: calling dsk_shutdown after a failed/incomplete
+        // dsk_init is UB, and `load()` returns this struct via `Err(...)` early-outs
         // that still run Drop on the partially-built value.
         if !self.initialized {
             return;
         }
         // SAFETY: shim shutdown is idempotent; called once as the helper drops it.
         unsafe {
-            if let Ok(shutdown) = self.lib.get::<ShutdownFn>(b"smk_shutdown\0") {
+            if let Ok(shutdown) = self.lib.get::<ShutdownFn>(b"dsk_shutdown\0") {
                 shutdown();
             }
         }

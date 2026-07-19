@@ -6,12 +6,12 @@ use std::path::PathBuf;
 
 use crate::parakeet::ParakeetTranscriber;
 
-/// FluidAudio Core ML / ANE shim present (`SMKOKORO_DYLIB_PATH`)? Gates `ane` so a
+/// FluidAudio Core ML / ANE shim present (`DSKOKORO_DYLIB_PATH`)? Gates `ane` so a
 /// missing shim falls back to ONNX. Engine checks the SAME env
 /// (`apple_native_shim_available`); helper inherits it so status row stays honest.
 #[cfg(target_os = "macos")]
 fn shim_available() -> bool {
-    std::env::var_os("SMKOKORO_DYLIB_PATH")
+    std::env::var_os("DSKOKORO_DYLIB_PATH")
         .map(|p| std::path::Path::new(&p).exists())
         .unwrap_or(false)
 }

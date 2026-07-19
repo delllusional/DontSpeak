@@ -1,6 +1,6 @@
-// libsmkokoro — C ABI over FluidAudio ANE Kokoro (IPA phonemes → 24 kHz mono f32).
+// libdskokoro — C ABI over FluidAudio ANE Kokoro (IPA phonemes → 24 kHz mono f32).
 // Rust owns the shared text frontend; this shim skips FluidAudio G2P so backends don't drift.
-// See smkokoro.h. 0 = success. Helper synthesizes serially; lock guards shared manager.
+// See dskokoro.h. 0 = success. Helper synthesizes serially; lock guards shared manager.
 import AVFoundation
 import FluidAudio
 import Foundation
@@ -21,20 +21,20 @@ private func runBlocking<T>(_ op: @escaping @Sendable () async throws -> T) -> R
         sem.signal()
     }
     sem.wait()
-    return box.value ?? .failure(SmkError.noResult)
+    return box.value ?? .failure(DskError.noResult)
 }
 
-private enum SmkError: Error {
+private enum DskError: Error {
     case noResult, notInitialized, nilText, nilDir, badAudio
     case sysUnavailable(String)
 }
 
 // MARK: - borrowed-result callbacks
 // Success path: fire cb once on this thread with borrowed buffer; Rust copies out — no free.
-// Still blocking via runBlocking; status is the C return. Types mirror smkokoro.h.
-public typealias SmkPcmCb =
+// Still blocking via runBlocking; status is the C return. Types mirror dskokoro.h.
+public typealias DskPcmCb =
     @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Float>?, Int, Int32) -> Void
-public typealias SmkStrCb = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
+public typealias DskStrCb = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
 
 // MARK: - shared state
 
@@ -66,8 +66,8 @@ private func logErr(_ s: String) {
 
 // MARK: - C ABI
 
-@_cdecl("smk_init")
-public func smk_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
+@_cdecl("dsk_init")
+public func dsk_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
     state.lock.lock()
     defer { state.lock.unlock() }
     // offlineMode: load only — DontSpeak pre-downloads (integrity + % UI).
@@ -84,25 +84,25 @@ public func smk_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -
         state.manager = mgr
         return 0
     case .failure(let e):
-        logErr("smk_init error: \(e)")
+        logErr("dsk_init error: \(e)")
         return 1
     }
 }
 
-@_cdecl("smk_synthesize_phonemes")
-public func smk_synthesize_phonemes(
+@_cdecl("dsk_synthesize_phonemes")
+public func dsk_synthesize_phonemes(
     _ phonemes: UnsafePointer<CChar>?,
     _ voice: UnsafePointer<CChar>?,
     _ speed: Float,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: SmkPcmCb?
+    _ cb: DskPcmCb?
 ) -> Int32 {
     guard let cb else { return 4 }
     state.lock.lock()
     let mgr = state.manager
     state.lock.unlock()
     guard let mgr else {
-        logErr("smk_synthesize: not initialized")
+        logErr("dsk_synthesize: not initialized")
         return 2
     }
     guard let p = cString(phonemes) else { return 3 }
@@ -115,13 +115,13 @@ public func smk_synthesize_phonemes(
         r.samples.withUnsafeBufferPointer { cb(ctx, $0.baseAddress, $0.count, Int32(r.sampleRate)) }
         return 0
     case .failure(let e):
-        logErr("smk_synthesize error: \(e)")
+        logErr("dsk_synthesize error: \(e)")
         return 1
     }
 }
 
-@_cdecl("smk_shutdown")
-public func smk_shutdown() {
+@_cdecl("dsk_shutdown")
+public func dsk_shutdown() {
     state.lock.lock()
     let mgr = state.manager
     state.manager = nil
@@ -143,15 +143,15 @@ private final class AsrState: @unchecked Sendable {
 private let asr = AsrState()
 
 /// Load Parakeet TDT v2 (English-only; mirrors ONNX — not v3 multilingual). 0 = ok.
-@_cdecl("smk_asr_init")
-public func smk_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
+@_cdecl("dsk_asr_init")
+public func dsk_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
     asr.lock.lock()
     defer { asr.lock.unlock() }
     ModelHub.offlineMode = true  // load-only: DontSpeak pre-downloads the Parakeet set
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     switch runBlocking({ () -> AsrManager in
         // load(from:) only — DontSpeak pre-downloads to parent/parakeet-tdt-0.6b-v2.
-        guard let dir else { throw SmkError.nilDir }
+        guard let dir else { throw DskError.nilDir }
         let models = try await AsrModels.load(from: dir, version: .v2)
         let mgr = AsrManager(config: .default)
         try await mgr.loadModels(models)
@@ -161,25 +161,25 @@ public func smk_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int3
         asr.manager = mgr
         return 0
     case .failure(let e):
-        logErr("smk_asr_init error: \(e)")
+        logErr("dsk_asr_init error: \(e)")
         return 1
     }
 }
 
 /// 16 kHz mono f32 → UTF-8 via borrowed cb. Empty input → "" (rc 0).
-@_cdecl("smk_transcribe")
-public func smk_transcribe(
+@_cdecl("dsk_transcribe")
+public func dsk_transcribe(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: SmkStrCb?
+    _ cb: DskStrCb?
 ) -> Int32 {
     asr.lock.lock()
     let mgr = asr.manager
     asr.lock.unlock()
     guard let mgr else {
-        logErr("smk_transcribe: not initialized")
+        logErr("dsk_transcribe: not initialized")
         return 2
     }
     guard let samples, n > 0 else {
@@ -197,13 +197,13 @@ public func smk_transcribe(
         text.withCString { cb?(ctx, $0) }
         return 0
     case .failure(let e):
-        logErr("smk_transcribe error: \(e)")
+        logErr("dsk_transcribe error: \(e)")
         return 1
     }
 }
 
-@_cdecl("smk_asr_shutdown")
-public func smk_asr_shutdown() {
+@_cdecl("dsk_asr_shutdown")
+public func dsk_asr_shutdown() {
     asr.lock.lock()
     let mgr = asr.manager
     asr.manager = nil
@@ -226,8 +226,8 @@ private final class StreamAsrState: @unchecked Sendable {
 private let streamAsr = StreamAsrState()
 
 /// Start/reset streaming utterance (modelDir only on first load). 0 = ok.
-@_cdecl("smk_asr_stream_start")
-public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
+@_cdecl("dsk_asr_stream_start")
+public func dsk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
     streamAsr.lock.lock()
     defer { streamAsr.lock.unlock() }
     ModelHub.offlineMode = true  // DontSpeak pre-downloads the streaming model set
@@ -237,7 +237,7 @@ public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
             await mgr.reset()
             return mgr
         }
-        guard let dir else { throw SmkError.nilDir }
+        guard let dir else { throw DskError.nilDir }
         let mgr = StreamingEouAsrManager(chunkSize: .ms160)  // lowest latency (~6 partials/sec)
         try await mgr.loadModels(from: dir)
         await mgr.reset()
@@ -247,25 +247,25 @@ public func smk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
         streamAsr.manager = mgr
         return 0
     case .failure(let e):
-        logErr("smk_asr_stream_start error: \(e)")
+        logErr("dsk_asr_stream_start error: \(e)")
         return 1
     }
 }
 
 /// Push chunk; cb gets getPartialTranscript() (process returns "" mid-stream).
-@_cdecl("smk_asr_stream_push")
-public func smk_asr_stream_push(
+@_cdecl("dsk_asr_stream_push")
+public func dsk_asr_stream_push(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: SmkStrCb?
+    _ cb: DskStrCb?
 ) -> Int32 {
     streamAsr.lock.lock()
     let mgr = streamAsr.manager
     streamAsr.lock.unlock()
     guard let mgr else {
-        logErr("smk_asr_stream_push: not started")
+        logErr("dsk_asr_stream_push: not started")
         return 2
     }
     // Build non-Sendable AVAudioPCMBuffer inside the @Sendable closure (not capture it).
@@ -279,7 +279,7 @@ public func smk_asr_stream_push(
             let buffer = AVAudioPCMBuffer(
                 pcmFormat: format,
                 frameCapacity: AVAudioFrameCount(max(audio.count, 1)))
-        else { throw SmkError.badAudio }
+        else { throw DskError.badAudio }
         buffer.frameLength = AVAudioFrameCount(audio.count)
         if !audio.isEmpty, let dst = buffer.floatChannelData {
             audio.withUnsafeBufferPointer { dst[0].update(from: $0.baseAddress!, count: audio.count) }
@@ -292,16 +292,16 @@ public func smk_asr_stream_push(
         text.withCString { cb?(ctx, $0) }
         return 0
     case .failure(let e):
-        logErr("smk_asr_stream_push error: \(e)")
+        logErr("dsk_asr_stream_push error: \(e)")
         return 1
     }
 }
 
 /// Finish stream; cb borrows final transcript.
-@_cdecl("smk_asr_stream_finish")
-public func smk_asr_stream_finish(
+@_cdecl("dsk_asr_stream_finish")
+public func dsk_asr_stream_finish(
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: SmkStrCb?
+    _ cb: DskStrCb?
 ) -> Int32 {
     streamAsr.lock.lock()
     let mgr = streamAsr.manager
@@ -315,7 +315,7 @@ public func smk_asr_stream_finish(
         text.withCString { cb?(ctx, $0) }
         return 0
     case .failure(let e):
-        logErr("smk_asr_stream_finish error: \(e)")
+        logErr("dsk_asr_stream_finish error: \(e)")
         return 1
     }
 }
@@ -368,7 +368,7 @@ private func sysEnsureModel(_ transcriber: SpeechTranscriber) async throws {
 /// Legacy callbacks — never main queue (historical deadlock).
 private let legacyQueue: OperationQueue = {
     let q = OperationQueue()
-    q.name = "smkokoro.sysstt.legacy"
+    q.name = "dskokoro.sysstt.legacy"
     q.maxConcurrentOperationCount = 1
     return q
 }()
@@ -517,10 +517,10 @@ private func legacyEnsureAuthorizedRecognizer() -> Result<SFSpeechRecognizer, Er
         _ = legacyAuthorize()
     }
     guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
-        return .failure(SmkError.sysUnavailable("speech recognition permission not granted"))
+        return .failure(DskError.sysUnavailable("speech recognition permission not granted"))
     }
     guard let recognizer = legacyRecognizer(), recognizer.supportsOnDeviceRecognition else {
-        return .failure(SmkError.sysUnavailable("no on-device recognition for en-US"))
+        return .failure(DskError.sysUnavailable("no on-device recognition for en-US"))
     }
     return .success(recognizer)
 }
@@ -533,7 +533,7 @@ private func legacyTranscribe(_ samples: [Float], sampleRate: Double) -> Result<
     case .failure(let e): return .failure(e)
     }
     guard sampleRate > 0, let buffer = sysMakeBuffer(samples, sampleRate: sampleRate) else {
-        return .failure(SmkError.badAudio)
+        return .failure(DskError.badAudio)
     }
 
     let request = SFSpeechAudioBufferRecognitionRequest()
@@ -556,17 +556,17 @@ private func legacyTranscribe(_ samples: [Float], sampleRate: Double) -> Result<
     let margin = Int(Double(samples.count) / sampleRate) + 30
     if run.sem.wait(timeout: .now() + .seconds(margin)) == .timedOut {
         run.task?.cancel()
-        run.finish(text: nil, error: SmkError.sysUnavailable("recognition timed out"))
+        run.finish(text: nil, error: DskError.sysUnavailable("recognition timed out"))
     }
     if let text = run.text { return .success(text) }
-    return .failure(run.error ?? SmkError.noResult)
+    return .failure(run.error ?? DskError.noResult)
 }
 
 // MARK: C entry points (both tiers)
 
 /// Non-prompting availability for model-status poll (1 → preparing orange).
-@_cdecl("smk_sys_available")
-public func smk_sys_available() -> Int32 {
+@_cdecl("dsk_sys_available")
+public func dsk_sys_available() -> Int32 {
     guard #available(macOS 26, *) else { return legacyAvailable() }
     switch runBlocking({ () -> Int32 in
         guard await sysLocaleSupported() else { return 2 }
@@ -578,8 +578,8 @@ public func smk_sys_available() -> Int32 {
 }
 
 /// Blocking enable: 26+ model download; <26 Speech-Rec TCC. 0 = ready.
-@_cdecl("smk_sys_authorize")
-public func smk_sys_authorize() -> Int32 {
+@_cdecl("dsk_sys_authorize")
+public func dsk_sys_authorize() -> Int32 {
     guard #available(macOS 26, *) else { return legacyAuthorize() }
     switch runBlocking({ () -> Int32 in
         guard await sysLocaleSupported() else { return 2 }
@@ -589,19 +589,19 @@ public func smk_sys_authorize() -> Int32 {
     }) {
     case .success(let code): return code
     case .failure(let e):
-        logErr("smk_sys_authorize error: \(e)")
+        logErr("dsk_sys_authorize error: \(e)")
         return 2
     }
 }
 
 /// On-device batch transcribe; cb borrows text. Empty → "".
-@_cdecl("smk_sys_transcribe")
-public func smk_sys_transcribe(
+@_cdecl("dsk_sys_transcribe")
+public func dsk_sys_transcribe(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: SmkStrCb?
+    _ cb: DskStrCb?
 ) -> Int32 {
     guard let samples, n > 0 else {
         "".withCString { cb?(ctx, $0) }
@@ -619,7 +619,7 @@ public func smk_sys_transcribe(
         text.withCString { cb?(ctx, $0) }
         return 0
     case .failure(let e):
-        logErr("smk_sys_transcribe error: \(e)")
+        logErr("dsk_sys_transcribe error: \(e)")
         return 1
     }
 }
@@ -680,7 +680,7 @@ private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) thr
     return output
 }
 
-// MARK: - System STT streaming (start/push/finish like smk_asr_stream_*)
+// MARK: - System STT streaming (start/push/finish like dsk_asr_stream_*)
 // Incremental hyp vs full-tail re-transcribe. Per tier:
 //   26+: persistent SpeechAnalyzer; drain volatile + final results into committed/latest.
 //   <26: one request/task for the utterance with partials=true. No phrase-boundary signal —
@@ -872,8 +872,8 @@ func legacySegmentDidReset(previous: String, new: String, gapSeconds: TimeInterv
 }
 
 /// Begin a new system-STT utterance (per-tier). Returns 0 on success.
-@_cdecl("smk_sys_stream_start")
-public func smk_sys_stream_start() -> Int32 {
+@_cdecl("dsk_sys_stream_start")
+public func dsk_sys_stream_start() -> Int32 {
     if #available(macOS 26, *) {
         return sysStreamStartModern()
     }
@@ -886,7 +886,7 @@ private func sysStreamStartModern() -> Int32 {
         guard await sysLocaleSupported() else { return 1 }
         // Finding #1: tear down prior session before replace (finish may have been skipped).
         if let prior = sysStreamTakeModern() {
-            logErr("smk_sys_stream_start: tearing down a leaked prior session")
+            logErr("dsk_sys_stream_start: tearing down a leaked prior session")
             _ = await sysStreamTeardownModern(prior)
         }
         // Need volatile partials; union preset with volatile+fastResults (~6/sec cadence).
@@ -915,7 +915,7 @@ private func sysStreamStartModern() -> Int32 {
                     session.recordResult(String(result.text.characters), isFinal: result.isFinal)
                 }
             } catch {
-                logErr("smk_sys_stream: results drain error: \(error)")
+                logErr("dsk_sys_stream: results drain error: \(error)")
             }
         }
 
@@ -924,7 +924,7 @@ private func sysStreamStartModern() -> Int32 {
     }) {
     case .success(let code): return code
     case .failure(let e):
-        logErr("smk_sys_stream_start error: \(e)")
+        logErr("dsk_sys_stream_start error: \(e)")
         return 1
     }
 }
@@ -947,7 +947,7 @@ private func sysStreamStartLegacy() -> Int32 {
     switch legacyEnsureAuthorizedRecognizer() {
     case .success(let r): recognizer = r
     case .failure(let e):
-        logErr("smk_sys_stream_start: \(e)")
+        logErr("dsk_sys_stream_start: \(e)")
         return 1
     }
 
@@ -1006,23 +1006,23 @@ private func sysStreamConvert(_ buffer: AVAudioPCMBuffer, for session: SysModern
     do {
         return try sysConvert(buffer, to: target)
     } catch {
-        logErr("smk_sys_stream_push: convert failed, using raw buffer: \(error)")
+        logErr("dsk_sys_stream_push: convert failed, using raw buffer: \(error)")
         return nil
     }
 }
 
 /// Feed a 16 kHz mono chunk; hand back the running hypothesis-so-far.
-@_cdecl("smk_sys_stream_push")
-public func smk_sys_stream_push(
+@_cdecl("dsk_sys_stream_push")
+public func dsk_sys_stream_push(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: SmkStrCb?
+    _ cb: DskStrCb?
 ) -> Int32 {
     let audio = samples.map { Array(UnsafeBufferPointer(start: $0, count: n)) } ?? []
     guard sampleRate > 0, let buffer = sysMakeBuffer(audio, sampleRate: Double(sampleRate)) else {
-        logErr("smk_sys_stream_push: bad audio")
+        logErr("dsk_sys_stream_push: bad audio")
         return 1
     }
 
@@ -1031,7 +1031,7 @@ public func smk_sys_stream_push(
         let session = sysStream.modern as? SysModernSession
         sysStream.lock.unlock()
         guard let session else {
-            logErr("smk_sys_stream_push: not started")
+            logErr("dsk_sys_stream_push: not started")
             return 2
         }
         let toYield = sysStreamConvert(buffer, for: session) ?? buffer
@@ -1046,7 +1046,7 @@ public func smk_sys_stream_push(
     let run = sysStream.legacyRun
     sysStream.lock.unlock()
     guard let request, let run else {
-        logErr("smk_sys_stream_push: not started")
+        logErr("dsk_sys_stream_push: not started")
         return 2
     }
     let text = run.hypothesis()
@@ -1056,10 +1056,10 @@ public func smk_sys_stream_push(
 }
 
 /// Flush the stream and return the final transcript.
-@_cdecl("smk_sys_stream_finish")
-public func smk_sys_stream_finish(
+@_cdecl("dsk_sys_stream_finish")
+public func dsk_sys_stream_finish(
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: SmkStrCb?
+    _ cb: DskStrCb?
 ) -> Int32 {
     if #available(macOS 26, *) {
         sysStream.lock.lock()
@@ -1105,7 +1105,7 @@ public func smk_sys_stream_finish(
         text.withCString { cb?(ctx, $0) }
         return 0
     }
-    logErr("smk_sys_stream_finish error: \(run.error ?? SmkError.noResult)")
+    logErr("dsk_sys_stream_finish error: \(run.error ?? DskError.noResult)")
     return 1
 }
 
@@ -1119,8 +1119,8 @@ private final class DiarState: @unchecked Sendable {
 private let diar = DiarState()
 
 /// Load diarizer. clustering_threshold ≤0 → FluidAudio default 0.7 (lower = more speakers).
-@_cdecl("smk_diar_init")
-public func smk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThreshold: Float) -> Int32 {
+@_cdecl("dsk_diar_init")
+public func dsk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThreshold: Float) -> Int32 {
     diar.lock.lock()
     defer { diar.lock.unlock() }
     // debugMode → speakerDatabase embeddings for enrollment match. let for @Sendable capture.
@@ -1137,7 +1137,7 @@ public func smk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThresho
     ModelHub.offlineMode = true
     let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
     switch runBlocking({ () -> DiarizerManager in
-        guard let dir else { throw SmkError.nilDir }
+        guard let dir else { throw DskError.nilDir }
         let base = dir.appendingPathComponent("speaker-diarization-coreml")
         let models = try DiarizerModels.load(
             localSegmentationModel: base.appendingPathComponent("pyannote_segmentation.mlmodelc"),
@@ -1151,26 +1151,26 @@ public func smk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThresho
         diar.manager = mgr
         return 0
     case .failure(let e):
-        logErr("smk_diar_init error: \(e)")
+        logErr("dsk_diar_init error: \(e)")
         return 1
     }
 }
 
 /// 16 kHz mono f32 → JSON {segments, speakers}. Same id-space for join. Empty → {"segments":[]}.
-@_cdecl("smk_diarize")
-public func smk_diarize(
+@_cdecl("dsk_diarize")
+public func dsk_diarize(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: SmkStrCb?
+    _ cb: DskStrCb?
 ) -> Int32 {
     _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
     // Full-call lock: DiarizerManager is not an actor (races if concurrent).
     diar.lock.lock()
     defer { diar.lock.unlock() }
     guard let mgr = diar.manager else {
-        logErr("smk_diarize: not initialized")
+        logErr("dsk_diarize: not initialized")
         return 2
     }
     guard let samples, n > 0 else {
@@ -1204,33 +1204,33 @@ public func smk_diarize(
         String(decoding: data, as: UTF8.self).withCString { cb?(ctx, $0) }
         return 0
     } catch {
-        logErr("smk_diarize error: \(error)")
+        logErr("dsk_diarize error: \(error)")
         return 1
     }
 }
 
-@_cdecl("smk_diar_shutdown")
-public func smk_diar_shutdown() {
+@_cdecl("dsk_diar_shutdown")
+public func dsk_diar_shutdown() {
     diar.lock.lock()
     diar.manager = nil
     diar.lock.unlock()
 }
 
-/// WeSpeaker embedding for enrollment. Needs smk_diar_init. Empty → rc 3.
-@_cdecl("smk_diar_embed")
-public func smk_diar_embed(
+/// WeSpeaker embedding for enrollment. Needs dsk_diar_init. Empty → rc 3.
+@_cdecl("dsk_diar_embed")
+public func dsk_diar_embed(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: SmkPcmCb?
+    _ cb: DskPcmCb?
 ) -> Int32 {
     _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
     // Full-call lock (non-actor manager).
     diar.lock.lock()
     defer { diar.lock.unlock() }
     guard let mgr = diar.manager else {
-        logErr("smk_diar_embed: not initialized")
+        logErr("dsk_diar_embed: not initialized")
         return 2
     }
     guard let samples, n > 0 else { return 3 }
@@ -1241,14 +1241,14 @@ public func smk_diar_embed(
         emb.withUnsafeBufferPointer { cb?(ctx, $0.baseAddress, $0.count, 0) }
         return 0
     } catch {
-        logErr("smk_diar_embed error: \(error)")
+        logErr("dsk_diar_embed error: \(error)")
         return 1
     }
 }
 
 /// Pre-download diarization models only (no manager).
-@_cdecl("smk_diar_download")
-public func smk_diar_download() -> Int32 {
+@_cdecl("dsk_diar_download")
+public func dsk_diar_download() -> Int32 {
     switch runBlocking({ () -> Bool in
         _ = try await DiarizerModels.downloadIfNeeded()
         return true
@@ -1256,7 +1256,7 @@ public func smk_diar_download() -> Int32 {
     case .success:
         return 0
     case .failure(let e):
-        logErr("smk_diar_download error: \(e)")
+        logErr("dsk_diar_download error: \(e)")
         return 1
     }
 }

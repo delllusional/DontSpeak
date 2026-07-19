@@ -161,7 +161,7 @@ pub fn ensure_coreml_backend(provider: DiarizerProvider) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 pub use coreml_impl::CoremlDiarizer;
 
-/// FluidAudio's offline diarizer behind the `libsmkokoro.dylib` C ABI (the SAME shim
+/// FluidAudio's offline diarizer behind the `libdskokoro.dylib` C ABI (the SAME shim
 /// as the apple-native Kokoro TTS + Parakeet STT backends). macOS only.
 #[cfg(target_os = "macos")]
 mod coreml_impl {
@@ -174,7 +174,7 @@ mod coreml_impl {
 
     // diarize/embed still BLOCK and return their status; the JSON / embedding comes back through a
     // borrowed callback (copied out by `ds_model::shim::collect_{str,pcm}`), so there's no out-param
-    // and no `smk_free_str` / `smk_free`. init/download/shutdown carry no buffer → plain int32.
+    // and no `dsk_free_str` / `dsk_free`. init/download/shutdown carry no buffer → plain int32.
     type DiarInitFn = unsafe extern "C" fn(*const c_char, f32) -> i32;
     type DiarizeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
     type EmbedFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, PcmCb) -> i32;
@@ -186,7 +186,7 @@ mod coreml_impl {
     pub struct CoremlDiarizer {
         lib: Option<Library>,
         loaded: bool,
-        /// Clustering threshold passed to `smk_diar_init` (0.5–0.9, lower = more
+        /// Clustering threshold passed to `dsk_diar_init` (0.5–0.9, lower = more
         /// speakers); 0.0 = use FluidAudio's default (0.7).
         threshold: f32,
     }
@@ -216,7 +216,7 @@ mod coreml_impl {
             }
         }
 
-        /// Ensure the shim dylib is open (resolves `SMKOKORO_DYLIB_PATH`).
+        /// Ensure the shim dylib is open (resolves `DSKOKORO_DYLIB_PATH`).
         fn ensure_lib(&mut self) -> Result<(), String> {
             if self.lib.is_none() {
                 self.lib = Some(ds_model::shim::open()?);
@@ -232,19 +232,19 @@ mod coreml_impl {
             }
             self.ensure_lib()?;
             let lib = self.lib.as_ref().expect("lib opened above");
-            // SAFETY: `smk_diar_init` is looked up by NUL-terminated name from the
-            // app-signed shim and has exactly `DiarInitFn`'s signature (smkokoro.h); the
+            // SAFETY: `dsk_diar_init` is looked up by NUL-terminated name from the
+            // app-signed shim and has exactly `DiarInitFn`'s signature (dskokoro.h); the
             // Symbol borrows `lib`, and `dir` is a live CString across the blocking call.
             let rc = unsafe {
                 let init: Symbol<DiarInitFn> = lib
-                    .get(b"smk_diar_init\0")
-                    .map_err(|e| format!("smk_diar_init symbol: {e}"))?;
+                    .get(b"dsk_diar_init\0")
+                    .map_err(|e| format!("dsk_diar_init symbol: {e}"))?;
                 // Our DontSpeak-controlled Core ML cache dir (not "" → FluidAudio's default).
                 let dir = ds_model::shim::model_dir_arg();
                 init(dir.as_ptr(), self.threshold)
             };
             if rc != 0 {
-                return Err(format!("smk_diar_init failed (rc={rc})"));
+                return Err(format!("dsk_diar_init failed (rc={rc})"));
             }
             self.loaded = true;
             Ok(())
@@ -256,19 +256,19 @@ mod coreml_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
-            // SAFETY: `smk_diarize` in the app-signed shim has exactly `DiarizeFn`'s
-            // signature (smkokoro.h); the returned Symbol borrows `lib`.
-            let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"smk_diarize\0") }
-                .map_err(|e| format!("smk_diarize symbol: {e}"))?;
-            // The shim borrows the JSON to our sink, which copies it out (no smk_free_str).
+            // SAFETY: `dsk_diarize` in the app-signed shim has exactly `DiarizeFn`'s
+            // signature (dskokoro.h); the returned Symbol borrows `lib`.
+            let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"dsk_diarize\0") }
+                .map_err(|e| format!("dsk_diarize symbol: {e}"))?;
+            // The shim borrows the JSON to our sink, which copies it out (no dsk_free_str).
             // The call blocks; `pcm` lives across it.
             // SAFETY: `pcm.as_ptr()`/`len()` describe a live buffer that outlives the
             // blocking call, and `ctx`/`cb` are the borrowed-result pair `collect_str`
-            // supplies, fired synchronously per smkokoro.h's callback contract.
+            // supplies, fired synchronously per dskokoro.h's callback contract.
             let json = ds_model::shim::collect_str(|ctx, cb| unsafe {
                 dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
-            .map_err(|rc| format!("smk_diarize failed (rc={rc})"))?;
+            .map_err(|rc| format!("dsk_diarize failed (rc={rc})"))?;
             parse_output(&json)
         }
 
@@ -278,19 +278,19 @@ mod coreml_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
-            // SAFETY: `smk_diar_embed` in the app-signed shim has exactly `EmbedFn`'s
-            // signature (smkokoro.h); the returned Symbol borrows `lib`.
-            let ex: Symbol<EmbedFn> = unsafe { lib.get(b"smk_diar_embed\0") }
-                .map_err(|e| format!("smk_diar_embed symbol: {e}"))?;
-            // The shim borrows the embedding to our sink, which copies it out (no smk_free).
+            // SAFETY: `dsk_diar_embed` in the app-signed shim has exactly `EmbedFn`'s
+            // signature (dskokoro.h); the returned Symbol borrows `lib`.
+            let ex: Symbol<EmbedFn> = unsafe { lib.get(b"dsk_diar_embed\0") }
+                .map_err(|e| format!("dsk_diar_embed symbol: {e}"))?;
+            // The shim borrows the embedding to our sink, which copies it out (no dsk_free).
             // The call blocks; `pcm` lives across it.
             // SAFETY: `pcm.as_ptr()`/`len()` describe a live buffer that outlives the
             // blocking call, and `ctx`/`cb` are the borrowed-result pair `collect_pcm`
-            // supplies, fired synchronously per smkokoro.h's callback contract.
+            // supplies, fired synchronously per dskokoro.h's callback contract.
             let emb = ds_model::shim::collect_pcm(|ctx, cb| unsafe {
                 ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
-            .map_err(|rc| format!("smk_diar_embed failed (rc={rc})"))?;
+            .map_err(|rc| format!("dsk_diar_embed failed (rc={rc})"))?;
             if emb.is_empty() {
                 return Err("embed: empty embedding".into());
             }
@@ -300,17 +300,17 @@ mod coreml_impl {
         fn download(&mut self) -> Result<(), String> {
             self.ensure_lib()?;
             let lib = self.lib.as_ref().expect("lib opened above");
-            // SAFETY: `smk_diar_download` is looked up by NUL-terminated name from the
-            // app-signed shim and has exactly `DownloadFn`'s signature (smkokoro.h — no
+            // SAFETY: `dsk_diar_download` is looked up by NUL-terminated name from the
+            // app-signed shim and has exactly `DownloadFn`'s signature (dskokoro.h — no
             // arguments); the Symbol borrows `lib`.
             let rc = unsafe {
                 let dl: Symbol<DownloadFn> = lib
-                    .get(b"smk_diar_download\0")
-                    .map_err(|e| format!("smk_diar_download symbol: {e}"))?;
+                    .get(b"dsk_diar_download\0")
+                    .map_err(|e| format!("dsk_diar_download symbol: {e}"))?;
                 dl()
             };
             if rc != 0 {
-                return Err(format!("smk_diar_download failed (rc={rc})"));
+                return Err(format!("dsk_diar_download failed (rc={rc})"));
             }
             Ok(())
         }
@@ -322,7 +322,7 @@ mod coreml_impl {
             if let Some(lib) = &self.lib {
                 // SAFETY: idempotent shim shutdown.
                 unsafe {
-                    if let Ok(sd) = lib.get::<DiarShutdownFn>(b"smk_diar_shutdown\0") {
+                    if let Ok(sd) = lib.get::<DiarShutdownFn>(b"dsk_diar_shutdown\0") {
                         sd();
                     }
                 }

@@ -1,6 +1,6 @@
-//! Smoke-test the FluidAudio Core ML / ANE Kokoro backend (the libsmkokoro shim).
-//! Requires SMKOKORO_DYLIB_PATH to point at a built libsmkokoro.dylib.
-//!   SMKOKORO_DYLIB_PATH=.../libsmkokoro.dylib \
+//! Smoke-test the FluidAudio Core ML / ANE Kokoro backend (the libdskokoro shim).
+//! Requires DSKOKORO_DYLIB_PATH to point at a built libdskokoro.dylib.
+//!   DSKOKORO_DYLIB_PATH=.../libdskokoro.dylib \
 //!     cargo run -q --release -p ds-tts --example ane_check
 //!
 //! macOS-only: the Core ML backend (`ds_tts::synth_coreml`) is `#[cfg(target_os = "macos")]`,

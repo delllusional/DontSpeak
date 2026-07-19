@@ -26,9 +26,9 @@ apps/macos/models/
 # build --locked against it, so keep it out of this ignore list.
 target/
 
-# macOS SmKokoro Swift package smoke-test artifacts
-apps/macos/SmKokoro/ctest*
-apps/macos/SmKokoro/*.wav
+# macOS DsKokoro Swift package smoke-test artifacts
+apps/macos/DsKokoro/ctest*
+apps/macos/DsKokoro/*.wav
 
 # Windows installer build artifacts
 apps/windows/installer/payload/

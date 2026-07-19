@@ -1,9 +1,9 @@
 //! Manual on-device check for the Core ML diarizer: feed a WAV file straight into
 //! [`ds_stt::diarize::CoremlDiarizer`] (bypassing the mic) and print the speaker
-//! segments. macOS only — needs `SMKOKORO_DYLIB_PATH` pointing at a built
-//! `libsmkokoro.dylib`; the Pyannote + WeSpeaker models download on first run.
+//! segments. macOS only — needs `DSKOKORO_DYLIB_PATH` pointing at a built
+//! `libdskokoro.dylib`; the Pyannote + WeSpeaker models download on first run.
 //!
-//!   SMKOKORO_DYLIB_PATH=…/libsmkokoro.dylib \
+//!   DSKOKORO_DYLIB_PATH=…/libdskokoro.dylib \
 //!     cargo run -p ds-stt --example diarize_wav -- /path/to/two-speakers.wav
 
 #[cfg(target_os = "macos")]
@@ -11,11 +11,11 @@ fn main() {
     use ds_stt::diarize::{CoremlDiarizer, Diarizer};
 
     let path = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: diarize_wav <file.wav>  (needs SMKOKORO_DYLIB_PATH)");
+        eprintln!("usage: diarize_wav <file.wav>  (needs DSKOKORO_DYLIB_PATH)");
         std::process::exit(2);
     });
-    if std::env::var_os("SMKOKORO_DYLIB_PATH").is_none() {
-        eprintln!("SMKOKORO_DYLIB_PATH is not set — point it at a built libsmkokoro.dylib");
+    if std::env::var_os("DSKOKORO_DYLIB_PATH").is_none() {
+        eprintln!("DSKOKORO_DYLIB_PATH is not set — point it at a built libdskokoro.dylib");
         std::process::exit(2);
     }
     // Optional 2nd arg: clustering threshold (0.5–0.9, lower = more speakers); 0 = default.

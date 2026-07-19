@@ -59,7 +59,7 @@ BART is frontend, not ONNX-synth-only — Core ML path still needs ORT
 
 **ONNX:** chunk → token IDs → style row → pad → shared ORT → PCM commit per batch.
 
-**Apple Core ML:** `SmKokoro` / `smk_synthesize_phonemes` — caller IPA only; 24 kHz;
+**Apple Core ML:** `DsKokoro` / `dsk_synthesize_phonemes` — caller IPA only; 24 kHz;
 sync non-null PCM callback; null callback rejected.
 
 ## Queue and focus

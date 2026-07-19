@@ -62,26 +62,26 @@ compile_icon() {
   legacy_icns "$out"
 }
 
-# build_smkokoro_dylib SWARCH — both arches (System STT on Intel). Path on stdout or empty.
-build_smkokoro_dylib() {
+# build_dskokoro_dylib SWARCH — both arches (System STT on Intel). Path on stdout or empty.
+build_dskokoro_dylib() {
   local swarch="$1"
-  local pkg="$BUNDLE_LIB_DIR/SmKokoro"
-  if ! swift_build_resilient "$pkg" -c release --arch "$swarch" --product smkokoro >&2; then
-    echo "   WARN: libsmkokoro build failed — apple-native backends unavailable in this build" >&2
+  local pkg="$BUNDLE_LIB_DIR/DsKokoro"
+  if ! swift_build_resilient "$pkg" -c release --arch "$swarch" --product dskokoro >&2; then
+    echo "   WARN: libdskokoro build failed — apple-native backends unavailable in this build" >&2
     return 0
   fi
   local bin
-  bin="$(cd "$pkg" && swift build -c release --arch "$swarch" --product smkokoro --show-bin-path 2>/dev/null)"
+  bin="$(cd "$pkg" && swift build -c release --arch "$swarch" --product dskokoro --show-bin-path 2>/dev/null)"
   # if/else not bare && — missing file must not kill set -e with empty contract.
-  if [ -f "$bin/libsmkokoro.dylib" ]; then
-    echo "$bin/libsmkokoro.dylib"
+  if [ -f "$bin/libdskokoro.dylib" ]; then
+    echo "$bin/libdskokoro.dylib"
   else
-    echo "   WARN: libsmkokoro.dylib missing after build — apple-native TTS not bundled" >&2
+    echo "   WARN: libdskokoro.dylib missing after build — apple-native TTS not bundled" >&2
   fi
 }
 
 # assemble_app: 1 app 2 exe 3 helper 4 car 5 icns 6 plist 7 menubar_svg 8 sign
-# Optional DONTSPEAK_SMKOKORO_DYLIB, DONTSPEAK_CLI_BIN.
+# Optional DONTSPEAK_DSKOKORO_DYLIB, DONTSPEAK_CLI_BIN.
 assemble_app() {
   local app="$1" exe="$2" helper="$3" car="$4" icns="$5" plist="$6" mbsvg="$7" sign="$8"
   local repo; repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -97,11 +97,11 @@ assemble_app() {
     cp "$cli" "$app/Contents/Helpers/dontspeak"
     echo "   bundled dontspeak CLI ← $cli"
   fi
-  local smk="${DONTSPEAK_SMKOKORO_DYLIB:-}"
-  if [ -n "$smk" ] && [ -f "$smk" ]; then
+  local dsk="${DONTSPEAK_DSKOKORO_DYLIB:-}"
+  if [ -n "$dsk" ] && [ -f "$dsk" ]; then
     mkdir -p "$app/Contents/Frameworks"
-    cp "$smk" "$app/Contents/Frameworks/libsmkokoro.dylib"
-    echo "   bundled libsmkokoro ← $smk"
+    cp "$dsk" "$app/Contents/Frameworks/libdskokoro.dylib"
+    echo "   bundled libdskokoro ← $dsk"
   fi
   cp "$plist"  "$app/Contents/Info.plist"
   plutil -replace CFBundleShortVersionString -string "$(product_version)" "$app/Contents/Info.plist"
@@ -165,8 +165,8 @@ sign_app_dist() {
   local opts=(--force --options runtime --timestamp --sign "$sign")
   [ -f "$app/Contents/Frameworks/libonnxruntime.dylib" ] &&
     codesign "${opts[@]}" "$app/Contents/Frameworks/libonnxruntime.dylib"
-  [ -f "$app/Contents/Frameworks/libsmkokoro.dylib" ] &&
-    codesign "${opts[@]}" "$app/Contents/Frameworks/libsmkokoro.dylib"
+  [ -f "$app/Contents/Frameworks/libdskokoro.dylib" ] &&
+    codesign "${opts[@]}" "$app/Contents/Frameworks/libdskokoro.dylib"
   codesign "${opts[@]}" --entitlements "$ent" "$app/Contents/MacOS/ds-helper"
   [ -f "$app/Contents/Helpers/dontspeak" ] &&
     codesign "${opts[@]}" "$app/Contents/Helpers/dontspeak"
