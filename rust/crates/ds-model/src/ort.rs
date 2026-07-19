@@ -46,11 +46,9 @@ pub(crate) struct OrtDist {
 /// it in <1 s. Kokoro/Parakeet are unaffected (backward-compatible; on Apple Silicon they
 /// run on Core ML / ANE, not this dylib, anyway).
 pub(crate) fn onnxruntime_dist() -> Option<OrtDist> {
+    // Official Microsoft dynamic ORT only (pyke ships static `.a` — load-dynamic can't dlopen).
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        // Microsoft's official release ships the DYNAMIC libonnxruntime.dylib.
-        // (The pyke ortrs archive ships only a STATIC libonnxruntime.a, which
-        // ort's `load-dynamic` cannot dlopen.)
         return Some(OrtDist {
             url: crate::urls::ONNXRUNTIME_DIST_URL,
             archive_sha256: crate::urls::ONNXRUNTIME_DIST_SHA256,
@@ -58,8 +56,6 @@ pub(crate) fn onnxruntime_dist() -> Option<OrtDist> {
     }
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
-        // Microsoft's official win-x64 build — a .zip whose lib/onnxruntime.dll is
-        // the dynamic runtime `ort` (load-dynamic) dlopens via ORT_DYLIB_PATH.
         return Some(OrtDist {
             url: crate::urls::ONNXRUNTIME_DIST_URL,
             archive_sha256: crate::urls::ONNXRUNTIME_DIST_SHA256,
@@ -67,8 +63,6 @@ pub(crate) fn onnxruntime_dist() -> Option<OrtDist> {
     }
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
     {
-        // Microsoft's official win-arm64 build — same .zip layout (lib/onnxruntime.dll) as
-        // win-x64, dlopened by `ort` (load-dynamic). Native ARM64, no x64 emulation.
         return Some(OrtDist {
             url: crate::urls::ONNXRUNTIME_DIST_URL,
             archive_sha256: crate::urls::ONNXRUNTIME_DIST_SHA256,
@@ -76,8 +70,6 @@ pub(crate) fn onnxruntime_dist() -> Option<OrtDist> {
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        // Microsoft's official linux-x64 build — a .tgz whose lib/libonnxruntime.so.1.27.0 is
-        // the dynamic runtime `ort` (load-dynamic) dlopens via ORT_DYLIB_PATH.
         return Some(OrtDist {
             url: crate::urls::ONNXRUNTIME_DIST_URL,
             archive_sha256: crate::urls::ONNXRUNTIME_DIST_SHA256,
@@ -85,14 +77,12 @@ pub(crate) fn onnxruntime_dist() -> Option<OrtDist> {
     }
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
-        // Microsoft's official linux-aarch64 build — same .tgz layout as linux-x64.
         return Some(OrtDist {
             url: crate::urls::ONNXRUNTIME_DIST_URL,
             archive_sha256: crate::urls::ONNXRUNTIME_DIST_SHA256,
         });
     }
-    // Intel macOS / other arches: no pinned dynamic dist → route B (build ort with
-    // `download-binaries`, or set ORT_DYLIB_PATH manually).
+    // Intel macOS / other: no pin → route B (`download-binaries` or manual ORT_DYLIB_PATH).
     #[allow(unreachable_code)]
     None
 }
@@ -111,11 +101,7 @@ pub fn onnxruntime_dylib_path() -> Option<PathBuf> {
         return Some(p);
     }
     let downloaded = model_path(onnxruntime_dylib_file());
-    // Intel macOS is the one shipped platform with NO pinned dist to download (Microsoft
-    // publishes arm64-only macOS archives since 1.2x) — fall back to a Homebrew-installed
-    // runtime when nothing is downloaded. Resolved in ds-config so the loader and the
-    // engine-usability gate share ONE source; returns `None` on platforms with a pinned dist,
-    // where the SHA-pinned official bytes stay the source of truth.
+    // Intel macOS: no pinned dist; brew path from ds-config (shared with usability gate).
     if !downloaded.as_deref().is_some_and(|p| p.is_file())
         && let Some(brew) = ds_config::brew_onnxruntime_dylib()
     {
@@ -141,21 +127,12 @@ fn has_supported_macos_dylib_id(mut reader: impl std::io::Read) -> bool {
         .any(|window| window == NEEDLE)
 }
 
-/// CHEAP check that the on-disk onnxruntime dylib is the version `ort` needs.
+/// Cheap gate that the on-disk dylib matches what `ort` needs (status-poll safe).
 ///
-/// A WRONG-version dylib (e.g. a stale 1.22) `dlopen`s fine, but `GetApi(24)` then
-/// returns NULL and `ort` rc.12 RE-ENTERS its `api()` OnceLock while building the
-/// error → a self-deadlock (the engine's warm child hangs before READY, in a
-/// respawn loop). So we reject a mismatched dylib BEFORE handing it to `ort`. We
-/// scan a bounded Mach-O header region (load commands, where `LC_ID_DYLIB` lives),
-/// cheap enough for the status-poll path while allowing unusually large headers.
-///
-/// NAMING NOTE: onnxruntime ≥ 1.25 ships a MAJOR-ONLY `LC_ID_DYLIB`
-/// (`libonnxruntime.1.dylib`) — the full `1.27.0` string lives deep in the binary, not the
-/// cheap-to-read header. Older 1.24.x used the FULL `libonnxruntime.1.24.2.dylib`. So we
-/// match the major-only id: it accepts our pinned new-style 1.27 dylib and REJECTS an
-/// old-style full-version dylib (e.g. a stale 1.24.2), which then triggers a re-download.
-/// A precise version is enforced upstream by the SHA-256-pinned archive `ensure` downloads.
+/// Wrong-version dylib dlopens fine, but `GetApi(24)` NULL + ort rc.12 re-enters
+/// `api()` OnceLock → self-deadlock (warm child hangs before READY). Reject before
+/// `ort` loads. macOS: scan Mach-O for major-only `LC_ID_DYLIB` (`libonnxruntime.1.dylib`
+/// since ≥1.25; full `1.24.x` id rejected → re-download). Exact pin is archive SHA-256.
 pub fn is_onnxruntime_dylib_version_ok() -> bool {
     let Some(path) = onnxruntime_dylib_path() else {
         return false;
@@ -169,24 +146,14 @@ pub fn is_onnxruntime_dylib_version_ok() -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        // Windows/Linux: the dll/.so is extracted from the SHA-pinned
-        // ONNXRUNTIME_VERSION package into this managed path, so its PRESENCE
-        // implies the right version — there is no embedded dylib-id string to scan,
-        // and re-reading a 16 MB Windows dll on every status poll would be wasteful.
+        // Managed SHA-pinned extract: presence implies version; no id string to scan.
         path.is_file()
     }
 }
 
-/// Resolve the onnxruntime dylib, verify it's the version `ort` needs, and point
-/// `ort` (load-dynamic) at it via `ORT_DYLIB_PATH`. The SINGLE bootstrap shared by
-/// every in-process ONNX backend — Kokoro-ONNX (TTS) and Parakeet-ONNX (STT) — so
-/// the resolve + version-gate + the exact error string live in ONE place. Returns
-/// the dylib path on success, or a user-facing error (no dylib / wrong version).
-///
-/// Rejecting a wrong-version dylib BEFORE `ort` touches it is load-bearing: a
-/// mismatched `GetApi` makes ort rc.12 self-deadlock (it re-enters its `api`
-/// OnceLock) instead of erroring. The Windows-CUDA path resolves a different
-/// (GPU) dylib itself and sets `ORT_DYLIB_PATH` after; it doesn't use this.
+/// Single ORT bootstrap for in-process ONNX (Kokoro TTS + Parakeet STT): resolve,
+/// version-gate, set `ORT_DYLIB_PATH`. Wrong version before `ort` = deadlock (see
+/// [`is_onnxruntime_dylib_version_ok`]). Windows CUDA sets its own GPU dylib after.
 pub fn ensure_ort_dylib() -> Result<PathBuf, String> {
     let path = onnxruntime_dylib_path().ok_or("cannot resolve onnxruntime dylib path")?;
     if !is_onnxruntime_dylib_version_ok() {
@@ -198,18 +165,9 @@ pub fn ensure_ort_dylib() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Resolve the onnxruntime dylib for an in-process ONNX engine and point `ort` at it,
-/// choosing the Windows CUDA **GPU** runtime when `want_gpu` AND that runtime is present,
-/// else the CPU (version-gated) dylib. On the GPU path it also prepends the CUDA DLL dir
-/// to `PATH` exactly once (the Windows loader resolves the CUDA/cuDNN DLLs from there).
-/// Returns the chosen dylib path.
-///
-/// The SINGLE GPU-aware ORT bootstrap shared by BOTH ONNX engines — Kokoro (TTS, via the
-/// warm helper's `load_synth`) and Parakeet (STT, via `ParakeetTranscriber`). They run in
-/// ONE warm-helper process over ONE ort runtime, so routing both through here keeps their
-/// CUDA path identical: whichever loads first `dlopen`s the GPU onnxruntime and the other
-/// reuses it. Falls back to [`ensure_ort_dylib`] (CPU + version gate) whenever GPU isn't
-/// wanted/available, so it never breaks dictation or playback.
+/// GPU-aware ORT bootstrap (Kokoro + Parakeet share one process / one runtime):
+/// CUDA dylib when `want_gpu` and runtime present (Windows: set CUDA DLL dir once),
+/// else [`ensure_ort_dylib`]. First loader wins; second reuses.
 pub fn ensure_ort_dylib_gpu(want_gpu: bool) -> Result<PathBuf, String> {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     if want_gpu
@@ -246,7 +204,6 @@ pub fn ensure_ort_dylib_gpu(want_gpu: bool) -> Result<PathBuf, String> {
         && is_cuda_runtime_present()
         && let Some(gpu_so) = cuda_onnxruntime_path()
     {
-        // Make the CUDA dependency libs resolvable for the provider plugin ORT will dlopen.
         if let Some(dir) = cuda_runtime_dir() {
             preload_cuda_libs(&dir);
         }
@@ -294,37 +251,24 @@ fn preload_cuda_libs(dir: &std::path::Path) {
                 let Ok(c) = CString::new(p.as_os_str().as_bytes()) else {
                     return false;
                 };
-                // RTLD_NOW so a success means every dep resolved; RTLD_GLOBAL so the symbols are
-                // visible to the provider plugin ORT loads later.
-                //
-                // SAFETY: `c` is a valid NUL-terminated CString alive across the call;
-                // the returned handle is deliberately never dlclose'd — the point is
-                // keeping the RTLD_GLOBAL symbols resident for ORT's later dlopen.
+                // SAFETY: `c` NUL-terminated for the call; never dlclose — keep RTLD_GLOBAL
+                // symbols resident for ORT's later provider dlopen (RTLD_NOW = deps resolved).
                 let h = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
-                h.is_null() // keep (retry next pass) if it failed
+                h.is_null() // retry next pass on failure
             });
             if pending.is_empty() || pending.len() == before {
-                break; // all loaded, or no further progress
+                break;
             }
         }
     });
 }
 
-/// Make an ORT [`SessionBuilder`](ort::session::builder::SessionBuilder) with the CUDA execution
-/// provider registered, and the [`RealizedProvider`](ds_config::RealizedProvider) it loaded on. THE
-/// single GPU-aware session-builder shared by Kokoro TTS (`ds_tts::synth`) and Parakeet STT
-/// (`ds_stt::streaming`), so the CUDA-EP registration + CPU fallback lives in ONE place instead of
-/// being copy-pasted per engine — the two can't drift into different GPU behavior.
+/// Shared CUDA session builder for Kokoro TTS + Parakeet STT (single EP + CPU fallback).
 ///
-/// It only ATTEMPTS CUDA when `want_gpu` AND the GPU runtime + NVIDIA driver are actually present
-/// (the SAME gate [`ensure_ort_dylib_gpu`] uses to pick the GPU dylib). This is load-bearing for
-/// HONESTY: `resolved_*_provider` returns `cuda` on every x64 box as a static preference, so without
-/// this gate a CPU-only user (no ~1.5 GB GPU runtime) would report `Cuda` while the session actually
-/// ran on CPU — the "UI claims CUDA but runs CPU" trap. Gated, a returned `Cuda` means the runtime +
-/// driver are installed AND the EP registered. When the runtime IS present but the EP still fails
-/// (driver/runtime mismatch, provider-DLL init — Win32 1114) the REAL ort error is logged before the
-/// CPU fallback, so that genuine failure stays diagnosable. `want_gpu` is ignored off Windows/Linux-
-/// x64 (no CUDA EP there); the caller's macOS Core ML path is separate.
+/// Attempts CUDA only when `want_gpu` and runtime + driver present (same gate as
+/// [`ensure_ort_dylib_gpu`]). Static preference alone would report `Cuda` on CPU-only
+/// boxes; gated, `Cuda` means EP registered. EP fail with runtime present logs real ort
+/// error then falls back. Off Windows/Linux-x64: CPU only.
 pub fn cuda_session_builder(
     want_gpu: bool,
 ) -> Result<
@@ -341,15 +285,10 @@ pub fn cuda_session_builder(
     ))]
     if want_gpu && is_cuda_runtime_present() && is_cuda_driver_present() {
         use ort::execution_providers::CUDAExecutionProvider;
-        // ort's builder methods return the builder INSIDE their error (for recovery), so chain
-        // them with `?` in a closure that yields ort::Result and match on the whole GPU attempt.
+        // Chain builders in a closure: ort returns the builder inside Err for recovery.
         match (|| -> ort::Result<_> {
             let b = ort::session::Session::builder()?;
-            // `.error_on_failure()`: WITHOUT it, ort registers the CUDA EP best-effort and returns
-            // Ok even when registration SOFT-fails (device/provider unavailable), so the session
-            // would silently commit on CPU while we returned `Cuda` — a mislabel. With it, a
-            // registration failure propagates as `Err`, so the CPU fallback below fires AND the token
-            // returned is honestly `Cpu`.
+            // `error_on_failure`: soft EP fail would Ok+CPU while we return `Cuda`.
             Ok(b.with_execution_providers([CUDAExecutionProvider::default()
                 .build()
                 .error_on_failure()])?)
@@ -365,46 +304,26 @@ pub fn cuda_session_builder(
     Ok((b, RealizedProvider::Cpu))
 }
 
-/// Point `ort` (load-dynamic) at `path` by writing `ORT_DYLIB_PATH`. The SINGLE
-/// place this env var is set: [`ensure_ort_dylib`] routes the CPU/version-gated
-/// dylib through here, and the Windows-CUDA path (which resolves its own GPU dylib,
-/// bypassing the version gate) calls this directly — so the one `unsafe set_var`
-/// and its threading argument live in ONE spot instead of being duplicated per
-/// in-process ONNX backend. Call BEFORE the first ort session is built; idempotent.
+/// Sole writer of `ORT_DYLIB_PATH` (CPU path + Windows CUDA). Call before first session.
 pub fn set_ort_dylib_path(path: &std::path::Path) {
-    // SERIALIZED behind a Once: TTS (Kokoro) and STT (Parakeet) now warm up on PARALLEL
-    // threads, and BOTH route their ort bootstrap through here — so the env write must happen
-    // at most once and never concurrently (`set_var` is not thread-safe; a concurrent write +
-    // ort's lazy read of ORT_DYLIB_PATH would be a data race / UB). The dylib path is
-    // deterministic per process (both engines load the SAME runtime), so first-wins is correct.
+    // Once: TTS/STT warm in parallel; concurrent `set_var` + ort's lazy read is UB.
+    // Path is deterministic per process — first-wins.
     static DYLIB_ONCE: std::sync::Once = std::sync::Once::new();
     DYLIB_ONCE.call_once(|| {
-        // SAFETY: the Once guarantees this runs exactly once and never races another writer
-        // of ORT_DYLIB_PATH; ort reads the var lazily when it builds its first session.
+        // SAFETY: Once = single writer; ort reads ORT_DYLIB_PATH lazily on first session.
         unsafe { std::env::set_var("ORT_DYLIB_PATH", path) };
     });
 }
 
-/// Sidecar marker written next to the DOWNLOADED onnxruntime dylib (under `model_dir()`)
-/// holding the exact [`ONNXRUNTIME_VERSION`] that was fetched. Bare existence of the dylib
-/// isn't enough to prove it's current: after a version bump, the naming convention macOS
-/// embeds in the dylib's own Mach-O header (`libonnxruntime.1.dylib`) stays IDENTICAL across
-/// every 1.x release (see `is_onnxruntime_dylib_version_ok`'s NAMING NOTE), so neither a bare
-/// existence check nor that header scan can detect the bump on its own — a stale dylib would
-/// never get automatically (or, since `ensure_onnxruntime_with_progress` is what a manual
-/// re-download ultimately calls, even manually) re-fetched. This marker is the precise signal:
-/// written only right after a successful extract, and checked BEFORE treating the downloaded
-/// copy as up to date, so a version bump reliably triggers a re-fetch.
+/// Sidecar next to managed download: exact [`ONNXRUNTIME_VERSION`]. Mach-O major-only
+/// id is identical across 1.x, so existence/header alone never re-fetch after a pin bump.
 fn version_marker_path(dylib_path: &Path) -> PathBuf {
     let mut name = dylib_path.as_os_str().to_os_string();
     name.push(".ds-version");
     PathBuf::from(name)
 }
 
-/// True if `path` is a complete dylib WE downloaded+extracted AND its version marker
-/// (see [`version_marker_path`]) matches the currently pinned [`ONNXRUNTIME_VERSION`] — the
-/// gate [`ensure_onnxruntime_at`] uses to decide "already fetched" vs. "needs a (re)fetch".
-/// Pure/local (no `model_dir()` lookup) so tests can drive it against a fixture path.
+/// Managed extract + matching [`version_marker_path`] pin (fixture-friendly; no model_dir).
 fn is_managed_download_up_to_date(path: &Path) -> bool {
     path.is_file()
         && std::fs::read_to_string(version_marker_path(path))
@@ -412,14 +331,7 @@ fn is_managed_download_up_to_date(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
-/// True if `path` is a complete AND CURRENT onnxruntime dylib we can use without re-fetching —
-/// the gate [`ensure_onnxruntime_with_progress`] uses for its unlocked fast path. For the copy
-/// WE download+extract (`model_path(onnxruntime_dylib_file())`) this means
-/// [`is_managed_download_up_to_date`] (existence AND a matching version marker), so an
-/// `ONNXRUNTIME_VERSION` bump correctly invalidates a stale on-disk dylib. A bundled
-/// (`ORT_DYLIB_PATH` override, shipped signed+notarized with the app) or Homebrew-fallback
-/// dylib isn't extracted by us and carries no marker, so existence alone remains the right
-/// signal for those — this only applies the version gate to the path we actually manage.
+/// Fast-path "use this dylib": managed path needs version marker; bundled/brew = existence only.
 pub(crate) fn is_downloaded_onnxruntime_up_to_date(path: &Path) -> bool {
     match model_path(onnxruntime_dylib_file()) {
         Some(managed) if managed == path => is_managed_download_up_to_date(path),
@@ -442,10 +354,7 @@ pub fn ensure_onnxruntime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io:
     let final_path = onnxruntime_dylib_path().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve model_dir()")
     })?;
-    // Unlocked fast path: a version-matched managed download, or any bundled/brew dylib
-    // (existence alone — see `is_downloaded_onnxruntime_up_to_date`), is treated as present. A
-    // STALE managed download (marker missing/mismatched after an ONNXRUNTIME_VERSION bump)
-    // falls through to the fetch below instead of being trusted forever.
+    // Stale managed marker falls through to re-fetch.
     if is_downloaded_onnxruntime_up_to_date(&final_path) {
         return Ok(final_path);
     }
@@ -462,12 +371,8 @@ pub fn ensure_onnxruntime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io:
     Ok(final_path)
 }
 
-/// Destination/source-explicit core of [`ensure_onnxruntime_with_progress`] (split out so
-/// tests can drive it against a temp dir + a localhost archive without the real
-/// `model_dir()`/pinned dist). Serialized per destination via `file_flight`, like
-/// `ensure_at`: BOTH model setups pull this shared dylib, and with download targets
-/// running in parallel the second request must ATTACH to the fetch in flight (block,
-/// then find the file present below) instead of re-downloading the archive alongside it.
+/// Testable core of [`ensure_onnxruntime_with_progress`]. `file_flight` so parallel
+/// Kokoro/Parakeet setups attach to one in-flight extract.
 fn ensure_onnxruntime_at(
     final_path: &Path,
     url: &str,
@@ -476,11 +381,7 @@ fn ensure_onnxruntime_at(
 ) -> std::io::Result<()> {
     let flight = crate::download::file_flight(final_path);
     let _in_flight = flight.lock().unwrap();
-    // `final_path` IS the managed download target by contract (we're about to extract onto
-    // it) — the version-marker gate applies unconditionally here, not the bundled/brew
-    // fallback `is_downloaded_onnxruntime_up_to_date` uses (that distinction belongs to the
-    // OUTER `ensure_onnxruntime_with_progress`, whose `final_path` might resolve to a
-    // bundled/brew dylib we never reach this function for).
+    // Managed extract only here (outer path may be bundled/brew).
     if is_managed_download_up_to_date(final_path) {
         return Ok(());
     }
@@ -489,10 +390,7 @@ fn ensure_onnxruntime_at(
         .ok_or_else(|| std::io::Error::other("dylib path has no parent"))?;
     std::fs::create_dir_all(dir)?;
 
-    // Download the .tgz, verify ITS sha (the archive digest), extract the single
-    // dylib member — all under the SAME retry policy as the model files: transient
-    // failures (truncation/timeout/5xx) retry with backoff; permanent ones
-    // (complete-body sha mismatch / 404) fail fast.
+    // Same retry policy as model files (transient vs permanent).
     let retries = DEFAULT_RETRIES.max(1);
     let tmp_tgz = tempfile::NamedTempFile::new_in(dir)?;
     let mut state = DownloadState::default();
@@ -507,10 +405,7 @@ fn ensure_onnxruntime_at(
                 ));
             }
             extract_runtime_member(tmp_tgz.path(), final_path)?;
-            // Record the exact version just extracted so a LATER `ONNXRUNTIME_VERSION` bump
-            // is detected even though the Mach-O header naming convention can't distinguish
-            // it (see `version_marker_path`). Best-effort: a write failure here just means
-            // the next run re-fetches unnecessarily — the dylib itself is already correct.
+            // Best-effort marker; write fail only causes a later re-fetch.
             let _ = std::fs::write(version_marker_path(final_path), ONNXRUNTIME_VERSION);
             Ok(())
         })();

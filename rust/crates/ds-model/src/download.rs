@@ -135,7 +135,7 @@ fn ensure_at(
 
     let tmp = tempfile::NamedTempFile::new_in(dir)?;
 
-    // Corrupt prefetch → network once (don't re-copy bad bytes on retry).
+    // Bad prefetch: zero temp and fall through to network (once).
     if let Some(local) = prefetch_local(&spec.url) {
         copy_prefetched(&local, tmp.path(), progress)?;
         if verify_sha256(tmp.path(), &spec.sha256) {
@@ -375,25 +375,19 @@ fn download_once(
 ) -> std::io::Result<()> {
     let tmp = tempfile::NamedTempFile::new_in(dir)?;
 
-    // Installer path: a pre-downloaded copy exists locally — use it if it verifies.
-    // If the local copy is CORRUPT, fall through to a normal network fetch rather than
-    // failing the whole install on a bad temp blob (the installer's {tmp} download could
-    // be partial/damaged; the real bytes still download fine).
+    // Prefetch if it verifies; corrupt local → zero temp and network.
     if let Some(local) = prefetch_local(url) {
         copy_prefetched(&local, tmp.path(), progress)?;
         if verify_sha256(tmp.path(), expected_sha) {
             tmp.persist(final_path).map_err(|e| e.error)?;
             return Ok(());
         }
-        // Discard the bad copy and start the network path with a clean temp file.
         tmp.as_file().set_len(0)?;
     }
 
     download_to_network(url, tmp.path(), progress, &mut DownloadState::default())?;
 
-    // Verify the .part BEFORE renaming so a corrupt body never lands as final. A
-    // mismatch on a COMPLETE body (downloaded == total, or length unknown) is a
-    // genuine corrupt/stale-digest case → permanent (InvalidData), not retried.
+    // Verify before rename; complete-body mismatch → permanent InvalidData.
     if !verify_sha256(tmp.path(), expected_sha) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -401,22 +395,19 @@ fn download_once(
         ));
     }
 
-    // Atomic rename onto the final path.
     tmp.persist(final_path).map_err(|e| e.error)?;
     Ok(())
 }
 
 #[cfg(test)]
 fn download_to(url: &str, dest: &Path, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
-    // Installer path: copy the pre-downloaded archive (the caller verifies its sha).
     if let Some(local) = prefetch_local(url) {
         return copy_prefetched(&local, dest, progress);
     }
     download_to_network(url, dest, progress, &mut DownloadState::default())
 }
 
-/// GET `url` into `dest` without checksum verification, retaining the response validator across
-/// caller-owned retries. Archive and Core ML callers verify before atomic extraction or rename.
+/// GET into `dest` (no checksum); retains validator across retries. Callers verify before land.
 pub(crate) fn download_to_with_state(
     url: &str,
     dest: &Path,
@@ -446,8 +437,7 @@ fn download_to_network(
     let mut restarted_after_416 = false;
     let mut range_segments = 0;
     loop {
-        // Without a validator, Range cannot prove that the suffix belongs to the retained
-        // prefix. Keep checksum safety and fall back to a clean full request.
+        // Range needs a retained validator; otherwise full GET (checksum still gates land).
         if resume_from > 0 && state.validator.is_none() {
             std::fs::OpenOptions::new()
                 .write(true)

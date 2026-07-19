@@ -1,33 +1,19 @@
-//! OpenAI Codex CLI hooks (`~/.codex/config.toml`) — same event/stdin contract as Claude Code;
-//! TOML via `toml_edit`. Quote-free Windows commands ([`cmdline`](super::cmdline)).
+//! Codex hooks (`~/.codex/config.toml`) — Claude event/stdin contract; TOML via `toml_edit`.
+//! Quote-free Windows commands ([`cmdline`](super::cmdline)).
 //!
-//! Events:
-//! - `SessionStart` → `notify --greet-only` (plain `notify` would seed the streaming witness
-//!   and suppress Stop on hook-only clients; mid-turn uses `codex_stream` instead).
-//! - `UserPromptSubmit` → `notify` (MarkActive + session re-discovery) + `provide` (spec).
-//! - `Stop` → `notify` for non-streamed sessions (streamed witness stays silent).
+//! - SessionStart → `notify --greet-only` (plain notify seeds witness and silences Stop;
+//!   mid-turn uses `codex_stream`).
+//! - UserPromptSubmit → `notify` + sync `provide`.
+//! - Stop → `notify` when not mid-streamed.
 //!
-//! Additive/idempotent: "ours" = basename is `dontspeak` (`command_is_ours`), not substring.
+//! "Ours" = basename `dontspeak` ([`command_is_ours`]), not substring.
 
 use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
 use ds_client::ClientSource;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item as TomlItem, Table as TomlTable, value};
 
-/// Render one Codex hook command. Codex's command-hook schema is `command` /
-/// `command_windows` / `timeout` / `async` / `statusMessage` — there is NO `shell` field, so
-/// a spaced bin path cannot be pinned to a shell that tolerates quotes and must instead be
-/// made space-free (the 8.3 short name); see [`super::cmdline`].
-///
-/// We write the host's dialect into plain `command` rather than splitting it across
-/// `command`/`command_windows`: `dontspeak wire` runs ON the machine it is wiring, the bin
-/// path it embeds is that machine's absolute install path, and Codex resolves
-/// `command_windows.unwrap_or(command)` — so a second, non-host form would be dead weight
-/// carrying a path that doesn't exist on the other OS anyway. This matches what the Claude
-/// Code / Qwen JSON writers already do.
-///
-/// `client` is stamped on as a trailing `--client <token>` — the same uniform tail every other
-/// hook mechanism appends (see [`super::hooks::HookSpec::client`]), so the binary knows who
-/// invoked it. Quote-free by construction: the token is snake_case with no spaces.
+/// Host dialect into plain `command` (not `command`/`command_windows` split — wire runs on
+/// this machine; spaced path → 8.3, no `shell` field). Trailing `--client <token>`.
 fn codex_command(bin: &str, verb: &str, client: ClientSource) -> String {
     inline_command(
         host_inline_flavor(),
@@ -38,35 +24,21 @@ fn codex_command(bin: &str, verb: &str, client: ClientSource) -> String {
     .0
 }
 
-/// The `(event, [(verb, timeout)])` hooks we wire into Codex — ONE group per event, holding
-/// that event's inner hooks. Codex has no MessageDisplay hook stream, so the reply is voiced
-/// from `Stop` (unless the engine's app-server subscriber streamed it mid-turn); the
-/// narration spec is injected at `UserPromptSubmit` via the synchronous `provide` verb (its
-/// stdout `additionalContext` is read by Codex), alongside a `notify` sibling in the SAME
-/// group — mark-active routing + engine session re-discovery (see the module docs); and
-/// `SessionStart` greets with `--greet-only` — the flag skips the streaming-witness seed,
-/// which on a hook-only client would silence every `Stop` reply. Timeouts are SECONDS,
-/// and every entry runs SYNCHRONOUSLY: Codex SKIPS `async = true` hooks outright, so we never
-/// emit an `async` flag here (the UserPromptSubmit `notify` is a ~ms `MarkActive` ping, so a
-/// synchronous spawn per prompt is fine). That's also why SessionStart carries an explicit
-/// 30 s ceiling — the greet ping returns in milliseconds, and a tight bound beats inheriting
-/// Codex's 600 s default on a hook it blocks on.
+/// One group/event. No MessageDisplay — voice from Stop (or mid-turn app-server).
+/// Timeouts SECONDS; sync only (Codex skips `async = true`). SessionStart 30 s ceiling
+/// (vs Codex 600 s default) for a ms greet ping.
 const CODEX_HOOKS: &[(&str, &[(&str, i64)])] = &[
     ("SessionStart", &[("notify --greet-only", 30)]),
     ("UserPromptSubmit", &[("notify", 5), ("provide", 5)]),
     ("Stop", &[("notify", 1800)]),
 ];
 
-/// Why a [`merge_codex_hooks`]/[`strip_codex_hooks`] call could not apply. The caller must
-/// treat BOTH variants as a non-success: an unmergeable shape must NOT be reported as a
-/// silent success (it would claim the hooks were wired while wiring nothing).
+/// Merge/strip failure — both variants are non-success (no silent "wired" claim).
 #[derive(Debug)]
 pub enum CodexMergeError {
-    /// The file is not valid TOML (passes through `toml_edit`'s parse error).
+    /// Invalid TOML.
     Parse(toml_edit::TomlError),
-    /// The file is valid TOML, but `hooks` / `hooks.<event>` has a shape we can neither
-    /// append to nor safely coerce (e.g. `hooks = "x"`, or an event is a scalar). We do NOT
-    /// clobber the user's file; we report so the installer can warn instead of claiming success.
+    /// Valid TOML but `hooks` / `hooks.<event>` unappendable; leave file unchanged.
     UnmergeableShape(String),
 }
 
@@ -92,25 +64,8 @@ impl From<toml_edit::TomlError> for CodexMergeError {
     }
 }
 
-/// True if `cmd` (a Codex hook's `command` string) invokes OUR `dontspeak` binary — matched
-/// by the leading double-quoted path's basename (file stem), mirroring the Claude Code JSON
-/// path's `command_is_ours`. Deliberately NOT a substring match on the whole string: a
-/// user's own unrelated hook whose command merely happens to CONTAIN "dontspeak" (e.g. a
-/// personal script path component) must not be misidentified as ours — that misidentification
-/// was empirically reproduced to both silently skip wiring our real hook (merge sees the
-/// event as "already ours") AND make `strip_codex_hooks` delete the user's entire hook group
-/// on unwire.
-///
-/// Recognition is the SHARED [`super::cmdline::command_is_ours`] — deliberately NOT a local
-/// copy. It accepts every dialect we have ever written, which is what makes a re-wire
-/// self-heal: entries left by the old always-quoted Windows form are still seen as ours, so
-/// merge replaces them rather than appending a duplicate, and unwire still removes them.
-/// (The previous local copy required a LEADING QUOTE and used `std::path::Path`, so it
-/// recognised neither the quote-free Windows command we now emit nor a `\`-separated path on
-/// a non-Windows host.)
-///
-/// Does this inner hooks `Item` (the `[[hooks.<event>.hooks]]` array-of-tables OR an inline
-/// `hooks = [{…}]` array) hold a `command` referencing our `dontspeak` binary?
+/// Inner hooks hold our binary? Shared [`command_is_ours`] (all dialects; basename only —
+/// substring would skip re-wire and delete user groups on strip).
 fn inner_hooks_are_ours(item: &TomlItem) -> bool {
     let cmd_is_ours = |c: Option<&str>| c.is_some_and(command_is_ours);
     if let Some(aot) = item.as_array_of_tables() {
@@ -130,21 +85,11 @@ fn inner_hooks_are_ours(item: &TomlItem) -> bool {
     false
 }
 
-/// True if this `[[hooks.<event>]]` group is one of ours.
 fn codex_group_is_ours(group: &TomlTable) -> bool {
     group.get("hooks").is_some_and(inner_hooks_are_ours)
 }
 
-/// True if this `[[hooks.<event>]]` group is ALREADY exactly ours for this event's rendered
-/// `commands` — its inner command list is IDENTICAL (same commands, same order; a group may
-/// hold SEVERAL inner hooks now, e.g. UserPromptSubmit's notify + provide). Used to make a
-/// re-wire with an UNCHANGED `dontspeak` path a true byte-for-byte no-op (see
-/// `append_to_event`): only rebuild the group when something actually differs, rather than
-/// unconditionally retain+push-ing an identical replacement every time (which would risk
-/// disturbing `toml_edit`'s formatting/decor and would rewrite the file on every plain
-/// re-wire even when nothing changed). Exact-list (not any-member) matching means an OLD
-/// one-verb group from a previous version correctly reads "differs" and is healed to the
-/// current two-verb shape on re-wire.
+/// Exact command list match → re-wire is byte-identical no-op; older one-verb shapes heal.
 fn codex_group_matches(group: &TomlTable, commands: &[String]) -> bool {
     group
         .get("hooks")
@@ -158,7 +103,7 @@ fn codex_group_matches(group: &TomlTable, commands: &[String]) -> bool {
         })
 }
 
-/// `codex_group_matches` for the inline-array element case (a user's `event = [{ hooks = … }]`).
+/// Inline-array form of [`codex_group_matches`].
 fn inner_hooks_value_matches(v: &toml_edit::Value, commands: &[String]) -> bool {
     if let Some(arr) = v.as_array() {
         let got: Vec<&str> = arr
@@ -174,8 +119,7 @@ fn inner_hooks_value_matches(v: &toml_edit::Value, commands: &[String]) -> bool 
     false
 }
 
-/// Build our group (`{ hooks = [[…]] }`) for this event's `(command, timeout)` list as a
-/// standalone table — one inner `[[hooks.<event>.hooks]]` table per command, in order.
+/// Our group: one inner hooks table per `(command, timeout)`.
 fn codex_our_group(commands: &[(String, i64)]) -> TomlTable {
     let mut inner_aot = ArrayOfTables::new();
     for (command, timeout) in commands {
@@ -190,8 +134,7 @@ fn codex_our_group(commands: &[(String, i64)]) -> TomlTable {
     group
 }
 
-/// Get-or-create the `[hooks]` table, returning `None` (→ UnmergeableShape) if `hooks` exists
-/// as a non-table scalar we must not clobber.
+/// Get-or-create `[hooks]`; non-table scalar → UnmergeableShape.
 fn hooks_table(doc: &mut DocumentMut) -> Result<&mut TomlTable, CodexMergeError> {
     if doc.get("hooks").is_none() {
         let mut t = TomlTable::new();
@@ -203,18 +146,8 @@ fn hooks_table(doc: &mut DocumentMut) -> Result<&mut TomlTable, CodexMergeError>
         .ok_or_else(|| CodexMergeError::UnmergeableShape("hooks".into()))
 }
 
-/// REPLACE-OURS + append our group into the `hooks.<event>` slot — handling both the
-/// array-of-tables form we write and a user's inline `<event> = [{…}]` array. Returns `Err`
-/// only for a scalar shape we can't coerce. Mirrors the Claude Code JSON path's
-/// `merge_hooks`: an existing group of ours on this event is REPLACED (not just left as
-/// "already wired") whenever its inner-command LIST differs from the freshly rendered one —
-/// so a re-wire after the resolved `dontspeak` binary path changes (an install-layout
-/// upgrade), OR after the wired verb set for the event changes (e.g. UserPromptSubmit
-/// growing its `notify` sibling), HEALS the group instead of leaving a stale one in place.
-/// When the list is UNCHANGED, the slot is left byte-for-byte untouched (a true no-op, not
-/// a rebuild-to-the-same-content) — `commands` are the exact strings `group` was built from
-/// (see `merge_codex_hooks`), used only for that identical-content check. A user's own
-/// unrelated hook on the same event is never touched either way.
+/// Replace-ours into `hooks.<event>` (array-of-tables or inline array). Exact list match →
+/// no-op; differ → heal. Scalar → UnmergeableShape. User groups on the event kept.
 fn append_to_event(
     htbl: &mut TomlTable,
     event: &str,
@@ -237,8 +170,6 @@ fn append_to_event(
                 }
                 Ok(())
             } else if let Some(arr) = item.as_array_mut() {
-                // User's inline `event = [{ hooks = … }]`: replace ours (if present and
-                // different) and append the freshly rendered inline table.
                 let already_current = arr.iter().any(|e| {
                     e.as_inline_table()
                         .and_then(|t| t.get("hooks"))
@@ -260,7 +191,7 @@ fn append_to_event(
     }
 }
 
-/// `inner_hooks_are_ours` for a `toml_edit::Value` (the inline-array element case).
+/// Inline-array form of [`inner_hooks_are_ours`].
 fn inner_hooks_are_ours_value(v: &toml_edit::Value) -> bool {
     if let Some(arr) = v.as_array() {
         return arr.iter().any(|e| {
@@ -273,7 +204,7 @@ fn inner_hooks_are_ours_value(v: &toml_edit::Value) -> bool {
     false
 }
 
-/// Render our standalone group `Table` as an inline `toml_edit::Value` (for the inline-array form).
+/// Group table → inline value (inline-array event form).
 fn group_to_inline(group: &TomlTable) -> toml_edit::Value {
     let mut inner_arr = Array::new();
     if let Some(aot) = group.get("hooks").and_then(|h| h.as_array_of_tables()) {
@@ -292,15 +223,8 @@ fn group_to_inline(group: &TomlTable) -> toml_edit::Value {
     toml_edit::Value::InlineTable(outer)
 }
 
-/// Merge DontSpeak's Codex hooks (SessionStart → notify --greet-only, UserPromptSubmit →
-/// notify + provide, Stop → notify) into a Codex
-/// `config.toml` (its text), preserving every other key. ADDITIVE + idempotent per event,
-/// and REPLACE-OURS (not keep-if-present, see `append_to_event`): a re-wire after the
-/// resolved `dontspeak` path changes — or after the per-event verb set changes — updates
-/// the existing group instead of leaving a stale, dead one in place. `bin` is the absolute
-/// path to the `dontspeak` binary; each command Codex runs is `"<bin>" <verb> --client <client>`.
-/// `client` is the [`ClientSource`] whose config this is (always `Codex` today — passed in
-/// rather than hardcoded, so this shaper stays client-agnostic like every other one).
+/// Merge Codex hooks into `config.toml` text. Additive + replace-ours (see `append_to_event`).
+/// `bin` absolute; each command = host dialect + verb + `--client <client>`.
 pub fn merge_codex_hooks(
     existing: &str,
     bin: &str,
@@ -325,15 +249,14 @@ pub fn merge_codex_hooks(
     Ok(doc.to_string())
 }
 
-/// Remove EVERY DontSpeak hook group from a Codex `config.toml`, across all events, dropping
-/// an event (and the `hooks` table) that becomes empty. Leaves all other config untouched.
+/// Strip our groups; prune empty events / empty `hooks`. Foreign keys kept.
 pub fn strip_codex_hooks(existing: &str) -> Result<String, CodexMergeError> {
     if existing.trim().is_empty() {
         return Ok(existing.to_string());
     }
     let mut doc: DocumentMut = existing.parse()?;
     let Some(htbl) = doc.get_mut("hooks").and_then(|h| h.as_table_mut()) else {
-        return Ok(doc.to_string()); // no `hooks` table (or a scalar) → nothing of ours
+        return Ok(doc.to_string());
     };
     let events: Vec<String> = htbl.iter().map(|(k, _)| k.to_string()).collect();
     for event in events {

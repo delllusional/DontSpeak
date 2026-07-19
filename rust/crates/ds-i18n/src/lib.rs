@@ -1,18 +1,16 @@
-//! Shared YAML catalog (`locales/*.yml`); English source + fallback. FFI via ds-core.
-//! App-rendered strings only (OS metadata stays native). Distinct keys for platform idioms.
+//! YAML catalog (`locales/*.yml`); English source + fallback. FFI via ds-core.
+//! App-rendered strings only; distinct keys for platform idioms.
 
 use std::sync::Once;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
-// First touch wins: explicit `set_locale` or OS detection. Once so a later lookup
-// can't re-run OS detection and clobber a UI choice.
+// First touch: set_locale or OS detect. Once — later lookup must not clobber UI choice.
 static INIT: Once = Once::new();
 
-/// OS language as active locale (best-effort); English fallback. At most once, lazy.
 fn init_from_os() {
     if let Some(loc) = sys_locale::get_locale() {
-        // rust-i18n matches language subtag, e.g. "de-DE" → "de".
+        // Language subtag: "de-DE" → "de".
         let lang = loc.split(['-', '_']).next().unwrap_or("en");
         rust_i18n::set_locale(lang);
     }
@@ -22,31 +20,29 @@ fn ensure_init() {
     INIT.call_once(init_from_os);
 }
 
-/// Set active locale (BCP-47 or bare language tag). Marks init done so OS won't override.
+/// BCP-47 or bare tag; marks init done so OS won't override.
 pub fn set_locale(locale: &str) {
     INIT.call_once(|| {});
     rust_i18n::set_locale(locale);
 }
 
-/// Active locale tag — so a UI number formatter can match the catalog language.
+/// Active locale (for UI number formatters).
 pub fn locale() -> String {
     ensure_init();
     rust_i18n::locale().to_string()
 }
 
-/// Look up `key` (English fallback). Missing key returns the key itself (visible gap).
+/// Lookup (English fallback). Missing key returns the key (visible gap).
 pub fn t(key: &str) -> String {
     ensure_init();
     rust_i18n::t!(key).to_string()
 }
 
-/// Look up `key` and interpolate `%{name}` from a JSON object. Caller formats numbers
-/// natively and passes them in — templates stay in the catalog.
+/// Lookup + `%{name}` from JSON. Caller formats numbers; templates stay in catalog.
 pub fn t_args_json(key: &str, args_json: &str) -> String {
     let s = t(key);
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(args_json)
     {
-        // rust-i18n's interpolator: unknown placeholders left intact.
         let mut patterns: Vec<&str> = Vec::with_capacity(map.len());
         let mut values: Vec<String> = Vec::with_capacity(map.len());
         for (k, v) in &map {
@@ -71,7 +67,6 @@ mod tests {
         assert_eq!(t("tray.quit"), "Quit");
         assert_eq!(t("common.nav_status"), "Status");
         assert_eq!(t("common.nav_agents"), "Agents");
-        // Missing key returns itself (visible gap, not blank).
         assert_eq!(t("nope.not.here"), "nope.not.here");
     }
 

@@ -1,12 +1,10 @@
-//! SINGLE source of truth for DontSpeak's tool catalog.
+//! Single source for DontSpeak's tool catalog.
 //!
-//! Tools + params authored once (`TOOLS`, display order); both consumer shapes GENERATED:
+//! Tools + params authored once (`TOOLS`); consumers generated:
+//! * [`catalog`] — MCP schemas + annotations
+//! * [`catalog_ui`] — ordered `params` for app FFI (authored order, not property key order)
 //!
-//! * [`catalog`] — MCP definitions (schemas + annotations).
-//! * [`catalog_ui`] — ordered `params` array for app FFI (`ds_tools_json`) — not unordered
-//!   JSON-Schema `properties`, so authored order survives to the UI.
-//!
-//! Dispatch lives in the MCP server; this crate is pure catalog data, no I/O.
+//! Pure catalog data; dispatch is in the MCP server.
 
 use serde_json::{Map, Value, json};
 
@@ -16,9 +14,7 @@ use descriptions::*;
 
 pub use set_config::SetConfigArgs;
 
-/// Diarization implemented but hidden pending issue #77 validation. One toggle hides it from
-/// every user-facing surface (MCP tools/list, set_config schema, Tools windows). Dispatch/
-/// config/engine still work when called directly — VISIBILITY gate, not a functional rip-out.
+/// Visibility gate (#77): hide diarize from MCP/list/UI; dispatch/config still work if called.
 pub const DIARIZATION_ENABLED: bool = false;
 
 const HIDDEN_TOOLS: &[&str] = &["diarize", "manage_speakers"];

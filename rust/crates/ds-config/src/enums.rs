@@ -9,19 +9,16 @@ use serde::{Deserialize, Deserializer};
 // Scalar engine enums: fail-open `de_*` (typo/absent → default). Set/ladder fields are
 // Vecs with their own deserializers; element enums here are the building blocks.
 
-/// STT backend token. Enum [`Default`] is `BuiltIn`; out-of-box walks `stt_engine_ladder`.
-/// Off is structural: `stt_engine = Some(vec![])`.
+/// STT backend token. Enum Default is `BuiltIn`; out-of-box walks `stt_engine_ladder`.
+/// Off: `stt_engine = Some(vec![])`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SttEngine {
-    /// Built-in local STT (FastConformer). Runtime via shared [`Provider`]. Token `built_in`.
-    /// Factory degrades to ClaudeCode if the model is missing.
+    /// Local FastConformer (`built_in`). Via [`Provider`]; factory → ClaudeCode if model missing.
     #[default]
     BuiltIn,
-    /// OS on-device STT (macOS SFSpeechRecognizer). Inert when unavailable — never silent
-    /// degrade to claude_code. Deferred on Windows/Linux.
+    /// OS on-device STT (macOS). Inert when unavailable (no silent fall to claude_code).
     System,
-    /// Claude Code dictation: READ keybindings for `voice:pushToTalk`, never write CC config.
-    /// Token `claude_code`.
+    /// CC dictation: read `voice:pushToTalk` only (`claude_code`).
     ClaudeCode,
 }
 
@@ -86,8 +83,7 @@ impl SttEngine {
     }
 }
 
-/// TTS backend. Config/wire TOKEN is `built_in` (mirror of STT); brand/model name stays
-/// `kokoro` in listings/`model_status` via [`brand`](TtsEngine::brand) only.
+/// TTS backend. Config token `built_in`; brand `kokoro` only via [`brand`](TtsEngine::brand).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TtsEngine {
     #[default]
@@ -150,7 +146,7 @@ impl TtsEngine {
         }
     }
 
-    /// Brand/model name for listings and status (`kokoro`/`system`) — not the config token.
+    /// Brand/model for listings/status (`kokoro`/`system`); config token is [`as_str`].
     pub fn brand(self) -> &'static str {
         match self {
             TtsEngine::BuiltIn => "kokoro",
@@ -221,20 +217,18 @@ impl DiarizerProvider {
     }
 }
 
-/// Shared on-device compute rung for Kokoro TTS and Parakeet STT. `provider: Vec` is a priority
-/// ladder (default ANE → CUDA → CPU). `Ort*` = ONNX Runtime EPs; `Ane` = FluidAudio native ANE
-/// (non-ort). Element default `OrtCpu`.
+/// Shared compute rung (TTS+STT). Ladder default ANE→CUDA→CPU. `Ort*` = ORT EPs;
+/// `Ane` = FluidAudio native ANE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Provider {
-    /// ONNX Runtime CPU EP — always available.
+    /// ORT CPU EP — always available.
     #[default]
     OrtCpu,
-    /// ONNX Runtime CUDA EP (NVIDIA). Both TTS and STT; may trigger GPU-runtime download.
-    /// STT int8 models may partially fall back per-op to CPU.
+    /// ORT CUDA (NVIDIA). May download GPU runtime; STT int8 may fall back per-op.
     OrtCuda,
-    /// ONNX Runtime CoreML EP (macOS). TTS only; explicit (slower than CPU for Kokoro).
+    /// ORT CoreML (macOS). TTS only; explicit (often slower than CPU for Kokoro).
     OrtCoreMl,
-    /// FluidAudio native Core ML on ANE — not `OrtCoreMl`. Both engines on macOS.
+    /// FluidAudio native ANE (distinct from `OrtCoreMl`). Both engines on macOS.
     Ane,
 }
 
@@ -298,20 +292,18 @@ impl Provider {
     }
 }
 
-/// ANE is Apple-Silicon only. Single source for STT and TTS usability — when they diverged,
-/// Intel mac ladders hit a dead `ane` rung and silently slowed down.
+/// ANE = Apple Silicon only. Shared STT/TTS predicate (diverged ladders left dead `ane` on Intel).
 fn ane_usable_on(os: &str, arch: &str) -> bool {
     os == "macos" && arch == "aarch64"
 }
 
-/// Does a preference token request NVIDIA GPU? Shared by TTS and STT load paths.
+/// Preference token asks for NVIDIA GPU? Shared TTS/STT load paths.
 pub fn provider_pref_wants_gpu(pref: &str) -> bool {
     pref.eq_ignore_ascii_case("cuda") || pref.eq_ignore_ascii_case("auto")
 }
 
-/// Realized backend a warm child actually loaded (`PROVIDER` / `STT_PROVIDER` wire).
-/// Distinct from config [`Provider`] (preference ladder); UPPERCASE tokens. Stringify once at
-/// IPC; status `parse`s and maps via `to_provider` so token typos are compile errors.
+/// Warm-child loaded backend (`PROVIDER`/`STT_PROVIDER`). Distinct from config [`Provider`];
+/// UPPERCASE. Stringify once at IPC; status maps via `to_provider` (typos = compile errors).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RealizedProvider {
     Cuda,
@@ -320,7 +312,7 @@ pub enum RealizedProvider {
     CoreMl,
     /// FluidAudio native ANE (macOS).
     CoreMlAne,
-    /// System STT recognizer (no ort).
+    /// System STT (no ort).
     System,
 }
 
@@ -336,7 +328,7 @@ impl RealizedProvider {
         }
     }
 
-    /// Wire token → self; unknown → Cpu (never a false GPU claim).
+    /// Wire token → self; unknown → Cpu (fail closed on GPU claim).
     pub fn parse(s: &str) -> Self {
         match s {
             "CUDA" => RealizedProvider::Cuda,
@@ -526,9 +518,8 @@ macro_rules! fail_open_vec {
     }};
 }
 
-/// Fail-open `exclude_clients`: array → `Some` known *clients* (deduped); non-array/`None` =
-/// all supported; `Some([])` = none. **`is_client()` is load-bearing** — without it
-/// `exclude_clients = ["dontspeak"]` would unwire ourselves (parse accepts non-clients).
+/// Fail-open `exclude_clients`: array → known clients (deduped); non-array/`None` → wire all;
+/// `Some([])` = none. **`is_client()` load-bearing** (parse accepts non-clients).
 /// Pinned by `exclude_clients_drops_non_client_tokens`.
 pub(crate) fn de_exclude_clients<'de, D>(d: D) -> Result<Option<Vec<ClientSource>>, D::Error>
 where
@@ -594,8 +585,7 @@ serialize_as_str!(DiarizerProvider);
 serialize_as_str!(NarrateKind);
 // `ClientSource` Serialize lives in `ds-client` (no macro there).
 
-/// Strict Deserialize: unknown → error (for `set_config`). Opposite of fail-open file path;
-/// only `SetConfigArgs` uses this; VoiceConfig fields pin `de_*`.
+/// Strict Deserialize: unknown → error (`set_config` only; VoiceConfig uses fail-open `de_*`).
 macro_rules! strict_de {
     ($ty:ty, $valid:literal) => {
         impl<'de> serde::Deserialize<'de> for $ty {

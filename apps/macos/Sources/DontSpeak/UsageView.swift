@@ -212,7 +212,6 @@ private struct UsageRowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            // Bottom-align period + remaining for a shared baseline.
             HStack(alignment: .lastTextBaseline) {
                 Text(periodTitle(row.period)).glassRowTitle()
                 Spacer(minLength: 8)

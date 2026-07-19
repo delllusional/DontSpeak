@@ -1,13 +1,8 @@
 //! Retry-on-transient-`NotFound` file read — shared by every model-file loader.
 //!
-//! A momentary external actor (AV/EDR scan, indexer) can make `std::fs::read` on an
-//! existing, correctly-sized model file spuriously fail with `NotFound` (os error 2)
-//! for a few dozen milliseconds. This is NOT a missing-file condition (the caller
-//! already established the file is present/downloaded) — it's a transient stat/open
-//! race, so a bounded retry clears it without the caller ever seeing an error. Any
-//! OTHER error kind (permissions, "is a directory", genuine corruption downstream)
-//! is NOT retried — it fails immediately, since retrying it would only delay a real
-//! failure by up to `attempts * delay`.
+//! AV/EDR or indexers can make `std::fs::read` on a present model file fail with
+//! `NotFound` for tens of ms (stat/open race after the caller already ensured download).
+//! Bounded retry absorbs that. Other error kinds fail immediately.
 
 use std::io;
 use std::path::Path;

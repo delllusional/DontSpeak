@@ -1,9 +1,9 @@
-//! Client-identity enum for wiring, hooks, `ds-ipc`, MCP, and log `client=`.
-//! Leaf crate: breaks `ds-log` ↔ `ds-config` cycle; `ds-ipc` stays light.
+//! Client identity for wiring, hooks, IPC, MCP, log `client=`.
+//! Leaf crate (breaks `ds-log` ↔ `ds-config` cycle).
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Wire-able clients in [`CLIENTS`]; also `DontSpeak` / `Unknown`.
+/// Wireable clients in [`CLIENTS`]; plus `DontSpeak` / `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ClientSource {
     ClaudeCode,
@@ -11,15 +11,15 @@ pub enum ClientSource {
     QwenCode,
     Grok,
     KimiCode,
-    /// Never wired (`client_spec` is `None`).
+    /// Internal; `client_spec` is always `None`.
     DontSpeak,
-    /// Domain value (not legacy) — foreign MCP / missing `--client`.
+    /// Foreign MCP / missing `--client`.
     #[default]
     Unknown,
 }
 
 impl ClientSource {
-    /// Wire-able clients in token order (registry drift-tested).
+    /// Wireable clients in token order (registry drift-tested).
     pub const CLIENTS: &'static [ClientSource] = &[
         ClientSource::ClaudeCode,
         ClientSource::Codex,
@@ -28,7 +28,7 @@ impl ClientSource {
         ClientSource::KimiCode,
     ];
 
-    /// Case/whitespace tolerant. Fail-open to Unknown at call sites.
+    /// Case/whitespace tolerant; `None` → call sites use Unknown.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "claude_code" => Some(ClientSource::ClaudeCode),
@@ -60,15 +60,13 @@ impl ClientSource {
     }
 }
 
-/// `as_str()` token (no `ds-config` macro).
 impl Serialize for ClientSource {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(self.as_str())
     }
 }
 
-/// Unknown token → [`ClientSource::Unknown`]; non-string errors. Absent field fails
-/// closed at `Request::source` (not here).
+/// Unknown token → [`ClientSource::Unknown`]. Absent field fails closed at `Request::source`.
 impl<'de> Deserialize<'de> for ClientSource {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;

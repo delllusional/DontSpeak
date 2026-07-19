@@ -1,20 +1,13 @@
-//! `dontspeak` — multi-call binary. No args: stdio MCP (or Grok bare-command hook when
-//! `GROK_HOOK_EVENT` is set). With a subcommand: client launcher, hook executor, or installer.
+//! Multi-call binary. No args: stdio MCP (or Grok bare hook via `GROK_HOOK_EVENT`).
+//! Subcommands: client launch, hooks, installer.
 //!
-//! MCP: newline-delimited JSON-RPC 2.0 on stdio (MCP 2025-11-25) + `ds-ipc` to the resident
-//! engine. Catalog in `ds_tools::catalog()`. `voices` is config-direct; config writes go
-//! through `set_config` / `config.toml` (engine mtime reload) — no per-session voice override.
+//! MCP: NDJSON-RPC 2.0 on stdio + `ds-ipc`. Catalog: `ds_tools::catalog()`. Config via
+//! `set_config` / mtime reload. Stdout = RPC only; log to stderr.
 //!
-//! Transport: stdout is JSON-RPC only; logging to stderr. One response per request id;
-//! notifications (no id) get none.
-//!
-//! Dispatch here; MCP in [`mcp`]; handlers in [`tools`]; hooks in [`hook_speak`] / [`hook_narrate`].
-// Console-subsystem on Windows: hook/MCP inherit stdio; `dontspeak <client>` must block the
-// shell with console attached to the interactive child. GUI-subsystem makes PowerShell return
-// immediately and race the prompt against the TUI.
-//
-// Tradeoff: console-subsystem child of a console-less GUI host briefly flashes a console
-// unless detached. `main` detaches for every role except `Launch`.
+//! Dispatch here; [`mcp`], [`tools`], [`hook_speak`] / [`hook_narrate`].
+// Windows console-subsystem: hooks/MCP inherit stdio; Launch blocks shell with console.
+// GUI-subsystem would race PowerShell prompt vs TUI. Detach every role except Launch
+// (console flash under console-less GUI host).
 
 mod client_launch;
 mod engine_launch;
@@ -28,7 +21,7 @@ mod voices;
 
 use ds_config::ClientSource;
 
-/// Roles argv\[1\] can select — pure so dispatch is unit-testable without stdio/spawns.
+/// Pure argv\[1\] roles (unit-testable without stdio/spawns).
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand<'a> {
     Notify,
@@ -37,17 +30,14 @@ enum Subcommand<'a> {
     Launch(ClientSource, &'a [String]),
     Version,
     Help,
-    /// Points at MCP `status`; no engine call.
+    /// MCP `status` path; no engine call.
     Status,
-    /// No argv\[1\]: stdio MCP (or Grok bare hook).
+    /// No argv\[1\]: stdio MCP / Grok bare hook.
     Server,
     Unknown(String),
 }
 
-/// `--client <token>` from wiring. Rides at argv\[2+\]; `resolve_subcommand` (argv\[1\]) undisturbed.
-///
-/// Unrecognised / missing / non-client ⇒ [`ClientSource::Unknown`] — never a hard error: hooks
-/// must degrade, never fail the client's turn.
+/// `--client` at argv\[2+\]. Unrecognised/missing → Unknown (hooks degrade, fail-open).
 fn client_from_argv(argv: &[String]) -> ClientSource {
     argv.iter()
         .position(|a| a == "--client")
@@ -57,13 +47,11 @@ fn client_from_argv(argv: &[String]) -> ClientSource {
         .unwrap_or(ClientSource::Unknown)
 }
 
-/// Pure argv\[1\] dispatch — no I/O, no `process::exit`.
 fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
     match argv.get(1).map(String::as_str) {
         Some("notify") => Subcommand::Notify,
         Some("provide") => Subcommand::Provide,
         Some("wire") => Subcommand::Wire(&argv[2..]),
-        // Host/shell probes — exit 0, never ERROR as unknown.
         Some("-V" | "--version" | "version") => Subcommand::Version,
         Some("-h" | "--help" | "help") => Subcommand::Help,
         Some("status") => Subcommand::Status,

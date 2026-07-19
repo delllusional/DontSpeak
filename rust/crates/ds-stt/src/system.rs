@@ -1,10 +1,6 @@
 //! System STT — Apple's on-device speech recognition on macOS. Windows/Linux: issue #75.
-//! Live recognition runs in the warm helper (`crate::sysspeech::SystemTranscriber`);
-//! this `SystemStt` is the INERT in-process placeholder the factory returns when the
-//! helper path is unavailable.
-//!
-//! Deliberately inert (never grabs Caps, never injects) so selecting `stt_engine=system`
-//! when it can't run does NOT silently fall back to Claude-native — surfaces "unavailable".
+//! Live path is the warm helper (`sysspeech`); this is the inert in-process placeholder
+//! when helper is unavailable. Surfaces "unavailable" (no silent claude_native fallback).
 
 use crate::Stt;
 
@@ -25,9 +21,7 @@ impl SystemStt {
 
 impl Stt for SystemStt {
     fn start(&mut self) -> bool {
-        // Inert: live recognizer is in the warm helper. false ⇒ Caps does nothing here
-        // (no silent claude_native fallback).
-        false
+        false // helper owns live recognizer
     }
     fn stop(&mut self) {}
     fn is_available(&self) -> bool {

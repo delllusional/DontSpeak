@@ -40,11 +40,10 @@ pub use kokoro::KokoroTts;
 pub use system::SystemTts;
 pub use vocab::SAMPLE_RATE;
 
-/// Re-export from `ds-voices` (issue #5) so CLI can list voices without this heavy crate,
-/// and existing `ds_tts::enumerate` / `SpeakerVoice` call sites keep compiling.
+/// Re-export from `ds-voices` (issue #5) — CLI lists voices without this heavy crate.
 pub use ds_voices::enumerate;
 pub use ds_voices::{Gender, Quality, SpeakerVoice};
-// Private: synth/ane_voices reach the npz parser as `crate::voices` (never public API).
+// Private: synth/ane_voices use `crate::voices` for the npz parser.
 pub(crate) use ds_voices::voices;
 
 /// Normalize rendered English before Kokoro G2P. Shared helper front-end; idempotent
@@ -115,14 +114,11 @@ mod tests {
     #[test]
     fn rate_to_wpm_baseline_and_clamp() {
         assert_eq!(rate_to_wpm(1.0), 175);
-        // 0.5 -> ~88, 2.0 -> 350.
         assert_eq!(rate_to_wpm(0.5), 88);
         assert_eq!(rate_to_wpm(2.0), 350);
-        // Out-of-range clamps, never panics.
-        assert_eq!(rate_to_wpm(0.0), 88); // clamps up to 0.5
-        assert_eq!(rate_to_wpm(10.0), 350); // clamps down to 2.0
+        assert_eq!(rate_to_wpm(0.0), 88);
+        assert_eq!(rate_to_wpm(10.0), 350);
         assert_eq!(rate_to_wpm(-3.0), 88);
-        // A mid step (1.25) is a sane interpolation.
         assert_eq!(rate_to_wpm(1.25), 219);
     }
 

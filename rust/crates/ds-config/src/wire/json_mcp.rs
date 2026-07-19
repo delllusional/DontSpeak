@@ -1,9 +1,8 @@
-//! JSON MCP shaper (`mcpServers.<name>`) for Claude Code / Qwen. Pure, additive:
-//! updates `command`/`args` in place so reinstall re-points; preserves sibling keys.
+//! JSON MCP shaper (`mcpServers.<name>`). Pure, additive: updates command/args; keeps siblings.
 
 use serde_json::{Map, Value, json};
 
-/// Merge stdio MCP entry under `mcpServers.<name>`. Updates command/args only; pure.
+/// Merge stdio entry under `mcpServers.<name>`. Pure.
 pub fn merge_mcp_server(mut root: Value, name: &str, command: &str, args: &[&str]) -> Value {
     if !root.is_object() {
         root = Value::Object(Map::new());
@@ -32,8 +31,7 @@ pub fn merge_mcp_server(mut root: Value, name: &str, command: &str, args: &[&str
     root
 }
 
-/// Remove our MCP server entry `mcpServers.<name>`, dropping an emptied `mcpServers`
-/// object. Leaves all other servers and keys untouched. PURE — no disk.
+/// Remove `mcpServers.<name>`; drop empty `mcpServers`. Pure.
 pub fn strip_mcp_server(mut root: Value, name: &str) -> Value {
     let Some(obj) = root.as_object_mut() else {
         return root;

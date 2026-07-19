@@ -25,11 +25,8 @@ pub const KOKORO_FALLBACK_IDS: &[&str] = &[
     "bm_george",
 ];
 
-/// Bare on-disk filename for the Kokoro voices asset — a DELIBERATE name-only
-/// duplicate, NOT a new source of truth. `ds_model::KOKORO_VOICES_FILE` remains
-/// the download pin (URL + SHA-256 + size); this crate must not depend on
-/// `ds-model` as a real dep (issue #5). Dev-only test
-/// `kokoro_voices_filename_matches_ds_model_registry` is the drift guard.
+/// Filename only — download pin stays `ds_model::KOKORO_VOICES_FILE` (issue #5: no ds-model dep).
+/// Drift: `kokoro_voices_filename_matches_ds_model_registry`.
 const KOKORO_VOICES_FILE: &str = "voices-v1.0.bin";
 
 // ── Kokoro id parsing (PURE) ─────────────────────────────────────────────────

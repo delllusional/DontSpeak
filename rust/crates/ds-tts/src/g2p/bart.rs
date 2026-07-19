@@ -25,14 +25,8 @@ struct BartG2p {
     decoder: Session,
 }
 
-/// Cache the loaded model, but NEVER cache a load failure.
-///
-/// `OnceLock<Result<..>>` memoized the `Err` too, so one transient fault — an AV scanner holding
-/// the dylib, an ORT version race, a `Session::builder()` hiccup — permanently downgraded every
-/// unknown word to letter-by-letter spelling for the rest of this (long-lived) helper process,
-/// with nothing logged. Successful pronunciations are memoized by the caller, while degraded
-/// spelling fallbacks remain retryable; the presence check behind `load()` is a cached checksum
-/// lookup.
+/// Load once on success only — never memoize `Err` (AV/ORT blip would stick letter-spelling
+/// for the helper's life). Caller caches good IPA; spelling fallbacks stay retryable.
 pub(super) fn phonemize(word: &str) -> Result<String, String> {
     static MODEL: OnceLock<Mutex<Option<BartG2p>>> = OnceLock::new();
     static LOAD_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -45,8 +39,7 @@ pub(super) fn phonemize(word: &str) -> Result<String, String> {
         match BartG2p::load() {
             Ok(loaded) => *model = Some(loaded),
             Err(error) => {
-                // Log once: an absent model is the ordinary pre-download state, and every
-                // distinct unknown word would otherwise repeat it.
+                // Log once (pre-download is normal; per-word spam is not).
                 if !LOAD_FAILURE_LOGGED.swap(true, Ordering::SeqCst) {
                     log::warn!(
                         target: "tts",
@@ -65,9 +58,7 @@ impl BartG2p {
         if !ds_model::is_kokoro_g2p_present() {
             return Err("Kokoro G2P model is not downloaded".to_string());
         }
-        // G2P runs before the synth backend loads. Select the same runtime library that synth
-        // will use so ORT's process-global API cannot be initialized on CPU and later asked to
-        // switch to the separately packaged CUDA build.
+        // Same ORT dylib as synth (G2P first): process-global API can't switch CPU→CUDA later.
         let want_gpu = ds_config::provider_pref_wants_gpu(
             &std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".to_string()),
         );
@@ -236,14 +227,9 @@ mod tests {
     }
 
     /// Drift guard. `GRAPHEME_CHARS`/`PHONEME_CHARS` mirror the pinned checkpoint's
-    /// `config.json` by hand, so these exact-map assertions catch reorders and substitutions in
-    /// normal CI. A one-character error here yields plausible-but-wrong pronunciations,
-    /// not an error.
+    /// Exact maps from pinned config.json — reorder/sub looks valid but wrong IPA.
     #[test]
     fn phoneme_vocabulary_is_kokoro_safe_and_bounds_line_up() {
-        // Exact token order from the pinned checkpoint's config.json. Length/vocabulary-only
-        // checks cannot catch a reorder or a substitution by another valid Kokoro character;
-        // either changes every affected model id while still looking superficially valid.
         assert_eq!(
             GRAPHEME_CHARS,
             "____AIOWYbdfhijklmnpstuvwz'-.BCDEFGHJKLMNPQRSTUVXZacegoqrxy"
@@ -255,13 +241,10 @@ mod tests {
         assert_eq!(PHONEME_CHARS.chars().count(), VALID_OUTPUT_IDS);
         assert!(GRAPHEME_CHARS.chars().count() <= MODEL_VOCAB_SIZE);
 
-        // Index 34 is U+0261 LATIN SMALL LETTER SCRIPT G, NOT ASCII 'g'. Kokoro's vocabulary
-        // deliberately has no ASCII 'g', so typing this as a plain 'g' would make every word
-        // containing /ɡ/ unspeakable.
+        // U+0261 script g only; ASCII 'g' is absent from Kokoro vocab.
         assert!(PHONEME_CHARS.contains('\u{0261}'));
         assert!(!PHONEME_CHARS.contains('g'));
 
-        // Everything the decoder can emit must be a phoneme Kokoro actually knows.
         for (id, c) in PHONEME_CHARS.chars().enumerate().skip(4) {
             assert!(
                 crate::vocab::vocab_id(c).is_some(),

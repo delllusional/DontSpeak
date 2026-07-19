@@ -1,7 +1,7 @@
 import Foundation
 
 /// One gauge (Rust UsageRow). `period` is an opaque wire token so unknown periods still decode.
-/// `remainingLabel` filled at data-source via ds_usage_resets_in (not in SwiftUI body).
+/// `remainingLabel` filled at data-source via ds_usage_resets_in.
 public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
     public var id: String { period }
     public let period: String

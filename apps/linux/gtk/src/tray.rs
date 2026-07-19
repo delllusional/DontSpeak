@@ -9,7 +9,7 @@ use crate::icon::{self, Rgb};
 const ICON_SIZES: [u32; 4] = [16, 24, 32, 48];
 
 pub struct SpeakTray {
-    /// [`ds_status::tray_icon_kind`].
+    /// From [`ds_status::tray_icon_kind`].
     pub kind: ds_status::TrayIconKind,
     pub muted: bool,
     seed_purple: Rgb,
@@ -27,7 +27,6 @@ impl SpeakTray {
         }
     }
 
-    /// recording→mic_orange, speaking→seed_purple, else idle. Mute is a slash.
     fn ink(&self) -> Rgb {
         match self.kind {
             ds_status::TrayIconKind::Recording => self.mic_orange,
@@ -72,7 +71,7 @@ fn activate_application() {
                         err.trim()
                     );
                 }
-                // Goes through ds_log → existing dontspeak.log (not a new file).
+                // log::warn → unified dontspeak.log (ds_log).
                 Err(e) => log::warn!(target: "tray", "activate application failed: {e}"),
             }
         })
@@ -95,7 +94,7 @@ impl Tray for SpeakTray {
             .collect()
     }
 
-    /// Left-click → show window (ItemIsMenu false).
+    /// Left-click → show window (`ItemIsMenu` false).
     fn activate(&mut self, _x: i32, _y: i32) {
         activate_application();
     }

@@ -1,8 +1,5 @@
-//! When the `cbindgen` feature is on, regenerate committed `dontspeak.h` from the
-//! `extern "C"` surface into `apps/macos/Sources/CDontSpeak/include/dontspeak.h`.
-//!
-//! Header is committed: default builds (feature off / offline) do nothing. Only
-//! `--features cbindgen` regenerates — Swift does not require cbindgen installed.
+//! With `--features cbindgen`, regenerate committed `dontspeak.h` into
+//! `apps/macos/Sources/CDontSpeak/include/`. Default builds leave the header alone.
 
 fn main() {
     println!("cargo:rerun-if-changed=src/ffi.rs");
@@ -21,8 +18,7 @@ fn regenerate_header() {
     let config = match cbindgen::Config::from_file(Path::new(&crate_dir).join("cbindgen.toml")) {
         Ok(c) => c,
         Err(e) => {
-            // Keep committed header; do not fall back to Config::default() (wrong
-            // usize/uintptr_t mapping) while still claiming "regenerated".
+            // Keep committed header; Config::default() maps usize/uintptr_t wrong.
             println!(
                 "cargo:warning=cbindgen.toml failed to parse ({e}); keeping committed dontspeak.h"
             );

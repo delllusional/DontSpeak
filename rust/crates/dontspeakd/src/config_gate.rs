@@ -1,5 +1,5 @@
-//! Pure config predicates + reload decisions. Side-effect-light
-//! (`reconcile_helper_models` touches the warm helper; rest pure).
+//! Pure config predicates + reload decisions.
+//! (`reconcile_helper_models` touches the warm helper; rest pure.)
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -11,30 +11,27 @@ use ds_stt::Stt;
 use crate::engine::PasteState;
 use crate::tts;
 
-/// §F physical-hold threshold default.
 pub(crate) const DEFAULT_LONG_PRESS_MS: u64 = 600;
 
-/// `0` → default; else honor. Shared by startup and `Engine::reload`.
+/// `0` → default. Shared by startup and reload.
 pub(crate) fn normalize_long_press(ms: u64) -> u64 {
     if ms == 0 { DEFAULT_LONG_PRESS_MS } else { ms }
 }
 
-/// Caps-Lock dictation loop gated by `caps`.
 pub(crate) fn caps_loop_enabled(cfg: &VoiceConfig) -> bool {
     cfg.caps
 }
 
-/// Warm helper needed when either Kokoro TTS or local STT is in use.
 pub(crate) fn helper_needed(cfg: &VoiceConfig) -> bool {
     helper_uses_tts(cfg) || helper_uses_stt(cfg)
 }
 
-/// Resolved TTS is Kokoro (helper hosts the model).
+/// Kokoro via warm helper.
 pub(crate) fn helper_uses_tts(cfg: &VoiceConfig) -> bool {
     cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
 }
 
-/// Resolved STT is BuiltIn or System (both run through the warm helper).
+/// BuiltIn or System STT via warm helper.
 pub(crate) fn helper_uses_stt(cfg: &VoiceConfig) -> bool {
     matches!(
         cfg.resolved_stt(),
@@ -42,7 +39,7 @@ pub(crate) fn helper_uses_stt(cfg: &VoiceConfig) -> bool {
     )
 }
 
-/// macOS + `SMKOKORO_DYLIB_PATH` present. Combine with model-asset gates before advertising.
+/// macOS + `SMKOKORO_DYLIB_PATH`. Pair with model-asset gates before advertising.
 #[cfg(target_os = "macos")]
 pub(crate) fn apple_native_shim_available() -> bool {
     std::env::var_os("SMKOKORO_DYLIB_PATH")
@@ -54,7 +51,7 @@ pub(crate) fn apple_native_shim_available() -> bool {
     false
 }
 
-/// ANE Parakeet usable: shim + Core ML sets (same revision markers as the downloader).
+/// Shim + Core ML sets (same revision markers as downloader).
 pub(crate) fn parakeet_available() -> bool {
     apple_native_shim_available()
         && ds_model::coreml_repo::is_coreml_set_present(&ds_model::coreml_repo::PARAKEET_COREML_SET)

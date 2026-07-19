@@ -8,7 +8,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::{engine, models};
 
-// release-ffi forces panic=unwind — catch_unwind is a no-op under abort.
+// release-ffi: panic=unwind — catch_unwind is a no-op under abort.
 #[cfg(panic = "abort")]
 compile_error!(
     "ds-core must not be built with panic=\"abort\" -- its extern \"C\" boundary relies on \
@@ -18,9 +18,9 @@ compile_error!(
      panic=\"unwind\") instead of the default `release` profile."
 );
 
-// Lifecycle owned by [`crate::host`]; thin u8 adapters for `dontspeak.h`.
+// Lifecycle in [`crate::host`]; thin u8 adapters for `dontspeak.h`.
 
-/// 1 = running, 0 = failure.
+/// 1 = ok.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_start() -> u8 {
     guard_val(0, || crate::host::engine_start() as u8)
@@ -32,13 +32,13 @@ pub extern "C" fn ds_engine_stop() -> u8 {
     guard_val(0, || crate::host::engine_stop() as u8)
 }
 
-/// 1 if engine running.
+/// 1 if ok.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_reload() -> u8 {
     guard_val(0, || crate::host::engine_reload() as u8)
 }
 
-/// Mute audio (`on != 0`); playback still drains. 1 if IPC delivered.
+/// Mute (`on != 0`); playback drains. 1 if IPC delivered.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_set_muted(on: u8) -> u8 {
     guard_val(0, || {
@@ -61,17 +61,17 @@ pub extern "C" fn ds_open_voice_settings() -> u8 {
     guard_val(0, || ds_tts::system::open_voice_settings() as u8)
 }
 
-/// Panic must not cross FFI → `default`.
+/// Panic across FFI → `default`.
 fn guard_val<T>(default: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(default)
 }
 
-/// Panic path only allocates `default` (eager alloc would leak unused CString).
+/// Panic path allocates `default` only (eager CString would leak on success).
 fn guard_str(default: &'static str, f: impl FnOnce() -> *mut c_char) -> *mut c_char {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| to_cstring(default))
 }
 
-/// Caller frees with `ds_string_free`. Interior NUL → "".
+/// Free with `ds_string_free`. Interior NUL → "".
 fn to_cstring(s: impl Into<Vec<u8>>) -> *mut c_char {
     match CString::new(s) {
         Ok(c) => c.into_raw(),
@@ -79,44 +79,41 @@ fn to_cstring(s: impl Into<Vec<u8>>) -> *mut c_char {
     }
 }
 
-/// Inbound C string → owned String (empty if NULL or invalid UTF-8).
 fn cstr_or_empty(p: *const c_char) -> String {
     cstr_or(p, "")
 }
 
-/// Inbound C string; `default` for NULL or invalid UTF-8 (valid empty string kept as-is).
+/// `default` for NULL / invalid UTF-8; empty string kept.
 fn cstr_or(p: *const c_char, default: &str) -> String {
     if p.is_null() {
         return default.to_string();
     }
-    // SAFETY: `p` non-null; C ABI contract — NUL-terminated, valid for the call;
-    // copied into owned String before return.
+    // SAFETY: non-null C ABI — NUL-terminated, valid for call; copied before return.
     unsafe { std::ffi::CStr::from_ptr(p) }
         .to_str()
         .unwrap_or(default)
         .to_string()
 }
 
-/// Kokoro (TTS) model set present + valid? Disk probe. HANDLE-FREE.
+/// Kokoro present+valid? Disk probe. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_kokoro_present_global() -> u8 {
     guard_val(0, || models::is_kokoro_present() as u8)
 }
 
-/// Full Parakeet-ONNX (STT) asset set present + valid? HANDLE-FREE.
+/// Full Parakeet-ONNX set present+valid? HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_parakeet_onnx_present_global() -> u8 {
     guard_val(0, || models::is_parakeet_onnx_present() as u8)
 }
 
-/// Engine running? Pidfile probe. HANDLE-FREE, safe off main thread.
+/// Pidfile probe. HANDLE-FREE, off-main-thread ok.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_running_global() -> u8 {
     guard_val(0, || engine::is_running() as u8)
 }
 
-/// Model-status JSON (presence + subsystem map). Owned `char*`, free with
-/// `ds_string_free`; `"{}"` if engine down. HANDLE-FREE, safe off main thread.
+/// Model-status JSON. Owned `char*` (`ds_string_free`); `"{}"` if down. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_model_status_json() -> *mut c_char {
     guard_str("{}", || {
@@ -130,10 +127,8 @@ pub extern "C" fn ds_model_status_json() -> *mut c_char {
     })
 }
 
-/// Like [`ds_model_status_json`] but BLOCKS until status `seq` differs from `since` or
-/// `timeout_ms` elapses. PUSH transport for the dictation overlay: call on a dedicated
-/// background thread (never UI) in a loop. Pass `since = 0` first (returns immediately).
-/// JSON `seq` is the next `since`. Owned `char*`; `"{}"` if engine down.
+/// Block until `seq` ≠ `since` or timeout. Overlay push: background thread loop
+/// (`since = 0` first). Owned `char*`; `"{}"` if down.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_model_status_wait(since: u64, timeout_ms: u32) -> *mut c_char {
     guard_str("{}", || {

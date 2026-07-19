@@ -1,4 +1,4 @@
-//! Claude Code voice-dictation config — READ only, never written.
+//! Claude Code voice-dictation config — read-only.
 
 use serde_json::Value;
 

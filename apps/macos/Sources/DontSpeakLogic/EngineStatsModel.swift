@@ -36,7 +36,6 @@ public struct EngineStats: Sendable, Equatable {
 
     public init() {}
 
-    /// Map the decoded metrics into the UI model.
     public static func from(_ dto: StatsDTO) -> EngineStats {
         var s = EngineStats()
         s.tts.rtfMin = dto.tts.rtfMin

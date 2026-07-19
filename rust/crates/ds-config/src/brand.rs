@@ -1,14 +1,13 @@
-//! Product brand strings — single source for human-facing name and version.
-//! [`DISPLAY_NAME`] is title-case ("DontSpeak"); [`VERSION`] tracks the workspace
-//! (`version.workspace = true`).
+//! Product brand strings — single source for name + version.
+//! [`DISPLAY_NAME`] title-case; [`VERSION`] from workspace (`version.workspace = true`).
 
-/// Human-facing product name (not the binary/server id `dontspeak`).
+/// Human-facing product name (binary/server id is `dontspeak`).
 pub const DISPLAY_NAME: &str = "DontSpeak";
 
-/// Workspace version via `CARGO_PKG_VERSION` — do not hardcode elsewhere.
+/// Workspace version via `CARGO_PKG_VERSION` (single source).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// `"DontSpeak 0.2.0"` — one-line product identity for logs / UI.
+/// `"DontSpeak 0.2.0"` for logs / UI.
 pub fn name_version() -> String {
     format!("{DISPLAY_NAME} {VERSION}")
 }

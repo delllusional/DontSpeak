@@ -1,41 +1,22 @@
-//! The `ds-helper --serve` child wire vocabulary.
+//! `ds-helper --serve` wire vocabulary.
 //!
-//! * **Stdout** — reply-token constants. `ds-helper` emits them; `dontspeakd` parses them.
-//!   Constants only (no format helpers) so call sites keep exact byte behaviour
-//!   (notably the [`ERR`] no-trailing-space quirk).
-//! * **Stdin** — typed JSON ops ([`HelperOp`] / [`HelperModel`]) for engine→helper
-//!   requests. Both ends share these enums so op typos fail at serde, not at runtime.
+//! **Stdout** — token constants (exact bytes; keep [`ERR`] no-trailing-space quirk).
+//! **Stdin** — [`HelperOp`] / [`HelperModel`] JSON (shared serde; op typos fail at compile/decode).
 //!
-//! Contract (every line `\n`-terminated; engine trims before matching):
-//!
-//! * `READY` — once: TTS warm AND audio output open.
-//! * `WARMING stt` / `WARMING tts` — load+warm started ([`WARMING_PREFIX`]);
-//!   pre-READY loop deliberately ignores these.
-//! * `PROVIDER <ep>` — realized TTS EP, before `READY`.
-//! * `ERR <msg>` — fatal pre-READY (child exits) or soft per-speak after.
-//!   **Quirk:** engine strips [`ERR`] with NO trailing space, so `<msg>` keeps its
-//!   leading space. Do not "normalize" this.
-//! * `DONE` — speak/preview terminal (success or cancel); failures use `ERR`.
-//! * `CUEDONE` — earcon terminal (played, suppressed, or cancelled).
-//! * `STATS <k=v …>` — per-utterance synth timing, just before `DONE`.
-//! * `PROGRESS <n>` — played-batch high-water for batch-granular resume
-//!   ([`PROGRESS_PREFIX`]); intermediate, never terminal.
-//! * `TTSLOADED` / `STTLOADED` — model resident + warm.
-//! * `TTSLOADERR <msg>` / `STTLOADERR <msg>` — (re)load failed.
-//! * `STT_PROVIDER <ep>` — realized STT EP (may land either side of `READY`).
-//! * `LISTENING` — dictation opened (emit-only; engine ignores).
-//! * `PARTIAL <text>` — live overlay (helper de-dupes).
-//! * `FINAL <text>` — final transcript; empty emits `FINAL ` so trim yields bare
-//!   `FINAL` — both [`FINAL`] and [`FINAL_PREFIX`] exist.
-//! * `STTSTATS <k=v …>` — per-listen timing, just before `FINAL`.
-//! * `STTERR <msg>` — listen failed (e.g. mic won't open).
-//! * `LDONE` — listen terminal (never `DONE`; demuxes concurrent speak on shared stdout).
-//! * `DIAR <json>` / `DIARERR <msg>` / `DDONE` — one-shot diarize.
-//! * `EMB <json>` / `ENROLLERR <msg>` / `EDONE` — one-shot enroll.
+//! Lines `\n`-terminated; engine trims before match:
+//! - `READY` — TTS warm + output open (once)
+//! - `WARMING stt|tts` — load started; pre-READY ignores
+//! - `PROVIDER <ep>` / `STT_PROVIDER <ep>` — realized EPs
+//! - `ERR <msg>` — fatal pre-READY or soft per-speak; strip `ERR` with **no** trailing space
+//! - `DONE` / `CUEDONE` / `LDONE` / `DDONE` / `EDONE` — terminals (listen ≠ speak)
+//! - `PROGRESS <n>` — batch high-water; intermediate only
+//! - `TTSLOADED` / `STTLOADED` / `*LOADERR` — residency
+//! - `LISTENING` / `PARTIAL` / `FINAL` / `STTSTATS` / `STTERR` — listen stream
+//! - `DIAR*` / `EMB*` — one-shot diarize / enroll
 
 // ── stdin ops (engine → helper JSON lines) ───────────────────────────────────
 
-/// One stdin request op (`{"op":…}`). Serde wire = snake_case token.
+/// Stdin op (`{"op":…}`, snake_case).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HelperOp {
@@ -77,10 +58,7 @@ pub const ERR: &str = "ERR";
 pub const DONE: &str = "DONE";
 /// Per-utterance synth timing, just before [`DONE`].
 pub const STATS_PREFIX: &str = "STATS ";
-/// Absolute played-batch high-water (`skip` included) for batch-granular resume.
-/// Intermediate only — request still ends in [`DONE`]/[`ERR`]. Rodio path only
-/// (full-duplex never pauses/resumes). Version skew degrades to replay-from-top
-/// both ways: older engine drops the line; older helper never emits (mark stays 0).
+/// Batch high-water (`skip` included); intermediate only. Rodio path; skew → replay-from-top.
 pub const PROGRESS_PREFIX: &str = "PROGRESS ";
 
 // ── earcon ───────────────────────────────────────────────────────────────────
@@ -115,7 +93,7 @@ pub const FINAL_PREFIX: &str = "FINAL ";
 pub const STTSTATS_PREFIX: &str = "STTSTATS ";
 /// Listen failed (e.g. mic won't open).
 pub const STTERR_PREFIX: &str = "STTERR ";
-/// Listen terminal — never [`DONE`], so the engine can demux concurrent speak on shared stdout.
+/// Listen terminal (≠ [`DONE`]; demux concurrent speak on shared stdout).
 pub const LDONE: &str = "LDONE";
 
 // ── one-shot diarize ─────────────────────────────────────────────────────────

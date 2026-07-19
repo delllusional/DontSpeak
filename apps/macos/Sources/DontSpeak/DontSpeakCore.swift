@@ -227,7 +227,7 @@ final class Core {
         t.start()
     }
 
-    /// Assign only when != so @Observable invalidation stays granular. Not perms.
+    /// Assign only when != so @Observable invalidation stays granular. Perms polled separately.
     private func apply(_ s: HealthSnapshot) {
         if activity != s.activity { activity = s.activity }
         if tts != s.tts { tts = s.tts }
@@ -243,14 +243,14 @@ final class Core {
         )
     }
 
-    /// Prompt mic TCC once for capture engines (not off/claude_code). Fresh install has no
+    /// Prompt mic TCC once for capture engines (see `dontSpeakUsesMicrophone`). Fresh install has no
     /// Privacy→Microphone row otherwise; dialog only while .notDetermined.
     private func maybeRequestMicAccess() {
         guard !micAccessRequested,
             dontSpeakUsesMicrophone(sttEngine: stt.engine)
         else { return }
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else {
-            // Latch: don't re-read TCC on every status push after decided.
+            // Latch: skip TCC re-read on every status push after decided.
             micAccessRequested = true
             return
         }
@@ -258,7 +258,7 @@ final class Core {
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
     }
 
-    /// Including perms (return from System Settings / after download).
+    /// Includes perms (return from System Settings / after download).
     func refresh() {
         Task { [weak self] in
             let snap = await Task.detached { Core.probe() }.value
@@ -309,7 +309,7 @@ final class Core {
         return (s, seq)
     }
 
-    /// Optional fields → per-field defaults. Does not set engineRunning (caller uses global).
+    /// Optional fields → per-field defaults. Caller sets engineRunning from global pidfile probe.
     private nonisolated static func decodeStatus(_ json: String?) -> (HealthSnapshot, UInt64?)? {
         guard let json,
             let dto = try? JSONDecoder().decode(ModelStatusDTO.self, from: Data(json.utf8))

@@ -10,9 +10,8 @@ use ds_ipc::Request;
 
 use crate::mcp::log;
 
-/// Detach the spawned host into its own process group so it survives this short-lived MCP
-/// shim exiting (and isn't killed by Ctrl-C to our pgroup). Linux: `process_group(0)`;
-/// Windows: CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS. macOS uses `open`, which detaches.
+/// Own process group so host survives this MCP shim / Ctrl-C. Linux process_group(0);
+/// Windows DETACHED; macOS `open` detaches.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn detach(cmd: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -26,10 +25,7 @@ fn detach(cmd: &mut std::process::Command) {
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
 
-/// Ensure the engine is up. No headless mode — engine only runs in-process inside the
-/// platform host (macOS DontSpeak.app, Windows `ds-winui.exe`, Linux `ds-gtk`), so we launch
-/// that app and wait for the socket. One host per platform; no host installed ⇒ tools fail
-/// until the user launches it.
+/// Launch platform host if needed and wait for the engine socket (in-process only).
 pub(crate) fn ensure_engine(sock: &Path) -> bool {
     if ds_ipc::request(sock, &Request::Ping).is_ok() {
         return true;

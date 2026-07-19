@@ -12,19 +12,18 @@ using Windows.Foundation;
 using Windows.Graphics.DirectX;
 using Vortice.DirectComposition;
 using Vortice.DXGI;
-using static DontSpeak.Win32; // shared window-class interop + structs
+using static DontSpeak.Win32;
 using WinColor = Windows.UI.Color;
 
 namespace DontSpeak;
 
 /// <summary>
-/// Dictation overlay (macOS OverlayPanel): non-activating topmost Win32 window + Win2D swap
-/// chain hosted via DirectComposition (no UpdateLayeredWindow / GPU→CPU readback). Fixed max
-/// height container — card top-anchored, grows down into HTTRANSPARENT slack (no 1-frame wrap
-/// flicker). Not WinUI: must never activate; App SDK compositor lacks ICompositorDesktopInterop
-/// for bare HWND. Dedicated render thread (vsync Present(1); not thread pool — STT starves it);
-/// Update publishes Snapshot only. Self-heals GPU/DComp on device loss. SWP_ASYNCWINDOWPOS so
-/// render never blocks UI Dispose join. Driven by App status push via <see cref="Update"/>.
+/// Dictation overlay (macOS OverlayPanel): non-activating topmost Win32 + Win2D via DComp
+/// (GPU present path). Fixed-height container — card top-anchored into HTTRANSPARENT slack
+/// (avoids wrap flicker). Bare HWND (App SDK compositor lacks ICompositorDesktopInterop).
+/// Dedicated render thread (vsync Present(1); pool would starve under STT). Update publishes
+/// Snapshot only. Self-heals GPU/DComp on device loss. SWP_ASYNCWINDOWPOS so render never
+/// blocks UI Dispose join. Driven by App status push via <see cref="Update"/>.
 /// </summary>
 internal sealed class DictationPanel : IDisposable
 {
@@ -40,7 +39,7 @@ internal sealed class DictationPanel : IDisposable
     private volatile bool _userMoved;
     private volatile int _userPosX, _userPosY;
     private volatile bool _dragging;
-    private volatile int _userWidth;      // 0 = CardWidth
+    private volatile int _userWidth; // 0 = CardWidth
     // Card bottom in window px for hit-test click-through below card. 0 until first frame.
     private volatile int _cardBottomInWin;
 
@@ -48,14 +47,14 @@ internal sealed class DictationPanel : IDisposable
     private readonly ManualResetEventSlim _wake = new(false);
     private volatile bool _stop;
     private int _renderFailures;
-    private const int MaxRenderFailures = 8; // then idle until next signal (no hot-loop)
+    private const int MaxRenderFailures = 8; // then idle until next signal
 
     /// <summary>Immutable frame input. `record` for safe `with` copies (OnThemeChanged).</summary>
     internal sealed record Snapshot
     {
         public bool Visible;
-        public bool GlowOn;                 // listening OR no paste target
-        public bool WholePill;              // no-target wash vs speak-now frame glow
+        public bool GlowOn; // listening OR no paste target
+        public bool WholePill; // no-target wash vs speak-now frame glow
         public bool Light;
         public WinColor Glow;
         public string[] Words = Array.Empty<string>();
@@ -72,7 +71,7 @@ internal sealed class DictationPanel : IDisposable
     private int _swapW, _swapH;
     private IDXGISwapChain1? _dxgiSwap;
     private float _lineH;
-    private int _maxSurfaceH;                // fixed height; set once per device
+    private int _maxSurfaceH; // fixed height; set once per device
     private readonly Dictionary<string, float> _wordW = new();
     private readonly Dictionary<string, CanvasRenderTarget> _tiles = new();
     private WinColor _tileColor;
@@ -89,20 +88,20 @@ internal sealed class DictationPanel : IDisposable
     private bool _wasDragging;
     private int _curX, _curY, _curW, _curH;
 
-    // 96 DPI surface: 1 unit == 1 px (DPI scale is a later refinement).
-    private const int CardWidth = 460;                          // macOS 460-pt pill
+    // 96 DPI surface: 1 unit == 1 px (DPI scale later).
+    private const int CardWidth = 460; // macOS 460-pt pill
     private const int MinCardWidth = 240, MaxCardWidth = 900;
     private const int PadX = 18, PadY = 13, Radius = 14;
     private const int BottomMargin = 90;
     private const int GlowMargin = 26;
-    private const int MaxExtraLines = 13;    // fixed-height budget (~14 lines; avoids resize flicker)
+    private const int MaxExtraLines = 13; // fixed-height budget (~14 lines)
     // TUNE vs macOS for 60Hz (macOS parity: Fade 220, MaxBlur 6, TilePad 14).
     private const float FadeMs = 360f;
     private const int BreathMs = 2400;
-    private const float FontSizeDip = 20f;   // 15pt @96
-    private const float WordGap = 6f;        // DWrite drops trailing space
+    private const float FontSizeDip = 20f; // 15pt @96
+    private const float WordGap = 6f; // DWrite drops trailing space
     private const float MaxBlur = 9f;
-    private const float TilePad = 24f;       // keep ≥ ~2.6·MaxBlur
+    private const float TilePad = 24f; // keep ≥ ~2.6·MaxBlur
     private static readonly WinColor Transparent = WinColor.FromArgb(0, 0, 0, 0);
 
     public DictationPanel()
@@ -116,8 +115,8 @@ internal sealed class DictationPanel : IDisposable
             lpszClassName = WndClassName,
         };
         RegisterClassW(ref wc);
-        // No WS_EX_LAYERED (DComp can't share GDI layered path). NOREDIRECTIONBITMAP = clean
-        // per-pixel alpha. No WS_EX_TRANSPARENT — card is draggable; NOACTIVATE keeps focus.
+        // NOREDIRECTIONBITMAP for per-pixel alpha (DComp path; not GDI layered).
+        // Card stays draggable; NOACTIVATE keeps focus on the target app.
         _hwnd = CreateWindowExW(
             WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             WndClassName, "DontSpeak Dictation", WS_POPUP,
@@ -127,8 +126,8 @@ internal sealed class DictationPanel : IDisposable
         _renderThread.Start();
     }
 
-    /// <summary>UI thread: publish Snapshot + wake. <paramref name="promptGlow"/> is derived
-    /// from canonical dictation state.</summary>
+    /// <summary>UI thread: publish Snapshot + wake. <paramref name="promptGlow"/> from
+    /// canonical dictation state.</summary>
     public void Update(bool visible, string text, bool hasTarget, bool promptGlow)
     {
         if (_disposed || _hwnd == IntPtr.Zero) return;
@@ -140,7 +139,7 @@ internal sealed class DictationPanel : IDisposable
 
         var prev = _snap;
         bool hasText = !string.IsNullOrWhiteSpace(text);
-        // Same orange; shape differs: speak-now = frame, no-target = whole-pill wash.
+        // Same orange; speak-now = frame, no-target = whole-pill wash.
         var s = new Snapshot
         {
             Visible = true,
@@ -154,8 +153,8 @@ internal sealed class DictationPanel : IDisposable
         _wake.Set();
     }
 
-    /// <summary>Per-word fade diff (macOS blurReplace). Pure data; `now` injected so tests need
-    /// no Win32 window. Unchanged prefix keeps stamps; replaced slot → OutWords.</summary>
+    /// <summary>Per-word fade diff (macOS blurReplace). Pure data; inject `now` so tests skip
+    /// Win32. Unchanged prefix keeps stamps; replaced slot → OutWords.</summary>
     internal static void BuildWords(Snapshot prev, Snapshot s, string text, long now)
     {
         var nw = text.Length == 0
@@ -199,8 +198,8 @@ internal sealed class DictationPanel : IDisposable
         _wake.Set();
     }
 
-    /// <summary>Vsync-paced loop; self-heals GPU/DComp on any render failure. Reset-then-recheck
-    /// _snap closes lost-wake race with Update.</summary>
+    /// <summary>Vsync-paced loop; self-heals GPU/DComp on failure. Reset-then-recheck _snap
+    /// closes lost-wake race with Update.</summary>
     private void RenderLoop()
     {
         try
@@ -232,7 +231,7 @@ internal sealed class DictationPanel : IDisposable
                 }
                 catch
                 {
-                    // Don't kill the thread — rebuild stack with backoff; after streak, idle.
+                    // Rebuild stack with backoff; after streak, idle until signal.
                     CleanupGpu();
                     _shownNative = false;
                     if (++_renderFailures >= MaxRenderFailures)
@@ -256,7 +255,7 @@ internal sealed class DictationPanel : IDisposable
         finally { CleanupGpu(); }
     }
 
-    /// <summary>One frame into fixed-height swap chain. Returns true if still animating.</summary>
+    /// <summary>One frame into fixed-height swap chain. True while still animating.</summary>
     private bool RenderOnce(Snapshot s)
     {
         EnsureDevice();
@@ -276,7 +275,7 @@ internal sealed class DictationPanel : IDisposable
         EnsureSwapChain(w, h);
         var cardRect = new Rect(ox, oy, cardW, cardH);
 
-        // Time-based breath so intensity is refresh-rate independent.
+        // Time-based breath — intensity independent of refresh rate.
         double phase = (now % BreathMs) / (double)BreathMs;
         bool fading = AnyFading(s, now);
         bool animating = s.GlowOn || fading;
@@ -316,7 +315,7 @@ internal sealed class DictationPanel : IDisposable
         return false;
     }
 
-    // ── GPU device / swap-chain / DComp lifecycle ────────────────────────────────────────────
+    // GPU device / swap-chain / DComp lifecycle
     private void EnsureDevice()
     {
         if (_device != null) return;
@@ -331,7 +330,7 @@ internal sealed class DictationPanel : IDisposable
         };
         using var probe = new CanvasTextLayout(_device, "Ayg", _fmt, 1e6f, 1e6f);
         _lineH = (float)probe.LayoutBounds.Height;
-        // Fixed height for device lifetime — avoids 1-frame wrap flicker.
+        // Fixed for device lifetime — avoids 1-frame wrap flicker.
         _maxSurfaceH = (int)Math.Ceiling(_lineH) + PadY * 2 + GlowMargin * 2
                        + MaxExtraLines * (int)Math.Ceiling(_lineH);
         _wordW.Clear();
@@ -339,8 +338,8 @@ internal sealed class DictationPanel : IDisposable
         _tileColor = default;
     }
 
-    /// <summary>Create/resize composition swap chain; first create binds DComp. ResizeBuffers keeps
-    /// the same object (visual stays bound). Height fixed → resize only on width change.</summary>
+    /// <summary>Create/resize composition swap chain; first create binds DComp. ResizeBuffers
+    /// keeps the same object (visual stays bound). Height fixed → width-only resize.</summary>
     private void EnsureSwapChain(int w, int h)
     {
         if (_swapChain == null)
@@ -360,7 +359,7 @@ internal sealed class DictationPanel : IDisposable
 
     private void SetupDComp()
     {
-        // Vortice owns native IDXGISwapChain1 ref; same object is DComp content + device source.
+        // Vortice owns native IDXGISwapChain1; same object is DComp content + device source.
         IntPtr nativeSwap = GetNativeSwapChain(_swapChain!);
         _dxgiSwap = new IDXGISwapChain1(nativeSwap);
 
@@ -405,7 +404,7 @@ internal sealed class DictationPanel : IDisposable
         _tiles.Clear();
     }
 
-    /// <summary>Bake Gaussians once per card size; breath is opacity-only (~⅔ core → sliver).</summary>
+    /// <summary>Bake Gaussians once per card size; breath is opacity-only.</summary>
     private void EnsureGlowResources(int cardW, int cardH, Rect card, int surfW, int surfH, WinColor glow)
     {
         if (_outerGlowTile != null && _glowW == cardW && _glowH == cardH) return;
@@ -475,8 +474,8 @@ internal sealed class DictationPanel : IDisposable
         }
     }
 
-    /// <summary>Fresh effect pair per call: D2D realizes effect graphs lazily — reusing one mutable
-    /// effect for out+in DrawImage makes both use last params (replace becomes plain swap).</summary>
+    /// <summary>Fresh effect pair per call: D2D realizes graphs lazily — reusing one mutable
+    /// effect for out+in DrawImage applies last params to both (replace collapses to a swap).</summary>
     private void DrawTile(CanvasDrawingSession ds, string word, float x, float y, WinColor color, float blur, float opacity)
     {
         var tile = WordTile(word, color);
@@ -515,7 +514,7 @@ internal sealed class DictationPanel : IDisposable
 
     private static void DrawCard(CanvasDrawingSession ds, Rect rect, bool light)
     {
-        // Flat glass tint (≥~0.8 acrylic baseline) — no live backdrop blur on a composed HWND.
+        // Flat glass tint (≥~0.8 acrylic baseline); composed HWND has no live backdrop blur.
         WinColor bg = light ? WinColor.FromArgb(210, 244, 244, 247) : WinColor.FromArgb(204, 28, 28, 32);
         ds.FillRoundedRectangle(rect, Radius, Radius, bg);
         WinColor border = light ? WinColor.FromArgb(30, 0, 0, 0) : WinColor.FromArgb(34, 255, 255, 255);
@@ -538,7 +537,7 @@ internal sealed class DictationPanel : IDisposable
         catch { return false; }
     }
 
-    /// <summary>SWP_ASYNCWINDOWPOS — cross-thread, no block on UI (needed at Dispose join).
+    /// <summary>SWP_ASYNCWINDOWPOS — cross-thread, non-blocking on UI (needed at Dispose join).
     /// SetWindowPos only on show/move/width change.</summary>
     private void PlaceWindow(int w, int h, int oneLineWinH)
     {
@@ -603,13 +602,13 @@ internal sealed class DictationPanel : IDisposable
             case WM_MOUSEACTIVATE:
                 return (IntPtr)MA_NOACTIVATE;
             case WM_SETTINGCHANGE:
-                // Theme flip doesn't bump status seq — must listen here or card stays stale.
+                // Theme flip does not bump status seq — listen here or card stays stale.
                 if (lparam != IntPtr.Zero && Marshal.PtrToStringUni(lparam) == "ImmersiveColorSet")
                     OnThemeChanged();
                 break;
             case WM_NCHITTEST:
             {
-                // ToInt32() overflows when bit 31 set (monitors left/above primary) — kills process.
+                // ToInt32 overflows when bit 31 set (monitors left/above primary) — process dies.
                 int lp = unchecked((int)lparam.ToInt64());
                 int sx = (short)(lp & 0xFFFF);
                 int sy = (short)((lp >> 16) & 0xFFFF);
@@ -634,7 +633,7 @@ internal sealed class DictationPanel : IDisposable
             }
             case WM_SIZING:
             {
-                // Horizontal only; height stays fixed container.
+                // Horizontal only; height is the fixed container.
                 var r = Marshal.PtrToStructure<RECT>(lparam);
                 int clamped = Math.Clamp((r.right - r.left) - GlowMargin * 2, MinCardWidth, MaxCardWidth);
                 _userWidth = clamped;
@@ -664,7 +663,7 @@ internal sealed class DictationPanel : IDisposable
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
 
-    /// <summary>Render-thread only. Shared CanvasDevice dropped, not disposed.
+    /// <summary>Render-thread only. Shared CanvasDevice is dropped (not Disposed).
     /// Order visual→target→device→swap balances SetContent refs.</summary>
     private void CleanupGpu()
     {
@@ -730,7 +729,7 @@ internal sealed class DictationPanel : IDisposable
         SWP_NOACTIVATE = 0x0010, SWP_SHOWWINDOW = 0x0040, SWP_HIDEWINDOW = 0x0080,
         SWP_ASYNCWINDOWPOS = 0x4000;
 
-    // Win2D unwrap only; DComp/DXGI via Vortice. Shared class/DC in Win32.cs.
+    // Win2D unwrap only; DComp/DXGI via Vortice.
     private static readonly Guid IID_IDXGISwapChain1 = new("790a45f7-0d42-4876-983a-0a55cfe6f4aa");
 
     [StructLayout(LayoutKind.Sequential)]

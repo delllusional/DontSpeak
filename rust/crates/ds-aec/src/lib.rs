@@ -1,7 +1,7 @@
 //! Acoustic-echo-cancelled duplex audio (docs/AEC.md).
 //!
-//! One platform unit owns speaker + mic so the OS can subtract TTS (far-end reference)
-//! from the mic — full-duplex STT during TTS instead of half-duplex (mic closed during TTS).
+//! One platform unit owns speaker + mic so the OS subtracts TTS (far-end) from the mic:
+//! full-duplex STT while speaking (vs half-duplex with mic closed during TTS).
 //!
 //! - **macOS** — one `kAudioUnitSubType_VoiceProcessingIO` unit (AEC built-in; both streams).
 //! - **Windows** — WASAPI Communications capture (capture-side AEC APO). `owns_render() == false`;

@@ -102,16 +102,14 @@ pub fn step(
     digests_on: bool,
     shorts_on: bool,
 ) -> DisplayStep {
-    // Mic gate once per message key — per-batch checks stranded mid-message on a mic blip
-    // ("only the first sentence spoke"). FOCUS is NOT gated here: engine holds inactive
-    // terminals (docs/PER-TERMINAL-QUEUES.md); we only suppress while the user is recording.
+    // Mic gate once per message key (per-batch checks stranded mid-message). Focus stays
+    // with the engine (PER-TERMINAL-QUEUES); we only suppress while recording.
     let gate_on = if prev.gate_set && prev.gate_msg == batch.key {
         prev.gate_on
     } else {
         !mic_active
     };
     if !gate_on {
-        // Cache the skip for later batches of this message.
         return DisplayStep {
             write: Some(DisplayState {
                 offset: 0,
@@ -240,7 +238,7 @@ pub fn deliver_batch(
                 false,
                 "narration selections must map one-to-one to delivery checkpoints"
             );
-            // Fail closed: don't advance past unrepresentable checkpoints.
+            // Fail closed on unrepresentable checkpoints.
             return admit_pending(&state_path, prev, &mut admit);
         }
         if !short_after
@@ -250,12 +248,12 @@ pub fn deliver_batch(
                 .iter()
                 .any(|p| p.key == next.key && matches!(p.after, DeliveryCheckpoint::Short))
         {
-            // Empty-after-cleanup short needs no admission.
+            // Empty-after-cleanup short: no admission.
         } else {
             next.short_done = true;
         }
 
-        // Persist before offer — rejection/exit leaves retryable pending, not a lost offset.
+        // Persist before offer so rejection/exit keeps retryable pending.
         write_state(&state_path, &next);
         admit_pending(&state_path, next, &mut admit)
     })

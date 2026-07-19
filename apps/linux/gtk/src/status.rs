@@ -1,4 +1,4 @@
-//! Engine→UI status push: a background thread blocks in `ds_model_status_wait` and forwards
+//! Engine→UI status push: background thread blocks in `ds_model_status_wait` and forwards
 //! each [`ModelStatus`] over an async-channel the GTK main loop drains (macOS AsyncStream /
 //! Windows push-thread analogue).
 
@@ -43,7 +43,7 @@ impl StatusThread {
 }
 
 /// Spawn the push thread (`model_status_wait`, 1 s guard). Throttles when the engine is down
-/// (immediate `{}`) so it never busy-spins. Join via [`StatusThread`] before `engine_stop()`.
+/// (immediate `{}`) with a 500 ms sleep. Join via [`StatusThread`] before `engine_stop()`.
 pub fn spawn_push(tx: async_channel::Sender<Snapshot>) -> StatusThread {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_t = stop.clone();
@@ -78,7 +78,7 @@ pub fn spawn_push(tx: async_channel::Sender<Snapshot>) -> StatusThread {
                     delivered = true;
                 }
                 if down {
-                    // Down engine returns `{}` immediately; don't hammer the wait.
+                    // Down engine returns `{}` immediately; 500 ms throttle (see spawn_push).
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             }

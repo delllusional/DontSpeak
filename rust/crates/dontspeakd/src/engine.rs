@@ -20,42 +20,39 @@ use crate::status::StatusGate;
 use crate::tts::TtsManager;
 use crate::ttsq::TtsQueue;
 
-/// Skip-while-playing / paste-vs-submit flip. Not armed from silence.
+/// Skip-while-playing / paste-vs-submit flip window.
 const DOUBLE_TAP_MS: u64 = 280;
 
-/// Finalize lifecycle for the dictation-preview buffer (armed flag + landed text
-/// as one value — old triple fields could diverge).
+/// Finalize lifecycle for the dictation-preview buffer (armed + landed text as one
+/// value — old triple fields could diverge).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FinalState {
-    /// Live partial only (not confirm mode).
+    /// Live partial only.
     Idle,
-    /// Stop tap fired; final may still be landing. Keeps panel up (anti-flicker);
-    /// [`dictation_preview`] falls back to still-fresh `partial`.
+    /// Stop tap fired; final may still land. Panel stays up; preview uses `partial`.
     Armed,
     /// Non-empty final awaiting confirm paste.
     Ready(String),
-    /// Empty final — tick disarms without pasting; still "awaiting" until disarm.
+    /// Empty final — tick disarms without pasting; still awaiting until disarm.
     Empty,
 }
 
-/// Engine ↔ confirm-panel channel. `HelperStt` writes partials/finals; engine pastes
-/// on confirm, clears on long-press cancel. Via `model_status.dictation`.
-/// Manual `Default` so `can_paste` starts true (fail-open).
+/// Engine ↔ confirm-panel channel (`model_status.dictation`). Helper writes;
+/// engine pastes on confirm / clears on long-press. Manual `Default`: `can_paste` fail-open.
 pub(crate) struct PasteBuf {
-    /// Live PARTIAL mirror (detached helper thread). Not in [`FinalState`] — coexists
-    /// with every finalize state.
+    /// Live partial from detached helper (coexists with every [`FinalState`]).
     pub partial: String,
-    /// See [`FinalState`]. Engine: [`arm`]/[`disarm`]; deposits: helper_stt/listener.
+    /// Engine arms/disarms; helper_stt/listener deposit finals.
     pub final_state: FinalState,
     /// App focused when recording started.
     pub target: Option<String>,
-    /// Editable field focused? Sampled each tick while panel up. Init true (fail-open).
+    /// Editable field focused? Sampled while panel up. Init true (fail-open).
     pub can_paste: bool,
-    /// Caps physically held — suppress `Ready` while held (might become long-press cancel).
+    /// Caps held — suppress Ready (might become long-press cancel).
     pub caps_held: bool,
-    /// Session counter: detached `stop` joiner deposits only if epoch still matches.
+    /// Detached `stop` joiner deposits only if epoch still matches.
     pub epoch: u64,
-    /// Refusal cue deadline after a Caps start the engine couldn't honor.
+    /// Refusal-cue deadline after an unhonored Caps start.
     pub refused_until: Option<Instant>,
 }
 
@@ -67,8 +64,7 @@ impl PasteBuf {
         }
     }
 
-    /// `Armed|Empty → Idle`; leave Ready (call sites take text first). One enum =
-    /// armed flag and text can't diverge (old mirror-stuck bug).
+    /// `Armed|Empty → Idle`; leave Ready (call sites take text first).
     fn disarm(&mut self) {
         if matches!(self.final_state, FinalState::Armed | FinalState::Empty) {
             self.final_state = FinalState::Idle;
@@ -82,7 +78,7 @@ impl Default for PasteBuf {
             partial: String::new(),
             final_state: FinalState::Idle,
             target: None,
-            can_paste: true, // fail-open: no orange warning before the first probe
+            can_paste: true, // fail-open before first probe
             caps_held: false,
             epoch: 0,
             refused_until: None,
@@ -90,16 +86,15 @@ impl Default for PasteBuf {
     }
 }
 
-/// Refusal-cue duration after an unhonored Caps start. See [`PasteBuf::refused_until`].
+/// Refusal-cue duration after an unhonored Caps start.
 pub(crate) const DICTATION_REFUSAL_MS: u64 = 1500;
 
-/// Refusal window live at `now` — shared by tick digest and `model_status`.
+/// Shared by tick digest and `model_status`.
 pub(crate) fn refusal_live(refused_until: Option<Instant>, now: Instant) -> bool {
     refused_until.is_some_and(|t| now < t)
 }
 
-/// Panel display: `(text, awaiting_confirm)`. Caps held suppresses Ready (anti-flicker);
-/// Armed/Empty keep awaiting with partial. PURE.
+/// Panel display: `(text, awaiting_confirm)`. Caps held suppresses Ready; Armed/Empty keep awaiting.
 pub(crate) fn dictation_preview(
     final_state: &FinalState,
     partial: &str,
@@ -115,104 +110,93 @@ pub(crate) fn dictation_preview(
     }
 }
 
-/// Shared handle to the dictation-preview buffer (engine poll thread writes it,
-/// the listen thread mirrors partials, the IPC thread reads it for status).
+/// Shared dictation-preview buffer (poll / listen / IPC threads).
 pub(crate) type PasteState = Arc<Mutex<PasteBuf>>;
 
-/// Dictation gesture mode (was lockstep booleans/fields that every disarm reset).
-/// Mutually exclusive by construction; confirm sub-state only on ConfirmArmed.
+/// Dictation gesture; mutually exclusive. Confirm sub-state only on `ConfirmArmed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GestureState {
     Idle,
     /// Mic open; start tap barges TTS + live dot.
     Recording,
-    /// Deferred submit armed; tick pastes when final lands. Flip window is time-based
-    /// (not a second variant) — see `deferred_submit_held` / `apply_caps_edge`.
+    /// Deferred submit; tick pastes when final lands. Flip window is time-based
+    /// (`deferred_submit_held` / `apply_caps_edge`).
     ConfirmArmed {
-        /// Flip double-tap anchor; `None` after second tap consumed it.
+        /// Double-tap flip anchor; `None` after second tap.
         stop_tap_at: Option<Instant>,
         /// Press began inside flip window → not a new recording.
         double_pending: bool,
-        /// Enter after paste? Armed to `!double_tap_submit`; second tap toggles.
+        /// Enter after paste; armed to `!double_tap_submit`, second tap toggles.
         enter_after_paste: bool,
     },
 }
 
-/// Physical Caps press (separate from [`GestureState`] — press occurs in every mode).
-/// No LongPressResetting: `cancel_all` returns to idle; latch is `long_press_fired`.
+/// Physical Caps press (orthogonal to [`GestureState`]). Latch: `long_press_fired`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PressState {
     Up,
-    /// Press since `since`; latch so cancel fires once and release ≠ tap.
+    /// Latch so cancel fires once and release ≠ tap.
     Down {
         since: Instant,
         long_press_fired: bool,
     },
 }
 
-/// Engine state + deps. `plat` is `Rc<P>` so boxed STT shares the same platform
-/// (Stt is non-`Send`; single poll thread only).
+/// Engine state + deps. `Rc<P>` so boxed STT shares platform (`Stt` non-`Send`; single poll thread).
 pub(crate) struct Engine<P: Platform + 'static> {
     pub(crate) plat: Rc<P>,
-    /// Caps edges route through this.
     pub(crate) stt: Box<dyn Stt>,
     pidfile: std::path::PathBuf,
 
-    /// See [`GestureState`]. `voice_paused`/`caps_phys_prev`/`pending_tap_at` stay
-    /// plain fields (orthogonal to every mode). INVARIANT: every `self.gesture = …`
-    /// is followed by `sync_caps_led` (or goes through a function that already does).
+    /// INVARIANT: every `self.gesture = …` is followed by `sync_caps_led` (or a helper that does).
     gesture: GestureState,
-    /// Caps pause/resume when dictation is OFF (same gesture as dictation path).
+    /// Caps pause/resume when dictation is OFF.
     voice_paused: bool,
-    /// Last physical Caps sample — edge detector; LED is pure output, never read back.
+    /// Last physical Caps sample; LED is pure output (not read back).
     caps_phys_prev: bool,
 
-    /// Physical hold ≥ this (ms) → force idle, LED off.
+    /// Hold ≥ this (ms) → force idle, LED off.
     long_press_ms: u64,
-    /// See [`PressState`].
     press: PressState,
-    /// Deferred tap while speaking (double-tap skip). Coexists with every gesture mode.
+    /// Deferred tap while speaking (double-tap skip).
     pending_tap_at: Option<Instant>,
-    /// Deferred Enter after paste (`paste_delay_ms`); polled via `deferred_ready`.
+    /// Deferred Enter after paste (`paste_delay_ms`).
     pending_enter_at: Option<Instant>,
 
     /// Last applied config for surgical [`Engine::reload`] diffs.
     pub(crate) cfg: VoiceConfig,
     /// Caps loop live; false ⇒ `tick` no-op.
     pub(crate) caps: bool,
-    /// Warm helper; barge-in / tts toggle. `None` in tests.
+    /// Warm helper. `None` in tests.
     pub(crate) tts: Option<Arc<TtsManager>>,
-    /// TTS queue; start-tap barge-in. `None` in tests.
+    /// TTS queue. `None` in tests.
     pub(crate) ttsq: Option<Arc<TtsQueue>>,
     /// Effective caps (config && AX) for status. `None` in tests.
     pub(crate) caps_active: Option<Arc<AtomicBool>>,
     /// Live recording for status. `None` in tests.
     pub(crate) stt_active: Option<Arc<AtomicBool>>,
-    /// Hands-free runtime when `listen_mode == Always`.
+    /// Hands-free when `listen_mode == Always`.
     pub(crate) listener: Option<listener::Listener<P>>,
 
-    /// Dictation preview buffer. Arming is in `gesture`; mirror in `final_state`.
+    /// Arming in `gesture`; finalize mirror in `final_state`.
     pub(crate) paste: PasteState,
 
-    /// Push gate for WaitModelStatus; same Arc as IPC EngineShared.
+    /// WaitModelStatus push gate (same Arc as IPC).
     pub(crate) status_gate: Option<Arc<StatusGate>>,
-    /// Last published overlay digest (bump only on change).
+    /// Overlay digest (bump only on change).
     dict_digest: u64,
     /// Local helper STT vs factory fallback — reload rebuilds when this flips.
     pub(crate) stt_is_local: bool,
-    /// Injected so tests never hit real `$HOME` for Claude Code keybindings.
+    /// Injectable Paths (tempdir in tests) for Claude Code keybindings.
     pub(crate) paths: Option<ds_config::Paths>,
 }
 
 impl<P: Platform + 'static> Engine<P> {
-    /// Construct with the default ClaudeNative STT engine (used by the
-    /// §F tests and as the fallback). `main` uses [`Engine::with_config`] to
-    /// honor the configured engine via the `ds-engines` factory.
+    /// Default ClaudeNative STT (tests + fallback). Production: [`Engine::with_config`].
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(plat: P, pidfile: std::path::PathBuf, long_press_ms: u64) -> Self {
         let plat = Rc::new(plat);
-        // Default Space chord — this constructor is the §F test / fallback path; the real
-        // engine reads Claude Code's bound key via the ds-engines factory (with_config).
+        // Space chord — real engine reads Claude Code binding via `with_config`/factory.
         let stt: Box<dyn Stt> = Box::new(ds_stt::ClaudeNative::new(
             plat.clone(),
             ds_platform::KeyChord::default(),
@@ -227,8 +211,7 @@ impl<P: Platform + 'static> Engine<P> {
         )
     }
 
-    /// Construct selecting the STT engine from config via the factory
-    /// (degrade-to-default-never-silent, §A.3).
+    /// STT from config via factory (no silent engine substitution).
     pub(crate) fn with_config(
         plat: P,
         cfg: &VoiceConfig,
@@ -256,7 +239,6 @@ impl<P: Platform + 'static> Engine<P> {
         long_press_ms: u64,
         paths: Option<ds_config::Paths>,
     ) -> Self {
-        // Caps dictation needs Accessibility trust AND the config toggle(s).
         let caps = caps_loop_enabled(&cfg) && plat.preflight().is_ok();
         let mut engine = Self {
             plat,
@@ -270,14 +252,8 @@ impl<P: Platform + 'static> Engine<P> {
             pending_tap_at: None,
             pending_enter_at: None,
             cfg,
-            // Starts `false` regardless of the computed `caps` — the call to
-            // `set_caps_gate` below is the ONE place that decides whether to acquire the
-            // physical Caps key, so "acquire only when starting enabled" is expressed
-            // once, not re-derived here too (and here, again, on every future edit to
-            // that rule). Safe post-construction: every OTHER field `set_caps_gate`
-            // touches (`gesture`, `caps_active`, `status_gate`) is still
-            // at its just-initialized default right below, so the call is a pure
-            // acquire-or-not with no side effect on them.
+            // `set_caps_gate` is the sole Caps-key acquire site; start false so that rule
+            // lives in one place. Safe post-construction: fields it touches are still defaults.
             caps: false,
             tts: None,
             ttsq: None,
@@ -287,16 +263,11 @@ impl<P: Platform + 'static> Engine<P> {
             paste: Arc::new(Mutex::new(PasteBuf::default())),
             status_gate: None,
             dict_digest: 0,
-            // `assemble`'s `stt` is always the ClaudeNative/factory engine (the test + fallback
-            // constructors); the local helper is only ever installed by `build_stt` in
-            // `engine_run`/`reload`, which set this flag alongside.
+            // Local helper only via `build_stt` in `engine_run`/`reload`.
             stt_is_local: false,
             paths,
         };
-        // Push the user's extra paste-target identifiers to the freshly-constructed platform
-        // (config.toml `extra_terminals`/`extra_editors`, ADDED TO — never
-        // replacing — the compiled-in KNOWN_TERMINALS/CUSTOM_TEXT_EXES tables at lookup
-        // time). `reload` below refreshes this on every config.toml change too.
+        // Union onto compiled-in tables (does not replace). `reload` refreshes on config change.
         engine
             .plat
             .set_extra_terminals(engine.cfg.extra_terminals.clone());
@@ -307,34 +278,22 @@ impl<P: Platform + 'static> Engine<P> {
         engine
     }
 
-    /// Whether dictation is actively recording ([`GestureState::Recording`]).
     fn is_recording(&self) -> bool {
         matches!(self.gesture, GestureState::Recording)
     }
 
-    /// Re-drive the physical Caps LED to match the current gesture
-    /// (`is_recording()`). Call this as the LAST statement of any function that
-    /// assigns `self.gesture` — it is the ONE place in this file that writes
-    /// `Platform::set_caps_lock`, so "did I forget to sync the LED after changing
-    /// gesture" reduces to "did I call this line". (`check_long_press`'s per-tick
-    /// call is the one exception that isn't about a gesture change — see its doc.)
+    /// Sole `Platform::set_caps_lock` write in this file — call last after every `gesture` assign.
+    /// (`check_long_press` also calls per tick for drift recovery.)
     fn sync_caps_led(&self) {
         self.plat.set_caps_lock(self.is_recording());
     }
 
-    /// Whether the stop tap has armed the deferred submit
-    /// ([`GestureState::ConfirmArmed`]) — the final may or may not have landed yet.
     fn is_confirm_armed(&self) -> bool {
         matches!(self.gesture, GestureState::ConfirmArmed { .. })
     }
 
-    /// Bump the status push gate when the dictation-overlay PREVIEW changes, so a blocked
-    /// `WaitModelStatus` (the app's overlay push thread) wakes immediately. Digests the
-    /// preview fields that change WITHOUT a recording toggle (live/final text, awaiting
-    /// confirm, paste target) — the `recording`/`stt_active` flag itself is pushed at its
-    /// flip site by [`set_stt_active`], so re-digesting it here would only double-bump.
-    /// Skips the bump when unchanged so an idle engine never wakes waiters every tick.
-    /// No-op in tests (`status_gate` is `None`).
+    /// Bump WaitModelStatus when overlay preview changes (text/awaiting/can_paste/refusal).
+    /// `stt_active` is pushed only at [`set_stt_active`]. No-op without `status_gate`.
     fn publish_status_change(&mut self) {
         use std::hash::{Hash, Hasher};
         let Some(gate) = self.status_gate.clone() else {
@@ -345,10 +304,7 @@ impl<P: Platform + 'static> Engine<P> {
             .lock()
             .map(|p| {
                 let (t, a) = dictation_preview(&p.final_state, &p.partial, p.caps_held);
-                // LIVE refusal state folded into the digest: arming it (a refused Caps
-                // tap) AND its time-based expiry both change the hash, so the overlay's
-                // pop-up and its fade-out each get a push within one tick — no separate
-                // expiry bookkeeping.
+                // Refusal arm + expiry both hash so pop-up and fade each push within one tick.
                 (
                     t,
                     a,
@@ -369,17 +325,11 @@ impl<P: Platform + 'static> Engine<P> {
         }
     }
 
-    /// Log a caps-trigger event (press/release/tap/reset) for diagnostics. No longer
-    /// surfaced through `model_status` — just the engine's own debug log.
     fn record_caps(&self, kind: &'static str) {
         log::debug!(target: "engine", "caps event: {kind}");
     }
 
-    /// Publish the live recording state for the app's caps status dot. On a real
-    /// transition, bump the status-push gate so a blocked `WaitModelStatus` (the app's
-    /// overlay push thread) sees recording start/stop immediately — the authoritative
-    /// `stt_active` push for the engine PTT path (so `publish_status_change` need not
-    /// re-digest `recording`). No-op bump in tests (`status_gate` is `None`).
+    /// Publish recording for the status dot; bump gate on real transition (PTT path).
     fn set_stt_active(&self, on: bool) {
         if let Some(r) = &self.stt_active
             && r.swap(on, Ordering::Relaxed) != on
@@ -389,58 +339,31 @@ impl<P: Platform + 'static> Engine<P> {
         }
     }
 
-    /// Tear down an IN-FLIGHT dictation for an INTERNAL reason (a reload swapping the STT
-    /// engine, or the caps gate going off mid-hold) — NOT a user cancel, so it does NOT
-    /// silence the voice or barge. Aborts the listen and FULLY resets the recording state:
-    /// the gesture mode, the published `stt_active` (so the menu-bar icon doesn't stay
-    /// "recording" with no actual listen), and the preview buffer. Idempotent when
-    /// already idle. Callers that rebuild `self.stt` must invoke this BEFORE the swap (it
-    /// aborts the CURRENT engine).
+    /// Internal end of in-flight dictation (reload / caps-gate off) — aborts listen, resets
+    /// gesture/`stt_active`/preview; does not silence TTS. Call before swapping `self.stt`.
     fn teardown_hold(&mut self) {
         if self.is_recording() {
             self.stt.abort();
         }
-        // One assignment ends the hold AND disarms any deferred submit — the confirm
-        // sub-state lives inside `ConfirmArmed`, so it can't survive this reset.
+        // Ends hold + disarms deferred submit (`ConfirmArmed` sub-state dies with the variant).
         self.gesture = GestureState::Idle;
-        // If this was actually recording, the LED must go dark to match — an INTERNAL
-        // reason for ending dictation is still the dictation ending, and a caller who
-        // silently swaps the STT engine (or bounces into/out of always-listen mode) out
-        // from under an active hold must not leave the LED lit with no future edge left
-        // to correct it (there may be no physical release coming at all, e.g. the key
-        // was already up when the reload landed).
+        // Internal end still ends recording — LED off even if no physical release is coming.
         self.sync_caps_led();
         if let Ok(mut p) = self.paste.lock() {
             p.partial.clear();
             p.final_state = FinalState::Idle;
             p.target = None;
-            // New session boundary: invalidate any in-flight `stop` joiner so its
-            // late final can't repopulate this just-cleared buffer (the engine
-            // hot-swap drops the old HelperStt, but its detached joiner survives).
+            // Invalidate detached `stop` joiner (survives HelperStt drop).
             p.epoch = p.epoch.wrapping_add(1);
         }
-        // Publish `stt_active = false` LAST: it bumps the status-push gate and can wake a
-        // blocked status reader immediately, so the buffer must already be fully settled —
-        // otherwise that reader could see recording=false with a stale armed/landed
-        // `final_state` from the torn-down session (see `stop_recording`'s identical
-        // ordering concern).
+        // `stt_active=false` last: gate bump can wake a status reader; buffer must be settled
+        // (same ordering as `stop_recording`).
         self.set_stt_active(false);
     }
 
-    /// Drop the deferred-submit latch: `ConfirmArmed → Idle`, with the whole
-    /// insert-only double-tap sub-state (`stop_tap_at`/`double_pending`/
-    /// `enter_after_paste`) dropped structurally — it lives inside the variant, so
-    /// "every disarm site must reset all four" no longer depends on discipline.
-    /// A NO-OP on `Recording` (`start_recording` calls this AFTER setting
-    /// `Recording` — the fresh session must not be knocked back to `Idle`).
-    ///
-    /// Also disarms the [`PasteBuf::final_state`] MIRROR the bar's `awaiting_confirm`
-    /// reads (see [`PasteBuf::disarm`], which keeps the war story of the one disarm
-    /// site that forgot the mirror). Callers that need the buffer settled EARLIER
-    /// than this — `confirm_paste` takes the text and drops to `Idle` atomically
-    /// under one lock, before its synchronous paste/Enter syscalls, so a concurrent
-    /// status read never sees a half-cleared confirm state mid-syscall — may still do
-    /// so themselves; the disarm here is then just a harmless redundant no-op.
+    /// `ConfirmArmed → Idle` (drops flip sub-state) + disarms paste mirror. No-op on
+    /// `Recording` (`start_recording` sets Recording first). `confirm_paste` may clear
+    /// final_state earlier under lock before paste syscalls.
     fn disarm_confirm(&mut self) {
         if self.is_confirm_armed() {
             self.gesture = GestureState::Idle;
@@ -451,14 +374,7 @@ impl<P: Platform + 'static> Engine<P> {
         }
     }
 
-    /// Whether a finalized transcript is waiting for the user's confirm tap (a landed
-    /// `Ready`/`Empty` final, or the stop tap has armed the deferred submit and the
-    /// final just hasn't landed yet ⇒ the confirm panel is up and the Caps key means
-    /// confirm/cancel) — i.e. any non-`Idle` [`FinalState`]. Gates the live
-    /// paste-target probe in `tick` — without the `Armed` state counting here too,
-    /// that probe would skip the exact window `dictation_preview` keeps the panel
-    /// visible through, leaving `can_paste` stale for the length of the async
-    /// final.
+    /// Any non-`Idle` final (incl. Armed) — gates tick's paste-target probe while panel is up.
     fn awaiting_confirm(&self) -> bool {
         self.paste
             .lock()
@@ -466,10 +382,7 @@ impl<P: Platform + 'static> Engine<P> {
             .unwrap_or(false)
     }
 
-    /// Whether the warm helper is running in full-duplex AEC coexist mode (dictation
-    /// and TTS overlap). Drives the coexist gesture semantics: a dictation tap does
-    /// not barge the voice, the stopping press auto-submits, and long-press meanings
-    /// split by state. False in tests (`ttsq` is `None`) and half-duplex.
+    /// Full-duplex AEC coexist (dictation + TTS overlap). False in tests / half-duplex.
     fn is_full_duplex(&self) -> bool {
         self.ttsq
             .as_ref()
@@ -477,72 +390,41 @@ impl<P: Platform + 'static> Engine<P> {
             .unwrap_or(false)
     }
 
-    /// Submit the just-finalized dictation: paste the pending transcript into the focused
-    /// text field — ANY app, the synthetic Cmd+V lands wherever the cursor is — then press
-    /// Return whenever `enter_after_paste` is set (armed per `double_tap_submit` and the
-    /// stop gesture's tap count — one of the two gestures always submits, the other always
-    /// just inserts).
-    /// Driven by the deferred-submit check once the stop tap's async final lands.
-    /// `disarm_confirm()` below owns the LED sync (it's already off from the stop
-    /// tap's own `stop_recording` call anyway; this just goes through the one
-    /// shared path rather than re-deriving it here too).
+    /// Paste finalized transcript (any focused app); Enter when `enter_after_paste`.
+    /// LED sync via `disarm_confirm`.
     fn confirm_paste(&mut self) {
-        // Capture the armed outcome ONCE at entry (it is read both before and after
-        // `disarm_confirm()` below, which drops the variant that holds it). Only ever
-        // called from the tick's ConfirmArmed arm; the `true` fallback matches the
-        // field's disarmed reset default.
+        // Capture before `disarm_confirm` drops the variant. Only called from ConfirmArmed arm.
         let enter_after_paste = match self.gesture {
             GestureState::ConfirmArmed {
                 enter_after_paste, ..
             } => enter_after_paste,
             _ => true,
         };
-        // The confirm tap ALWAYS pastes — there's no focus refusal. The "is there a
-        // paste target?" cue is a live glow on the panel (the engine samples
-        // `can_paste` (the platform probe) each tick → `can_paste` (the
-        // status field) → the app tints it orange when there's nowhere to land).
+        // Always paste; no-target is panel glow only (`can_paste` sampled each tick).
         let text = self.paste.lock().ok().and_then(|mut p| {
             p.partial.clear();
             p.target = None;
-            // Take the text and drop to `Idle` atomically under this ONE lock — not
-            // later via `disarm_confirm()`, which only runs after the syscalls below
-            // (see its doc comment). A concurrent status read must never see a
-            // half-cleared confirm state mid-syscall.
+            // Idle under this lock before paste/Enter syscalls — status readers stay consistent.
             match std::mem::replace(&mut p.final_state, FinalState::Idle) {
                 FinalState::Ready(text) => Some(text),
                 _ => None,
             }
         });
         if let Some(text) = text {
-            // Paste into WHATEVER is focused (terminal, Notes, browser, chat, …). The
-            // explicit confirm tap + the overlay's "→ <app>" target label are the
-            // deliberate gate now, so the paste is no longer restricted to a terminal.
             self.plat.type_text(&text);
-            // Exactly one of the two stop-tap gestures always submits (presses Return in
-            // ANY focused app — terminal, chat box, search field, editor); the other always
-            // just inserts the transcript and the user presses Return themselves. Which TAP
-            // COUNT (single vs double) submits for this transcript is `enter_after_paste`,
-            // armed per `double_tap_submit` and possibly flipped by a second tap on the
-            // stop gesture (captured from the `ConfirmArmed` variant at entry above).
+            // Single vs double stop-tap chooses submit vs insert (`enter_after_paste`).
             let submit = enter_after_paste;
             if submit {
                 if let Some(q) = &self.ttsq {
-                    // Apply `clear_on_input` immediately at submit — must not wait on the
-                    // deferred Enter below; a playing reply is silenced (or not)
-                    // exactly when the user submits, not delayed by
-                    // `paste_delay_ms`. `current` drops this window's own
-                    // now-stale pending speech, `other` drops every other window's (and
-                    // untagged global audio). Resolve "active" ONCE and hand it to
-                    // `cancel_for_submit` so the two scopes can't disagree (see its doc).
+                    // `clear_on_input` at submit time (not after `paste_delay_ms`). One
+                    // `active_session` for both scopes so they can't disagree.
                     q.cancel_for_submit(
                         q.active_session(),
                         self.cfg.clear_on_input.contains(&CancelSpeechScope::Current),
                         self.cfg.clear_on_input.contains(&CancelSpeechScope::Other),
                     );
                 }
-                // Let the async paste settle before Enter lands — deferred via a polled
-                // timer (see `pending_enter_at`) rather than a blocking sleep, since this
-                // runs on the engine's single tick thread.
+                // Polled timer — tick thread must not block-sleep.
                 if self.cfg.paste_delay_ms > 0 {
                     self.pending_enter_at = Some(
                         Instant::now() + Duration::from_millis(self.cfg.paste_delay_ms),
@@ -565,31 +447,19 @@ impl<P: Platform + 'static> Engine<P> {
         }
     }
 
-    /// Caps HELD past the long-press threshold → the universal CANCEL: discard any
-    /// in-flight dictation WITHOUT injecting a partial, SILENCE the current voice /
-    /// generation (clear the warm queue + barge the cold speaker), and return to idle with
-    /// the LED off. This is the "hold to shut it up" gesture — there is NO hold-to-dictate;
-    /// a hold never leaves a recording running (the stuck-state bug the tap/hold split fixes).
+    /// Long-press cancel: abort dictation (no partial inject), clear TTS + barge cold speaker,
+    /// idle + LED off. Hold is cancel only — not hold-to-dictate.
     fn cancel_all(&mut self) {
-        // Drop any deferred single tap — a long-press supersedes it (don't toggle later).
         self.pending_tap_at = None;
-        // End any in-flight listen via ABORT: ClaudeNative releases Ctrl+G (nothing left
-        // held); Parakeet/System DISCARD the capture WITHOUT injecting a partial transcript.
+        // Abort: ClaudeNative releases Ctrl+G; Parakeet/System discard without inject.
         if self.is_recording() {
             self.stt.abort();
         }
-        // Silence the voice / cancel generation: clear the warm queue + barge the cold
-        // one-shot speaker. (Unlike a normal stop, a hold does NOT resume — it means
-        // "stop talking".)
+        // Hold means "stop talking" — clear queue, no resume.
         if let Some(q) = &self.ttsq {
             q.clear();
         }
         let _ = ds_proc::barge_in(&self.pidfile);
-        // Reset to idle, LED off. `Idle` in one assignment ends the recording AND
-        // disarms any deferred submit (the confirm sub-state lives inside
-        // `ConfirmArmed`, so nothing of it can leak past this reset); `sync_caps_led`
-        // derives the off write from that same assignment rather than a separate
-        // hardcoded literal.
         self.gesture = GestureState::Idle;
         self.sync_caps_led();
         self.set_stt_active(false);
@@ -597,10 +467,8 @@ impl<P: Platform + 'static> Engine<P> {
             p.partial.clear();
             p.final_state = FinalState::Idle;
             p.target = None;
-            // A hold means "stop everything" — that includes a still-live refusal cue.
             p.refused_until = None;
-            // Invalidate any in-flight `stop` joiner (see PasteBuf::epoch) so a stale
-            // final can't land after this cancel reset the buffer.
+            // Stale stop-joiner finals must not land after cancel.
             p.epoch = p.epoch.wrapping_add(1);
         }
         self.pending_enter_at = None;
@@ -608,17 +476,12 @@ impl<P: Platform + 'static> Engine<P> {
         log::debug!(target: "engine", "HOLD cancel — dictation discarded, voice silenced, LED off, idle");
     }
 
-    /// Whether dictation can START right now: the selected STT engine is on AND ready to
-    /// transcribe. `BuiltIn` (Parakeet) needs its model resident + warm; `System` needs the OS
-    /// recognizer ready (probed only when selected — the probe isn't free); `ClaudeCode`
-    /// delegates so it's always ready; off (`None`) never. See
-    /// [`crate::config_gate::stt_can_start`].
+    /// Resolved STT on and ready. BuiltIn needs warm model; System needs OS ready;
+    /// ClaudeCode always; off never. See [`crate::config_gate::stt_can_start`].
     fn stt_ready_to_dictate(&self) -> bool {
         use ds_config::SttEngine;
-        // The RESOLVED STT engine (first usable rung); None = dictation off.
         let resolved = self.cfg.resolved_stt();
-        // No warm-engine host (tests / pure-RPC): nothing to probe, so don't gate — keep the
-        // plain on/off behavior. In production `ttsq` is always Some.
+        // Tests / pure-RPC: no warm host — on/off only.
         let Some(q) = self.ttsq.as_ref() else {
             return resolved.is_some();
         };
@@ -627,43 +490,23 @@ impl<P: Platform + 'static> Engine<P> {
         crate::config_gate::stt_can_start(resolved, q.stt_loaded(), system_ready)
     }
 
-    /// A completed Caps TAP toggles dictation: start when idle, stop+submit when recording.
-    /// `start_recording`/`stop_recording` each sync the LED themselves as they flip the
-    /// gesture state, so the light reflects the real recording state whether this fires
-    /// immediately (from a tap's release) or later (from a speaking-deferred tap) — see
-    /// [`sync_caps_led`](Self::sync_caps_led)'s doc.
+    /// Caps tap: start when idle, stop+submit when recording. LED via start/stop helpers.
     fn toggle_dictation(&mut self) {
-        // GUARD: dictation can START only if the selected STT engine is actually READY to
-        // transcribe (BuiltIn/System model resident + warm; ClaudeCode delegates → always).
-        // On-but-not-ready REFUSES the tap: the visual cue armed below is the whole
-        // response, and the voice is left strictly alone — it must NOT borrow the OFF
-        // mode's pause/resume, because nothing would resume the pause when the model
-        // finishes loading (TTS went silent for the entire download window, issue #1).
-        // While ALREADY recording, readiness is moot — the model was ready when the
-        // recording started, and a tap must always still STOP it.
+        // Start only if ready; refused start leaves voice alone (issue #1: pause-for-download
+        // with nothing to resume). Already recording → always stop.
         let dictation_on = self.cfg.resolved_stt().is_some();
         let ready = if self.is_recording() {
             true
         } else {
             let ready = self.stt_ready_to_dictate();
-            // A refused START with Parakeet SELECTED may be a warm child that CRASHED
-            // post-READY — and a user who only dictates never queues the speak that
-            // triggers the worker-side heal, so dictation would stay refused until an app
-            // restart. Kick the non-blocking heal; this tap stays a pause/resume, the NEXT
-            // finds the model warm. No-op for a child that's alive (still loading) or
-            // whose start failed (see `warm_child_heal_action`).
+            // Parakeet refused after crash: kick heal so next tap can start (no speak path).
             if !ready
                 && self.cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
                 && let Some(q) = &self.ttsq
             {
                 q.heal_crashed_child();
             }
-            // A refused START must not be a silent no-op (the fresh-install trap: model
-            // still downloading, Caps does "nothing", the user restarts the app). Arm the
-            // refusal cue — the overlay pops up washed in the no-target warning glow for
-            // DICTATION_REFUSAL_MS on every platform (`dictation.state = refused`). Only for the
-            // engines with a runtime readiness gate (BuiltIn/System); dictation OFF keeps
-            // its documented silent pause/resume tap (deliberate, not an error).
+            // BuiltIn/System refused: refusal cue. Dictation OFF keeps silent pause/resume.
             if !ready && crate::config_gate::refusal_cue_on_refused_start(self.cfg.resolved_stt()) {
                 if let Ok(mut p) = self.paste.lock() {
                     p.refused_until =
@@ -674,16 +517,11 @@ impl<P: Platform + 'static> Engine<P> {
             ready
         };
         match caps_tap_action(dictation_on, ready, self.is_recording(), self.voice_paused) {
-            CapsTap::StartRecord => self.start_recording(), // opens mic; pauses the voice
-            CapsTap::StopRecord => self.stop_recording(),   // stops+submits; resumes the voice
-            // Dictation ON but the engine can't start yet (model still downloading /
-            // loading): the refusal cue armed above is the whole response. Deliberately a
-            // strict no-op for the voice — the old shared pause path silenced TTS for the
-            // entire download window with nothing to resume it (issue #1).
+            CapsTap::StartRecord => self.start_recording(),
+            CapsTap::StopRecord => self.stop_recording(),
+            // Voice alone (issue #1); cue already armed.
             CapsTap::Refused => {}
-            // Dictation OFF: the mic never opens, but the tap still pauses/resumes the
-            // voice — the SAME gesture, so the voice is HELD (and any narration that
-            // arrives stays QUEUED), never silenced/dropped.
+            // Dictation OFF: hold TTS (queue stays), same gesture as dictation path.
             CapsTap::PauseVoice => {
                 if let Some(q) = &self.ttsq {
                     q.pause_for_record();
@@ -699,61 +537,27 @@ impl<P: Platform + 'static> Engine<P> {
         }
     }
 
-    /// §E.4 hot-reload: re-read VoiceConfig and REBUILD the boxed Stt via the
-    /// factory, WITHOUT corrupting the running state machine.
+    /// Hot-reload: rebuild STT via factory without corrupting the gesture machine.
     ///
-    /// In-flight handling (mirrors `cancel_all`'s teardown, via the same
-    /// `teardown_hold` helper):
-    ///   * If a dictation is active, `abort()` the OUTGOING engine first —
-    ///     ClaudeNative releases Ctrl+G cleanly (nothing left held); Parakeet
-    ///     discards the in-flight capture without injecting (§F.1).
-    ///   * Swap in a fresh engine built on the SAME platform `Rc` (one event
-    ///     source — never two engines fighting over the keyboard).
-    ///   * Reset the gesture state to `Idle` so the new engine starts idle.
-    ///
-    /// `teardown_hold` DOES sync the LED off when it actually ends an in-flight
-    /// recording (an internal reason for ending dictation is still the dictation
-    /// ending — the LED must not lie that it's still recording just because nothing
-    /// physically released the key). This does NOT fabricate a spurious tap: `reload`
-    /// leaves the physical key untouched, and tap/long-press detection is edge-based
-    /// on the physical key only (never reads the LED/lock state back) — so driving
-    /// the LED here has no effect on gesture detection, only on the indicator's
-    /// accuracy.
+    /// Active dictation: `teardown_hold` aborts outgoing STT (shared platform `Rc`).
+    /// LED may go off without a physical release; edge detection is physical-only.
     pub(crate) fn reload(&mut self, cfg: &VoiceConfig) {
-        // Diff against the last-applied config and touch ONLY what changed — the
-        // "no extra reloads" contract. Per-call params
-        // (voice/rate/narrate/region/vocab) need no action: the next call reads
-        // them fresh from `self.cfg`, which we update unconditionally below.
+        // Touch only what `changes_since` reports; next call reads scalars from `self.cfg`.
         let change = cfg.changes_since(&self.cfg);
 
-        // long_press is a cheap scalar latch — refresh it every reload.
         self.long_press_ms = normalize_long_press(cfg.long_press_ms);
-
-        // Same reasoning as long_press_ms above: cheap to refresh unconditionally, no diff
-        // needed. See Engine::assemble for why this lives here too (first-boot coverage).
         self.plat.set_extra_terminals(cfg.extra_terminals.clone());
         self.plat
             .set_extra_editors(cfg.extra_editors.clone());
 
-        // STT engine: rebuild when the engine SELECTION changed OR when local availability
-        // FLIPPED. The latter is the fresh-install case: a model download makes Parakeet
-        // present without changing `resolved_stt()` (still `built_in`), so `stt_changed` is
-        // false — but `build_stt` would now pick the local helper instead of the ClaudeNative
-        // fallback. Without this, dictation stays on the Claude Code tap even though Parakeet
-        // downloaded, loaded, and the status dot went green. (The download-completion self-heal
-        // nudges a reload precisely so this check re-runs.)
-        // Mirror `build_stt`'s decision EXACTLY: it uses the local helper only when a warm
-        // helper exists (`tts.is_some()`, always true in production, `None` in tests) AND the
-        // model is available. Gating on `tts` keeps this hermetic (tests never touch the real
-        // model cache) and correct (no helper ⇒ build_stt always falls to the factory anyway).
+        // Rebuild STT when selection changes OR local model becomes available (fresh-install:
+        // `resolved_stt` stays `built_in` but `build_stt` would switch ClaudeNative → helper).
+        // Gate on `tts.is_some()` to mirror `build_stt` (tests: no helper ⇒ factory only).
         let want_local = self.tts.is_some() && local_stt_available(cfg);
-        // Captured BEFORE the rebuild below overwrites `stt_is_local` — the listener
-        // lifecycle further down needs the same availability edge (see there).
+        // Capture before overwrite — listener lifecycle uses the same edge.
         let local_avail_flipped = want_local != self.stt_is_local;
         if change.stt_changed || local_avail_flipped {
-            // Reset the recording state (incl. the published `stt_active` icon) BEFORE the
-            // swap — otherwise a reload mid-dictation leaves the menu-bar icon stuck
-            // "recording" with no live listen on the fresh engine.
+            // Before swap: clear recording icon + buffer (mid-dictation reload).
             self.teardown_hold();
             self.stt = build_stt(
                 cfg,
@@ -765,92 +569,52 @@ impl<P: Platform + 'static> Engine<P> {
             self.stt_is_local = want_local;
         }
 
-        // Caps loop gate: recomputed EVERY reload (not just when the toggle
-        // changed) so a freshly-granted Accessibility trust is picked up by a
-        // reload nudge — no restart. If the loop just went OFF mid-hold, end the
-        // HOLD cleanly so we never leave a key down or the mic open. Turning it
-        // back ON needs no teardown — the next tick re-arms on the live key state.
+        // Every reload: pick up Accessibility grants; OFF mid-hold → teardown_hold via gate.
         let now_on = caps_loop_enabled(cfg) && self.plat.preflight().is_ok();
         self.set_caps_gate(now_on);
 
-        // Full-duplex AEC env for the warm helper (Parakeet STT + Kokoro TTS):
-        // store the desired mode BEFORE any (re)start below so a fresh start uses it.
+        // Prefs before any restart so a fresh start sees them.
         if let Some(tts) = &self.tts {
             tts.set_full_duplex_pref(full_duplex_wanted(cfg));
             tts.set_stt_provider_pref(helper_stt_provider(cfg));
             tts.set_stt_wanted(helper_uses_stt(cfg));
             tts.set_tts_wanted(helper_uses_tts(cfg));
-            // See the identical seeding + rationale in `boot::engine_run`: without this the
-            // model-presence gate in `start_locked` would resolve ANE-vs-ONNX from a stale
-            // provider preference on the FIRST `set_enabled` below whenever this reload flips
-            // TTS on (`apply_provider_and_autofetch` only applies the resolved provider AFTER
-            // `daemon.reload` returns, in `boot.rs`'s `ReloadTick::Run` arm).
+            // Seed provider before first `set_enabled` — autofetch applies resolved EP only
+            // after `daemon.reload` returns (`boot::engine_run` / ReloadTick). Same as boot.
             tts.set_provider(cfg.resolved_tts_provider().as_str());
         }
 
-        // Warm helper lifecycle: it hosts BOTH engines now, so (re)gate it whenever
-        // TTS or STT toggles/engine changes — run it iff either engine needs it.
+        // Helper hosts TTS+STT — re-gate when either engine needs change.
         if (change.tts_toggled || change.stt_changed)
             && let Some(tts) = &self.tts
         {
-            // Debug aid: this is the trigger for a warm-child bounce (set_enabled +
-            // reconcile below can kill/respawn ds-helper). Logging WHICH flag fired
-            // lets a burst of back-to-back reloads be tied to a cause from the log
-            // alone, instead of pieced together from timestamps across several lines.
             log::info!(
                 target: "engine",
                 "warm helper lifecycle re-gated (tts_toggled={} stt_changed={})",
                 change.tts_toggled, change.stt_changed
             );
             tts.set_enabled(helper_needed(cfg));
-            // …then make the helper's resident models match the selection
-            // (load the selected engine, free the deselected one).
             reconcile_helper_models(tts, cfg);
         }
 
-        // If the helper stayed running but its full-duplex env is now stale (the
-        // user toggled `full_duplex`, or switched STT to/from Parakeet without
-        // stopping the helper), restart it to pick up the new DONTSPEAK_FULL_DUPLEX.
         if let Some(tts) = &self.tts {
             tts.restart_if_full_duplex_stale();
         }
 
-        // Always-listening lifecycle: (re)build the listener when the mode turns
-        // on or its params change; drop it when the mode turns off. Compared
-        // against the still-current self.cfg (replaced just below).
-        // `paste_delay_ms` deliberately does NOT gate a rebuild: unlike
-        // `submit_confirm_ms`/`endpoint_silence_ms`, which are baked into
-        // `TurnLogic::new`/`Endpointer::new` at construction, it's just a plain `u64`
-        // the listener reads at submit time — pushed live below instead, so changing
-        // it mid-utterance doesn't drop an in-flight hands-free capture.
+        // Always-listen: rebuild on mode/params; `paste_delay_ms` is live-pushed (not baked in).
         let listen_changed = cfg.listen_mode != self.cfg.listen_mode
             || cfg.hands_free != self.cfg.hands_free
             || cfg.submit_confirm_ms != self.cfg.submit_confirm_ms
             || cfg.endpoint_silence_ms != self.cfg.endpoint_silence_ms;
         if cfg.listen_mode == ds_config::ListenMode::Always {
-            // `local_avail_flipped`: the listener probes model presence ONCE at
-            // construction (`Listener::new` → `available`, false ⇒ the loop no-ops), so
-            // the fresh-install model download must REBUILD it too — the hands-free twin
-            // of the `build_stt` self-heal above; without it always-listen stays inert
-            // until an app restart even though the model arrived and the dot went green.
-            // `change.stt_changed`: the listener also resolves its provider ONCE at
-            // construction (`Listener::new` → `helper_stt_provider`), same as `build_stt`
-            // does for tap-to-talk above (line ~946) — without mirroring that same trigger
-            // here, switching STT engine/provider (e.g. ANE → CPU, or BuiltIn → System)
-            // while Always-listening is already running leaves the background listener on
-            // the STALE provider indefinitely, since `local_avail_flipped` alone stays
-            // false whenever both the old and new provider are already locally available.
+            // Listener freezes availability + provider at construction — rebuild on
+            // local_avail_flipped / stt_changed (same self-heal as tap STT).
             if self.listener.is_none()
                 || listen_changed
                 || local_avail_flipped
                 || change.stt_changed
             {
-                // Entering (or re-parameterizing) hands-free bypasses the Caps PTT in
-                // `tick`, so an in-flight dictation or a still-armed deferred submit
-                // would sit in stasis and paste a STALE transcript when the mode flips
-                // back. Same hazard as the caps gate going off — same teardown.
-                // (Any non-Idle gesture ⇔ the old `holding || confirm_armed`: the enum
-                // is exhaustive over exactly those two live modes.)
+                // Hands-free bypasses Caps PTT — tear down in-flight / deferred submit.
                 if !matches!(self.gesture, GestureState::Idle) {
                     self.teardown_hold();
                 }
@@ -870,28 +634,19 @@ impl<P: Platform + 'static> Engine<P> {
                 ));
             }
         } else if self.listener.is_some() {
-            // Leaving Always mid-capture must not strand the shared state the listener was
-            // driving: the listener writes the SAME `stt_active` flag + paste buffer the
-            // Caps PTT path uses (see `listener::sync_pill`), so simply dropping it here —
-            // possibly mid-utterance — left `stt_active` stuck true (a permanently-lit
-            // "recording" indicator) with a stale transcript still in the buffer. Route
-            // through the same teardown the caps-gate-off and engine-rebuild paths use.
+            // Listener drives shared stt_active + paste — teardown before drop.
             self.teardown_hold();
             self.listener = None;
         }
-        // Live-push the delay onto whatever listener now exists (freshly built above,
-        // or untouched) — cheap field copy, no rebuild needed.
         if let Some(l) = self.listener.as_mut() {
             l.set_paste_delay_ms(cfg.paste_delay_ms);
         }
 
-        // Record the applied config so the NEXT reload diffs against it.
         if let Some(q) = &self.ttsq {
             q.set_config(cfg.clone());
         }
         self.cfg = cfg.clone();
-        // NOTE: `press` is a physical-key latch; a config reload does not change the
-        // physical key, so leave it as-is.
+        // `press` is physical-key latch — leave across reload.
         log::info!(
             target: "engine",
             "dontspeakd reloaded config (caps={} stt={}{} tts={} long_press={}ms narrate={} \

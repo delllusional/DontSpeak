@@ -1,9 +1,7 @@
-//! Client-wiring orchestrator — CLI `wire` ([`run`]) and engine boot/config reconcile
-//! ([`reconcile`]). Walks `ds_config::CLIENT_REGISTRY` surfaces; same path for interactive
-//! wire and engine reconcile (no drift). Additive, idempotent, backed-up; absent client ⇒ skip.
+//! Client-wiring orchestrator — CLI [`run`] and engine boot/config [`reconcile`].
+//! Same path over `CLIENT_REGISTRY` (no drift). Additive, idempotent, backed-up.
 //!
-//! `--print-only` (issue #30): surfaces sharing one file must not each re-read disk.
-//! `wire_surfaces_print_only` groups by path and threads `PreviewDoc`.
+//! `--print-only` (#30): co-file surfaces share one disk read via `PreviewDoc`.
 
 pub(crate) mod hooks;
 mod io;
@@ -23,15 +21,14 @@ pub(crate) enum PreviewDoc {
 /// MCP registry key / `serverInfo.name`. Must match `dontspeak::mcp::SERVER_NAME`.
 pub const SERVER_NAME: &str = "DontSpeak";
 
-/// CLI entry. Exit 0 ok/skip, 1 hard error. Wire-able tokens only (`client_spec` rejects
-/// `dontspeak`/`unknown`).
+/// CLI entry. Exit 0 ok/skip, 1 hard error. Wire-able tokens only.
 pub fn run(args: &[String]) -> i32 {
     let mut client: Option<ClientSource> = None;
     let mut remove = false;
     let mut print_only = false;
     let mut all = false;
     let mut do_reconcile = false;
-    // Registry-driven usage tokens (can't go stale).
+    // Registry-driven usage tokens.
     let tokens = || {
         ds_config::CLIENT_REGISTRY
             .iter()
@@ -400,7 +397,7 @@ mod tests {
         assert_eq!(run(&args(&["--help"])), 0);
     }
 
-    /// Injectable `Paths` so this never touches real $HOME.
+    /// Injectable `Paths` (tempdir; no real $HOME).
     #[test]
     fn list_flag_exits_zero() {
         let dir = tempfile::tempdir().unwrap();
@@ -806,9 +803,7 @@ mod tests {
         );
     }
 
-    /// Steady-state idempotency (LOAD-BEARING — the engine reconciles every boot): after a
-    /// first reconcile wires everything, a SECOND reconcile writes nothing and creates NO new
-    /// `.bak` sibling across the three newly-guarded writers (JSON hooks, JSON MCP, TOML MCP).
+    /// Load-bearing: second boot reconcile is zero-write (no new `.bak`) across writers.
     #[test]
     fn reconcile_is_idempotent_and_creates_no_new_backups() {
         let dir = tempfile::tempdir().unwrap();

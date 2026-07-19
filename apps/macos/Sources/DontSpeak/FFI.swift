@@ -3,7 +3,7 @@
 import CDontSpeak
 import Foundation
 
-/// Call that returns an owned `char*`: copy to Swift String, `ds_string_free`. Nil on NULL.
+/// Owned `char*` → Swift String + `ds_string_free`. Nil on NULL.
 func ffiString(_ call: () -> UnsafeMutablePointer<CChar>?) -> String? {
     guard let ptr = call() else { return nil }
     defer { ds_string_free(ptr) }

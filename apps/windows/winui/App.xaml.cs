@@ -9,7 +9,7 @@ using Microsoft.UI.Xaml;
 namespace DontSpeak;
 
 /// <summary>
-/// Process entry: in-process engine host + Fluent UI (merged former ds-tray).
+/// Process entry: in-process engine host + Fluent UI.
 /// <see cref="Native.EngineStart"/> on launch / <see cref="Native.EngineStop"/> on quit;
 /// tray + Status/Tools window. Close hides to tray; Exit is tray-only. Runtime control via MCP.
 /// </summary>
@@ -24,9 +24,9 @@ public partial class App : Application
     private bool _hostingEngine;
     private int _promoteTries;
     private bool _hintedTray;
-    private bool _testOverlay;            // --test-overlay visual QA
+    private bool _testOverlay; // --test-overlay visual QA
     private DispatcherQueueTimer? _testTimer;
-    private Thread? _pushThread;          // blocks in WaitModelStatus
+    private Thread? _pushThread; // blocks in WaitModelStatus
     private volatile bool _pushStop;
     private readonly object _statusDispatchLock = new();
     private HealthSnapshot? _pendingStatus;
@@ -34,20 +34,18 @@ public partial class App : Application
     private static Mutex? _instanceMutex;
     private static EventWaitHandle? _activate;
     private const string ActivateEvent = "DontSpeak.WinUI.Activate";
-    // Stable AUMID pairs with Start-menu shortcut (install.ps1) so taskbar/TM show "DontSpeak"
-    // not "ds-winui". See Win32.SetCurrentProcessExplicitAppUserModelID.
+    // Pairs with Start-menu shortcut (install.ps1); set before any UI. See Win32.AUMID note.
     private const string AppUserModelId = "DontSpeak";
 
     public App()
     {
-        // Before any UI so taskbar/TM group as DontSpeak. Best-effort.
         try { _ = Win32.SetCurrentProcessExplicitAppUserModelID(AppUserModelId); } catch { }
         EnablePortableModelDir();
         InitializeComponent();
     }
 
-    /// <summary>Portable bundle: sibling `models/` + unset DONTSPEAK_MODEL_DIR → set env before
-    /// any P/Invoke so engine + children inherit. Installed app has no sibling dir → per-user cache.</summary>
+    /// <summary>Portable: sibling `models/` + unset DONTSPEAK_MODEL_DIR → set env before any
+    /// P/Invoke so engine + children inherit. Else per-user cache.</summary>
     private static void EnablePortableModelDir()
     {
         if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DONTSPEAK_MODEL_DIR"))) return;
@@ -57,11 +55,10 @@ public partial class App : Application
             if (System.IO.Directory.Exists(models))
                 Environment.SetEnvironmentVariable("DONTSPEAK_MODEL_DIR", models);
         }
-        catch { /* best-effort; fall back to the per-user cache */ }
+        catch { /* best-effort */ }
     }
 
-    /// <summary>Sync probe capped at 2500ms (same budget as RefreshStatus) — ModelStatusJson can
-    /// block ~120s on a wedged engine; don't stall launch.</summary>
+    /// <summary>2500ms cap (same as RefreshStatus) — ModelStatusJson can block ~120s if wedged.</summary>
     private static HealthSnapshot ProbeBounded()
     {
         var probe = System.Threading.Tasks.Task.Run(HealthSnapshot.Probe);
@@ -69,15 +66,14 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Hardcoded English-only ds_core.dll load-failure dialog — the ONE user-facing string NOT
-    /// via <see cref="Loc.T(string)"/>. Loc.T P/Invokes ds_core; this only runs when that DLL is
-    /// already unloadable, so Loc.T would throw and swallow the diagnostic. Permanent exception
-    /// to "no hardcoded UI strings" (AGENTS.md / LOCALIZATION.md). Do not switch this to Loc.T.
+    /// Only user-facing string outside <see cref="Loc.T(string)"/>: Loc.T P/Invokes ds_core, and
+    /// this path only runs when that DLL is unloadable. Permanent exception to "no hardcoded UI
+    /// strings" (LOCALIZATION.md).
     /// </summary>
     private static string DllLoadFailureMessage() =>
         CultureInfo.CurrentUICulture.TwoLetterISOLanguageName switch
         {
-            // Only add cases if this specific message is ever translated; ds_core is unreachable here.
+            // ds_core unreachable here — English only unless this message is ever translated.
             _ => "ds_core.dll was not found next to the app, so the voice engine cannot start.\n\n" +
                  "Reinstall DontSpeak (irm https://github.com/delllusional/DontSpeak/releases/latest/download/install.ps1 | iex). Building from " +
                  "source? Build the Rust engine first — see apps/windows/installer/build-portable.ps1.",
@@ -85,9 +81,8 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        // Diagnosable fail if DLL missing (partial install / C# without Rust build). Downstream
-        // P/Invokes would otherwise throw DllNotFoundException with no window. No Loc.T — see
-        // DllLoadFailureMessage.
+        // Fail with a window if DLL missing (partial install / C# without Rust build).
+        // No Loc.T — see DllLoadFailureMessage.
         if (!NativeLibrary.TryLoad("ds_core.dll", out _))
         {
             _ = Win32.MessageBoxW(IntPtr.Zero, DllLoadFailureMessage(),
@@ -95,7 +90,7 @@ public partial class App : Application
             Exit(); return;
         }
 
-        // Single instance: second launch signals the first to show its window, then exits.
+        // Second launch signals first to show window, then exits.
         _instanceMutex = new Mutex(true, "DontSpeak.WinUI.SingleInstance", out bool createdNew);
         if (!createdNew)
         {
@@ -107,32 +102,31 @@ public partial class App : Application
         var cli = Environment.GetCommandLineArgs();
         bool Has(params string[] flags) =>
             cli.Any(a => flags.Any(f => a.Equals(f, StringComparison.OrdinalIgnoreCase)));
-        // --hidden/--tray = autostart tray-only; tools/--tools = Tools tab on first show.
+        // --hidden/--tray: autostart tray-only; tools/--tools: Tools tab on first show.
         bool hidden = Has("--hidden", "--tray");
         bool tools = Has("tools", "--tools");
         bool testGlow = Has("--test-glow");
         _testOverlay = Has("--test-overlay") || testGlow;
 
-        // Host engine only if nothing already answers the socket (avoid double-bind).
-        // We only stop on exit what we started.
+        // Start engine only if socket free; stop on exit only what we started.
         _hostingEngine = !ProbeBounded().Activity.EngineRunning;
         if (_hostingEngine) Native.EngineStart();
 
         _tray = new TrayIcon();
-        // Tray re-show must not force a tab — keep whatever was selected (first open uses XAML default).
+        // Re-show keeps the selected tab (first open uses XAML default).
         _tray.OpenStatus += () => ShowWindow();
         _tray.Exit += ExitApp;
 
         _panel = new DictationPanel();
 
         _window = new MainWindow();
-        // Close → hide to tray; real teardown is tray Exit.
+        // Close hides to tray; real teardown is tray Exit.
         _window.AppWindow.Closing += (_, e) =>
         {
             if (_exiting) return;
             e.Cancel = true;
             _window!.AppWindow.Hide();
-            // First hide: balloon — Win11 puts new icons in overflow.
+            // Win11 often parks new icons in overflow — balloon once.
             if (!_hintedTray)
             {
                 _hintedTray = true;
@@ -144,14 +138,13 @@ public partial class App : Application
         else _tray.Balloon(Loc.T("tray.hint_tray_title"), Loc.T("tray.hint_tray_body"));
 
         var q = DispatcherQueue.GetForCurrentThread();
-        // One-shot paint before push thread (first Wait can block 1s). After this, push is sole
-        // driver of tray/stats/overlay — no poll timer (Windows has no OS-permission poll).
+        // One-shot paint before push (first Wait can block 1s); then push alone drives UI.
         ApplyStatus(ProbeBounded());
 
-        // Dedicated WaitModelStatus thread (not thread pool — blocks indefinitely). Skipped for QA overlay.
+        // Dedicated thread (not pool — Wait blocks indefinitely). Skip for QA overlay.
         if (!_testOverlay) StartDictationPush();
 
-        // One-shot update check off UI thread (GitHub GET blocks). Fire-and-forget pill only.
+        // GitHub GET blocks — off UI; fire-and-forget pill.
         new Thread(() =>
         {
             bool available; string? latest;
@@ -166,14 +159,14 @@ public partial class App : Application
         })
         { IsBackground = true, Name = "update-check" }.Start();
 
-        // Visual QA: drive panel without live STT; push thread is skipped above.
+        // Visual QA without live STT (push skipped above).
         if (testGlow)
         {
             _panel?.Update(true, "", true, true);
         }
         else if (_testOverlay)
         {
-            // Streaming script: listening → grow words → blur-replace backtracks.
+            // Listening → grow words → blur-replace backtracks.
             string[] script =
             {
                 "",
@@ -200,7 +193,7 @@ public partial class App : Application
             _testTimer.Start();
         }
 
-        // Single-instance reactivation: second launch Set()s; ExitApp Set()s to end loop.
+        // Second launch Set()s; ExitApp Set()s to end loop.
         var uiq = DispatcherQueue.GetForCurrentThread();
         new Thread(() =>
         {
@@ -213,7 +206,7 @@ public partial class App : Application
                     uiq.TryEnqueue(() => { if (!_exiting) ShowWindow(); });
                 }
             }
-            catch { /* handle disposed during teardown */ }
+            catch { /* disposed during teardown */ }
         }) { IsBackground = true }.Start();
     }
 
@@ -224,8 +217,7 @@ public partial class App : Application
         _window.AppWindow.Show();
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
         Win32.ShowWindow(hwnd, SW_RESTORE);
-        // Tray right-click blocks SetForegroundWindow while a menu is active. Work around:
-        // topmost → SetForegroundWindow → drop topmost (topmost doesn't need FG rights).
+        // Tray menu blocks SetForegroundWindow; topmost → FG → drop (topmost needs no FG rights).
         SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
         SetForegroundWindow(hwnd);
         SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
@@ -238,10 +230,10 @@ public partial class App : Application
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
 
-    /// <summary>UI-thread tray paint from a pre-probed snapshot (push + startup share this).</summary>
+    /// <summary>UI-thread tray paint (push + startup share this).</summary>
     private void ApplyStatus(HealthSnapshot s)
     {
-        // Win11 NotifyIconSettings appears a beat after NIM_ADD — retry promote ~12 pushes.
+        // NotifyIconSettings appears after NIM_ADD — retry promote for ~12 pushes.
         if (_promoteTries < 12 && _tray != null && TrayIcon.PromoteInTray())
             _promoteTries = 12;
         else
@@ -251,8 +243,7 @@ public partial class App : Application
         _tray?.Update(state, s.Activity.Muted);
     }
 
-    /// <summary>Coalesce status UI work: at most one queued callback; newer snapshots replace pending
-    /// so a busy UI shows the latest transcript, not a backlog replay.</summary>
+    /// <summary>At most one queued UI callback; newer snapshots replace pending (latest wins).</summary>
     private void QueueLatestStatus(DispatcherQueue queue, HealthSnapshot snapshot)
     {
         lock (_statusDispatchLock)
@@ -296,13 +287,13 @@ public partial class App : Application
         }
     }
 
-    /// <summary>Sole UI driver: dedicated thread blocks in WaitModelStatus, marshals on change.</summary>
+    /// <summary>Sole UI driver: blocks in WaitModelStatus, marshals on change.</summary>
     private void StartDictationPush()
     {
         var uiQueue = DispatcherQueue.GetForCurrentThread();
         _pushThread = new Thread(() =>
         {
-            ulong since = 0;   // 0 ⇒ immediate first sample
+            ulong since = 0; // 0 ⇒ immediate first sample
             bool delivered = false;
             while (!_pushStop)
             {
@@ -312,19 +303,17 @@ public partial class App : Application
                 if (_pushStop) break;
                 if (string.IsNullOrWhiteSpace(json) || json == "{}")
                 {
-                    // Engine down: wait doesn't block — pace to avoid hot spin.
+                    // Engine down: wait returns immediately — pace to avoid hot spin.
                     Thread.Sleep(400);
                     continue;
                 }
                 var s = HealthSnapshot.FromJson(json);
-                // Timeout returns same seq when idle (StatusGate::wait_changed) — skip re-marshal
-                // or UI repaints ~1×/s forever. Windows liveness = payload presence (empty above);
-                // macOS ALSO yields on external engineRunning flip (pidfile/launchd) — do not unify.
+                // Idle timeout returns same seq (StatusGate::wait_changed) — skip re-marshal.
+                // Win liveness = payload presence; macOS also yields on engineRunning flip — keep split.
                 bool changed = !delivered || s.StatusSeq != since;
                 since = s.StatusSeq;
                 if (!changed) continue;
                 delivered = true;
-                // Panel gate uses engine ShowPanel (canonical dictation.state; legacy bool fallback).
                 QueueLatestStatus(uiQueue, s);
             }
         })
@@ -336,13 +325,13 @@ public partial class App : Application
     {
         if (_exiting) return;
         _exiting = true;
-        _pushStop = true;   // wakes within 1s wait cap
-        _activate?.Set();   // end reactivation thread
+        _pushStop = true; // wakes within 1s wait cap
+        _activate?.Set(); // end reactivation thread
         _panel?.Dispose();
         _tray?.Dispose();
         if (_hostingEngine)
         {
-            // EngineStop has no native timeout — cap join so Quit can't hang forever.
+            // EngineStop has no native timeout — cap join so Quit can't hang.
             var stop = System.Threading.Tasks.Task.Run(Native.EngineStop);
             stop.Wait(TimeSpan.FromSeconds(5));
         }

@@ -1,7 +1,6 @@
 //! VoiceConfig (de)serialize — serde derive is the field single source.
-//! File: TOML via `write_settings` (merge sibling keys). IPC: JSON via `voice_to_value`.
-//! Round-trip identity via enum tokens. Never writes Claude Code's `voice` block.
-//! Also: atomic-write + backup helpers for wire.
+//! File: TOML [`write_settings`] (sibling keys). IPC: JSON [`voice_to_value`].
+//! CC `voice` block is read-only. Atomic-write + backup helpers for wire.
 
 use std::io::{self, Write};
 
@@ -10,11 +9,8 @@ use serde_json::{Map, Value};
 use crate::voice::{read_config_table, write_config_table};
 use crate::{Paths, VoiceConfig};
 
-/// Set OUR `dontspeak` block, preserving every other root key — including Claude Code's
-/// `voice` block (we only *read* it via `claude_code` STT). Serde `Serialize` is the single
-/// source of truth — no hand-maintained field list. PURE — no disk. Non-object root → `{}`.
-///
-/// IPC wire shaper (via [`voice_to_value`]); the config FILE is TOML via [`write_settings`].
+/// Insert `dontspeak` from serde Serialize (field single source). Pure; non-object → `{}`.
+/// IPC via [`voice_to_value`]; config file via [`write_settings`].
 pub fn merge_settings(mut root: Value, voice: &VoiceConfig) -> Value {
     if !root.is_object() {
         root = Value::Object(Map::new());
@@ -27,7 +23,7 @@ pub fn merge_settings(mut root: Value, voice: &VoiceConfig) -> Value {
     root
 }
 
-/// `VoiceConfig` as a JSON object for IPC — [`merge_settings`] then extract `dontspeak`.
+/// IPC JSON object — [`merge_settings`] then extract `dontspeak`.
 pub fn voice_to_value(voice: &VoiceConfig) -> Value {
     let root = merge_settings(Value::Null, voice);
     root.get("dontspeak")
@@ -35,13 +31,12 @@ pub fn voice_to_value(voice: &VoiceConfig) -> Value {
         .unwrap_or_else(|| Value::Object(Map::new()))
 }
 
-/// Parse wire JSON back to `VoiceConfig`. Fail-open (defaults), matching [`VoiceConfig::load`].
+/// Wire JSON → `VoiceConfig`. Fail-open defaults ([`VoiceConfig::load`]).
 pub fn voice_from_value(v: Value) -> VoiceConfig {
     serde_json::from_value(v).unwrap_or_default()
 }
 
-/// Atomically write `VoiceConfig` into our `config.toml`, preserving sibling keys (MCP-HTTP
-/// etc.). Temp file + rename so the engine never reads half-written TOML.
+/// Atomic write into `config.toml`, preserving sibling keys (temp + rename).
 pub fn write_settings(paths: &Paths, voice: &VoiceConfig) -> io::Result<()> {
     let mut table = read_config_table(paths);
     let voice_table = match toml::Value::try_from(voice) {
@@ -59,8 +54,7 @@ pub fn write_settings(paths: &Paths, voice: &VoiceConfig) -> io::Result<()> {
     write_config_table(paths, &table)
 }
 
-/// Atomic JSON write: pretty + trailing newline, temp in SAME dir, rename. Shared by wire
-/// orchestrator hook + MCP writes.
+/// Atomic JSON: pretty + trailing newline, temp in same dir, rename.
 pub fn atomic_write_json(path: &std::path::Path, value: &Value) -> io::Result<()> {
     let pretty = serde_json::to_string_pretty(value)? + "\n";
     let dir = path
@@ -74,7 +68,7 @@ pub fn atomic_write_json(path: &std::path::Path, value: &Value) -> io::Result<()
     Ok(())
 }
 
-/// Same crash-safe pattern as [`atomic_write_json`] for non-JSON (e.g. already-serialized TOML).
+/// Atomic text write (same pattern as [`atomic_write_json`]).
 pub fn atomic_write_str(path: &std::path::Path, contents: &str) -> io::Result<()> {
     let dir = path
         .parent()
@@ -87,11 +81,8 @@ pub fn atomic_write_str(path: &std::path::Path, contents: &str) -> io::Result<()
     Ok(())
 }
 
-/// Copy `path` → timestamped sibling `…<suffix>.bak.<epoch-nanos>` before overwrite.
-/// CORR-3: backup is the only recovery if the write corrupts the user's file (settings.json
-/// is also Claude Code's) — failure must NOT be swallowed; caller surfaces warning or aborts.
-///
-/// `Ok(None)` = source missing (clean install). `suffix` e.g. `"json"` / `"toml"`.
+/// `path` → `….<suffix>.bak.<epoch-nanos>` before overwrite. CORR-3: only recovery for
+/// shared files (e.g. CC settings.json) — failure must surface. `Ok(None)` = missing.
 pub fn backup_before_write(
     path: &std::path::Path,
     suffix: &str,

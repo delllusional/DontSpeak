@@ -1,37 +1,31 @@
-//! ONE renderer/recogniser for hook COMMAND STRINGS (Codex, Qwen InlineShell, Kimi Code).
-//! Claude Code uses argv (`ArgsArray`) and never comes here — only client whose Windows
-//! hooks worked before this module.
+//! Hook command-string renderer/recogniser (Codex, Qwen InlineShell, Kimi). Claude Code
+//! uses argv (`ArgsArray`) and skips this module.
 //!
-//! ## Windows: no double quotes in the command string
+//! ## Windows: no double quotes
 //!
-//! Runners pass the whole string as ONE argv to cmd (`/C`). Rust/Node escape `"` as `\"`
-//! per `CommandLineToArgvW`; **cmd.exe does not** and treats `\"` literally — so a quoted
-//! path becomes a non-existent program name. Windows forms here are quote-free; spaced
-//! paths use other means (see `ShellOverride` / short names).
+//! Runners pass the whole string as ONE argv to `cmd /C`. cmd.exe treats `\"` literally
+//! (unlike `CommandLineToArgvW`) → quoted path becomes a non-existent program. Forms here
+//! are quote-free; spaced paths use `ShellOverride` / 8.3 short names.
 
-/// OS dialect for the command string. A parameter (not `cfg!`) so BOTH forms are unit-tested
-/// on Linux CI; production selects via [`host_inline_flavor`].
+/// OS dialect. Parameter (not `cfg!`) so both forms unit-test on Linux CI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InlineFlavor {
     /// `bash -c` / `sh -lc` — quotes parse correctly.
     Unix,
-    /// `%ComSpec%` (`cmd /C`), Git Bash `-c` under MSYS/MinGW, or PowerShell if ComSpec repointed.
+    /// `cmd /C`, Git Bash, or PowerShell if ComSpec repointed.
     Windows,
 }
 
-/// Can this client's hook schema carry a per-hook shell override?
-///
-/// Only axis among string-runner clients; decides the one case a quote-free string cannot
-/// express: a bin path containing a space.
+/// Whether the schema has a per-hook `shell` field (spaced-path escape hatch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShellOverride {
-    /// Qwen: `shell` field exists → pin spaced path to PowerShell (`\"` parses).
+    /// Qwen: pin spaced path to PowerShell.
     Supported,
-    /// Codex: no shell field → spaced path must be space-FREE (8.3 short name).
+    /// Codex/Kimi: spaced path → 8.3 short name.
     Unsupported,
 }
 
-/// Production host dialect; tests pass both flavors explicitly so Linux CI covers Windows form.
+/// Host dialect; tests pass both flavors so Linux CI covers Windows.
 pub(crate) fn host_inline_flavor() -> InlineFlavor {
     if cfg!(windows) {
         InlineFlavor::Windows
@@ -145,28 +139,20 @@ fn host_short_path(_long: &str) -> Option<String> {
     None
 }
 
-/// Is this wired `command` OURS — the `dontspeak` binary, in ANY dialect we have ever written?
-/// Shared so re-wire self-heals (old dialect still recognised → merge REPLACES, not duplicates)
-/// and unwire still removes it.
-///
-/// Accepts bare path AND every inlined form. OS-separator-independent parse (`Path` won't split
-/// `\` on Linux; CI runs Windows-flavor tests): trim → strip optional leading `&` → path token
-/// (quoted span or up to whitespace) → basename → stem → `== "dontspeak"`.
-///
-/// Precision both ways: a user command that merely has `dontspeak` in its path must not match —
-/// would silently skip wiring AND make unwire delete the user's hook group.
+/// Ours? Leading path stem == `dontspeak` in any dialect we emit (self-heal + strip).
+/// OS-separator-independent (`Path` won't split `\` on Linux). Basename only — path
+/// substring match would skip re-wire and delete user groups on unwire.
 pub(crate) fn command_is_ours(cmd: &str) -> bool {
     let s = cmd.trim();
     let s = s.strip_prefix('&').map(str::trim_start).unwrap_or(s);
     let path = match s.strip_prefix('"') {
-        // Unterminated quote takes the rest (defensive — we never write one).
         Some(rest) => rest.split('"').next().unwrap_or(rest),
         None => s.split_whitespace().next().unwrap_or(""),
     };
     let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let stem = match base.rfind('.') {
         Some(i) if i > 0 => &base[..i],
-        _ => base, // no extension, or leading-dot name
+        _ => base,
     };
     stem == "dontspeak"
 }
@@ -207,8 +193,7 @@ mod tests {
 
     #[test]
     fn windows_spaceless_path_is_unquoted_for_every_string_runner_client() {
-        // REGRESSION: a double quote in a Windows command string IS the bug — cmd gets
-        // `\"` literally and exits 1. Normal install path has no spaces.
+        // Regression: quotes in Windows command strings break cmd (`\"` literal).
         let bin = r"C:\Users\usr\AppData\Local\Programs\DontSpeak\dontspeak.exe";
         for style in [ShellOverride::Supported, ShellOverride::Unsupported] {
             let (cmd, shell) = inline_command(InlineFlavor::Windows, bin, ["notify"], style);
@@ -219,7 +204,6 @@ mod tests {
             assert!(!cmd.contains('"'), "no quote may reach cmd.exe: {cmd}");
             assert_eq!(shell, None);
 
-            // `--client <token>` is snake_case — space-joining cannot reintroduce a quote.
             let (cmd, shell) = inline_command(
                 InlineFlavor::Windows,
                 bin,
@@ -270,8 +254,7 @@ mod tests {
 
     #[test]
     fn windows_spaced_path_with_8dot3_disabled_emits_quoted_not_a_bare_spaced_path() {
-        // 8.3 disabled ⇒ quoted form (broken under cmd; OK under Bash/PowerShell).
-        // Never emit unquoted spaced path.
+        // 8.3 off → quoted (cmd-broken; Bash/PowerShell OK). Unquoted-spaced is always wrong.
         let bin = r"C:\Users\Alex Smith\AppData\Local\Programs\DontSpeak\dontspeak.exe";
         let (cmd, shell) = inline_command_with(
             InlineFlavor::Windows,
@@ -300,8 +283,7 @@ mod tests {
         assert!(command_is_ours(
             "C:/Users/ALEXSM~1/AppData/Local/Programs/DontSpeak/dontspeak.exe notify"
         ));
-        // Recognition keys on leading path only — trailing verbs don't affect it (pre-token
-        // groups still heal).
+        // Leading path only — trailing verbs ignored (pre-token groups still heal).
         assert!(command_is_ours(
             "\"/opt/x y/dontspeak\" notify --greet-only --client qwen_code"
         ));

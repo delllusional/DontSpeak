@@ -7,9 +7,7 @@ import SwiftUI
 
 /// Overlay geometry shared by AppKit sizing + SwiftUI content.
 private enum Overlay {
-    /// Default width; user width persisted via OverlayWidth (edge drag).
     static let width: CGFloat = 460
-    /// Resize bounds + side grab margin (resize vs move).
     static let minWidth: CGFloat = 280
     static let maxWidth: CGFloat = 900
     static let edgeMargin: CGFloat = 8
@@ -24,19 +22,16 @@ private enum Overlay {
     }
 }
 
-/// Engine dictation state bound to the overlay view.
 @Observable @MainActor
 final class DictationModel {
     var text: String = ""
-    /// Editable paste target focused? False → warning glow.
+    /// False → warning glow (no editable paste target).
     var hasTarget: Bool = true
-    /// Derived from the canonical dictation state.
     var promptGlow: Bool = false
-    /// User-resizable; drives content re-wrap.
     var width: CGFloat = Overlay.width
 }
 
-/// Borderless non-activating panel: mouse for drag, never key/main (paste stays on target).
+/// Borderless non-activating panel: mouse for drag; paste target stays key/main.
 private final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -79,13 +74,11 @@ private enum OverlayWidth {
     }
 }
 
-/// Full-pill drag handle. Does not set cursor (non-activating panel; foreground resets it);
-/// overlay keeps arrow vs I-beam from SwiftUI text.
+/// Full-pill drag handle. Cursor stays with SwiftUI text; push resize cursor only during edge drag.
 private final class DragView: NSView {
-    /// Move: begin; end with new top-left.
     var onDragBegan: (() -> Void)?
     var onDragEnded: ((NSPoint) -> Void)?
-    /// Resize: begin; step(width, leftEdge); end. Left edge keeps right fixed.
+    /// Left edge keeps right fixed.
     var onResizeBegan: (() -> Void)?
     var onResize: ((CGFloat, Bool) -> Void)?
     var onResizeEnded: (() -> Void)?
@@ -115,7 +108,7 @@ private final class DragView: NSView {
         if mode == .move {
             onDragBegan?()
         } else {
-            // Show resize cursor for the drag (hover is unreliable from non-activating).
+            // Hover cursor is unreliable from non-activating; push for the drag.
             NSCursor.resizeLeftRight.push()
             onResizeBegan?()
         }
@@ -180,7 +173,6 @@ final class DictationPanelController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        // Mouse for drag; stays non-key so paste target keeps focus.
         panel.ignoresMouseEvents = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
 
@@ -211,7 +203,7 @@ final class DictationPanelController {
         }
     }
 
-    /// Live edge resize: opposite edge + top stay put (grows down).
+    /// Opposite edge + top stay put (grows down).
     private func applyResize(_ newWidth: CGFloat, leftEdge: Bool) {
         let old = panel.frame
         width = newWidth
@@ -227,7 +219,7 @@ final class DictationPanelController {
             display: true)
     }
 
-    /// Apply Core dictation snapshot; show gate is `dictation.state` token.
+    /// Show gate is `dictation.state` token (ds-status dictation_state).
     func apply(
         state: String,
         text: String, hasTarget: Bool
@@ -241,14 +233,14 @@ final class DictationPanelController {
         let promptGlow = state == "recording" && text.isEmpty
         if model.promptGlow != promptGlow { model.promptGlow = promptGlow }
 
-        // Canonical state token (ds-status dictation_state) — same show gate every platform.
+        // Same show gate every platform: state != "hidden".
         let show = state != "hidden"
         guard show else {
             if panel.isVisible { panel.orderOut(nil) }
             return
         }
         resizeAndPosition()
-        // orderFrontRegardless — not makeKey — keeps accessory non-activating.
+        // orderFrontRegardless keeps accessory non-activating (paste target retains key).
         panel.orderFrontRegardless()
     }
 
@@ -283,13 +275,11 @@ final class DictationPanelController {
     }
 }
 
-/// Overlay content: status + transcript (+ confirm hint).
 struct DictationOverlay: View {
     var model: DictationModel
     /// One flip under repeatForever keeps glow pulsing without a timer.
     @State private var breathe = false
 
-    /// Speak-now glow derived from the canonical dictation state.
     private var prompting: Bool { model.promptGlow }
 
     /// Whole-card orange wash when no paste target (separate from white speak-now ring).
@@ -316,7 +306,6 @@ struct DictationOverlay: View {
         .padding(Overlay.pad)
         .frame(width: model.width, alignment: .leading)
         .glassBackground()
-        // No-target: shared smWarning wash (separate layer from white speak-now ring).
         .overlay {
             RoundedRectangle(cornerRadius: Overlay.corner, style: .continuous)
                 .fill(Color.smWarning)
@@ -335,7 +324,7 @@ struct DictationOverlay: View {
                 .animation(.easeOut(duration: 0.3), value: prompting)
                 .allowsHitTesting(false)
         }
-        // No outer shadow — window is card-sized; outward glow clips to a dark rect.
+        // Outer shadow clips dark on card-sized window.
         .onAppear { breathe = true }
     }
 
@@ -343,7 +332,7 @@ struct DictationOverlay: View {
 
     private static var wordTransition: AnyTransition { AnyTransition(.blurReplace) }
 
-    /// Words with stable `position·word` ids for per-word transitions.
+    /// Stable `position·word` ids for per-word transitions.
     private var words: [(id: String, text: String)] {
         displayText.split(separator: " ", omittingEmptySubsequences: true)
             .enumerated()

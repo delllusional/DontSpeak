@@ -1,27 +1,22 @@
-//! Canonical dictation confirm-panel state — single source for the `dictation.state` wire token.
+//! `dictation.state` wire token — single source.
 //!
-//! Producer (`dontspeakd::status::dictation_state`) derives one [`DictationState`] per snapshot
-//! with precedence `awaiting_confirm > (recording && local_stt) > refused > hidden` and stores
-//! it typed in [`crate::Dictation::state`]. Serde emits the wire token.
-//!
-//! Platform UIs (Swift/C#) hand-mirror token values across the C ABI; the pinning test below
-//! blocks silent drift.
+//! Producer precedence: `awaiting_confirm > (recording && local_stt) > refused > hidden`.
+//! Swift/C# hand-mirror tokens; pinning test blocks drift.
 
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Dictation confirm-panel state; 1:1 with `dictation.state`. Panel shown when not `hidden`.
-/// Producer precedence and skew fallback: module docs.
+/// Confirm-panel mode; 1:1 with `dictation.state`. Panel when not `hidden`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DictationState {
-    /// Idle, or recording whose engine shows no panel (ClaudeNative).
+    /// Idle, or ClaudeNative recording (no panel).
     Hidden,
-    /// Local-transcript engine actively capturing (live partials in panel).
+    /// Local STT capturing (live partials).
     Recording,
-    /// Transcript finalized; waiting for Caps confirm tap.
+    /// Finalized; wait Caps confirm.
     AwaitingConfirm,
-    /// Dictation START refused (engine can't transcribe yet); warning glow for the refusal window.
+    /// Start refused (not ready); warning glow for the window.
     Refused,
 }
 
@@ -33,7 +28,7 @@ impl DictationState {
         DictationState::Refused,
     ];
 
-    /// Wire token — engine→app contract; change only with every platform mirror + pinning test.
+    /// Wire token; change only with every platform mirror + pinning test.
     pub fn as_str(self) -> &'static str {
         match self {
             DictationState::Hidden => "hidden",
@@ -43,7 +38,7 @@ impl DictationState {
         }
     }
 
-    /// Wire token → variant; `None` if unrecognized (consumers use legacy booleans, never hidden).
+    /// Wire token → variant; `None` if unrecognized.
     pub fn parse(s: &str) -> Option<DictationState> {
         Some(match s {
             "hidden" => DictationState::Hidden,
@@ -63,14 +58,13 @@ impl FromStr for DictationState {
     }
 }
 
-/// Wire token string (not externally-tagged JSON).
 impl Serialize for DictationState {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(self.as_str())
     }
 }
 
-/// Unknown token → error (producer only emits [`DictationState::ALL`]).
+/// Unknown token → error.
 impl<'de> Deserialize<'de> for DictationState {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;

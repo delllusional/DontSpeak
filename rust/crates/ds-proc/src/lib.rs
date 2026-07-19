@@ -1,17 +1,11 @@
-//! Process helpers for DontSpeak: single-speaker arbitration/barge-in and shared Unix
-//! child process-group lifecycle.
+//! Speaker arbitration/barge-in and Unix process-group lifecycle.
 //!
-//! Contract (shared with the engine's caps-ON barge-in):
-//!   * `~/.claude/speak-hook.pid` holds the **process-GROUP id** of the current
-//!     speaker. On unix the speaker runs in its own process group (`set -m` /
-//!     `setsid`/`setpgid` so the `uv`/`python`/`afplay` tree shares one pgid).
-//!   * To preempt, SIGTERM the **negative** pgid (`killpg`) — mirrors
-//!     `kill -TERM -- -<pgid>`.
-//!   * Pidfile written **atomically** (tempfile + rename) so readers never see a
-//!     half-written value.
+//! Contract (shared with engine barge-in):
+//! - Pidfile holds process-**group** id (unix: own group via setsid/`set -m`).
+//! - Preempt: SIGTERM negative pgid (`killpg`).
+//! - Atomic write (temp + rename).
 //!
-//! Windows has no POSIX process groups; uses `OpenProcess`/`TerminateProcess` on
-//! the recorded leaf PID.
+//! Windows: leaf PID via `OpenProcess`/`TerminateProcess`.
 
 use std::fs;
 use std::io::Write;
@@ -36,8 +30,7 @@ pub fn set_new_process_group(command: &mut std::process::Command) {
     }
 }
 
-/// Canonical pidfile reader. PURE: `None` on ANY failure so a stale/garbage file
-/// never yields a bogus pid to signal. Shared codec for speaker + engine pidfiles.
+/// Pidfile reader; `None` on any failure (stale/garbage fail-closed).
 pub fn read_pid(pidfile: &Path) -> Option<i32> {
     let s = fs::read_to_string(pidfile).ok()?;
     let n: i32 = s.trim().parse().ok()?;
@@ -59,14 +52,12 @@ pub fn write_speaker(pidfile: &Path, pgid: i32) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Record an already-spawned speaker's pgid, or kill it.
+/// Record spawned speaker pgid, or kill it.
 ///
-/// SACRED post-spawn contract (ARCHITECTURE §0.2): pgid MUST be recorded before
-/// sound, else a later spawn overwrites the pidfile and two speakers play. On
-/// write failure, kill the just-spawned group and propagate — untracked spawn
-/// never leaves an orphan sounding. Caller owns the `Child`.
+/// Post-spawn: record before sound (ARCHITECTURE §0.2) — write failure kills the
+/// group so untracked spawn leaves no orphan audio. Caller owns `Child`.
 pub fn record_or_kill(pidfile: &Path, child: &std::process::Child) -> std::io::Result<i32> {
-    // setsid => child is its own group leader, so pgid == pid.
+    // setsid ⇒ pgid == pid.
     let pid = child.id() as i32;
     if let Err(e) = write_speaker(pidfile, pid) {
         kill_group(pid);
@@ -75,12 +66,11 @@ pub fn record_or_kill(pidfile: &Path, child: &std::process::Child) -> std::io::R
     Ok(pid)
 }
 
-/// Best-effort pidfile removal (speaker finished).
 pub fn clear_speaker(pidfile: &Path) {
     let _ = fs::remove_file(pidfile);
 }
 
-/// Preempt the recorded speaker if still alive. Returns the signalled pgid, or None.
+/// Preempt recorded speaker if alive; returns signalled pgid.
 pub fn barge_in(pidfile: &Path) -> Option<i32> {
     let pgid = read_pid(pidfile)?;
     if group_alive(pgid) {

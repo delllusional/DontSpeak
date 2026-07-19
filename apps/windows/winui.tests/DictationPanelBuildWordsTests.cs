@@ -3,7 +3,7 @@ using Xunit;
 namespace DontSpeak.Tests;
 
 /// <summary>
-/// <see cref="DictationPanel.BuildWords"/> pure data tests — injected `now`, no panel instance
+/// <see cref="DictationPanel.BuildWords"/> pure data — inject `now`; skip panel instance
 /// (would open a Win32 window).
 /// </summary>
 public class DictationPanelBuildWordsTests
@@ -49,7 +49,7 @@ public class DictationPanelBuildWordsTests
         DictationPanel.BuildWords(prev, next, "hello world foo", now: 5000);
 
         Assert.Equal(HelloWorldFoo, next.Words);
-        // Stable prefix keeps stamp (no re-animate on partial).
+        // Stable prefix keeps stamp (partial append must not re-animate).
         Assert.Equal(Stamp1000Then5000, next.AppearMs);
     }
 

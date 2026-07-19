@@ -35,7 +35,7 @@ private struct GlassBackground: ViewModifier {
 
 /// Full-bleed window glass + frosted title-bar strip in front (content scrolling under blurs).
 private struct WindowGlassBackground: ViewModifier {
-    /// Flat color fill for the strip (not a material tint — those wash out when unfocused).
+    /// Flat color fill for the strip (material tints wash out when unfocused).
     var topTint: Color = .clear
     var topHeight: CGFloat = 0
     func body(content: Content) -> some View {
@@ -76,15 +76,15 @@ extension View {
         modifier(WindowGlassBackground(topTint: topTint, topHeight: topHeight))
     }
 
-    /// Shared Status/Tools inset. Do NOT `.ignoresSafeArea()` on content — system title-bar
-    /// height keeps the first platter clear of traffic lights; glass slab still fills behind.
+    /// Shared Status/Tools inset. System title-bar height keeps the first platter clear of
+    /// traffic lights (content must not ignore safe area); glass slab still fills behind.
     /// Honest content-min size → resizable window wraps with no phantom bottom gap.
     func windowContentInset() -> some View {
         padding(.top, Glass.windowTopInset)
             .padding([.horizontal, .bottom], Glass.windowInset)
     }
 
-    /// Material platter (not a second glass layer) — keeps text legible on the window slab.
+    /// Material platter (keeps text legible on the window glass slab).
     func platterBackground(cornerRadius: CGFloat = Glass.platterCorner) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         return
@@ -118,7 +118,7 @@ struct Platter<Content: View>: View {
     }
 }
 
-/// Inset hairline between platter rows (not after the last).
+/// Inset hairline between platter rows (skip after the last).
 struct PlatterDivider: View {
     var body: some View {
         Divider().padding(.leading, 14)

@@ -3,10 +3,10 @@ using System.Runtime.InteropServices;
 
 namespace DontSpeak;
 
-// Shared Win32 interop for DictationPanel / TrayIcon (window class, DC, DIB). Component-specific
-// imports stay with their owners. `using static DontSpeak.Win32;`.
+// Shared Win32 interop for DictationPanel / TrayIcon (window class, DC, DIB).
+// Component-specific imports stay with their owners. `using static DontSpeak.Win32;`.
 
-/// <summary>WndProc for hand-rolled Win32 windows. Owners keep a field ref so the GC can't
+/// <summary>WndProc for hand-rolled Win32 windows. Owners keep a field ref so the GC cannot
 /// collect the thunk.</summary>
 internal delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
@@ -101,8 +101,8 @@ internal static class Win32
     [DllImport("user32.dll")]
     internal static extern int GetSystemMetrics(int index);
 
-    // AppUserModelID so taskbar + Task Manager group as "DontSpeak" (paired with the Start-menu
-    // shortcut). Without it Windows labels the group "ds-winui". Call before any UI.
+    // AUMID so taskbar + Task Manager group as "DontSpeak" (paired with Start-menu shortcut).
+    // Without it Windows labels the group "ds-winui". Call before any UI.
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
     internal static extern int SetCurrentProcessExplicitAppUserModelID(
         [MarshalAs(UnmanagedType.LPWStr)] string appID);

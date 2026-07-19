@@ -23,11 +23,10 @@ use crate::vocab::{MAX_PHONEME_LENGTH, tokenize};
 /// Loaded Kokoro ONNX session + per-voice style arrays.
 pub struct KokoroSynth {
     session: Session,
-    // Arc: each style is ~522 KB; synthesize clones once per batch — pointer bump
-    // not memcpy. Only a 256-float row is read per forward (`style_row`).
+    // Arc: ~522 KB style arrays; clone per batch is a pointer. Forward reads 256 floats.
     voices: HashMap<String, Arc<Vec<f32>>>,
     output_name: String,
-    /// REALIZED EP for stats / child's `PROVIDER` (shared type with STT).
+    /// Realized EP for stats / child's `PROVIDER` (shared type with STT).
     provider: ds_config::RealizedProvider,
 }
 
@@ -41,12 +40,10 @@ impl KokoroSynth {
     /// Session from model bytes + voices npz. Call [`ds_model::ensure_ort_dylib`]
     /// (or set path) first. Errors for caller fail-quiet.
     pub fn load(model_bytes: &[u8], voices_npz: &[u8]) -> Result<Self, String> {
-        // DONTSPEAK_PROVIDER: cpu|cuda|coreml|auto (`ane` never reaches here — FluidAudio).
-        // Windows auto → CUDA; macOS auto → CPU (ort CoreML EP slower).
+        // cpu|cuda|coreml|auto (`ane` → FluidAudio, not here).
         let pref = std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into());
         match Self::load_with_provider(model_bytes, voices_npz, &pref) {
             Ok(s) => Ok(s),
-            // GPU build failure retries CPU — GPU is best-effort.
             Err(e) if !pref.eq_ignore_ascii_case("cpu") => {
                 eprintln!("dontspeak/synth: provider '{pref}' failed ({e}); falling back to CPU");
                 Self::load_with_provider(model_bytes, voices_npz, "cpu")
@@ -62,20 +59,12 @@ impl KokoroSynth {
         voices_npz: &[u8],
         pref: &str,
     ) -> Result<Self, String> {
-        // Wrap each style array in an Arc so `synthesize()` clones a pointer, not the buffer.
         let voices: HashMap<String, Arc<Vec<f32>>> = crate::voices::parse_voices_npz(voices_npz)?
             .into_iter()
             .map(|(name, style)| (name, Arc::new(style)))
             .collect();
-        // Each cfg branch binds BOTH the session builder AND the realized `provider` token, so
-        // there's no dead pre-init to overwrite (exactly one branch compiles per target).
-
-        // Windows / Linux x86_64 `auto`/`cuda` → CUDA (NVIDIA GPU), via the ONE GPU-aware builder
-        // shared with Parakeet STT (`ds_model::cuda_session_builder`) — the CUDA-EP registration +
-        // silent-CPU-fallback + failure logging live THERE, not copy-pasted per engine, so TTS and
-        // STT can't drift into different GPU behavior.
-        // Windows (any arch — win-arm64 is a real release target) + Linux x86_64. On win-arm64
-        // `cuda_session_builder`'s inner cfg is stripped, so it just returns a CPU builder — safe.
+        // One cfg branch binds builder + realized provider (shared CUDA path with Parakeet).
+        // win-arm64: cuda_session_builder compiles to CPU-only — safe.
         #[cfg(any(
             target_os = "windows",
             all(target_os = "linux", target_arch = "x86_64")
@@ -88,11 +77,8 @@ impl KokoroSynth {
         #[cfg(target_os = "macos")]
         let (mut builder, provider) = {
             use ort::execution_providers::CoreMLExecutionProvider;
-            // FULL-DUPLEX prefers CoreML even for "auto": running Kokoro on the CPU
-            // saturates the cores and starves VPIO's real-time render thread, which
-            // CHOPS the playback. CoreML keeps the cores free → smooth (verified
-            // on-device; it benches slightly slower, which is why "auto" picks CPU
-            // in the half-duplex/rodio path that isn't sensitive to this).
+            // Full-duplex + auto → CoreML: CPU Kokoro starves VPIO RT thread (choppy).
+            // Half-duplex auto stays CPU (CoreML benches slightly slower).
             let full_duplex = std::env::var_os("DONTSPEAK_FULL_DUPLEX").is_some();
             let want_coreml = pref.eq_ignore_ascii_case("coreml")
                 || (full_duplex && pref.eq_ignore_ascii_case("auto"));
@@ -114,7 +100,7 @@ impl KokoroSynth {
             }
         };
 
-        // Other Unix (non-x86_64 Linux, BSD): CPU only.
+        // Other Unix: CPU only.
         #[cfg(all(
             not(any(target_os = "windows", target_os = "macos")),
             not(all(target_os = "linux", target_arch = "x86_64"))

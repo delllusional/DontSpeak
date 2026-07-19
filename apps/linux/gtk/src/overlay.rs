@@ -1,16 +1,9 @@
-//! Focus-safe dictation overlay — GTK4 analogue of macOS `OverlayPanel` / Windows layered
-//! `DictationPanel`. Live transcript (and speak-now / no-paste glow) without stealing focus,
-//! so paste still lands in the user's terminal.
-//!
-//! No single portable focus-safe API: wlroots/KDE use `gtk4-layer-shell` (OVERLAY layer,
-//! `KeyboardMode::None`); GNOME/Mutter (no wlr-layer-shell) and X11 fall back to a plain
-//! undecorated non-focusing window — best-effort. Shown when `dictation.state` ≠ `hidden`.
-//!
-//! Drag + resize (peer parity): plain-toplevel path is draggable (`begin_move`) and
-//! horizontally resizable within [`MIN_WIDTH`, `MAX_WIDTH`] (edge grab `EDGE`); width
-//! persists in `$XDG_STATE_HOME/dontspeak/overlay-width`. Position is not: GTK4 has no
-//! reliable toplevel-position API (Wayland forbids it). Layer-shell path stays compositor-
-//! anchored + fixed-width — layer surfaces can't be user-moved/resized.
+//! Focus-safe dictation overlay (macOS `OverlayPanel` / Windows `DictationPanel`).
+//! Layer-shell (wlroots/KDE): OVERLAY + `KeyboardMode::None`. Else undecorated non-focusing
+//! toplevel (GNOME/X11 best-effort). Shown when `dictation.state` ≠ `hidden`.
+//! Plain path: drag + horizontal resize [`MIN_WIDTH`..=`MAX_WIDTH`]; width in
+//! `$XDG_STATE_HOME/dontspeak/overlay-width` (position omitted — Wayland/GTK4). Layer-shell:
+//! compositor-anchored, fixed width.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -62,7 +55,7 @@ impl Overlay {
         window.add_css_class("ds-overlay");
 
         if layer_shell {
-            // wlroots / KDE: true overlay surface that never takes the keyboard.
+            // wlroots / KDE: overlay surface; KeyboardMode::None keeps focus on the target.
             window.init_layer_shell();
             window.set_namespace(Some("ds-dictation"));
             window.set_layer(Layer::Overlay);
@@ -72,7 +65,7 @@ impl Overlay {
         } else {
             // GNOME/Mutter or X11: best-effort non-focusing float.
             window.set_modal(false);
-            // Floor width at MIN_WIDTH; ceiling enforced on save/restore (no GTK max-size).
+            // Floor at MIN_WIDTH; ceiling on save/restore (GTK has no max-size).
             window.set_size_request(MIN_WIDTH, -1);
             // Transparent CSS needs a compositor; without one the window is opaque black.
             // `Display::is_composited()` is more precise than backend alone: Wayland always
@@ -204,7 +197,6 @@ fn hit_test(x: f64, width: f64) -> Hit {
     }
 }
 
-// ── width persistence ────────────────────────────────────────────────────────
 // `$XDG_STATE_HOME/dontspeak/overlay-width` (fallback `~/.local/state/…`) — same local-state
 // root as the engine capskey marker; computed here to stay dependency-light. Width only.
 
@@ -244,7 +236,7 @@ fn save_width(w: i32) {
     }
 }
 
-/// Overlay (and panel) styling, loaded once into the default display.
+/// Overlay styling, loaded once into the default display.
 pub fn load_css() {
     let css = "
         .ds-overlay { background: transparent; }

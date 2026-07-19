@@ -1,21 +1,16 @@
-//! Tray status-icon rendering — Linux analogue of the macOS/Windows custom tray glyph.
-//!
-//! Rasterizes the one canonical `assets/tray-icon.svg`, tints with shared brand colors
-//! (`ds-core` BRAND_COLORS_JSON via [`crate::ffi::brand_colors_json`]), and overlays the
-//! muted slash with the same geometry as Windows (`BrandGlyph.cs`). Output is SNI pixmap
-//! format: ARGB32, network byte order. A custom pixmap is required — symbolic theme names
-//! can't match brand glyph + tint + slash across platforms.
+//! Tray status-icon: rasterize canonical `assets/tray-icon.svg`, brand tint, muted slash
+//! (Windows `BrandGlyph.cs` geometry). SNI pixmap ARGB32 NBO — theme icons can't match
+//! glyph + tint + slash across hosts.
 
 use std::sync::OnceLock;
 
 use resvg::tiny_skia;
 use resvg::usvg;
 
-/// Canonical glyph, embedded at build time — never duplicated per platform.
+/// Canonical glyph, embedded at build time (one asset, all hosts).
 const TRAY_SVG: &str = include_str!("../../../../assets/tray-icon.svg");
 
-/// Parsed once; `tray.rs` calls `render` ~4× per status push (~1 s), so re-parsing every time
-/// would waste CPU continuously.
+/// Parsed once; `tray.rs` calls `render` ~4× per status push.
 static TRAY_TREE: OnceLock<usvg::Tree> = OnceLock::new();
 
 fn tray_tree() -> &'static usvg::Tree {
@@ -35,8 +30,7 @@ fn tray_tree() -> &'static usvg::Tree {
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 /// Idle tray foreground. GNOME Shell / Ubuntu panels are dark regardless of app theme, and a
-/// pixmap can't be recolored by the host — so idle uses a light fg that reads on the dark
-/// panel (brand-colored recording/speaking states already do). Panel-theme analogue of
+/// pixmap can't be recolored by the host — light fg so idle reads on the panel. Analogue of
 /// Windows `BrandGlyph.IdleForeground` (taskbar theme, not app window).
 pub fn idle_fg() -> Rgb {
     Rgb(0xEC, 0xEC, 0xF0)
@@ -67,11 +61,11 @@ fn parse_hex(s: &str) -> Option<Rgb> {
     Some(Rgb((n >> 16) as u8, (n >> 8) as u8, n as u8))
 }
 
-/// Brand glyph at `size`×`size`, tinted `ink`, muted slash when `muted`. SNI pixmap (ARGB32 NBO).
+/// SNI pixmap (ARGB32 NBO): brand glyph tinted with `ink`; muted slash when `muted`.
 pub fn render(size: u32, ink: Rgb, muted: bool) -> ksni::Icon {
     let mut pm = tiny_skia::Pixmap::new(size, size).expect("size is non-zero");
 
-    // Rasterize SVG; keep only coverage (source color is irrelevant).
+    // Rasterize SVG; keep only coverage (source color is irrelevant — recolor below).
     {
         let tree = tray_tree();
         let svg = tree.size();
@@ -84,7 +78,6 @@ pub fn render(size: u32, ink: Rgb, muted: bool) -> ksni::Icon {
         resvg::render(tree, transform, &mut pm.as_mut());
     }
 
-    // Recolor: each pixel = `ink` premultiplied by coverage.
     for px in pm.pixels_mut() {
         let a = px.alpha();
         let pre = |c: u8| ((c as u16 * a as u16) / 255) as u8;
@@ -131,7 +124,7 @@ pub fn render(size: u32, ink: Rgb, muted: bool) -> ksni::Icon {
         }
     }
 
-    // Premultiplied RGBA → straight ARGB32, network byte order (A, R, G, B per pixel).
+    // Premultiplied RGBA → straight ARGB32 NBO (A, R, G, B per pixel).
     let mut data = Vec::with_capacity((size * size * 4) as usize);
     for px in pm.pixels() {
         let c = px.demultiply();

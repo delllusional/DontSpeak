@@ -78,9 +78,8 @@ pub fn open_voice_settings() -> bool {
     false
 }
 
-/// `say` flags: `-r <wpm>` ([`crate::rate_to_wpm`]), optional `-v`, null Stdio.
-/// Does NOT append text / pgroup / spawn / pidfile — call sites do. Single source
-/// so free `spawn`, `SystemTts::speak`, and dontspeakd::speak_system agree.
+/// `say` flags only (`-r`/`-v`, null Stdio). Call sites own text/pgroup/spawn/pidfile.
+/// Single source for free `spawn`, `SystemTts::speak`, and dontspeakd::speak_system.
 #[cfg(target_os = "macos")]
 pub fn say_command(voice: Option<&str>, rate: f32) -> Command {
     use std::process::Stdio;

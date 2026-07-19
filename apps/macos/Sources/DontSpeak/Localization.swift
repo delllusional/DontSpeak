@@ -4,7 +4,7 @@ import CDontSpeak
 import Foundation
 
 enum L {
-    /// Localized string for `key` (English fallback; missing key returns the key).
+    /// English fallback; missing key returns the key.
     static func t(_ key: String) -> String {
         key.withCString { kp in
             guard let ptr = ds_t(kp) else { return key }
@@ -13,7 +13,7 @@ enum L {
         }
     }
 
-    /// `key` with `%{name}` placeholders from `args`. Caller formats numbers as strings.
+    /// Interpolate `%{name}` placeholders from `args` (numbers as strings).
     static func t(_ key: String, _ args: [String: String]) -> String {
         let json =
             (try? JSONSerialization.data(withJSONObject: args))

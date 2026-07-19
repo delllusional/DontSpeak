@@ -1,9 +1,7 @@
-//! `ds-ipc` — newline-delimited JSON RPC between the in-process engine (server) and clients
-//! (`ds-core`/host UI, `dontspeak` MCP server, Claude Code hooks).
+//! Newline-delimited JSON RPC: in-process engine (server) ↔ host UI / MCP / hooks.
 //!
-//! Byte transport is [`transport`]: filesystem Unix-domain socket (native macOS/Linux;
-//! `uds_windows` on Windows). Engine owns all model state; clients never load a model.
-//! Missing socket ⇒ "engine down"; every call is fallible so callers use their legacy path.
+//! Transport: filesystem UDS ([`transport`]; `uds_windows` on Windows). Engine owns
+//! model state. Missing socket ⇒ engine down; every call is fallible.
 
 pub mod client;
 pub mod protocol;

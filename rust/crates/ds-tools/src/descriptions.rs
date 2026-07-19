@@ -1,5 +1,5 @@
-//! Tool + parameter description strings (canonical MCP text; referenced from `TOOLS`).
-//! WHAT not HOW. No model/runtime names (platform engines can change).
+//! Tool + parameter description strings (canonical MCP text from `TOOLS`).
+//! WHAT not HOW; no model/runtime names (engines can change).
 
 pub const SPEAK: &str = "Queue text for spoken playback.";
 pub const SPEAK_TEXT: &str = "Text to speak.";

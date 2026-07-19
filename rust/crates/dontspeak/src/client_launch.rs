@@ -12,7 +12,7 @@ use ds_ipc::{Request, Response};
 
 use crate::engine_launch::ensure_engine;
 
-/// Launch one registry client; return the exit code this wrapper should expose.
+/// Launch registry client; wrapper exit code.
 pub(crate) fn run(spec: &ClientSpec, args: &[String]) -> i32 {
     let Some(paths) = Paths::resolve() else {
         eprintln!("dontspeak: could not resolve the user data directory");
@@ -49,7 +49,7 @@ fn run_codex(spec: &ClientSpec, args: &[String], paths: &Paths, configured_bin: 
     }
 }
 
-/// Best-effort Codex app-server narration prep. Failure ⇒ "no narration", never block launch.
+/// Best-effort Codex narration prep; failure does not block launch.
 fn prepare_codex_stream(paths: &Paths) -> Option<String> {
     if !ensure_engine(&paths.engine_sock) {
         eprintln!(

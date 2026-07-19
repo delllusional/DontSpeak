@@ -1,5 +1,5 @@
 // Libraries/Credits: third-party models + runtimes from `ds_libraries_json`
-// (shared ds-model catalog, already platform-filtered — no CUDA on Apple Silicon).
+// (shared ds-model catalog, platform-filtered — no CUDA on Apple Silicon).
 
 import CDontSpeak
 import SwiftUI
@@ -121,7 +121,7 @@ struct CreditsView: View {
                         Label(L.t("libraries.homepage"), systemImage: "link")
                     }
                 }
-                // License link label is the SPDX/name itself ("MIT"), not a generic "License".
+                // Link label is the SPDX/name itself (e.g. "MIT").
                 if !lib.license.isEmpty, !lib.licenseURL.isEmpty, let url = URL(string: lib.licenseURL) {
                     Link(destination: url) {
                         Label(lib.license, systemImage: "doc.text")

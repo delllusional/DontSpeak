@@ -27,19 +27,15 @@ impl SpokenText {
             match event {
                 Event::Text(text) | Event::Code(text) => rendered.push_str(&text),
                 Event::SoftBreak | Event::HardBreak | Event::Rule => rendered.push(' '),
-                // LOAD-BEARING: a block boundary is a word boundary at BOTH ends. pulldown-cmark
-                // emits `Start(List)` for a NESTED list immediately after the parent item's inline
-                // text with no intervening `End`, so separating only on `End` glued
-                // "- outer\n  - inner" into the single OOV word "outerinner".
+                // Block boundary = word boundary both ends. Nested `Start(List)` has no
+                // intervening `End` — End-only spacing glued "outerinner".
                 Event::Start(tag) if is_block_start(&tag) => rendered.push(' '),
                 Event::End(tag) if is_block_end(&tag) => rendered.push(' '),
-                // Raw HTML keeps its visible text, not its tags: a block-level element
-                // (`<div>Hello</div>`, `<details><summary>Notes</summary>`) arrives as one
-                // `Html` event whose inner prose would otherwise be silenced wholesale.
+                // One Html event may hold a whole block; strip tags, keep residual text.
                 Event::Html(html) | Event::InlineHtml(html) => {
                     rendered.push_str(&strip_html_tags(&html));
                 }
-                // Footnotes / checkboxes are structure, not prose.
+                // Footnotes / checkboxes: structure only.
                 _ => {}
             }
         }
@@ -92,8 +88,7 @@ fn is_block_end(tag: &TagEnd) -> bool {
     )
 }
 
-/// Drop tags/comments; keep residual text. Not a real HTML parser: unterminated
-/// `<` swallows the rest (for agent output only drops markup).
+/// Drop tags/comments; keep residual text. Unterminated `<` swallows the rest (agent markup only).
 fn strip_html_tags(html: &str) -> String {
     let mut text = String::with_capacity(html.len());
     let mut rest = html;
@@ -194,23 +189,21 @@ mod tests {
         assert_eq!(ordered.as_str(), "first sub a second");
     }
 
-    /// Regression: without `ENABLE_TABLES` the pipes and the `---` rule survived as text and
-    /// were read aloud; `---` also became an em-dash and the cells were number-expanded.
+    /// GFM tables: cells as prose (else pipes/`---` spoken).
     #[test]
     fn table_cells_are_spoken_as_separated_prose() {
         let spoken = SpokenText::from_markdown("| Stage | Result |\n|---|---|\n| G2P | ok |");
         assert_eq!(spoken.as_str(), "Stage Result G2P ok");
     }
 
-    /// Regression: without `ENABLE_FOOTNOTES` the marker stayed literal and `expand_numbers`
-    /// later read `Claim[^1].` as "Claim caret one."
+    /// Footnotes: marker silent; definition spoken (else "Claim caret one").
     #[test]
     fn footnote_markers_are_not_spoken_but_the_definition_is() {
         let spoken = SpokenText::from_markdown("Claim[^1].\n\n[^1]: The source.");
         assert_eq!(spoken.as_str(), "Claim. The source.");
     }
 
-    /// Regression: without the extensions these read as "[x] shipped" and "~~gone~~".
+    /// Tasklists + strike: drop markers/syntax, keep text.
     #[test]
     fn task_markers_and_strikethrough_syntax_are_dropped() {
         assert_eq!(

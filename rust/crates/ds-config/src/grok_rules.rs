@@ -1,9 +1,7 @@
-//! Managed Grok global-rules injection for the narration digest instruction.
+//! Managed Grok narrate section in `~/.grok/AGENTS.md`.
 //!
-//! Grok treats `UserPromptSubmit` as passive and **ignores stdout**, so
-//! `hookSpecificOutput.additionalContext` never reaches the model (issue #95).
-//! It does load `~/.grok/AGENTS.md` at session start. This module owns a marker-bounded
-//! section there for [`crate::DEFAULT_NARRATION_SPEC`] without clobbering user rules.
+//! Grok ignores UserPromptSubmit stdout (#95), so digests go here at session start.
+//! Marker-bounded section for [`crate::DEFAULT_NARRATION_SPEC`]; user rules kept.
 
 use std::path::Path;
 
@@ -68,13 +66,13 @@ pub fn sync_grok_narrate_agents_md(agents_md: &Path, digests_on: bool) -> std::i
     Ok(true)
 }
 
-/// Best-effort sync from paths + live voice config. No-op if paths unresolved; never panics.
+/// Best-effort sync from live voice config.
 pub fn sync_grok_narrate_from_config(paths: &crate::Paths) -> std::io::Result<bool> {
     let digests_on = crate::VoiceConfig::load(paths).narrates(crate::NarrateKind::Digests);
     sync_grok_narrate_agents_md(&paths.grok_agents_md, digests_on)
 }
 
-/// Best-effort remove (unwire). Ignores missing file.
+/// Best-effort remove (unwire).
 pub fn clear_grok_narrate_agents_md(agents_md: &Path) -> std::io::Result<bool> {
     sync_grok_narrate_agents_md(agents_md, false)
 }

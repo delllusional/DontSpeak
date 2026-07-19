@@ -1,8 +1,5 @@
-//! Blocking RPC server over [`crate::transport`]. Engine calls [`serve`] on a dedicated
-//! thread: accept, one [`Request`] per line, handler `emit`s [`Response`] lines (streaming).
-//!
-//! Undecodable lines never reach the handler. `on_bad_request` makes rejections observable
-//! (engine logs WARN) without a logger dep in this crate.
+//! Blocking RPC server ([`serve`]): accept → one [`Request`] per line → handler `emit`s
+//! [`Response`]s. Undecodable lines skip the handler; `on_bad_request` is the observability hook.
 
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -15,26 +12,20 @@ use std::{io, thread};
 use crate::protocol::{Request, Response};
 use crate::transport::{self, Stream};
 
-/// Per-conn timeouts (mirrors `client::connect`). Covers ~120s streaming dictate; kills
-/// partial-line / wedged clients that would otherwise park a thread forever.
+/// Per-conn timeouts (mirror `client::connect`); cover ~120s streaming dictate.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Cap concurrent connections/threads. Without it, a flood can panic `thread::spawn` past
-/// the OS limit and kill the never-restarted accept loop (or abort under `panic = "abort"`).
+/// Cap concurrent conns — flood otherwise panics spawn and kills the accept loop.
 const MAX_CONNECTIONS: usize = 64;
 
-/// Cap one request line so a no-newline trickle can't grow memory unboundedly (defeats
-/// per-read timeout). Legitimate payloads are KB-scale.
+/// Cap one request line (no-newline trickle vs per-read timeout).
 const MAX_LINE_LEN: usize = 1024 * 1024; // 1 MiB
 
-/// Cap on `cmd` echoed into bad-request reports (hostile clients can put megabytes there).
 const MAX_CMD_LEN: usize = 32;
-
-/// Cap on the whole bad-request report. serde_json may quote field values (user/agent prose).
 const MAX_DETAIL_LEN: usize = 200;
 
-/// Parsed request → zero-or-more responses via `emit`. Thread-safe (one conn per thread).
+/// Request → zero-or-more responses via `emit`. One conn per thread.
 pub trait Handler: Send + Sync + 'static {
     fn handle(&self, req: Request, emit: &mut dyn FnMut(&Response));
 }
@@ -48,13 +39,10 @@ where
     }
 }
 
-/// Bind, accept forever, dispatch lines to `handler`. Stale-socket unlink on bind.
-/// Blocks; run on its own thread.
+/// Bind + accept forever (stale-socket unlink on bind). Blocks — own thread.
 ///
-/// `on_bad_request(detail)` runs on the conn thread for every undecodable line (bounded
-/// report via `bad_request_detail`). Socket still gets `bad request: …`, but hooks discard
-/// replies — without this, a stale CLI missing required `source` silently kills the voice
-/// loop. Required (not optional no-op) so callers must decide how rejections are observed.
+/// `on_bad_request` required: hooks discard socket replies, so stale missing-`source`
+/// would otherwise kill the voice loop silently. Bounded detail via `bad_request_detail`.
 pub fn serve<H: Handler, B>(sock_path: &Path, handler: H, on_bad_request: B) -> io::Result<()>
 where
     B: Fn(&str) + Send + Sync + 'static,
@@ -68,7 +56,6 @@ where
         match stream {
             Ok(stream) => {
                 if active_conns.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-                    // Cap: refuse rather than panic spawn past OS thread limit.
                     active_conns.fetch_sub(1, Ordering::SeqCst);
                     drop(stream);
                     continue;
@@ -111,29 +98,26 @@ fn handle_conn<H: Handler, B: Fn(&str) + ?Sized>(
         let req: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                // Hooks discard the socket reply; callback is the only observability path.
                 on_bad_request(&bad_request_detail(&line, &e));
                 write_line(&mut writer, &Response::error(format!("bad request: {e}")))?;
                 continue;
             }
         };
         let mut emit = |resp: &Response| {
-            let _ = write_line(&mut writer, resp); // client may have vanished
+            let _ = write_line(&mut writer, resp);
         };
         handler.handle(req, &mut emit);
     }
     Ok(())
 }
 
-/// Parse only `cmd` so a partially-valid / missing-`source` line still names the command.
+/// Parse only `cmd` for partial / missing-`source` lines.
 #[derive(Deserialize)]
 struct CmdOnly {
     cmd: String,
 }
 
-/// Log-safe rejection report: `rejected request (cmd=…): <serde error>`. Never the raw
-/// line. `cmd` sanitized to `[A-Za-z0-9_]` and [`MAX_CMD_LEN`]; finished string strips
-/// controls (no forged log lines) and caps at [`MAX_DETAIL_LEN`].
+/// Log-safe report: `rejected request (cmd=…): <serde error>` (sanitized cmd + controls).
 fn bad_request_detail(line: &str, err: &serde_json::Error) -> String {
     let cmd = serde_json::from_str::<CmdOnly>(line)
         .map(|c| {

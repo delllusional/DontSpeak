@@ -1,5 +1,5 @@
-//! Agents tab: one card per installed agent. [`skeleton`] offline; [`refresh_card`]
-//! blocking. Credentials read-only; install via `ClientSpec::present`.
+//! Agents tab: one card per installed agent. [`skeleton`] offline; [`refresh_card`] blocking.
+//! Credentials read-only; install via `ClientSpec::present`.
 
 mod providers;
 
@@ -105,7 +105,7 @@ impl UsageCard {
     }
 }
 
-/// Trim + cap (hostile credential files). Not email-shaped — some clients only store a login.
+/// Trim + cap (hostile credential files). Login label may be non-email.
 fn normalize_account(raw: &str) -> Option<String> {
     const MAX_LEN: usize = 128;
     let trimmed = raw.trim();
@@ -294,7 +294,7 @@ fn fetch_rows(paths: &ds_config::Paths, agent: ClientSource) -> std::io::Result<
     }
 }
 
-/// Local identity only (never network).
+/// Local identity only (offline).
 fn fetch_account(paths: &ds_config::Paths, agent: ClientSource) -> Option<String> {
     match agent {
         ClientSource::ClaudeCode => providers::claude::account(paths),
@@ -336,7 +336,7 @@ pub fn skeleton() -> UsageDeck {
     UsageDeck { cards }
 }
 
-/// Blocking one-card refresh. Soft = 60s cache; never swaps a good card for empty (rate limits).
+/// Blocking one-card refresh. Soft = 60s cache; keep last good card on empty (rate limits).
 pub fn refresh_card(agent: ClientSource, force: bool) -> UsageCard {
     if !agent.is_client() {
         return UsageCard::empty(agent);

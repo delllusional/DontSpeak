@@ -1,8 +1,7 @@
-//! Typed `model_status` schema — engine → app status contract (single source).
+//! Typed `model_status` — engine → app contract (single source).
 //!
-//! Engine builds [`ModelStatus`]; UIs hand-mirror closed-set wire tokens. Closed-set
-//! fields are enums that (de)serialize as those tokens — unknown values fail closed.
-//! `Option<_>` → JSON `null` (never omitted).
+//! Engine builds [`ModelStatus`]; UIs hand-mirror closed-set tokens. Unknown enum
+//! values fail closed. `Option<_>` → JSON `null` (always present).
 
 mod dictation_state;
 mod engines;
@@ -13,7 +12,7 @@ pub use engines::{StatusSttEngine, StatusTtsEngine};
 pub use state::EngineState;
 pub use tray::{StatusTrayKind, TrayIconKind, tray_icon_kind};
 
-/// NaN/Infinity → 0.0 (serde_json null would break non-optional float DTOs).
+/// NaN/Infinity → 0.0 (non-optional float DTOs).
 mod finite_f64_or_zero {
     pub fn serialize<S: serde::Serializer>(value: &f64, ser: S) -> Result<S::Ok, S::Error> {
         serde::Serialize::serialize(&sanitize(*value), ser)

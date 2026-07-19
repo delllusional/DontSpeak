@@ -17,12 +17,10 @@ using Windows.UI;
 
 namespace DontSpeak;
 
-/// <summary>
-/// Fluent Agents/Status/Tools/Logs/Credits. Status push-driven by App; close hides to tray.
-/// </summary>
+/// <summary>Fluent Agents/Status/Tools/Logs/Credits. Status push-driven by App; close hides to tray.</summary>
 public sealed partial class MainWindow : Window
 {
-    // Orange = Brand.Warning (warming/download), matching macOS.
+    // Orange = Brand.Warning (warming/download); macOS parity.
     private static readonly SolidColorBrush Green = new(Color.FromArgb(255, 46, 160, 67));
     private static readonly SolidColorBrush Orange = new(Brand.Warning);
     private static readonly SolidColorBrush Red = new(Color.FromArgb(255, 232, 70, 70));
@@ -37,8 +35,8 @@ public sealed partial class MainWindow : Window
         AppWindow.Resize(new Windows.Graphics.SizeInt32(380, 620));
         var icoPath = System.IO.Path.Combine(AppContext.BaseDirectory, "AppIcon.ico");
         if (System.IO.File.Exists(icoPath)) AppWindow.SetIcon(icoPath);
-        // Close only; width-resizable; height locked to Status content.
-        // IsMaximizable/IsMinimizable=false greys buttons — StripMinMaxButtons removes WS_*BOX.
+        // Width-resizable; height locked to Status content.
+        // IsMaximizable/IsMinimizable=false greys buttons — StripMinMaxButtons drops WS_*BOX.
         if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter pr)
         {
             pr.IsResizable = true;
@@ -55,7 +53,7 @@ public sealed partial class MainWindow : Window
         LoadLibraries();
         RefreshStatus();
 
-        // No poll — App push calls ApplyPushed. One-shot on show; pushes no-op while hidden.
+        // App push calls ApplyPushed. One-shot on show; pushes no-op while hidden.
         AppWindow.Changed += (s, e) =>
         {
             if (e.DidVisibilityChange && s.IsVisible)
@@ -66,7 +64,7 @@ public sealed partial class MainWindow : Window
             }
         };
 
-        // SizeChanged is post-arrange — don't Measure manually (corrupts layout → blank).
+        // SizeChanged is post-arrange — manual Measure blanks the window.
         if (StatusScroll?.Content is FrameworkElement statusPanel)
             statusPanel.SizeChanged += (_, _) => CapHeightToStatusContent();
     }
@@ -136,7 +134,6 @@ public sealed partial class MainWindow : Window
 
     private async void Nav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
-        // Null/empty → first menu item (XAML default).
         var tag = (args.SelectedItem as NavigationViewItem)?.Tag as string
             ?? (Nav.MenuItems.OfType<NavigationViewItem>().FirstOrDefault()?.Tag as string);
         await ApplyTabAsync(tag);
@@ -153,7 +150,7 @@ public sealed partial class MainWindow : Window
         if (LogTab != null) LogTab.Visibility = tag == "log" ? Visibility.Visible : Visibility.Collapsed;
         if (tag == "agents") await LoadUsageOnTabSelectedAsync();
         else ++_usageGeneration;
-        if (tag == "log") await LoadLogsAsync(loadGeneration); // reload each select (no poll)
+        if (tag == "log") await LoadLogsAsync(loadGeneration); // reload each select
     }
 
     private int _usageGeneration;
@@ -302,7 +299,7 @@ public sealed partial class MainWindow : Window
         return rank >= 0 ? rank : int.MaxValue;
     }
 
-    /// <summary>Catalog title; unknown tokens → Title Case (never raw key).</summary>
+    /// <summary>Catalog title; unknown tokens → Title Case (not the raw key).</summary>
     private static string UsageProviderTitle(string agent)
     {
         var key = $"usage.provider.{agent}";
@@ -325,7 +322,7 @@ public sealed partial class MainWindow : Window
             Spacing = 8,
             HorizontalAlignment = HorizontalAlignment.Stretch,
         };
-        // Account transparent until clicked; session-only (not persisted).
+        // Account opacity 0 until click; session-only (not persisted).
         var heading = new Grid
         {
             ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition() },
@@ -412,7 +409,7 @@ public sealed partial class MainWindow : Window
         body.Content = rows;
     }
 
-    // Matching shape: update in place so ProgressBar animates (not remount at zero).
+    // Same shape: update in place so ProgressBar animates (remount would restart at zero).
     private static bool TryUpdateUsageRows(StackPanel mountedRows, UsageCardDto card)
     {
         if (mountedRows.Children.Count != card.Rows.Count) return false;
@@ -440,13 +437,12 @@ public sealed partial class MainWindow : Window
     private static StackPanel BuildUsageRow(UsageRowDto row)
     {
         var heading = new Grid { ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition() } };
-        // Bottom-align period + remaining for a shared baseline.
         heading.Children.Add(new TextBlock
         {
             Text = Loc.T($"usage.{row.Period}"),
             VerticalAlignment = VerticalAlignment.Bottom,
         });
-        // Remaining top-right; percent is the bar only.
+        // Percent is on the bar only; remaining is the reset countdown.
         var remaining = new TextBlock
         {
             HorizontalAlignment = HorizontalAlignment.Right,
@@ -459,7 +455,7 @@ public sealed partial class MainWindow : Window
         Grid.SetColumn(remaining, 1);
         heading.Children.Add(remaining);
 
-        // Default WinUI track is 1px — bump for a readable bar.
+        // Default WinUI track is 1px — bump for readability.
         const double barThickness = 6;
         var progress = new ProgressBar
         {
@@ -547,8 +543,8 @@ public sealed partial class MainWindow : Window
         await RenderLogLinesAsync(++_logRenderGeneration);
     }
 
-    /// <summary>Confirm then LogsClear. No destructive style — Accent recolored ERROR red.
-    /// No DefaultButton (would make Enter trigger Clear over the red override).</summary>
+    /// <summary>Confirm then LogsClear. Accent recolored ERROR red; omit DefaultButton so
+    /// Enter does not fire Clear past the red override.</summary>
     private async void LogClear_Click(object sender, RoutedEventArgs e)
     {
         var danger = new SolidColorBrush(Brand.LogLevelColor("ERROR") ?? Color.FromArgb(255, 0xE8, 0x46, 0x46));
@@ -573,7 +569,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>Filter + color; yield every 64 so large logs don't freeze input.</summary>
+    /// <summary>Filter + color; yield every 64 so large logs keep input responsive.</summary>
     private async System.Threading.Tasks.Task RenderLogLinesAsync(int renderGeneration)
     {
         LogText.Blocks.Clear();
@@ -631,7 +627,7 @@ public sealed partial class MainWindow : Window
 
     private bool _refreshing;
 
-    /// <summary>Bounded off-UI probe (2500ms). Skip while hidden; never latch _refreshing on hang.</summary>
+    /// <summary>Bounded off-UI probe (2500ms). Skip while hidden; clear _refreshing even on hang.</summary>
     private async void RefreshStatus()
     {
         if (!AppWindow.IsVisible) return;
@@ -668,7 +664,7 @@ public sealed partial class MainWindow : Window
         VersionText.Text = v.Length > 0 ? v : Loc.T("common.dash");
 
         // Closed set matches ds-status StatusTtsEngine / StatusSttEngine wire tokens.
-        // Unknown → off (no fail-open to built-in labels).
+        // Unknown → off (never fail-open to built-in labels).
         switch (s.TtsEngine.Engine)
         {
             case "system":
@@ -698,8 +694,8 @@ public sealed partial class MainWindow : Window
                 ApplyOff(SttDot, SttRing); break;
         }
 
-        // Shared formatter returns "" for ready states — emptiness is note-vs-stats (all platforms).
-        // Runtime line only when ready (never stale "ORT CPU" under Downloading N%).
+        // Shared formatter returns "" when ready — empty note means show stats (all platforms).
+        // Runtime line only when ready (avoids stale "ORT CPU" under Downloading N%).
         bool ttsSystem = s.TtsEngine.Engine == "system";
         var ttsInfo = s.TtsEngine.Status;
         bool ttsTrouble = !string.IsNullOrEmpty(ttsInfo.Word);
@@ -910,7 +906,7 @@ public sealed partial class MainWindow : Window
             await Windows.System.Launcher.LaunchUriAsync(uri);
     }
 
-    /// <summary>Startup pill. SeedPurple only — not error/warning. VersionLink still opens homepage.</summary>
+    /// <summary>Startup pill in SeedPurple (info, not error/warning). VersionLink still opens homepage.</summary>
     internal void ApplyUpdateCheck(bool available, string? latestVersion)
     {
         if (!available || latestVersion is null) return;
@@ -920,7 +916,7 @@ public sealed partial class MainWindow : Window
         VersionPill.Background = new SolidColorBrush(Color.FromArgb(40, purple.R, purple.G, purple.B));
     }
 
-    // HyperlinkButton.Click doesn't mark Tapped Handled — else bubbles to header expand.
+    // HyperlinkButton.Click leaves Tapped unhandled — mark it or header expand also fires.
     private void VersionLink_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => e.Handled = true;
 
     private void TtsSystemSettings_Click(object sender, RoutedEventArgs e) => Native.OpenVoiceSettings();
@@ -952,7 +948,7 @@ public sealed partial class MainWindow : Window
         int nonClientPx = Math.Max(0, AppWindow.Size.Height - AppWindow.ClientSize.Height);
         pr.PreferredMinimumHeight = clientPx + nonClientPx;
         pr.PreferredMaximumHeight = null;
-        // Height-only resize doesn't fire panel SizeChanged — no loop.
+        // Height-only resize skips panel SizeChanged — safe from feedback loops.
         int cur = AppWindow.ClientSize.Height;
         bool atAutoFit = _lastFitClientPx < 0 || Math.Abs(cur - _lastFitClientPx) <= 2;
         if (atAutoFit || cur < clientPx)
@@ -1133,6 +1129,6 @@ public sealed partial class MainWindow : Window
         [property: JsonPropertyName("type")] string? Type,
         [property: JsonPropertyName("required")] bool Required,
         [property: JsonPropertyName("description")] string? Description,
-        // Pre-built by status_fmt::tool_param_detail — no host-side derivation.
+        // Pre-built by status_fmt::tool_param_detail — host paints only.
         [property: JsonPropertyName("detail")] string? Detail);
 }

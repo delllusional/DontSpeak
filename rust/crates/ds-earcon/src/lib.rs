@@ -1,15 +1,12 @@
-//! Audible earcons — reply-done ding and needs-input cue. The engine resolves an event
-//! to a sound FILE and hands the path to the warm helper; nothing here opens audio.
+//! Earcons: resolve event → sound file path for the warm helper (no audio I/O here).
 //!
-//! Configured sound IS each cue's on/off (no separate enable flag): bundled system-sound
-//! NAME or a path inside a platform sound directory; empty = off. Reply ding defaults to
-//! the OS chime by name (`"ding"` / `"Tink"` / `"message"`). Bare names resolve through
-//! [`system_sounds`] (introspection of the OS sounds folder — never a hardcoded path);
-//! unresolved ⇒ fail-quiet off. [`system_sounds`] also feeds the UI picker.
+//! Configured sound is on/off (empty = off): bare name via [`system_sounds`] OS-dir
+//! scan, or absolute path inside a platform sound dir. Unresolved ⇒ fail-quiet off.
+//! Reply defaults: `"ding"` / `"Tink"` / `"message"`.
 
 use std::path::{Path, PathBuf};
 
-/// Eyes-free cues. Wire: `reply_done` (Stop hook) / `needs_input` (Notification hook).
+/// Wire: `reply_done` (Stop) / `needs_input` (Notification).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EarconEvent {
@@ -18,7 +15,7 @@ pub enum EarconEvent {
 }
 
 impl EarconEvent {
-    /// Wire token over IPC (`"reply_done"` / `"needs_input"`).
+    /// IPC wire token.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim() {
             "reply_done" => Some(Self::ReplyDone),
@@ -27,7 +24,6 @@ impl EarconEvent {
         }
     }
 
-    /// Canonical wire token.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ReplyDone => "reply_done",
@@ -35,7 +31,7 @@ impl EarconEvent {
         }
     }
 
-    /// Configured sound (trimmed). Empty = this cue is OFF.
+    /// Trimmed config sound; empty = cue off.
     fn sound_in<'a>(self, reply_sound: &'a str, needs_input_sound: &'a str) -> &'a str {
         match self {
             Self::ReplyDone => reply_sound.trim(),
@@ -44,17 +40,17 @@ impl EarconEvent {
     }
 }
 
-/// Bundled system sound from [`system_sounds`].
+/// Entry from [`system_sounds`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemSound {
-    /// File stem (no extension) — what a config sound matches against.
+    /// File stem — config match key.
     pub name: String,
     pub path: PathBuf,
-    /// Size in bytes (smaller ≈ shorter) — UI-picker sort key.
+    /// Size (UI-picker sort; smaller ≈ shorter).
     pub bytes: u64,
 }
 
-/// OS directories for bundled system sounds (convention, not a hardcoded list).
+/// Platform OS sound directories (introspected, not a name list).
 fn sound_dirs() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -80,7 +76,7 @@ fn sound_dirs() -> Vec<PathBuf> {
     }
 }
 
-/// Trust boundary: canonicalize and keep the path inside a platform sound directory.
+/// Canonicalize; accept only paths under a platform sound directory.
 pub fn canonical_sound_path(path: &Path) -> Option<PathBuf> {
     canonical_sound_path_in(path, &sound_dirs())
 }
@@ -97,7 +93,7 @@ fn canonical_sound_path_in(path: &Path, sound_dirs: &[PathBuf]) -> Option<PathBu
         .then_some(path)
 }
 
-/// Platform extension for the dir scan: aiff / wav / oga (rodio/symphonia decodes all).
+/// Scan extension: aiff / wav / oga.
 fn sound_ext() -> &'static str {
     #[cfg(target_os = "macos")]
     {
@@ -117,13 +113,12 @@ fn sound_ext() -> &'static str {
     }
 }
 
-/// Enumerate bundled sounds by introspection. Size-then-name sort; de-dup by name
-/// (earlier dirs win) — no hardcoded names.
+/// Enumerate OS sound dirs: size-then-name; de-dup by name (earlier dirs win).
 pub fn system_sounds() -> Vec<SystemSound> {
     system_sounds_in(&sound_dirs(), sound_ext())
 }
 
-/// Resource-explicit core; tests pass tempdir fixtures so the harness never scans OS dirs.
+/// Injectable dirs/ext; tests use tempdir fixtures.
 fn system_sounds_in(sound_dirs: &[PathBuf], ext: &str) -> Vec<SystemSound> {
     let mut out: Vec<SystemSound> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -164,8 +159,7 @@ fn system_sounds_in(sound_dirs: &[PathBuf], ext: &str) -> Vec<SystemSound> {
     out
 }
 
-/// Resolve event → sound file, or `None` (fail-quiet). Empty config ⇒ off; absolute path
-/// only if inside a platform sound dir; bare name matches [`system_sounds`] case-insensitively.
+/// Event → sound file, or `None`. Empty = off; absolute only under sound dir; bare name CI match.
 pub fn resolve_cue(
     reply_sound: &str,
     needs_input_sound: &str,
@@ -231,7 +225,7 @@ mod tests {
 
     #[test]
     fn default_reply_sound_is_the_os_chime() {
-        // Pin against VoiceConfig's actual default (not a hardcoded literal here).
+        // Pin against VoiceConfig default (single source).
         let cfg = ds_config::VoiceConfig::default();
         let expected_name = if cfg!(target_os = "macos") {
             "Tink" // /System/Library/Sounds/Tink.aiff

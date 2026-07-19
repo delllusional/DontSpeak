@@ -29,8 +29,7 @@
 //! request. Download progress is exposed by the engine. The pure fns below are network-free
 //! and unit-tested; `ensure` is exercised by localhost fixtures (no real CDN).
 //!
-//! Modules of note: `read_retry` (AV/EDR transient-`NotFound` race on present files);
-//! [`update_check`] (GitHub release check — lives here for shared HTTP GET plumbing).
+//! Also: `read_retry` (AV/EDR transient-`NotFound`); [`update_check`] (shared HTTP GET).
 
 use std::path::{Path, PathBuf};
 
@@ -42,7 +41,7 @@ pub mod libraries;
 pub mod ort;
 mod read_retry;
 pub mod setup;
-/// FluidAudio Core ML shim loader shared by `ds-stt` + `ds-tts` (neither depends on the other).
+/// FluidAudio Core ML shim loader for `ds-stt` + `ds-tts` (no cross-crate dep).
 #[cfg(target_os = "macos")]
 pub mod shim;
 pub mod spec;
@@ -50,7 +49,7 @@ pub mod target;
 pub mod update_check;
 pub mod urls;
 
-// Flat facade: historical `ds_model::<item>` paths.
+// Flat facade — stable `ds_model::<item>` paths.
 pub use download::{ensure, ensure_with_progress, set_prefetch_source, url_basename};
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
 pub use ort::{

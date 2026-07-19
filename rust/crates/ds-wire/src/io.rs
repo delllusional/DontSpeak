@@ -1,15 +1,14 @@
-//! Shared wire-writer IO: bin resolve, never-clobber JSON read, backup→atomic-write tail.
+//! Shared wire-writer IO: bin resolve, fail-closed JSON read, backup→atomic-write.
 
 use ds_config::Paths;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// Deployed `dontspeak` path for hook/MCP registration.
+/// Deployed `dontspeak` for hook/MCP registration.
 ///
-/// Unix prefers `~/.local/bin/dontspeak` (wired configs survive rebuilds; dev `target/` wires
-/// the deployed bin). Windows never does — portable zip is beside this exe; a stale
-/// `~/.local/bin` must not shadow it. Else sibling of this exe. `paths: None` skips the unix
-/// stable path. macOS `.app` uses [`bundle_cli_path`] so reconcile doesn't churn every launch.
+/// Unix: prefer `~/.local/bin` (wired configs survive rebuilds). Windows: sibling of this
+/// exe only (portable zip; ignore stale `~/.local/bin`). macOS `.app` → [`bundle_cli_path`].
+/// `paths: None` skips the unix stable path.
 pub(crate) fn resolve_dontspeak_bin_at(paths: Option<&Paths>) -> Option<String> {
     let file = format!("dontspeak{}", std::env::consts::EXE_SUFFIX);
     #[cfg(unix)]
@@ -41,7 +40,7 @@ fn bundle_cli_path(exe: &Path) -> Option<PathBuf> {
     Some(contents.join("Helpers").join("dontspeak"))
 }
 
-/// Missing/empty → `Null` (shapers treat as `{}`). Malformed → report + `Err` (never clobber).
+/// Missing/empty → `Null` (shapers treat as `{}`). Malformed → report + `Err` (leave file).
 pub(crate) fn read_json_or_bail(tool: &str, cfg: &Path) -> Result<Value, ()> {
     match std::fs::read_to_string(cfg) {
         Err(_) => Ok(Value::Null),

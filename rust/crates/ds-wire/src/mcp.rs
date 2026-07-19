@@ -1,6 +1,5 @@
-//! MCP registration (`JsonMcp` / `TomlMcp`): identical stdio `DontSpeak` entry; file/labels
-//! from the registry via [`target_for`]. Shared `ds-config` merge/strip + backup/atomic write.
-//! `seed`/`capture`: print-only grouping (issue #30 / `crate::wire_surfaces_print_only`).
+//! MCP registration (`JsonMcp` / `TomlMcp`): stdio `DontSpeak` entry; target from registry.
+//! Shared merge/strip + backup/atomic write. Print-only seed/capture: #30.
 
 use std::path::Path;
 

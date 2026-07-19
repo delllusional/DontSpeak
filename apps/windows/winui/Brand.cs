@@ -11,9 +11,9 @@ namespace DontSpeak;
 /// </summary>
 internal static class Brand
 {
-    public static readonly WinColor SeedPurple;   // speaking / seed (#5B4397)
-    public static readonly WinColor MicOrange;    // recording (#FF9F0A)
-    public static readonly WinColor Warning;      // warming/blocked + no-target glow
+    public static readonly WinColor SeedPurple; // speaking / seed (#5B4397)
+    public static readonly WinColor MicOrange; // recording (#FF9F0A)
+    public static readonly WinColor Warning; // warming/blocked + no-target glow
 
     public static GdiColor SeedPurpleGdi => Gdi(SeedPurple);
     public static GdiColor MicOrangeGdi => Gdi(MicOrange);

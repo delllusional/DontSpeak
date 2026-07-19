@@ -1,10 +1,9 @@
 //! Per-message accumulation: which top-level blockquote runs become speakable now.
-//! PURE of IO (unit-testable); [`crate::deliver_batch`] adds the state file + lock.
+//! Pure of IO; [`crate::deliver_batch`] owns state file + lock.
 //!
-//! Claude Code can deliver batches out of order (hooks run in parallel). [`Accum`]
-//! reconstructs by content-block `index` and emits each completed run EXACTLY ONCE in
-//! document order (high-water mark, not a one-shot latch). Cumulative `displayed_text`
-//! mode covers Qwen / Codex final snapshots.
+//! Out-of-order batches (parallel hooks): reconstruct by content-block `index`, emit
+//! each completed run once in document order (high-water mark). Cumulative
+//! `displayed_text` covers Qwen / Codex final snapshots.
 
 use std::collections::BTreeMap;
 

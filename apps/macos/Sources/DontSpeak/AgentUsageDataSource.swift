@@ -2,7 +2,7 @@ import CDontSpeak
 import DontSpeakLogic
 import Foundation
 
-/// Usage C ABI adapter. Decode at boundary; attach `remainingLabel` here (not in body).
+/// Usage C ABI adapter. Decode at boundary; attach `remainingLabel` via ds_usage_resets_in.
 enum AgentUsageDataSource {
     static func readCachedDeck() async -> UsageDeck? {
         await Task.detached(priority: .userInitiated) {

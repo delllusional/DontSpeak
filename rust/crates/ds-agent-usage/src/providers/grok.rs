@@ -59,10 +59,9 @@ fn merge_cli_web_errors(cli: std::io::Error, web: std::io::Error) -> std::io::Er
     std::io::Error::new(kind, format!("Grok CLI: {cli_msg}; web: {web_msg}"))
 }
 
-/// Categories only — never bodies/tokens/Authorization.
+/// Categories only — strip bodies/tokens/Authorization.
 fn sanitize_error_message(error: &std::io::Error) -> String {
     let raw = error.to_string();
-    // Drop anything that could look like a bearer / cookie fragment if a lower layer slipped.
     if raw.len() > 160
         || raw.contains("Bearer ")
         || raw.contains("eyJ")

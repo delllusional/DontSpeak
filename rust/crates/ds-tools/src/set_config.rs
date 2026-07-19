@@ -1,4 +1,4 @@
-//! `SetConfigArgs` — typed `set_config` surface + apply-onto-`VoiceConfig`.
+//! Typed `set_config` surface + apply onto `VoiceConfig`.
 
 use serde::{Deserialize, Serialize};
 
@@ -8,11 +8,8 @@ use ds_config::{
     normalize_tray,
 };
 
-/// SINGLE source for the `set_config` surface (schema / parse / apply can't drift —
-/// once `greet` was in `VoiceConfig` but unsettable). Guards:
-///   • PARSE  — deserialize into this; `deny_unknown_fields` + strict enums (`strict_de!`).
-///   • APPLY  — destructures EVERY field with no `..` → new field is a compile error.
-///   • SCHEMA — `set_config_schema_matches_args` asserts property names match.
+/// Single source for set_config (schema/parse/apply can't drift). Guards:
+/// parse (`deny_unknown_fields` + strict enums); apply (no `..`); schema name parity test.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SetConfigArgs {
@@ -43,8 +40,8 @@ pub struct SetConfigArgs {
 }
 
 impl SetConfigArgs {
-    /// Merge provided fields onto `cfg`; returns `key=value` change tokens. Clamps
-    /// rate/`Manual` gain; rejects empty voices. NO `..` — new fields fail to compile.
+    /// Merge fields onto `cfg`; `key=value` tokens. Clamps rate/gain; rejects empty voices.
+    /// Exhaustive destructure (no `..`) — new fields fail at compile.
     pub fn apply(self, cfg: &mut VoiceConfig) -> Result<Vec<String>, String> {
         let SetConfigArgs {
             rate,

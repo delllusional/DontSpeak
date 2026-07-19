@@ -72,7 +72,7 @@ extension View {
 }
 
 extension View {
-    /// Pin sidebar width and forbid collapse. Do NOT replace the split-view delegate —
+    /// Pin sidebar width and forbid collapse. Leave the split-view delegate alone —
     /// NavigationSplitView's NSSplitViewController is its own delegate; wrapping it left
     /// AppKit calling a freed proxy → segfault. Set item thickness via the controller instead;
     /// if a future SwiftUI hierarchy change misses us, this no-ops (draggable again), never crashes.

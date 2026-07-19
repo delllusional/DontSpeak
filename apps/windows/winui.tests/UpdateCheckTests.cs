@@ -4,7 +4,7 @@ namespace DontSpeak.Tests;
 
 /// <summary>
 /// <see cref="Native.ParseUpdateAvailable"/> / ParseLatestVersion: missing/malformed ⇒ false/null
-/// (never show pill on ambiguity). No ds_core.dll or network.
+/// (pill only on clear true). No ds_core.dll or network.
 /// </summary>
 public class UpdateCheckTests
 {

@@ -28,7 +28,7 @@ pub(crate) struct UsageRow {
     pub(crate) resets_at_unix: i64,
 }
 
-/// Owned `ds_*` C string → Rust String + free. NULL → "".
+/// Owned `ds_*` C string → Rust `String` + free. NULL → `""`.
 fn take(p: *mut c_char) -> String {
     if p.is_null() {
         return String::new();
@@ -60,8 +60,7 @@ pub fn set_provider(which: &str) -> bool {
     sys::ds_set_provider(c.as_ptr()) != 0
 }
 
-// BLOCKING (same ds_ipc round-trip as wait). Not used from on_activate (main thread);
-// kept for host parity.
+// BLOCKING (same ds_ipc round-trip as wait). Host-parity only — GTK main thread must not call.
 #[allow(dead_code)]
 pub fn model_status_json() -> String {
     take(sys::ds_model_status_json())
@@ -70,7 +69,7 @@ pub fn model_status_json() -> String {
 pub fn model_status_wait(since: u64, timeout_ms: u32) -> String {
     take(sys::ds_model_status_wait(since, timeout_ms))
 }
-/// Instant deck: installed agents + last-good cache. No network.
+/// Instant deck: installed agents + last-good cache (local only).
 pub fn agent_usage_skeleton() -> Option<UsageDeck> {
     serde_json::from_str(&take(sys::ds_agent_usage_skeleton_json())).ok()
 }
@@ -101,13 +100,12 @@ pub fn log_tail_json(max_bytes: u32) -> String {
     take(sys::ds_logs_json(max_bytes))
 }
 
-/// Like log_tail_json but BLOCKS on log-dir change or timeout (client fs watch).
-/// Background thread only.
+/// BLOCKING on log-dir change or timeout (client fs watch). Background thread only.
 pub fn log_wait_json(max_bytes: u32, timeout_ms: u32) -> String {
     take(sys::ds_logs_wait(max_bytes, timeout_ms))
 }
 
-/// Parse + filter with shared ds_log rules; returns (total, shown, flat).
+/// Parse + filter via ds_log; returns (total, shown, flat).
 pub fn filter_and_flatten_logs(json: &str, query: &str) -> (usize, usize, String) {
     let lines = ds_log::parse_logs_json(json);
     let total = lines.len();
@@ -155,7 +153,7 @@ pub fn t(key: &str) -> String {
     let c = CString::new(key).unwrap_or_default();
     take(sys::ds_t(c.as_ptr()))
 }
-/// Localized string with `%{name}` placeholders via ds_t_args.
+/// Localized string with `%{name}` placeholders via `ds_t_args`.
 pub fn t_args(key: &str, args: &[(&str, &str)]) -> String {
     let key_c = CString::new(key).unwrap_or_default();
     let mut obj = serde_json::Map::with_capacity(args.len());

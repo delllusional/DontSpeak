@@ -2,7 +2,7 @@
 /// the Status tab shows a Microphone permission row (and folds its grant into the Caps Lock
 /// header dot).
 ///
-/// macOS raises the mic prompt LAZILY (first real capture), never at launch. Row policy:
+/// macOS raises the mic prompt lazily (first real capture), never at launch. Row policy:
 ///   - `built_in` / `system`: we open the mic → show row
 ///   - `off`: dictation disabled → hide
 ///   - `claude_code`: Claude Code owns mic prompt + capture → hide (our grant would mislead)

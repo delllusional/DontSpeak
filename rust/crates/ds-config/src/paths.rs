@@ -143,8 +143,8 @@ impl Paths {
         })
     }
 
-    /// Env-free Paths under `home` when [`resolve`](Paths::resolve) is None (inert engine).
-    /// Must not `set_var` (unsound with other threads). Layout immaterial — not a real session.
+    /// Env-free Paths under `home` (inert engine when resolve fails). No `set_var`.
+    /// Layout immaterial — not a real session.
     pub fn rooted_at(home: &Path) -> Self {
         let home = home.to_path_buf();
         let claude_dir = home.join(".claude");
@@ -165,7 +165,6 @@ impl Paths {
             stats_toml: ds_dir.join("stats.toml"),
             config_toml: ds_dir.join("config.toml"),
             speakers_json: ds_dir.join("speakers.json"),
-            // The inert fallback uses ONE dir for both roots (layout is immaterial here).
             config_dir: ds_dir.clone(),
             state_dir: ds_dir.clone(),
             cache_dir: ds_dir,

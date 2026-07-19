@@ -9,10 +9,10 @@ using static DontSpeak.Win32;
 namespace DontSpeak;
 
 /// <summary>
-/// Tray icon via H.NotifyIcon (<see cref="H.NotifyIcon.TaskbarIcon"/>) — no first-party WinUI 3
-/// NotifyIcon. Modern <see cref="MenuFlyout"/> (SecondWindow); brand glyph HICONs from
-/// <see cref="BrandGlyph"/>. Trade-off vs hand-rolled Win32: no live theme/DPI rebuild (state at
-/// launch); restart re-renders. Events + <see cref="Update"/> surface unchanged for App.
+/// Tray icon via H.NotifyIcon (<see cref="H.NotifyIcon.TaskbarIcon"/>) — WinUI 3 has no
+/// first-party NotifyIcon. Modern <see cref="MenuFlyout"/> (SecondWindow); brand glyph HICONs
+/// from <see cref="BrandGlyph"/>. Trade-off vs hand-rolled Win32: glyphs captured at launch
+/// (restart re-renders theme/DPI). Events + <see cref="Update"/> surface for App.
 /// </summary>
 internal sealed class TrayIcon : IDisposable
 {
@@ -38,8 +38,8 @@ internal sealed class TrayIcon : IDisposable
 
         _icon = new H.NotifyIcon.TaskbarIcon
         {
-            ToolTipText = Loc.T("common.app_name"), // state is icon color, not tooltip
-            ContextMenuMode = H.NotifyIcon.ContextMenuMode.SecondWindow, // not classic PopupMenu
+            ToolTipText = Loc.T("common.app_name"), // state is icon color
+            ContextMenuMode = H.NotifyIcon.ContextMenuMode.SecondWindow, // modern MenuFlyout
             NoLeftClickDelay = true,
             ContextFlyout = BuildMenu(),
         };
@@ -90,7 +90,7 @@ internal sealed class TrayIcon : IDisposable
 
     private void SetMuted(bool muted)
     {
-        // Only cache if engine accepted — else icon would lie until next poll.
+        // Cache only when engine accepted — else icon lies until next status push.
         if (Native.SetMuted(muted)) _muted = muted;
         if (_muteItem != null) _muteItem.IsChecked = _muted;
         ApplyIcon();
@@ -249,7 +249,7 @@ internal sealed class TrayIcon : IDisposable
         _ = ReleaseDC(IntPtr.Zero, hdc);
         if (color == IntPtr.Zero) return LoadIconW(IntPtr.Zero, IDI_APPLICATION);
 
-        // COPY into DIB — drawing GDI+ onto external DIB memory is unreliable.
+        // COPY into DIB — GDI+ draw onto external DIB bits is unreliable.
         var buf = BrandGlyph.RenderBgra(size, ink, muted);
         Marshal.Copy(buf, 0, bits, buf.Length);
 
@@ -304,7 +304,7 @@ internal sealed class TrayIcon : IDisposable
     [DllImport("gdi32.dll")]
     private static extern IntPtr CreateBitmap(int w, int h, uint planes, uint bitCount, byte[] bits);
 
-    /// <summary>Minimal ICommand for LeftClickCommand (no CommunityToolkit.Mvvm for one command).</summary>
+    /// <summary>Minimal ICommand for LeftClickCommand (avoids CommunityToolkit.Mvvm for one command).</summary>
     private sealed class RelayCommand : ICommand
     {
         private readonly Action _run;

@@ -76,9 +76,8 @@ impl EnglishFrontend {
             if surface.chars().any(char::is_alphabetic) {
                 let cache_key = surface.to_lowercase();
                 let cached = self.oov_cache.get(&cache_key).cloned();
-                // A retryable fallback is already installed as a voice-g2p override, so
-                // `is_unresolved()` would now report false. Consult that cache state first:
-                // every later occurrence retries BART until a real pronunciation replaces it.
+                // Installed retryable override makes `is_unresolved` false — consult
+                // `retry_bart` so later occurrences re-try BART until a real hit lands.
                 let needs_resolution = match &cached {
                     Some(entry) => entry.retry_bart,
                     None => self.is_unresolved(&surface),
@@ -237,9 +236,7 @@ fn try_phonemize_cancellable(
 ) -> Result<Cancellable<String>, String> {
     static FRONTEND: OnceLock<Mutex<EnglishFrontend>> = OnceLock::new();
     let normalized = crate::normalize_kokoro_text(text);
-    // voice-g2p intentionally maps punctuation to model pause tokens. A punctuation-only
-    // request therefore looks non-empty after G2P even though there is no speech to synthesize.
-    // Decide the no-op at the normalized text boundary, before loading either G2P or synth.
+    // Punctuation maps to pause tokens; no-op before loading G2P/synth if nothing alphanumeric.
     if !normalized.chars().any(char::is_alphanumeric) {
         return Ok(Cancellable::Finished(String::new()));
     }
@@ -254,8 +251,7 @@ fn try_phonemize_cancellable(
         Cancellable::Finished(phonemes) => phonemes,
         Cancellable::Cancelled => return Ok(Cancellable::Cancelled),
     };
-    // The early guard established there was something pronounceable, so silence here is a real
-    // frontend failure rather than the successful no-op used for emoji/punctuation-only input.
+    // Past the alphanumeric guard: empty phonemes is a real frontend failure.
     if phonemes.trim().is_empty() {
         return Err("English G2P returned no phonemes".to_string());
     }
@@ -312,22 +308,17 @@ fn letter_phonemes(c: char) -> Option<&'static str> {
     })
 }
 
-/// Convert English text to Kokoro-compatible IPA. Kept as an infallible convenience for
-/// diagnostics/examples; synthesis uses [`phoneme_batches_for`] so a frontend error is reported
-/// instead of becoming a successful empty utterance.
+/// Diagnostics/examples only; synthesis uses [`phoneme_batches_for`] (errors surface).
 pub fn phonemize(text: &str) -> String {
     try_phonemize(text).unwrap_or_default()
 }
 
-/// `voice` is retained for call-site stability. DontSpeak's Kokoro surface is English-only, so
-/// all compatible voices use the same contextual frontend.
+/// `voice` kept for call-site stability; English-only frontend is shared across voices.
 pub fn phonemize_for(text: &str, _voice: &str) -> String {
     phonemize(text)
 }
 
-/// A backend-ready Kokoro IPA batch. Construction is private so callers receive only chunks
-/// whose characters exist in `crate::vocab::KOKORO_VOCAB` and whose token count fits both
-/// the ONNX voice-style table and FluidAudio's context window.
+/// Backend-ready IPA chunk: vocab-safe chars, token count within ONNX style table + FluidAudio.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KokoroPhonemeChunk(String);
 
@@ -337,24 +328,16 @@ impl KokoroPhonemeChunk {
     }
 }
 
-/// Result of a cancellable Markdown-to-IPA frontend pass. Cancellation is a successful
-/// terminal rather than an error because the helper protocol reports stopped speech as DONE.
+/// Cancellable Markdown→IPA. Cancel = success (helper protocol: stopped speech is DONE).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PhonemeBatchesOutcome {
     Finished(Vec<KokoroPhonemeChunk>),
     Cancelled,
 }
 
-/// Drop phonemes Kokoro's vocabulary doesn't contain, logging the set once.
-///
-/// LOAD-BEARING failure mode. Kokoro's vocabulary is the MODEL's, not the frontend's: the
-/// contextual tokenizer passes some punctuation through verbatim (`„` U+201E is not in
-/// [`crate::vocab::KOKORO_VOCAB`]), and an OOV pronunciation can carry a stress or length mark
-/// the model never learned. Rejecting the utterance on one such character silenced the ENTIRE
-/// reply — strictly worse than the lossy-but-audible behavior it replaced, and reachable from
-/// ordinary agent text. Dropping the character keeps the reply speakable; the warning keeps the
-/// loss observable instead of silent (a deterministic transliteration layer is the real fix;
-/// see `docs/TTS-PIPELINE.md#known-limitations-and-planned-evolution`).
+/// Drop model-unknown phonemes (log once). Vocab is the model's: tokenizer may pass
+/// punctuation (`„` U+201E) or marks the model never learned. One OOV char used to
+/// silence the whole reply; drop keeps speakable output (see TTS-PIPELINE limitations).
 fn drop_unsupported_phonemes(phonemes: &str) -> String {
     let mut dropped: Vec<char> = Vec::new();
     let kept: String = phonemes
@@ -468,10 +451,7 @@ mod tests {
             },
         );
 
-        // Reproduce the production hazard state: the convert() that installed the fallback also
-        // rebuilt the live g2p with it, so `is_unresolved` reports false for the word. A
-        // regressed `needs_resolution` that re-consults `is_unresolved` instead of `retry_bart`
-        // (the pre-fix shape) would treat the sentinel as resolved and never retry.
+        // Override installed → `is_unresolved` false; must still re-resolve via `retry_bart`.
         let g2p = frontend.g2p.take().expect("live g2p");
         frontend.g2p = Some(g2p.with_overrides(frontend.overrides.clone()));
         assert!(
@@ -493,8 +473,7 @@ mod tests {
         assert_eq!(frontend.oov_order.len(), 1, "a retry updates in place");
     }
 
-    /// Sibling guard to the retry test above: an entry cached WITHOUT `retry_bart` is a genuine
-    /// hit — `convert` must serve it as-is, not re-resolve it into a spelling fallback.
+    /// Genuine cache hit (`retry_bart` false) is served as-is.
     #[test]
     fn cached_pronunciation_without_retry_flag_is_served_not_re_resolved() {
         let mut frontend = EnglishFrontend::new();
@@ -521,8 +500,7 @@ mod tests {
         );
     }
 
-    /// A stop observed at the OOV boundary must bypass BART entirely. This is the boundary that
-    /// keeps a long identifier-heavy request from starting another autoregressive inference.
+    /// Cancel at OOV boundary skips BART (identifier-heavy stop path).
     #[test]
     fn cancellation_before_oov_inference_is_a_distinct_outcome() {
         let mut frontend = EnglishFrontend::new();
@@ -541,9 +519,7 @@ mod tests {
         ));
     }
 
-    /// LOAD-BEARING GPL guard: the frontend must hand voice-g2p an empty espeak path — an
-    /// empty command can never resolve through PATH, so the crate's optional GPLv3
-    /// espeak-ng process fallback is structurally unreachable (issue #57).
+    /// GPL guard: empty espeak path → no PATH-resolvable GPLv3 espeak-ng (issue #57).
     #[test]
     fn espeak_process_fallback_is_disabled_by_an_empty_path() {
         assert!(
@@ -552,10 +528,7 @@ mod tests {
         );
     }
 
-    /// Drift guard for every hand-authored IPA table in this file (restores the deleted
-    /// `every_letter_phoneme_is_vocab_safe` and extends it over OVERRIDES and the
-    /// unknown-word fallback): one out-of-vocab char (e.g. ASCII 'g' for U+0261) would
-    /// silently degrade every spelled-out OOV word at synth time.
+    /// Hand-authored IPA (letters, OVERRIDES, unknown fallback) must stay in KOKORO_VOCAB.
     #[test]
     fn hand_authored_phoneme_tables_are_vocab_safe() {
         let mut all: Vec<(String, &str)> = ('a'..='z')
@@ -608,10 +581,7 @@ mod tests {
         assert!(phoneme_batches_for("", "af_heart").unwrap().is_empty());
     }
 
-    /// Restores the coverage guard the frontend rewrite dropped. It matters MORE now than it
-    /// did: an out-of-vocabulary character used to be discarded silently at tokenize time, so
-    /// the word merely sounded wrong. Everything the G2P emits is now handed straight to the
-    /// model, so a miss here is a mispronunciation for every user, on every reply.
+    /// G2P output goes straight to the model; OOV chars mispronounce every reply.
     #[test]
     fn g2p_output_is_vocab_safe_for_common_and_edge_words() {
         for text in [
@@ -643,10 +613,7 @@ mod tests {
         }
     }
 
-    /// Regression: one character outside Kokoro's vocabulary used to fail the whole request, so
-    /// a single `„` anywhere in a reply produced total silence. It must be dropped, not fatal.
-    /// `„` (U+201E) is real: the contextual tokenizer passes it through verbatim as punctuation,
-    /// and `KOKORO_VOCAB` has no entry for it.
+    /// One OOV char (`„` U+201E from tokenizer) must drop, not silence the reply.
     #[test]
     fn one_out_of_vocabulary_character_does_not_silence_the_reply() {
         assert!(
@@ -663,8 +630,7 @@ mod tests {
         }
     }
 
-    /// Text that renders to nothing speakable is a successful no-op, not a failure — the helper
-    /// terminates it with DONE. Returning Err made `ds-helper "🎉"` exit nonzero.
+    /// Nothing speakable → empty success (DONE); Err would fail `ds-helper "🎉"`.
     #[test]
     fn unspeakable_text_yields_no_chunks_rather_than_an_error() {
         for text in ["   ", "🎉", "![](img.png)", "...", "!?", "—"] {

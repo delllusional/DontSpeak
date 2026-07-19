@@ -66,10 +66,9 @@ pub const DEFAULT_NARRATION_SPEC: &str = r#"# Narrate
 Start every reply with a concise spoken summary of the full response. Write each point on its own `>` line in plain text, without other Markdown, code, URLs, or paths.
 "#;
 
-/// Spoken-text cleanup for digests and shorts (one path — no drift).
-/// Drops `` ` * _ # `` (content kept); drops hash-like tokens (7–40 hex, ≥1 a–f letter;
-/// plain decimals kept). Does not strip slashes/extensions (e.g. pause/resume). Collapses
-/// whitespace; `None` if nothing speakable remains.
+/// Spoken-text cleanup for digests and shorts (one path). Drops `` ` * _ # ``; drops
+/// hash-like tokens (7–40 hex, ≥1 a–f); keeps plain decimals and paths/slashes.
+/// Collapses whitespace; `None` if nothing speakable.
 pub fn clean_for_speech(text: &str) -> Option<String> {
     let t = text.trim();
     if t.is_empty() {

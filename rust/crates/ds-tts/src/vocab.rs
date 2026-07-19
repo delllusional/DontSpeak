@@ -171,11 +171,8 @@ mod tests {
         assert_eq!(vocab_id('ˌ'), Some(157)); // secondary stress
         assert_eq!(vocab_id('ɡ'), Some(92)); // U+0261 script g
         assert_eq!(vocab_id('.'), Some(4));
-        // ASCII 'g' is NOT in the vocab (only the U+0261 variant).
-        assert_eq!(vocab_id('g'), None);
-        // No apostrophe.
+        assert_eq!(vocab_id('g'), None); // only U+0261 script g
         assert_eq!(vocab_id('\''), None);
-        // All ids are distinct (no two phonemes share a token id).
         let mut ids: Vec<i64> = KOKORO_VOCAB.iter().map(|&(_, v)| v).collect();
         ids.sort_unstable();
         let distinct = {

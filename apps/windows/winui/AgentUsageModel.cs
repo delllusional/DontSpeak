@@ -6,7 +6,7 @@ namespace DontSpeak;
 
 /// <summary>
 /// Decoder for shared Usage card contract (Rust <c>UsageDeck</c> / <c>UsageCard</c>).
-/// Hosts only paint this model — no agent-specific layout branches.
+/// Hosts only paint this model (no agent-specific layout branches).
 /// </summary>
 internal static class AgentUsageModel
 {
@@ -43,17 +43,15 @@ internal static class AgentUsageModel
     }
 }
 
-/// <summary>Mirrors Rust <c>UsageDeck</c>.</summary>
+// Wire DTOs mirror Rust UsageDeck / UsageCard / UsageRow.
 internal sealed record UsageDeckDto(
     [property: JsonPropertyName("cards")] List<UsageCardDto> Cards);
 
-/// <summary>Mirrors Rust <c>UsageCard</c>.</summary>
 internal sealed record UsageCardDto(
     [property: JsonPropertyName("agent")] string Agent,
     [property: JsonPropertyName("rows")] List<UsageRowDto> Rows,
     [property: JsonPropertyName("account")] string? Account = null);
 
-/// <summary>Mirrors Rust <c>UsageRow</c>.</summary>
 internal sealed record UsageRowDto(
     [property: JsonPropertyName("period")] string Period,
     [property: JsonPropertyName("used_percent")] double UsedPercent,

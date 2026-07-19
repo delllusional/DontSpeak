@@ -1,9 +1,7 @@
-//! Hook writers: [`claude_json_hooks`], [`claude_toml_hooks`], [`kimi_toml_hooks`],
-//! [`grok_json_hooks`], plus [`seed_and_prune`]. Target from registry; merges in `ds-config`;
-//! path resolve / read / backup+write in `super::io`.
-//!
-//! Additive, idempotent, backed-up. Malformed/unmergeable → leave untouched (non-fatal).
-//! Print-only `seed`/`capture`: issue #30 / `crate::wire_surfaces_print_only`.
+//! Hook writers ([`claude_json_hooks`], TOML, Grok, [`seed_and_prune`]).
+//! Registry target; merges in `ds-config`; IO in `super::io`.
+//! Additive, idempotent, backed-up. Unmergeable → leave untouched.
+//! Print-only seed/capture: #30 / `wire_surfaces_print_only`.
 
 use super::io::{self, WriteBody};
 use crate::PreviewDoc;

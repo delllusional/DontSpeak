@@ -1,25 +1,10 @@
 //! Self-managed FluidAudio (Core ML / ANE) model downloads.
 //!
-//! Historically FluidAudio fetched its own Core ML models on first load, which meant we had
-//! no integrity control, no real download %, and the files scattered across FluidAudio's
-//! several hardcoded cache roots. Instead we now fetch EVERY FluidAudio model file ourselves
-//! (reusing the same HTTP + retry + SHA + atomic-rename + progress machinery as the ONNX
-//! path) and then run FluidAudio in OFFLINE mode (the Swift shim sets
-//! `ModelHub.offlineMode = true`), so it only ever LOADS from the dirs we populated.
-//!
-//! Each model set is pinned to an IMMUTABLE HuggingFace revision (a commit SHA). At download
-//! time we enumerate that revision's file tree via the HF tree API and fetch each blob into
-//! the exact directory FluidAudio expects. Pinning the revision (content can't change under
-//! us) plus verifying each LFS file's `oid` (a content sha256) gives the same integrity as the
-//! per-file SHA pins we use for the ONNX assets. Plain (non-LFS) git-blob files — `config.json`,
-//! `g2p_vocab.json`, `parakeet_vocab.json`, … — carry no `lfs.oid`, but the tree API's
-//! top-level `oid` on those entries IS the git blob hash of their real bytes
-//! (`git hash-object`'s `sha1("blob {len}\0" + content)`); we verify THAT (plus the exact
-//! size) so these files get the same "downloaded bytes match the pinned revision" guarantee
-//! as the LFS ones, instead of the zero verification they used to get (see
-//! `git_blob_sha1_hex`). A small marker file written on completion (`.ds-ready` holding the
-//! revision) is the LOCAL presence signal — so the status poll never needs the network and a
-//! partial download never reads as present.
+//! We fetch every Core ML asset (same HTTP/retry/SHA/atomic-rename/progress as ONNX),
+//! then run FluidAudio offline (`ModelHub.offlineMode = true`) so it only loads our dirs.
+//! Each set is pinned to an immutable HF commit; tree API + LFS `oid` (content sha256) or
+//! plain-blob `oid` (`git hash-object`) + size verify bytes. `.ds-ready` holds the revision
+//! as the local presence signal (status poll is network-free; partials never look ready).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -176,8 +161,7 @@ pub static KOKORO_G2P_COREML: CoremlRepo = CoremlRepo {
     ],
     exclude_substrings: &[".mlpackage", ".DS_Store"],
     target: kokoro_g2p_target,
-    // Same repo + license as the Kokoro runtime set; folded into the "Kokoro (Core ML / ANE)"
-    // catalog entry (empty display_name) rather than listed as a separate library.
+    // Folded into Kokoro Core ML catalog entry (empty display_name).
     display_name: "",
     usage: "",
     license: "Apache-2.0",
@@ -207,12 +191,8 @@ pub static PARAKEET_COREML: CoremlRepo = CoremlRepo {
     license_url: "https://creativecommons.org/licenses/by/4.0/",
 };
 
-/// Apple-native STREAMING speech-to-text (Parakeet EOU 120M, cache-aware encoder) — the smooth
-/// real-time path the dictation overlay is built for. Without it the macOS Core ML STT silently
-/// falls back to the slower offline sliding-window engine (whole-tail re-passes). We fetch only the
-/// 160 ms variant the shim requests (lowest latency → ~6 partials/sec): the three runtime
-/// `.mlmodelc` bundles + the vocab (NOT the `.mlpackage` sources or the conversion scripts).
-/// cc-by-4.0 (NVIDIA NeMo; Core ML by FluidInference).
+/// Parakeet EOU 120M streaming STT (dictation overlay). Absent → offline sliding-window fallback.
+/// 160 ms variant only (~6 partials/sec); drops `.mlpackage`/scripts. CC-BY-4.0.
 pub static PARAKEET_EOU_COREML: CoremlRepo = CoremlRepo {
     name: "parakeet_eou_coreml",
     repo: "FluidInference/parakeet-realtime-eou-120m-coreml",
@@ -411,9 +391,7 @@ fn fetch_tree_at(url: &str, repo: &CoremlRepo) -> std::io::Result<Vec<TreeFile>>
         if !keep(repo, path) {
             continue;
         }
-        // LFS files carry the real content sha256 + size under `lfs`; plain git blobs only have
-        // a top-level `size` and a top-level git-blob `oid` — which we DO verify (see
-        // `git_blob_sha1_hex`) rather than trusting the revision blindly.
+        // LFS: content sha under `lfs`. Plain blob: top-level oid = git hash-object (not LFS pointer).
         let lfs = e.get("lfs");
         let size = lfs
             .and_then(|l| l.get("size"))
@@ -424,9 +402,6 @@ fn fetch_tree_at(url: &str, repo: &CoremlRepo) -> std::io::Result<Vec<TreeFile>>
             .and_then(|l| l.get("oid"))
             .and_then(|o| o.as_str())
             .map(|s| s.trim_start_matches("sha256:").to_string());
-        // Only capture the top-level `oid` for a NON-LFS entry: for an LFS entry it's the
-        // pointer file's hash (the small text blob actually committed to git), not the real
-        // resolved content we download, so it would never match and must be left `None`.
         let git_blob_sha1 = if lfs.is_none() {
             e.get("oid").and_then(|o| o.as_str()).map(|s| s.to_string())
         } else {
@@ -448,23 +423,12 @@ fn fetch_tree_at(url: &str, repo: &CoremlRepo) -> std::io::Result<Vec<TreeFile>>
     Ok(out)
 }
 
-/// True if `dest` already holds the right bytes for `f` — verified the same way a fresh
-/// download is (see [`verify_downloaded`]): its sha256 when LFS-tracked, or, for a plain blob,
-/// the exact size AND (when the tree API exposed it) the git blob oid. A same-size-but-
-/// different-content plain file (e.g. one left over from an older pinned revision) therefore
-/// reads as ABSENT rather than being silently kept. Lets a re-run skip already-fetched files.
+/// Skip re-fetch when [`verify_downloaded`] passes (stale same-size plain blobs fail).
 fn already_have(dest: &Path, f: &TreeFile) -> bool {
     verify_downloaded(dest, f).is_ok()
 }
 
-/// Verify a downloaded (or previously-downloaded) tree file's bytes at `path` against
-/// everything the pinned revision's tree API told us about it: an LFS file's real content
-/// sha256, or — for a plain git blob (no LFS sha256) — its exact size AND, when the tree API
-/// exposed it, the git blob oid (`git_blob_sha1_hex`) of the bytes on disk. This is the
-/// SINGLE place both a fresh download ([`download_one`]) and the presence check
-/// ([`already_have`]) apply integrity verification, so they can't drift apart. Plain files
-/// used to get NO verification at all here (not even a size check); they now get the same
-/// "matches the pinned revision" guarantee as LFS files.
+/// Single integrity check for download + presence: LFS sha256, else size + optional git blob oid.
 fn verify_downloaded(path: &Path, f: &TreeFile) -> std::io::Result<()> {
     if let Some(sha) = &f.sha256 {
         return if verify_sha256(path, sha) {
@@ -638,13 +602,7 @@ pub fn is_coreml_repo_present(repo: &CoremlRepo) -> bool {
         && s.trim() == repo.revision
 }
 
-// `CoremlRepo::target` is a plain `fn() -> Option<PathBuf>` (a real static's target function
-// captures nothing), so a test can't just close over a tempdir the way a closure would — this
-// thread-local + zero-capture accessor is the seam that lets `is_coreml_repo_present_*` tests point
-// a throwaway `CoremlRepo` at a tempdir and call the REAL function instead of re-implementing its
-// marker-comparison logic by hand. Thread-local (not a shared `Mutex`, unlike `download.rs`'s
-// `PREFETCH_DIR`) because each `#[test]` fn runs on its own thread by default, so there's no
-// cross-test interference to guard against.
+// `target` is `fn() -> Option<PathBuf>` (no captures). Thread-local seam for presence tests.
 #[cfg(test)]
 thread_local! {
     static TEST_TARGET_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
@@ -661,12 +619,7 @@ mod tests {
 
     #[test]
     fn diarization_model_names_match_prefixes() {
-        // The two `.mlmodelc` consts (mirrored as literals in the Swift `smk_diar_init`
-        // loader) MUST equal the download include-prefixes (with the dir-style trailing
-        // slash). A rename of either const without updating the prefixes — or vice versa —
-        // would make Rust download to one name and the Swift shim load another (the
-        // `ane_voices`-class bug, but cross-language so the compiler can't catch it). This
-        // test catches the Rust half; the Swift comment pins the other.
+        // Drift: Rust prefixes vs Swift `smk_diar_init` literals (cross-language).
         assert_eq!(
             DIARIZATION_COREML.include_prefixes,
             [
@@ -674,7 +627,6 @@ mod tests {
                 format!("{DIARIZATION_EMBEDDING_MODEL}/"),
             ]
         );
-        // The repo path's last segment is the on-disk folder name we materialize into.
         assert!(
             DIARIZATION_COREML
                 .repo
@@ -684,10 +636,7 @@ mod tests {
 
     #[test]
     fn kokoro_sets_share_one_repo_and_revision() {
-        // The runtime ANE chain and the G2P/lexicon set are two sub-paths of ONE HF tree;
-        // they MUST stay pinned to the same repo + commit, or a half-bumped revision mixes
-        // model files across commits. Both derive from the shared consts, so this can't
-        // drift — and the repo's last segment is the on-disk folder name we materialize into.
+        // ANE + G2P subtrees of one HF tree — half-bumped pin mixes commits.
         assert_eq!(KOKORO_COREML.repo, KOKORO_G2P_COREML.repo);
         assert_eq!(KOKORO_COREML.revision, KOKORO_G2P_COREML.revision);
         assert_eq!(KOKORO_COREML.repo, KOKORO_HF_REPO);
@@ -696,7 +645,6 @@ mod tests {
 
     #[test]
     fn filters_keep_only_the_runtime_set() {
-        // Kokoro runtime set keeps the ANE/ tree, drops the .mlpackage source copies + docs.
         assert!(keep(
             &KOKORO_COREML,
             "ANE/KokoroVocoder.mlmodelc/coremldata.bin"
@@ -705,8 +653,7 @@ mod tests {
         assert!(!keep(&KOKORO_COREML, "ANE/KokoroVocoder.mlpackage/x"));
         assert!(!keep(&KOKORO_COREML, "ANE/.DS_Store"));
         assert!(!keep(&KOKORO_COREML, "ANE/LICENSE"));
-        assert!(!keep(&KOKORO_COREML, "G2PEncoder.mlmodelc/coremldata.bin")); // belongs to G2P set
-        // G2P set is the complement at the repo root.
+        assert!(!keep(&KOKORO_COREML, "G2PEncoder.mlmodelc/coremldata.bin"));
         assert!(keep(
             &KOKORO_G2P_COREML,
             "G2PEncoder.mlmodelc/coremldata.bin"
@@ -716,7 +663,6 @@ mod tests {
             &KOKORO_G2P_COREML,
             "ANE/KokoroVocoder.mlmodelc/coremldata.bin"
         ));
-        // Parakeet keeps the v2 runtime mlmodelc, drops alternate encoders.
         assert!(keep(
             &PARAKEET_COREML,
             "Encoder.mlmodelc/weights/weight.bin"

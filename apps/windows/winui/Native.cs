@@ -7,9 +7,7 @@ using System.Text.Json.Serialization;
 
 namespace DontSpeak;
 
-/// <summary>
-/// P/Invoke to ds_core.dll — same C ABI as macOS (dontspeak.h). In-process engine.
-/// </summary>
+/// <summary>P/Invoke to ds_core.dll — same C ABI as macOS (dontspeak.h). In-process engine.</summary>
 internal static class Native
 {
     private const string Dll = "ds_core.dll";
@@ -32,7 +30,7 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_log_colors_json();
     [DllImport(Dll)] private static extern IntPtr ds_random_pastel_wash_json();
     [DllImport(Dll)] private static extern IntPtr ds_update_check_json();
-    // Shared status_fmt builders (one impl, every platform).
+    // Shared status_fmt builders (one impl, all platforms).
     [DllImport(Dll)] private static extern IntPtr ds_engine_state_word([MarshalAs(UnmanagedType.LPUTF8Str)] string state, double progress, [MarshalAs(UnmanagedType.LPUTF8Str)] string why);
     [DllImport(Dll)] private static extern IntPtr ds_duration_live(double secs);
     [DllImport(Dll)] private static extern IntPtr ds_usage_resets_in(long resetsAtUnix);
@@ -49,7 +47,7 @@ internal static class Native
     public static bool EngineStart() => ds_engine_start() != 0;
     public static bool EngineStop() => ds_engine_stop() != 0;
 
-    /// <summary>Silence without stopping. True if request reached engine (not resulting mute state).</summary>
+    /// <summary>Mute voice output. True if engine accepted the request (not the resulting mute bit).</summary>
     public static bool SetMuted(bool on) => ds_set_muted((byte)(on ? 1 : 0)) != 0;
 
     /// <summary>Open OS voice settings via shared Rust seam. True if a page launched.</summary>
@@ -61,7 +59,7 @@ internal static class Native
     public static string RuntimeLabel(string provider) => TakeString(ds_runtime_label(provider));
     public static string StatsRange(double lo, double avg, double hi, uint precision, string unitKey) => TakeString(ds_stats_range(lo, avg, hi, precision, unitKey));
     public static string StatsCount(ulong count, double audioSecs) => TakeString(ds_stats_count(count, audioSecs));
-    /// <summary>Decimal size string — shared with macOS/Linux Libraries (byte-for-byte parity).</summary>
+    /// <summary>Decimal size string — byte-for-byte parity with macOS/Linux Libraries.</summary>
     public static string HumanSize(ulong bytes) => TakeString(ds_human_size(bytes));
 
     public static string TrayIconKind(bool sttActive, bool ttsActive, string[] trayIndicator)
@@ -70,10 +68,10 @@ internal static class Native
         return TakeString(ds_tray_icon_kind((byte)(sttActive ? 1 : 0), (byte)(ttsActive ? 1 : 0), json));
     }
 
-    /// <summary><c>ds_diarization_ui_enabled</c> — do not re-mirror.</summary>
+    /// <summary><c>ds_diarization_ui_enabled</c> — single source; do not re-mirror.</summary>
     public static bool DiarizationUiEnabled() => ds_diarization_ui_enabled() != 0;
 
-    /// <summary>Cached (immutable for process life).</summary>
+    /// <summary>Cached for process life.</summary>
     public static string Version() => _version ??= TakeString(ds_version());
     private static string? _version;
 
@@ -88,7 +86,7 @@ internal static class Native
     /// <summary>BLOCKS on GitHub GET — off UI thread.</summary>
     public static string UpdateCheckJson() => TakeString(ds_update_check_json());
 
-    /// <summary>Missing/malformed ⇒ false (never pill on ambiguity). Testable without ds_core.dll.</summary>
+    /// <summary>Missing/malformed ⇒ false (pill only on clear true). Testable without ds_core.dll.</summary>
     internal static bool ParseUpdateAvailable(string json)
     {
         if (string.IsNullOrWhiteSpace(json)) return false;
@@ -120,7 +118,7 @@ internal static class Native
 
     public static string ModelStatusJson() => TakeString(ds_model_status_json());
 
-    /// <summary>Instant deck: installed agents + cache. No network.</summary>
+    /// <summary>Installed agents + cache; local only.</summary>
     public static string AgentUsageSkeletonJson() => TakeString(ds_agent_usage_skeleton_json());
 
     /// <summary>BLOCKING single-card load. Off UI; force bypasses 60s soft cache.</summary>
@@ -131,19 +129,19 @@ internal static class Native
     public static string AgentUsageJson(bool refresh)
         => TakeString(ds_agent_usage_json((byte)(refresh ? 1 : 0)));
 
-    /// <summary>BLOCKS until seq ≠ since or timeout. Background thread only; since=0 first. "{}" if down.</summary>
+    /// <summary>BLOCKS until seq ≠ since or timeout. Background only; since=0 first. "{}" if down.</summary>
     public static string ModelStatusWait(ulong since, uint timeoutMs) => TakeString(ds_model_status_wait(since, timeoutMs));
 
     /// <summary>MCP tool catalog (ds-tools), authored display order.</summary>
     public static string ToolsJson() => TakeString(ds_tools_json());
 
-    /// <summary>Libraries catalog (ds-model) — credits can't drift from what ships.</summary>
+    /// <summary>Libraries catalog (ds-model) — credits stay lockstep with what ships.</summary>
     public static string LibrariesJson() => TakeString(ds_libraries_json());
 
     /// <summary>Activity-log tail; "[]" if none.</summary>
     public static string LogsJson(uint maxBytes) => TakeString(ds_logs_json(maxBytes));
 
-    /// <summary>Like LogsJson but BLOCKS on log-dir change (client fs watch) or timeout. Background only.</summary>
+    /// <summary>LogsJson + BLOCKS on log-dir change (fs watch) or timeout. Background only.</summary>
     public static string LogsWait(uint maxBytes, uint timeoutMs) => TakeString(ds_logs_wait(maxBytes, timeoutMs));
 
     /// <summary>Erase on-disk activity log. Irreversible — confirm first.</summary>
@@ -168,12 +166,12 @@ public sealed record Activity
 {
     public bool EngineRunning;
     public bool CapsActive, CapsEnabled, Recording, Speaking;
-    // Mute silences voice without stopping playback (tray slash + menu checkmark).
+    // Silences voice; playback continues (tray slash + menu checkmark).
     public bool Muted;
     /// Wireable client of the in-flight TTS utterance (`claude_code`/…); null when idle.
     public string? Speaker;
-    // Tray tint tokens: stt/tts or stt_animated/tts_animated. Default ["stt","tts_animated"];
-    // [] = never tint. Fallback only — engine is source of truth.
+    // Tint tokens: stt/tts or stt_animated/tts_animated. Default ["stt","tts_animated"];
+    // [] = never tint. Host fallback only — engine is source of truth.
     public string[] TrayIndicator = { "stt", "tts_animated" };
 }
 
@@ -196,7 +194,6 @@ public sealed record SttEngineStatus
 public sealed record Dictation
 {
     public string DictText = "";
-    // Editable paste target focused?
     public bool DictCanPaste = true;
     // Canonical token (ds-status dictation_state.rs).
     public string DictState = "hidden";
@@ -257,7 +254,7 @@ internal sealed class HealthSnapshot
     public SttStats Stt = new();
     public LifetimeStats Lifetime = new();
 
-    // Echo as since to ModelStatusWait to block until next change.
+    // Echo as `since` to ModelStatusWait to block until next change.
     public ulong StatusSeq;
 
     public static HealthSnapshot Probe() => FromJson(Native.ModelStatusJson());
@@ -268,7 +265,7 @@ internal sealed class HealthSnapshot
         PropertyNameCaseInsensitive = true,
     };
 
-    /// <summary>Parse model-status JSON. Push path already holds JSON — must not re-fetch.</summary>
+    /// <summary>Parse model-status JSON. Push path already holds JSON — reuse, don't re-fetch.</summary>
     public static HealthSnapshot FromJson(string json) => FromJson(json, Native.EngineStateWord);
 
     /// <summary>Injectable state-word formatter (tests without ds_core.dll).</summary>
@@ -293,7 +290,7 @@ internal sealed class HealthSnapshot
                 s.Activity.Speaker = activity.Speaking ? activity.Speaker : null;
                 s.Activity.Muted = activity.Muted;
             }
-            // Override default only when key present (null ⇒ keep default).
+            // Keep host default when key absent.
             if (dto.TrayIndicator is { } ti)
                 s.Activity.TrayIndicator = ti.Where(t => t is not null).Cast<string>().ToArray();
             if (dto.Dictation is { } d)
@@ -370,8 +367,8 @@ internal sealed class HealthSnapshot
     }
 }
 
-// Hand mirror of ds-status model_status JSON. No codegen — kept honest by round-trip test.
-// Lockstep with Rust; unknown members OK.
+// Hand mirror of ds-status model_status JSON. No codegen — round-trip test keeps lockstep.
+// Unknown members OK.
 
 internal sealed record ModelStatusDto
 {

@@ -1,11 +1,9 @@
-//! TOML MCP registration (`[mcp_servers.<name>]`, Grok). Pure additive/idempotent shaper.
-//! Updates command/args; preserves other keys. Invalid TOML → Err (not silent).
-//! `toml_edit` for format preservation. `Result<String, String>` matches sole caller's needs.
+//! TOML MCP (`[mcp_servers.<name>]`). Pure additive/idempotent; format-preserving.
+//! Invalid TOML → Err. `Result<String, String>` matches sole caller.
 
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 
-/// Merge (or update) the `[mcp_servers.<name>]` table for a stdio MCP server.
-/// Returns the rendered TOML string (or error string on unmergeable shape).
+/// Merge/update `[mcp_servers.<name>]` stdio entry. Rendered TOML or unmergeable Err.
 pub fn merge_mcp_server_toml(
     existing: &str,
     name: &str,
@@ -32,10 +30,8 @@ pub fn merge_mcp_server_toml(
         .as_table_mut()
         .ok_or_else(|| format!("mcp_servers.{name} is not a table"))?;
 
-    // Update command (always string)
     entry.insert("command", Item::Value(TomlValue::from(command)));
 
-    // args: array or omit
     if args.is_empty() {
         entry.remove("args");
     } else {
@@ -46,11 +42,8 @@ pub fn merge_mcp_server_toml(
     Ok(doc.to_string())
 }
 
-/// Strip our `[mcp_servers.<name>]` entry. If the mcp_servers table becomes empty,
-/// remove it. Returns the rendered TOML, or an error on invalid TOML — mirroring
-/// `merge_mcp_server_toml`'s own parse handling (and `strip_codex_hooks`'s, the
-/// established precedent for a TOML strip half): a malformed file must not be
-/// silently reported as removed when nothing was actually parsed or changed.
+/// Strip `[mcp_servers.<name>]`; drop empty table. Invalid TOML → Err (same as merge —
+/// no silent "removed" on unparsed file).
 pub fn strip_mcp_server_toml(existing: &str, name: &str) -> Result<String, String> {
     if existing.trim().is_empty() {
         return Ok(existing.to_string());

@@ -25,8 +25,7 @@ use crate::vocab::SAMPLE_RATE;
 /// Unit-tested so it can't silently regress to 0 (re-break onset).
 const LEAD_SILENCE_MS: u32 = 80;
 
-// Too little lead won't cover rodio resume latency.
-const _: () = assert!(LEAD_SILENCE_MS >= 40);
+const _: () = assert!(LEAD_SILENCE_MS >= 40); // rodio resume latency floor
 
 fn leading_silence_pcm(srate_hz: u32) -> Vec<f32> {
     vec![0.0f32; srate_hz as usize * LEAD_SILENCE_MS as usize / 1000]

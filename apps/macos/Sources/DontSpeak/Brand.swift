@@ -31,15 +31,12 @@ enum Brand {
         nsColor(fromHex: colors[key]) ?? fallback
     }
 
-    /// Speaking pill / seed (`#5B4397`).
     static let seedPurple = color(
         "seed_purple", fallback: NSColor(srgbRed: 0.357, green: 0.263, blue: 0.592, alpha: 1.0))
 
-    /// Recording pill — mic-in-use orange (`#FF9F0A`).
     static let micOrange = color(
         "mic_orange", fallback: NSColor(srgbRed: 1.0, green: 0.624, blue: 0.039, alpha: 1.0))
 
-    /// Warming / blocked / no-focus attention (`#FF9F0A`).
     static let warning = color(
         "warning", fallback: NSColor(srgbRed: 1.0, green: 0.624, blue: 0.039, alpha: 1.0))
 
@@ -54,7 +51,7 @@ enum Brand {
         return (levels, palette)
     }()
 
-    /// Per-source palette; first-appearance index. Empty → default text color.
+    /// First-appearance palette index; empty → default text color.
     static let logSourcePalette: [NSColor] = logColors.palette.compactMap { nsColor(fromHex: $0) }
 
     /// ERROR/WARN from shared map; nil for INFO/unknown.
@@ -65,7 +62,7 @@ enum Brand {
 
 extension Color {
     static let smWarning = Color(nsColor: Brand.warning)
-    /// Neutral accent (update pill) — not a warning.
+    /// Update pill accent (brand purple).
     static let smSeedPurple = Color(nsColor: Brand.seedPurple)
 }
 

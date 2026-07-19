@@ -8,20 +8,19 @@ using Microsoft.Win32;
 namespace DontSpeak;
 
 /// <summary>
-/// Tray mark from <c>assets/tray-icon.svg</c> (shared brand source with macOS): one-color
-/// line-art bubble + "&lt;/&gt;", no background tile. Microsoft tray guidance is monochrome,
-/// edge-to-edge at 16px; state is ink color only (idle = theme fg, recording = mic orange,
-/// speaking = seed purple). <see cref="TrayIcon"/> wraps the BGRA in an HICON.
+/// Tray mark from <c>assets/tray-icon.svg</c> (shared with macOS): monochrome line-art bubble
+/// + "&lt;/&gt;", edge-to-edge at 16px. State is ink color only (idle = theme fg, recording =
+/// mic orange, speaking = seed purple). <see cref="TrayIcon"/> wraps BGRA in an HICON.
 /// </summary>
 internal static class BrandGlyph
 {
-    // SVG coordinate-space stroke. Geometry in BuildMark is transcribed verbatim from tray-icon.svg
-    // so Windows and the asset never drift. Heavier than the SVG's 30 so thin line-art reads like
+    // SVG coordinate-space stroke. BuildMark is transcribed verbatim from tray-icon.svg so
+    // Windows and the asset never drift. Heavier than the SVG's 30 so thin line-art reads like
     // neighboring solid Fluent tray icons at 16px.
     private const float StrokeW = 46f;
 
-    /// <summary>size×size straight-alpha BGRA (top-down, HICON DIB). Optional muted slash =
-    /// clear knockout then ink (macOS slashed menu-bar analogue).</summary>
+    /// <summary>size×size straight-alpha BGRA (top-down, HICON DIB). Muted slash: clear
+    /// knockout then ink (macOS slashed menu-bar analogue).</summary>
     internal static byte[] RenderBgra(int size, Color ink, bool muted)
     {
         int w = size, h = size;
@@ -30,7 +29,7 @@ internal static class BrandGlyph
         using (var g = Graphics.FromImage(src))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality; // crisp edges at 16–20px
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             g.Clear(Color.Transparent);
 
             // Fit stroked bounds (round caps included) to the cell minus a hair so AA caps don't clip.
@@ -72,8 +71,8 @@ internal static class BrandGlyph
         return buf;
     }
 
-    /// <summary>Theme foreground ink (light/dark) — macOS isTemplate analogue so idle isn't
-    /// "disabled". Idle state only.</summary>
+    /// <summary>Theme foreground ink (light/dark) — macOS isTemplate analogue so idle reads
+    /// active. Idle state only.</summary>
     internal static Color IdleForeground()
     {
         bool light;
@@ -94,7 +93,7 @@ internal static class BrandGlyph
         static PointF P(float x, float y) => new(x, y);
         var p = new GraphicsPath();
 
-        // bubble outline (closed) — same path as macOS; stroked not filled
+        // bubble outline (closed) — same path as macOS; stroked, not filled
         p.StartFigure();
         p.AddBezier(P(270, 90), P(390, 90), P(470, 165), P(470, 250));
         p.AddBezier(P(470, 250), P(470, 335), P(390, 410), P(270, 410));
@@ -108,7 +107,7 @@ internal static class BrandGlyph
 
         // "</>" — open figures so round end-caps show
         p.StartFigure(); p.AddLines(new[] { P(218, 205), P(168, 250), P(218, 295) }); // <
-        p.StartFigure(); p.AddLine(P(274, 178), P(238, 322));                          // /
+        p.StartFigure(); p.AddLine(P(274, 178), P(238, 322)); // /
         p.StartFigure(); p.AddLines(new[] { P(292, 205), P(342, 250), P(292, 295) }); // >
 
         return p;

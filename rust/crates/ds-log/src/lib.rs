@@ -1,6 +1,5 @@
-//! Unified activity log (wire + rotation in `log.rs`). Path-based API (no `ds-config`
-//! dep — avoids cycle). Logs-tab pure rules: [`parse_logs_json`] / [`filter_logs`] /
-//! [`distinct_sources`].
+//! Activity log (wire + rotation in `log.rs`). Path-based (no `ds-config` cycle).
+//! Logs-tab pure: [`parse_logs_json`] / [`filter_logs`] / [`distinct_sources`].
 mod catalog;
 mod facade;
 mod log;

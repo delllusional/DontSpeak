@@ -1,9 +1,8 @@
 //! Warm `ds-helper --serve` owner (Kokoro + Parakeet residency).
 //!
-//! One long-lived child; enable spawns, disable kills (no ONNX teardown). Stdio
-//! protocol: `ds_helper/main.rs`. Full-duplex: one reader demuxes stdout into
-//! [`SpeakSlot`] / [`ListenSlot`] so speak and listen run concurrently; `stop`
-//! only needs the brief stdin lock.
+//! Enable spawns, disable kills. Full-duplex: one reader demuxes stdout into
+//! [`SpeakSlot`] / [`ListenSlot`]; `stop` needs only the brief stdin lock.
+//! Protocol: `ds_helper` / `ds-helper-proto`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -22,22 +21,20 @@ mod reader;
 use reader::*;
 
 const SPEAK_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-/// CUEDONE wait (not speak timeout): stale helpers never answer; must exceed long custom
-/// cues (30 s killed healthy children). Reap-on-timeout closes late-CUEDONE races.
+/// CUEDONE wait: exceed long custom cues (~30 s); reap-on-timeout closes late races.
 const CUE_TERMINAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const CAPTURE_TERMINAL_GRACE: u64 = 25;
-/// Pre-READY handshake bound (issue #59: alive-but-silent child must not hold lifecycle forever).
+/// Pre-READY bound (issue #59: silent-but-alive child).
 const READY_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Last-resort helper stderr → rotated aux log beside the engine log (native abort /
-/// panic / pre-init failure). Routine diagnostics use unified activity log (`helper`).
+/// Last-resort helper stderr → aux log beside engine log (abort/panic/pre-init).
 fn helper_stderr(engine_log_file: &std::path::Path) -> Stdio {
     ds_log::open_aux_log(engine_log_file, "ds-helper.log")
         .map(Stdio::from)
         .unwrap_or_else(Stdio::null)
 }
 
-/// Daemon→helper env: `Some` set, `None` clear (so ambient `DONTSPEAK_*` can't leak).
+/// `Some` set, `None` clear (block ambient `DONTSPEAK_*` leak).
 fn child_env(prefs: &SpawnPrefs) -> [(&'static str, Option<String>); 5] {
     [
         ("DONTSPEAK_PROVIDER", Some(prefs.provider.clone())),
@@ -57,32 +54,26 @@ fn child_env(prefs: &SpawnPrefs) -> [(&'static str, Option<String>); 5] {
     ]
 }
 
-/// Next child's spawn prefs (one mutex — always read/written together). See [`child_env`].
+/// Next-child spawn prefs (one mutex; always r/w together). See [`child_env`].
 #[derive(Clone)]
 struct SpawnPrefs {
-    /// TTS provider preference → `DONTSPEAK_PROVIDER`.
     provider: String,
-    /// Local STT backend token → `DONTSPEAK_STT_PROVIDER`.
     stt_provider: String,
-    /// Full-duplex AEC → `DONTSPEAK_FULL_DUPLEX`.
     full_duplex: bool,
-    /// Parakeet preload (`helper_uses_stt`) → `DONTSPEAK_STT_PRELOAD` (provider alone
-    /// is not on/off — resolves "cpu" even for Off/ClaudeCode).
+    /// `DONTSPEAK_STT_PRELOAD` — provider alone is not on/off.
     stt_preload: bool,
-    /// Load Kokoro + open output (STT-only helper must not).
+    /// Kokoro + output open (STT-only helper skips).
     tts_preload: bool,
 }
 
-/// Constructor-injected settings for production paths that tests must bound or steer. A new
-/// test-only dependency belongs here rather than in a post-construction manager setter.
+/// Test-only ctor knobs (prefer here over post-construction setters).
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct TtsManagerTestOptions {
     finalize_timeout: Option<std::time::Duration>,
     ready_timeout: Option<std::time::Duration>,
     cue_timeout: Option<std::time::Duration>,
-    /// Extra env vars consumed by the first spawn. This lets the READY-wedge regression prove
-    /// recovery on the same manager without mutating either the manager or process-global env.
+    /// First-spawn env only (READY-wedge tests without mutating manager/global env).
     first_spawn_env: Mutex<Option<Vec<(String, String)>>>,
 }
 
@@ -115,67 +106,55 @@ impl TtsManagerTestOptions {
 
 pub struct TtsManager {
     bin: PathBuf,
-    /// Engine log path — helper last-resort stderr sits beside it.
     helper_log_file: PathBuf,
-    /// Outer lifecycle lock (start/stop/mark_dead). Before child/stdin/reader;
-    /// never across a slot Condvar wait. Prevents join of wrong reader on dual-EOF.
+    /// Outer lifecycle (start/stop/mark_dead). Before child/stdin/reader; not across
+    /// slot Condvar waits (avoids joining wrong reader on dual-EOF).
     lifecycle: Mutex<()>,
-    /// Debounce for restart_child; None until first restart.
     last_restart: Mutex<Option<std::time::Instant>>,
-    /// Live child + generation + deliberate-teardown ([`ChildSlot`]). Shared with reader.
+    /// Live child + gen + deliberate teardown; shared with reader.
     child: Arc<ChildSlot>,
     stdin: Mutex<Option<ChildStdin>>,
-    /// Persistent demux reader; joined after kill so slots aren't raced by next start.
+    /// Joined after kill so next start doesn't race slots.
     reader: Mutex<Option<JoinHandle<()>>>,
     speak_slot: Arc<(Mutex<SpeakSlot>, Condvar)>,
     cue_slot: Arc<(Mutex<CueSlot>, Condvar)>,
-    /// Separate from speak_slot so speak+listen coexist on one stdout.
+    /// Separate from speak so speak+listen coexist on one stdout.
     listen_slot: Arc<(Mutex<ListenSlot>, Condvar)>,
-    /// One untagged listen owner; tests fail busy instead of stealing Caps events.
+    /// One untagged listen; tests fail busy instead of stealing Caps events.
     listen_lease: Mutex<()>,
-    /// One cue op (closes CueSlot race in cue_validated).
     cue_lease: Mutex<()>,
-    /// Stop = cancel through gen N (early stop can't be erased by delayed start).
+    /// Stop cancels through gen N (early stop vs delayed start).
     next_listen_generation: AtomicU64,
     active_listen_generation: AtomicU64,
     listen_stopped_through: AtomicU64,
-    /// Bounds wedged native finalizer after stop.
     listen_stop_started: Mutex<Option<(u64, std::time::Instant)>>,
     #[cfg(test)]
     test_options: TtsManagerTestOptions,
-    /// Own slot so diarize/speak demux independently.
     diarize_slot: Arc<(Mutex<DiarizeSlot>, Condvar)>,
     enroll_slot: Arc<(Mutex<EnrollSlot>, Condvar)>,
-    /// In-flight `say` (System TTS, per-request spawn).
+    /// System TTS one-shot.
     say_child: Mutex<Option<Child>>,
-    /// Warm-child START failure only while no child installed.
+    /// START failure while no child installed.
     last_error: Mutex<Option<String>>,
     stats: Arc<crate::stats::TtsStats>,
     stt_stats: Arc<crate::stats::SttStats>,
     lifetime: Arc<crate::stats::LifetimeSeconds>,
-    /// Realized TTS EP from PROVIDER line.
     provider: Mutex<String>,
-    /// Realized STT EP from STT_PROVIDER (same channel as provider). Starts "CPU".
+    /// Realized STT EP; starts "CPU".
     stt_realized: Arc<Mutex<String>>,
-    /// Next spawn prefs ([`SpawnPrefs`]); start_locked reads as one unit.
     spawn_prefs: Mutex<SpawnPrefs>,
-    /// Running child's full-duplex (restart once on pref change).
     full_duplex_active: Mutex<bool>,
-    /// Running child's STT provider token.
     stt_provider_active: Mutex<String>,
     tts_wanted_active: Mutex<bool>,
-    /// Kokoro residency. Arc so reader unloads on unexpected EOF.
+    /// Arc so reader unloads on unexpected EOF.
     tts_model: Arc<ModelSlot>,
-    /// Parakeet residency (STTLOADED after warmup) + per-model load error.
     stt_model: Arc<ModelSlot>,
     muted: AtomicBool,
-    /// Status gate (mute bumps WaitModelStatus). Empty in tests / pre-wire.
     gate: OnceLock<Arc<StatusGate>>,
-    /// Heal throttle ([`HEAL_COOLDOWN`]).
     last_heal: Mutex<Option<std::time::Instant>>,
 }
 
-/// Min spacing between crash-heal attempts (deterministic crasher vs transient kill).
+/// Crash-heal spacing (deterministic crasher vs transient kill).
 const HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl TtsManager {

@@ -26,10 +26,8 @@ pub fn sha256_file(path: &Path) -> Option<String> {
     Some(hex(&h.finalize()))
 }
 
-/// True iff `path` exists and its streamed SHA-256 equals `expected`
-/// (case-insensitive hex compare). An empty `expected` is never accepted: production
-/// downloads must opt into a different, explicit trust mechanism instead of silently
-/// bypassing integrity verification.
+/// Streamed SHA-256 equals `expected` (case-insensitive). Empty `expected` always false —
+/// production must use an explicit trust path, never silent bypass.
 pub fn verify_sha256(path: &Path, expected: &str) -> bool {
     if expected.is_empty() {
         return false;

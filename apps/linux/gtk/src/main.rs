@@ -1,5 +1,4 @@
 //! DontSpeak Linux GUI host — GTK4 + libadwaita.
-//!
 //! In-process engine via `ds-core` C ABI; tray + health panel + dictation overlay.
 //! Control lives in the MCP.
 
@@ -29,7 +28,7 @@ fn main() -> glib::ExitCode {
     let status_thread: Rc<RefCell<Option<status::StatusThread>>> = Rc::new(RefCell::new(None));
 
     app.connect_startup(|_| {
-        // Unified activity log only (no host-private files). Idempotent with engine init.
+        // Unified activity log (shared with engine). Idempotent with engine init.
         ds_log::init();
         ffi::set_locale(&sys_locale::get_locale().unwrap_or_else(|| "en".to_string()));
         overlay::load_css();
@@ -62,7 +61,7 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
     // No sync prime: model_status_json blocks (up to 120s) on the GTK main thread.
     // Blank one frame; status::spawn_push delivers within its 1s poll.
 
-    // Tray-resident: hide (don't destroy) on close.
+    // Tray-resident: hide_on_close so the process stays up.
     let _hold = app.hold();
     widgets.window.set_hide_on_close(true);
 
@@ -84,7 +83,7 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
         });
     }
 
-    // ksni spawn() blocks on the calling thread before detaching — never on GTK UI thread.
+    // ksni spawn() blocks on the calling thread before detaching — off GTK UI thread.
     let tray_handle = {
         use ksni::blocking::TrayMethods;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -145,7 +144,7 @@ fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::
     widgets.window.present();
 }
 
-/// Re-show health/settings ApplicationWindow; skip dictation overlay (plain gtk::Window).
+/// Re-show health/settings `ApplicationWindow`; skip dictation overlay (plain `gtk::Window`).
 fn present_main_window(app: &adw::Application) -> bool {
     for win in app.windows() {
         if !win.is::<adw::ApplicationWindow>() {
@@ -159,7 +158,7 @@ fn present_main_window(app: &adw::Application) -> bool {
     false
 }
 
-/// Force GDK_BACKEND=x11 on common hypervisors when unset (Wayland freezes present/map).
+/// Force `GDK_BACKEND=x11` on common hypervisors when unset (Wayland freezes present/map).
 fn prefer_x11_under_hypervisor() {
     if std::env::var_os("GDK_BACKEND").is_some() {
         return;

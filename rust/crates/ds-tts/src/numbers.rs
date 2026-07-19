@@ -83,7 +83,6 @@ fn cardinal(n: u64) -> String {
     if n == 0 {
         return "zero".to_string();
     }
-    // Split into thousands groups, least significant first.
     let mut groups: Vec<u64> = Vec::new();
     let mut v = n;
     while v > 0 {
@@ -91,7 +90,7 @@ fn cardinal(n: u64) -> String {
         v /= 1000;
     }
     if groups.len() > SCALES.len() {
-        // Beyond our named scales — caller handles via digit-by-digit; shouldn't reach here.
+        // Beyond named scales; expand_numbers digit-paths before this.
         return n.to_string();
     }
     let mut parts: Vec<String> = Vec::new();
@@ -115,11 +114,8 @@ fn digit_by_digit(digits: &str) -> String {
         .join(" ")
 }
 
-/// Turn a cardinal phrase into its ordinal form by transforming the final word
-/// ("twenty-one" → "twenty-first", "two" → "second", "forty" → "fortieth").
+/// Inflect the last space-separated word ("twenty-one" → "twenty-first").
 fn to_ordinal(cardinal: &str) -> String {
-    // The ordinal inflection applies to the LAST space-separated word; a trailing
-    // hyphenated unit ("twenty-one") inflects its unit part ("twenty-first").
     let (head, last) = match cardinal.rsplit_once(' ') {
         Some((h, l)) => (Some(h), l),
         None => (None, cardinal),
@@ -131,8 +127,7 @@ fn to_ordinal(cardinal: &str) -> String {
     }
 }
 
-/// Ordinal of a single cardinal word, which may itself be hyphenated
-/// ("twenty-one" → "twenty-first"). Handles the irregular forms.
+/// Single cardinal word (may be hyphenated). Irregulars + `-y` → `-ieth`.
 fn ordinal_word(word: &str) -> String {
     if let Some((tens, unit)) = word.split_once('-') {
         return format!("{tens}-{}", ordinal_word(unit));
@@ -145,7 +140,6 @@ fn ordinal_word(word: &str) -> String {
         "eight" => "eighth".into(),
         "nine" => "ninth".into(),
         "twelve" => "twelfth".into(),
-        // "twenty" → "twentieth", "forty" → "fortieth", … (-y → -ieth).
         w if w.ends_with('y') => format!("{}ieth", &w[..w.len() - 1]),
         w => format!("{w}th"),
     }
@@ -168,9 +162,7 @@ pub fn expand_numbers(text: &str) -> String {
             continue;
         }
 
-        // At the first digit of a run. Fold a directly-preceding '-' that we already
-        // emitted into a spoken "minus", but only when it reads as a sign: at the
-        // start, or right after a space / opening delimiter (so "3-4" stays a range).
+        // Preceding '-' is a sign only at start / after space or opening delimiter ("3-4" stays range).
         let mut minus = false;
         if out.ends_with('-') {
             let before = out[..out.len() - 1].chars().next_back();
@@ -188,7 +180,6 @@ pub fn expand_numbers(text: &str) -> String {
             out.push(' ');
         }
 
-        // Integer part, allowing comma group separators between digits.
         let mut int_digits = String::new();
         while i < chars.len() {
             if chars[i].is_ascii_digit() {
@@ -199,24 +190,22 @@ pub fn expand_numbers(text: &str) -> String {
                 && chars[i + 1].is_ascii_digit()
                 && !int_digits.is_empty()
             {
-                i += 1; // skip the thousands comma
+                i += 1; // skip thousands comma
             } else {
                 break;
             }
         }
 
-        // Optional decimal part: a '.' followed by at least one digit.
         let mut frac_digits = String::new();
         if i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
-            i += 1; // skip '.'
+            i += 1;
             while i < chars.len() && chars[i].is_ascii_digit() {
                 frac_digits.push(chars[i]);
                 i += 1;
             }
         }
 
-        // Optional ordinal suffix immediately after an integer (no decimal): 1st, 21st.
-        // The suffix must not run into another alphanumeric (so "1street" isn't ordinal).
+        // Ordinal suffix after integer only; next char must not be alphanumeric ("1street").
         let mut ordinal = false;
         if frac_digits.is_empty() && i + 1 < chars.len() {
             let s0 = chars[i].to_ascii_lowercase();
@@ -229,8 +218,6 @@ pub fn expand_numbers(text: &str) -> String {
             }
         }
 
-        // Render. Leading-zero runs (and over-long ones) read digit-by-digit; the
-        // sign and decimal forms compose around the integer rendering.
         if minus {
             out.push_str("minus ");
         }
@@ -239,11 +226,7 @@ pub fn expand_numbers(text: &str) -> String {
         let int_words = if leading_zero || too_long {
             digit_by_digit(&int_digits)
         } else {
-            // A 20-21 digit run is short enough to skip the `too_long` digit-by-digit
-            // path above, but can still exceed `u64::MAX` (~1.8×10^19, 20 digits) — e.g.
-            // a long account/transaction ID. Falling back to `unwrap_or(0)` there would
-            // silently mispronounce it as "zero"; read it digit-by-digit instead, same
-            // as any other number this module can't name.
+            // 20–21 digits can clear `too_long` yet overflow u64; digit-path, never "zero".
             match int_digits.parse::<u64>() {
                 Ok(n) => cardinal(n),
                 Err(_) => digit_by_digit(&int_digits),
@@ -254,9 +237,7 @@ pub fn expand_numbers(text: &str) -> String {
             out.push_str(&int_words);
             out.push_str(" point ");
             out.push_str(&digit_by_digit(&frac_digits));
-            // A second dot means a version/address-like dotted number, not sentence
-            // punctuation. Preserve every component as "point <digits>" instead of
-            // producing the glued and misleading "zero point two.two" for `0.2.2`.
+            // Further dots are version-like components ("0.2.2" → "zero point two point two").
             while i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
                 i += 1;
                 let mut component = String::new();
@@ -331,9 +312,8 @@ mod tests {
 
     #[test]
     fn u64_overflow_reads_digits_instead_of_zero() {
-        // A 20-digit run that overflows u64::MAX (~1.8×10^19) but is short of the
-        // `too_long` (22+ digit) digit-by-digit cutoff. Must NOT silently become "zero".
-        let big = "99999999999999999999"; // 20 nines, > u64::MAX
+        // 20 digits > u64::MAX but < too_long (22+); must digit-speak, not "zero".
+        let big = "99999999999999999999"; // 20 nines
         assert_eq!(big.len(), 20);
         assert!(
             big.parse::<u64>().is_err(),
@@ -350,19 +330,16 @@ mod tests {
             expand_numbers("room 42, at 3 today, 100 items"),
             "room forty-two, at three today, one hundred items"
         );
-        // Hyphen between numbers is NOT a sign mid-token.
-        assert_eq!(expand_numbers("3-4"), "three-four");
-        // A hyphen that IS a sign (after a space) reads as minus.
-        assert_eq!(expand_numbers("down -3"), "down minus three");
+        assert_eq!(expand_numbers("3-4"), "three-four"); // mid-token hyphen = range
+        assert_eq!(expand_numbers("down -3"), "down minus three"); // after space = sign
     }
 
     #[test]
     fn passthrough_non_numbers() {
         assert_eq!(expand_numbers("hello world"), "hello world");
         assert_eq!(expand_numbers(""), "");
-        // A trailing bare suffix-looking word that isn't after a number is untouched.
         assert_eq!(expand_numbers("first place"), "first place");
-        // Technical alphanumeric tokens keep an audible word boundary.
+        // Alphanumeric: audible word boundary before digits.
         assert_eq!(expand_numbers("v2"), "v two");
         assert_eq!(expand_numbers("UTF8"), "UTF eight");
         assert_eq!(expand_numbers("42items"), "forty-two items");

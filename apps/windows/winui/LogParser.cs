@@ -9,7 +9,7 @@ namespace DontSpeak;
 /// <summary>One combined-activity-log line for the Logs tab.</summary>
 internal readonly record struct LogLine(string Source, string Level, string Text);
 
-/// <summary>Logs tab JSON parse/filter — pure, no WinAppRuntime (unit-testable).</summary>
+/// <summary>Logs tab JSON parse/filter — pure (unit-testable without WinAppRuntime).</summary>
 internal static class LogParser
 {
     private static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true };

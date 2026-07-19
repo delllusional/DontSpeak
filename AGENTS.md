@@ -122,7 +122,10 @@ duplicate notes of the same fact.
 SAFETY preconditions; single-source / drift / race notes; why a test exists.
 
 **Strip:** signature restatements; pure "what"; history/changelog asides; the same
-explanation restated on module, item, and call site.
+explanation restated on module, item, and call site; comments that only say what
+something is *not* / does *not* do (rephrase to the positive contract if the
+constraint is load-bearing, else delete). Negative form stays only for hard-to-
+infer safety, fail-closed, race, or isolation invariants.
 
 One canonical note per concept; cross-ref elsewhere. Update or delete when
 behavior changes.

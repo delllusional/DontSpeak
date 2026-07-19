@@ -1,9 +1,7 @@
-//! External-config wiring: pure merge/strip shapers for Claude Code, Qwen, Codex, Grok, and
-//! Kimi Code configs, plus atomic-write / backup helpers. Additive and idempotent; path
-//! resolution and the atomic write live in the `dontspeak` subcommands.
+//! External-config wiring: pure merge/strip shapers + atomic-write/backup helpers.
+//! Additive/idempotent; path resolve and disk writes live in `dontspeak` subcommands.
 //!
-//! Clients whose hook runner takes a command STRING (Codex, Grok, Qwen, Kimi Code) share the
-//! one [`cmdline`] module — Windows quoting is subtle and was got wrong per-client independently.
+//! String-runner clients share [`cmdline`] (Windows quoting was wrong per-client before).
 
 pub(crate) mod cmdline;
 

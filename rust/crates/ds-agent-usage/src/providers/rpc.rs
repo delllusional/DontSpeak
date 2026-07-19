@@ -21,7 +21,7 @@ pub(super) struct Request<'a> {
     pub request_timeout: Duration,
 }
 
-/// Short-lived CLI NDJSON-RPC; always reaps; errors never include raw bodies.
+/// Short-lived CLI NDJSON-RPC; always reaps; errors omit raw bodies.
 pub(super) fn call(request: Request<'_>) -> std::io::Result<Value> {
     let mut command = Command::new(request.binary);
     command

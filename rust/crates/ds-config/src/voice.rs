@@ -37,16 +37,16 @@ impl Default for HandsFreePhrases {
     }
 }
 
-/// Speech config from `config.toml`. Never writes CC voice. Absent field = default.
+/// Speech config from `config.toml`. CC voice is read-only. Absent field = default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceConfig {
-    /// Built-in TTS pool (stable per-agent pick). Brand/model: Kokoro.
+    /// Built-in TTS pool (stable per-agent). Brand: Kokoro.
     #[serde(default = "default_voices")]
     pub tts_voices: Vec<String>,
-    /// System voice name; empty = OS default. Separate from built-in list.
+    /// System voice name; empty = OS default.
     #[serde(default)]
     pub tts_system_voice: String,
-    /// SessionStart greet (default on). Voice only.
+    /// SessionStart greet (default on).
     #[serde(default = "default_enabled")]
     pub greet: bool,
 
@@ -58,7 +58,7 @@ pub struct VoiceConfig {
     #[serde(default = "default_long_press_ms")]
     pub long_press_ms: u64,
 
-    /// STT pref: None→ladder; Some([])=off; Some([e])=force. See resolved_stt.
+    /// Pref: None→ladder; Some([])=off; Some([e])=force. See `resolved_stt`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -66,7 +66,7 @@ pub struct VoiceConfig {
         deserialize_with = "de_stt_engine_pref"
     )]
     pub stt_engine: Option<Vec<SttEngine>>,
-    /// STT ladder if pref unset (default system→built_in→claude_code). Config-file only.
+    /// Ladder when pref unset (default system→built_in→claude_code). Config-file only.
     #[serde(
         default = "default_stt_engine_ladder",
         deserialize_with = "de_stt_engine_ladder"
@@ -82,11 +82,11 @@ pub struct VoiceConfig {
     /// Enrolled-voiceprint cosine cutoff. Default 0.65.
     #[serde(default = "default_match_threshold")]
     pub match_threshold: f32,
-    /// Keep only enrolled speakers when diarization on (Parakeet; fail-open).
+    /// Enrolled speakers only when diarization on (fail-open).
     #[serde(default)]
     pub speaker_lock: bool,
 
-    /// TTS pref tri-state (same shape as stt_engine).
+    /// TTS pref tri-state (same shape as `stt_engine`).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -94,7 +94,7 @@ pub struct VoiceConfig {
         deserialize_with = "de_tts_engine_pref"
     )]
     pub tts_engine: Option<Vec<TtsEngine>>,
-    /// TTS ladder if pref unset (default built_in→system). Config-file only.
+    /// Ladder when pref unset (default built_in→system). Config-file only.
     #[serde(
         default = "default_tts_engine_ladder",
         deserialize_with = "de_tts_engine_ladder"
@@ -103,19 +103,19 @@ pub struct VoiceConfig {
     /// 0.5–2.0; 1.0 = normal.
     #[serde(default = "default_rate")]
     pub rate: f32,
-    /// Shared compute ladder (default ane→cuda→cpu). Always has a backend.
+    /// Compute ladder (default ane→cuda→cpu). Always has a backend.
     #[serde(default = "default_provider", deserialize_with = "de_provider")]
     pub provider: Vec<Provider>,
 
-    // On/off = resolved engine; no separate tts_enabled. caps independent.
+    // On/off = resolved engine; caps independent.
     /// Caps loop (dictation + silence/cancel). Default on.
     #[serde(default = "default_enabled")]
     pub caps: bool,
-    /// Menu-bar color set. Empty = never color. Engine pass-through.
+    /// Menu-bar color set. Empty = never color.
     #[serde(default = "default_tray", deserialize_with = "de_tray")]
     pub tray: Vec<TrayKind>,
 
-    /// `record_submit` (PTT) | `always`. Exclusive.
+    /// `record_submit` (PTT) | `always`.
     #[serde(default, deserialize_with = "de_listen_mode")]
     pub listen_mode: ListenMode,
     #[serde(default)]
@@ -127,10 +127,10 @@ pub struct VoiceConfig {
     #[serde(default = "default_endpoint_silence_ms")]
     pub endpoint_silence_ms: u64,
 
-    /// Mic open during TTS with AEC (Parakeet+Kokoro). Default off.
+    /// Mic open during TTS with AEC. Default off.
     #[serde(default)]
     pub full_duplex: bool,
-    /// Mic make-up gain before STT. Next dictation; no restart.
+    /// Mic make-up gain; next dictation.
     #[serde(default = "default_capture_gain")]
     pub capture_gain: CaptureGain,
 
@@ -149,18 +149,18 @@ pub struct VoiceConfig {
     )]
     pub clear_on_input: Vec<CancelSpeechScope>,
 
-    /// Pause when no terminal frontmost. Default false. Any terminal, not which one.
+    /// Pause when no terminal frontmost. Default false.
     #[serde(default)]
     pub pause_bg: bool,
 
     /// Reply-done ding; empty = off. Default OS chime.
     #[serde(default = "default_earcon_reply")]
     pub earcon_reply: String,
-    /// Needs-input cue. Empty default = off.
+    /// Needs-input cue. Empty = off.
     #[serde(default)]
     pub earcon_input: String,
 
-    /// Codex mid-turn (config-file; re-read each loop). Default on; inert without daemon.
+    /// Codex mid-turn (re-read each loop). Default on; inert without daemon.
     #[serde(default = "default_enabled")]
     pub codex_stream: bool,
     /// Lazy-start app-server. Default off.
@@ -180,11 +180,11 @@ pub struct VoiceConfig {
     #[serde(default)]
     pub extra_terminals: Vec<String>,
 
-    /// Extra custom-text-editor ids (OS-native). Ignored on Linux. #14/#15.
+    /// Extra custom-text-editor ids (OS-native). Linux ignores. #14/#15.
     #[serde(default)]
     pub extra_editors: Vec<String>,
 
-    /// Opt-out unwire list. None/`[]` = wire all. Boot reconcile; no set_config.
+    /// Opt-out unwire list. None/`[]` = wire all. Boot reconcile only.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -193,7 +193,7 @@ pub struct VoiceConfig {
     pub exclude_clients: Option<Vec<ClientSource>>,
 }
 
-/// Warm-subsystem delta for surgical set_config (not per-call params).
+/// Warm-subsystem delta for surgical set_config.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConfigChange {
     pub caps_toggled: bool,
@@ -227,10 +227,8 @@ fn default_earcon_reply() -> String {
     }
 }
 fn default_voices() -> Vec<String> {
-    // Out-of-the-box pool: Sarah + Emma, so two agent types already speak with different
-    // voices on a clean install. Every voice comes from this pool — there is no separate
-    // default/fallback voice. An empty list is invalid: `set_config` rejects it and
-    // `clamp` restores this default on load.
+    // Two-voice pool out of box (no separate default slot). Empty invalid — set_config
+    // rejects; clamp restores this on load.
     vec!["af_sarah".to_string(), "bf_emma".to_string()]
 }
 fn default_long_press_ms() -> u64 {
@@ -261,8 +259,7 @@ fn default_codex_bin() -> String {
     "codex".to_string()
 }
 
-/// Mic make-up gain. `Auto` (default) normalizes per utterance; `Manual(g)` fixed multiply.
-/// Wire: `"auto"` or a number.
+/// Mic make-up gain. `Auto` per-utterance; `Manual(g)` fixed. Wire: `"auto"` or number.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CaptureGain {
     #[default]
@@ -271,7 +268,7 @@ pub enum CaptureGain {
 }
 
 impl CaptureGain {
-    /// The fixed multiplier for `Manual`; `None` for `Auto` (the caller normalizes).
+    /// Fixed multiplier for `Manual`; `None` for `Auto`.
     pub fn manual(self) -> Option<f32> {
         match self {
             CaptureGain::Manual(g) => Some(g),
@@ -351,12 +348,12 @@ impl Default for VoiceConfig {
 }
 
 impl VoiceConfig {
-    /// Spoken replies on? ([`Self::resolved_tts`] is Some.)
-    pub fn is_tts_on(&self) -> bool {
+/// Spoken replies on ([`Self::resolved_tts`] is Some).
+pub fn is_tts_on(&self) -> bool {
         self.resolved_tts().is_some()
     }
 
-    /// Resolved TTS: preference wins (empty=off; force no auto-sub); else first usable ladder rung.
+    /// Pref wins (empty=off; force no auto-sub); else first usable ladder rung.
     pub fn resolved_tts(&self) -> Option<TtsEngine> {
         match &self.tts_engine {
             Some(pref) if pref.is_empty() => None,
@@ -369,7 +366,7 @@ impl VoiceConfig {
         }
     }
 
-    /// Resolved STT: same tri-state as TTS. Default ladder ends at always-usable `claude_code`.
+    /// Same tri-state as TTS. Default ladder ends at always-usable `claude_code`.
     pub fn resolved_stt(&self) -> Option<SttEngine> {
         match &self.stt_engine {
             Some(pref) if pref.is_empty() => None,
@@ -382,13 +379,12 @@ impl VoiceConfig {
         }
     }
 
-    /// Warm-subsystem delta for surgical `set_config` apply (not per-call params).
+    /// Warm-subsystem delta for surgical `set_config`.
     pub fn changes_since(&self, prev: &VoiceConfig) -> ConfigChange {
         ConfigChange {
             caps_toggled: self.caps != prev.caps,
-            // Diff RESOLVED TTS (not raw ladder) so reorder-only is a no-op.
+            // Resolved TTS (not raw ladder) so reorder-only is no-op.
             tts_toggled: self.resolved_tts() != prev.resolved_tts(),
-            // Provider also rebuilds STT runtime.
             stt_changed: self.resolved_stt() != prev.resolved_stt()
                 || self.provider != prev.provider,
             listen_mode_changed: self.listen_mode != prev.listen_mode,
@@ -397,7 +393,7 @@ impl VoiceConfig {
     }
 }
 
-/// Read config.toml as a table. Fail-open → empty. Flat keys only (VoiceConfig + MCP-HTTP).
+/// config.toml as table. Fail-open → empty. Flat keys (VoiceConfig + MCP-HTTP).
 pub(crate) fn read_config_table(paths: &Paths) -> toml::Table {
     std::fs::read_to_string(&paths.config_toml)
         .ok()
@@ -405,13 +401,13 @@ pub(crate) fn read_config_table(paths: &Paths) -> toml::Table {
         .unwrap_or_default()
 }
 
-/// Atomically write a TOML table to `our config.toml`.
+/// Atomic write of a TOML table to config.toml.
 pub(crate) fn write_config_table(paths: &Paths, table: &toml::Table) -> io::Result<()> {
     let text = toml::to_string_pretty(table).map_err(io::Error::other)?;
     crate::atomic_write_str(&paths.config_toml, &text)
 }
 
-/// Capture Serde struct field names only (incl. skip_serializing_if) — no value visit.
+/// Serde field names only (incl. skip_serializing_if).
 struct StructFieldNames<'a>(&'a mut HashSet<String>);
 
 impl<'de> serde::Deserializer<'de> for StructFieldNames<'_> {
@@ -450,7 +446,7 @@ impl<'de> serde::Deserializer<'de> for StructFieldNames<'_> {
 }
 
 impl VoiceConfig {
-    /// Load config.toml; fail-open to defaults. Unknown keys warned; numbers clamped.
+    /// Load config.toml; fail-open defaults. Unknown keys warned; numbers clamped.
     pub fn load(paths: &Paths) -> Self {
         let Ok(text) = std::fs::read_to_string(&paths.config_toml) else {
             return Self::default();
@@ -464,7 +460,7 @@ impl VoiceConfig {
             );
             return Self::default();
         };
-        // Warn on unknown keys — serde would silently drop typos.
+        // Warn on unknown keys (serde would drop typos silently).
         let known = Self::known_keys();
         for k in table.keys() {
             if !known.contains(k.as_str()) {
@@ -481,7 +477,7 @@ impl VoiceConfig {
         cfg
     }
 
-    /// Known config keys from Serde field list (includes skip_serializing_if fields).
+    /// Serde field list (incl. skip_serializing_if).
     fn known_keys() -> HashSet<String> {
         let mut keys = HashSet::new();
         let _ = VoiceConfig::deserialize(StructFieldNames(&mut keys));
@@ -494,32 +490,26 @@ impl VoiceConfig {
         self.rate = self.rate.clamp(0.5, 2.0);
         self.cluster_threshold = self.cluster_threshold.clamp(0.5, 0.9);
         self.match_threshold = self.match_threshold.clamp(0.0, 1.0);
-        // Real timer param (not just compared) — same 0..5000 as set_config.
+        // Same 0..5000 as set_config.
         self.paste_delay_ms = self.paste_delay_ms.clamp(0, 5000);
-        // 0 is long_press sentinel ("use default") — do not clamp it to 100.
+        // 0 = long_press sentinel ("use default") — leave unclamped.
         if self.long_press_ms != 0 {
             self.long_press_ms = self.long_press_ms.clamp(100, 5000);
         }
-        // An empty voice pool is invalid (`set_config` rejects it); a hand-edited empty
-        // list fails open to the default pool, so a LOADED config always has voices.
+        // Empty pool invalid; hand-edit fails open so loaded config always has voices.
         if self.tts_voices.is_empty() {
             self.tts_voices = default_voices();
         }
     }
 
-    /// True when resolved TTS configuration selects apple-native (FluidAudio Core ML / ANE)
-    /// Kokoro. This is only the architecture/provider choice; runtime gates separately verify
-    /// the shim, DontSpeak-managed Core ML assets, and shared G2P assets.
+    /// Built-in TTS + Ane provider (architecture only; runtime gates assets/shim).
     pub fn uses_apple_native_model(&self) -> bool {
         self.resolved_tts() == Some(TtsEngine::BuiltIn)
             && cfg!(target_os = "macos")
             && self.resolved_tts_provider() == Provider::Ane
     }
 
-    /// The concrete STT runtime the `provider` ladder resolves to on THIS platform: walk the
-    /// priority list, take the first rung usable for STT, else CPU. Only ever returns
-    /// `OrtCpu`, `OrtCuda`, or `Ane`. A static PREFERENCE — the loader still falls back to CPU
-    /// at runtime if a GPU runtime/driver is absent, so a CUDA result never breaks dictation.
+    /// First STT-usable provider rung, else CPU. Preference only — loader still falls back.
     pub fn resolved_stt_provider(&self) -> Provider {
         self.provider
             .iter()
@@ -528,9 +518,7 @@ impl VoiceConfig {
             .unwrap_or(Provider::OrtCpu)
     }
 
-    /// The concrete TTS (Kokoro) runtime the `provider` ladder resolves to on THIS platform:
-    /// the first rung usable for TTS, else CPU. macOS may resolve to `Ane` (FluidAudio native)
-    /// or `OrtCoreMl`; Windows to `OrtCuda`; CPU otherwise.
+    /// First TTS-usable provider rung, else CPU.
     pub fn resolved_tts_provider(&self) -> Provider {
         self.provider
             .iter()
@@ -539,22 +527,17 @@ impl VoiceConfig {
             .unwrap_or(Provider::OrtCpu)
     }
 
-    /// The single `DONTSPEAK_PROVIDER` token the warm child should run TTS on — the resolved
-    /// TTS rung as its canonical string (e.g. "ane" / "cuda" / "cpu").
+    /// `DONTSPEAK_PROVIDER` token for the warm child's TTS rung.
     pub fn tts_provider_token(&self) -> &'static str {
         self.resolved_tts_provider().as_str()
     }
 
-    /// Whether diarization is ON — i.e. the `diarizer` ladder is non-empty. The
-    /// single gate for the `diarize`/`enroll` tools and speaker-lock (folds in the old
-    /// `diarization_enabled` flag).
+    /// Non-empty diarizer ladder (gate for `diarize`/`enroll` + speaker-lock).
     pub fn is_diarization_on(&self) -> bool {
         !self.diarizer.is_empty()
     }
 
-    /// The concrete diarizer runtime the `diarizer` ladder resolves to on THIS
-    /// platform: the first rung usable here, else `apple_native` (the only rung). What the
-    /// `diarize`/`enroll` tools actually load (only meaningful when [`Self::is_diarization_on`]).
+    /// First platform-usable diarizer rung, else `apple_native`.
     pub fn resolved_diarizer(&self) -> DiarizerProvider {
         self.diarizer
             .iter()
@@ -563,30 +546,23 @@ impl VoiceConfig {
             .unwrap_or(DiarizerProvider::AppleNative)
     }
 
-    /// The Kokoro voice pool — `voices`, shared by every TTS provider. Both backends draw
-    /// from one list: the apple-native FluidAudio (Core ML / ANE) backend materializes any
-    /// requested voice on demand from the same `voices-v1.0.bin` the ONNX path uses (see
-    /// `ds_tts::ane_voices`), so there is no separate apple-native voice set. Every entry is
-    /// a per-agent pool voice — no privileged "default" slot.
+    /// Shared Kokoro voice pool (ONNX + ANE from `voices-v1.0.bin`; no separate default slot).
     pub fn active_voices(&self) -> &[String] {
         &self.tts_voices
     }
 
-    /// Whether `kind` is in the narration set. `narrates(Digests)` gates both message-blockquote
-    /// narration AND the injected narration spec; `narrates(Shorts)` gates voicing a short,
-    /// blockquote-less reply whole.
+    /// `Digests` gates blockquotes + injected spec; `Shorts` gates short whole replies.
     pub fn narrates(&self, kind: NarrateKind) -> bool {
         self.narrate.contains(&kind)
     }
 
-    /// The narration set as a compact `[messages,short]`-style token list, for log lines.
+    /// Compact `[digests,shorts]`-style list for logs.
     pub fn narrate_summary(&self) -> String {
         let toks: Vec<&str> = self.narrate.iter().map(|k| k.as_str()).collect();
         format!("[{}]", toks.join(","))
     }
 
-    /// The clients EXCLUDED from wiring: the configured [`Self::exclude_clients`] set, or EMPTY
-    /// (exclude nothing) when unset. The engine wires every client NOT in this set.
+    /// Excluded clients (empty when unset). Engine wires everyone else.
     pub fn excluded_clients(&self) -> Vec<ClientSource> {
         self.exclude_clients.clone().unwrap_or_default()
     }
@@ -824,11 +800,7 @@ pub(crate) mod tests {
 
     #[test]
     fn exclude_clients_drops_non_client_tokens() {
-        // GUARD on the `is_client()` filter in `de_exclude_clients`. `ClientSource::parse` now
-        // accepts `dontspeak` and `unknown` (the old `WireTarget::parse` returned `None` for
-        // both), so WITHOUT that filter these tokens would enter a set whose ONLY use is
-        // "which client do I unwire" — letting DontSpeak mark ITSELF excluded, and letting
-        // `unknown` sit in a list of clients. Both must be dropped exactly like `bogus` is.
+        // `is_client()` load-bearing: parse accepts dontspeak/unknown; filter drops them.
         let wc = |j: &str| {
             serde_json::from_str::<VoiceConfig>(j)
                 .unwrap()
@@ -848,9 +820,7 @@ pub(crate) mod tests {
 
     #[test]
     fn exclude_clients_round_trips_through_write_and_load() {
-        // Each of the tri-state values reproduces through write_settings → VoiceConfig::load,
-        // rooted at a tempdir (never the real config path). None must serialize to ABSENT (the
-        // skip_serializing_if) and reload as None — distinct from Some([]) (explicit none).
+        // None serializes absent (≠ Some([])); tempdir only.
         for state in [None, Some(vec![]), Some(vec![ClientSource::ClaudeCode])] {
             let dir = tempfile::tempdir().unwrap();
             let paths = Paths::rooted_at(dir.path());

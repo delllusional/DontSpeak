@@ -55,7 +55,7 @@ struct StatusDot: View {
 
     private let size: CGFloat = 10
 
-    // No tooltip — not-ready state is the expanded troubleNote line.
+    // Not-ready detail is the expanded troubleNote line (no tooltip).
     var body: some View {
         Group {
             switch status {
@@ -114,7 +114,6 @@ struct StatusView: View {
     private let diarizationUIEnabled: Bool = ds_diarization_ui_enabled() != 0
 
     var body: some View {
-        // Scrollable content only; chrome is on MainWindow.
         ScrollView {
             VStack(spacing: 12) {
                 // Headline row → lifetime totals. Integrations wired by engine reconcile, not here.
@@ -219,7 +218,6 @@ private struct EngineStatRow<Stats: View>: View {
             if expanded {
                 PlatterDivider()
                 statusDetailBlock {
-                    // Not ready → troubleNote; ready → stats.
                     if let note = status.troubleNote {
                         Text(note).glassCaption()
                     } else {
@@ -283,7 +281,7 @@ private struct DontSpeakRow: View {
     }
 }
 
-/// "current → new" pill; brand purple (not warning) — neutral notice.
+/// "current → new" pill; brand purple (neutral notice, not warning orange).
 private struct UpdateBadge: View {
     let current: String
     let latest: String

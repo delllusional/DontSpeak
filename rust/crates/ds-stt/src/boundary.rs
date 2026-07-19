@@ -1,29 +1,12 @@
 //! Live utterance segmentation for streaming dictation.
 //!
-//! [`VadBoundaryDetector`] watches a mono PCM stream (at the capture device's
-//! native rate) and reports the sample offsets where a spoken segment ENDS — the
-//! speech→silence transitions. It does NOT transcribe and it does NOT buffer the
-//! audio: the caller keeps the full capture buffer and simply slices it at the
-//! boundaries we hand back. That keeps this backend-agnostic (it works the same
-//! whether the model behind it is the ONNX Parakeet, the macOS Core ML / ANE
-//! Parakeet, or system STT) and loss-proof: because the caller still owns every
-//! sample, a session where the detector never fires degrades to one whole-buffer
-//! transcription — exactly the old behavior, never worse.
-//!
-//! Why this exists: dictation used to be transcribed as ONE buffer at stop (plus a
-//! wasteful periodic re-pass of the WHOLE growing buffer for the live partial). On
-//! a long utterance that final pass costs `rtf × duration` — the lag felt on the
-//! second Caps tap. By cutting the utterance at natural pauses and transcribing
-//! each segment WHILE the user keeps talking, only the short final segment is left
-//! to transcribe at stop, so the submit feels instant. (transcribe-rs DOES expose
-//! an incremental `Transcriber`/`VadChunked` API, but it borrows a `&mut dyn
-//! SpeechModel` and so only fits the ONNX path; this detector reuses the same
-//! [`transcribe_rs::vad`] smoothing for ALL backends and leaves inference to the
-//! caller's existing per-segment pipeline — gain, resample, speaker-lock, trim.)
-//!
-//! The detector runs at the device rate (energy RMS is rate-independent; the frame
-//! size is scaled to a fixed 30 ms), so the caller resamples each WHOLE segment to
-//! 16 kHz once — no per-block resampling artifacts.
+//! [`VadBoundaryDetector`] reports speech→silence sample offsets on a mono PCM
+//! stream at device rate. Caller owns the capture buffer and slices at those
+//! offsets (backend-agnostic; no-fire degrades to whole-buffer). Segments at
+//! pauses so only the short tail remains at stop (avoids `rtf × duration` lag on
+//! Caps). Reuses [`transcribe_rs::vad`] for all backends; transcribe-rs's own
+//! `VadChunked` is ONNX-only (`&mut dyn SpeechModel`). Frame = 30 ms at device rate;
+//! caller resamples each whole segment to 16 kHz once.
 
 use transcribe_rs::vad::{EnergyVad, SmoothedVad, Vad};
 
@@ -39,15 +22,10 @@ const ONSET_FRAMES: usize = 3;
 /// Non-speech frames tolerated before a segment CLOSES (~750 ms) — a natural
 /// sentence pause, long enough not to split mid-sentence on a brief breath.
 const HANGOVER_FRAMES: usize = 25;
-/// Hard cap on one segment (7 s). A pause-free monologue is force-split here so a
-/// single transcription call (and the live-partial tail) stays bounded.
+/// Force-split monologue at 7 s so one call + live-partial tail stay bounded.
 ///
-/// This MUST stay ≥ the live-partial tail re-pass budget in the dictation helper
-/// (`tail_partial_max`), which is keyed off this value. The two used to diverge (8 s
-/// preview cap vs 20 s split): a pause-free phrase between 8 s and 20 s grew a tail too
-/// long to preview but too short to commit, so the overlay went BLANK until stop. Force-
-/// splitting at 7 s keeps the open tail short enough to always preview, so committed text
-/// lands every ~7 s during an unbroken monologue instead of nothing until you stop.
+/// MUST stay ≥ helper `tail_partial_max` (keyed off this). Diverged 8 s preview vs
+/// 20 s split left mid-length tails unpreviewable and blank until stop.
 pub const MAX_SEGMENT_SECS: usize = 7;
 
 /// Detects spoken-segment end boundaries in a live mono PCM stream at `rate` Hz.

@@ -12,12 +12,11 @@
 //!   1. Split on the FIRST `#` — the sample (right) is discarded.
 //!   2. On the left, the locale is the LAST whitespace-delimited token; the name
 //!      is everything before it, trimmed.
-//!   3. A trailing `(Enhanced)` / `(Premium)` on the name → [`Quality`]; any other
-//!      trailing paren group (e.g. `(English (India))`) is a descriptor kept as
-//!      part of the id/name (NOT a quality). Default quality = `Default`.
+//!   3. Trailing `(Enhanced)`/`(Premium)` → [`Quality`]; other paren groups stay in
+//!      id/name as descriptors. Default quality = `Default`.
 //!   4. `language_tag` = locale with `_`→`-` (`en_US` → `en-US`).
-//!   5. `id` = the full name INCLUDING any quality suffix — what `say -v` expects
-//!      back. `gender` is unknown from `say` ⇒ `None`. `downloadable` = false.
+//!   5. `id` = full name including quality suffix (`say -v` expects that).
+//!      `gender` unknown; `downloadable` = false.
 //!
 //! Malformed lines (no locale token, blank) are skipped.
 

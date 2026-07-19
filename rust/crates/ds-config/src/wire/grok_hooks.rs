@@ -1,15 +1,11 @@
-//! Grok native hooks (`~/.grok/hooks/dontspeak.json`) — dedicated file we own (overwrite /
-//! delete; no merge). Bare binary command so Grok dedupes with imported Claude wiring
-//! (compat adapter drops `args`). `GROK_HOOK_EVENT` distinguishes hook vs MCP launch.
-//!
-//! No MessageDisplay; Stop reads final text from `transcriptPath` JSONL.
-//! Events: SessionStart greet-only; SessionEnd barge; UserPromptSubmit notify (+ AGENTS.md
-//! digests — stdout ignored, issue #95); Stop narrate+earcon; Notification needs-input.
+//! Grok hooks (`~/.grok/hooks/dontspeak.json`) — owned file (overwrite/delete; no merge).
+//! Bare binary so Grok dedupes with imported Claude (adapter drops `args`).
+//! `GROK_HOOK_EVENT` distinguishes hook vs MCP. No MessageDisplay; Stop from transcript JSONL.
+//! Digests also → AGENTS.md (stdout ignored, #95).
 
 use serde_json::{Map, Value, json};
 
-/// The full non-streaming event set and seconds timeouts. Every event gets one bare-binary
-/// handler; the runtime performs the event-specific notify/provide combination.
+/// Non-streaming events + seconds. One bare-binary handler each; runtime splits notify/provide.
 const GROK_HOOKS: &[(&str, i64)] = &[
     ("SessionStart", 30),
     ("SessionEnd", 30),
@@ -18,11 +14,8 @@ const GROK_HOOKS: &[(&str, i64)] = &[
     ("Notification", 30),
 ];
 
-/// Render the dedicated Grok hooks file body — the WHOLE `dontspeak.json` (DontSpeak owns the
-/// file outright, so this is not merged into anything). `bin` is the absolute path to the
-/// `dontspeak` binary. The exact, unmodified path is load-bearing: it matches the `command`
-/// in Claude Code's args-array entries byte-for-byte, allowing Grok to deduplicate the native
-/// and imported handlers. There are no `args`, `async`, `shell`, or `matcher` keys.
+/// Whole `dontspeak.json` body. Exact `bin` path matches Claude args-array `command`
+/// (dedupe). No `args`/`async`/`shell`/`matcher`.
 pub fn grok_hooks_value(bin: &str) -> Value {
     let mut events = Map::new();
     for (event, timeout) in GROK_HOOKS {
@@ -44,8 +37,7 @@ mod tests {
 
     const BIN: &str = "/home/u/.local/bin/dontspeak";
 
-    /// Every inner `(command, timeout)` wired on `event`, in order — asserting the event holds
-    /// exactly one group along the way (so callers also pin "not duplicated").
+    /// Inner `(command, timeout)` list; pins exactly one group.
     fn event_entries(v: &Value, event: &str) -> Vec<(String, i64)> {
         let groups = v["hooks"][event]
             .as_array()

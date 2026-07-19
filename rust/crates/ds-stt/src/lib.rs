@@ -52,7 +52,7 @@ pub enum SystemState {
     Unavailable,
 }
 
-/// System STT usability. Probes WITHOUT prompting (safe for model-status poll).
+/// System STT usability. Probe only (no prompt) — safe for model-status poll.
 /// Always [`SystemState::Unavailable`] off macOS.
 #[cfg(target_os = "macos")]
 pub fn system_state() -> SystemState {
@@ -89,8 +89,7 @@ pub fn system_authorize() -> Result<(), String> {
 
 /// Speech-to-text backend. Object-safe so the factory returns `Box<dyn Stt>`.
 ///
-/// Caps-Lock edges: OFF→ON ⇒ `start()`; ON→OFF ⇒ `stop()`; §F reset ⇒ `abort()`
-/// (discard, do not inject) then the engine resets.
+/// Caps-Lock edges: OFF→ON ⇒ `start()`; ON→OFF ⇒ `stop()`; §F reset ⇒ `abort()` then engine resets.
 pub trait Stt {
     /// Caps-ON. Returns whether the engine considered itself started (informational).
     fn start(&mut self) -> bool;
@@ -98,8 +97,8 @@ pub trait Stt {
     /// Caps-OFF: end capture / inject as appropriate for the backend.
     fn stop(&mut self);
 
-    /// Abort WITHOUT injecting (§F long-press force-reset). DEFAULT → `stop()`;
-    /// local engines override to DISCARD (per §F.1 reset must not inject).
+    /// §F long-press force-reset: discard capture (no inject). Default → `stop()`;
+    /// local engines override to discard (§F.1).
     fn abort(&mut self) {
         self.stop();
     }

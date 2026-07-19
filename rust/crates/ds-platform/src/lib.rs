@@ -1,4 +1,4 @@
-//! Platform traits: [`KeyInjector`], [`FrontmostWindow`], [`CapsKeyMonitor`];
+//! Platform traits: [`KeyInjector`], [`FrontmostWindow`], [`CapsKeyMonitor`],
 //! [`Platform`] + `preflight`. Per-OS `cfg`; full matrix in release CI.
 
 use std::error::Error;
@@ -8,23 +8,17 @@ use std::time::Instant;
 mod chord;
 pub use chord::{KeyBase, KeyChord};
 
-/// Physical Caps edge. Queued so down+up in one poll gap still replays. `at` for long-press.
+/// Physical Caps edge (queued so down+up in one poll gap still replays).
 #[derive(Clone, Copy, Debug)]
 pub struct CapsEdge {
-    /// true = DOWN.
     pub down: bool,
     pub at: Instant,
 }
 
-/// Dictation key tap (`voice:pushToTalk`, default Space).
+/// Dictation key (`voice:pushToTalk`, default Space). Caller gates frontmost.
 pub trait KeyInjector {
-    /// Down+up. Caller gates terminal frontmost.
     fn tap_key(&self, _chord: &KeyChord) {}
-
-    /// Inject text; caller gates frontmost.
     fn type_text(&self, _text: &str) {}
-
-    /// Enter submit; caller gates frontmost.
     fn press_enter(&self) {}
 }
 
@@ -34,7 +28,7 @@ pub fn warn_unsupported_dictation_key(base: &KeyBase) {
     );
 }
 
-/// After paste: restore `prev` or clear if clipboard still holds our text.
+/// Restore `prev` or clear if clipboard still holds our text.
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub fn restore_clipboard_after_paste(prev: Option<String>, pasted: String) {
     std::thread::spawn(move || {
@@ -55,76 +49,70 @@ pub fn restore_clipboard_after_paste(prev: Option<String>, pasted: String) {
     });
 }
 
-/// Inject only when terminal is frontmost.
 pub trait FrontmostWindow {
     fn is_terminal_frontmost(&self) -> bool;
 
-    /// Confirm panel label. Default None.
     fn frontmost_app_name(&self) -> Option<String> {
         None
     }
 
-    /// Warn-only paste check; never gates delivery. Default true.
+    /// Warn-only paste probe; does not gate delivery. Default true.
     fn can_paste(&self) -> bool {
         true
     }
 
-    /// config.toml `extra_terminals` union on reload.
+    /// Union `extra_terminals` on reload.
     fn set_extra_terminals(&self, _extra: Vec<String>) {}
 
-    /// `extra_editors` for paste exemption (Win/macOS).
+    /// `extra_editors` paste exemption (Win/macOS).
     fn set_extra_editors(&self, _extra: Vec<String>) {}
 }
 
-/// Caps physical hold + LED (long-press + recording).
+/// Caps physical hold + LED.
 pub trait CapsKeyMonitor {
     fn is_caps_physically_down(&self) -> bool;
-    /// Force LED/lock (long-press drift recovery).
+    /// Force LED/lock (drift recovery).
     fn set_caps_lock(&self, on: bool);
 
-    /// macOS: IOHID/LED stuck denied → relaunch. Prefer `caps_monitor_stuck_detail`.
+    /// macOS IOHID/LED stuck → relaunch. Prefer `caps_monitor_stuck_detail`.
     fn caps_monitor_stuck(&self) -> bool {
         false
     }
 
-    /// Which resource is stuck for the persisted engine log (stderr often invisible).
+    /// Stuck resource name for engine log.
     fn caps_monitor_stuck_detail(&self) -> Option<&'static str> {
         None
     }
 
-    /// True when Caps edges come from a lossless event stream ([`Self::drain_caps_events`])
-    /// rather than sampling [`Self::is_caps_physically_down`]. Windows hook = true; polled
-    /// ports default false. Event-driven ports suppress OS Caps toggle but still drive
-    /// the LED via `set_caps_lock`.
+    /// Lossless event stream ([`drain_caps_events`]) vs polled physical sample.
+    /// Windows hook = true. Event-driven ports suppress OS toggle; still drive LED.
     fn is_caps_event_driven(&self) -> bool {
         false
     }
 
-    /// Drain Caps edges since last call (oldest first). Meaningful only if event-driven.
+    /// Edges since last call (oldest first); event-driven only.
     fn drain_caps_events(&self) -> Vec<CapsEdge> {
         Vec::new()
     }
 
-    /// [`acquire_caps_key`] phase 1: suppression that must be live before clearing logical
-    /// Caps (macOS hidutil / Windows hook). false → skip normalize+finish. Default ready.
+    /// Phase 1: suppression live before clear (hidutil / Win hook). false → skip rest.
     fn begin_caps_key_acquisition(&self) -> bool {
         true
     }
 
-    /// Phase 2: clear pre-existing logical Caps, indicator off. Default `set_caps_lock(false)`.
+    /// Phase 2: clear logical Caps, indicator off.
     fn normalize_caps_lock(&self) {
         self.set_caps_lock(false);
     }
 
-    /// Phase 3: post-normalize suppression (Linux XKB `caps:none`). Default no-op.
+    /// Phase 3: post-normalize (Linux XKB `caps:none`).
     fn finish_caps_key_acquisition(&self) {}
 
-    /// Release ownership; restore native Caps. Idempotent. MUST discard queued Caps edges
-    /// (else re-acquire replays them). Default no-op.
+    /// Restore native Caps; discard queued edges (else re-acquire replays). Idempotent.
     fn release_caps_key(&self) {}
 }
 
-/// Shared Caps ownership: begin → normalize → finish. Only acquisition entry point.
+/// Caps ownership: begin → normalize → finish. Sole acquisition entry.
 pub fn acquire_caps_key(monitor: &(impl CapsKeyMonitor + ?Sized)) {
     if !monitor.begin_caps_key_acquisition() {
         return;
@@ -189,12 +177,11 @@ mod caps_key_acquisition_tests {
     }
 }
 
-/// Full OS capability set.
 pub trait Platform: KeyInjector + FrontmostWindow + CapsKeyMonitor {
-    /// Silent, repeatable permission check (re-probe safe; never prompt).
+    /// Silent permission check (re-probe safe; no prompt).
     fn preflight(&self) -> Result<(), PreflightError>;
 
-    /// One-shot permission prompt at startup only (macOS Accessibility). Default no-op.
+    /// One-shot startup prompt (macOS Accessibility). Default no-op.
     fn request_permissions(&self) {}
 }
 

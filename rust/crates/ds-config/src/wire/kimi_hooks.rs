@@ -1,23 +1,17 @@
-//! Kimi Code hooks (`~/.kimi-code/config.toml`) — flat top-level `[[hooks]]` via `toml_edit`.
-//! Commands use the shared quote-free inline-shell dialect ([`cmdline`](super::cmdline)).
+//! Kimi Code hooks (`~/.kimi-code/config.toml`) — flat `[[hooks]]` via `toml_edit`.
+//! Quote-free inline-shell dialect ([`cmdline`](super::cmdline)).
 //!
-//! HARD CONSTRAINT: a `[[hooks]]` entry may carry ONLY `event` / `matcher` / `command` /
-//! `timeout` — any extra key makes Kimi fail to load the whole config. We emit
-//! `event`/`command`/`timeout` (never `matcher`); timeouts are SECONDS.
+//! Entry keys only: `event` / `matcher` / `command` / `timeout` (extra keys break load).
+//! We emit `event`/`command`/`timeout`; timeouts SECONDS.
 //!
-//! Non-streaming (no MessageDisplay): SessionStart → `notify --greet-only` (plain `notify`
-//! would seed the streaming witness and suppress Stop; see `codex.rs`); SessionEnd/Stop/
-//! Notification → `notify`; UserPromptSubmit → `notify` + `provide`.
-//!
-//! Additive/idempotent: "ours" = binary basename `dontspeak` ([`command_is_ours`]), not a
-//! substring — same precision argument as `codex.rs`.
+//! Non-streaming: SessionStart greet-only; SessionEnd/Stop/Notification notify;
+//! UserPromptSubmit notify+provide. "Ours" = basename `dontspeak` ([`command_is_ours`]).
 
 use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
 use ds_client::ClientSource;
 use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table as TomlTable, value};
 
-/// Kimi has no `shell`/`args` field → verbs + `--client` inlined; spaced bin → 8.3 short name
-/// ([`ShellOverride::Unsupported`]).
+/// No `shell`/`args` → inlined verbs + `--client`; spaced bin → 8.3.
 fn kimi_command(bin: &str, verb: &str, client: ClientSource) -> String {
     inline_command(
         host_inline_flavor(),
@@ -28,9 +22,7 @@ fn kimi_command(bin: &str, verb: &str, client: ClientSource) -> String {
     .0
 }
 
-/// One `[[hooks]]` entry per verb (flat array). Timeouts in SECONDS, synchronous (no `async`
-/// key — hard constraint). Kimi caps `timeout` at 600s (`kimi doctor`); Stop uses the cap,
-/// not the 1800s Claude/Qwen use.
+/// Flat entries, SECONDS, sync (no `async` key). Stop at Kimi's 600s cap (`kimi doctor`).
 const KIMI_HOOKS: &[(&str, &[(&str, i64)])] = &[
     ("SessionStart", &[("notify --greet-only", 30)]),
     ("SessionEnd", &[("notify", 30)]),
@@ -39,13 +31,11 @@ const KIMI_HOOKS: &[(&str, &[(&str, i64)])] = &[
     ("Notification", &[("notify", 30)]),
 ];
 
-/// Same caller contract as [`super::codex::CodexMergeError`]: both variants are non-success —
-/// never report a silent success.
+/// Same non-success contract as [`super::codex::CodexMergeError`].
 #[derive(Debug)]
 pub enum KimiMergeError {
     Parse(toml_edit::TomlError),
-    /// Valid TOML but `hooks` is neither appendable nor safely coerceable. Do NOT clobber;
-    /// installer must warn, not claim success.
+    /// `hooks` unappendable; leave file unchanged.
     UnmergeableShape(String),
 }
 
@@ -71,7 +61,7 @@ impl From<toml_edit::TomlError> for KimiMergeError {
     }
 }
 
-/// Basename match via [`command_is_ours`] — not substring (see `codex.rs`).
+/// Basename match via [`command_is_ours`].
 fn kimi_entry_is_ours(entry: &TomlTable) -> bool {
     entry
         .get("command")
@@ -79,14 +69,14 @@ fn kimi_entry_is_ours(entry: &TomlTable) -> bool {
         .is_some_and(command_is_ours)
 }
 
-/// Exact content match → re-wire is byte-for-byte no-op; older dialects self-heal on replace.
+/// Exact match → re-wire no-op; older dialects heal on replace.
 fn kimi_entry_matches(entry: &TomlTable, event: &str, command: &str, timeout: i64) -> bool {
     entry.get("event").and_then(|v| v.as_str()) == Some(event)
         && entry.get("command").and_then(|v| v.as_str()) == Some(command)
         && entry.get("timeout").and_then(|v| v.as_integer()) == Some(timeout)
 }
 
-/// Exactly the three keys Kimi's schema allows us to emit.
+/// The three keys we emit.
 fn kimi_entry(event: &str, command: &str, timeout: i64) -> TomlTable {
     let mut entry = TomlTable::new();
     entry.insert("event", value(event));

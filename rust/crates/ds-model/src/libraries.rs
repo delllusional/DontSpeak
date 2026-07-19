@@ -119,8 +119,7 @@ pub fn catalog() -> Value {
     )))]
     let (cuda_files, cudnn_files): (Vec<Value>, Vec<Value>) = (Vec::new(), Vec::new());
 
-    // System libraries first (CUDA, then cuDNN), lowest-level before the runtime that uses them.
-    // Each is shown only where its `platforms` says AND its files actually assembled.
+    // CUDA/cuDNN then ORT, then models by function (TTS→STT→diarize); ONNX before Core ML.
     if urls::NVIDIA_CUDA.runs_on(plat) && !cuda_files.is_empty() {
         projects.push(project_obj(&urls::NVIDIA_CUDA, cuda_files));
     }
@@ -128,17 +127,10 @@ pub fn catalog() -> Value {
         projects.push(project_obj(&urls::NVIDIA_CUDNN, cudnn_files));
     }
 
-    // Then the runtime.
     if urls::ONNX_RUNTIME.runs_on(plat) && !onnx_files.is_empty() {
         projects.push(project_obj(&urls::ONNX_RUNTIME, onnx_files));
     }
 
-    // The models, grouped by FUNCTION (TTS → STT → diarization) and, within each function, the
-    // portable ONNX asset first then the Apple-native Core ML set. This keeps the two STT entries
-    // adjacent — the portable "FastConformer" sits right beside "Parakeet (Core ML)", since
-    // they're the same model on different runtimes — likewise the two Kokoro (TTS) entries. The
-    // Core ML sets are Apple Silicon only; the Kokoro G2P sub-set (empty `display_name`) is folded
-    // into the Kokoro entry, so it's never listed on its own.
     let apple = urls::Platform::APPLE_NATIVE.contains(&plat);
     let push_portable = |projects: &mut Vec<Value>, p: &Project| {
         if p.runs_on(plat) {
@@ -152,15 +144,11 @@ pub fn catalog() -> Value {
         }
     };
 
-    // TTS — shared English frontend fallback, then Kokoro synthesis runtimes.
     push_portable(&mut projects, &urls::KOKORO_G2P);
     push_portable(&mut projects, &urls::KOKORO);
     push_coreml(&mut projects, &crate::coreml_repo::KOKORO_COREML);
-    // STT — the FastConformer/Parakeet model (portable ONNX, then Core ML).
     push_portable(&mut projects, &urls::PARAKEET);
     push_coreml(&mut projects, &crate::coreml_repo::PARAKEET_COREML);
-    // Diarization (Core ML only) + the SepFormer separator the speaker-lock pairs with it
-    // (portable ONNX, but macOS-only — its `platforms` list gates it).
     push_coreml(&mut projects, &crate::coreml_repo::DIARIZATION_COREML);
     push_portable(&mut projects, &urls::SEPFORMER_PROJECT);
 

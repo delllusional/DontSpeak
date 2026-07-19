@@ -32,8 +32,8 @@ public class LogParserTests
         Assert.Equal(new LogLine("ds-helper", "ERROR", "tts spawn failed"), lines[1]);
     }
 
-    /// <summary>A missing/null field on a line reads as "" rather than null or throwing — the
-    /// renderer (<c>MainWindow.RenderLogLines</c>) assumes non-null <see cref="LogLine"/> fields.</summary>
+    /// <summary>Missing/null fields → "" so <c>MainWindow.RenderLogLines</c> can assume non-null
+    /// <see cref="LogLine"/> fields.</summary>
     [Fact]
     public void MissingOrNullFieldsDefaultToEmptyString()
     {
@@ -50,8 +50,7 @@ public class LogParserTests
         Assert.Empty(LogParser.ParseLogs("[]"));
     }
 
-    /// <summary>Property names are matched case-insensitively, matching every other JSON
-    /// boundary in this app (<c>ToolsJsonOptions</c>/<c>ModelStatusJsonOptions</c>).</summary>
+    /// <summary>Case-insensitive property names — same as ToolsJsonOptions / ModelStatusJsonOptions.</summary>
     [Fact]
     public void PropertyNamesAreCaseInsensitive()
     {

@@ -1,24 +1,17 @@
-//! Centralized paths and runtime config for the dontspeak Rust workspace.
+//! Paths and runtime config for the dontspeak Rust workspace.
 //!
-//! Fixed locations (DO NOT relocate — pidfile is the single-speaker contract shared by
-//! barge-in and the hook executor):
+//! Fixed location (do not relocate — single-speaker contract for barge-in + hooks):
 //!   speak-hook.pid (per-OS state dir)  process-GROUP id of the current speaker
 //!
-//! Unified activity log: per-OS logs dir (e.g. macOS `~/Library/Logs/DontSpeak/dontspeak.log`),
-//! rename-based size rotation in `ds-log` (issue #6). No `newsyslog`.
+//! Unified activity log (per-OS logs dir; `ds-log` size rotation, #6).
+//! In-process Kokoro (`ds-tts`); models in per-OS data dir — `model_dir()`.
 //!
-//! Synthesis is native in-process Kokoro (`ds-tts`). Model assets live in the per-OS data dir
-//! from `directories` (not repo, not bundled) — see `model_dir()`.
-//!
-//! Modules are focused; PUBLIC API is flat (re-exports at crate root). `enums` is first
-//! (`#[macro_use]`) so deserialize/serialize macros are textually in scope.
+//! Flat public re-exports. `enums` first (`#[macro_use]`) for de/se macros.
 //!
 //! # What belongs here
 //!
-//! Configuration DEFINED and read: [`Paths`], `config.toml` schema/enums, settings.json bridge,
-//! client wire shapers. Not runtime state machines, engine behavior, or protocol defs —
-//! nearly everything depends here, so code parked here rebuilds the world. Behavior that only
-//! *reads* config belongs with its owner; pass the value in.
+//! Config defined/read: [`Paths`], `config.toml` schema/enums, settings bridge, wire shapers.
+//! Nearly everything depends here — park only config ownership; pass values to readers.
 
 // `enums` FIRST: `macro_rules!` are textually scoped; `#[macro_use]` lifts them crate-wide.
 #[macro_use]
@@ -37,8 +30,7 @@ mod wire;
 // Flat public re-export facade — preserves every `ds_config::X` path.
 pub use brand::{DISPLAY_NAME, VERSION, name_version};
 pub use claude_code::{ClaudeCodeVoice, read_claude_code_voice};
-/// Client identity from the `ds-client` leaf (ex-`WireTarget`). Lives below `ds-log`/`ds-ipc`
-/// to avoid a cycle; re-export keeps `ds_config::ClientSource` working.
+/// Client identity (`ds-client` leaf; re-export avoids cycle with `ds-log`/`ds-ipc`).
 pub use ds_client::ClientSource;
 pub use enums::{
     CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Provider, RealizedProvider,

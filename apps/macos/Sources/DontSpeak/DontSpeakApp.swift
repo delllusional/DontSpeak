@@ -33,25 +33,23 @@ struct DontSpeakApp: App {
 
 }
 
-/// Menu-bar label: idle template / orange recording / purple speaking via `TrayAnimator`.
-/// Same `TrayState` source as the window title-bar indicator.
+/// Menu-bar label via `TrayAnimator`. Same `TrayState` source as the title-bar indicator.
 private struct MenuBarLabel: View {
     @Environment(Core.self) private var core
     @Environment(\.openWindow) private var openWindow
     var body: some View {
-        // Side effect via `let _ =` — NOT a view modifier — so the returned view stays a bare
+        // Side effect via `let _ =` (not a view modifier) so the returned view stays a bare
         // Image and the status item hugs the glyph. Label is the only view at launch, so reopen
         // is ready before the first Finder/Dock click.
         let _ = WindowOpener.shared.register(openWindow)
-        // MUST be bare `Image(nsImage:)`: any modifier balloons the status item to dropdown width.
+        // Bare `Image(nsImage:)` only: any modifier balloons the status item to dropdown width.
         // Animation + mute slash are baked into the NSImage by TrayAnimator.
         Image(nsImage: core.trayAnimator.image)
     }
 }
 
-/// Live tray state shared by menu-bar + title-bar indicator. Glyph is always the brand icon;
-/// only the pill behind it changes. Recording wins over speaking when both apply (full-duplex
-/// live-mic cue must override purple).
+/// Shared by menu-bar + title-bar. Glyph is always the brand icon; only the pill changes.
+/// Recording wins over speaking when both apply (full-duplex live-mic cue).
 enum TrayState: Equatable {
     case idle, recording, speaking
 
@@ -96,7 +94,7 @@ enum TrayState: Equatable {
         }
     }
 
-    /// Mute slash baked into NSImage (not a SwiftUI overlay) so the label stays bare.
+    /// Mute slash baked into NSImage so the label stays bare `Image(nsImage:)`.
     @MainActor func image(muted: Bool) -> NSImage {
         let base = image
         return muted ? Self.applySlash(to: base, tint: self.tint) : base
@@ -163,7 +161,7 @@ enum TrayState: Equatable {
     }
 }
 
-/// Brand glyph: SVG preferred (crisp at any scale), then PNG, then SF Symbol.
+/// Brand glyph: SVG preferred, then PNG, then SF Symbol.
 private func brandGlyph(height: CGFloat) -> NSImage {
     if let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "svg")
         ?? Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
@@ -253,7 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// Notarized builds ship ORT in Frameworks (no runtime download / Gatekeeper block).
+    /// Notarized builds ship ORT in Frameworks (avoids Gatekeeper on runtime download).
     /// Set before engine start; helper inherits. Local builds no-op → engine downloads on first use.
     private func useBundledOnnxRuntimeIfPresent() {
         guard let dylib = Bundle.main.privateFrameworksURL?.appendingPathComponent("libonnxruntime.dylib"),

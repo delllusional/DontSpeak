@@ -1,12 +1,8 @@
-//! FluidAudio Core ML / ANE Kokoro voice packs, materialized from the local npz.
+//! FluidAudio Core ML / ANE Kokoro voice packs from local ONNX `voices-v1.0.bin`.
 //!
-//! ANE ships only `af_heart.bin` on HF, but the graph accepts any Kokoro voice
-//! (`[510, 256]` fp32 style tensor). We hold all 54 in ONNX `voices-v1.0.bin`, so
-//! extract via `crate::voices::voice_pack_bytes` into FluidAudio's on-disk cache
-//! instead of depending on per-voice upstream `.bin`s.
-//!
-//! `ensureVoicePack` prefers local files — materialized packs avoid network/404→
-//! `af_heart` fallback. Layout matches shipped `af_heart.bin` (522_240 LE f32 bytes).
+//! HF ships only `af_heart.bin`; graph accepts any Kokoro voice (`[510, 256]` fp32).
+//! Materialize all 54 via `voice_pack_bytes` into FluidAudio's cache so `ensureVoicePack`
+//! hits local files (avoids network/404→`af_heart`). Layout = shipped pack (522_240 LE f32).
 
 use std::path::PathBuf;
 

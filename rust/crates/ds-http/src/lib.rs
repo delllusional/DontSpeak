@@ -15,18 +15,17 @@ const MAX_ROOTS_ERROR_CONTEXTS: usize = 3;
 
 struct OsRoots {
     certs: Vec<rustls_pki_types::CertificateDer<'static>>,
-    /// Set when the store is empty or load reported errors. Not a log sink —
-    /// process-local so higher layers need not have logging wired yet (#114).
+    /// Empty/partial load note (#114); process-local until logging is wired.
     diagnostic: Option<String>,
 }
 
-/// OS trust store once (workspace rustls leaves attohttpc roots empty). TLS still
-/// fails closed if roots are missing; empty/partial init is preserved for callers.
+/// OS trust store once (workspace rustls leaves attohttpc roots empty). Fail-closed
+/// if empty; partial init preserved for callers.
 fn os_roots() -> &'static OsRoots {
     static ROOTS: OnceLock<OsRoots> = OnceLock::new();
     ROOTS.get_or_init(|| {
         let loaded = rustls_native_certs::load_native_certs();
-        // `Error::context` is a static phrase without filesystem paths.
+        // `Error::context` is path-free static phrase.
         let contexts: Vec<&str> = loaded.errors.iter().map(|e| e.context).collect();
         let diagnostic = describe_native_roots_init(loaded.certs.len(), &contexts);
         OsRoots {
@@ -36,16 +35,13 @@ fn os_roots() -> &'static OsRoots {
     })
 }
 
-/// Sanitized one-shot note when native roots failed or came back empty.
-/// Independent of application log init; `None` when load looked healthy.
+/// Empty/partial native roots note; `None` if healthy. Independent of log init.
 pub fn native_roots_diagnostic() -> Option<&'static str> {
     os_roots().diagnostic.as_deref()
 }
 
-/// Pure helper: diagnose empty or partial native-cert load without I/O (#114).
-///
-/// `error_contexts` should already omit paths (e.g. `rustls_native_certs::Error::context`).
-/// Returns `None` when at least one cert loaded and no errors were reported.
+/// Pure empty/partial cert-load diagnose (#114). Path-free `error_contexts`.
+/// `None` when ≥1 cert and no errors.
 pub fn describe_native_roots_init(cert_count: usize, error_contexts: &[&str]) -> Option<String> {
     if cert_count > 0 && error_contexts.is_empty() {
         return None;
@@ -77,7 +73,6 @@ pub fn describe_native_roots_init(cert_count: usize, error_contexts: &[&str]) ->
 }
 
 fn push_sanitized(out: &mut String, s: &str) {
-    // Drop controls so diagnostics stay single-line / log-safe if later printed.
     for ch in s.chars() {
         if ch.is_control() {
             out.push('?');
@@ -99,7 +94,7 @@ fn clamp_diagnostic(msg: &mut String) {
     msg.push('…');
 }
 
-/// Blocking request: connect/read budgets, optional total timeout, native roots, no redirects.
+/// Blocking request: budgets, native roots, no redirects (Auth not re-sent cross-origin).
 pub fn request(
     method: Method,
     url: &str,
@@ -110,7 +105,6 @@ pub fn request(
     let mut builder = RequestBuilder::new(method, url)
         .connect_timeout(connect_timeout)
         .read_timeout(read_timeout)
-        // Default 5 hops + Authorization re-sent cross-origin — refuse all hops.
         .max_redirections(0);
     if let Some(total) = total_timeout {
         builder = builder.timeout(total);
@@ -121,12 +115,11 @@ pub fn request(
     builder
 }
 
-/// Successful body with hard size cap.
+/// Body with hard size cap.
 pub fn read_bytes_limited(response: Response, max_bytes: usize) -> std::io::Result<Vec<u8>> {
     let mut response = response
         .error_for_status()
         .map_err(|error| std::io::Error::other(format!("HTTP request failed: {error}")))?;
-    // Hard bound is `take(limit)` (max_bytes + 1); Vec grows as needed up to that.
     let limit = u64::try_from(max_bytes)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
@@ -145,7 +138,7 @@ pub fn read_bytes_limited(response: Response, max_bytes: usize) -> std::io::Resu
     Ok(bytes)
 }
 
-/// Successful UTF-8 body with hard size cap.
+/// UTF-8 body with hard size cap.
 pub fn read_utf8_limited(response: Response, max_bytes: usize) -> std::io::Result<String> {
     let bytes = read_bytes_limited(response, max_bytes)?;
     String::from_utf8(bytes)

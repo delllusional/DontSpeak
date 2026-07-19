@@ -1,5 +1,5 @@
 //! Health panel — AdwApplicationWindow of preference rows (macOS StatusView / Windows status).
-//! Read-only; control is MCP. Strings from ds-i18n; state as colored dots, never words.
+//! Read-only; control is MCP. Strings from ds-i18n; state via colored dots.
 
 use std::collections::HashMap;
 
@@ -39,7 +39,7 @@ pub struct Widgets {
     spoken: gtk::Label,
     heard: gtk::Label,
     /// Version subtitle: homepage click via make_version_link; apply_update_check rewrites
-    /// in place to "current → new" + badge (one pill, not a separate badge).
+    /// in place to "current → new" + badge class on the same label.
     version_subtitle: gtk::Label,
     usage_page: UsagePage,
 }
@@ -458,7 +458,7 @@ fn engine_subtitle(
     extra: Option<String>,
 ) -> String {
     // Shared state-word returns "" for ready — that emptiness is the note-vs-ready gate
-    // (macOS/Windows). No local "is trouble" list to drift.
+    // (macOS/Windows); host must not invent a local trouble list.
     let (prog, why) = obj
         .map(|o| (o.progress, o.error.as_deref().unwrap_or("")))
         .unwrap_or((0.0, ""));
@@ -477,7 +477,7 @@ fn engine_subtitle(
     }
 }
 
-/// Claude Code STT: name the delegated key (no local transcription).
+/// Claude Code STT: delegated voice-key name in the subtitle.
 fn claude_hint(s: &ModelStatus) -> Option<String> {
     if s.stt.engine != StatusSttEngine::ClaudeCode {
         return None;
@@ -572,7 +572,7 @@ fn random_pastel_wash() -> Option<(u8, u8, u8, f64)> {
     Some((r, g, b, a.clamp(0.0, 1.0)))
 }
 
-/// Startup update pill. Missing/false/malformed → leave plain version (never pill on doubt).
+/// Startup update pill. Missing/false/malformed → leave plain version.
 /// Rewrites subtitle in place; homepage click unchanged.
 pub fn apply_update_check(w: &Widgets, json: &str) {
     let v: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
@@ -612,7 +612,7 @@ fn status_dot() -> gtk::Image {
     dot
 }
 
-/// Hide native arrow with set_visible(false) (not opacity) so the slot frees; dots align.
+/// Hide native arrow with `set_visible(false)` (opacity still occupies the slot).
 fn hide_expander_arrow(row: &adw::ExpanderRow) {
     if let Some(arrow) = find_by_css_class(row.upcast_ref::<gtk::Widget>(), "expander-row-arrow") {
         arrow.set_visible(false);
@@ -1010,7 +1010,7 @@ fn try_update_usage_rows(mounted: &[UsageRowWidgets], card: &UsageCard) -> bool 
 }
 
 fn update_usage_row(view: &UsageRowWidgets, row: &UsageRow) {
-    // Percent is the bar only; remaining sits top-right (no seconds).
+    // Bar = percent; remaining label = resets-in string from status_fmt.
     view.progress
         .set_fraction((row.used_percent / 100.0).clamp(0.0, 1.0));
     let remaining = crate::ffi::usage_resets_in(row.resets_at_unix);
@@ -1018,7 +1018,7 @@ fn update_usage_row(view: &UsageRowWidgets, row: &UsageRow) {
     view.remaining.set_visible(!remaining.is_empty());
 }
 
-/// Localized agent title; unknown tokens → prettified fallback (not the raw key).
+/// Localized agent title; unknown tokens → prettified fallback.
 fn agent_display_name(agent: &str) -> String {
     let key = format!("usage.provider.{agent}");
     let label = t(&key);
@@ -1029,7 +1029,6 @@ fn agent_display_name(agent: &str) -> String {
     }
 }
 
-/// snake_case → Title Case.
 fn prettify_agent_token(agent: &str) -> String {
     agent
         .split('_')
@@ -1053,7 +1052,7 @@ fn paint_usage_card(card: &UsageCard) -> (adw::PreferencesGroup, gtk::Label, Vec
     let group = adw::PreferencesGroup::builder()
         .title(agent_display_name(&card.agent))
         .build();
-    // Account top-right; transparent until clicked (session-only, not persisted).
+    // Account top-right; session-only opacity toggle (starts transparent).
     let account = gtk::Label::builder()
         .halign(gtk::Align::End)
         .valign(gtk::Align::End)
@@ -1114,7 +1113,6 @@ fn usage_row_widget(row: &UsageRow) -> (gtk::Widget, UsageRowWidgets) {
         .margin_end(12)
         .build();
 
-    // Bottom-align period + remaining for a shared baseline.
     let header = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
@@ -1172,7 +1170,7 @@ fn build_tools_page() -> gtk::Widget {
                     } else {
                         t("tools.param.optional")
                     };
-                    // Pre-built by status_fmt::tool_param_detail (no host-side derivation).
+                    // Pre-built by status_fmt::tool_param_detail (host must not re-derive).
                     let detail = p["detail"].as_str().unwrap_or("");
                     let pdesc = p["description"].as_str().unwrap_or("");
                     let mut sub = format!("{ptype} · {req}");

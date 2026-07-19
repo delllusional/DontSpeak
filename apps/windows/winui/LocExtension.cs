@@ -4,7 +4,7 @@ namespace DontSpeak;
 
 /// <summary>
 /// Load-time catalog lookup: <c>Text="{loc:Loc Key=status.caps_lock}"</c> → <see cref="Loc.T(string)"/>.
-/// <c>xmlns:loc="using:DontSpeak"</c>. Runtime-locale strings are set from code-behind.
+/// <c>xmlns:loc="using:DontSpeak"</c>. Runtime-locale strings come from code-behind.
 /// </summary>
 [MarkupExtensionReturnType(ReturnType = typeof(string))]
 internal sealed partial class LocExtension : MarkupExtension
