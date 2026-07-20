@@ -32,33 +32,34 @@ explicit target.
 
 Pure Q&A that doesn't inspect the repo needs no worktree.
 
-## Before final verification and landing
+## Before final verification and publishing
 
-Don't leave finished work only on a side branch. Land onto `main`, clean up the
-branch, and close related GitHub issues. Don't open a pull request unless the
-user asks for one.
+Keep all work on its feature branch, including branches created under the default
+workflow and handed-off feature worktrees. Preserve its history unless the user
+asks for a rewrite, fetch `origin/main` for comparison, re-run every applicable
+verification, commit, and push the feature branch. Do not land on `main`, delete
+the branch or worktree, or close related issues or pull requests unless the user
+explicitly asks.
 
-1. Fetch `origin/main` again.
-2. If the task branch has more than one commit, squash to one landing commit
-   (keep every distinct `Agent:` trailer — [COMMIT-ATTRIBUTION.md](COMMIT-ATTRIBUTION.md)).
-3. If upstream moved, rebase the clean task branch onto `origin/main`. Stop on conflict.
-4. Re-run every applicable verification after rebase/squash.
-5. **Land on `main`** (never force-push `main`):
-   - Prefer: fast-forward local `main` to the verified task branch, then
-     `git push origin main`.
-   - If the branch can't fast-forward (diverged history, or the user says to
-     pick): from the main worktree, cherry-pick the verified landing commit(s)
-     onto up-to-date `main`, then push. Stop on cherry-pick conflict.
-   - No merge commits on `main` for agent landings. If a user-requested PR is
-     the merge vehicle, finish that PR, then still do the cleanup steps below.
-6. **Delete the task branch** locally and on `origin` once `main` has the work
-   (`git branch -d` / `-D` after a cherry-pick rewrite; `git push origin --delete
-   <branch>`). Remove the task worktree
-   (`ExitWorktree` / `git worktree remove`) so it doesn't linger.
-7. **Close related GitHub issues** the work fixes. Prefer `Closes #N` (or
-   `Fixes #N`) in the landing commit so GitHub auto-closes on push to `main`;
-   otherwise `gh issue close N` with a one-line pointer to the main SHA. If a
-   PR was opened for the branch, close it after `main` has the change (note the
-   main SHA); don't leave the PR or issue open after a successful land.
+Report the feature-branch SHA and any issue or pull request state changes.
 
-Report the main SHA and any issue/PR numbers closed.
+## Landing on main
+
+Land only when the user explicitly asks:
+
+1. Fetch `origin/main`, then update the local `main` worktree with
+   `git pull --ff-only origin main`.
+2. From the `main` worktree, cherry-pick only the requested, verified feature
+   commit or commits. Stop and report any conflict.
+3. Re-run every applicable verification on the resulting `main`.
+4. Push `main` without force. Do not merge or rebase the feature branch into
+   `main`.
+5. Keep the feature branch and worktree unless the user explicitly asks to delete
+   them.
+6. Close related GitHub issues only for fixes now present on `main`. Prefer
+   `Closes #N` or `Fixes #N` in the cherry-picked commit; otherwise close the issue
+   with a one-line pointer to the main SHA. Close a related pull request only when
+   the user asks or the requested landing makes it obsolete.
+
+Report the main SHA, the cherry-picked commit SHAs, and any issue or pull request
+state changes.
