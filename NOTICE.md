@@ -115,7 +115,8 @@ These are fetched to the user's machine on first use; DontSpeak does not redistr
 Each carries its upstream license:
 
 - **ONNX Runtime** (Microsoft) — **MIT**.
-- **Kokoro-82M** TTS model (hexgrad) — **Apache-2.0**.
+- **Kokoro-82M** TTS model (hexgrad; onnx-community FP16 export) — **Apache-2.0**.
+  https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX
 - **Chatterbox Multilingual** TTS model and default reference voice (Resemble AI,
   onnx-community export) — **MIT**. https://huggingface.co/onnx-community/chatterbox-multilingual-ONNX
 - **Qwen3-TTS 12 Hz 0.6B CustomVoice** (Qwen), downloaded as either the onnx-community

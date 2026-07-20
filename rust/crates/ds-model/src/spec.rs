@@ -487,10 +487,10 @@ mod tests {
     #[test]
     fn kokoro_specs_have_right_urls_and_files() {
         let onnx = kokoro_onnx_spec();
-        assert_eq!(onnx.file_name, "kokoro-v1.0.onnx");
+        assert_eq!(onnx.file_name, "kokoro-v1.0-fp16.onnx");
         assert_eq!(
             onnx.url,
-            "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+            "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231/onnx/model_fp16.onnx"
         );
         let voices = kokoro_voices_spec();
         assert_eq!(voices.file_name, "voices-v1.0.bin");

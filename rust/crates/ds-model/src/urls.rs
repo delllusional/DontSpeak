@@ -26,13 +26,13 @@ pub struct Download {
     pub size_bytes: u64,
 }
 
-// ── Kokoro TTS — thewh1teagle/kokoro-onnx release `model-files-v1.0` ──────────
+// ── Kokoro TTS — onnx-community/Kokoro-82M-v1.0-ONNX FP16 ─────────────
 
 pub const KOKORO_ONNX: Download = Download {
-    file_name: "kokoro-v1.0.onnx",
-    url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
-    sha256: "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
-    size_bytes: 325_532_387,
+    file_name: "kokoro-v1.0-fp16.onnx",
+    url: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231/onnx/model_fp16.onnx",
+    sha256: "ba4527a874b42b21e35f468c10d326fdff3c7fc8cac1f85e9eb6c0dfc35c334a",
+    size_bytes: 163_234_740,
 };
 
 pub const KOKORO_VOICES: Download = Download {
@@ -435,7 +435,7 @@ impl Project {
 pub const KOKORO: Project = Project {
     name: "Kokoro",
     usage: "Text-to-speech voice model",
-    homepage: "https://github.com/thewh1teagle/kokoro-onnx",
+    homepage: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX",
     license: "Apache-2.0",
     license_url: "https://www.apache.org/licenses/LICENSE-2.0",
     platforms: Platform::ALL,

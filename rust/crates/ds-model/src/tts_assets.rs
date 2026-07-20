@@ -411,7 +411,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         dir_name: None,
         files: &KOKORO_FILES,
         display_name: "Kokoro",
-        homepage: "https://github.com/thewh1teagle/kokoro-onnx",
+        homepage: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX",
         license: "Apache-2.0",
         license_url: "https://www.apache.org/licenses/LICENSE-2.0",
     },

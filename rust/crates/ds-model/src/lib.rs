@@ -1,7 +1,7 @@
 //! ds-model — locate & download model assets for dontspeak (ARCHITECTURE §C.1 / §D).
 //!
 //! Assets: the Parakeet STT model (streaming FastConformer: encoder + decoder + joiner + tokens) AND the native
-//! Kokoro TTS set — `kokoro-v1.0.onnx`, voices, the tiny English G2P encoder/decoder,
+//! Kokoro TTS set — `kokoro-v1.0-fp16.onnx`, voices, the tiny English G2P encoder/decoder,
 //! and the matching `libonnxruntime` dylib for `ort` (load-dynamic, resolved at
 //! runtime). One base dir [`ds_config::model_dir`] holds every asset; each is a
 //! [`ModelSpec`] with a pinned SHA-256. [`ensure`] returns a cached file if its
