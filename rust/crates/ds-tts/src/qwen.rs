@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use half::f16;
 use ort::session::{Session, SessionInputValue};
-use ort::value::{Tensor, ValueType};
+use ort::value::{Tensor, TensorElementType, ValueType};
 use serde::Deserialize;
 use tokenizers::AddedToken;
 use tokenizers::models::bpe::BPE;
@@ -62,6 +63,43 @@ impl TensorData {
             Tensor::from_array((self.shape.clone(), self.data.clone()))
                 .map_err(|error| format!("qwen tensor: {error}"))
         }
+    }
+
+    /// f16 form of [`tensor`](Self::tensor). The int4 talker's FP16 sub-graphs take their
+    /// embeddings/hidden/KV as float16; the host loop stays f32 and narrows at the boundary.
+    fn tensor_f16(&self) -> Result<Tensor<f16>, String> {
+        if self.data.is_empty() {
+            Tensor::new(&ort::memory::Allocator::default(), self.shape.clone())
+                .map_err(|error| format!("qwen empty f16 tensor: {error}"))
+        } else {
+            let data: Vec<f16> = self.data.iter().map(|&x| f16::from_f32(x)).collect();
+            Tensor::from_array((self.shape.clone(), data))
+                .map_err(|error| format!("qwen f16 tensor: {error}"))
+        }
+    }
+}
+
+/// Build a float model input from f32 host data, narrowed to float16 when the graph
+/// declares that input as f16 (per-input, since a graph can mix dtypes).
+fn float_feed(
+    session: &Session,
+    name: &str,
+    data: &TensorData,
+) -> Result<SessionInputValue<'static>, String> {
+    let wants_f16 = session.inputs().iter().any(|input| {
+        input.name() == name
+            && matches!(
+                input.dtype(),
+                ValueType::Tensor {
+                    ty: TensorElementType::Float16,
+                    ..
+                }
+            )
+    });
+    if wants_f16 {
+        Ok(data.tensor_f16()?.into())
+    } else {
+        Ok(data.tensor()?.into())
     }
 }
 
@@ -308,17 +346,21 @@ impl QwenSynth {
                 if cancelled() {
                     return Ok(Vec::new());
                 }
-                let hidden_tensor =
-                    Tensor::from_array((vec![1, hidden_width as i64], talker_hidden.clone()))
-                        .map_err(|error| format!("qwen predictor hidden tensor: {error}"))?;
+                let hidden_data = TensorData {
+                    shape: vec![1, hidden_width as i64],
+                    data: talker_hidden.clone(),
+                };
                 let ids_tensor = Tensor::from_array((vec![1, GROUPS as i64], frame.to_vec()))
                     .map_err(|error| format!("qwen predictor IDs tensor: {error}"))?;
                 let predicted = self
                     .code_predictor
-                    .run(ort::inputs! {
-                        "talker_hidden" => hidden_tensor,
-                        "codec_ids" => ids_tensor,
-                    })
+                    .run(vec![
+                        (
+                            "talker_hidden".to_string(),
+                            float_feed(&self.code_predictor, "talker_hidden", &hidden_data)?,
+                        ),
+                        ("codec_ids".to_string(), SessionInputValue::from(ids_tensor)),
+                    ])
                     .map_err(|error| format!("qwen code predictor run: {error}"))?;
                 let predicted = extract_f32(&predicted[0], "qwen group logits")?;
                 let group_vocab = predicted.data.len() / (GROUPS - 1);
@@ -382,12 +424,15 @@ impl QwenSynth {
         ))
         .map_err(|error| format!("qwen attention tensor: {error}"))?;
         let mut feed: Vec<(String, SessionInputValue)> = vec![
-            ("inputs_embeds".into(), embeds.tensor()?.into()),
+            (
+                "inputs_embeds".into(),
+                float_feed(&self.talker, "inputs_embeds", embeds)?,
+            ),
             ("position_ids".into(), positions.into()),
             ("attention_mask".into(), attention.into()),
         ];
         for ((name, _), value) in self.past_names.iter().zip(&self.past_shapes).zip(cache) {
-            feed.push((name.clone(), value.tensor()?.into()));
+            feed.push((name.clone(), float_feed(&self.talker, name, value)?));
         }
         let outputs = self
             .talker
@@ -483,13 +528,21 @@ fn run_ids(
     extract_f32(&outputs[0], label)
 }
 
+/// Extract a float output as f32, accepting either f32 or f16 — the FP16 talker sub-graphs
+/// emit float16 while other graphs emit float32.
 fn extract_f32(value: &ort::value::DynValue, label: &str) -> Result<TensorData, String> {
+    if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
+        return Ok(TensorData {
+            shape: shape.to_vec(),
+            data: data.to_vec(),
+        });
+    }
     let (shape, data) = value
-        .try_extract_tensor::<f32>()
+        .try_extract_tensor::<f16>()
         .map_err(|error| format!("{label}: {error}"))?;
     Ok(TensorData {
         shape: shape.to_vec(),
-        data: data.to_vec(),
+        data: data.iter().map(|h| h.to_f32()).collect(),
     })
 }
 

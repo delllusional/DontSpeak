@@ -16,8 +16,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use half::f16;
 use ort::session::{Session, SessionInputValue};
-use ort::value::{Tensor, ValueType};
+use ort::value::{Tensor, TensorElementType, ValueType};
 
 use super::tokenizer::ChatterboxTokenizer;
 
@@ -135,6 +136,20 @@ impl<T: Clone + ort::value::PrimitiveTensorElementType + std::fmt::Debug + 'stat
         }
         Tensor::from_array((self.shape.clone(), self.data.clone()))
             .map_err(|e| format!("tensor: {e}"))
+    }
+}
+
+impl TensorData<f32> {
+    /// Build an f16 tensor from this f32 data. The pinned FP16 language_model export takes
+    /// its embeddings and KV cache as float16; the loop keeps f32 host-side (argmax/penalty
+    /// math) and narrows only at the model boundary.
+    fn to_tensor_f16(&self) -> Result<Tensor<f16>, String> {
+        if self.data.is_empty() {
+            return Tensor::new(&ort::memory::Allocator::default(), self.shape.clone())
+                .map_err(|e| format!("empty f16 tensor: {e}"));
+        }
+        let data: Vec<f16> = self.data.iter().map(|&x| f16::from_f32(x)).collect();
+        Tensor::from_array((self.shape.clone(), data)).map_err(|e| format!("f16 tensor: {e}"))
     }
 }
 
@@ -387,13 +402,13 @@ impl ChatterboxSynth {
             let mut feed: Vec<(String, SessionInputValue)> = Vec::new();
             feed.push((
                 "inputs_embeds".to_string(),
-                inputs_embeds.to_tensor()?.into(),
+                lm_input(&self.lm, "inputs_embeds", &inputs_embeds)?,
             ));
             let mask = Tensor::from_array((vec![1i64, attn_len as i64], vec![1i64; attn_len]))
                 .map_err(|e| format!("attention_mask tensor: {e}"))?;
             feed.push(("attention_mask".to_string(), mask.into()));
             for (name, kv) in self.lm_past_names.iter().zip(&past) {
-                feed.push((name.clone(), kv.to_tensor()?.into()));
+                feed.push((name.clone(), lm_input(&self.lm, name, kv)?));
             }
             let outputs = self
                 .lm
@@ -454,13 +469,47 @@ impl ChatterboxSynth {
     }
 }
 
+/// Build one language_model input from f32 host data, narrowed to float16 when the graph
+/// declares that input as f16. The pinned FP16 export mixes dtypes — the embeddings are
+/// float16 while the KV cache stays float32 — so each input must match its own declaration
+/// rather than assume one dtype for the whole feed.
+fn lm_input(
+    session: &Session,
+    name: &str,
+    data: &TensorData<f32>,
+) -> Result<SessionInputValue<'static>, String> {
+    let wants_f16 = session.inputs().iter().any(|input| {
+        input.name() == name
+            && matches!(
+                input.dtype(),
+                ValueType::Tensor {
+                    ty: TensorElementType::Float16,
+                    ..
+                }
+            )
+    });
+    if wants_f16 {
+        Ok(data.to_tensor_f16()?.into())
+    } else {
+        Ok(data.to_tensor()?.into())
+    }
+}
+
+/// Extract a float output as f32, accepting either an f32 or an f16 tensor — the FP16
+/// language_model emits float16 logits and KV, while the encoder/decoder emit float32.
 fn extract_f32(v: &ort::value::DynValue, what: &str) -> Result<TensorData<f32>, String> {
+    if let Ok((shape, data)) = v.try_extract_tensor::<f32>() {
+        return Ok(TensorData {
+            shape: shape.to_vec(),
+            data: data.to_vec(),
+        });
+    }
     let (shape, data) = v
-        .try_extract_tensor::<f32>()
+        .try_extract_tensor::<f16>()
         .map_err(|e| format!("extract {what}: {e}"))?;
     Ok(TensorData {
         shape: shape.to_vec(),
-        data: data.to_vec(),
+        data: data.iter().map(|h| h.to_f32()).collect(),
     })
 }
 
@@ -475,14 +524,14 @@ fn extract_i64(v: &ort::value::DynValue, what: &str) -> Result<TensorData<i64>, 
 }
 
 fn extract_last_f32_row(v: &ort::value::DynValue, what: &str) -> Result<Vec<f32>, String> {
-    let (shape, data) = v
-        .try_extract_tensor::<f32>()
-        .map_err(|e| format!("extract {what}: {e}"))?;
-    let width = shape
+    let tensor = extract_f32(v, what)?;
+    let width = tensor
+        .shape
         .last()
         .copied()
         .filter(|width| *width > 0)
         .ok_or_else(|| format!("{what} has no row width"))? as usize;
+    let data = &tensor.data;
     data.get(data.len().saturating_sub(width)..)
         .filter(|row| row.len() == width)
         .map(<[f32]>::to_vec)

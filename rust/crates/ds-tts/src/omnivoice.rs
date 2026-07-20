@@ -1,7 +1,60 @@
 //! OmniVoice int4 ONNX inference with confidence-weighted iterative unmasking.
 
+use half::f16;
 use ort::session::{Session, SessionInputValue};
-use ort::value::{Tensor, ValueType};
+use ort::value::{Tensor, TensorElementType, ValueType};
+
+/// Extract a float output as f32, accepting either f32 or f16 — the FP16 audio sub-models
+/// (embeddings/heads/decoder) emit float16 while the int4 LLM path emits float32.
+fn extract_floats(value: &ort::value::DynValue, label: &str) -> Result<Vec<f32>, String> {
+    if let Ok((_, data)) = value.try_extract_tensor::<f32>() {
+        return Ok(data.to_vec());
+    }
+    let (_, data) = value
+        .try_extract_tensor::<f16>()
+        .map_err(|error| format!("{label}: {error}"))?;
+    Ok(data.iter().map(|half| half.to_f32()).collect())
+}
+
+/// Build a float model input from f32 host data (possibly empty, for a zero-length KV
+/// cache), narrowed to float16 when the graph declares that input as f16.
+fn float_input(
+    session: &Session,
+    name: &str,
+    shape: Vec<i64>,
+    data: Vec<f32>,
+) -> Result<SessionInputValue<'static>, String> {
+    let wants_f16 = session.inputs().iter().any(|input| {
+        input.name() == name
+            && matches!(
+                input.dtype(),
+                ValueType::Tensor {
+                    ty: TensorElementType::Float16,
+                    ..
+                }
+            )
+    });
+    let alloc = ort::memory::Allocator::default();
+    if wants_f16 {
+        if data.is_empty() {
+            return Tensor::<f16>::new(&alloc, shape)
+                .map(Into::into)
+                .map_err(|error| format!("{name} empty f16: {error}"));
+        }
+        let data: Vec<f16> = data.iter().map(|&x| f16::from_f32(x)).collect();
+        Tensor::from_array((shape, data))
+            .map(Into::into)
+            .map_err(|error| format!("{name} f16 tensor: {error}"))
+    } else if data.is_empty() {
+        Tensor::<f32>::new(&alloc, shape)
+            .map(Into::into)
+            .map_err(|error| format!("{name} empty f32: {error}"))
+    } else {
+        Tensor::from_array((shape, data))
+            .map(Into::into)
+            .map_err(|error| format!("{name} tensor: {error}"))
+    }
+}
 
 const CODEBOOKS: usize = 8;
 const CODEBOOK_SIZE: usize = 1024;
@@ -169,10 +222,8 @@ impl OmniVoiceSynth {
             .decoder
             .run(ort::inputs! { "codes" => tensor })
             .map_err(|error| format!("omnivoice decoder run: {error}"))?;
-        let (_, waveform) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|error| format!("omnivoice waveform: {error}"))?;
-        Ok(crate::trim::trim_silence(waveform))
+        let waveform = extract_floats(&outputs[0], "omnivoice waveform")?;
+        Ok(crate::trim::trim_silence(&waveform))
     }
 
     fn run_step(
@@ -189,13 +240,14 @@ impl OmniVoiceSynth {
             .embeddings
             .run(ort::inputs! { "input_ids" => ids, "audio_mask" => mask })
             .map_err(|error| format!("omnivoice embeddings run: {error}"))?;
-        let (_, embedded) = embedded[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|error| format!("omnivoice embeddings: {error}"))?;
-        let embeds = Tensor::from_array((vec![1, sequence as i64, 1024], embedded.to_vec()))
-            .map_err(|error| format!("omnivoice embeddings tensor: {error}"))?;
-        let mut feed: Vec<(String, SessionInputValue)> =
-            vec![("inputs_embeds".into(), embeds.into())];
+        let embedded = extract_floats(&embedded[0], "omnivoice embeddings")?;
+        let embeds = float_input(
+            &self.llm,
+            "inputs_embeds",
+            vec![1, sequence as i64, 1024],
+            embedded,
+        )?;
+        let mut feed: Vec<(String, SessionInputValue)> = vec![("inputs_embeds".into(), embeds)];
         let input_names: Vec<&str> = self.llm.inputs().iter().map(|input| input.name()).collect();
         if input_names.contains(&"attention_mask") {
             let attention = Tensor::from_array((vec![1, sequence as i64], vec![1i64; sequence]))
@@ -209,26 +261,25 @@ impl OmniVoiceSynth {
             feed.push(("position_ids".into(), positions.into()));
         }
         for (name, shape) in &self.llm_past {
-            let tensor = Tensor::<f32>::new(&ort::memory::Allocator::default(), shape.clone())
-                .map_err(|error| format!("omnivoice empty cache: {error}"))?;
-            feed.push((name.clone(), tensor.into()));
+            let tensor = float_input(&self.llm, name, shape.clone(), Vec::new())?;
+            feed.push((name.clone(), tensor));
         }
         let hidden = self
             .llm
             .run(feed)
             .map_err(|error| format!("omnivoice LLM run: {error}"))?;
-        let (_, hidden) = hidden[self.hidden_output]
-            .try_extract_tensor::<f32>()
-            .map_err(|error| format!("omnivoice hidden states: {error}"))?;
-        let hidden = Tensor::from_array((vec![1, sequence as i64, 1024], hidden.to_vec()))
-            .map_err(|error| format!("omnivoice hidden tensor: {error}"))?;
+        let hidden = extract_floats(&hidden[self.hidden_output], "omnivoice hidden states")?;
+        let hidden = float_input(
+            &self.heads,
+            "hidden_states",
+            vec![1, sequence as i64, 1024],
+            hidden,
+        )?;
         let logits = self
             .heads
-            .run(ort::inputs! { "hidden_states" => hidden })
+            .run(vec![("hidden_states".to_string(), hidden)])
             .map_err(|error| format!("omnivoice heads run: {error}"))?;
-        let (_, logits) = logits[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|error| format!("omnivoice logits: {error}"))?;
+        let logits = extract_floats(&logits[0], "omnivoice logits")?;
         // The unmasking loop slices by fixed offsets; a shape drift must fail here,
         // not panic there.
         let expected = CODEBOOKS * sequence * (CODEBOOK_SIZE + 1);

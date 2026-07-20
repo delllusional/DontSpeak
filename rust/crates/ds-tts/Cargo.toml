@@ -30,6 +30,8 @@ serde_json = { workspace = true }
 # lib.rs — so they're no longer pure modules of THIS crate. Pinned once in the workspace.
 # ONNX inference (load-dynamic: no onnxruntime baked, resolved at runtime).
 ort = { workspace = true }
+# f16 tensors for the FP16 model exports (Chatterbox LM, OmniVoice/Qwen sub-models).
+half = { workspace = true }
 # Released Misaki-compatible English frontend.
 voice-g2p = { workspace = true }
 # Runtime-load the same prebuilt eSpeak distribution used by MLX Audio/Misaki.
