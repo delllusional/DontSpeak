@@ -38,19 +38,18 @@ serde_json = { workspace = true }
 # Extract libonnxruntime.dylib from the microsoft/pyke .tgz (Kokoro route A).
 flate2 = { workspace = true }
 tar = { workspace = true }
-
-# Windows route A ships ONNX Runtime as a .zip (not .tgz), so we need a zip reader
-# to pull lib/onnxruntime.dll out of it.
-[target.'cfg(windows)'.dependencies]
+# Zip reader for: Kokoro frontend wheels (espeakng-loader) on every OS; Windows ORT
+# .zip; Linux CUDA wheels. Kept as a normal dep so macOS/linux-aarch64 compile the
+# frontend path instead of only the CUDA/Windows target cfgs.
 zip = { workspace = true }
+
 # LoadLibraryW("nvcuda.dll") — the live NVIDIA-driver presence probe that gates the CUDA download.
+[target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_Foundation"] }
 
-# Linux x86_64 CUDA GPU runtime: the NVIDIA + onnxruntime-gpu wheels are zips (need `zip` to
-# pull the .so's out), and the CUDA provider's dependency libs are preloaded with RTLD_GLOBAL
-# via dlopen (need `libc`) since glibc reads LD_LIBRARY_PATH only at process start.
+# Linux x86_64 CUDA GPU runtime: the CUDA provider's dependency libs are preloaded with
+# RTLD_GLOBAL via dlopen (need `libc`) since glibc reads LD_LIBRARY_PATH only at process start.
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-zip = { workspace = true }
 libc = { workspace = true }
 
 # macOS: the shared MLX Audio shim loader (mlx_shim.rs) dlopens libdontspeak_mlx at
