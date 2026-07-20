@@ -332,6 +332,67 @@ pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
     Ok(())
 }
 
+/// Dev diagnostic (`--synth-check`): drive the real load → detect → frontend → synth path
+/// for one model + phrase and report amplitude, without opening the audio device. Reports
+/// `non-finite`/`peak` so a NaN render (which reaches a sink as silence, not an error —
+/// the Kokoro FP16 trap) fails loudly here instead of playing nothing. Loads UNwarmed so
+/// the reported audio is this phrase, not the discarded warm-up utterance.
+pub(crate) fn synth_check(
+    model: ds_config::TtsModel,
+    text: &str,
+    voice: &str,
+) -> Result<(), String> {
+    let language = ds_tts::detect_supported_language(text, model)?;
+    let FrontendOutcome::Finished(batches) = frontend_batches(model, text, voice, &language)?
+    else {
+        return Err("frontend cancelled".to_string());
+    };
+    if batches.len() == 0 {
+        return Err("frontend produced no batches".to_string());
+    }
+    let mut backend = load_backend_unwarmed(model)?;
+    let mut pcm: Vec<f32> = Vec::new();
+    prepare_backend_audio(
+        &mut backend,
+        &batches,
+        &SynthesisRequest {
+            skip: 0,
+            voice,
+            language: &language,
+            rate: 1.0,
+        },
+        &|| false,
+        |audio| {
+            pcm.extend_from_slice(&audio.pcm);
+            Ok(())
+        },
+    )?;
+
+    let non_finite = pcm.iter().filter(|s| !s.is_finite()).count();
+    let peak = pcm
+        .iter()
+        .copied()
+        .filter(|s| s.is_finite())
+        .fold(0.0f32, |m, s| m.max(s.abs()));
+    println!(
+        "OK model={} lang={language} voice={voice} samples={} peak={peak:.4} non_finite={non_finite}",
+        model.as_str(),
+        pcm.len()
+    );
+    if pcm.is_empty() {
+        return Err("no samples".to_string());
+    }
+    if non_finite > 0 {
+        return Err(format!(
+            "{non_finite} non-finite samples — the render is silent"
+        ));
+    }
+    if peak < 0.001 {
+        return Err(format!("peak {peak:.6} is inaudible"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

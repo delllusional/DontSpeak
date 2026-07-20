@@ -43,6 +43,24 @@ fn main() {
         duplex::coexist_probe(); // dev check: VPIO + a separate cpal capture at once
     }
 
+    if first == "--synth-check" {
+        // Dev check: `--synth-check <model> <voice> <text>` — load + synth one phrase and
+        // report amplitude (no audio device). Model from arg, else DONTSPEAK_TTS_MODEL.
+        let model = ds_config::TtsModel::parse(&args.next().unwrap_or_default())
+            .unwrap_or_else(oneshot::tts_model);
+        let voice = args.next().unwrap_or_default();
+        let text = args.next().unwrap_or_default();
+        let code = match oneshot::synth_check(model, &text, &voice) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("FAIL {}: {error}", model.as_str());
+                1
+            }
+        };
+        // SAFETY: deliberate `_exit` teardown; see crate doc.
+        unsafe { _exit(code) };
+    }
+
     if first == "--prefetch" {
         // Installer: pinned URLs/SHAs via ds-model. Default "all" ⇒ models + CUDA.
         let what = args.next().unwrap_or_else(|| "all".to_string());
