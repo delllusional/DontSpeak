@@ -44,11 +44,19 @@ fn detector() -> &'static LanguageDetector {
 /// Ambiguous / unspeakable → `en`.
 pub fn detect_language(text: &str) -> String {
     let prose = crate::normalize_spoken_text(text);
-    detector()
-        .detect_language_of(&prose)
-        .map(language_code)
-        .unwrap_or(DEFAULT_LANGUAGE)
-        .to_string()
+    let detected = detector().detect_language_of(&prose);
+    let code = detected.map(language_code).unwrap_or(DEFAULT_LANGUAGE);
+    // Which language an utterance got is the first thing to check when speech comes out
+    // in the wrong voice or a frontend refuses it, and the fallback to `en` is otherwise
+    // indistinguishable from a confident English detection. Logs the classified prose
+    // length rather than the prose, which is user speech content.
+    log::debug!(
+        target: "tts",
+        "lingua detected {code}{} over {} chars",
+        if detected.is_none() { " (no match, default)" } else { "" },
+        prose.chars().count()
+    );
+    code.to_string()
 }
 
 fn language_code(language: Language) -> &'static str {
@@ -100,6 +108,18 @@ mod tests {
     #[test]
     fn normalizes_markdown_before_detection() {
         assert_eq!(detect_language("**Bonjour**, comment allez-vous ?"), "fr");
+    }
+
+    #[test]
+    fn detects_kokoro_espeak_languages() {
+        // The espeak-backed Kokoro languages, so a detection regression that routed one
+        // of these to English (silently wrong voice) fails here.
+        assert_eq!(
+            detect_language("Ciao, oggi è una bella giornata di sole."),
+            "it"
+        );
+        assert_eq!(detect_language("Hola, hoy hace un día muy bonito."), "es");
+        assert_eq!(detect_language("Olá, hoje está um dia muito bonito."), "pt");
     }
 
     #[test]
