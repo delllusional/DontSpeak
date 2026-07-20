@@ -40,6 +40,11 @@ impl SttResidencySlot {
         *self.0.lock().unwrap() = SttResidency::Loaded;
     }
 
+    /// `Loaded` residency — distinguishes the steady state from an in-flight `Loading` claim.
+    pub(crate) fn is_loaded(&self) -> bool {
+        *self.0.lock().unwrap() == SttResidency::Loaded
+    }
+
     /// `-> Idle` from any state. On load failure (so later `load stt` can retry) and on
     /// `unload stt`. Structural unstick: only exit from `Loading`/`Loaded` (with `resolve_ok`).
     pub(crate) fn mark_unloaded(&self) {
@@ -70,6 +75,20 @@ mod tests {
         assert!(slot.try_claim());
         slot.resolve_ok();
         assert!(!slot.try_claim(), "a claim while already Loaded must fail");
+    }
+
+    #[test]
+    fn is_loaded_only_after_resolve_ok() {
+        // The serve loop stays silent on Loaded skips (steady-state reconcile tick)
+        // but still logs an in-flight (Loading) collision — the distinction is this flag.
+        let slot = SttResidencySlot::new();
+        assert!(!slot.is_loaded());
+        assert!(slot.try_claim());
+        assert!(!slot.is_loaded(), "Loading is not Loaded");
+        slot.resolve_ok();
+        assert!(slot.is_loaded());
+        slot.mark_unloaded();
+        assert!(!slot.is_loaded());
     }
 
     #[test]

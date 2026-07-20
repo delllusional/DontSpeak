@@ -1211,7 +1211,12 @@ pub(crate) fn serve() -> ! {
                 // load is already claimed (by that preload, or a prior `load stt`), skip — else
                 // claim it and load HERE (STT became wanted after startup, or preload was off).
                 if !stt_claimed.try_claim() {
-                    log::info!(target: "helper", "load stt skipped — a load is already claimed/in flight");
+                    // Loaded is the steady state the engine's ~20s reconcile tick re-requests
+                    // unconditionally — logging it would flood the log; only a genuinely
+                    // concurrent (in-flight) load is worth a line.
+                    if !stt_claimed.is_loaded() {
+                        log::info!(target: "helper", "load stt skipped — a load is already in flight");
+                    }
                     continue;
                 }
                 log::info!(target: "helper", "load stt attempting (provider={stt_provider})");
@@ -1499,7 +1504,7 @@ pub(crate) fn serve() -> ! {
                     s.stop();
                 }
                 *cur_player.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                log::warn!(target: "helper", "batch synthesis failed: {e}");
+                // The ERR reply is the single failure record — the engine (ttsq) logs it.
                 println!("{} {}", proto::ERR, one_line(&e));
                 let _ = std::io::stdout().flush();
                 continue;

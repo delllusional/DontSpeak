@@ -1073,15 +1073,18 @@ impl TtsManager {
             // whole gating scheme exists to fix. Transitioning straight to `Idle` also clears
             // any stale "failed to load" state — a deliberately unloaded model has none anymore.
             let gate = self.gate.get().map(|g| g.as_ref());
-            match engine {
+            let changed = match engine {
                 ds_helper_proto::HelperModel::Tts => {
                     self.tts_model.transition(ModelState::Idle, gate)
                 }
                 ds_helper_proto::HelperModel::Stt => {
                     self.stt_model.transition(ModelState::Idle, gate)
                 }
+            };
+            // Log like the gate: real transitions only, or the tick floods the log.
+            if changed {
+                log::info!(target: "engine", "helper: requested unload of {engine:?} model");
             }
-            log::info!(target: "engine", "helper: requested unload of {engine:?} model");
         }
     }
 
@@ -1099,7 +1102,15 @@ impl TtsManager {
             // confirmation (after `load_backend`) exactly as STT waits for `STTLOADED` (after
             // preload + graph warmup), so the dot stays "warming" until the model is truly
             // resident — never greening on the mere `load` request.
-            log::info!(target: "engine", "helper: requested preload of {engine:?} model");
+            let already_loaded = match engine {
+                ds_helper_proto::HelperModel::Tts => self.tts_model.is_loaded(),
+                ds_helper_proto::HelperModel::Stt => self.stt_model.is_loaded(),
+            };
+            // Already-Loaded = the reconcile tick's steady-state re-send; log only
+            // requests that can start a real load, or the tick floods the log.
+            if !already_loaded {
+                log::info!(target: "engine", "helper: requested preload of {engine:?} model");
+            }
         }
     }
 

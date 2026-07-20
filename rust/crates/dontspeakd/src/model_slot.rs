@@ -20,8 +20,9 @@ impl ModelSlot {
         Self(Mutex::new(ModelState::Idle))
     }
 
-    /// Authoritative transition; bump gate only on real change.
-    pub(crate) fn transition(&self, new_state: ModelState, gate: Option<&StatusGate>) {
+    /// Authoritative transition; bump gate — and return `true` — only on real change,
+    /// so callers can also change-gate their own side effects (e.g. logging).
+    pub(crate) fn transition(&self, new_state: ModelState, gate: Option<&StatusGate>) -> bool {
         let mut guard = self.0.lock().unwrap();
         if *guard != new_state {
             *guard = new_state;
@@ -29,7 +30,9 @@ impl ModelSlot {
             if let Some(g) = gate {
                 g.bump();
             }
+            return true;
         }
+        false
     }
 
     /// `Failed → Idle` only (never regress Loaded).
@@ -73,7 +76,10 @@ mod tests {
     fn fresh_transition_bumps() {
         let slot = ModelSlot::new();
         let gate = StatusGate::new();
-        slot.transition(ModelState::Loaded, Some(&gate));
+        assert!(
+            slot.transition(ModelState::Loaded, Some(&gate)),
+            "a real change reports true"
+        );
         assert_ne!(gate.seq(), 0, "the first transition bumps the gate");
         assert!(slot.is_loaded());
     }
@@ -84,7 +90,10 @@ mod tests {
         let gate = StatusGate::new();
         slot.transition(ModelState::Loaded, Some(&gate));
         let seq1 = gate.seq();
-        slot.transition(ModelState::Loaded, Some(&gate));
+        assert!(
+            !slot.transition(ModelState::Loaded, Some(&gate)),
+            "an identical repeat reports false"
+        );
         assert_eq!(gate.seq(), seq1, "an identical repeat must not bump again");
     }
 
