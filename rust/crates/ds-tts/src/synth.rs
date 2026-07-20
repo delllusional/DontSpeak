@@ -1,4 +1,4 @@
-//! ONNX inference over `kokoro-v1.0-fp16.onnx` via `ort` (load-dynamic) — `synthesizeBatch`.
+//! ONNX inference over `kokoro-v1.0-fp32.onnx` via `ort` (load-dynamic) — `synthesizeBatch`.
 //!
 //! I/O parity with kokoro-onnx `_create_audio` (the onnx-community export names the
 //! token input `input_ids`):

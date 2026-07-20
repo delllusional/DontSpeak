@@ -23,8 +23,13 @@ fn main() {
         Err(error) => fail(&format!("ORT dylib unavailable: {error}")),
     }
 
-    let model_path = ds_model::model_path(ds_model::KOKORO_ONNX_FILE)
-        .unwrap_or_else(|| fail("cannot resolve the model dir"));
+    // KOKORO_CHECK_MODEL evaluates a candidate export before it is pinned, without
+    // disturbing the installed model set.
+    let model_path = match std::env::var_os("KOKORO_CHECK_MODEL") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => ds_model::model_path(ds_model::KOKORO_ONNX_FILE)
+            .unwrap_or_else(|| fail("cannot resolve the model dir")),
+    };
     let voices_path = ds_model::model_path(ds_model::KOKORO_VOICES_FILE)
         .unwrap_or_else(|| fail("cannot resolve the model dir"));
     println!("model:     {}", model_path.display());
@@ -34,6 +39,10 @@ fn main() {
         .unwrap_or_else(|error| fail(&format!("read model: {error}")));
     let voices_bytes = ds_model::read_model_file(&voices_path)
         .unwrap_or_else(|error| fail(&format!("read voices: {error}")));
+
+    if std::env::var_os("KOKORO_CHECK_DUMP_IO").is_some() {
+        dump_graph_io(&model_bytes);
+    }
 
     let mut synth = ds_tts::synth::KokoroSynth::load(&model_bytes, &voices_bytes)
         .unwrap_or_else(|error| fail(&format!("load: {error}")));
@@ -99,6 +108,23 @@ fn main() {
         ));
     }
     println!("OK: audible Kokoro audio");
+}
+
+/// Graph boundary dtypes. An export whose I/O is float32 while its weights are float16
+/// is doing the precision change internally, which is where an overflow would live.
+fn dump_graph_io(model_bytes: &[u8]) {
+    let session = match ort::session::Session::builder()
+        .and_then(|mut builder| builder.commit_from_memory(model_bytes))
+    {
+        Ok(session) => session,
+        Err(error) => fail(&format!("dump load: {error}")),
+    };
+    for input in session.inputs() {
+        println!("input:     {} {:?}", input.name(), input.dtype());
+    }
+    for output in session.outputs() {
+        println!("output:    {} {:?}", output.name(), output.dtype());
+    }
 }
 
 fn fail(message: &str) -> ! {

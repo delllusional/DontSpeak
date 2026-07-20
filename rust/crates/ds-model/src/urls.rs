@@ -26,13 +26,18 @@ pub struct Download {
     pub size_bytes: u64,
 }
 
-// ── Kokoro TTS — onnx-community/Kokoro-82M-v1.0-ONNX FP16 ─────────────
+// ── Kokoro TTS — onnx-community/Kokoro-82M-v1.0-ONNX FP32 ─────────────
+//
+// FP32, not the half-size FP16 export from the same revision: FP16 overflows to NaN for
+// whole utterances (always under the CUDA EP, and under the CPU EP whenever the CUDA
+// build of the ORT dylib is loaded). The graph takes and returns FP32 either way, so the
+// precision is internal and cannot be worked around from the caller.
 
 pub const KOKORO_ONNX: Download = Download {
-    file_name: "kokoro-v1.0-fp16.onnx",
-    url: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231/onnx/model_fp16.onnx",
-    sha256: "ba4527a874b42b21e35f468c10d326fdff3c7fc8cac1f85e9eb6c0dfc35c334a",
-    size_bytes: 163_234_740,
+    file_name: "kokoro-v1.0-fp32.onnx",
+    url: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231/onnx/model.onnx",
+    sha256: "8fbea51ea711f2af382e88c833d9e288c6dc82ce5e98421ea61c058ce21a34cb",
+    size_bytes: 325_532_232,
 };
 
 pub const KOKORO_VOICES: Download = Download {

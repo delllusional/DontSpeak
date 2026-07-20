@@ -122,7 +122,7 @@ Each carries its upstream license:
   **GPL-3.0-or-later**. https://github.com/espeak-ng/espeak-ng
 - **jpreprocess NAIST-JDIC dictionary**, used by Kokoro's Japanese frontend —
   **BSD-3-Clause**. https://github.com/jpreprocess/jpreprocess
-- **Kokoro-82M** TTS model (hexgrad; onnx-community FP16 export) — **Apache-2.0**.
+- **Kokoro-82M** TTS model (hexgrad; onnx-community FP32 export) — **Apache-2.0**.
   https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX
 - **Chatterbox Multilingual** TTS model and default reference voice (Resemble AI,
   onnx-community FP16 language-model profile or mlx-community 8-bit conversion) — **MIT**.

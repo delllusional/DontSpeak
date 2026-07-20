@@ -179,11 +179,12 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         voices: KOKORO_VOICES,
         default_voices: KOKORO_VOICES,
         warmup_voice: "af_heart",
-        // No CUDA: the pinned FP16 export runs under the CUDA EP but returns all-NaN
-        // samples, which reach the sink as silence rather than an error. CPU is ~2x
-        // realtime, so correctness costs no usable speed. `ds-tts` rejects non-finite
-        // output at synthesis, which is what surfaced this.
-        providers: &[Provider::Mlx, Provider::OrtCoreMl, Provider::OrtCpu],
+        providers: &[
+            Provider::Mlx,
+            Provider::OrtCuda,
+            Provider::OrtCoreMl,
+            Provider::OrtCpu,
+        ],
         frontend: TtsFrontend::KokoroPhonemes,
         supports_rate: true,
         supports_full_duplex: true,
@@ -338,7 +339,7 @@ mod tests {
             assert!(model.descriptor().supports_provider(Provider::Mlx));
             assert!(model.descriptor().supports_provider(Provider::OrtCpu));
         }
-        for model in [TtsModel::Chatterbox, TtsModel::Qwen] {
+        for model in [TtsModel::Kokoro, TtsModel::Chatterbox, TtsModel::Qwen] {
             assert!(model.descriptor().supports_provider(Provider::OrtCuda));
         }
         assert!(
@@ -346,15 +347,6 @@ mod tests {
                 .descriptor()
                 .supports_provider(Provider::OrtCuda)
         );
-        // Kokoro's pinned FP16 export returns all-NaN under the CUDA EP, which renders as
-        // silence. Withholding CUDA here is what keeps provider selection on a backend
-        // that can actually synthesize.
-        assert!(
-            !TtsModel::Kokoro
-                .descriptor()
-                .supports_provider(Provider::OrtCuda)
-        );
-        assert!(!TtsModel::Kokoro.descriptor().wants_cuda("cuda"));
         assert!(TtsModel::Chatterbox.descriptor().wants_cuda("auto"));
         assert!(TtsModel::Qwen.descriptor().wants_cuda("cuda"));
         assert!(!TtsModel::OmniVoice.descriptor().wants_cuda("auto"));
