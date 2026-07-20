@@ -159,8 +159,8 @@ const DEFAULT_VOICE: &[&str] = &["default"];
 const QWEN_DEFAULT_VOICE: &[&str] = &["sohee"];
 const OMNIVOICE_VOICES: &[&str] = &["warm, clear female voice"];
 const MLX_CUDA_CPU_PROVIDERS: &[Provider] = &[Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu];
-// The pinned OmniVoice backbone is the CPU-int4 export; its CUDA export uses
-// different weights and tensor types.
+// The portable OmniVoice profile uses FP16 audio sub-models and an INT4 LLM because
+// ONNX Runtime GenAI has no FP16 CPU LLM profile. The all-FP16 export is CUDA-only.
 const OMNIVOICE_PROVIDERS: &[Provider] = &[Provider::Mlx, Provider::OrtCpu];
 
 pub static TTS_MODELS: [TtsModelDescriptor; 4] = [

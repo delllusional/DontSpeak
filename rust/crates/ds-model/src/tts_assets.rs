@@ -94,21 +94,21 @@ hf_asset!(
 );
 hf_asset!(
     CB_LANGUAGE_MODEL,
-    "language_model_q4f16.onnx",
+    "language_model_fp16.onnx",
     "onnx-community/chatterbox-multilingual-ONNX",
     CHATTERBOX_REV,
-    "onnx/language_model_q4f16.onnx",
-    "3b78e9235be5e2e2a811e482399155cb30415f6d87c98c21d12bf48843fc928f",
-    229_388
+    "onnx/language_model_fp16.onnx",
+    "0c36a5bbbc2a4ed8c345033896612cd320fd0971a0f5e6447ab4cdd2d7f22e36",
+    172_657
 );
 hf_asset!(
     CB_LANGUAGE_MODEL_DATA,
-    "language_model_q4f16.onnx_data",
+    "language_model_fp16.onnx_data",
     "onnx-community/chatterbox-multilingual-ONNX",
     CHATTERBOX_REV,
-    "onnx/language_model_q4f16.onnx_data",
-    "bdbc79504d20742b5d028074b4f1cdca8872e013fdfbbcea6b8b03154fe85a42",
-    304_737_408
+    "onnx/language_model_fp16.onnx_data",
+    "16dca11ae994e78427fa3090cc6faf347a15988ca40809c1bd9f2721f3b759a0",
+    1_040_316_416
 );
 hf_asset!(
     CB_DECODER,
@@ -170,52 +170,52 @@ hf_asset!(
     "code_predictor.onnx",
     "onnx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice",
     QWEN_ONNX_REV,
-    "cpu_int4/code_predictor.onnx",
-    "f0b3a431b90a56d2784599948bcff678d5188e38481d3a991d80c550d0d0bfa2",
-    91_668_866
+    "cpu_fp16/code_predictor.onnx",
+    "2bf685d424c0e7b36363c2139fe18c381da3188e037587f87ccfda42c2bd085f",
+    285_552_428
 );
 hf_asset!(
     QWEN_CODEC_EMBED,
     "codec_embed.onnx",
     "onnx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice",
     QWEN_ONNX_REV,
-    "cpu_int4/codec_embed.onnx",
-    "bd76cd6b77907c76b6d0055ea6cf7572468ab99dc3451c1176ea2189d1a55f70",
-    2_015_779
+    "cpu_fp16/codec_embed.onnx",
+    "7f5a774e01e8d8b7d788b4e3839e1188ce5ad3497044aeabca93dfe21ee6aec0",
+    6_291_797
 );
 hf_asset!(
     QWEN_RESIDUAL_EMBED,
     "residual_embed.onnx",
     "onnx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice",
     QWEN_ONNX_REV,
-    "cpu_int4/residual_embed.onnx",
-    "eec76513b562f558e76eeeb9b0bfa982de512104cddac372ec368ab504b080a0",
-    22_179_258
+    "cpu_fp16/residual_embed.onnx",
+    "95a5d7ff95bdda5ea71a772dfb4a092313679b8a874af45801de1aa881adc7c4",
+    69_215_780
 );
 hf_asset!(
     QWEN_TALKER,
     "talker_cache.onnx",
     "onnx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice",
     QWEN_ONNX_REV,
-    "cpu_int4/talker_cache.onnx",
-    "910e1d556cd74f11bbb55fff9d509a962bfc43f23608b62fb0a8215c7acc882f",
-    288_573_853
+    "cpu_fp16/talker_cache.onnx",
+    "a4170b103de61c89ab78a2471c2ca19eea9f6daad7b53b869d1a22c6aa1068c3",
+    891_756_744
 );
 hf_asset!(
     QWEN_TEXT_EMBED,
     "text_embed.onnx",
     "onnx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice",
     QWEN_ONNX_REV,
-    "cpu_int4/text_embed.onnx",
-    "b2923edfce01344dea9bd719e2daf94bda0b45bfd05a307514e9dd5f793dcd09",
-    203_384_915
+    "cpu_fp16/text_embed.onnx",
+    "3c1ec888fde0960d81e1a17f13c9ad737fb60693453916a49d7e78b171214204",
+    634_920_759
 );
 hf_asset!(
     QWEN_DECODER,
     "tok_decoder.onnx",
     "onnx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice",
     QWEN_ONNX_REV,
-    "cpu_int4/tok_decoder.onnx",
+    "cpu_fp16/tok_decoder.onnx",
     "8ec10051735029f6e08b04834128c9108428885c39384f443e49a6790ccb129f",
     458_268_831
 );
@@ -261,34 +261,34 @@ hf_asset!(
     "audio_embeddings_encoder.onnx",
     "onnx-community/OmniVoice-Onnx",
     OMNIVOICE_REV,
-    "int4/audio_embeddings_encoder.onnx",
-    "f21daf4ee076c841d210b8941063a057c6e36d2bc04f4405daefa15b82c05563",
-    2_363
+    "audio_embeddings_encoder.onnx",
+    "5b216f18a58e33e52e7d2a85ea843b996b1b7da6ecfbc5d70fb82f5e15136ab6",
+    2_172
 );
 hf_asset!(
     OMNI_AUDIO_EMBED_DATA,
     "audio_embeddings_encoder.onnx.data",
     "onnx-community/OmniVoice-Onnx",
     OMNIVOICE_REV,
-    "int4/audio_embeddings_encoder.onnx.data",
-    "f6ed8d313fa5f6d2d33f3ad0af077dd1ba6d607f2a573cb389f28eec53f84393",
-    87_160_832
+    "audio_embeddings_encoder.onnx.data",
+    "e2c605b03749beefd0b9d1c037b1ebd2d0c9c5c29928d7e382a1d4e5d3316660",
+    327_426_048
 );
 hf_asset!(
     OMNI_AUDIO_HEADS,
     "audio_heads_decoder.onnx",
     "onnx-community/OmniVoice-Onnx",
     OMNIVOICE_REV,
-    "int4/audio_heads_decoder.onnx",
-    "389f2133371f7f0bd678aba8cf1eac102ee4b227d3372f49bd181c591b890360",
-    4_462_676
+    "audio_heads_decoder.onnx",
+    "38e69afe9c9aa531fa59f23337d7fecbe84b7b04dc9c3ce0b871249a1c659ad4",
+    16_795_584
 );
 hf_asset!(
     OMNI_LLM,
     "llm_decoder.onnx",
     "onnx-community/OmniVoice-Onnx",
     OMNIVOICE_REV,
-    "int4/llm_decoder.onnx",
+    "llm_decoder.onnx",
     "dba2abc6753795f47e9c2f79e274ba1149de8a056f4cda35c7fb30fa0e50fedc",
     298_798
 );
@@ -297,7 +297,7 @@ hf_asset!(
     "llm_decoder.onnx.data",
     "onnx-community/OmniVoice-Onnx",
     OMNIVOICE_REV,
-    "int4/llm_decoder.onnx.data",
+    "llm_decoder.onnx.data",
     "59aa22f43d7b501d9ce64183106e60b65f97fb67e92f5d9e088d07504cf63383",
     296_484_864
 );
@@ -306,7 +306,7 @@ hf_asset!(
     "tokenizer.json",
     "onnx-community/OmniVoice-Onnx",
     OMNIVOICE_REV,
-    "int4/tokenizer.json",
+    "tokenizer.json",
     "408f669b7e2b045fdf54201d815bd364e6667dbd845115da81239c40bc6dcfd1",
     11_423_986
 );
@@ -315,7 +315,7 @@ hf_asset!(
     "config.json",
     "onnx-community/OmniVoice-Onnx",
     OMNIVOICE_REV,
-    "int4/config.json",
+    "config.json",
     "a8957a1c6e980b1f13347af7f33b339be6566f35dec66365dedaedabf51f61e9",
     1_416
 );
@@ -324,7 +324,7 @@ hf_asset!(
     "model_config.json",
     "onnx-community/OmniVoice-Onnx",
     OMNIVOICE_REV,
-    "int4/model_config.json",
+    "model_config.json",
     "cc4d867113078c19d500469bf5dd8bfd5344dfdae5acb2da6be8110c40b2fc8d",
     341
 );
@@ -333,7 +333,7 @@ hf_asset!(
     "tokenizer_config.json",
     "onnx-community/OmniVoice-Onnx",
     OMNIVOICE_REV,
-    "int4/tokenizer_config.json",
+    "tokenizer_config.json",
     "49f78845596a82bf15c83673794bdf9f76f812b11f60ab6a2239d9be65b00676",
     533
 );
@@ -342,9 +342,18 @@ hf_asset!(
     "higgs_decoder.onnx",
     "onnx-community/OmniVoice-Onnx",
     OMNIVOICE_REV,
-    "audio_tokenizer/higgs_decoder.onnx",
-    "b28b3317a6cbf0d0f4a71b476ecb5c767612a31702da6561154783c94b6fa806",
-    86_500_102
+    "audio_tokenizer/fp16/higgs_decoder.onnx",
+    "19b368e460fcf4a0352fd49127d37b75327b34a17e82c31599155f8968ce4002",
+    308_494
+);
+hf_asset!(
+    OMNI_WAVE_DECODER_DATA,
+    "higgs_decoder.onnx.data",
+    "onnx-community/OmniVoice-Onnx",
+    OMNIVOICE_REV,
+    "audio_tokenizer/fp16/higgs_decoder.onnx.data",
+    "5be7ff51d117dd1cd001b87ec6e6e93f61cbe923355c50841a15fcaf19f64a19",
+    43_100_160
 );
 
 static KOKORO_FILES: [Download; 4] = [
@@ -379,7 +388,7 @@ static QWEN_FILES: [Download; 10] = [
     QWEN_TOKENIZER_CONFIG,
     QWEN_VOCAB,
 ];
-static OMNIVOICE_FILES: [Download; 10] = [
+static OMNIVOICE_FILES: [Download; 11] = [
     OMNI_AUDIO_EMBED,
     OMNI_AUDIO_EMBED_DATA,
     OMNI_AUDIO_HEADS,
@@ -390,6 +399,7 @@ static OMNIVOICE_FILES: [Download; 10] = [
     OMNI_MODEL_CONFIG,
     OMNI_TOKENIZER_CONFIG,
     OMNI_WAVE_DECODER,
+    OMNI_WAVE_DECODER_DATA,
 ];
 
 #[derive(Debug)]
@@ -539,6 +549,38 @@ mod tests {
                 assert!(file.size_bytes > 0);
             }
         }
+    }
+
+    #[test]
+    fn portable_profiles_stay_on_the_closest_compatible_precision() {
+        let chatterbox = tts_ort_asset_set(TtsModel::Chatterbox);
+        assert!(
+            chatterbox
+                .files
+                .iter()
+                .any(|file| { file.url.contains("/onnx/language_model_fp16.onnx") })
+        );
+        assert!(!chatterbox.files.iter().any(|file| file.url.contains("q4")));
+
+        let qwen = tts_ort_asset_set(TtsModel::Qwen);
+        assert!(
+            qwen.files
+                .iter()
+                .filter(|file| file.file_name.ends_with(".onnx"))
+                .all(|file| file.url.contains("/cpu_fp16/"))
+        );
+
+        let omnivoice = tts_ort_asset_set(TtsModel::OmniVoice);
+        assert!(
+            !omnivoice
+                .files
+                .iter()
+                .any(|file| file.url.contains("/int4/"))
+        );
+        assert!(omnivoice.files.iter().any(|file| {
+            file.url
+                .contains("/audio_tokenizer/fp16/higgs_decoder.onnx")
+        }));
     }
 
     #[test]

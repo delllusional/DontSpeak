@@ -125,11 +125,13 @@ Each carries its upstream license:
 - **Kokoro-82M** TTS model (hexgrad; onnx-community FP16 export) — **Apache-2.0**.
   https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX
 - **Chatterbox Multilingual** TTS model and default reference voice (Resemble AI,
-  onnx-community export) — **MIT**. https://huggingface.co/onnx-community/chatterbox-multilingual-ONNX
+  onnx-community FP16 language-model profile or mlx-community 8-bit conversion) — **MIT**.
+  https://huggingface.co/onnx-community/chatterbox-multilingual-ONNX
 - **Qwen3-TTS 12 Hz 0.6B CustomVoice** (Qwen), downloaded as either the onnx-community
-  int4 export or the mlx-community 8-bit conversion — **Apache-2.0**.
+  FP16 profile or the mlx-community 8-bit conversion — **Apache-2.0**.
   https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
-- **OmniVoice / Prince-1** TTS model (onnx-community int4 export) — **Apache-2.0**.
+- **OmniVoice / Prince-1** TTS model (onnx-community CPU profile: FP16 audio sub-models
+  and Higgs decoder with an INT4 LLM; mlx-community BF16 conversion) — **Apache-2.0**.
   https://huggingface.co/onnx-community/OmniVoice-Onnx
 - **graphemes_to_phonemes_en_us** tiny BART model (Peter Reid), used for unknown English
   words in the Kokoro frontend — **Apache-2.0**. The upstream model card declares the license
