@@ -142,14 +142,12 @@ semver = "1"
 # (Apache-2.0). Default features pull native onig; this fancy-regex configuration is
 # pure Rust and covers inference (training-only paths are unused).
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
-# Offline language identification over the exact multilingual TTS language set. Limiting
-# model features keeps the detector smaller and more accurate than the all-language build.
-lingua = { version = "1.8", default-features = false, features = [
-    "arabic", "bokmal", "chinese", "danish", "dutch", "english", "finnish",
-    "french", "german", "greek", "hebrew", "hindi", "italian", "japanese",
-    "korean", "malay", "polish", "portuguese", "russian", "spanish", "swahili",
-    "swedish", "turkish",
-] }
+# Offline language identification over the multilingual TTS language set. Trigram models,
+# restricted to our languages via an allowlist at the call site. Chosen over lingua, which
+# embeds ~93 MB of models per binary (it ships in both ds_core and ds-helper); whatlang's
+# models are ~0.3 MB. Trade-off: whatlang has no Malay/Swahili (Chatterbox-only) and is
+# less accurate on very short text. See ds-tts `language`.
+whatlang = "0.16"
 # RFC 3339 provider reset timestamps. Parsing only; native hosts format in the
 # user's locale/time zone.
 time = { version = "0.3", features = ["parsing"] }

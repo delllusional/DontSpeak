@@ -47,7 +47,7 @@ log = { workspace = true }
 # Chatterbox's HF tokenizer.json (see the workspace pin for the pure-Rust feature choice).
 tokenizers = { workspace = true }
 # Shared per-utterance language detection before every backend dispatch.
-lingua = { workspace = true }
+whatlang = { workspace = true }
 # 24 kHz mono f32 PCM playback. `symphonia-aiff` (added to the default decoders) lets the
 # earcon `cue` op decode macOS system sounds (.aiff); wav (Windows) + vorbis/oga (Linux) are
 # already in rodio's defaults.

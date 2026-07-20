@@ -2,49 +2,49 @@
 
 use std::sync::OnceLock;
 
-use lingua::{Language, LanguageDetector, LanguageDetectorBuilder};
+use whatlang::{Detector, Lang};
 
 pub const DEFAULT_LANGUAGE: &str = "en";
 
-const LANGUAGES: &[Language] = &[
-    Language::Arabic,
-    Language::Bokmal,
-    Language::Chinese,
-    Language::Danish,
-    Language::Dutch,
-    Language::English,
-    Language::Finnish,
-    Language::French,
-    Language::German,
-    Language::Greek,
-    Language::Hebrew,
-    Language::Hindi,
-    Language::Italian,
-    Language::Japanese,
-    Language::Korean,
-    Language::Malay,
-    Language::Polish,
-    Language::Portuguese,
-    Language::Russian,
-    Language::Spanish,
-    Language::Swahili,
-    Language::Swedish,
-    Language::Turkish,
+/// The languages any built-in model can speak, as the `whatlang` variants that map to a
+/// two-letter code below. Restricting the detector to this set (rather than whatlang's
+/// full 80+) keeps it from returning a language no model supports and improves accuracy
+/// by removing confusable candidates. Malay and Swahili are in Chatterbox's set but not
+/// in whatlang, so their text detects as a related allowed language or falls back to
+/// English — the accepted cost of whatlang over the much larger lingua models.
+const LANGUAGES: &[Lang] = &[
+    Lang::Ara,
+    Lang::Cmn,
+    Lang::Dan,
+    Lang::Deu,
+    Lang::Ell,
+    Lang::Eng,
+    Lang::Fin,
+    Lang::Fra,
+    Lang::Heb,
+    Lang::Hin,
+    Lang::Ita,
+    Lang::Jpn,
+    Lang::Kor,
+    Lang::Nld,
+    Lang::Nob,
+    Lang::Pol,
+    Lang::Por,
+    Lang::Rus,
+    Lang::Spa,
+    Lang::Swe,
+    Lang::Tur,
 ];
 
-fn detector() -> &'static LanguageDetector {
-    static DETECTOR: OnceLock<LanguageDetector> = OnceLock::new();
-    DETECTOR.get_or_init(|| {
-        LanguageDetectorBuilder::from_languages(LANGUAGES)
-            .with_minimum_relative_distance(0.15)
-            .build()
-    })
+fn detector() -> &'static Detector {
+    static DETECTOR: OnceLock<Detector> = OnceLock::new();
+    DETECTOR.get_or_init(|| Detector::with_allowlist(LANGUAGES.to_vec()))
 }
 
 /// Ambiguous / unspeakable → `en`.
 pub fn detect_language(text: &str) -> String {
     let prose = crate::normalize_spoken_text(text);
-    let detected = detector().detect_language_of(&prose);
+    let detected = detector().detect_lang(&prose);
     let code = detected.map(language_code).unwrap_or(DEFAULT_LANGUAGE);
     // Which language an utterance got is the first thing to check when speech comes out
     // in the wrong voice or a frontend refuses it, and the fallback to `en` is otherwise
@@ -52,38 +52,40 @@ pub fn detect_language(text: &str) -> String {
     // length rather than the prose, which is user speech content.
     log::debug!(
         target: "tts",
-        "lingua detected {code}{} over {} chars",
+        "whatlang detected {code}{} over {} chars",
         if detected.is_none() { " (no match, default)" } else { "" },
         prose.chars().count()
     );
     code.to_string()
 }
 
-fn language_code(language: Language) -> &'static str {
+/// `whatlang::Lang` → the two-letter ISO 639-1 code every model frontend consumes
+/// (whatlang's own `code()` is three-letter 639-3, which no model accepts). Exhaustive
+/// over [`LANGUAGES`]; any other variant cannot occur under the allowlist and defaults.
+fn language_code(language: Lang) -> &'static str {
     match language {
-        Language::Arabic => "ar",
-        Language::Bokmal => "no",
-        Language::Chinese => "zh",
-        Language::Danish => "da",
-        Language::Dutch => "nl",
-        Language::English => "en",
-        Language::Finnish => "fi",
-        Language::French => "fr",
-        Language::German => "de",
-        Language::Greek => "el",
-        Language::Hebrew => "he",
-        Language::Hindi => "hi",
-        Language::Italian => "it",
-        Language::Japanese => "ja",
-        Language::Korean => "ko",
-        Language::Malay => "ms",
-        Language::Polish => "pl",
-        Language::Portuguese => "pt",
-        Language::Russian => "ru",
-        Language::Spanish => "es",
-        Language::Swahili => "sw",
-        Language::Swedish => "sv",
-        Language::Turkish => "tr",
+        Lang::Ara => "ar",
+        Lang::Cmn => "zh",
+        Lang::Dan => "da",
+        Lang::Deu => "de",
+        Lang::Ell => "el",
+        Lang::Eng => "en",
+        Lang::Fin => "fi",
+        Lang::Fra => "fr",
+        Lang::Heb => "he",
+        Lang::Hin => "hi",
+        Lang::Ita => "it",
+        Lang::Jpn => "ja",
+        Lang::Kor => "ko",
+        Lang::Nld => "nl",
+        Lang::Nob => "no",
+        Lang::Pol => "pl",
+        Lang::Por => "pt",
+        Lang::Rus => "ru",
+        Lang::Spa => "es",
+        Lang::Swe => "sv",
+        Lang::Tur => "tr",
+        _ => DEFAULT_LANGUAGE,
     }
 }
 
