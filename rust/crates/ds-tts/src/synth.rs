@@ -1,7 +1,8 @@
 //! ONNX inference over `kokoro-v1.0-fp16.onnx` via `ort` (load-dynamic) — `synthesizeBatch`.
 //!
-//! I/O parity with kokoro-onnx `_create_audio`:
-//!   * "tokens": int64 [1, n+2], padded `[0, …ids, 0]` (pad = BOS/EOS)
+//! I/O parity with kokoro-onnx `_create_audio` (the onnx-community export names the
+//! token input `input_ids`):
+//!   * "input_ids": int64 [1, n+2], padded `[0, …ids, 0]` (pad = BOS/EOS)
 //!   * "style": f32 [1, 256] — voice 510*256 row by UNPADDED token count (`style_row`)
 //!   * "speed": f32 `[1]`, clamped 0.5..=2.0 (`rate` maps directly; not rate_to_wpm)
 //!
@@ -153,7 +154,7 @@ impl KokoroSynth {
         padded.push(0);
 
         let tokens_t = Tensor::from_array((vec![1_i64, padded.len() as i64], padded))
-            .map_err(|e| format!("tokens tensor: {e}"))?;
+            .map_err(|e| format!("input_ids tensor: {e}"))?;
         let style_t = Tensor::from_array((vec![1_i64, 256], style_row))
             .map_err(|e| format!("style tensor: {e}"))?;
         let speed_t = Tensor::from_array((vec![1_i64], vec![speed]))
@@ -162,7 +163,7 @@ impl KokoroSynth {
         let outputs = self
             .session
             .run(ort::inputs! {
-                "tokens" => tokens_t,
+                "input_ids" => tokens_t,
                 "style" => style_t,
                 "speed" => speed_t,
             })
