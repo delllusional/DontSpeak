@@ -106,7 +106,11 @@ mod tests {
     fn every_explicit_tts_language_has_a_display_name() {
         set_locale("en");
         for descriptor in &ds_config::TTS_MODELS {
-            for code in descriptor.languages.iter().filter(|code| **code != "auto") {
+            for code in descriptor
+                .model_languages
+                .iter()
+                .filter(|code| **code != "auto")
+            {
                 let key = format!("language.{code}");
                 assert_ne!(t(&key), key, "missing en.yml entry for {key}");
             }

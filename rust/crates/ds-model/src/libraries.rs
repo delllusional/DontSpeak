@@ -44,11 +44,11 @@ fn project_obj(p: &Project, files: Vec<Value>) -> Value {
     })
 }
 
-/// Add the shared runtime language contract to a TTS project. The descriptor remains the
-/// source of truth used by config validation and synthesis; the Libraries wire only shapes it.
+/// Add published model-language coverage to a TTS project. Runtime acceptance stays in the
+/// descriptor's separate `languages` field; the Libraries wire describes the downloaded model.
 fn with_tts_languages(mut project: Value, model: ds_config::TtsModel) -> Value {
     let descriptor = model.descriptor();
-    project["languages"] = json!(descriptor.languages);
+    project["languages"] = json!(descriptor.model_languages);
     project["language_count"] = json!(descriptor.supported_language_count());
     project["automatic_language_detection"] = json!(descriptor.detects_language_automatically());
     if let Some(url) = descriptor.language_list_url() {
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn tts_projects_expose_the_runtime_language_contract() {
+    fn tts_projects_expose_published_model_language_coverage() {
         let cat = catalog();
         let projects = cat.as_array().unwrap();
         for model in ds_config::TtsModel::ALL.iter().copied() {
@@ -275,7 +275,7 @@ mod tests {
                 .iter()
                 .find(|project| project["name"].as_str() == Some(descriptor.display_name))
                 .unwrap_or_else(|| panic!("missing TTS project {}", descriptor.display_name));
-            assert_eq!(project["languages"], json!(descriptor.languages));
+            assert_eq!(project["languages"], json!(descriptor.model_languages));
             assert_eq!(
                 project["language_count"],
                 descriptor.supported_language_count()

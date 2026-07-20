@@ -59,7 +59,12 @@ pub struct TtsModelDescriptor {
     pub id: &'static str,
     pub display_name: &'static str,
     pub default_language: &'static str,
+    /// Languages the DontSpeak frontend can currently send to this model.
     pub languages: &'static [&'static str],
+    /// Published model coverage shown in the Libraries catalog. This stays separate from
+    /// `languages` because Kokoro's non-English voices require frontends DontSpeak does not
+    /// ship under its no-GPL policy.
+    pub model_languages: &'static [&'static str],
     pub voices: &'static [&'static str],
     /// Out-of-box pool for this model. `voices` may expose additional choices.
     pub default_voices: &'static [&'static str],
@@ -91,7 +96,7 @@ impl TtsModelDescriptor {
     pub fn supported_language_count(&self) -> usize {
         match self.model {
             TtsModel::OmniVoice => 646,
-            _ => self.languages.len(),
+            _ => self.model_languages.len(),
         }
     }
 
@@ -99,11 +104,17 @@ impl TtsModelDescriptor {
         self.model == TtsModel::OmniVoice
     }
 
-    /// Exact upstream list when the supported set is too large to duplicate in the app.
+    /// Pinned upstream language/voice list when the catalog benefits from a primary source.
     pub fn language_list_url(&self) -> Option<&'static str> {
-        (self.model == TtsModel::OmniVoice).then_some(
-            "https://github.com/k2-fsa/OmniVoice/blob/468e927ba3716cd8dd86421148dfb3046e9f9d7b/docs/languages.md",
-        )
+        match self.model {
+            TtsModel::Kokoro => Some(
+                "https://huggingface.co/hexgrad/Kokoro-82M/blob/c3327e9bac3dbe55779397bfa82de0f8806fb3bc/VOICES.md",
+            ),
+            TtsModel::OmniVoice => Some(
+                "https://github.com/k2-fsa/OmniVoice/blob/468e927ba3716cd8dd86421148dfb3046e9f9d7b/docs/languages.md",
+            ),
+            TtsModel::Chatterbox | TtsModel::Qwen => None,
+        }
     }
 
     /// Whether an automatically detected ISO language can be sent to this model.
@@ -133,6 +144,9 @@ impl TtsModelDescriptor {
 }
 
 const KOKORO_LANGUAGES: &[&str] = &["en"];
+// Kokoro v1.0 publishes eight languages. American and British English are separate
+// voice families but one language in the upstream release count.
+const KOKORO_MODEL_LANGUAGES: &[&str] = &["en", "es", "fr", "hi", "it", "ja", "pt", "zh"];
 const CHATTERBOX_LANGUAGES: &[&str] = &[
     "ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "it", "ja", "ko", "ms", "nl", "no",
     "pl", "pt", "ru", "sv", "sw", "tr", "zh",
@@ -158,6 +172,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         display_name: "Kokoro",
         default_language: "en",
         languages: KOKORO_LANGUAGES,
+        model_languages: KOKORO_MODEL_LANGUAGES,
         voices: KOKORO_VOICES,
         default_voices: KOKORO_VOICES,
         warmup_voice: "af_heart",
@@ -178,6 +193,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         display_name: "Chatterbox Multilingual",
         default_language: "en",
         languages: CHATTERBOX_LANGUAGES,
+        model_languages: CHATTERBOX_LANGUAGES,
         voices: DEFAULT_VOICE,
         default_voices: DEFAULT_VOICE,
         warmup_voice: "default",
@@ -193,6 +209,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         display_name: "Qwen3-TTS",
         default_language: "en",
         languages: QWEN_LANGUAGES,
+        model_languages: QWEN_LANGUAGES,
         voices: QWEN_VOICES,
         default_voices: QWEN_DEFAULT_VOICE,
         warmup_voice: "ryan",
@@ -208,6 +225,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         display_name: "OmniVoice",
         default_language: "auto",
         languages: OMNIVOICE_LANGUAGES,
+        model_languages: OMNIVOICE_LANGUAGES,
         voices: OMNIVOICE_VOICES,
         default_voices: OMNIVOICE_VOICES,
         warmup_voice: "default",
@@ -265,7 +283,27 @@ mod tests {
             TtsModel::Chatterbox.descriptor().runtime_language("ja"),
             "ja"
         );
-        assert_eq!(TtsModel::Kokoro.descriptor().supported_language_count(), 1);
+        let kokoro = TtsModel::Kokoro.descriptor();
+        assert_eq!(kokoro.languages, &["en"]);
+        assert_eq!(
+            kokoro.model_languages,
+            &["en", "es", "fr", "hi", "it", "ja", "pt", "zh"]
+        );
+        assert_eq!(kokoro.supported_language_count(), 8);
+        assert!(
+            kokoro
+                .language_list_url()
+                .is_some_and(|url| url.contains("hexgrad/Kokoro-82M"))
+        );
+        for descriptor in &TTS_MODELS {
+            for language in descriptor.languages {
+                assert!(
+                    descriptor.model_languages.contains(language),
+                    "{} runtime language {language} is absent from published coverage",
+                    descriptor.id
+                );
+            }
+        }
         assert_eq!(
             TtsModel::Chatterbox.descriptor().supported_language_count(),
             CHATTERBOX_LANGUAGES.len()
